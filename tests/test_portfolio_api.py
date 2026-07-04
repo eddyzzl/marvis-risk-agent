@@ -145,6 +145,36 @@ def test_gate_summary_aggregates_red_flags():
     assert set(payload["checklist"]) == {"m", "c", "h"}
 
 
+def test_gate_summary_promotes_el_basis():
+    """A2: gate highlights surface the total_el 口径 (basis + reference snapshot) verbatim."""
+    el = {
+        "total_el": 42.0,
+        "assumptions": {"total_el_basis": "reference_snapshot", "reference_snapshot": "2025-12"},
+    }
+    payload = gate_summary_payload(flow=None, migration=None, segment=None, trend=None, expected_loss=el)
+    assert payload["highlights"]["total_el"] == 42.0
+    assert payload["highlights"]["total_el_basis"] == "reference_snapshot"
+    assert payload["highlights"]["reference_snapshot"] == "2025-12"
+
+
+def test_report_writes_el_basis(tmp_path):
+    """A2: the 组合概览 sheet records the reference-snapshot 口径 annotation."""
+    el = {
+        "total_el": 999.0,
+        "el_by_month": [{"month": "2025-01", "balance": 1000.0, "expected_loss": 999.0}],
+        "chain": [{"from_state": "current", "p_to_loss": 0.1}],
+        "assumptions": {"lgd": 0.6, "total_el_basis": "reference_snapshot", "reference_snapshot": "2025-01"},
+    }
+    out = tmp_path / "basis.xlsx"
+    path, _ = build_report(project_meta={"名称": "T"}, flow=None, migration=None, segment=None, trend=None, expected_loss=el, out_path=out)
+    wb = load_workbook(path)
+    overview = wb["组合概览"]
+    cells = [cell.value for row in overview.iter_rows() for cell in row]
+    assert "假设.total_el_basis" in cells
+    assert "假设.reference_snapshot" in cells
+    assert "2025-01" in cells
+
+
 def test_report_carries_numbers_not_recompute(tmp_path):
     """报告只搬运不重算：改 payload 数字，报告落盘的对应单元格跟着变。"""
     segment = {"segments": [{"segment": "A", "count": 7, "pop_pct": 0.7}], "concentration": {"hhi": 0.5, "top1_pct": 0.7}}

@@ -510,6 +510,220 @@ def test_python_match_rate_date_fallback_uses_same_formats_as_duckdb_join(tmp_pa
     ) == (0, 1)
 
 
+def _exact_key_pair() -> KeyPair:
+    return KeyPair(
+        anchor_col="id",
+        feature_col="id",
+        match_method="exact",
+        transform_side="both",
+        match_rate=1.0,
+        resolved_by="test",
+    )
+
+
+def test_left_join_treats_blank_keys_as_missing_not_matchable(tmp_path):
+    # T1-A5: a blank/whitespace-only join key is MISSING (nullif), so a blank-keyed anchor
+    # row must fall through to NULL feature columns rather than wrongly attaching to the
+    # blank-keyed feature row. Row count is preserved (LEFT JOIN keeps the anchor row).
+    anchor_path = tmp_path / "anchor.parquet"
+    feature_path = tmp_path / "feature.parquet"
+    out_path = tmp_path / "joined.parquet"
+    pd.DataFrame({"id": ["", "   ", "A1"], "score": [0.1, 0.2, 0.3]}).to_parquet(
+        anchor_path, index=False
+    )
+    pd.DataFrame({"id": ["", "A1"], "limit": [999, 100]}).to_parquet(
+        feature_path, index=False
+    )
+    backend = DataBackend(tmp_path)
+
+    joined_rows = backend.left_join(
+        anchor_path,
+        feature_path,
+        [_exact_key_pair()],
+        dedup_strategy=None,
+        out_path=out_path,
+    )
+
+    joined = pd.read_parquet(out_path).sort_values("score").reset_index(drop=True)
+    assert joined_rows == 3  # 1:1 preservation -- blank-key anchor rows stay in the result
+    limits = joined["limit"].tolist()
+    # blank '' and whitespace '   ' anchor rows are UNMATCHED (NULL), not attached to 999.
+    assert pd.isna(limits[0])
+    assert pd.isna(limits[1])
+    assert limits[2] == 100  # 'A1' still matches its feature row
+
+
+def test_match_rate_and_left_join_agree_on_blank_keys(tmp_path):
+    # T1-A5: the match-rate diagnostic and the executed join must AGREE on a dataset with
+    # blank keys (previously diverged: SQL join matched blank=blank, diagnostics excluded it).
+    anchor_path = tmp_path / "anchor.parquet"
+    feature_path = tmp_path / "feature.parquet"
+    out_path = tmp_path / "joined.parquet"
+    pd.DataFrame({"id": ["", "   ", "A1"], "score": [0.1, 0.2, 0.3]}).to_parquet(
+        anchor_path, index=False
+    )
+    pd.DataFrame({"id": ["", "A1"], "limit": [999, 100]}).to_parquet(
+        feature_path, index=False
+    )
+    backend = DataBackend(tmp_path)
+    fp = _fingerprint(is_hashed=False)
+
+    matched, sampled = backend.match_rate_for_method(
+        anchor_path,
+        ["id"],
+        feature_path,
+        ["id"],
+        method="exact",
+        key_fingerprints=[(fp, fp)],
+        sample_n=10,
+        seed=0,
+    )
+    assert (matched, sampled) == (1, 3)  # only 'A1' matches; blanks excluded both sides
+
+    backend.left_join(
+        anchor_path, feature_path, [_exact_key_pair()], dedup_strategy=None, out_path=out_path
+    )
+    joined = pd.read_parquet(out_path)
+    realized = int(joined["limit"].notna().sum())
+    assert realized == matched  # diagnostic prediction equals executed-join matched count
+
+
+def test_blank_feature_keys_not_reported_as_duplicate_collision(tmp_path):
+    # T1-A5: two blank feature keys are MISSING, not a duplicate-key collision -- lock the
+    # chosen semantics so a feature with two '' keys still reads as key-unique.
+    feature_path = tmp_path / "feature.parquet"
+    pd.DataFrame({"id": ["", "   ", "A1"], "limit": [1, 2, 3]}).to_parquet(
+        feature_path, index=False
+    )
+    backend = DataBackend(tmp_path)
+    assert backend.is_key_unique(feature_path, ["id"], key_pairs=[_exact_key_pair()]) is True
+
+
+@pytest.mark.parametrize(
+    "digits",
+    ["1234567890123456", "12345678901234567", "123456789012345678", "1234567890123456789", "9999999999999999"],
+)
+def test_sql_and_python_value_text_agree_on_long_integral_float(digits):
+    # T1-A6: for a float64-stored long integer id, the DuckDB SQL normalizer and the Python
+    # normalizer must produce the SAME string (both the precision-rounded integer, no
+    # scientific notation, no trailing .0) so SQL-vs-Python key comparisons cannot diverge.
+    from marvis.data.backend import _sql_value_text, _value_text
+
+    value = float(digits)
+    sql_expr = _sql_value_text('a."x"')
+    con = duckdb.connect()
+    con.register("t", pd.DataFrame({"x": [value]}))
+    sql_result = con.execute(f"SELECT {sql_expr} FROM t a").fetchone()[0]
+    assert sql_result == _value_text(value)
+
+
+def test_left_join_matches_long_float_ids_both_sides_float(tmp_path):
+    # T1-A6: both sides store an 18-digit id as float64; exact join must attach the feature
+    # (today: SQL renders sci-notation, Python renders rounded int -> silent no-match/shrink).
+    anchor_path = tmp_path / "anchor.parquet"
+    feature_path = tmp_path / "feature.parquet"
+    out_path = tmp_path / "joined.parquet"
+    ids = [123456789012345678.0, 223456789012345678.0]
+    pd.DataFrame({"id": ids, "score": [0.1, 0.2]}).to_parquet(anchor_path, index=False)
+    pd.DataFrame({"id": ids, "limit": [100, 200]}).to_parquet(feature_path, index=False)
+    backend = DataBackend(tmp_path)
+
+    joined_rows = backend.left_join(
+        anchor_path, feature_path, [_exact_key_pair()], dedup_strategy=None, out_path=out_path
+    )
+    joined = pd.read_parquet(out_path).sort_values("score").reset_index(drop=True)
+    assert joined_rows == 2
+    assert joined["limit"].tolist() == [100, 200]
+
+
+def test_distinct_count_long_float_ids_consistent_sql_and_python(tmp_path):
+    # T1-A6: two ids that round to the SAME float64 collide; distinct_count reflects the
+    # collision the SAME way on the DuckDB (parquet) and pandas (feather) branches.
+    frame = pd.DataFrame({"id": [123456789012345678.0, 123456789012345679.0, 5.0]})
+    parquet_path = tmp_path / "feature.parquet"
+    feather_path = tmp_path / "feature.feather"
+    frame.to_parquet(parquet_path, index=False)
+    frame.to_feather(feather_path)
+    backend = DataBackend(tmp_path)
+
+    sql_distinct = backend.distinct_count(parquet_path, ["id"], key_pairs=[_exact_key_pair()])
+    py_distinct = backend.distinct_count(feather_path, ["id"], key_pairs=[_exact_key_pair()])
+    # ...678 and ...679 both round to ...680 -> 2 distinct join keys (the collision + 5.0)
+    assert sql_distinct == py_distinct == 2
+
+
+def test_match_rate_matches_left_join_for_zero_padded_csv_keys(tmp_path):
+    # T1-B7: for a zero-padded CSV key, the match-rate diagnostic must equal the actual
+    # left_join result. Previously the feature was read all_varchar ("007") while the anchor
+    # was pandas-typed (007 -> int 7) and execution read both typed -> diagnostic and
+    # execution disagreed. Unifying on the typed reader makes them agree.
+    anchor_path = tmp_path / "anchor.csv"
+    feature_path = tmp_path / "feature.csv"
+    out_path = tmp_path / "joined.parquet"
+    pd.DataFrame({"id": ["007", "012", "099"]}).to_csv(anchor_path, index=False)
+    pd.DataFrame({"id": ["007", "012"], "val": [1, 2]}).to_csv(feature_path, index=False)
+    backend = DataBackend(tmp_path)
+    fp = _fingerprint(is_hashed=False)
+
+    matched, sampled = backend.match_rate_for_method(
+        anchor_path, ["id"], feature_path, ["id"],
+        method="exact", key_fingerprints=[(fp, fp)], sample_n=10, seed=0,
+    )
+    backend.left_join(
+        anchor_path, feature_path, [_exact_key_pair()], dedup_strategy=None, out_path=out_path
+    )
+    realized = int(pd.read_parquet(out_path)["val"].notna().sum())
+    assert matched == realized == 2
+
+
+def test_match_rate_feature_scan_uses_typed_reader_like_execution(tmp_path):
+    # T1-B7: pin diagnostics and execution to the SAME reader so the all_varchar split can't
+    # silently return -- _duckdb_text_rel must no longer exist as a reader on the backend.
+    backend = DataBackend(tmp_path)
+    assert not hasattr(backend, "_duckdb_text_rel")
+
+
+def test_match_rate_wide_varchar_feature_still_works_under_typed_reader(tmp_path):
+    # T1-B7: the one concrete reason all_varchar existed was wide payload columns; the typed
+    # read_csv_auto reader must still handle a very wide VARCHAR feature column.
+    anchor_path = tmp_path / "anchor.csv"
+    feature_path = tmp_path / "feature.csv"
+    pd.DataFrame({"id": ["A1", "B2", "C3"]}).to_csv(anchor_path, index=False)
+    pd.DataFrame(
+        {"customer_id": ["a1", "b2"], "wide_payload": ["x" * 1000, "y" * 1000]}
+    ).to_csv(feature_path, index=False)
+    backend = DataBackend(tmp_path)
+    fp = _fingerprint(is_hashed=False)
+
+    assert backend.match_rate_for_method(
+        anchor_path, ["id"], feature_path, ["customer_id"],
+        method="exact_lower", key_fingerprints=[(fp, fp)], sample_n=10, seed=0,
+    ) == (2, 3)
+
+
+def test_match_rates_for_methods_zero_padded_parity(tmp_path):
+    # T1-B7: the batched align._resolve_by_data shape must also see a diagnostic rate that
+    # equals the realized join for a zero-padded CSV key (anchor sampled inside DuckDB).
+    anchor_path = tmp_path / "anchor.csv"
+    feature_path = tmp_path / "feature.csv"
+    out_path = tmp_path / "joined.parquet"
+    pd.DataFrame({"id": ["007", "012", "099"]}).to_csv(anchor_path, index=False)
+    pd.DataFrame({"id": ["007", "012"], "val": [1, 2]}).to_csv(feature_path, index=False)
+    backend = DataBackend(tmp_path)
+    fp = _fingerprint(is_hashed=False)
+
+    rates = backend.match_rates_for_methods(
+        anchor_path, "id", feature_path, "id",
+        methods=["exact", "exact_lower"], key_fingerprints=[(fp, fp), (fp, fp)],
+        sample_n=10, seed=0,
+    )
+    backend.left_join(
+        anchor_path, feature_path, [_exact_key_pair()], dedup_strategy=None, out_path=out_path
+    )
+    realized = int(pd.read_parquet(out_path)["val"].notna().sum())
+    for matched, sampled in rates:
+        assert (matched, sampled) == (realized, 3) == (2, 3)
+
 
 def _duckdb_setting_on(temp_directory, name: str) -> str:
     # TST-9c: settings live on the per-operation connection connect_duckdb()

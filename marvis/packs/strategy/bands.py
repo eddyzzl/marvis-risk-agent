@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
 import pandas as pd
 
 from marvis.data.direction import ScoreDirection
+from marvis.feature.binning import equal_frequency_edges
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.profit import ProfitParams, profit_calc
 
@@ -63,8 +63,9 @@ def design_cutoff_bands(
     of the max). Cumulative metrics accumulate in *approval order*: for
     higher_is_better we approve from the highest band down, for higher_is_riskier
     from the lowest band up, so cum_approval_rate/cum_bad_rate read as "if we
-    approve down to this band's boundary". Band edges are quantile-derived unless
-    overridden; no randomness anywhere."""
+    approve down to this band's boundary". Band edges come from the platform's
+    equal_frequency_edges (open +/-inf endpoints) unless an explicit band_edges
+    override is supplied; no randomness anywhere."""
     if objective not in {"max_profit", "max_approval"}:
         raise StrategyError("objective must be max_profit or max_approval")
     _assert_columns(df, [score_col, target_col])
@@ -130,6 +131,8 @@ def design_cutoff_bands(
 
 def _resolve_edges(scores: pd.Series, *, n_bands: int, band_edges: list[float] | None) -> list[float]:
     if band_edges is not None:
+        # Explicit user-supplied boundaries are honoured verbatim (finite, no
+        # equal_frequency): the operator has chosen the cut points on purpose.
         edges = sorted({float(edge) for edge in band_edges})
         if len(edges) < 2:
             raise StrategyError("band_edges must yield at least one band (>=2 edges)")
@@ -139,12 +142,12 @@ def _resolve_edges(scores: pd.Series, *, n_bands: int, band_edges: list[float] |
     clean = scores.dropna().to_numpy(dtype=float)
     if clean.size == 0:
         raise StrategyError("design_cutoff_bands requires non-null scores")
-    quantiles = np.quantile(clean, np.linspace(0.0, 1.0, n_bands + 1))
-    edges = sorted({float(edge) for edge in quantiles})
-    if len(edges) < 2:
-        # Degenerate (all scores equal) -- widen so a single band still forms.
-        base = float(clean[0])
-        edges = [base, base + 1.0]
+    # T2-3: the auto/quantile path reuses the platform's equal_frequency_edges so
+    # degenerate/repeated scores segment identically everywhere in MARVIS -- open
+    # (+/-inf) endpoints (every score lands in a band) and the 2-unique midpoint
+    # special case, instead of the old bespoke np.quantile that produced finite
+    # endpoints and spurious float-noise interior splits.
+    edges = [float(edge) for edge in equal_frequency_edges(clean, n_bands)]
     return edges
 
 

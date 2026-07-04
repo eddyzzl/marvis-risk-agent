@@ -21,6 +21,7 @@ import re
 import numpy as np
 import pandas as pd
 
+from marvis.data.labels import require_labels_confirmed
 from marvis.feature.binning import equal_frequency_edges
 from marvis.feature.correlation import safe_correlation
 from marvis.feature.metrics import (
@@ -97,6 +98,12 @@ class ScreenResult:
     """DOM-7b PSI flags (only when ``max_feature_psi`` is set): features whose train-vs-
     holdout PSI (``scores[col]["psi_split"]``) meets or exceeds the threshold — elevated
     temporal drift. Informational, never dropped: (feature, psi_split, reason)."""
+    nan_labels_dropped: int = 0
+    """D13: count of NaN-label rows the deterministic KS/IV core excludes from every
+    label-dependent statistic. 0 on a fully-labelled target (the gate is inert). Non-zero
+    only after the caller confirms ``drop_nan_labels=True`` — otherwise the gate raises
+    ``NanLabelNotConfirmedError`` before screening (INV-1/INV-2: a NaN label carries no
+    supervision signal and must never silently shrink the ranking/leakage basis)."""
 
 
 def _dev_mask(
@@ -169,6 +176,7 @@ def screen_features(
     batch_size: int = 500,
     max_ks_decay: float | None = None,
     max_feature_psi: float | None = None,
+    drop_nan_labels: bool = False,
 ) -> ScreenResult:
     """Screen ``features`` against ``target_col`` and propose a clean candidate set.
 
@@ -188,12 +196,30 @@ def screen_features(
       ``None`` is display-only — no filtering. When set, features whose ``psi_split`` meets
       or exceeds it are flagged in ``psi_watch`` (informational, never auto-dropped — same
       confirm-don't-block pattern as ``leakage_watch``/``ks_decay_watch``).
+    - ``drop_nan_labels`` (D13): every label-dependent statistic (KS/IV/split-shift) routes
+      through ``_finite_binary_pairs`` and silently drops NaN-label rows, so with NaN labels
+      the ranking/leakage gate/top_k would run on the labelled subset while reporting the full
+      sample. Default ``False`` raises :class:`NanLabelNotConfirmedError` (scope='screen') when
+      any label is NaN. Set ``True`` to confirm dropping those rows; the returned
+      ``nan_labels_dropped`` records how many the core excludes (INV-1/INV-2 confirmation gate,
+      same pattern as compute_feature_metrics/bin_feature).
     """
     feats = [f for f in dict.fromkeys(features) if f != target_col]
     base_cols = [target_col] + ([split_col] if split_col else [])
     base = backend.read_frame(dataset_path, columns=base_cols)
     target = base[target_col].to_numpy(dtype=float)
     dev = _dev_mask(base, split_col, holdout_values)
+    # D13: stop-vs-proceed gate BEFORE any label-consuming stat. Every KS/IV/split-shift
+    # runs on the DEV rows only (holdout/OOT is excluded from screening), so the gate is
+    # applied to the dev subframe: a fully-unlabeled OOT (legitimate scoring-only split,
+    # like resolve_modeling_splits allows) never trips it, while NaN labels among the rows
+    # that actually decide ranking/leakage/top_k do. The deterministic core
+    # (_finite_binary_pairs) already excludes NaN-label rows from every KS/IV; this only
+    # decides raise-vs-proceed and audits the drop count. base is NOT mutated — per-column
+    # missing_rate/coverage keep their full-dev-row semantics.
+    nan_labels_dropped = require_labels_confirmed(
+        base.loc[dev], target_col, drop_nan_labels=drop_nan_labels, scope="screen"
+    )
     target_dev = target[dev]
     # FS-4/FS-6: per-split (train vs test) target vectors for split-shift + KS-decay
     # detection. None when the dataset has no usable train/test split (no per-split flags).
@@ -361,6 +387,7 @@ def screen_features(
         leakage_watch=tuple(sorted(leakage_watch, key=lambda z: z[1], reverse=True)),
         ks_decay_watch=tuple(sorted(ks_decay_watch, key=lambda z: z[1])),
         psi_watch=tuple(sorted(psi_watch, key=lambda z: z[1], reverse=True)),
+        nan_labels_dropped=nan_labels_dropped,
     )
 
 

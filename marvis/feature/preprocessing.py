@@ -13,10 +13,21 @@ turn ``preprocessing_steps`` back into concrete column transforms.
 
 A ``PreprocessingStep`` is a plain, JSON-safe dict:
 
-    {"kind": "impute" | "cap" | "normalize" | "onehot" | "missing_indicator"
-             | "woe" | "categorical_woe",
+    {"kind": "sentinel" | "impute" | "cap" | "normalize" | "onehot"
+             | "missing_indicator" | "woe" | "categorical_woe",
      "columns": [...],
      "params": {...}}
+
+``sentinel`` (PREP-4 / A3) records the per-column sentinel values (e.g. ``-999``)
+that a fitting tool masked to NaN *before* fitting. ``params[column]`` is a
+``list[float]`` of the sentinel values for that column. It is emitted *first* in
+the chain for its tool call -- ahead of the paired ``impute`` /
+``missing_indicator`` / ``cap`` / ``normalize`` / ``woe`` step -- so replay masks
+raw sentinels to NaN before any downstream transform runs, reproducing fit-time
+behavior. Without it, a raw ``-999`` arriving at scoring time is treated as a
+genuine value (train/serve skew): imputation leaves it unfilled, capping clips it
+to a bound, normalization scales it to an extreme z, and WOE routes it to a finite
+bin instead of ``na_woe``.
 
 ``params`` mirrors what each tool already returns today (fill_values /
 bounds / scaler_params / mapping), keyed by column name so ``kind`` +
@@ -53,7 +64,7 @@ import pandas as pd
 from marvis.feature.contracts import CategoricalWOECategory, CategoricalWOEResult, WOEResult
 from marvis.feature.encode import apply_categorical_woe, woe_encode
 from marvis.feature.errors import FeatureError
-from marvis.feature.transform import apply_scaler
+from marvis.feature.transform import apply_scaler, mask_sentinel_values
 
 
 _SIDECAR_SUFFIX = ".preprocessing.json"
@@ -119,7 +130,9 @@ def apply_preprocessing_steps(frame: pd.DataFrame, steps: list[dict[str, Any]]) 
         kind = str(step.get("kind") or "")
         columns = [str(c) for c in step.get("columns") or []]
         params = step.get("params") or {}
-        if kind == "impute":
+        if kind == "sentinel":
+            out = _apply_sentinel(out, columns, params)
+        elif kind == "impute":
             out = _apply_impute(out, columns, params)
         elif kind == "cap":
             out = _apply_cap(out, columns, params)
@@ -135,6 +148,25 @@ def apply_preprocessing_steps(frame: pd.DataFrame, steps: list[dict[str, Any]]) 
             out = _apply_categorical_woe_step(out, columns, params)
         else:
             raise FeatureError(f"unsupported preprocessing step kind: {kind!r}")
+    return out
+
+
+def _apply_sentinel(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
+    """Replay sentinel masking (PREP-4 / A3): ``params[column]`` is a ``list[float]``
+    of sentinel values to treat as missing. Masks each column's sentinel rows to NaN
+    (via the same ``mask_sentinel_values`` the tools use at fit time) so every
+    downstream step in the chain sees NaN, not the raw sentinel. Must run *before*
+    the paired impute/missing_indicator/cap/normalize/woe step for the same column --
+    ``tools.py`` always emits the ``sentinel`` step first. Missing input columns are
+    skipped per-column, mirroring the other appliers."""
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        values = params.get(column)
+        if not values:
+            continue
+        out[column] = mask_sentinel_values(out[column], [float(v) for v in values])
     return out
 
 

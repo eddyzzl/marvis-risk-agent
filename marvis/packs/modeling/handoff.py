@@ -10,7 +10,7 @@ from typing import Any
 
 import nbformat
 
-from marvis.agent.data_dictionary import first_data_dictionary_id, load_business_names
+from marvis.data.data_dictionary import first_data_dictionary_id, load_business_names
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry

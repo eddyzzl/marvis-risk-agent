@@ -2224,6 +2224,29 @@ def test_render_propose_join_surfaces_fingerprint_consistency_column():
     assert "键指纹不一致" in _text  # the mismatch warning fired
 
 
+def test_render_propose_join_surfaces_dtype_mismatch():
+    """T1-B8: a RED key-dtype divergence (one side text, one side float) surfaces a 键类型
+    column cell and a ⚠️ 键类型不一致 warning block (precision-loss / silent miss risk)."""
+    _text, tables = render_tool_output("propose_join", {
+        "joins": [{
+            "feature_id": "feat_divergent",
+            "key_pairs": [{"anchor_col": "id_card", "feature_col": "id_card", "transform_side": "both"}],
+            "diagnostics": {
+                "match_rate": 0.60, "feature_key_unique": True, "fan_out_detected": False,
+                "key_dtype_divergences": [{
+                    "anchor_col": "id_card", "feature_col": "id_card",
+                    "anchor_dtype": "object", "feature_dtype": "float64", "level": "red",
+                }],
+            },
+        }],
+    })
+    table = next(t for t in tables if t["title"].startswith("拼接诊断"))
+    assert "键类型" in table["columns"]
+    dtype_idx = table["columns"].index("键类型")
+    assert "✗" in table["rows"][0][dtype_idx]
+    assert "键类型不一致" in _text
+
+
 def test_render_make_split_surfaces_split_counts_and_group_distribution():
     """G1 split gate renders train/test/oot counts + a per month/channel distribution table
     so the user can sanity-check the split before screening/training."""

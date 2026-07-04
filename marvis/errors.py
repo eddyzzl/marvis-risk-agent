@@ -44,6 +44,7 @@ class ErrorKind:
 
     # --- Data layer typed errors (marvis/data/errors.py to_detail kinds) ---
     NAN_LABEL_NOT_CONFIRMED = "nan_label_not_confirmed"
+    LABEL_SEMANTICS_NOT_DECLARED = "label_semantics_not_declared"
     SCORE_DIRECTION_CONFLICT = "score_direction_conflict"
     PERFORMANCE_FRAME_INVALID = "performance_frame_invalid"
     DATASET_TOO_LARGE = "dataset_too_large"

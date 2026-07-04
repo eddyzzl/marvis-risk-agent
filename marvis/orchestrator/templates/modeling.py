@@ -290,7 +290,10 @@ MODELING = WorkflowTemplate(
                 "features": "$ref:特征筛选.output.selected",
                 "target_col": "{slot:target_col}",
                 "split_col": "{slot:split_col}",
-                "holdout_values": "{slot:holdout_values}",
+                # FS-2/D11: selection must fit TRAIN ONLY. Do NOT forward the screen's
+                # ['oot'] holdout slot here — let select_features apply its own
+                # ('test','oot') default so IV/corr/VIF/top_k never see test-split
+                # labels. The holdout_values slot drives only the 特征筛选 screen above.
                 "target_type": "$ref:选择建模规格.output.target_type",
                 "space": "raw",
                 "iv_min": 0.02,
@@ -578,7 +581,10 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "features": "$ref:特征筛选.output.selected",
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
-                "holdout_values": "$ref:切分样本.output.holdout_values",
+                # FS-2/D11: selection must fit TRAIN ONLY. Do NOT forward make_split's
+                # ['oot'] holdout into select — let select_features apply its own
+                # ('test','oot') default so IV/corr/VIF/top_k never see test-split
+                # labels. That holdout output still drives the 特征筛选 screen above.
                 "target_type": "$ref:选择建模规格.output.target_type",
                 "space": "raw",
                 "iv_min": 0.02,

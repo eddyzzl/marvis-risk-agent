@@ -7,8 +7,13 @@ import numpy as np
 import pandas as pd
 
 from marvis.feature.correlation import safe_correlation
+from marvis.formatting import ratio as _ratio
+from marvis.formatting import score_interval as _score_interval
+from marvis.feature.metrics import feature_auc as _feature_auc
+from marvis.feature.metrics import feature_ks as _feature_ks
 from marvis.feature.metrics import head_tail_lift as _feature_head_tail_lift
 from marvis.validation.binning import (
+    accumulate_bin_metrics,
     assign_bins,
     bin_distribution,
     bin_table,
@@ -302,35 +307,17 @@ def _should_reverse_eval_bins(
 
 
 def _recompute_cumulative_bin_metrics(rows: list[BinRow]) -> list[BinRow]:
-    total = sum(row.sample_count for row in rows)
-    total_bad = sum(row.bad_count for row in rows)
-    total_good = total - total_bad
-    overall_bad_rate = _ratio(total_bad, total)
-    cumulative_count = 0
-    cumulative_bad = 0
-    recomputed: list[BinRow] = []
-    for index, row in enumerate(rows, start=1):
-        cumulative_count += row.sample_count
-        cumulative_bad += row.bad_count
-        cumulative_good = cumulative_count - cumulative_bad
-        bad_rate = _ratio(row.bad_count, row.sample_count)
-        cumulative_bad_pct = _ratio(cumulative_bad, total_bad)
-        cumulative_good_pct = _ratio(cumulative_good, total_good)
-        recomputed.append(
-            BinRow(
-                bin_index=index,
-                score_lower=row.score_lower,
-                score_upper=row.score_upper,
-                sample_count=row.sample_count,
-                bad_count=row.bad_count,
-                bad_rate=bad_rate,
-                cum_sample_pct=_ratio(cumulative_count, total),
-                cum_bad_pct=cumulative_bad_pct,
-                lift=_ratio(bad_rate, overall_bad_rate),
-                ks=float(abs(cumulative_bad_pct - cumulative_good_pct)),
-            )
-        )
-    return recomputed
+    """T2-2: re-accumulate the cumulative fields for the given (already-ordered)
+    marginal BinRows, renumbering bin_index in walk order. Now delegates to the shared
+    ``accumulate_bin_metrics`` kernel (reverse=False, since the caller already reversed
+    the list when the score is inversely correlated) so this cannot drift from
+    ``bin_table``'s cumulation. Behaviour-preserving vs. the previous hand-rolled loop.
+    """
+    marginals = [
+        (row.score_lower, row.score_upper, row.sample_count, row.bad_count)
+        for row in rows
+    ]
+    return accumulate_bin_metrics(marginals, reverse=False)
 
 
 def compute_monthly_psi(
@@ -393,22 +380,16 @@ def _month_ordinal(month: str) -> int | None:
 
 
 def compute_auc(scores, labels) -> float:
+    """T2-4: delegates to feature/metrics.py::feature_auc, the platform-wide
+    reference AUC (scipy rankdata, mask on finite score+label pairs). This module
+    previously reimplemented the Mann-Whitney AUC with pandas rank and a
+    ``labels.astype(int)`` that silently mis-mapped NaN labels; routing through the
+    canonical impl removes the duplicate and adopts its NaN-target masking (an
+    improvement, not a regression) so the two call surfaces can never drift again.
+    """
     scores = np.asarray(scores, dtype=float)
-    labels = np.asarray(labels, dtype=int)
-    finite_mask = np.isfinite(scores)
-    scores = scores[finite_mask]
-    labels = labels[finite_mask]
-    positive_count = int(labels.sum())
-    negative_count = int(len(labels) - positive_count)
-    if len(scores) == 0 or positive_count == 0 or negative_count == 0:
-        return 0.5
-
-    ranks = pd.Series(scores).rank(method="average").to_numpy(dtype=float)
-    positive_rank_sum = float(ranks[labels == 1].sum())
-    auc = (positive_rank_sum - positive_count * (positive_count + 1) / 2) / (
-        positive_count * negative_count
-    )
-    return float(auc)
+    labels = np.asarray(labels, dtype=float)
+    return _feature_auc(scores, labels)
 
 
 def compute_head_tail_lift(scores, labels, fraction: float = 0.05) -> tuple[float | None, float | None]:
@@ -485,29 +466,17 @@ def _roc_ks_curve(*, split: str, scores, labels) -> RocKsCurve:
     population = np.r_[0.0, (threshold_indexes + 1) / len(sorted_scores)]
     ks_curve = tpr - fpr
     ks_index = int(np.argmax(np.abs(ks_curve)))
+    # T2-4: the reported KS scalar is taken from feature/metrics.py::feature_ks (the
+    # platform reference), not from this descending-order curve's own argmax, so the
+    # report's KS cannot drift from the canonical KS. The curve arrays (fpr/tpr/ks_curve)
+    # and population_at_ks are still derived here because the ROC/KS plot needs them; the
+    # local argmax and feature_ks agree on the max |cum_bad - cum_good| magnitude.
     return RocKsCurve(
         split=split,
         fpr=[float(value) for value in fpr],
         tpr=[float(value) for value in tpr],
         ks_curve=[float(value) for value in ks_curve],
-        ks=float(abs(ks_curve[ks_index])),
+        ks=float(_feature_ks(scores, labels.astype(float))),
         population_at_ks=float(population[ks_index]),
     )
 
-
-def _score_interval(lower: float, upper: float) -> str:
-    return f"[{_compact_number(lower)},{_compact_number(upper)}]"
-
-
-def _compact_number(value: float) -> str:
-    if value == -np.inf:
-        return "-inf"
-    if value == np.inf:
-        return "inf"
-    if float(value).is_integer():
-        return str(int(value))
-    return f"{float(value):.3f}".rstrip("0").rstrip(".")
-
-
-def _ratio(numerator: float, denominator: float) -> float:
-    return float(numerator / denominator) if denominator else 0.0

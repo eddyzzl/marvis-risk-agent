@@ -33,10 +33,6 @@ export async function readErrorPayload(response) {
   return { detail: message, message, payload: null };
 }
 
-export async function readErrorMessage(response) {
-  return (await readErrorPayload(response)).message;
-}
-
 function isFormDataBody(body) {
   return typeof FormData !== "undefined" && body instanceof FormData;
 }

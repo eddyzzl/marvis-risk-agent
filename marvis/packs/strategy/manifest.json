@@ -38,6 +38,17 @@
           },
           "drop_nan_labels": {
             "type": "boolean"
+          },
+          "label_semantics": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "incremental",
+              "snapshot",
+              null
+            ]
           }
         },
         "required": [
@@ -75,6 +86,12 @@
           "nan_labels_dropped": {
             "type": "integer",
             "minimum": 0
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
@@ -83,7 +100,8 @@
           "curves",
           "counts",
           "summary",
-          "nan_labels_dropped"
+          "nan_labels_dropped",
+          "warnings"
         ],
         "additionalProperties": false
       },

@@ -248,6 +248,8 @@ class DataBackend:
             keys_sql = ", ".join(f"{expr} AS {alias}" for expr, alias in key_exprs)
             keys_select_sql = ", ".join(alias for _expr, alias in key_exprs)
             key_not_null = " AND ".join(f"{alias} IS NOT NULL" for _expr, alias in key_exprs) or "TRUE"
+            # T1-B7: key-VARCHAR reader, so conflict detection sees keys typed as the join does.
+            rel = self._duckdb_key_rel(path, [pair.feature_col for pair in key_pairs])
         else:
             keys_sql = ", ".join(sql_identifier(col, allowed_columns) for col in key_columns)
             keys_select_sql = keys_sql
@@ -255,9 +257,10 @@ class DataBackend:
                 f"{sql_identifier(col, allowed_columns)} IS NOT NULL"
                 for col in key_columns
             ) or "TRUE"
+            rel = self._duckdb_rel(path)
         duplicate_groups = (
             f"SELECT {keys_sql}, count(*) AS __n "
-            f"FROM {self._duckdb_rel(path)} "
+            f"FROM {rel} "
             f"WHERE {key_not_null} "
             f"GROUP BY {keys_select_sql} "
             "HAVING count(*) > 1"
@@ -294,7 +297,7 @@ class DataBackend:
                     f"SELECT {keys_select_sql} FROM ({duplicate_groups}) ORDER BY {keys_select_sql} "
                     f"LIMIT {int(sample_key_limit)}"
                     "), feature_with_keys AS ("
-                    f"SELECT f.*, {keys_sql} FROM {self._duckdb_rel(path)} f"
+                    f"SELECT f.*, {keys_sql} FROM {rel} f"
                     ") "
                     f"SELECT f_key.* EXCLUDE ({', '.join(key_aliases)}) "
                     "FROM feature_with_keys f_key "
@@ -439,18 +442,34 @@ class DataBackend:
             if key_pairs is not None:
                 key_exprs = self._transformed_key_exprs(key_pairs, allowed_columns, side="feature")
                 cols_sql = ", ".join(expr for expr, _alias in key_exprs)
+                # T1-A5: a blank/whitespace key transforms to NULL (missing) and never
+                # participates in the LEFT JOIN, so it is not a distinct join key -- exclude
+                # rows whose transformed key is NULL so two '' rows aren't counted as a
+                # duplicate-key collision (and don't distort the fan-out duplicate_factor).
+                not_null_sql = " AND ".join(
+                    f"({expr}) IS NOT NULL" for expr, _alias in key_exprs
+                )
+                where_sql = f" WHERE {not_null_sql}"
+                # T1-B7: read key columns with the same VARCHAR typing the executed dedup uses.
+                rel = self._duckdb_key_rel(path, [pair.feature_col for pair in key_pairs])
             else:
                 cols_sql = ", ".join(sql_identifier(col, allowed_columns) for col in columns)
+                where_sql = ""
+                rel = self._duckdb_rel(path)
             query = (
                 "SELECT count(*) FROM ("
-                f"SELECT DISTINCT {cols_sql} FROM {self._duckdb_rel(path)}"
+                f"SELECT DISTINCT {cols_sql} FROM {rel}{where_sql}"
                 ")"
             )
             with self._connect() as conn:
                 return int(conn.execute(query).fetchone()[0])
         if key_pairs is not None:
             frame = self.with_transformed_key_columns(self.read_frame(path), key_pairs)
-            return int(frame[transformed_key_names(key_pairs)].drop_duplicates().shape[0])
+            key_names = transformed_key_names(key_pairs)
+            # Mirror the SQL branch: a missing (None) transformed key never joins, so drop
+            # rows with any NULL key before counting distinct join keys.
+            key_frame = frame[key_names].dropna()
+            return int(key_frame.drop_duplicates().shape[0])
         frame = self.read_frame(path, columns=columns)
         return int(frame.drop_duplicates().shape[0])
 
@@ -461,7 +480,37 @@ class DataBackend:
         *,
         key_pairs: Sequence[KeyPair] | None = None,
     ) -> bool:
+        if key_pairs is not None:
+            # T1-A5: uniqueness is judged over JOINABLE rows only -- a blank/whitespace key
+            # transforms to NULL and never joins, so it is neither a distinct key nor a
+            # collision. Compare distinct non-missing keys against the count of rows that
+            # actually carry a non-missing key (distinct_count already excludes NULL keys).
+            basis = self._nonnull_key_row_count(path, key_pairs)
+            return self.distinct_count(path, columns, key_pairs=key_pairs) == basis
         return self.distinct_count(path, columns, key_pairs=key_pairs) == self.row_count(path)
+
+    def _nonnull_key_row_count(self, path: Path, key_pairs: Sequence[KeyPair]) -> int:
+        path = self._resolve_path(path)
+        return self._memo(
+            "nonnull_key_row_count", path, tuple(key_pairs),
+            compute=lambda: self._nonnull_key_row_count_uncached(path, key_pairs),
+        )
+
+    def _nonnull_key_row_count_uncached(self, path: Path, key_pairs: Sequence[KeyPair]) -> int:
+        allowed_columns = set(self.column_names(path))
+        if path.suffix.lower() in SUPPORTED_DUCKDB_SUFFIXES:
+            key_exprs = self._transformed_key_exprs(key_pairs, allowed_columns, side="feature")
+            not_null_sql = " AND ".join(
+                f"({expr}) IS NOT NULL" for expr, _alias in key_exprs
+            )
+            # T1-B7: key-VARCHAR reader, consistent with distinct_count and the executed dedup.
+            rel = self._duckdb_key_rel(path, [pair.feature_col for pair in key_pairs])
+            query = f"SELECT count(*) FROM {rel} WHERE {not_null_sql}"
+            with self._connect() as conn:
+                return int(conn.execute(query).fetchone()[0])
+        frame = self.with_transformed_key_columns(self.read_frame(path), key_pairs)
+        key_names = transformed_key_names(key_pairs)
+        return int(frame[key_names].dropna().shape[0])
 
     def left_join(
         self,
@@ -510,10 +559,14 @@ class DataBackend:
             anchor_columns,
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        # T1-B7: read the anchor key columns as VARCHAR (same reader the diagnostics and dedup
+        # use) so a typing-sensitive key (zero-padded / mixed-date) joins consistently. Only the
+        # anchor's KEY columns are forced to text; payload columns keep their sniffed types.
+        anchor_key_columns = [pair.anchor_col for pair in key_pairs]
         query = (
             "COPY ("
             f"SELECT a.*{feature_select} "
-            f"FROM {self._duckdb_rel(anchor_path)} a "
+            f"FROM {self._duckdb_key_rel(anchor_path, anchor_key_columns)} a "
             f"LEFT JOIN ({feature_rel}) b ON {on_sql}"
             f") TO {sql_string_literal(out_path.as_posix())} (FORMAT parquet)"
         )
@@ -573,6 +626,117 @@ class DataBackend:
         self._cache[cache_key] = result
         return result
 
+    def match_rate_pandas(
+        self,
+        anchor_path: Path,
+        anchor_keys: Sequence[str],
+        feature_path: Path,
+        feature_keys: Sequence[str],
+        *,
+        method: str | Sequence[str],
+        key_fingerprints: Sequence[Any],
+        sample_n: int,
+        seed: int,
+    ) -> tuple[int, int]:
+        """T3-1: the pure-pandas match-rate path, ALWAYS forced (never delegates to
+        DuckDB). :meth:`match_rate_for_method` picks DuckDB for supported methods; this
+        is the genuinely independent second implementation the reconciliation layer
+        compares it against -- same key normalization, but a python set-membership loop
+        over sampled anchor rows instead of a SQL hash join. Same ``(matched, sampled)``
+        contract, so a divergence between the two is a real bug, not a shape mismatch."""
+        anchor_path = self._resolve_path(anchor_path)
+        feature_path = self._resolve_path(feature_path)
+        if len(anchor_keys) != len(feature_keys):
+            raise DataBackendError("anchor_keys and feature_keys must have the same length")
+        if len(anchor_keys) != len(key_fingerprints):
+            raise DataBackendError("key_fingerprints must align with key columns")
+        methods = _methods_for_keys(method, len(anchor_keys))
+        self._validate_columns(anchor_keys, set(self.column_names(anchor_path)))
+        self._validate_columns(feature_keys, set(self.column_names(feature_path)))
+        return self._pandas_match_rate(
+            anchor_path, anchor_keys, feature_path, feature_keys,
+            methods=methods, key_fingerprints=key_fingerprints,
+            sample_n=sample_n, seed=seed,
+        )
+
+    def reconcile_paths_are_independent(
+        self,
+        anchor_path: Path,
+        feature_path: Path,
+        method: str | Sequence[str],
+    ) -> bool:
+        """T3-2: True only when :meth:`match_rate_for_method` (the reconcile PRIMARY) would run
+        the DuckDB SQL kernel -- i.e. both datasets are a DuckDB-readable format AND every match
+        method is one DuckDB can express. In that case the pandas secondary is a genuinely
+        independent implementation and a reconcile verdict is meaningful.
+
+        When this is False the primary FALLS BACK to the same ``_pandas_match_rate`` kernel the
+        secondary uses (unsupported hash algorithm, or a non-CSV/parquet feature such as .xlsx),
+        so the "two paths" collapse to ONE function and always agree by construction. Presenting
+        that as a passing reconciliation is false assurance; the caller must instead mark the
+        number as not independently verified."""
+        anchor_path = self._resolve_path(anchor_path)
+        feature_path = self._resolve_path(feature_path)
+        methods = [str(m) for m in ([method] if isinstance(method, str) else method)]
+        return (
+            anchor_path.suffix.lower() in SUPPORTED_DUCKDB_SUFFIXES
+            and feature_path.suffix.lower() in SUPPORTED_DUCKDB_SUFFIXES
+            and _duckdb_supports_match_methods(methods)
+        )
+
+    def match_rate_reconcile_secondary(
+        self,
+        anchor_path: Path,
+        anchor_keys: Sequence[str],
+        feature_path: Path,
+        feature_keys: Sequence[str],
+        *,
+        method: str | Sequence[str],
+        key_fingerprints: Sequence[Any],
+        sample_n: int,
+        seed: int,
+    ) -> tuple[int, int]:
+        """T3-1: the reconcile-only pandas recount, scored over the EXACT anchor rows the DuckDB
+        primary sampled. Same pure-pandas set-membership kernel as :meth:`match_rate_pandas` (a
+        genuinely independent implementation vs the SQL hash join), but fed the identical anchor
+        subset via the shared DuckDB reservoir -- so a divergence now reflects a real
+        implementation disagreement, never a sampling artifact. Used only by the join trust
+        layer; :meth:`match_rate_pandas` remains the general-purpose forced-pandas path."""
+        anchor_path = self._resolve_path(anchor_path)
+        feature_path = self._resolve_path(feature_path)
+        if len(anchor_keys) != len(feature_keys):
+            raise DataBackendError("anchor_keys and feature_keys must have the same length")
+        if len(anchor_keys) != len(key_fingerprints):
+            raise DataBackendError("key_fingerprints must align with key columns")
+        methods = _methods_for_keys(method, len(anchor_keys))
+        self._validate_columns(anchor_keys, set(self.column_names(anchor_path)))
+        self._validate_columns(feature_keys, set(self.column_names(feature_path)))
+        # Distinct cache discriminator so this NEVER collides with match_rate_pandas cache
+        # entries (same (sample_n, seed) but a different sampling semantics).
+        cache_key = (
+            "match_rate_reconcile_secondary",
+            *self._file_identity(anchor_path),
+            tuple(anchor_keys),
+            *self._file_identity(feature_path),
+            tuple(feature_keys),
+            tuple(methods),
+            tuple(key_fingerprints),
+            int(sample_n),
+            int(seed),
+        )
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        anchor_frame = self._duckdb_reservoir_sample_frame(
+            anchor_path, anchor_keys, sample_n=sample_n, seed=seed
+        )
+        result = self._pandas_match_rate(
+            anchor_path, anchor_keys, feature_path, feature_keys,
+            methods=methods, key_fingerprints=key_fingerprints,
+            sample_n=sample_n, seed=seed, anchor_frame=anchor_frame,
+        )
+        self._cache[cache_key] = result
+        return result
+
     def _match_rate_for_method_uncached(
         self,
         anchor_path: Path,
@@ -587,19 +751,49 @@ class DataBackend:
     ) -> tuple[int, int]:
         self._validate_columns(anchor_keys, set(self.column_names(anchor_path)))
         self._validate_columns(feature_keys, set(self.column_names(feature_path)))
-        anchor_frame = self.sample_rows(anchor_path, sample_n, seed=seed)
         if (
-            feature_path.suffix.lower() in SUPPORTED_DUCKDB_SUFFIXES
+            anchor_path.suffix.lower() in SUPPORTED_DUCKDB_SUFFIXES
+            and feature_path.suffix.lower() in SUPPORTED_DUCKDB_SUFFIXES
             and _duckdb_supports_match_methods(methods)
         ):
+            # T1-B7: sample the anchor INSIDE DuckDB through the same key-VARCHAR reader as the
+            # feature and the executed join, instead of a pandas frame whose CSV type inference
+            # (007 -> int 7) diverged from execution's read_csv_auto. Now anchor + feature +
+            # execution read keys identically, so the diagnostic rate equals the realized join.
             return self._duckdb_match_rate_for_method(
-                anchor_frame,
+                anchor_path,
                 feature_path,
                 anchor_keys,
                 feature_keys,
                 methods=methods,
                 key_fingerprints=key_fingerprints,
+                sample_n=sample_n,
+                seed=seed,
             )
+        return self._pandas_match_rate(
+            anchor_path, anchor_keys, feature_path, feature_keys,
+            methods=methods, key_fingerprints=key_fingerprints,
+            sample_n=sample_n, seed=seed,
+        )
+
+    def _pandas_match_rate(
+        self,
+        anchor_path: Path,
+        anchor_keys: Sequence[str],
+        feature_path: Path,
+        feature_keys: Sequence[str],
+        *,
+        methods: Sequence[str],
+        key_fingerprints: Sequence[Any],
+        sample_n: int,
+        seed: int,
+        anchor_frame: pd.DataFrame | None = None,
+    ) -> tuple[int, int]:
+        # ``anchor_frame`` lets the reconcile secondary inject the SAME anchor rows the DuckDB
+        # primary sampled (T3-1 defect: the two paths must score an identical anchor subset,
+        # not two independently-drawn samples). When absent, sample independently as before.
+        if anchor_frame is None:
+            anchor_frame = self.sample_rows(anchor_path, sample_n, seed=seed)
         feature_frame = self.read_frame(feature_path, columns=feature_keys)
         fingerprint_pairs = [
             _fingerprint_pair(item)
@@ -700,29 +894,38 @@ class DataBackend:
 
         self._validate_columns([anchor_col], set(self.column_names(anchor_path)))
         self._validate_columns([feature_col], set(self.column_names(feature_path)))
-        anchor_frame = self.sample_rows(anchor_path, sample_n, seed=seed)
         results = self._duckdb_match_rates_for_methods(
-            anchor_frame, feature_path, anchor_col, feature_col,
+            anchor_path, feature_path, anchor_col, feature_col,
             methods=methods, key_fingerprints=key_fingerprints,
+            sample_n=sample_n, seed=seed,
         )
         self._cache[cache_key] = results
         return list(results)
 
     def _duckdb_match_rates_for_methods(
         self,
-        anchor_frame: pd.DataFrame,
+        anchor_path: Path,
         feature_path: Path,
         anchor_col: str,
         feature_col: str,
         *,
         methods: Sequence[str],
         key_fingerprints: Sequence[Any],
+        sample_n: int,
+        seed: int,
     ) -> list[tuple[int, int]]:
-        anchor_columns = set(str(column) for column in anchor_frame.columns)
+        anchor_columns = set(self.column_names(anchor_path))
         feature_columns = set(self.column_names(feature_path))
         anchor_ident = "a." + sql_identifier(anchor_col, anchor_columns)
         feature_ident = "b." + sql_identifier(feature_col, feature_columns)
-        feature_rel = self._duckdb_text_rel(feature_path)
+        # T1-B7: anchor + feature read through the SAME key-VARCHAR reader as the executed join
+        # (previously the feature was all_varchar and the anchor a pandas frame -- both diverged
+        # from execution's read_csv_auto for typing-sensitive keys). The anchor is sampled once
+        # inside DuckDB and shared across every method's LEFT JOIN below.
+        anchor_rel, sampled = self._duckdb_key_sample_cte(
+            anchor_path, [anchor_col], sample_n=sample_n, seed=seed
+        )
+        feature_rel = self._duckdb_key_rel(feature_path, [feature_col])
         # feature_keys computes DISTINCT normalized keys for EVERY method from a SINGLE
         # scan of the feature table (one file read shared across all methods, instead of
         # one read per method as the single-method path would do if called N times), then
@@ -733,7 +936,10 @@ class DataBackend:
             f"AS __key_{index}"
             for index, (method, fp) in enumerate(zip(methods, key_fingerprints))
         )
-        ctes = [f"feature_keys AS (SELECT {feature_exprs} FROM {feature_rel} b)"]
+        ctes = [
+            f"anchor_sample AS (SELECT * FROM {anchor_rel})",
+            f"feature_keys AS (SELECT {feature_exprs} FROM {feature_rel} b)",
+        ]
         selects = []
         for index, (method, fp) in enumerate(zip(methods, key_fingerprints)):
             anchor_fp, _feature_fp = _fingerprint_pair(fp)
@@ -751,23 +957,23 @@ class DataBackend:
             )
         query = "WITH " + ", ".join(ctes) + " SELECT " + ", ".join(selects)
         with self._connect() as conn:
-            conn.register("anchor_sample", anchor_frame)
             row = conn.execute(query).fetchone()
-        sampled = int(anchor_frame.shape[0])
-        return [(int(row[index] or 0), sampled) for index in range(len(methods))]
+        return [(int(row[index] or 0), int(sampled)) for index in range(len(methods))]
 
     def _duckdb_match_rate_for_method(
         self,
-        anchor_frame: pd.DataFrame,
+        anchor_path: Path,
         feature_path: Path,
         anchor_keys: Sequence[str],
         feature_keys: Sequence[str],
         *,
         methods: Sequence[str],
         key_fingerprints: Sequence[Any],
+        sample_n: int,
+        seed: int,
     ) -> tuple[int, int]:
         fingerprint_pairs = [_fingerprint_pair(item) for item in key_fingerprints]
-        anchor_columns = set(str(column) for column in anchor_frame.columns)
+        anchor_columns = set(self.column_names(anchor_path))
         feature_columns = set(self.column_names(feature_path))
         anchor_exprs = []
         feature_exprs = []
@@ -791,10 +997,14 @@ class DataBackend:
         key_columns = [f"__key_{index}" for index in range(len(anchor_exprs))]
         join_condition = " AND ".join(f"a.{column} = f.{column}" for column in key_columns)
         anchor_not_null = " AND ".join(f"a.{column} IS NOT NULL" for column in key_columns)
-        feature_rel = self._duckdb_text_rel(feature_path)
+        # T1-B7: anchor + feature read through the SAME key-VARCHAR reader as the executed join.
+        anchor_rel, sampled = self._duckdb_key_sample_cte(
+            anchor_path, anchor_keys, sample_n=sample_n, seed=seed
+        )
+        feature_rel = self._duckdb_key_rel(feature_path, feature_keys)
         query = (
             "WITH anchor_keys AS ("
-            f"SELECT {anchor_projection} FROM anchor_sample a"
+            f"SELECT {anchor_projection} FROM {anchor_rel} a"
             "), feature_keys AS ("
             f"SELECT DISTINCT {feature_projection} FROM {feature_rel} b"
             "), joined AS ("
@@ -807,9 +1017,8 @@ class DataBackend:
             ") FROM joined a"
         )
         with self._connect() as conn:
-            conn.register("anchor_sample", anchor_frame)
             matched = conn.execute(query).fetchone()[0]
-        return int(matched), int(anchor_frame.shape[0])
+        return int(matched), int(sampled)
 
     def _resolve_path(self, path: Path) -> Path:
         path = Path(path)
@@ -823,13 +1032,86 @@ class DataBackend:
             return parquet_rel(path)
         raise DataBackendError(f"unsupported DuckDB dataset format: {path.suffix}")
 
-    def _duckdb_text_rel(self, path: Path) -> str:
+    def _duckdb_key_rel(self, path: Path, key_columns: Sequence[str]) -> str:
+        """T1-B7: the SAME reader for every key-consuming SQL surface -- the executed
+        ``left_join`` (anchor + deduped feature) AND the match-rate diagnostics (anchor +
+        feature) -- so diagnostics and execution type join keys identically and cannot
+        diverge on typing-sensitive keys.
+
+        For CSV, force the KEY columns to VARCHAR via ``read_csv_auto(..., types=...)``: this
+        keeps zero-padded ids ("007", not int 7), long-id text, and same-column mixed date
+        formats ("2026-01-01" and "2026/01/02") as text -- the canonical form the shared
+        normalizer ``_sql_value_text`` casts to anyway (so this only aligns the read with the
+        cast already applied everywhere downstream). Non-key columns keep their sniffed types,
+        so numeric dedup / payload typing is unaffected. Parquet keys are already exact on disk
+        and the VARCHAR cast in ``_sql_value_text`` normalizes them, so parquet needs no
+        override."""
         suffix = path.suffix.lower()
-        if suffix == ".csv":
-            return f"read_csv_auto({sql_string_literal(path.as_posix())}, all_varchar=true)"
         if suffix == ".parquet":
             return parquet_rel(path)
+        if suffix == ".csv":
+            unique_cols = list(dict.fromkeys(str(column) for column in key_columns))
+            if not unique_cols:
+                return csv_rel(path)
+            types_entries = ", ".join(
+                f"{sql_string_literal(column)}: 'VARCHAR'" for column in unique_cols
+            )
+            return (
+                f"read_csv_auto({sql_string_literal(path.as_posix())}, "
+                f"types={{{types_entries}}})"
+            )
         raise DataBackendError(f"unsupported DuckDB dataset format: {path.suffix}")
+
+    def _duckdb_key_sample_cte(
+        self, path: Path, key_columns: Sequence[str], *, sample_n: int, seed: int
+    ) -> tuple[str, int]:
+        """T1-B7: a DuckDB-native anchor sample scanned through ``_duckdb_key_rel`` (keys as
+        VARCHAR), replacing the pandas-typed ``sample_rows`` frame in the DuckDB match-rate
+        path so anchor+feature+execution read keys identically. Returns the relation SQL and
+        the sampled row count (the match-rate denominator). Reservoir-samples deterministically
+        (REPEATABLE(seed)) only when the table exceeds ``sample_n`` -- mirroring
+        ``_sample_rows_uncached`` -- otherwise scans the whole (small) table."""
+        rel = self._duckdb_key_rel(path, key_columns)
+        total = self.row_count(path)
+        if total <= sample_n:
+            return rel, total
+        sampled_rel = (
+            f"(SELECT * FROM {rel} "
+            f"USING SAMPLE reservoir({int(sample_n)} ROWS) REPEATABLE ({int(seed)}))"
+        )
+        return sampled_rel, int(sample_n)
+
+    def _duckdb_reservoir_sample_frame(
+        self, path: Path, columns: Sequence[str], *, sample_n: int, seed: int
+    ) -> pd.DataFrame:
+        """T3-1: materialize the SAME anchor rows the DuckDB match-rate primary path scores.
+
+        The primary path samples the anchor with ``USING SAMPLE reservoir(sample_n) REPEATABLE
+        (seed)`` whenever ``total > sample_n`` (:meth:`_duckdb_key_sample_cte`), while the pandas
+        ``sample_rows`` only crosses to the DuckDB reservoir past ``LARGE_ROW_THRESHOLD`` -- so in
+        the ``(sample_n, LARGE_ROW_THRESHOLD]`` band the two paths drew DIFFERENT subsets and a
+        correct join looked like a reconcile mismatch. This reads the anchor through the SAME
+        reservoir the primary uses so the reconcile secondary scores an IDENTICAL subset.
+
+        Read through ``_duckdb_rel`` (sniffed types), NOT ``_duckdb_key_rel`` (forced VARCHAR):
+        the pandas normalizer's numeric branches (``_value_text``) must see numeric scalars, or a
+        float-scientific-notation / long-id key would re-diverge from the SQL normalizer on the
+        Python side. Only which ROWS are compared changes; typing stays what the pandas path
+        always used."""
+        path = self._resolve_path(path)
+        total = self.row_count(path)
+        cols_sql = ", ".join(
+            sql_identifier(str(column), set(self.column_names(path))) for column in columns
+        )
+        if total <= sample_n:
+            query = f"SELECT {cols_sql} FROM {self._duckdb_rel(path)}"
+        else:
+            query = (
+                f"SELECT {cols_sql} FROM {self._duckdb_rel(path)} "
+                f"USING SAMPLE reservoir({int(sample_n)} ROWS) REPEATABLE ({int(seed)})"
+            )
+        with self._connect() as conn:
+            return conn.execute(query).df()
 
     def _validate_columns(
         self,
@@ -861,7 +1143,9 @@ class DataBackend:
         *,
         key_pairs: Sequence[KeyPair] | None = None,
     ) -> str:
-        rel = self._duckdb_rel(feature_path)
+        # T1-B7: read feature key columns as VARCHAR (same reader the anchor + diagnostics use)
+        # so the deduped feature that feeds the join types keys identically to the join's ON.
+        rel = self._duckdb_key_rel(feature_path, feature_key_columns)
         if dedup_strategy in (None, "abort"):
             return f"SELECT * FROM {rel}"
         if key_pairs is not None:
@@ -1133,17 +1417,41 @@ def _sql_transform(method: str, expression: str, *, side: str, pair: KeyPair) ->
 
 
 def _sql_value_text(expression: str) -> str:
-    trimmed = f"trim(CAST({expression} AS VARCHAR))"
+    # T1-A5: nullif(...,'') is applied INSIDE the shared normalizer so blank/whitespace-only
+    # keys become NULL on EVERY path -- the executed JOIN condition (_sql_transform) and the
+    # match-rate/dedup diagnostics (_sql_normalized_key) alike. SQL NULL never equals NULL in
+    # a join, so a blank-keyed anchor row falls through to NULL feature columns instead of
+    # wrongly attaching to a blank-keyed feature row. This matches the Python fallback
+    # (_value_text -> '' -> None) and the diagnostics, closing the three-way split.
+    #
+    # T1-A6: a float64-stored long integer id renders in scientific notation under a plain
+    # CAST(... AS VARCHAR) (e.g. 1.2345678901234568e+17), which the trailing-.0 regex below
+    # cannot strip -- so the SQL key never matched the Python key (str(int(float(...)))) nor a
+    # string-stored id. When the column's runtime type is a floating type AND the value is a
+    # finite whole number, render it through HUGEINT so it becomes the SAME precision-rounded
+    # integer string Python produces (no exponent, no trailing .0). isfinite/floor operate on a
+    # TRY_CAST(... AS DOUBLE) handle (NULL for non-numeric text) so this branch never raises a
+    # binder error when the column is VARCHAR (DuckDB does not short-circuit those by typeof).
+    # _sql_value_text always receives a bare column identifier, so typeof() is well-defined.
+    text = f"CAST({expression} AS VARCHAR)"
+    trimmed = f"trim({text})"
+    as_double = f"TRY_CAST({expression} AS DOUBLE)"
     return (
-        "CASE "
+        "nullif(trim(CASE "
+        f"WHEN typeof({expression}) IN ('DOUBLE', 'FLOAT', 'REAL') "
+        f"AND {as_double} IS NOT NULL AND isfinite({as_double}) "
+        f"AND {as_double} = floor({as_double}) "
+        f"THEN CAST(TRY_CAST({expression} AS HUGEINT) AS VARCHAR) "
         f"WHEN regexp_matches({trimmed}, '^-?[0-9]+\\.0+$') "
         f"THEN regexp_replace({trimmed}, '\\.0+$', '') "
-        f"ELSE {trimmed} END"
+        f"ELSE {trimmed} END), '')"
     )
 
 
 def _sql_normalized_key(method: str, expression: str, *, fingerprint: ColumnFingerprint) -> str:
-    text = f"nullif({_sql_value_text(expression)}, '')"
+    # _sql_value_text already nullifs blank keys (T1-A5), so the diagnostics path no longer
+    # needs its own nullif wrapper -- it inherits blank=missing from the shared normalizer.
+    text = _sql_value_text(expression)
     if method == "exact":
         return text
     if method == "exact_lower":

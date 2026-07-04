@@ -11,6 +11,10 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.formatting import period_text as _period_text
+from marvis.formatting import psi_reference_month_text as _psi_reference_month_text
+from marvis.formatting import ratio as _ratio
+from marvis.formatting import score_interval as _score_interval
 from marvis.output.image_render import render_roc_ks_graph
 from marvis.output.styles import (
     BORDER_COLOR,
@@ -479,34 +483,6 @@ def _reference_bin_rows(bins: list[BinRow]) -> list[tuple]:
     return rows
 
 
-def _score_interval(lower: float, upper: float) -> str:
-    return f"[{_compact_number(lower)},{_compact_number(upper)}]"
-
-
-def _compact_number(value: float) -> str:
-    if value == float("inf"):
-        return "inf"
-    if value == float("-inf"):
-        return "-inf"
-    if float(value).is_integer():
-        return str(int(value))
-    return f"{value:.3f}".rstrip("0").rstrip(".")
-
-
-def _period_text(start: str, end: str, *, default: str) -> str:
-    if not start and not end:
-        return default
-    if not start:
-        return str(end)
-    if not end:
-        return str(start)
-    return str(start) if start == end else f"{start}-{end}"
-
-
-def _ratio(numerator: float, denominator: float) -> float:
-    return float(numerator / denominator) if denominator else 0.0
-
-
 def _pct_point(value: float) -> float:
     return round(float(value) * 100, 1)
 
@@ -519,12 +495,6 @@ def _bad_count(row) -> int:
 
 def _optional_number(value) -> float | str:
     return "" if value is None else float(value)
-
-
-def _psi_reference_month_text(month: str, *, has_calendar_gap: bool) -> str:
-    if not month:
-        return ""
-    return f"{month}(跨月)" if has_calendar_gap else str(month)
 
 
 def _safe_sheet_title(workbook: Workbook, title: str) -> str:

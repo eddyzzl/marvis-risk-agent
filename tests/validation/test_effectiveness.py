@@ -8,6 +8,7 @@ import pytest
 from marvis.validation.config import ValidationConfig
 from marvis.validation.binning import compute_psi
 from marvis.validation.effectiveness import (
+    _roc_ks_curve,
     _should_reverse_eval_bins,
     build_effectiveness_result,
     compute_auc,
@@ -147,6 +148,47 @@ def test_overall_auc_keeps_declared_positive_score_direction():
 def test_compute_auc_returns_neutral_for_degenerate_labels():
     assert compute_auc([0.1, 0.2, 0.3], [1, 1, 1]) == pytest.approx(0.5)
     assert compute_auc([], []) == pytest.approx(0.5)
+
+
+def test_compute_auc_matches_canonical_feature_auc():
+    """T2-4 two-sided consistency: effectiveness.compute_auc must produce the same
+    number as the platform reference feature/metrics.py::feature_auc for the same
+    (scores, labels), so the report's AUC can never drift from the canonical AUC."""
+    from marvis.feature.metrics import feature_auc
+
+    rng = np.random.default_rng(7)
+    for i in range(200):
+        n = int(rng.integers(2, 400))
+        scores = rng.uniform(0.0, 1.0, size=n)
+        if i % 3 == 0:  # exercise ties
+            scores = np.round(scores * rng.integers(2, 8)).astype(float)
+        labels = (rng.uniform(0.0, 1.0, size=n) < 0.3).astype(int)
+        if labels.sum() in (0, len(labels)):
+            continue
+        assert compute_auc(scores, labels) == pytest.approx(
+            float(feature_auc(scores.astype(float), labels.astype(float)))
+        )
+
+
+def test_roc_ks_curve_scalar_matches_canonical_feature_ks():
+    """T2-4 two-sided consistency: the KS scalar on the ROC/KS curve must equal the
+    platform reference feature/metrics.py::feature_ks on the same (scores, labels),
+    so the reported curve KS cannot drift from the canonical KS."""
+    from marvis.feature.metrics import feature_ks
+
+    rng = np.random.default_rng(11)
+    for i in range(200):
+        n = int(rng.integers(2, 400))
+        scores = rng.uniform(0.0, 1.0, size=n)
+        if i % 3 == 0:  # exercise ties
+            scores = np.round(scores * rng.integers(2, 8)).astype(float)
+        labels = (rng.uniform(0.0, 1.0, size=n) < 0.3).astype(int)
+        if labels.sum() in (0, len(labels)):
+            continue
+        curve = _roc_ks_curve(split="train", scores=scores, labels=labels)
+        assert curve.ks == pytest.approx(
+            float(feature_ks(scores.astype(float), labels.astype(float)))
+        )
 
 
 def test_roc_ks_curve_population_at_ks_uses_rank_position_not_fpr():

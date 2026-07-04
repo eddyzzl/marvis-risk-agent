@@ -34,6 +34,7 @@ class MonthEL:
     month: str
     balance: float
     expected_loss: float
+    is_reference: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,7 +96,7 @@ def expected_loss_estimate(
     ]
     p_to_loss = {row.from_state: row.p_to_loss for row in chain}
 
-    el_by_month, total_el, months_available = _el_by_month(
+    el_by_month, total_el, months_available, reference_month = _el_by_month(
         df, contract, state_order, p_to_loss, lgd=lgd
     )
 
@@ -125,6 +126,10 @@ def expected_loss_estimate(
         "horizon_months": int(horizon_months),
         "matrix_window": list(migration.window_months),
         "loss_state": resolved_loss,
+        # total_el is a point-in-time EL of the reference snapshot (latest month),
+        # NOT a cross-month sum; these keys document that口径 to gate/xlsx/renderer.
+        "total_el_basis": "reference_snapshot",
+        "reference_snapshot": reference_month,
     }
     return ExpectedLossResult(
         loss_state=resolved_loss,
@@ -178,15 +183,24 @@ def _el_by_month(
     p_to_loss: dict[str, float],
     *,
     lgd: float,
-) -> tuple[list[MonthEL], float, int]:
+) -> tuple[list[MonthEL], float, int, str | None]:
+    """Per-month point-in-time EL rows + a reference-snapshot headline total_el.
+
+    Each MonthEL row is a self-contained point-in-time EL for that snapshot month.
+    `total_el` is NOT the cross-month sum (that double-counts the same loans once
+    per snapshot they appear in, inflating ~N× on an N-month panel); it is the EL
+    of the reference snapshot (default = latest month present in the frame). The
+    reference row carries is_reference=True. Returns
+    (rows, total_el, months_available, reference_month).
+    """
     frame = df[[contract.snapshot_col, contract.bucket_col, contract.balance_col]].copy()
     frame["_month"] = frame[contract.snapshot_col].map(parse_snapshot_month)
     frame["_bucket"] = frame[contract.bucket_col].astype(str)
     frame["_balance"] = pd.to_numeric(frame[contract.balance_col], errors="coerce").fillna(0.0).astype(float)
     frame = frame[frame["_month"].notna()]
     months = sorted({str(month) for month in frame["_month"].tolist()})
+    reference_month = months[-1] if months else None
     rows: list[MonthEL] = []
-    total_el = 0.0
     for month in months:
         month_frame = frame[frame["_month"] == month]
         balance = float(month_frame["_balance"].sum())
@@ -194,9 +208,18 @@ def _el_by_month(
         for bucket, group in month_frame.groupby("_bucket", sort=False):
             probability = p_to_loss.get(str(bucket), 0.0)
             el += float(group["_balance"].sum()) * probability * float(lgd)
-        rows.append(MonthEL(month=month, balance=balance, expected_loss=el))
-        total_el += el
-    return rows, total_el, len(months)
+        rows.append(
+            MonthEL(
+                month=month,
+                balance=balance,
+                expected_loss=el,
+                is_reference=(month == reference_month),
+            )
+        )
+    total_el = next(
+        (row.expected_loss for row in rows if row.month == reference_month), 0.0
+    )
+    return rows, total_el, len(months), reference_month
 
 
 __all__ = [

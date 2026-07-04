@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from marvis.formatting import period_text as _period_text
+from marvis.formatting import psi_reference_month_text as _psi_reference_month_text
+from marvis.formatting import ratio as _ratio
+from marvis.formatting import score_interval as _score_interval
+
 LAYOUT_BY_KEY = {
     "IMAGE:overall_model_effect": "kpi_cards",
     "IMAGE:loan_month_effect": "trend_table",
@@ -426,37 +431,6 @@ def _stress_status_label(status: Any, error: Any = None) -> str:
     }.get(str(status or "completed"), str(status or "completed"))
 
 
-def _score_interval(lower: Any, upper: Any) -> str:
-    return f"[{_compact_number(lower)},{_compact_number(upper)}]"
-
-
-def _psi_reference_month_text(month: str, *, has_calendar_gap: bool) -> str:
-    if not month or month == "-":
-        return ""
-    return f"{month}(跨月)" if has_calendar_gap else month
-
-
-def _compact_number(value: Any) -> str:
-    numeric = _to_float(value)
-    if numeric is None:
-        return "-"
-    if numeric.is_integer():
-        return str(int(numeric))
-    return f"{numeric:.3f}".rstrip("0").rstrip(".")
-
-
-def _period_text(start: Any, end: Any, *, default: str) -> str:
-    start_text = str(start or "")
-    end_text = str(end or "")
-    if not start_text and not end_text:
-        return default
-    if not start_text:
-        return end_text
-    if not end_text:
-        return start_text
-    return start_text if start_text == end_text else f"{start_text}-{end_text}"
-
-
 def _integer(value: Any) -> str:
     numeric = _to_float(value)
     return "-" if numeric is None else f"{numeric:,.0f}"
@@ -475,10 +449,6 @@ def _percent_point(value: Any) -> str:
 def _decimal(value: Any, *, digits: int) -> str:
     numeric = _to_float(value)
     return "-" if numeric is None else f"{numeric:.{digits}f}"
-
-
-def _ratio(numerator: float, denominator: float) -> float:
-    return float(numerator / denominator) if denominator else 0.0
 
 
 def _number(row: dict[str, Any], key: str) -> float:

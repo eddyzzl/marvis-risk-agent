@@ -6,17 +6,20 @@ from pathlib import Path
 
 import pandas as pd
 
-from marvis.agent.data_dictionary import first_data_dictionary_id, load_business_names
+from marvis.data.data_dictionary import first_data_dictionary_id, load_business_names
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import (
     connect_duckdb,
     sql_identifier,
 )
+from marvis.data.contracts import SMALL_SAMPLE_N
 from marvis.data.dedup import two_level_dedup
-from marvis.data.errors import DedupRequiredError
+from marvis.data.errors import DedupRequiredError, KeyDtypeMismatchError
 from marvis.data.excel_ingest import ingest_sheet, list_sheets
-from marvis.data.join_engine import JoinEngine
+from marvis.data.join_engine import JoinEngine, _key_fps
+from marvis.provenance import NumberProvenance
+from marvis.reconcile import EXACT_ABS_TOL, EXACT_REL_TOL, ReconcileReport, reconcile
 from marvis.db_schema import connect
 from marvis.plugins.sdk import PackRuntime
 from marvis.repositories.strategy import _write_audit_row
@@ -118,11 +121,14 @@ def tool_align_columns(inputs: dict, ctx) -> dict:
 
 def tool_propose_join(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
+    anchor_id = str(inputs["anchor_id"])
+    feature_ids = [str(item) for item in inputs.get("feature_ids") or []]
+    seed = _seed(ctx)
     plan = runtime.join_engine.propose_join_plan(
-        str(inputs["anchor_id"]),
-        [str(item) for item in inputs.get("feature_ids") or []],
+        anchor_id,
+        feature_ids,
         ctx.task_id,
-        seed=_seed(ctx),
+        seed=seed,
     )
     payload = _join_plan_payload(plan)
     for join in payload.get("joins", []):
@@ -133,7 +139,121 @@ def tool_propose_join(inputs: dict, ctx) -> dict:
     dictionary = _join_dictionary(runtime, ctx, payload)
     if dictionary:
         payload["dictionary"] = dictionary
+    # T3: attach the trust layer — a DuckDB-vs-pandas dual-path reconciliation of each
+    # feature's match count (blocking red flag on divergence) plus a minimal provenance
+    # tuple per number. Best-effort: a trust-layer failure must never break the proposal
+    # itself, so any error degrades to "no trust block" rather than failing the gate.
+    try:
+        _attach_join_trust_layer(runtime, anchor_id, plan, payload, inputs=inputs, seed=seed)
+    except Exception:  # noqa: BLE001 - trust layer is additive, never fatal to the join
+        pass
     return payload
+
+
+def _attach_join_trust_layer(
+    runtime: "_Runtime",
+    anchor_id: str,
+    plan,
+    payload: dict,
+    *,
+    inputs: dict,
+    seed: int,
+) -> None:
+    """T3-1/T3-2: reconcile each proposed join's match count two independent ways
+    (DuckDB SQL vs a forced pandas recount over the same sampled keys) and stamp a
+    provenance tuple, attaching both to the per-join payload and a plan-level summary.
+
+    The match count is THE highest-risk headline join number: it decides whether a
+    feature is worth joining. Reconciling it against a genuinely separate code path
+    turns the human's confirmation from trusting one number into seeing whether two
+    paths agree. A divergence beyond the exact-path tolerance (counts, so 1e-9) is a
+    BLOCKING typed red flag carried in the payload, not a soft warning.
+    """
+    anchor = runtime.registry.get(anchor_id)
+    anchor_path = runtime.registry.resolve_path(anchor_id)
+    payload_by_feature = {
+        str(join.get("feature_id")): join for join in payload.get("joins", [])
+    }
+    plan_results = []
+    for spec in plan.joins:
+        feature_id = spec.feature_dataset_id
+        join_payload = payload_by_feature.get(feature_id)
+        if join_payload is None or not spec.key_pairs:
+            continue
+        feature = runtime.registry.get(feature_id)
+        feature_path = runtime.registry.resolve_path(feature_id)
+        anchor_keys = [pair.anchor_col for pair in spec.key_pairs]
+        feature_keys = [pair.feature_col for pair in spec.key_pairs]
+        methods = [pair.match_method for pair in spec.key_pairs]
+        fingerprints = _key_fps(anchor, feature, spec.key_pairs)
+        label = f"{_friendly_name(runtime.registry, feature_id)} 匹配行数"
+        primary_matched, primary_sampled = runtime.backend.match_rate_for_method(
+            anchor_path, anchor_keys, feature_path, feature_keys,
+            method=methods, key_fingerprints=fingerprints,
+            sample_n=SMALL_SAMPLE_N, seed=seed,
+        )
+        # T3-2: the reconcile is only meaningful when the primary actually ran the DuckDB SQL
+        # kernel. When it doesn't (unsupported hash / non-CSV-parquet feature), the "pandas"
+        # secondary would be the SAME function the primary fell back to -> they agree by
+        # construction. Present that honestly as "not independently verified", NEVER as a
+        # passing two-path reconciliation (which would be false assurance).
+        independent = runtime.backend.reconcile_paths_are_independent(
+            anchor_path, feature_path, methods,
+        )
+        if independent:
+            # Primary = DuckDB SQL path; secondary = pure-pandas set membership over the SAME
+            # anchor sample the primary scored (identical subset -> a mismatch is a real
+            # implementation divergence, not a sampling artifact).
+            secondary_matched, _secondary_sampled = runtime.backend.match_rate_reconcile_secondary(
+                anchor_path, anchor_keys, feature_path, feature_keys,
+                method=methods, key_fingerprints=fingerprints,
+                sample_n=SMALL_SAMPLE_N, seed=seed,
+            )
+            result = reconcile(
+                primary_matched,
+                secondary_matched,
+                rel_tol=EXACT_REL_TOL,
+                abs_tol=EXACT_ABS_TOL,
+                label=label,
+                primary_path="duckdb_sql",
+                secondary_path="pandas",
+            )
+            plan_results.append(result)
+            reconcile_payload = {**result.to_dict(), "sampled": int(primary_sampled)}
+        else:
+            # No independent second path available. Do NOT append a ReconcileResult (an
+            # unverified number is not a divergence, so it must not colour the plan's blocking
+            # verdict), and stamp an honest trust status the renderer surfaces as 未独立复核.
+            reconcile_payload = {
+                "label": label,
+                "primary": float(primary_matched),
+                "secondary": None,
+                "primary_path": "duckdb_sql_or_pandas_fallback",
+                "secondary_path": None,
+                "consistent": None,
+                "trust": "not_independently_verified",
+                "sampled": int(primary_sampled),
+            }
+        provenance = NumberProvenance.build(
+            content_hashes=[
+                getattr(anchor, "content_hash", None),
+                getattr(feature, "content_hash", None),
+            ],
+            params={
+                "anchor_id": anchor_id,
+                "feature_id": feature_id,
+                "anchor_keys": anchor_keys,
+                "feature_keys": feature_keys,
+                "methods": methods,
+                "sample_n": SMALL_SAMPLE_N,
+                "seed": seed,
+            },
+            seed=seed,
+        )
+        join_payload["reconcile"] = reconcile_payload
+        join_payload["provenance"] = provenance.to_dict()
+    report = ReconcileReport(results=tuple(plan_results))
+    payload["reconcile_summary"] = report.to_dict()
 
 
 def _join_dictionary(runtime: "_Runtime", ctx, payload: dict) -> dict:
@@ -169,26 +289,48 @@ def tool_confirm_join(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     join_plan_id = str(inputs["join_plan_id"])
     strategies = inputs.get("dedup_strategies") or {}
+    # T1-B8: per-feature acknowledgement that a red (text<->float) key-dtype mismatch is the
+    # same identifier. Accept a set/list of feature ids, or a truthy scalar to ack all.
+    ack_input = inputs.get("ack_dtype_mismatch")
+    if isinstance(ack_input, (list, tuple, set)):
+        ack_ids = {str(fid) for fid in ack_input}
+        ack_all = False
+    else:
+        ack_ids = set()
+        ack_all = bool(ack_input)
     plan = runtime.repo.load_join_plan(join_plan_id)
     confirmed: list[str] = []
     needs_dedup: list[str] = []
+    needs_dtype_ack: list[str] = []
     for spec in plan.joins:
         feature_id = spec.feature_dataset_id
         strategy = strategies.get(feature_id)
         try:
             runtime.join_engine.confirm_join_spec(
-                join_plan_id, feature_id, dedup_strategy=strategy
+                join_plan_id, feature_id, dedup_strategy=strategy,
+                ack_dtype_mismatch=ack_all or feature_id in ack_ids,
             )
             confirmed.append(feature_id)
+        except KeyDtypeMismatchError:
+            needs_dtype_ack.append(feature_id)
         except DedupRequiredError:
             needs_dedup.append(feature_id)
+    status = "confirmed"
+    if needs_dtype_ack:
+        status = "needs_dtype_ack"
+    elif needs_dedup:
+        status = "needs_dedup"
     return {
         "join_plan_id": join_plan_id,
         "confirmed": confirmed,
         "needs_dedup": needs_dedup,
         # friendly file names for the gate message (raw ids stay in needs_dedup for the picker)
         "needs_dedup_labels": {fid: _friendly_name(runtime.registry, fid) for fid in needs_dedup},
-        "status": "needs_dedup" if needs_dedup else "confirmed",
+        "needs_dtype_ack": needs_dtype_ack,
+        "needs_dtype_ack_labels": {
+            fid: _friendly_name(runtime.registry, fid) for fid in needs_dtype_ack
+        },
+        "status": status,
     }
 
 
@@ -446,6 +588,24 @@ def tool_slice_aggregate(inputs: dict, ctx) -> dict:
             "level": "amber",
             "message": f"结果超过 top_k={top_k} 行已截断，请收窄分组或加筛选。",
         })
+    # A4: bad_rate/approval_rate denominators drop unlabeled rows. If any group carries
+    # excluded rows, surface it so the reader knows the rate is over labeled samples only
+    # rather than silently trusting a deflated column.
+    unlabeled_total = sum(
+        int(cell)
+        for row in rows
+        for label, cell in row.items()
+        if label.startswith("unlabeled_count_") and isinstance(cell, (int, float)) and cell
+    )
+    if unlabeled_total:
+        red_flags.append({
+            "code": "unlabeled_present",
+            "level": "amber",
+            "message": (
+                f"{unlabeled_total} 行标签/决策缺失或无法识别，坏率/批准率仅基于已标注样本，"
+                "请对照 unlabeled_count_* 列判断覆盖度。"
+            ),
+        })
 
     spec_echo = {
         "dataset_id": dataset_id,
@@ -502,6 +662,18 @@ def _metric_selects(metrics: list[dict], allowed_columns: set[str]) -> tuple[lis
         seen.add(label)
         selects.append(f"{_metric_expr(op, col, allowed_columns)} AS {_quote(label)}")
         labels.append(label)
+        # A4: bad_rate/approval_rate now exclude unlabeled rows from the denominator.
+        # Auto-derive a companion unlabeled_count_<col> so the excluded rows are always
+        # visible (the op enum stays stable). The extra select keeps the SELECT arity in
+        # step with metric_labels, so the zip(strict=True) row-build stays balanced.
+        if op in {"bad_rate", "approval_rate"} and col:
+            comp_label = f"unlabeled_count_{col}"
+            if comp_label not in seen:
+                seen.add(comp_label)
+                selects.append(
+                    f"{_unlabeled_count_expr(op, col, allowed_columns)} AS {_quote(comp_label)}"
+                )
+                labels.append(comp_label)
     return selects, labels
 
 
@@ -524,13 +696,47 @@ def _metric_expr(op: str, col: str | None, allowed_columns: set[str]) -> str:
         if not col:
             raise ValueError("metric op 'bad_rate' requires the target column")
         ident = sql_identifier(col, allowed_columns)
-        return f"avg(CASE WHEN try_cast({ident} AS DOUBLE) = 1 THEN 1.0 ELSE 0.0 END)"
+        # A4: only rows whose label casts to exactly 0/1 enter the denominator.
+        # NULL / empty / non-castable ("N/A") / non-binary (2, -1, ...) -> NULL, which
+        # DuckDB avg() drops — matching report_tools.labeled_count semantics and the
+        # sibling mean op, instead of the old ELSE 0.0 that deflated the rate.
+        num = f"try_cast({ident} AS DOUBLE)"
+        return f"avg(CASE WHEN {num} = 1 THEN 1.0 WHEN {num} = 0 THEN 0.0 ELSE NULL END)"
     if op == "approval_rate":
         if not col:
             raise ValueError("metric op 'approval_rate' requires the decision column")
         ident = sql_identifier(col, allowed_columns)
-        return f"avg(CASE WHEN lower(trim(CAST({ident} AS VARCHAR))) = 'approve' THEN 1.0 ELSE 0.0 END)"
+        # A4/D2: only affirmatively-decided rows (approve/deny vocab) enter the
+        # denominator; NULL / blank / unrecognized free text ("pending", "review")
+        # -> NULL -> dropped, so an unknown decision is never miscounted as a rejection.
+        norm = f"lower(trim(CAST({ident} AS VARCHAR)))"
+        approve_in = ", ".join(f"'{tok}'" for tok in _APPROVE_TOKENS)
+        deny_in = ", ".join(f"'{tok}'" for tok in _DENY_TOKENS)
+        return (
+            f"avg(CASE WHEN {norm} IN ({approve_in}) THEN 1.0 "
+            f"WHEN {norm} IN ({deny_in}) THEN 0.0 ELSE NULL END)"
+        )
     raise ValueError(f"unsupported metric op: {op}")
+
+
+# A4/D2 approval-decision vocabulary. Only these tokens (after lower/trim) count as an
+# affirmative decision; anything else is treated as "decision unknown" (unlabeled) and
+# excluded from the approval_rate denominator rather than silently counted as a rejection.
+_APPROVE_TOKENS = ("approve", "approved", "1", "y", "yes", "t", "true")
+_DENY_TOKENS = ("reject", "rejected", "decline", "declined", "deny", "denied", "0", "n", "no", "f", "false")
+
+
+def _unlabeled_count_expr(op: str, col: str, allowed_columns: set[str]) -> str:
+    """A4: per-group count of rows excluded from a bad_rate/approval_rate denominator
+    (label NULL / non-binary, or decision NULL / unrecognized). count(*) minus the
+    affirmatively-labeled rows, so a fully-labeled group yields 0."""
+    ident = sql_identifier(col, allowed_columns)
+    if op == "bad_rate":
+        num = f"try_cast({ident} AS DOUBLE)"
+        return f"count(*) - count(CASE WHEN {num} IN (0, 1) THEN 1 END)"
+    norm = f"lower(trim(CAST({ident} AS VARCHAR)))"
+    decided_in = ", ".join(f"'{tok}'" for tok in (*_APPROVE_TOKENS, *_DENY_TOKENS))
+    return f"count(*) - count(CASE WHEN {norm} IN ({decided_in}) THEN 1 END)"
 
 
 def _metric_label(op: str, col: str | None) -> str:
@@ -684,6 +890,10 @@ def _key_pair_payload(pair) -> dict:
         "transform_side": pair.transform_side,
         "match_rate": pair.match_rate,
         "resolved_by": pair.resolved_by,
+        # T1-B8: dtype provenance for each key side + cross-file divergence flag.
+        "anchor_dtype": getattr(pair, "anchor_dtype", ""),
+        "feature_dtype": getattr(pair, "feature_dtype", ""),
+        "dtype_divergent": getattr(pair, "dtype_divergent", False),
     }
 
 

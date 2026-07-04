@@ -120,6 +120,7 @@ def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
             "mob_col": "mob",
             "bad_col": "bad",
             "mob_max": 2,
+            "label_semantics": "incremental",
         },
         task_id=task.id,
     )
@@ -301,15 +302,78 @@ def test_vintage_curve_gates_nan_label(tmp_path):
         "bad_col": "bad",
     }
 
-    blocked = runner.invoke(ToolRef("strategy", "vintage_curve"), dict(base_inputs), task_id=task.id)
+    # The NaN-label gate fires first (label resolution precedes the semantics check),
+    # even though label_semantics is also undeclared here.
+    blocked = runner.invoke(
+        ToolRef("strategy", "vintage_curve"),
+        {**base_inputs, "label_semantics": "incremental"},
+        task_id=task.id,
+    )
     assert blocked.ok is False
     assert blocked.error_kind == "nan_label_not_confirmed"
     assert blocked.error_detail["n_nan"] == 1
 
     confirmed = runner.invoke(
         ToolRef("strategy", "vintage_curve"),
-        {**base_inputs, "drop_nan_labels": True},
+        {**base_inputs, "drop_nan_labels": True, "label_semantics": "incremental"},
         task_id=task.id,
     )
     assert confirmed.ok is True, confirmed.error
     assert confirmed.output["nan_labels_dropped"] == 1
+    assert "warnings" in confirmed.output
+
+
+def test_tool_vintage_curve_raises_label_semantics_not_declared(tmp_path):
+    runner, _plugin_registry, registry, task = _runtime(tmp_path)
+    # Snapshot-flag frame with clean 0/1 labels: no NaN gate, so the undeclared
+    # label_semantics gate is what fires. 3 MOBs with non-decreasing bad_count so the
+    # monotone snapshot heuristic also trips (advisory hint in the gate detail).
+    frame = pd.DataFrame({
+        "cohort": ["202601"] * 12,
+        "mob": [0, 0, 0, 0] + [1, 1, 1, 1] + [2, 2, 2, 2],
+        "bad": [1, 0, 0, 0] + [1, 1, 0, 0] + [1, 1, 0, 0],
+    })
+    path = tmp_path / "vintage_semantics_sample.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="strategy_sample")
+
+    blocked = runner.invoke(
+        ToolRef("strategy", "vintage_curve"),
+        {"dataset_id": dataset.id, "cohort_col": "cohort", "mob_col": "mob", "bad_col": "bad"},
+        task_id=task.id,
+    )
+    assert blocked.ok is False
+    assert blocked.error_kind == "label_semantics_not_declared"
+    detail = blocked.error_detail
+    assert detail["target_col"] == "bad"
+    assert set(detail["examples"]) == {"incremental", "snapshot"}
+    assert detail["monotone_heuristic"] is True
+
+
+def test_tool_vintage_curve_surfaces_warnings_in_output(tmp_path):
+    runner, _plugin_registry, registry, task = _runtime(tmp_path)
+    # Monotone snapshot-flag data declared incremental -> the tool output carries a
+    # non-empty 'warnings' list (schema additionalProperties:false compliance).
+    frame = pd.DataFrame({
+        "cohort": ["202601"] * 12,
+        "mob": [0, 0, 0, 0] + [1, 1, 1, 1] + [2, 2, 2, 2],
+        "bad": [1, 0, 0, 0] + [1, 1, 0, 0] + [1, 1, 0, 0],
+    })
+    path = tmp_path / "vintage_warnings_sample.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="strategy_sample")
+
+    result = runner.invoke(
+        ToolRef("strategy", "vintage_curve"),
+        {
+            "dataset_id": dataset.id,
+            "cohort_col": "cohort",
+            "mob_col": "mob",
+            "bad_col": "bad",
+            "label_semantics": "incremental",
+        },
+        task_id=task.id,
+    )
+    assert result.ok is True, result.error
+    assert isinstance(result.output["warnings"], list)
+    assert any("snapshot" in w.lower() or "快照" in w for w in result.output["warnings"])

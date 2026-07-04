@@ -1,11 +1,13 @@
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
+from marvis.feature.binning import equal_frequency_edges
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.packs.strategy import build_strategy
@@ -129,6 +131,78 @@ def test_design_cutoff_bands_higher_is_riskier_order_and_rule():
     assert [round(b.cum_approval_rate, 4) for b in res.bands] == [0.3333, 0.6667, 1.0]
     assert [b.decision for b in res.bands] == ["approve", "approve", "decline"]
     assert res.recommended_rules == ({"condition": "score >= 500", "decision": "reject"},)
+
+
+# ---------------------------------------------------------------------------
+# T2-3: the default (auto) quantile path reuses the platform's
+# equal_frequency_edges so degenerate/repeated scores segment identically to the
+# rest of MARVIS -- no bespoke np.quantile edges, no spurious interior splits,
+# open (+/-inf) endpoints so identical scores always land in the same band.
+# ---------------------------------------------------------------------------
+def test_design_cutoff_bands_auto_edges_use_equal_frequency_two_value():
+    # Two-value degenerate score {0, 5}: equal_frequency_edges collapses to the
+    # 2-unique midpoint special case [-inf, 2.5, inf]. The old bespoke path gave
+    # finite endpoints (0.0, 5.0) -- a single band with no boundary coverage.
+    frame = pd.DataFrame({"score": [0, 0, 0, 0, 5, 5], "bad": [1, 1, 1, 0, 0, 0]})
+    res = design_cutoff_bands(
+        frame, score_col="score", target_col="bad",
+        score_direction="higher_is_better", n_bands=5,
+    )
+    expected = tuple(
+        float(e) for e in equal_frequency_edges(np.array([0, 0, 0, 0, 5, 5], dtype=float), 5)
+    )
+    assert res.band_edges == expected
+    assert res.band_edges == (float("-inf"), 2.5, float("inf"))
+    # Two clean bands (all 0s vs all 5s), every row accounted for -- no phantom
+    # interior edge at floating-point noise (the old path produced ~2.22e-15).
+    assert [b.count for b in res.bands] == [4, 2]
+    assert sum(b.count for b in res.bands) == len(frame)
+
+
+def test_design_cutoff_bands_auto_edges_no_spurious_interior_edge():
+    # Same-score rows must never be split across bands by float noise. The old
+    # np.quantile path emitted (0.0, 2.22e-15, 5.0) here; equal_frequency_edges
+    # gives one honest split so identical scores share a band.
+    frame = pd.DataFrame({"score": [0, 0, 0, 0, 5, 5], "bad": [1, 1, 1, 0, 0, 0]})
+    res = design_cutoff_bands(
+        frame, score_col="score", target_col="bad",
+        score_direction="higher_is_better", n_bands=5,
+    )
+    interior = res.band_edges[1:-1]
+    # exactly one interior edge, and it is the honest midpoint (2.5) -- not the
+    # ~2.22e-15 float-noise split the old np.quantile path glued next to 0.
+    assert len(interior) == 1
+    assert interior[0] == 2.5
+    assert all(np.isfinite(e) for e in interior)
+
+
+def test_design_cutoff_bands_auto_edges_repeated_values():
+    # Heavy repeats (90x1, 10x9): equal_frequency_edges must not manufacture more
+    # bins than the data supports -- again the 2-unique midpoint [-inf, 5, inf].
+    scores = [1] * 90 + [9] * 10
+    frame = pd.DataFrame({"score": scores, "bad": [1] * 90 + [0] * 10})
+    res = design_cutoff_bands(
+        frame, score_col="score", target_col="bad",
+        score_direction="higher_is_better", n_bands=5,
+    )
+    expected = tuple(float(e) for e in equal_frequency_edges(np.array(scores, dtype=float), 5))
+    assert res.band_edges == expected
+    assert res.band_edges[0] == float("-inf")
+    assert res.band_edges[-1] == float("inf")
+    assert sum(b.count for b in res.bands) == len(frame)
+
+
+def test_design_cutoff_bands_explicit_band_edges_override_still_finite():
+    # The explicit band_edges override branch is untouched by T2-3: user-supplied
+    # boundaries stay verbatim (finite, no +/-inf sentinels, no equal_frequency).
+    frame = _hand_frame()
+    res = design_cutoff_bands(
+        frame, score_col="score", target_col="bad",
+        score_direction="higher_is_better", band_edges=[100, 350, 600],
+    )
+    assert res.band_edges == (100.0, 350.0, 600.0)
+    assert all(np.isfinite(e) for e in res.band_edges)
+    assert [b.count for b in res.bands] == [3, 3]
 
 
 # ---------------------------------------------------------------------------
@@ -784,6 +858,125 @@ def test_render_design_cutoff_bands_recommendation_carries_evidence():
 
 
 def test_render_train_models_champion_carries_evidence_vs_runner_up():
+    # C9: the champion evidence sentence must cite the REAL selection axis
+    # (penalized test KS), not a hard-coded 'OOT KS'. Champion exp-1 wins on the
+    # penalized test KS even though a runner-up could look better on OOT.
+    from marvis.agent.renderers import _render_train_models
+
+    text, _ = _render_train_models({
+        "target_type": "binary",
+        "selection_metric": "test_ks(overfit-penalized)",
+        "best_experiment_id": "exp-1", "best_recipe": "lgb",
+        "experiments": [
+            # penalized = 0.40 - 0.5*max(0, 0.44-0.40) = 0.38
+            {"experiment_id": "exp-1", "recipe": "lgb", "metrics": {"train_ks": 0.44, "test_ks": 0.40}},
+            # penalized = 0.42 - 0.5*max(0, 0.60-0.42) = 0.33
+            {"experiment_id": "exp-2", "recipe": "xgb", "metrics": {"train_ks": 0.60, "test_ks": 0.42}},
+        ],
+    })
+    assert "最优 **lgb**" in text
+    assert "依据：按 test KS(过拟合惩罚)=0.3800" in text
+    assert "较次优 xgb（0.3300）高 0.0500" in text
+    # The stale hard-coded axis must not resurface.
+    assert "OOT KS" not in text
+
+
+def test_render_train_models_champion_evidence_not_direction_wrong_on_oot():
+    # C9 (defect #2): the champion won on penalized test KS but has a LOWER oot_ks
+    # than the runner-up. The evidence must be computed on the penalized-KS axis
+    # (where the champion truly leads) and must NOT print oot_ks values nor falsely
+    # claim '高' against a runner-up it actually lost to on OOT.
+    from marvis.agent.renderers import _render_train_models
+
+    text, _ = _render_train_models({
+        "target_type": "binary",
+        "selection_metric": "test_ks(overfit-penalized)",
+        "best_experiment_id": "exp-1", "best_recipe": "lgb",
+        "experiments": [
+            # penalized = 0.41 - 0.5*max(0, 0.43-0.41) = 0.40 ; oot_ks LOWER than runner-up
+            {"experiment_id": "exp-1", "recipe": "lgb", "metrics": {"train_ks": 0.43, "test_ks": 0.41, "oot_ks": 0.30}},
+            # penalized = 0.38 - 0.5*max(0, 0.70-0.38) = 0.22 ; oot_ks HIGHER
+            {"experiment_id": "exp-2", "recipe": "xgb", "metrics": {"train_ks": 0.70, "test_ks": 0.38, "oot_ks": 0.45}},
+        ],
+    })
+    assert "依据：按 test KS(过拟合惩罚)=0.4000" in text
+    assert "较次优 xgb（0.2200）高 0.1800" in text
+    # The champion's lower oot_ks (0.30) must never appear as a '高' claim.
+    assert "0.3000" not in text
+    assert "0.4500" not in text
+    assert "OOT KS" not in text
+
+
+def test_render_train_models_champion_evidence_response_lift_axis():
+    # C9 (response_lift sub-case): selection_metric drives the evidence off
+    # top-decile test lift, not oot_ks.
+    from marvis.agent.renderers import _render_train_models
+
+    text, _ = _render_train_models({
+        "target_type": "binary",
+        "selection_metric": "test_lift_head_10",
+        "best_experiment_id": "exp-1", "best_recipe": "lgb",
+        "experiments": [
+            {"experiment_id": "exp-1", "recipe": "lgb", "metrics": {"test_lift_head_10": 2.40, "oot_ks": 0.10}},
+            {"experiment_id": "exp-2", "recipe": "xgb", "metrics": {"test_lift_head_10": 1.90, "oot_ks": 0.55}},
+        ],
+    })
+    assert "按 test 头部10%提升" in text
+    assert "依据：按 test 头部10%提升=2.4000" in text
+    assert "较次优 xgb（1.9000）高 0.5000" in text
+    assert "OOT KS" not in text
+
+
+def test_render_train_models_champion_penalized_value_matches_selector():
+    # C9 parity guard: the rendered penalized-KS value must equal
+    # train_tools._overfit_penalized_test_ks exactly (no formula drift between the
+    # renderer's copy and the selector that actually picked the champion).
+    from marvis.agent.renderers import _penalized_test_ks
+    from marvis.packs.modeling.train_tools import _overfit_penalized_test_ks
+
+    for metrics in (
+        {"train_ks": 0.44, "test_ks": 0.40},
+        {"train_ks": 0.60, "test_ks": 0.42},
+        {"weighted_train_ks": 0.55, "weighted_test_ks": 0.48, "train_ks": 0.9, "test_ks": 0.1},
+        {"test_ks": 0.37},  # no train reading -> gap 0
+    ):
+        assert _penalized_test_ks(metrics) == _overfit_penalized_test_ks(metrics)
+
+
+def test_render_train_models_champion_evidence_continuous_multiclass_unchanged():
+    # C9 regression: continuous (oot_rmse, lower-is-better) and multiclass
+    # (oot_macro_auc, higher-is-better) already matched the tool's selection_metric,
+    # so their evidence rendering must be behavior-preserving.
+    from marvis.agent.renderers import _render_train_models
+
+    text_c, _ = _render_train_models({
+        "target_type": "continuous",
+        "selection_metric": "oot_rmse",
+        "best_experiment_id": "exp-1", "best_recipe": "lgb",
+        "experiments": [
+            {"experiment_id": "exp-1", "recipe": "lgb", "metrics": {"oot_rmse": 0.20}},
+            {"experiment_id": "exp-2", "recipe": "xgb", "metrics": {"oot_rmse": 0.25}},
+        ],
+    })
+    assert "依据：按 OOT RMSE=0.2000" in text_c
+    assert "较次优 xgb（0.2500）低 0.0500" in text_c
+
+    text_m, _ = _render_train_models({
+        "target_type": "multiclass",
+        "selection_metric": "oot_macro_auc",
+        "best_experiment_id": "exp-1", "best_recipe": "lgb",
+        "experiments": [
+            {"experiment_id": "exp-1", "recipe": "lgb", "metrics": {"oot_macro_auc": 0.88}},
+            {"experiment_id": "exp-2", "recipe": "xgb", "metrics": {"oot_macro_auc": 0.83}},
+        ],
+    })
+    assert "依据：按 OOT macro-AUC=0.8800" in text_m
+    assert "较次优 xgb（0.8300）高 0.0500" in text_m
+
+
+def test_render_train_models_champion_evidence_legacy_no_selection_metric():
+    # C9 backward-compat: outputs missing selection_metric (old cached data) render
+    # via the per-target_type fallback without error.
     from marvis.agent.renderers import _render_train_models
 
     text, _ = _render_train_models({
@@ -794,7 +987,6 @@ def test_render_train_models_champion_carries_evidence_vs_runner_up():
             {"experiment_id": "exp-2", "recipe": "xgb", "metrics": {"oot_ks": 0.39}},
         ],
     })
-    # B.1/B.2: champion line cites the selection metric value + gap to the runner-up.
     assert "最优 **lgb**" in text
     assert "依据：按 OOT KS=0.4300" in text
     assert "较次优 xgb（0.3900）高 0.0400" in text

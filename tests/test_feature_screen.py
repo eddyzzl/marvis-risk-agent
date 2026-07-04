@@ -306,4 +306,74 @@ def test_screen_no_holdout_split_produces_no_psi(tmp_path):
     result = screen_features(backend, path, features=["f"], target_col="y")
 
     assert "psi_split" not in result.scores["f"]
+
+
+# --- D13: NaN-label confirmation gate (INV-1 / INV-2) --------------------------------
+
+
+def _nan_label_screen_frame(rows: int = 100, nan_fraction: float = 0.4) -> pd.DataFrame:
+    """A binary-labelled frame where ``nan_fraction`` of the target rows are NaN, with a
+    partially-discriminative feature (KS below the 0.40 leakage gate so it lands in
+    ``selected``) — the exact silent-degradation shape (screen ranks/gates on the labelled
+    subset while reporting the full sample)."""
+    rng = np.random.RandomState(0)
+    y = np.array([0, 1] * (rows // 2), dtype=float)
+    n_nan = int(round(rows * nan_fraction))
+    # Blank the label for a deterministic contiguous slice so the remaining labelled rows
+    # still carry both classes.
+    y[:n_nan] = np.nan
+    # Partial signal chosen so the KS on the labelled subset stays below the 0.40 leakage
+    # gate (so ``f`` lands in ``selected`` rather than the leakage bucket).
+    feature = np.nan_to_num(y, nan=0.0) + rng.normal(scale=3.0, size=rows)
+    return pd.DataFrame({"f": feature, "y": y})
+
+
+def test_screen_features_raises_on_nan_label_by_default(tmp_path):
+    """D13: with NaN labels and drop_nan_labels omitted, screen_features must STOP with the
+    typed NaN-label error (scope='screen') instead of silently ranking on the labelled subset."""
+    from marvis.data.errors import NanLabelNotConfirmedError
+
+    frame = _nan_label_screen_frame(rows=100, nan_fraction=0.4)
+    backend, path = _write(tmp_path, frame)
+
+    with pytest.raises(NanLabelNotConfirmedError) as excinfo:
+        screen_features(backend, path, features=["f"], target_col="y")
+    assert excinfo.value.n_nan == 40
+    assert excinfo.value.n_total == 100
+    assert excinfo.value.scope == "screen"
+
+
+def test_screen_features_drops_and_reports_when_confirmed(tmp_path):
+    """D13: with drop_nan_labels=True the gate proceeds, reports nan_labels_dropped, and the
+    KS/ranking are computed only over the labelled rows (the deterministic core already drops
+    NaN-label rows — the count is surfaced for audit)."""
+    from marvis.feature.metrics import feature_ks
+
+    frame = _nan_label_screen_frame(rows=100, nan_fraction=0.4)
+    backend, path = _write(tmp_path, frame)
+
+    result = screen_features(
+        backend, path, features=["f"], target_col="y", drop_nan_labels=True,
+    )
+    assert result.nan_labels_dropped == 40
+    assert result.selected == ("f",)
+    labelled = frame["y"].notna().to_numpy()
+    expected_ks = feature_ks(frame["f"].to_numpy()[labelled], frame["y"].to_numpy()[labelled])
+    # KS is computed only over the 60 labelled rows, not the full 100-row sample.
+    assert result.scores["f"]["ks"] == pytest.approx(expected_ks)
+
+
+def test_screen_features_clean_labels_reports_zero_dropped(tmp_path):
+    """D13 regression guard: on a fully-labelled target the gate is inert — no raise, and
+    nan_labels_dropped == 0 (screen output byte-identical to before the gate)."""
+    rows = 100
+    rng = np.random.RandomState(0)
+    y = np.array([0, 1] * (rows // 2), dtype=float)
+    feature = y + rng.normal(scale=2.0, size=rows)  # partial signal, KS below leakage gate
+    frame = pd.DataFrame({"f": feature, "y": y})
+    backend, path = _write(tmp_path, frame)
+
+    result = screen_features(backend, path, features=["f"], target_col="y")
+    assert result.nan_labels_dropped == 0
+    assert result.selected == ("f",)
     assert result.psi_watch == ()

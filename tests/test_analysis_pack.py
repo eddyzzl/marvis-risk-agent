@@ -314,3 +314,98 @@ def test_expected_loss_matrix_not_absorbing_warns():
     )
     kinds = {flag["kind"] for flag in result.red_flags}
     assert "matrix_not_absorbing" in kinds
+
+
+def _stable_panel_frame(months: list[str]) -> pd.DataFrame:
+    """跨月稳定组合面板：每个快照月的桶分布/余额完全相同 -> 各月 EL 相同。
+
+    每月都含 4 current / 4 M1 / 2 bad（余额均 1000），loan_id 在各月保持同一桶，
+    故 groupby-month EL 恒定。另加两个每月都出现且发生迁徙的探针 loan（用于让
+    bucket_migration 观测到 current->M1 与 M1->bad 的迁出），矩阵可算。跨月求和会
+    ~N× 虚高，参考快照口径应回到单月 EL。
+    """
+    # fixed-bucket loans: identical (bucket, balance) in every month -> stable distribution
+    fixed = [
+        ("c1", "current"), ("c2", "current"), ("c3", "current"), ("c4", "current"),
+        ("m1", "M1"), ("m2", "M1"), ("m3", "M1"), ("m4", "M1"),
+        ("b1", "bad"), ("b2", "bad"),
+    ]
+    rows = []
+    for month in months:
+        for loan_id, bucket in fixed:
+            rows.append({"loan_id": loan_id, "snapshot_month": month, "bucket": bucket, "balance": 1000.0})
+    # migration probes: present every month, migrating current->M1->bad so the
+    # transition matrix has observed out-flow from current and M1 (zero balance so
+    # they do not perturb the per-month EL headline balances/distribution weights).
+    ladder = {"current": "M1", "M1": "bad", "bad": "bad"}
+    probe_state = "current"
+    for month in months:
+        rows.append({"loan_id": "probe", "snapshot_month": month, "bucket": probe_state, "balance": 0.0})
+        probe_state = ladder[probe_state]
+    frame = pd.DataFrame(rows).reset_index(drop=True)
+    return frame
+
+
+def _el_kernel(frame: pd.DataFrame):
+    from marvis.packs.analysis.loss import expected_loss_estimate
+
+    return expected_loss_estimate(
+        frame,
+        id_col="loan_id",
+        snapshot_col="snapshot_month",
+        bucket_col="bucket",
+        states=_STATES,
+        balance_col="balance",
+        loss_state="bad",
+        lgd=0.5,
+        horizon_months=2,
+    )
+
+
+def test_expected_loss_total_el_is_reference_snapshot_not_sum():
+    """A2 anti-inflation lock: total_el == latest month's EL, NOT the cross-month sum."""
+    months = ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06"]
+    result = _el_kernel(_stable_panel_frame(months))
+    per_month = {row.month: row.expected_loss for row in result.el_by_month}
+    latest = max(per_month)
+    assert result.total_el == pytest.approx(per_month[latest])
+    # more than one month present -> the naive sum would be materially larger
+    assert len(result.el_by_month) > 1
+    naive_sum = sum(per_month.values())
+    assert result.total_el < naive_sum
+    assert naive_sum == pytest.approx(result.total_el * len(per_month))
+
+
+def test_expected_loss_assumptions_annotate_basis():
+    """口径 machine-readable: assumptions carries basis + reference snapshot month."""
+    months = ["2025-01", "2025-02", "2025-03"]
+    result = _el_kernel(_stable_panel_frame(months))
+    assert result.assumptions["total_el_basis"] == "reference_snapshot"
+    assert result.assumptions["reference_snapshot"] == "2025-03"
+
+
+def test_expected_loss_per_month_rows_unchanged():
+    """Only the sum changed: per-month rows keep one row per snapshot month with per-month EL."""
+    months = ["2025-01", "2025-02", "2025-03", "2025-04"]
+    frame = _stable_panel_frame(months)
+    result = _el_kernel(frame)
+    present = sorted({str(m) for m in frame["snapshot_month"].tolist()})
+    assert [row.month for row in result.el_by_month] == present
+    # each per-month EL is positive and equal across the stable panel
+    els = [row.expected_loss for row in result.el_by_month]
+    assert all(el > 0 for el in els)
+    assert all(el == pytest.approx(els[0]) for el in els)
+    # exactly one row flagged as the reference (latest) month
+    ref_rows = [row for row in result.el_by_month if row.is_reference]
+    assert len(ref_rows) == 1
+    assert ref_rows[0].month == max(row.month for row in result.el_by_month)
+
+
+def test_expected_loss_single_month_total_equals_month():
+    """Edge: single-snapshot dataset -> total_el == that month's EL, reference == that month."""
+    frame = _stable_panel_frame(["2025-07", "2025-08"])
+    frame = frame[frame["snapshot_month"] == "2025-08"].reset_index(drop=True)
+    result = _el_kernel(frame)
+    assert len(result.el_by_month) == 1
+    assert result.total_el == pytest.approx(result.el_by_month[0].expected_loss)
+    assert result.assumptions["reference_snapshot"] == "2025-08"

@@ -843,3 +843,43 @@ def test_dataset_registry_reads_scientific_notation_ids_as_strings(tmp_path):
         "6222021234567890123",
         "6222021234567890456",
     }
+
+
+def test_sniff_long_id_flags_zero_padded_short_codes(tmp_path):
+    # T1-B8: zero-padded SHORT codes (leading zero, below the 15-digit long-id rule) must be
+    # kept as string too, else int/float promotion strips the leading zero and the same code
+    # diverges dtype across files -> silent miss. The relaxed rule flags them.
+    from marvis.data.csv_ingest import sniff_long_id_columns
+
+    csv_path = tmp_path / "codes.csv"
+    csv_path.write_text("org_code\n000123\n000456\n000789\n", encoding="utf-8")
+    assert "org_code" in sniff_long_id_columns(csv_path, encoding="utf-8")
+
+
+def test_sniff_long_id_does_not_flag_plain_short_numerics(tmp_path):
+    # T1-B8 guard: plain short numerics without a leading zero must NOT be flagged (the
+    # relaxation must not over-trigger and force every small-int column to string).
+    from marvis.data.csv_ingest import sniff_long_id_columns
+
+    csv_path = tmp_path / "nums.csv"
+    csv_path.write_text("qty\n1\n22\n333\n", encoding="utf-8")
+    assert "qty" not in sniff_long_id_columns(csv_path, encoding="utf-8")
+
+
+def test_zero_padded_short_code_kept_as_string_end_to_end(tmp_path):
+    # T1-B8: registering a CSV with a zero-padded short code keeps it string in the parquet
+    # (leading zeros intact), so the same code cannot diverge dtype across files.
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    backend = DataBackend(datasets_root)
+    registry = DatasetRegistry(repo, backend, datasets_root)
+
+    csv_path = tmp_path / "codes.csv"
+    csv_path.write_text("org_code,bad_flag\n000123,0\n000456,1\n000789,0\n", encoding="utf-8")
+    dataset = registry.register_from_upload("task-1", csv_path, role="sample")
+
+    frame = pd.read_parquet(registry.resolve_path(dataset.id))
+    assert pd.api.types.is_string_dtype(frame["org_code"]) or frame["org_code"].dtype == object
+    assert set(frame["org_code"].dropna()) == {"000123", "000456", "000789"}

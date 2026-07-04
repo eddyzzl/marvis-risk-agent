@@ -139,9 +139,6 @@
   text-align: center;
 }
 
-.plan-steps,
-.subagent-list,
-.loop-events,
 .plugin-list,
 .memory-distillation-list,
 .skill-list {
@@ -149,78 +146,17 @@
   gap: 10px;
 }
 
-.goal-composer {
-  display: grid;
-  gap: 10px;
-}
-
-.goal-composer textarea {
-  width: 100%;
-  min-height: 96px;
-  resize: vertical;
-}
-
-.goal-composer label {
-  display: grid;
-  gap: 6px;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.goal-composer button {
-  justify-self: start;
-}
-
-.plan-header {
-  display: grid;
-  gap: 8px;
-}
-
-.plan-meta,
-.plan-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-
-.plan-actions button {
-  width: auto;
-}
-
-.plan-step,
-.subagent-row,
 .plugin-row,
 .memory-distillation-row,
 .memory-distillation-detail-inner,
 .skill,
-.tier-row,
-.join-card,
-.loop-evt {
+.tier-row {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 10px;
   background: var(--surface-soft);
 }
 
-.retry-step-panel {
-  display: grid;
-  gap: 8px;
-  grid-column: 1 / -1;
-  margin-top: 2px;
-}
-
-.retry-step-panel summary {
-  cursor: pointer;
-  color: var(--text);
-  font-weight: 650;
-}
-
-.retry-step-scope {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 12px;
-}
 .retry-schema-fields {
   display: grid;
   gap: 8px;
@@ -246,91 +182,6 @@
 .retry-schema-field select {
   width: 100%;
   min-height: 32px;
-}
-
-.retry-step-panel label {
-  display: grid;
-  gap: 6px;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.retry-step-panel textarea {
-  width: 100%;
-  min-height: 118px;
-  resize: vertical;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-}
-
-.retry-step-panel button {
-  justify-self: start;
-}
-
-.review-verdicts {
-  display: grid;
-  gap: 6px;
-  margin: 2px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.review-verdict {
-  display: grid;
-  gap: 4px;
-  padding: 7px 8px;
-  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
-  border-radius: var(--radius-control);
-  background: var(--surface);
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.review-verdict .reviewer {
-  font-weight: 650;
-  color: var(--text);
-}
-
-.review-verdict .verdict {
-  width: fit-content;
-  padding: 2px 7px;
-  border-radius: var(--radius-pill);
-  color: var(--success);
-  background: var(--success-soft);
-  font-weight: 650;
-}
-
-.review-verdict.failed.soft-warning {
-  border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
-  background: color-mix(in srgb, var(--warning) 7%, var(--surface));
-}
-
-.review-verdict.failed.soft-warning .verdict {
-  color: var(--warning);
-  background: var(--warning-soft);
-}
-
-.review-verdict.failed.hard-fail {
-  border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
-  background: color-mix(in srgb, var(--danger) 7%, var(--surface));
-}
-
-.review-verdict.failed.hard-fail .verdict {
-  color: var(--danger);
-  background: var(--danger-soft);
-}
-
-.review-reasons {
-  margin: 0;
-  padding-left: 16px;
-  color: var(--text-secondary);
-}
-
-.subagent-row,
-.loop-evt {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
 }
 
 /* Capability tiers: each row is a selectable radio card. */
@@ -377,11 +228,6 @@
   border-color: var(--option-selected);
   background: var(--option-selected);
   box-shadow: none;
-}
-
-.loop-evt.attention,
-.join-card.has-warn {
-  border-color: var(--danger);
 }
 
 .plugin-manager,
@@ -536,7 +382,6 @@
 .plugin-builtin-badge,
 .memory-distillation-row span,
 .skill-badge,
-.subagent-grants,
 .tier-limit {
   color: var(--text-muted);
   font-size: 12px;
@@ -1294,15 +1139,6 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   margin-left: 0;
   width: 100%;
 }
-/* Download button, shown under the steps once a report has been generated */
-.plan-rail-download {
-  display: flex;
-  margin-top: 10px;
-}
-.plan-rail-download .button {
-  width: 100%;
-}
-
 /* --- Manual-mode analysis view (driver tasks) --- */
 /* Manual mode is a tool, not a conversation: render step outputs as plain analysis
    sections with no speaker labels / chat bubbles. */
@@ -2195,9 +2031,6 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 .screen-row.screen-suspected {
   background: var(--warning-subtle);
   border-left: 3px solid var(--warning);
-}
-.screen-row.screen-unusable {
-  color: var(--text-muted);
 }
 /* watch-band rows (leakage_watch/ks_decay_watch/psi_watch/split_shift): informational,
    not a hard cut, so a lighter warning border rather than a tinted background. */

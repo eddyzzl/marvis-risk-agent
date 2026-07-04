@@ -1,4 +1,5 @@
 import hashlib
+from dataclasses import replace
 
 import pandas as pd
 import pytest
@@ -125,6 +126,16 @@ def _write_dataset(registry: FakeRegistry, tmp_path, dataset_id: str, frame: pd.
     path = tmp_path / f"{dataset_id}.csv"
     frame.to_csv(path, index=False)
     dataset = _dataset(dataset_id, frame, path.name)
+    registry.add(dataset, path)
+    return dataset
+
+
+def _write_parquet_dataset(registry: FakeRegistry, tmp_path, dataset_id: str, frame: pd.DataFrame):
+    # Parquet preserves the frame's exact dtypes (e.g. float64), which a CSV round-trip would
+    # re-sniff -- needed for T1-A6/B8 tests that depend on a key column staying float64.
+    path = tmp_path / f"{dataset_id}.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = replace(_dataset(dataset_id, frame, path.name), format="parquet")
     registry.add(dataset, path)
     return dataset
 
@@ -623,3 +634,160 @@ def test_join_engine_hash_uniqueness_and_dedup_use_transformed_key_space(tmp_pat
     joined = pd.read_parquet(registry.resolve_path(result.id))
     assert len(joined) == anchor.row_count
     assert joined["val"].tolist() == [2]
+
+
+def test_diagnose_join_flags_precision_loss_for_over_15_digit_float_id(tmp_path):
+    # T1-A6: a float64-stored key column with >=16-digit ids can silently lose precision, so
+    # diagnose_join must surface it via precision_loss_columns (reported, never swallowed).
+    engine, registry, _repo = _engine(tmp_path)
+    ids = [123456789012345678.0, 223456789012345678.0]
+    anchor = _write_parquet_dataset(
+        registry, tmp_path, "anchor", pd.DataFrame({"id_card": ids, "score": [0.1, 0.2]})
+    )
+    feature = _write_parquet_dataset(
+        registry, tmp_path, "feature", pd.DataFrame({"id_card": ids, "limit": [100, 200]})
+    )
+    key_pairs = [KeyPair("id_card", "id_card", "exact", "both", match_rate=1.0, resolved_by="test")]
+
+    diagnostics = engine.diagnose_join(
+        anchor, registry.resolve_path(anchor.id),
+        feature, registry.resolve_path(feature.id),
+        key_pairs, seed=0,
+    )
+    assert "id_card" in diagnostics.precision_loss_columns
+
+
+def test_diagnose_join_does_not_flag_short_float_id(tmp_path):
+    # T1-A6 regression guard: a short float id (5.0, well below 1e15) must NOT raise the
+    # precision-loss flag, so the existing integral-float join semantics are preserved.
+    engine, registry, _repo = _engine(tmp_path)
+    anchor = _write_parquet_dataset(
+        registry, tmp_path, "anchor", pd.DataFrame({"id": [5.0, 6.0], "score": [0.1, 0.2]})
+    )
+    feature = _write_parquet_dataset(
+        registry, tmp_path, "feature", pd.DataFrame({"id": ["5", "6"], "limit": [100, 200]})
+    )
+    key_pairs = [KeyPair("id", "id", "exact", "both", match_rate=1.0, resolved_by="test")]
+
+    diagnostics = engine.diagnose_join(
+        anchor, registry.resolve_path(anchor.id),
+        feature, registry.resolve_path(feature.id),
+        key_pairs, seed=0,
+    )
+    assert diagnostics.precision_loss_columns == ()
+
+
+def test_candidate_match_methods_numeric_vs_idcard_returns_empty():
+    # T1-B8: a numeric fingerprint vs a raw_idcard fingerprint yields NO method, so the
+    # aligner silently drops the pair -- motivating the diagnostics-level dtype check.
+    from marvis.data.contracts import ColumnFingerprint
+    from marvis.data.fingerprint import candidate_match_methods
+
+    numeric = ColumnFingerprint("numeric", None, None, False, None, None, None)
+    idcard = ColumnFingerprint("raw_idcard", 18, None, False, None, None, None)
+    assert candidate_match_methods(numeric, idcard) == []
+
+
+def test_dtype_family_classifies_common_dtypes():
+    from marvis.data.align import _dtype_family
+    from marvis.data.contracts import ColumnFingerprint, ColumnProfile
+
+    def _profile(dtype):
+        return ColumnProfile(
+            name="k", dtype=dtype, semantic_role="idcard",
+            fingerprint=ColumnFingerprint("raw_idcard", 18, None, False, None, None, None),
+            null_rate=0.0, cardinality=1, sample_values=(),
+        )
+
+    assert _dtype_family(_profile("object")) == "text"
+    assert _dtype_family(_profile("string")) == "text"
+    assert _dtype_family(_profile("float64")) == "float"
+    assert _dtype_family(_profile("int64")) == "int"
+    assert _dtype_family(_profile("datetime64[ns]")) == "date"
+
+
+def test_diagnose_join_reports_key_dtype_divergence_red_for_text_vs_float(tmp_path):
+    # T1-B8: same key name, dtype object (string) on the anchor vs float64 on the feature ->
+    # a RED (text<->float, precision-loss) divergence surfaced on JoinDiagnostics.
+    engine, registry, _repo = _engine(tmp_path)
+    anchor = _write_dataset(
+        registry, tmp_path, "anchor",
+        pd.DataFrame({"id_card": ["110101199001011234", "110101199001011235"], "score": [0.1, 0.2]}),
+    )
+    feature = _write_parquet_dataset(
+        registry, tmp_path, "feature",
+        pd.DataFrame({"id_card": [1.10101199001011e17, 2.10101199001011e17], "limit": [100, 200]}),
+    )
+    key_pairs = [
+        KeyPair(
+            "id_card", "id_card", "exact", "both", match_rate=1.0, resolved_by="test",
+            anchor_dtype="object", feature_dtype="float64", dtype_divergent=True,
+        )
+    ]
+    diagnostics = engine.diagnose_join(
+        anchor, registry.resolve_path(anchor.id),
+        feature, registry.resolve_path(feature.id),
+        key_pairs, seed=0,
+    )
+    assert len(diagnostics.key_dtype_divergences) == 1
+    divergence = diagnostics.key_dtype_divergences[0]
+    assert divergence.level == "red"
+    assert divergence.anchor_col == "id_card"
+
+
+def test_confirm_join_forces_ack_on_dtype_mismatch(tmp_path):
+    # T1-B8: a RED dtype divergence blocks confirm/execute until acknowledged.
+    from marvis.data.errors import KeyDtypeMismatchError
+
+    engine, registry, repo = _engine(tmp_path)
+    anchor = _write_dataset(
+        registry, tmp_path, "anchor",
+        pd.DataFrame({"id_card": ["110101199001011234", "110101199001011235"], "score": [0.1, 0.2]}),
+    )
+    feature = _write_parquet_dataset(
+        registry, tmp_path, "feature",
+        pd.DataFrame({"id_card": [1.10101199001011e17, 2.10101199001011e17], "limit": [100, 200]}),
+    )
+    key_pairs = [
+        KeyPair(
+            "id_card", "id_card", "exact", "both", match_rate=1.0, resolved_by="test",
+            anchor_dtype="object", feature_dtype="float64", dtype_divergent=True,
+        )
+    ]
+    plan = _propose_with_key_pairs(engine, registry, repo, anchor, feature, key_pairs)
+
+    with pytest.raises(KeyDtypeMismatchError):
+        engine.confirm_join_spec(plan.id, feature.id, dedup_strategy=None)
+    # With the ack flag, confirmation proceeds.
+    engine.confirm_join_spec(
+        plan.id, feature.id, dedup_strategy=None, ack_dtype_mismatch=True
+    )
+    assert plan.joins[0].confirmed is True
+
+
+def test_align_records_dtype_divergence_on_built_key_pair(tmp_path):
+    # T1-B8: when the aligner DOES build a pair whose sides have divergent stored dtypes
+    # (int64 phone vs object phone), it records the dtypes and the divergence flag so the
+    # diagnostics/gate can surface it. int<->text is lossless at VARCHAR-cast time -> not red.
+    from marvis.data.align import ColumnAligner
+
+    backend = DataBackend(tmp_path)
+    aligner = ColumnAligner(backend)
+    phones_int = [13800138000 + i for i in range(20)]
+    phones_str = [str(p) for p in phones_int]
+    anchor = _write_parquet_dataset(
+        registry_none := FakeRegistry(tmp_path), tmp_path, "anchor",
+        pd.DataFrame({"mobile": phones_int}),
+    )
+    feature = _write_parquet_dataset(
+        registry_none, tmp_path, "feature",
+        pd.DataFrame({"mobile": phones_str, "val": list(range(20))}),
+    )
+    pairs = aligner.align(
+        anchor, registry_none.resolve_path(anchor.id),
+        feature, registry_none.resolve_path(feature.id), seed=0,
+    )
+    mobile_pair = next(p for p in pairs if p.anchor_col == "mobile")
+    assert mobile_pair.dtype_divergent is True
+    assert mobile_pair.anchor_dtype in {"int64", "Int64"}
+    assert mobile_pair.feature_dtype in {"object", "string", "str"}

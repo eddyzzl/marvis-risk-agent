@@ -214,6 +214,22 @@ def _ks_ci_overlap_note(selected: dict, rows: list[dict], *, target_type: str) -
     return ""
 
 
+#: D14: metric keys computed on the refit's random 5% ``__refit_holdout__`` slice
+#: that are optimistically biased and must never surface as headline "held-out"
+#: results. The refit combines train+test into one training pool and carves a
+#: deterministic random 5% back out only to satisfy split_modeling_frame's
+#: non-empty-test contract (train_tools._refit_champion_on_train_plus_test); that
+#: slice is in-distribution with the training data, so any test_*/weighted_test_*
+#: KS/AUC/lift and the test-vs-train PSIs on it are near-meaningless. train_*,
+#: oot_*, weighted_train/oot_*, psi_oot_vs_train and overfit_flag stay honest
+#: (refit trained on train+test, OOT untouched) and are left intact.
+def _is_refit_holdout_tainted_key(key: str) -> bool:
+    return (
+        key in ("psi_test_vs_train", "weighted_psi_test_vs_train")
+        or key.startswith(("test_", "weighted_test_"))
+    )
+
+
 def _apply_champion_refit(
     runtime: "_Runtime",
     *,
@@ -269,16 +285,36 @@ def _apply_champion_refit(
         (row for row in runtime.experiments.compare([refit_experiment_id])["experiments"] if row.get("id") == refit_experiment_id),
         {},
     )
-    post_metrics = {k: v for k, v in refit_row.items() if _is_metric_key(k) and v is not None}
+    # D14: the refit reports honest train_*/oot_* (trained on train+test, OOT
+    # untouched) as headline metrics, but suppresses the random-5%-holdout test
+    # family -- those are optimistically biased and would masquerade as a genuine
+    # held-out test evaluation. The tainted values are kept as renamed internal
+    # diagnostics (refit_holdout_*), never merged into the headline. The pre-refit
+    # champion's honest held-out test_* stays available via metrics_before_refit.
+    post_metrics = {
+        k: v
+        for k, v in refit_row.items()
+        if _is_metric_key(k) and v is not None and not _is_refit_holdout_tainted_key(k)
+    }
+    refit_holdout_metrics = {
+        f"refit_holdout_{k}": v
+        for k, v in refit_row.items()
+        if _is_metric_key(k) and v is not None and _is_refit_holdout_tainted_key(k)
+    }
     return {
         "applied": True,
         "requested": True,
-        "reason": "已用冠军的定型超参在 train+test 全量重训,OOT 未参与训练,指标为重训后模型的 OOT/train 结果。",
+        "reason": (
+            "已用冠军的定型超参在 train+test 全量重训,OOT 未参与训练;报告的 headline 指标为重训后模型的 "
+            "OOT/train 结果。为满足非空 test 契约随机切出的 5% holdout 与训练同分布,其 test_ks/test_auc/psi "
+            "已剔出 headline,仅作内部诊断(refit_holdout_*)记录。冠军在真实留出 test 上的指标见 metrics_before_refit。"
+        ),
         "experiment_id": refit_experiment_id,
         "artifact_id": refit_experiment.artifact_id,
         "metrics": post_metrics,
         "metrics_before_refit": pre_refit_metrics,
         "metrics_after_refit": post_metrics,
+        "refit_holdout_metrics": refit_holdout_metrics,
         "oot_ks_before_refit": pre_refit_metrics.get("oot_ks"),
         "oot_ks_after_refit": post_metrics.get("oot_ks"),
     }

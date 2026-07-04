@@ -1415,3 +1415,335 @@ def test_impute_cap_normalize_bin_woe_accept_sentinel_values(tmp_path):
     )
     assert woe.ok is True, woe.error
     assert woe.output["woe_maps"]["amount"]["na_woe"] is not None
+
+
+@pytest.mark.slow
+def test_sentinel_values_emit_sentinel_step_first_in_preprocessing_chain(tmp_path):
+    """A3: every FEATURE tool that masks sentinel_values before fitting must record a
+    ``sentinel`` step in the persisted preprocessing chain, ordered FIRST so replay
+    masks the raw sentinel to NaN before the paired transform runs. Without it, a raw
+    -999 arriving at scoring time is treated as a genuine value (train/serve skew)."""
+    from marvis.feature.preprocessing import read_preprocessing_chain
+
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "amount": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -999.0, -999.0],
+        "y": [0, 0, 0, 1, 0, 1, 1, 1],
+    })
+    path = tmp_path / "sentinel_chain.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    imputed = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "strategy": "median",
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert imputed.ok is True, imputed.error
+    impute_chain = read_preprocessing_chain(registry.resolve_path(imputed.output["result_dataset_id"]))
+    assert [step["kind"] for step in impute_chain] == ["sentinel", "impute"]
+    assert impute_chain[0]["columns"] == ["amount"]
+    assert impute_chain[0]["params"] == {"amount": [-999.0]}
+
+    imputed_ind = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "strategy": "median",
+            "sentinel_values": [-999.0],
+            "add_indicators": True,
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert imputed_ind.ok is True, imputed_ind.error
+    ind_chain = read_preprocessing_chain(registry.resolve_path(imputed_ind.output["result_dataset_id"]))
+    assert [step["kind"] for step in ind_chain] == ["sentinel", "missing_indicator", "impute"]
+
+    capped = runner.invoke(
+        ToolRef("feature", "cap_outliers"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "method": "quantile",
+            "lower_q": 0.0,
+            "upper_q": 1.0,
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert capped.ok is True, capped.error
+    cap_chain = read_preprocessing_chain(registry.resolve_path(capped.output["result_dataset_id"]))
+    assert [step["kind"] for step in cap_chain] == ["sentinel", "cap"]
+    assert cap_chain[0]["params"] == {"amount": [-999.0]}
+
+    normalized = runner.invoke(
+        ToolRef("feature", "normalize"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "method": "minmax",
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert normalized.ok is True, normalized.error
+    norm_chain = read_preprocessing_chain(registry.resolve_path(normalized.output["result_dataset_id"]))
+    assert [step["kind"] for step in norm_chain] == ["sentinel", "normalize"]
+    assert norm_chain[0]["params"] == {"amount": [-999.0]}
+
+    woe = runner.invoke(
+        ToolRef("feature", "woe_encode"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["amount"],
+            "target_col": "y",
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert woe.ok is True, woe.error
+    woe_chain = read_preprocessing_chain(registry.resolve_path(woe.output["result_dataset_id"]))
+    assert [step["kind"] for step in woe_chain] == ["sentinel", "woe"]
+    assert woe_chain[0]["params"] == {"amount": [-999.0]}
+
+
+@pytest.mark.slow
+def test_sentinel_step_replay_impute_masks_raw_sentinel_before_fill(tmp_path):
+    """A3: replaying the impute chain on FRESH raw data containing -999 must mask the
+    sentinel to NaN then fill it with the train-only median (3.5) -- the same value the
+    derived frame got. Proves no raw -999 survives replay as a genuine value."""
+    from marvis.feature.preprocessing import apply_preprocessing_steps, read_preprocessing_chain
+
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "amount": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -999.0, -999.0],
+        "y": [0, 0, 0, 1, 0, 1, 1, 1],
+    })
+    path = tmp_path / "sentinel_replay.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    imputed = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "strategy": "median",
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert imputed.ok is True, imputed.error
+    chain = read_preprocessing_chain(registry.resolve_path(imputed.output["result_dataset_id"]))
+    derived_frame = backend.read_frame(registry.resolve_path(imputed.output["result_dataset_id"]))
+
+    raw = pd.DataFrame({"amount": [1.0, -999.0, 5.0, -999.0]})
+    replayed = apply_preprocessing_steps(raw, chain)
+    # No -999 survives; sentinel rows are filled with the train-only median 3.5.
+    assert replayed["amount"].tolist() == [1.0, 3.5, 5.0, 3.5]
+    assert (replayed["amount"] == -999.0).sum() == 0
+    # Replay of the original raw frame reproduces the derived column exactly.
+    replayed_full = apply_preprocessing_steps(frame[["amount"]], chain)
+    assert replayed_full["amount"].tolist() == derived_frame["amount"].tolist()
+
+
+@pytest.mark.slow
+def test_sentinel_step_replay_woe_routes_sentinel_to_na_woe(tmp_path):
+    """A3: replaying the woe chain on raw -999 rows must route them to na_woe (the NaN
+    bucket the fit put them in), NOT the bin-0 WOE. A control chain with the sentinel
+    step stripped shows the raw -999 would otherwise get a finite bin WOE (the skew)."""
+    from marvis.feature.preprocessing import apply_preprocessing_steps, read_preprocessing_chain
+
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "amount": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -999.0, -999.0],
+        "y": [0, 0, 0, 1, 0, 1, 1, 1],
+    })
+    path = tmp_path / "sentinel_woe.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    woe = runner.invoke(
+        ToolRef("feature", "woe_encode"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["amount"],
+            "target_col": "y",
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert woe.ok is True, woe.error
+    chain = read_preprocessing_chain(registry.resolve_path(woe.output["result_dataset_id"]))
+    na_woe = woe.output["woe_maps"]["amount"]["na_woe"]
+    assert na_woe is not None
+
+    raw = pd.DataFrame({"amount": [3.0, -999.0]})
+    replayed = apply_preprocessing_steps(raw, chain)
+    # The -999 row lands in na_woe, not a finite bin value.
+    assert replayed["amount_woe"].iloc[1] == pytest.approx(float(na_woe))
+
+    # Control: strip the sentinel step -> raw -999 is clipped into bin 0 (finite WOE), skew.
+    control_chain = [step for step in chain if step["kind"] != "sentinel"]
+    control = apply_preprocessing_steps(raw, control_chain)
+    assert control["amount_woe"].iloc[1] != pytest.approx(float(na_woe))
+
+
+@pytest.mark.slow
+def test_sentinel_step_replay_flips_was_missing_indicator_for_raw_sentinel(tmp_path):
+    """A3: with add_indicators + sentinel_values, replaying on raw -999 data must set
+    col__was_missing to 1 for the sentinel rows -- the sentinel step masks -999 to NaN
+    before the missing_indicator step reads isna(), matching the fit-time indicator."""
+    from marvis.feature.preprocessing import apply_preprocessing_steps, read_preprocessing_chain
+
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "amount": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -999.0, -999.0],
+        "y": [0, 0, 0, 1, 0, 1, 1, 1],
+    })
+    path = tmp_path / "sentinel_indicator.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    imputed = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "strategy": "median",
+            "sentinel_values": [-999.0],
+            "add_indicators": True,
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert imputed.ok is True, imputed.error
+    chain = read_preprocessing_chain(registry.resolve_path(imputed.output["result_dataset_id"]))
+
+    raw = pd.DataFrame({"amount": [1.0, -999.0, 5.0]})
+    replayed = apply_preprocessing_steps(raw, chain)
+    assert replayed["amount__was_missing"].tolist() == [0, 1, 0]
+    assert replayed["amount"].tolist() == [1.0, 3.5, 5.0]
+
+
+def test_no_sentinel_values_omit_sentinel_step(tmp_path):
+    """A3 regression: impute/cap/normalize/woe WITHOUT sentinel_values must NOT emit a
+    sentinel step -- guards the existing PREP-2/PREP-8 chain-shape tests."""
+    from marvis.feature.preprocessing import read_preprocessing_chain
+
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "amount": [1.0, np.nan, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        "y": [0, 0, 0, 1, 0, 1, 1, 1],
+    })
+    path = tmp_path / "no_sentinel.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    imputed = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {"dataset_id": dataset.id, "columns": ["amount"], "strategy": "median", "allow_full_fit": True},
+        task_id="task-feature",
+    )
+    assert imputed.ok is True, imputed.error
+    assert [s["kind"] for s in read_preprocessing_chain(registry.resolve_path(imputed.output["result_dataset_id"]))] == ["impute"]
+
+    capped = runner.invoke(
+        ToolRef("feature", "cap_outliers"),
+        {"dataset_id": dataset.id, "columns": ["amount"], "method": "iqr", "allow_full_fit": True},
+        task_id="task-feature",
+    )
+    assert capped.ok is True, capped.error
+    assert [s["kind"] for s in read_preprocessing_chain(registry.resolve_path(capped.output["result_dataset_id"]))] == ["cap"]
+
+    normalized = runner.invoke(
+        ToolRef("feature", "normalize"),
+        {"dataset_id": dataset.id, "columns": ["amount"], "method": "minmax", "allow_full_fit": True},
+        task_id="task-feature",
+    )
+    assert normalized.ok is True, normalized.error
+    assert [s["kind"] for s in read_preprocessing_chain(registry.resolve_path(normalized.output["result_dataset_id"]))] == ["normalize"]
+
+    woe = runner.invoke(
+        ToolRef("feature", "woe_encode"),
+        {"dataset_id": dataset.id, "features": ["amount"], "target_col": "y", "allow_full_fit": True},
+        task_id="task-feature",
+    )
+    assert woe.ok is True, woe.error
+    assert [s["kind"] for s in read_preprocessing_chain(registry.resolve_path(woe.output["result_dataset_id"]))] == ["woe"]
+
+
+def _register_nan_label_screen_sample(registry, tmp_path):
+    """A binary screen sample with one NaN label (the D13 dirty shape)."""
+    frame = pd.DataFrame({
+        "x1": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        "x2": [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+        "y": [0, 1, 0, 1, np.nan, 1, 0, 1],
+    })
+    path = tmp_path / "screen_nan.csv"
+    frame.to_csv(path, index=False)
+    return registry.register_from_upload("task-feature", path, role="sample")
+
+
+def test_tool_screen_features_gate_raises_without_confirmation(tmp_path):
+    """D13: the feature-pack screen tool must surface the typed NaN-label error (not silently
+    rank on the labelled subset) when labels are NaN and drop_nan_labels is omitted."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_nan_label_screen_sample(registry, tmp_path)
+
+    result = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {"dataset_id": dataset.id, "features": ["x1", "x2"], "target_col": "y"},
+        task_id="task-feature",
+    )
+    assert result.ok is False
+    assert result.error_kind == "nan_label_not_confirmed"
+    assert result.error_detail["n_nan"] == 1
+    assert result.error_detail["n_total"] == 8
+    assert result.error_detail["scope"] == "screen"
+
+
+def test_tool_screen_features_gate_drops_when_confirmed(tmp_path):
+    """D13: drop_nan_labels=True lets the screen proceed and echoes nan_labels_dropped."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_nan_label_screen_sample(registry, tmp_path)
+
+    result = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "drop_nan_labels": True,
+        },
+        task_id="task-feature",
+    )
+    assert result.ok is True, result.error
+    assert result.output["nan_labels_dropped"] == 1
+
+
+def test_tool_screen_features_clean_labels_reports_zero_dropped(tmp_path):
+    """D13 regression guard: a fully-labelled screen still succeeds and reports 0 dropped."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    result = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {"dataset_id": dataset.id, "features": ["x1", "x2"], "target_col": "y"},
+        task_id="task-feature",
+    )
+    assert result.ok is True, result.error
+    assert result.output["nan_labels_dropped"] == 0

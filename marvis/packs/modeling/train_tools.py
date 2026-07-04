@@ -663,8 +663,12 @@ def _refit_champion_on_train_plus_test(
 
     # Combined rows become "train"; a small deterministic slice is carved back out
     # to satisfy split_modeling_frame's non-empty-test contract (early stopping is
-    # off below, so this slice is never fit on and never reported -- only train/
-    # OOT metrics from this refit are surfaced).
+    # off below, so this slice is never fit on). compute_model_metrics DOES compute
+    # the full test_* family on it, but because the slice is a random 5% drawn from
+    # the same train+test population it is in-distribution and optimistically biased;
+    # select_tools._apply_champion_refit (D14) relabels those refit_holdout_* and
+    # excludes them from the headline / model card / monitoring baseline -- only the
+    # honest train_/OOT_ metrics from this refit are surfaced as held-out results.
     combined_idx = frame.index[train_mask | test_mask]
     rng = np.random.RandomState(int(config.seed))
     shuffled = combined_idx.to_numpy().copy()

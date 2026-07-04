@@ -21,6 +21,47 @@ class FanOutError(DataLayerError):
     """Raised when a join would expand beyond the anchor row count."""
 
 
+class KeyDtypeMismatchError(DataLayerError):
+    """T1-B8: raised when a proposed join key has a RED dtype divergence (one side text, the
+    other float) and the caller has not acknowledged it. A text<->float key can silently lose
+    precision / leading zeros and mis-match rows, so execute must not proceed silently. Mirrors
+    DedupRequiredError's pattern; pass ``ack_dtype_mismatch=True`` to confirm past it."""
+
+    def __init__(
+        self,
+        *,
+        feature_dataset_id: str,
+        divergences: list | None = None,
+    ) -> None:
+        self.feature_dataset_id = str(feature_dataset_id)
+        self.divergences = list(divergences or [])
+        columns = ", ".join(
+            f"{getattr(d, 'anchor_col', '?')}={getattr(d, 'feature_col', '?')}"
+            for d in self.divergences
+        )
+        super().__init__(
+            f"feature {self.feature_dataset_id} join key has a dtype mismatch "
+            f"(text vs float, possible precision/leading-zero loss): {columns or '?'}; "
+            f"pass ack_dtype_mismatch=true to proceed anyway, or re-import the column as string"
+        )
+
+    def to_detail(self) -> dict:
+        return {
+            "kind": "key_dtype_mismatch",
+            "feature_dataset_id": self.feature_dataset_id,
+            "divergences": [
+                {
+                    "anchor_col": getattr(d, "anchor_col", None),
+                    "feature_col": getattr(d, "feature_col", None),
+                    "anchor_dtype": getattr(d, "anchor_dtype", None),
+                    "feature_dtype": getattr(d, "feature_dtype", None),
+                    "level": getattr(d, "level", None),
+                }
+                for d in self.divergences
+            ],
+        }
+
+
 class JoinNotConfirmedError(DataLayerError):
     """Raised when executing a join plan before every join is confirmed."""
 
@@ -63,6 +104,93 @@ class NanLabelNotConfirmedError(DataLayerError):
             "n_nan": self.n_nan,
             "scope": self.scope,
             "by_split": self.by_split,
+        }
+
+
+class LabelSemanticsNotDeclaredError(DataLayerError):
+    """T1-A1: raised by the strategy vintage path when the caller has not declared
+    whether the bad column carries INCREMENTAL (每期当期新发生的坏, 会累加) or SNAPSHOT
+    (每列/行=截至该MOB是否曾坏, 已单调) semantics.
+
+    The vintage kernel ALWAYS accumulates the target across MOBs to form cum_bad_rate;
+    on a snapshot/ever-bad flag that double-counts (a 3% rate can virtually balloon to
+    36% over 12 MOBs) and only clips >1.0 in extreme cases -- a silent corruption. So
+    the strategy tool refuses to guess: it stops and hands structured diagnostics to the
+    user (mirrors NanLabelNotConfirmedError's typed-error + to_detail() pattern), who
+    picks incremental or snapshot. ``monotone_heuristic`` reports whether the data looks
+    snapshot-shaped (bad_count non-decreasing across every cohort), an advisory hint only.
+    """
+
+    def __init__(
+        self,
+        *,
+        target_col: str,
+        n_cohorts: int,
+        monotone_heuristic: bool,
+    ) -> None:
+        self.target_col = str(target_col)
+        self.n_cohorts = int(n_cohorts)
+        self.monotone_heuristic = bool(monotone_heuristic)
+        super().__init__(
+            f"vintage bad column {self.target_col!r} has undeclared label_semantics; "
+            f"pass label_semantics='incremental' (每期=当期新发生的坏, 会累加) or "
+            f"'snapshot' (每列/行=截至该MOB是否曾坏, 已单调, 不再累加) and retry"
+            + ("; data looks like a SNAPSHOT flag" if self.monotone_heuristic else "")
+        )
+
+    def to_detail(self) -> dict:
+        """Structured diagnostics for the confirmation gate (never parsed from free text)."""
+        return {
+            "kind": "label_semantics_not_declared",
+            "target_col": self.target_col,
+            "n_cohorts": self.n_cohorts,
+            "monotone_heuristic": self.monotone_heuristic,
+            "examples": {
+                "incremental": "每行=该MOB当期新发生的坏 (会逐期累加成 cum_bad_rate)",
+                "snapshot": "每行/列=截至该MOB累计是否曾坏 (已单调, 不再累加, 直接读该期率)",
+            },
+        }
+
+
+class CohortMaturityNotConfirmedError(DataLayerError):
+    """C1: raised when constructing labels over放款 cohorts whose 表现期 has not
+    closed to the 定坏判定 MOB, and the caller has not confirmed including them.
+
+    An immature cohort (its loans haven't been observed through the required MOB) has
+    an UNRELIABLE bad label: a loan that will go bad later is still counted as good,
+    so including immature cohorts UNDERSTATES the bad rate. Rather than silently
+    include them, the label tool stops and hands structured diagnostics to the user
+    (mirrors NanLabelNotConfirmedError / LabelSemanticsNotDeclaredError's typed-error +
+    ``to_detail()`` pattern), who either confirms including them anyway
+    (``confirm_immature_cohorts=True``) or waits/backfills the performance window.
+    """
+
+    def __init__(
+        self,
+        *,
+        required_mob: int,
+        immature_cohorts: list[str],
+        cohort_diagnostics: list[dict] | None = None,
+    ) -> None:
+        self.required_mob = int(required_mob)
+        self.immature_cohorts = [str(cohort) for cohort in immature_cohorts]
+        self.cohort_diagnostics = list(cohort_diagnostics or [])
+        preview = ", ".join(self.immature_cohorts[:5])
+        more = "" if len(self.immature_cohorts) <= 5 else f" (+{len(self.immature_cohorts) - 5} more)"
+        super().__init__(
+            f"{len(self.immature_cohorts)} cohort(s) have not matured to mob "
+            f"{self.required_mob} for the bad definition ({preview}{more}); including "
+            f"them will UNDERSTATE the bad rate. Pass confirm_immature_cohorts=true to "
+            f"include them anyway, or wait for the performance window to close"
+        )
+
+    def to_detail(self) -> dict:
+        """Structured diagnostics for the confirmation gate (never parsed from free text)."""
+        return {
+            "kind": "cohort_maturity_not_confirmed",
+            "required_mob": self.required_mob,
+            "immature_cohorts": self.immature_cohorts,
+            "cohort_diagnostics": self.cohort_diagnostics,
         }
 
 
@@ -211,6 +339,7 @@ class PerformanceFrameError(DataLayerError):
 
 
 __all__ = [
+    "CohortMaturityNotConfirmedError",
     "DataBackendError",
     "DataIngestError",
     "DataLayerError",
@@ -220,6 +349,8 @@ __all__ = [
     "FanOutError",
     "InvalidDatasetPathError",
     "JoinNotConfirmedError",
+    "KeyDtypeMismatchError",
+    "LabelSemanticsNotDeclaredError",
     "NanLabelNotConfirmedError",
     "PerformanceFrameError",
     "ScoreDirectionConflictError",

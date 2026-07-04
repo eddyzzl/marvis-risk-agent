@@ -36,6 +36,65 @@ def compute_psi(expected_distribution, actual_distribution, smoothing: float = 1
     return _feature_compute_psi(expected_distribution, actual_distribution, smoothing=smoothing)
 
 
+def accumulate_bin_metrics(
+    marginals: list[tuple[float, float, int, int]],
+    *,
+    reverse: bool = False,
+) -> list[BinRow]:
+    """T2-2: the single cumulative-accumulation kernel for score-band bin tables.
+
+    Takes per-bin marginals ``(score_lower, score_upper, sample_count, bad_count)`` in
+    ascending edge order and produces the running-cumulative :class:`BinRow` fields
+    (``cum_sample_pct``, ``cum_bad_pct``, ``lift``, ``ks``) with the platform convention
+    ``ks = |cum_bad_pct - cum_good_pct|`` and ``lift = bad_rate / overall_bad_rate``.
+
+    ``reverse=True`` walks the bins highest-first (used by the effectiveness eval table
+    when the score is negatively correlated with the label) and renumbers ``bin_index``
+    ``1..N`` in walk order -- byte-identical to the previous hand-rolled loops in
+    ``bin_table`` (reverse=False) and ``_recompute_cumulative_bin_metrics``. Denominators
+    are the labeled/count totals of the supplied marginals; amount-weighted and
+    count-vs-labeled-split tables (report_compute / report_tools) deliberately do NOT use
+    this kernel because their denominators differ.
+    """
+    ordered = list(reversed(marginals)) if reverse else list(marginals)
+    total = sum(count for _, _, count, _ in ordered)
+    total_bad = sum(bad for _, _, _, bad in ordered)
+    total_good = total - total_bad
+    overall_bad_rate = _ratio_or_zero(total_bad, total)
+
+    rows: list[BinRow] = []
+    cum_count = 0
+    cum_bad = 0
+    for walk_index, (score_lower, score_upper, count, bad) in enumerate(ordered, start=1):
+        bad_rate = _ratio_or_zero(bad, count)
+        cum_count += count
+        cum_bad += bad
+        cum_good = cum_count - cum_bad
+        cum_sample_pct = _ratio_or_zero(cum_count, total)
+        cum_bad_pct = _ratio_or_zero(cum_bad, total_bad)
+        cum_good_pct = _ratio_or_zero(cum_good, total_good)
+        lift = _ratio_or_zero(bad_rate, overall_bad_rate)
+        rows.append(
+            BinRow(
+                bin_index=walk_index,
+                score_lower=float(score_lower),
+                score_upper=float(score_upper),
+                sample_count=int(count),
+                bad_count=int(bad),
+                bad_rate=bad_rate,
+                cum_sample_pct=cum_sample_pct,
+                cum_bad_pct=cum_bad_pct,
+                lift=lift,
+                ks=float(abs(cum_bad_pct - cum_good_pct)),
+            )
+        )
+    return rows
+
+
+def _ratio_or_zero(numerator: float, denominator: float) -> float:
+    return float(numerator / denominator) if denominator else 0.0
+
+
 def bin_table(
     dataframe: pd.DataFrame,
     edges,
@@ -49,36 +108,14 @@ def bin_table(
     valid = (bins > 0) & np.isfinite(labels)
     labels = labels[valid].astype(int)
     bins = bins[valid]
-    total = len(labels)
-    total_bad = int(labels.sum())
-    overall_bad_rate = total_bad / total if total else 0.0
 
-    rows: list[BinRow] = []
-    cum_count = 0
-    cum_bad = 0
+    marginals: list[tuple[float, float, int, int]] = []
     for bin_index in range(1, len(edges)):
         mask = bins == bin_index
-        count = int(mask.sum())
-        bad = int(labels[mask].sum())
-        bad_rate = (bad / count) if count else 0.0
-        cum_count += count
-        cum_bad += bad
-        cum_sample_pct = cum_count / total if total else 0.0
-        cum_bad_pct = cum_bad / total_bad if total_bad else 0.0
-        cum_good_pct = (cum_count - cum_bad) / (total - total_bad) if (total - total_bad) else 0.0
-        lift = (bad_rate / overall_bad_rate) if overall_bad_rate else 0.0
-        rows.append(
-            BinRow(
-                bin_index=bin_index,
-                score_lower=float(edges[bin_index - 1]),
-                score_upper=float(edges[bin_index]),
-                sample_count=count,
-                bad_count=bad,
-                bad_rate=bad_rate,
-                cum_sample_pct=cum_sample_pct,
-                cum_bad_pct=cum_bad_pct,
-                lift=lift,
-                ks=float(abs(cum_bad_pct - cum_good_pct)),
-            )
-        )
-    return rows
+        marginals.append((
+            float(edges[bin_index - 1]),
+            float(edges[bin_index]),
+            int(mask.sum()),
+            int(labels[mask].sum()),
+        ))
+    return accumulate_bin_metrics(marginals, reverse=False)

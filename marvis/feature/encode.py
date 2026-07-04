@@ -6,6 +6,7 @@ import pandas as pd
 from marvis.feature.binning import assign_bins
 from marvis.feature.contracts import CategoricalWOECategory, CategoricalWOEResult, WOEResult
 from marvis.feature.errors import FeatureError
+from marvis.feature.iv import _smoothed_woe_iv
 
 _RARE_CATEGORY = "__rare__"
 
@@ -131,10 +132,9 @@ def categorical_woe_encode(
         count = int(np.sum(mask))
         bad = int(np.sum(non_na_target[mask] == 1))
         good = count - bad
-        bad_dist = (bad + smoothing) / (total_bad + smoothing * n_groups)
-        good_dist = (good + smoothing) / (total_good + smoothing * n_groups)
-        woe = float(np.log(good_dist / bad_dist))
-        iv_contribution = float((good_dist - bad_dist) * woe)
+        woe, iv_contribution = _smoothed_woe_iv(
+            bad, good, total_bad, total_good, n_groups, smoothing=smoothing
+        )
         total_iv += iv_contribution
         categories.append(
             CategoricalWOECategory(
@@ -154,10 +154,9 @@ def categorical_woe_encode(
         count = int(na_target.size)
         bad = int(np.sum(na_target == 1))
         good = count - bad
-        bad_dist = (bad + smoothing) / (total_bad + smoothing * n_groups)
-        good_dist = (good + smoothing) / (total_good + smoothing * n_groups)
-        woe = float(np.log(good_dist / bad_dist))
-        iv_contribution = float((good_dist - bad_dist) * woe)
+        woe, iv_contribution = _smoothed_woe_iv(
+            bad, good, total_bad, total_good, n_groups, smoothing=smoothing
+        )
         total_iv += iv_contribution
         na_woe = woe
         categories.append(
@@ -174,10 +173,12 @@ def categorical_woe_encode(
 
     # Global-prior WOE — the fallback for a category never seen during fit. Uses the
     # *fit frame's* overall good/bad split (still Laplace smoothed, single group) so an
-    # unseen category never contributes a leak-free-but-arbitrary signal.
-    default_bad_dist = (total_bad + smoothing) / (total_bad + smoothing)
-    default_good_dist = (total_good + smoothing) / (total_good + smoothing)
-    default_woe = float(np.log(default_good_dist / default_bad_dist))
+    # unseen category never contributes a leak-free-but-arbitrary signal. Same kernel as
+    # the per-group WOE above, evaluated on the single "everything" group (n_groups=1,
+    # bad=total_bad, good=total_good) so both distributions are 1.0 → default_woe = 0.0.
+    default_woe, _ = _smoothed_woe_iv(
+        total_bad, total_good, total_bad, total_good, 1, smoothing=smoothing
+    )
 
     return CategoricalWOEResult(
         feature=feature,

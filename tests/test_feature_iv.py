@@ -4,7 +4,33 @@ import numpy as np
 import pytest
 
 from marvis.feature.errors import FeatureError
-from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
+from marvis.feature.iv import _smoothed_woe_iv, compute_woe_iv, woe_result_from_binning
+
+
+def _inline_woe_iv(bad, good, total_bad, total_good, n_groups, smoothing):
+    """The Laplace-smoothed WOE/IV formula as it was inlined at every call site
+    before T2-5, kept here as the ground truth the shared kernel must reproduce."""
+    bad_dist = (bad + smoothing) / (total_bad + smoothing * n_groups)
+    good_dist = (good + smoothing) / (total_good + smoothing * n_groups)
+    woe = float(np.log(good_dist / bad_dist))
+    return woe, float((good_dist - bad_dist) * woe)
+
+
+def test_smoothed_woe_iv_kernel_matches_inline_formula():
+    """T2-5 two-sided consistency: the shared _smoothed_woe_iv kernel used by both
+    compute_woe_iv (numeric bins) and categorical_woe_encode (raw categories) must
+    reproduce the previously-inlined formula bit-for-bit for every input shape."""
+    rng = np.random.default_rng(3)
+    for _ in range(500):
+        total_bad = int(rng.integers(1, 5000))
+        total_good = int(rng.integers(1, 5000))
+        n_groups = int(rng.integers(1, 20))
+        bad = int(rng.integers(0, total_bad + 1))
+        good = int(rng.integers(0, total_good + 1))
+        smoothing = float(rng.choice([0.5, 1.0, 0.1, 2.0]))
+        assert _smoothed_woe_iv(
+            bad, good, total_bad, total_good, n_groups, smoothing=smoothing
+        ) == _inline_woe_iv(bad, good, total_bad, total_good, n_groups, smoothing)
 
 
 def test_compute_woe_iv_matches_known_smoothed_distribution():

@@ -180,6 +180,120 @@ def test_cum_bad_rate_clips_to_one_and_records_data_quality_warning_when_denomin
     assert payload["warnings"] == list(by_mob[1].data_quality_warnings)
 
 
+def _snapshot_flag_frame() -> pd.DataFrame:
+    # 4 loans in one cohort. Snapshot/ever-bad semantics: a loan flagged bad at an
+    # earlier MOB STAYS bad at every later MOB. Loan 1 goes bad at mob0 (stays bad
+    # mob1/mob2); loan 2 goes bad at mob1 (stays bad mob2). True cumulative bad
+    # rate: mob0=1/4, mob1=2/4, mob2=2/4. The incremental accumulator would sum the
+    # per-row bads (1 + 2 + 2 = 5 > 4) and blow past 1.0 -- exactly the double-count.
+    return pd.DataFrame({
+        "cohort": ["202601"] * 12,
+        "mob": [0, 0, 0, 0] + [1, 1, 1, 1] + [2, 2, 2, 2],
+        "bad": [1, 0, 0, 0] + [1, 1, 0, 0] + [1, 1, 0, 0],
+    })
+
+
+def test_snapshot_semantics_does_not_accumulate_bad():
+    frame = _snapshot_flag_frame()
+
+    snapshot_points = compute_vintage_curve(
+        frame,
+        cohort_col="cohort",
+        mob_col="mob",
+        target_col="bad",
+        label_semantics="snapshot",
+    )
+    by_mob = {point.mob: point for point in snapshot_points}
+
+    # cum_bad_rate under snapshot semantics IS the per-MOB marginal bad_rate: the
+    # already-cumulative flag is read directly, never re-accumulated.
+    assert by_mob[0].cum_bad_rate == pytest.approx(1 / 4)
+    assert by_mob[1].cum_bad_rate == pytest.approx(2 / 4)
+    assert by_mob[2].cum_bad_rate == pytest.approx(2 / 4)
+    for point in snapshot_points:
+        assert point.cum_bad_rate == pytest.approx(point.bad_rate)
+        assert point.cum_bad_rate <= 1.0
+
+    # Equivalence with the report_compute self-protection path (metric='bad_rate').
+    snapshot_wide = vintage_curve_wide(snapshot_points, metric="cum_bad_rate")
+    bad_rate_wide = vintage_curve_wide(snapshot_points, metric="bad_rate")
+    assert snapshot_wide == bad_rate_wide
+
+
+def test_incremental_semantics_is_backward_compatible():
+    frame = pd.DataFrame({
+        "cohort": ["202601"] * 12 + ["202602"] * 9,
+        "mob": [0] * 5 + [1] * 4 + [2] * 3 + [0] * 4 + [1] * 3 + [2] * 2,
+        "bad": (
+            [1, 0, 0, 0, 0] + [1, 1, 0, 0] + [1, 0, 0]
+            + [0, 0, 0, 1] + [1, 0, 0] + [0, 1]
+        ),
+    })
+
+    default_points = compute_vintage_curve(frame, cohort_col="cohort", mob_col="mob", target_col="bad")
+    explicit_points = compute_vintage_curve(
+        frame,
+        cohort_col="cohort",
+        mob_col="mob",
+        target_col="bad",
+        label_semantics="incremental",
+    )
+
+    # Default is incremental and passing it explicitly is byte-identical.
+    assert [p.cum_bad_rate for p in explicit_points] == [p.cum_bad_rate for p in default_points]
+    by_key = {(p.cohort, p.mob): p for p in explicit_points}
+    assert by_key[("2026-01", 0)].cum_bad_rate == pytest.approx(1 / 5)
+    assert by_key[("2026-01", 1)].cum_bad_rate == pytest.approx(3 / 5)
+    assert by_key[("2026-01", 2)].cum_bad_rate == pytest.approx(4 / 5)
+
+
+def test_label_semantics_rejects_unknown_value():
+    frame = pd.DataFrame({"cohort": ["202601"], "mob": [0], "bad": [0]})
+    with pytest.raises(ValueError, match="label_semantics"):
+        compute_vintage_curve(
+            frame,
+            cohort_col="cohort",
+            mob_col="mob",
+            target_col="bad",
+            label_semantics="cumulative",
+        )
+
+
+def test_monotone_bad_count_across_all_cohorts_flags_snapshot_red_flag():
+    # Per-MOB bad_count is non-decreasing in EVERY cohort (looks like snapshot
+    # flags) but the caller declared 'incremental' -- the kernel must attach an
+    # advisory red flag naming 'snapshot', never mutating the curve.
+    frame = _snapshot_flag_frame()
+
+    points = compute_vintage_curve(
+        frame,
+        cohort_col="cohort",
+        mob_col="mob",
+        target_col="bad",
+        label_semantics="incremental",
+    )
+
+    all_warnings = [w for point in points for w in point.data_quality_warnings]
+    assert any("snapshot" in w.lower() or "快照" in w for w in all_warnings)
+
+
+def test_snapshot_declaration_suppresses_the_monotone_red_flag():
+    # Same monotone data, but declared snapshot -> the monotone heuristic is
+    # satisfied, so no snapshot red flag is emitted.
+    frame = _snapshot_flag_frame()
+
+    points = compute_vintage_curve(
+        frame,
+        cohort_col="cohort",
+        mob_col="mob",
+        target_col="bad",
+        label_semantics="snapshot",
+    )
+
+    all_warnings = [w for point in points for w in point.data_quality_warnings]
+    assert not any("snapshot" in w.lower() or "快照" in w for w in all_warnings)
+
+
 def test_vintage_curve_wide_aligns_mob_axis_and_preserves_missing():
     frame = pd.DataFrame({
         "cohort": ["202501", "202501", "202502", "202502"],

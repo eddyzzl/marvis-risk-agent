@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from marvis.agent.data_dictionary import resolve_data_dictionary_id
+from marvis.data.data_dictionary import resolve_data_dictionary_id
 from marvis.domain import FileRole
 from marvis.files import scan_source_dir
 
