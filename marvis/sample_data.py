@@ -1,33 +1,23 @@
-"""Built-in sample credit data generator (UX-9).
+"""Deterministic synthetic credit data generators.
 
-Generates a small, deterministic synthetic credit-scoring dataset so a new user
-(or an internal demo) can try the modeling flow without preparing their own
-material directory first. Two files are written:
+Fixed-seed synthetic credit-scoring data shared by the KS baseline script
+(``scripts/ks_baseline.py``), the portfolio-analysis (S3) suite, and tests:
 
-  - ``样本表.csv``: 1500 rows with an ``apply_month`` time column, a binary ``y``
-    label, and 6 numeric features with a real (if modest) relationship to ``y`` so
-    the screen gate/training produce a non-degenerate KS instead of noise.
-  - ``特征字典.csv``: a 特征名/含义 dictionary covering the 6 features + apply_month/y,
-    so the demo also exercises GAP-4's business-meaning columns/tooltips end to end.
+  - ``generate_sample_frame``: 1500 rows with an ``apply_month`` time column, a
+    binary ``y`` label, and 6 numeric features with a real (if modest)
+    relationship to ``y`` so screening/training produce a non-degenerate KS
+    instead of noise.
+  - ``generate_performance_frame``: a 表现期快照 (performance snapshot) long frame
+    derived from a sample, for the组合分析 flow.
 
 Fully deterministic (fixed seed, no wall-clock/random-uuid content) so repeated
-"用示例数据试跑" clicks always produce the same data — a stable reproduction
-vehicle for UI regressions, per the review's UX-9 guidance.
+runs always produce byte-identical data — a stable ground-truth vehicle.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
-
-SAMPLE_TABLE_NAME = "样本表.csv"
-DICTIONARY_TABLE_NAME = "特征字典.csv"
-# NOTE: must stay inside MODEL_ID_RE (marvis.api_task_helpers) — that pattern accepts
-# \w / CJK / hyphen / space but not full-width brackets, so a "【示例】" prefix would
-# make every demo task fail model_name validation at creation time.
-DEMO_TASK_NAME_PREFIX = "示例-"
 
 _SEED = 20260701
 _N_ROWS = 1500
@@ -69,11 +59,6 @@ _FEATURES: dict[str, tuple[str, float, float]] = {
     "loan_amount": ("申请贷款金额（元）", 20000.0, 9000.0),
     "history_overdue_count": ("历史逾期次数", 0.8, 1.2),
     "account_age_months": ("账户开户月数", 36.0, 20.0),
-}
-_DICTIONARY_ROWS: dict[str, str] = {
-    "apply_month": "申请月份（时间切分列）",
-    "y": "是否违约（1=坏客户，0=好客户）",
-    **{name: meaning for name, (meaning, _mean, _std) in _FEATURES.items()},
 }
 
 
@@ -122,13 +107,6 @@ def generate_sample_frame(*, n_rows: int = _N_ROWS, seed: int = _SEED) -> pd.Dat
     for name in _FEATURES:
         frame[name] = frame[name].round(2)
     return frame
-
-
-def generate_dictionary_frame() -> pd.DataFrame:
-    """The 特征名/含义 dictionary CSV covering every generated column (GAP-4 demo)."""
-    return pd.DataFrame(
-        {"特征名": list(_DICTIONARY_ROWS.keys()), "含义": list(_DICTIONARY_ROWS.values())}
-    )
 
 
 def generate_performance_frame(
@@ -231,38 +209,9 @@ def _month_sequence(start_month: str, n_months: int) -> list[str]:
     return out
 
 
-def write_sample_materials(
-    target_dir: Path, *, seed: int = _SEED, include_performance: bool = False
-) -> Path:
-    """Write the sample table + dictionary CSVs into ``target_dir`` (created if
-    missing) and return the directory. Deterministic — safe to call repeatedly;
-    each call overwrites with byte-identical content for a fixed seed.
-
-    S3: when ``include_performance`` is True, also writes the performance
-    (表现期快照) snapshot CSV derived from the same sample, so the portfolio
-    analysis flow has a one-click demo table. Left off by default so the
-    first-run modeling entry keeps emitting exactly the two files it always has.
-    """
-    target_dir = Path(target_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    sample = generate_sample_frame(seed=seed)
-    sample.to_csv(target_dir / SAMPLE_TABLE_NAME, index=False, encoding="utf-8-sig")
-    generate_dictionary_frame().to_csv(target_dir / DICTIONARY_TABLE_NAME, index=False, encoding="utf-8-sig")
-    if include_performance:
-        generate_performance_frame(sample, seed=seed).to_csv(
-            target_dir / PERFORMANCE_TABLE_NAME, index=False, encoding="utf-8-sig"
-        )
-    return target_dir
-
-
 __all__ = [
-    "DEMO_TASK_NAME_PREFIX",
-    "DICTIONARY_TABLE_NAME",
     "PERFORMANCE_STATES",
     "PERFORMANCE_TABLE_NAME",
-    "SAMPLE_TABLE_NAME",
-    "generate_dictionary_frame",
     "generate_performance_frame",
     "generate_sample_frame",
-    "write_sample_materials",
 ]

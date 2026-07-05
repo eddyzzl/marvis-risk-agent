@@ -1710,67 +1710,6 @@ body.anim-ready:not(.is-resizing) .pet-companion:not(.dragging) {
   animation: none;
 }
 
-/* VD-5: real-logo glow loop, layered behind the sticker via z-index (no
-   stacking context needed since .pet-companion doesn't set one). Hidden
-   entirely unless the mascot_glow setting is on; opacity/speed react to
-   the existing V2-aware data-pet-mood value set by renderPetState(). */
-.pet-glow {
-  position: absolute;
-  inset: -30% -30% -18% -30%;
-  z-index: 0;
-  background-repeat: no-repeat;
-  background-position: center;
-  background-size: contain;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.4s ease;
-}
-.pet-companion[data-mascot-glow="on"] .pet-glow {
-  opacity: 0.85;
-}
-/* 门等待 = breathe (gentle pulse, matches the review mood already used for
-   an open, unresolved gate). */
-.pet-companion[data-mascot-glow="on"][data-pet-mood="review"] .pet-glow {
-  animation: pet-glow-breathe 3.2s ease-in-out infinite;
-}
-/* 执行中 = steady/constant glow (no pulse) at a higher level than idle -
-   work is actively happening, not waiting on anyone; a slow full-loop hue
-   cycle keeps it visibly "alive" without breathing in/out like the wait
-   state. */
-.pet-companion[data-mascot-glow="on"][data-pet-mood="running"] .pet-glow {
-  opacity: 0.75;
-  animation: pet-glow-steady 2.4s linear infinite;
-}
-/* 失败 = dim (a red flag / failure should read as subdued, not celebratory). */
-.pet-companion[data-mascot-glow="on"][data-pet-mood="failed"] .pet-glow {
-  opacity: 0.22;
-  filter: saturate(0.4);
-  animation: none;
-}
-/* 完成 = a single bright flash, then settle back down. */
-.pet-companion[data-mascot-glow="on"][data-pet-mood="success"] .pet-glow,
-.pet-companion[data-mascot-glow="on"][data-pet-mood="complete"] .pet-glow {
-  animation: pet-glow-flash 1.1s ease-out 1;
-}
-@keyframes pet-glow-breathe {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 0.9; }
-}
-@keyframes pet-glow-steady {
-  0%, 100% { filter: brightness(1); }
-  50% { filter: brightness(1.12); }
-}
-@keyframes pet-glow-flash {
-  0% { opacity: 0.4; }
-  35% { opacity: 1; }
-  100% { opacity: 0.6; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .pet-glow {
-    animation: none !important;
-  }
-}
-
 .pet-image {
   display: block;
   width: 100%;

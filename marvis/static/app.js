@@ -198,9 +198,6 @@ let sidebarCollapsed = false;
 let sidebarSlideTimer = null;
 let scanAbortController = null;
 let petPreference = defaultPetPreference;
-// VD-5: real-logo glow overlay, default OFF pending user visual sign-off
-// (backlog note - flip the default once approved).
-let mascotGlowEnabled = false;
 let petDragState = null;
 let petReactionMood = null;
 let petReactionKey = "";
@@ -283,10 +280,6 @@ const AGENT_TYPEWRITER_CHARS_PER_TICK = 2;
 const AGENT_TYPEWRITER_CATCHUP_TICKS = 15;
 const AGENT_NO_ENABLED_MODEL_MESSAGE = "请先在设置中配置并启用大模型，再发送 Agent 消息。";
 const AGENT_NO_SELECTED_MODEL_MESSAGE = "请先选择一个可用大模型，再发送 Agent 消息。";
-// UX-9: must match marvis.sample_data.DEMO_TASK_NAME_PREFIX (kept as a plain string
-// here rather than fetched from the backend — it's a fixed display convention, not
-// runtime state).
-const sampleDataTaskNamePrefix = "示例-";
 // Follow-mode state machine: the typewriter only pulls the viewport to the
 // bottom while agentAutoScrollFollows is true. recomputeAgentAutoScrollFollow
 // runs on scroll events that arrive within AGENT_USER_SCROLL_INPUT_WINDOW_MS
@@ -971,33 +964,6 @@ function applyPetPreference(value, options = {}) {
   ensurePetWithinViewport({ persist });
 }
 
-function persistMascotGlowPreference(value) {
-  try {
-    localStorage.setItem("marvis_mascot_glow", value ? "on" : "off");
-  } catch (_) {
-    // Mascot glow preference is optional in restricted notebook browsers.
-  }
-}
-
-function applyMascotGlowPreference(value, options = {}) {
-  const { persist = true } = options;
-  mascotGlowEnabled = Boolean(value);
-  if ($("settingsMascotGlowSelect")) {
-    $("settingsMascotGlowSelect").value = mascotGlowEnabled ? "on" : "off";
-  }
-  if (persist) persistMascotGlowPreference(mascotGlowEnabled);
-  renderPetState();
-}
-
-function restoreMascotGlowPreference() {
-  try {
-    const stored = localStorage.getItem("marvis_mascot_glow");
-    applyMascotGlowPreference(stored === "on", { persist: false });
-  } catch (_) {
-    applyMascotGlowPreference(false, { persist: false });
-  }
-}
-
 function restorePetPreference() {
   try {
     const stored = localStorage.getItem("marvis_pet");
@@ -1171,7 +1137,6 @@ function renderPetState() {
   }
   const mood = petMoodFromTask();
   pet.dataset.petMood = mood;
-  pet.dataset.mascotGlow = mascotGlowEnabled ? "on" : "off";
   pet.setAttribute("aria-label", `${definition.name}，${definition.label}，当前状态：${mood}`);
   ensurePetWithinViewport({ persist: false });
 }
@@ -1215,7 +1180,6 @@ function renderSettingsState() {
   if ($("settingsGroupSelect")) $("settingsGroupSelect").value = taskGroupMode;
   if ($("settingsThemeSelect")) $("settingsThemeSelect").value = themeController.preference;
   if ($("settingsPetSelect")) $("settingsPetSelect").value = petPreference;
-  if ($("settingsMascotGlowSelect")) $("settingsMascotGlowSelect").value = mascotGlowEnabled ? "on" : "off";
   renderExecutionEnvironmentSummary();
   renderLLMSettingsSummary();
 }
@@ -1271,9 +1235,6 @@ function handleSettingsMenuChange(event) {
   }
   if (target.id === "settingsPetSelect") {
     applyPetPreference(target.value, { explicit: true });
-  }
-  if (target.id === "settingsMascotGlowSelect") {
-    applyMascotGlowPreference(target.value === "on");
   }
 }
 
@@ -5527,48 +5488,6 @@ async function createTaskAndScan() {
   }
 }
 
-// UX-9: one-click sample data trial — generates the built-in demo credit sample
-// (+ dictionary) into a fresh material directory, then creates a manual-mode
-// modeling task with it and starts the same deterministic plan-rail flow
-// createTaskAndScan() uses for a real driver task, so the demo exercises the
-// actual JOIN→FEATURE→MODELING confirmation-gate experience end to end.
-async function createSampleDataTask() {
-  setActionStatus("正在生成示例数据...", "busy");
-  try {
-    const upload = await api("api/sample-data", { method: "POST" });
-    const task = await api("api/tasks", {
-      method: "POST",
-      body: JSON.stringify({
-        task_type: "modeling",
-        model_name: `${sampleDataTaskNamePrefix}演示建模`,
-        model_version: "",
-        validator: "演示",
-        source_dir: upload.source_dir,
-        run_mode: "manual",
-        report_values: {},
-      }),
-    });
-    selectedTaskId = task.id;
-    selectedTask = task;
-    rememberSelectedTaskId(task.id);
-    renderStoredStateSummaries();
-    await refreshTasks();
-    await loadReportFields();
-    setBusy(null, "", task.id);
-    await dispatchDriverStart(task.id);
-    renderAll();
-    setActionStatus("示例任务已创建，请在下方逐步确认。", "success");
-    return task;
-  } catch (error) {
-    setActionStatus(error?.message || "生成示例数据失败", "error");
-    return null;
-  }
-}
-
-function handleWelcomeSampleDataClick() {
-  void createSampleDataTask();
-}
-
 // Start a driver-based task's deterministic flow (manual mode, no LLM): POST the
 // agent-start endpoint, which routes to the plan-conversation driver.
 async function dispatchDriverStart(taskId = selectedTaskId) {
@@ -6039,7 +5958,6 @@ function handleWorkflowStepperKeydown(event) {
 $("createTaskOpenButton").onclick = openTaskTypeWelcome;
 $("collapsedCreateTaskButton").onclick = openTaskTypeWelcome;
 $("welcomeTaskCards").onclick = openTaskDialogFromCard;
-$("welcomeSampleDataButton").onclick = handleWelcomeSampleDataClick;
 $("closeTaskDialogButton").onclick = closeTaskDialog;
 $("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);
 $("openGovernanceSettingsButton").onclick = openGovernanceSettingsFromSidebar;
@@ -6296,7 +6214,6 @@ themeController.restoreTheme();
 themeController.watchSystemTheme();
 restoreTaskListSettings();
 restorePetPreference();
-restoreMascotGlowPreference();
 restorePetPosition();
 restoreLayoutWidths();
 restoreSidebarCollapsed();
