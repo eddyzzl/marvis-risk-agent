@@ -74,6 +74,27 @@ def test_conda_base_delegation_only_applies_to_runtime_commands(monkeypatch):
     assert cli._should_delegate_to_dedicated_conda_env(cli._parse_args(["version"])) is False
 
 
+def test_current_python_is_conda_base_uses_real_python_prefix(monkeypatch, tmp_path):
+    base_prefix = tmp_path / "miniconda3"
+    env_prefix = base_prefix / "envs" / "py_313"
+    monkeypatch.setenv("CONDA_DEFAULT_ENV", "base")
+    monkeypatch.setenv("CONDA_PREFIX", str(base_prefix))
+    monkeypatch.setattr(sys, "prefix", str(env_prefix))
+    monkeypatch.setattr(cli, "_conda_info", lambda: {"root_prefix": str(base_prefix)})
+
+    assert cli._current_python_is_conda_base() is False
+
+
+def test_current_python_is_conda_base_matches_root_prefix(monkeypatch, tmp_path):
+    base_prefix = tmp_path / "miniconda3"
+    monkeypatch.setenv("CONDA_DEFAULT_ENV", "base")
+    monkeypatch.setenv("CONDA_PREFIX", str(base_prefix))
+    monkeypatch.setattr(sys, "prefix", str(base_prefix))
+    monkeypatch.setattr(cli, "_conda_info", lambda: {"root_prefix": str(base_prefix)})
+
+    assert cli._current_python_is_conda_base() is True
+
+
 def test_delegate_to_dedicated_env_creates_env_installs_and_runs(monkeypatch, tmp_path):
     process_commands = []
 

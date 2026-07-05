@@ -485,15 +485,13 @@ def _conda_env_has_marvis(env_name: str) -> bool:
 
 
 def _current_python_is_conda_base() -> bool:
-    if os.environ.get("CONDA_DEFAULT_ENV") == "base":
-        return True
-
-    conda_info = _conda_info()
-    if not conda_info:
-        return False
+    conda_info = _conda_info() or {}
     root_prefix = str(conda_info.get("root_prefix") or conda_info.get("base_prefix") or "")
     if not root_prefix:
-        return False
+        conda_prefix = os.environ.get("CONDA_PREFIX")
+        if os.environ.get("CONDA_DEFAULT_ENV") != "base" or not conda_prefix:
+            return False
+        root_prefix = conda_prefix
     return _safe_same_path(Path(sys.prefix), Path(root_prefix))
 
 
