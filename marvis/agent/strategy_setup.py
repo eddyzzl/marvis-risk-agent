@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from marvis.agent.sample_setup import detect_setup
+from marvis.data.labels import nan_label_mask
 from marvis.db import StrategyRepository
 from marvis.domain import FileRole
 from marvis.files import scan_source_dir
@@ -240,8 +241,13 @@ def build_rule_strategy_proposal(
     columns = backend.column_names(path)
     resolved_target = _resolve_target_col(backend, path, columns, target_col)
     resolved_score = _optional_score_col(columns, score_col)
-    bad_rate = _target_bad_rate(backend, path, resolved_target)
+    bad_rate, n_nan_labels = _target_bad_rate(backend, path, resolved_target)
     notes = ["将在数据上挖掘候选拒绝规则，选定规则集后回测并采纳。"]
+    if n_nan_labels:
+        notes.append(
+            f"注意：目标列 `{resolved_target}` 有 {n_nan_labels} 行标签为空/非法，"
+            "预览坏率已排除这些行；回测时将再次确认如何处理。"
+        )
     return RuleStrategyProposal(
         dataset_id=dataset.id,
         dataset_name=_dataset_name(dataset),
@@ -259,15 +265,26 @@ def _optional_score_col(columns: list[str], requested: str | None) -> str | None
     return None
 
 
-def _target_bad_rate(backend, path, target_col: str) -> float | None:
+def _target_bad_rate(backend, path, target_col: str) -> tuple[float | None, int]:
+    """Preview bad-rate over finite labels, plus the NaN-label count excluded.
+
+    T2-1: this is a pre-gate PREVIEW surface, so it cannot hard-stop the way the
+    canonical ``resolve_labeled_frame`` gate does at backtest time. But it must not
+    SILENTLY diverge either: it reads finite labels via the same ``nan_label_mask``
+    the gate uses (so the bad-rate matches the gated value after a confirmed drop)
+    and returns ``n_nan`` so the caller can surface exactly what the gate would.
+    Returns ``(None, 0)`` when the column is unreadable or non-numeric (the preview
+    stays best-effort; the gate still fires with a hard error downstream).
+    """
     try:
         frame = backend.read_frame(path, columns=[target_col])
+        mask = nan_label_mask(frame, target_col)
     except Exception:
-        return None
-    target = pd.to_numeric(frame[target_col], errors="coerce").dropna()
-    if target.empty:
-        return None
-    return float((target == 1).mean())
+        return None, 0
+    finite = pd.to_numeric(frame[target_col], errors="coerce").to_numpy(dtype=float)[~mask]
+    if finite.size == 0:
+        return None, int(mask.sum())
+    return float((finite == 1).mean()), int(mask.sum())
 
 
 def _resolve_dataset(registry, task_id: str, source_dir):
@@ -312,9 +329,21 @@ def _resolve_score_col(columns: list[str], requested: str | None) -> str:
 
 def _score_profile(frame: pd.DataFrame, *, target_col: str, score_col: str) -> dict:
     clean = frame[[target_col, score_col]].copy()
+    # T2-1: read finite labels via the canonical nan_label_mask so the preview
+    # bad-rate uses the SAME label semantics as the resolve_labeled_frame gate that
+    # backtesting applies later (no silent divergence). A NaN *score* drop is a
+    # legitimately different concern (score is not a label), so it stays a plain
+    # dropna; only the NaN-LABEL count is surfaced back to the user.
+    try:
+        label_nan_mask = nan_label_mask(clean, target_col)
+    except Exception as exc:  # non-numeric labels: mirror the gate's hard error
+        raise StrategySetupError(
+            f"目标列 `{target_col}` 含非数值标签，无法作为 0/1 目标预览；请修正后重试。"
+        ) from exc
+    n_nan_labels = int(label_nan_mask.sum())
     clean[target_col] = pd.to_numeric(clean[target_col], errors="coerce")
     clean[score_col] = pd.to_numeric(clean[score_col], errors="coerce")
-    clean = clean.dropna()
+    clean = clean.loc[~label_nan_mask].dropna()
     if clean.empty:
         raise StrategySetupError("目标列/评分列没有可用于策略回测的有效数值。")
     target = clean[target_col].astype(int)
@@ -333,6 +362,11 @@ def _score_profile(frame: pd.DataFrame, *, target_col: str, score_col: str) -> d
         condition = f"{score_col} < {cutoff_literal}"
         direction = "lower_score_riskier"
         notes = [f"评分越低坏样本率越高，默认拒绝评分最低约 20%（cutoff={cutoff_literal}）。"]
+    if n_nan_labels:
+        notes.append(
+            f"注意：目标列 `{target_col}` 有 {n_nan_labels} 行标签为空/非法，"
+            "预览坏率与 cutoff 已排除这些行；回测时将再次确认如何处理。"
+        )
     return {
         "condition": condition,
         "cutoff": cutoff,

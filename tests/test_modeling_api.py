@@ -117,6 +117,15 @@ def _last_assistant(messages: list[dict]) -> dict:
     return [m for m in messages if m["role"] == "assistant"][-1]
 
 
+def _modeling_setup_message(messages: list[dict]) -> dict:
+    """The 建模 setup chat message (carries proposal.notes: split/OOT wording),
+    which precedes the plan-overview gate."""
+    return next(
+        m for m in messages
+        if m["role"] == "assistant" and (m.get("metadata") or {}).get("intent") == "modeling"
+    )
+
+
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(tmp_path))
@@ -898,6 +907,196 @@ def test_modeling_multiple_files_with_time_column_auto_splits_oot_after_join(
     assert "extra_score" in split_output["feature_cols"]
     counts = (split_output.get("sample_analysis") or {}).get("split_counts") or {}
     assert set(counts) == {"train", "test", "oot"} and all(v > 0 for v in counts.values())
+
+
+def _nonalias_time_dir(root: Path, time_col: str, n: int = 200) -> Path:
+    """A single-file modeling sample whose date column is NOT one of the
+    _BUSINESS_COLUMN_ALIASES loan_month synonyms — so time-extrapolated OOT can
+    ONLY fire when task.time_col is threaded through (D12)."""
+    src = root / f"nonalias_{time_col}"
+    src.mkdir()
+    rng = np.random.RandomState(23)
+    months = np.array(["2025-10", "2025-11", "2025-12", "2026-01"], dtype=object)
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "f1": rng.normal(size=n),
+        "f2": rng.normal(size=n),
+        "long_y": (rng.uniform(size=n) < 0.3).astype(float),
+        time_col: months[np.arange(n) % len(months)],
+    }).to_parquet(src / "s.parquet")
+    return src
+
+
+def test_modeling_single_file_user_time_col_non_alias_triggers_oot(client: TestClient, tmp_path: Path):
+    """D12: a user-supplied task.time_col naming a NON-alias date column
+    ('stmt_date' is not in _BUSINESS_COLUMN_ALIASES) must drive time-extrapolated
+    OOT — previously it silently fell back to a plain random train/test."""
+    src = _nonalias_time_dir(tmp_path, "stmt_date")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "非别名时间列", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "time_col": "stmt_date",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    opening = _modeling_setup_message(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert not (opening.get("metadata") or {}).get("error"), opening["content"]
+    assert "时间外推 OOT（" in opening["content"]
+    assert "stmt_date" in opening["content"]
+
+
+def test_modeling_joined_user_time_col_non_alias_sets_oot_by_time(client: TestClient, tmp_path: Path):
+    """D12 (joined path): a user time_col naming a non-alias anchor date column
+    ('observe_month') must set split_config.oot_by_time on the split step so the
+    in-plan make_split time-extrapolates OOT after the join."""
+    src = tmp_path / "join_nonalias_time"
+    src.mkdir()
+    n = 200
+    rng = np.random.RandomState(31)
+    months = np.array(["2025-10", "2025-11", "2025-12", "2026-01"], dtype=object)
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "sig1": rng.normal(size=n),
+        "long_y": (rng.uniform(size=n) < 0.3).astype(float),
+        "observe_month": months[np.arange(n) % len(months)],
+    }).to_parquet(src / "sample.parquet")
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "extra_score": np.linspace(0, 1, n),
+    }).to_parquet(src / "feature_table.parquet")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "多表非别名时间列", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "time_col": "observe_month",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    plan = client.app.state.plan_repo.list_plans_for_task(task_id)[-1]
+    assert plan.template_id == "modeling_with_join"
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    assert split_step.inputs.get("split_config", {}).get("oot_by_time") == "observe_month"
+
+
+def test_modeling_user_time_col_absent_column_does_not_crash(client: TestClient, tmp_path: Path):
+    """D12: task.time_col naming a column that does NOT exist (and no alias column
+    present) must NOT set oot_by_time — otherwise make_split raises 'missing
+    columns'. The plan builds and falls back to random train/test."""
+    src = tmp_path / "absent_time"
+    src.mkdir()
+    n = 200
+    rng = np.random.RandomState(5)
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "f1": rng.normal(size=n),
+        "f2": rng.normal(size=n),
+        "long_y": (rng.uniform(size=n) < 0.3).astype(float),
+    }).to_parquet(src / "s.parquet")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "缺列时间列", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "time_col": "no_such_col",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    opening = _modeling_setup_message(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert not (opening.get("metadata") or {}).get("error"), opening["content"]
+    assert "时间外推 OOT（" not in opening["content"]
+    assert "已自动" in opening["content"] and "train/test" in opening["content"]
+
+
+def test_modeling_default_apply_month_inert_when_absent(client: TestClient, tmp_path: Path):
+    """D12: the task.time_col default ('apply_month') must be inert when no such
+    column exists — the fix MUST NOT fabricate oot_by_time='apply_month' (which
+    would crash make_split). Task created WITHOUT setting time_col."""
+    src = tmp_path / "default_inert"
+    src.mkdir()
+    n = 200
+    rng = np.random.RandomState(9)
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "f1": rng.normal(size=n),
+        "f2": rng.normal(size=n),
+        "long_y": (rng.uniform(size=n) < 0.3).astype(float),
+    }).to_parquet(src / "s.parquet")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "默认时间列惰性", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    opening = _modeling_setup_message(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert not (opening.get("metadata") or {}).get("error"), opening["content"]
+    assert "apply_month" not in opening["content"]
+    assert "时间外推 OOT（" not in opening["content"]
+
+
+def test_modeling_user_time_col_alias_case_insensitive(client: TestClient, tmp_path: Path):
+    """D12: resolution is case-insensitive (mirrors vintage _resolve_named_col) and
+    the REAL column name is preserved — time_col='stmtdate' resolves 'StmtDate'."""
+    src = _nonalias_time_dir(tmp_path, "StmtDate")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "时间列大小写", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "time_col": "stmtdate",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    opening = _modeling_setup_message(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert not (opening.get("metadata") or {}).get("error"), opening["content"]
+    assert "时间外推 OOT（" in opening["content"]
+    assert "StmtDate" in opening["content"]
+
+
+def test_modeling_user_time_col_conflicts_with_detected_split_col(client: TestClient, tmp_path: Path):
+    """D12 conflict policy (patch step 5, option a): when detect_setup auto-detects a
+    split column, it wins over an explicit differing time_col (conservative — no
+    behavior change for existing-split datasets); an explanatory note records that
+    the detected split shadowed the requested time-OOT."""
+    src = tmp_path / "conflict_split"
+    src.mkdir()
+    n = 200
+    rng = np.random.RandomState(41)
+    months = np.array(["2025-10", "2025-11", "2025-12", "2026-01"], dtype=object)
+    split = np.array(["train"] * n, dtype=object)
+    split[int(n * 0.6):int(n * 0.8)] = "test"
+    split[int(n * 0.8):] = "oot"
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "f1": rng.normal(size=n),
+        "f2": rng.normal(size=n),
+        "long_y": (rng.uniform(size=n) < 0.3).astype(float),
+        "model_flag": split,
+        "stmt_date": months[np.arange(n) % len(months)],
+    }).to_parquet(src / "s.parquet")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "切分列冲突", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "time_col": "stmt_date",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    opening = _modeling_setup_message(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert not (opening.get("metadata") or {}).get("error"), opening["content"]
+    # Detected split_col wins; the plan uses it, not a fabricated time OOT.
+    plan = client.app.state.plan_repo.list_plans_for_task(task_id)[0]
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    assert split_step.inputs.get("split_col") == "model_flag"
+    assert split_step.inputs.get("split_config", {}).get("oot_by_time") in (None, "")
+    # An explanatory note tells the user the detected split overrode the time-OOT.
+    assert "stmt_date" in opening["content"] and "model_flag" in opening["content"]
+
+
+def test_modeling_user_time_col_equals_target_rejected(client: TestClient, tmp_path: Path):
+    """D12: a time_col that names the target/label column is nonsensical (leakage);
+    it must NOT be set as oot_by_time — falls back to None (no time OOT)."""
+    src = tmp_path / "time_is_target"
+    src.mkdir()
+    n = 200
+    rng = np.random.RandomState(53)
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "f1": rng.normal(size=n),
+        "f2": rng.normal(size=n),
+        "long_y": (rng.uniform(size=n) < 0.3).astype(float),
+    }).to_parquet(src / "s.parquet")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "时间列即标签", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual", "time_col": "long_y",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    opening = _modeling_setup_message(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert not (opening.get("metadata") or {}).get("error"), opening["content"]
+    assert "时间外推 OOT（" not in opening["content"]
 
 
 def test_modeling_without_split_auto_generates_grouped_split(client: TestClient, tmp_path: Path):

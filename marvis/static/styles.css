@@ -1046,8 +1046,7 @@ textarea {
   resize: vertical;
 }
 
-.status,
-.action-status {
+.status {
   min-height: 19px;
   color: var(--text-secondary);
   font-size: 12px;
@@ -1057,20 +1056,17 @@ textarea {
   margin-top: 10px;
 }
 
-.status.error,
-.action-status.error {
+.status.error {
   color: var(--danger);
   font-weight: 700;
 }
 
-.status.success,
-.action-status.success {
+.status.success {
   color: var(--success);
   font-weight: 700;
 }
 
-.status.warning,
-.action-status.warning {
+.status.warning {
   color: var(--warning);
   font-weight: 700;
 }
@@ -3101,27 +3097,21 @@ dialog.agent-memory-dialog,
   background: var(--surface-soft);
 }
 
-.agent-memory-filter-head,
-.agent-memory-pane-head,
-.draft-tools-pane-head {
+.agent-memory-pane-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
-.agent-memory-filter-head strong,
-.agent-memory-pane-head strong,
-.draft-tools-pane-head strong {
+.agent-memory-pane-head strong {
   display: block;
   color: var(--text);
   font-size: 13px;
   line-height: 1.35;
 }
 
-.agent-memory-filter-head span,
-.agent-memory-pane-head span,
-.draft-tools-pane-head span {
+.agent-memory-pane-head span {
   display: block;
   color: var(--text-muted);
   font-size: 12px;
@@ -3857,7 +3847,6 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
 
 .task-row-name,
 .task-row small,
-.workspace-title h2,
 .workspace-subtitle,
 .summary-item strong {
   overflow-wrap: anywhere;
@@ -4046,17 +4035,6 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
 .validation-workspace.is-empty .workspace-head,
 .validation-workspace.is-empty .workspace-body {
   display: none;
-}
-
-.workspace-title {
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.workspace-title h2 {
-  margin: 0 0 4px;
-  font-size: 25px;
-  line-height: 1.16;
 }
 
 .workspace-subtitle {
@@ -4787,14 +4765,6 @@ body[data-theme="dark"] .progress-rail {
   max-width: 460px;
 }
 
-.snapshot-detail {
-  color: var(--danger);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
 .progress-panel h3 {
   margin: 0;
   font-size: 14px;
@@ -4855,8 +4825,7 @@ body[data-theme="dark"] .progress-rail {
   gap: 8px;
 }
 
-.summary-item,
-.metric-item {
+.summary-item {
   display: grid;
   gap: 4px;
   padding: 9px;
@@ -4865,15 +4834,13 @@ body[data-theme="dark"] .progress-rail {
   background: var(--surface);
 }
 
-.summary-item span,
-.metric-item span {
+.summary-item span {
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
 }
 
-.summary-item strong,
-.metric-item strong {
+.summary-item strong {
   font-weight: 700;
 }
 
@@ -5225,20 +5192,6 @@ body[data-theme="dark"] .progress-rail {
   gap: 7px;
 }
 
-.file-chip {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  color: var(--text-secondary);
-  background: var(--surface);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
 .metric-preview {
   margin-bottom: 0;
 }
@@ -5317,22 +5270,13 @@ body[data-theme="dark"] .progress-rail {
   gap: 8px;
 }
 
-.metric-value {
-  color: var(--accent);
-  font-size: 22px;
-  line-height: 1.12;
-  font-weight: 700;
-}
-
 /* Model engine config — a clean engine list; connection details (incl. key) are
    edited in a focused dialog. Picking a model for a chat happens in the composer,
    not here. */
-.llm-settings-dialog,
 .llm-engine-edit-dialog {
   width: min(440px, calc(100vw - 32px));
 }
 
-.llm-settings-section,
 .llm-engine-edit-section {
   grid-template-columns: 1fr;
   gap: 10px;
@@ -5465,16 +5409,6 @@ body[data-theme="dark"] .progress-rail {
   font-weight: 600;
 }
 
-dialog.draft-tools-dialog,
-.draft-tools-dialog {
-  width: min(1120px, calc(100vw - 32px));
-}
-
-.draft-tools-section {
-  grid-template-columns: 1fr;
-  gap: 0;
-}
-
 .draft-tools-hint {
   margin: 0;
   color: var(--text-muted);
@@ -5569,8 +5503,7 @@ dialog.draft-tools-dialog,
   line-height: 1.4;
 }
 
-.draft-tool-item-main p,
-.draft-tool-summary {
+.draft-tool-item-main p {
   margin: 0;
   color: var(--text-muted);
   font-size: 12px;

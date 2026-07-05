@@ -90,6 +90,12 @@ def _render_screen(o: dict):
             f"\n- **{len(excluded_categorical)} 个类别列未入模**:{preview}{more}；"
             "如需使用，请先用 woe_encode_categorical 编码，或改用 catboost（原生支持类别列）。"
         )
+    nan_dropped = o.get("nan_labels_dropped") or 0
+    if nan_dropped:
+        text += (
+            f"\n- 🚩 **{nan_dropped} 行标签为空（NaN）已按确认丢弃**，"
+            "本次筛选的 KS/IV 与泄漏判定仅基于有标签样本。"
+        )
     tables = []
     if selected:
         rows = []
@@ -332,15 +338,83 @@ def _render_train(o: dict):
     return text, tables
 
 
-def _champion_evidence_text(experiments, best_id, selector_key, selector_label, higher_is_better) -> str:
-    """LT-11 (B.1/B.2): champion evidence -- the selected metric's champion value and
-    the gap to the runner-up algorithm on that same metric, both read from the
-    experiments' own metrics (INV-1: presentation only, the gap is a subtraction on
-    existing fields). Empty when the champion or a runner-up value is unavailable."""
-    def _val(exp):
-        metrics = exp.get("metrics") or {}
-        value = metrics.get(selector_key)
+# C9: champion-selection metric labels emitted by the tool
+# (marvis/packs/modeling/train_tools.py). The renderer maps each LABEL to the
+# per-experiment value used for selection so the evidence sentence cites the axis
+# the champion actually won on, not a hard-coded OOT KS. Kept in sync with
+# train_tools._CHAMPION_OVERFIT_PENALTY / BINARY_SELECTION_METRIC /
+# RESPONSE_LIFT_SELECTION_METRIC; test_strategy_development guards drift.
+_CHAMPION_OVERFIT_PENALTY = 0.5
+_BINARY_SELECTION_METRIC = "test_ks(overfit-penalized)"
+_RESPONSE_LIFT_SELECTION_METRIC = "test_lift_head_10"
+
+
+def _penalized_test_ks(metrics: dict):
+    """Mirror of train_tools._overfit_penalized_test_ks: ``test_ks - 0.5*max(0,
+    train_ks - test_ks)``, weighted-aware. Returns None when test_ks is missing so
+    the evidence line falls back to omitting the experiment (INV-1: recomputes only
+    the already-computed KS numbers, same formula that drove selection)."""
+    test_ks = metrics.get("weighted_test_ks")
+    if not isinstance(test_ks, (int, float)):
+        test_ks = metrics.get("test_ks")
+    if not isinstance(test_ks, (int, float)):
+        return None
+    train_ks = metrics.get("weighted_train_ks")
+    if not isinstance(train_ks, (int, float)):
+        train_ks = metrics.get("train_ks")
+    gap = float(train_ks) - float(test_ks) if isinstance(train_ks, (int, float)) else 0.0
+    return float(test_ks) - _CHAMPION_OVERFIT_PENALTY * max(0.0, gap)
+
+
+def _key_value(key: str):
+    """Per-experiment value extractor that reads a plain metrics dict key."""
+    def _extract(metrics: dict):
+        value = metrics.get(key)
         return float(value) if isinstance(value, (int, float)) else None
+    return _extract
+
+
+def _selection_axis(o: dict):
+    """C9: resolve (display_label, value_of, higher_is_better) from the tool's
+    emitted ``selection_metric`` LABEL so the evidence sentence renders the true
+    selection axis. ``selection_metric`` is a presentation label, not a metrics key,
+    so each label maps to the extractor that fetches its per-experiment value.
+    Falls back to the per-target_type defaults for legacy outputs that predate the
+    selection_metric field (the fallback label no longer claims 'OOT KS' unless OOT
+    KS was in fact the basis for that target type)."""
+    sel = str(o.get("selection_metric") or "")
+    if sel == _BINARY_SELECTION_METRIC:
+        return ("按 test KS(过拟合惩罚)", _penalized_test_ks, True)
+    if sel == _RESPONSE_LIFT_SELECTION_METRIC:
+        return ("按 test 头部10%提升", _key_value("test_lift_head_10"), True)
+    if sel == "oot_rmse":
+        return ("按 OOT RMSE", _key_value("oot_rmse"), False)
+    if sel == "oot_macro_auc":
+        return ("按 OOT macro-AUC", _key_value("oot_macro_auc"), True)
+    if sel == "oot_logloss":
+        return ("按 OOT logloss", _key_value("oot_logloss"), False)
+    # Legacy fallback (no selection_metric field): keep today's per-target_type
+    # basis so replayed/cached outputs do not crash. This is the ONLY path that may
+    # still label 'OOT KS', and only because that was the historical binary default.
+    target_type = str(o.get("target_type") or "binary")
+    if target_type == "continuous":
+        return ("按 OOT RMSE", _key_value("oot_rmse"), False)
+    if target_type == "multiclass":
+        return ("按 OOT macro-AUC", _key_value("oot_macro_auc"), True)
+    return ("按 OOT KS", _key_value("oot_ks"), True)
+
+
+def _champion_evidence_text(experiments, best_id, value_of, selector_label, higher_is_better) -> str:
+    """LT-11 (B.1/B.2) + C9: champion evidence -- the SELECTION metric's champion
+    value and the gap to the runner-up algorithm on that SAME axis, both read from
+    the experiments' own metrics via ``value_of`` (INV-1: presentation only, the gap
+    is a subtraction on existing fields). Because the axis is now the one the
+    champion actually won on, the '高'/'低' direction word is truthful by
+    construction; a defensive guard emits neutral phrasing if the champion is
+    somehow not the extreme. Empty when the champion or a runner-up value is
+    unavailable."""
+    def _val(exp):
+        return value_of(exp.get("metrics") or {})
 
     champion = next((e for e in experiments if e.get("experiment_id") == best_id), None)
     champion_value = _val(champion) if champion is not None else None
@@ -354,6 +428,15 @@ def _champion_evidence_text(experiments, best_id, selector_key, selector_label, 
         return f"（依据：{selector_label}={champion_value:.4f}，为唯一可比算法）"
     runner_up, runner_value = max(others, key=lambda item: item[1]) if higher_is_better else min(others, key=lambda item: item[1])
     gap = champion_value - runner_value
+    champion_leads = gap >= 0 if higher_is_better else gap <= 0
+    if not champion_leads:
+        # Defensive: champion is not the extreme on this axis. Do not assert '高'/'低';
+        # state the values without a false lead claim.
+        return (
+            f"（依据：{selector_label}={champion_value:.4f}，"
+            f"次优 {runner_up.get('recipe', '?')}（{runner_value:.4f}）"
+            f"，二者差 {abs(gap):.4f}）"
+        )
     return (
         f"（依据：{selector_label}={champion_value:.4f}，"
         f"较次优 {runner_up.get('recipe', '?')}（{runner_value:.4f}）"
@@ -371,16 +454,15 @@ def _render_train_models(o: dict):
     best_metrics: dict = {}
     if target_type == "continuous":
         metric_columns = ["train_rmse", "test_rmse", "oot_rmse", "test_mae", "oot_mae", "test_r2", "oot_r2"]
-        selector_label = "按 OOT RMSE"
-        selector_key, higher_is_better = "oot_rmse", False
     elif target_type == "multiclass":
         metric_columns = ["train_macro_auc", "test_macro_auc", "oot_macro_auc", "test_logloss", "oot_logloss", "test_accuracy", "oot_accuracy"]
-        selector_label = "按 OOT macro-AUC"
-        selector_key, higher_is_better = "oot_macro_auc", True
     else:
         metric_columns = ["train_ks", "test_ks", "oot_ks", "test_auc", "oot_auc"]
-        selector_label = "按 OOT KS"
-        selector_key, higher_is_better = "oot_ks", True
+    # C9: the evidence SENTENCE metric comes from the tool's emitted selection_metric
+    # (not a hard-coded per-target_type key). The comparison TABLE columns above are
+    # the full metric grid and stay unchanged. selection_axis falls back to the
+    # per-target_type default only for legacy outputs lacking selection_metric.
+    selector_label, value_of, higher_is_better = _selection_axis(o)
     for exp in experiments:
         metrics = exp.get("metrics") or {}
         is_best = exp.get("experiment_id") == best_id
@@ -391,13 +473,14 @@ def _render_train_models(o: dict):
             + [_num(metrics.get(column)) for column in metric_columns]
         )
     if len(experiments) > 1:
-        # LT-11 (B.1/B.2): the champion choice carries its evidence -- the selection
-        # metric it won on (selector_label), the champion's own value, and the gap to
-        # the runner-up algorithm on that SAME metric so the user sees what the
-        # champion beat. All numbers are the experiments' own already-computed metrics
-        # (INV-1: presentation only; the gap is a plain subtraction on existing fields).
+        # LT-11 (B.1/B.2) + C9: the champion choice carries its evidence -- the REAL
+        # selection metric it won on (selector_label from selection_metric), the
+        # champion's own value on that axis, and the gap to the runner-up algorithm on
+        # that SAME axis so the user sees what the champion actually beat. All numbers
+        # are the experiments' own already-computed metrics (INV-1: presentation only;
+        # the penalized-KS value recomputes the same formula that drove selection).
         evidence = _champion_evidence_text(
-            experiments, best_id, selector_key, selector_label, higher_is_better
+            experiments, best_id, value_of, selector_label, higher_is_better
         )
         text = (
             f"**训练完成**:对比 {len(experiments)} 个算法，"
@@ -1172,6 +1255,19 @@ def _render_vintage_curve(o: dict):
             "columns": ["cohort", "坏账率"],
             "rows": [[str(cohort), _pct(value)] for cohort, value in at_ref.items()],
         })
+    # A1: surface the vintage kernel's data-quality warnings (e.g. the snapshot-flag
+    # red flag when data looks cumulative but was declared incremental) as red flags,
+    # mirroring _render_slice_aggregate. De-duplicated: the kernel attaches the same
+    # flag to every point, so warnings arrives with one entry per point.
+    seen: set[str] = set()
+    flag_lines = []
+    for warning in o.get("warnings") or []:
+        text_warning = str(warning)
+        if text_warning and text_warning not in seen:
+            seen.add(text_warning)
+            flag_lines.append(f"🚩 {text_warning}")
+    if flag_lines:
+        text += "\n" + "\n".join(flag_lines)
     return text, tables
 
 
@@ -1214,10 +1310,16 @@ def _render_slice_aggregate(o: dict):
         filter_text = "、".join(f"{f.get('col')}{f.get('op')}{f.get('value')}" for f in filters)
         echo_parts.append(f"，筛选〔{filter_text}〕")
     text = "**即席问数结果**（" + str(len(rows)) + " 行）。\n" + "".join(echo_parts) + "。"
+    # A4: bad_rate/approval_rate may now be NULL for an all-unlabeled group — render it as
+    # "n/a" rather than the literal "None" so the honest "no labeled samples" answer reads
+    # cleanly. The companion unlabeled_count_<col> columns flow through automatically.
     tables = [{
         "title": "聚合结果",
         "columns": columns,
-        "rows": [[_fmt(row.get(col)) for col in columns] for row in rows],
+        "rows": [
+            ["n/a" if row.get(col) is None else _fmt(row.get(col)) for col in columns]
+            for row in rows
+        ],
     }]
     red_flags = [f for f in (o.get("red_flags") or []) if isinstance(f, dict)]
     if red_flags:
@@ -1235,6 +1337,7 @@ def _render_propose_join(o: dict):
     relax_rows = []
     any_conflict = False
     any_fp_mismatch = False
+    any_dtype_mismatch = False
     for j in joins:
         diag = j.get("diagnostics") or {}
         match_rate = diag.get("match_rate")
@@ -1269,6 +1372,17 @@ def _render_propose_join(o: dict):
         if not fp_consistent:
             any_fp_mismatch = True
         fp_cell = "✓" if fp_consistent else "✗ raw≠md5"
+        # T1-B8: key-dtype divergence (one side text, one side float/int) risks a silent miss
+        # via precision / leading-zero loss. A "red" (text↔float) divergence forces confirm.
+        divergences = [d for d in (diag.get("key_dtype_divergences") or []) if isinstance(d, dict)]
+        red_divergence = any(d.get("level") == "red" for d in divergences)
+        if red_divergence:
+            any_dtype_mismatch = True
+            dtype_cell = "✗ text≠float"
+        elif divergences:
+            dtype_cell = "⚠️类型不一致"
+        else:
+            dtype_cell = "✓"
         # Two-level dedup breakdown (spec §6): safe whole-row dups vs same-key conflicts.
         report = diag.get("conflict_report") or {}
         conflict_keys = int(report.get("n_conflict_keys") or 0)
@@ -1280,6 +1394,7 @@ def _render_propose_join(o: dict):
             fname,
             keys,
             fp_cell,
+            dtype_cell,
             _fmt(match_rate) if match_rate is not None else "n/a",
             "是" if unique else "否",
             "⚠️是" if fan_out else "否",
@@ -1299,16 +1414,29 @@ def _render_propose_join(o: dict):
             "\n\n⚠️ 检测到**键指纹不一致**（`✗ raw≠md5`:锚/特征侧一为原文、一为 md5）："
             "系统会自动对齐哈希后再连接，但请确认这是同一标识（避免误配）。"
         )
+    if any_dtype_mismatch:
+        text += (
+            "\n\n⚠️ 检测到**键类型不一致**（一侧文本、一侧浮点/整型）：可能已发生精度丢失/前导零丢失"
+            "导致静默漏配，请确认是否为同一标识后再拼接（需先确认才能执行）。"
+        )
     if relax_rows:
         text += (
             "\n\n💡 部分特征表命中率偏低，**减一个识别要素**可提高命中（见下「择键建议」）："
             "系统只提议、不会自动改键；若减后**膨胀**需配合去重策略。请确认后再选用。"
         )
+    # T3-1: dual-path reconciliation red flags. Each feature's match count is computed two
+    # independent ways (DuckDB SQL vs pandas); any divergence beyond tolerance is a BLOCKING
+    # red flag showing BOTH path values, so the human sees the disagreement rather than
+    # rubber-stamping one number. Silent (no line) when the two paths agree.
+    reconcile_summary = o.get("reconcile_summary") if isinstance(o.get("reconcile_summary"), dict) else {}
+    for flag in (reconcile_summary.get("red_flags") or []):
+        if isinstance(flag, dict) and flag.get("message"):
+            text += f"\n\n🚩 {str(flag.get('message'))}"
     tables = []
     if rows:
         tables.append({
             "title": "拼接诊断（逐特征表）",
-            "columns": ["特征表", "匹配键", "指纹（raw=md5?）", "命中率", "键唯一", "膨胀", "去重（安全/冲突键）"],
+            "columns": ["特征表", "匹配键", "指纹（raw=md5?）", "键类型", "命中率", "键唯一", "膨胀", "去重（安全/冲突键）"],
             "rows": rows,
         })
     if relax_rows:
@@ -1317,13 +1445,80 @@ def _render_propose_join(o: dict):
             "columns": ["特征表", "当前命中率", "建议键", "减后命中率", "减后唯一", "减后膨胀"],
             "rows": relax_rows,
         })
+    # T3: expandable "数字溯源" detail — the two-path match count + the provenance tuple
+    # (dataset fingerprint / code version / params digest / seed) behind each feature's
+    # headline number, so the displayed number is auditable back to its inputs.
+    trust_rows = _join_trust_rows(joins)
+    if trust_rows:
+        tables.append({
+            "title": "数字溯源（对账 + 血缘）",
+            "columns": ["特征表", "匹配行数(权威路)", "匹配行数(独立路)", "对账", "数据指纹", "代码版本", "参数摘要", "seed"],
+            "rows": trust_rows,
+        })
     return text, tables
+
+
+def _join_trust_rows(joins) -> list[list[str]]:
+    """T3: one row per feature summarizing its match-count reconciliation + provenance
+    tuple. Shows both computation paths' values, the reconcile verdict, and the minimal
+    lineage (fingerprints truncated for readability). Empty when the trust layer is
+    absent (e.g. an older stored plan) so this degrades to no extra table."""
+    rows = []
+    for j in joins:
+        if not isinstance(j, dict):
+            continue
+        rec = j.get("reconcile") if isinstance(j.get("reconcile"), dict) else None
+        prov = j.get("provenance") if isinstance(j.get("provenance"), dict) else None
+        if not rec and not prov:
+            continue
+        fname = str(j.get("feature_name") or j.get("feature_id", "?"))
+        primary = rec.get("primary") if rec else None
+        secondary = rec.get("secondary") if rec else None
+        # T3-2: an honest verdict. A number with no independent second path is "未独立复核",
+        # NOT the ✓ 一致 (agree) badge -- a same-path self-comparison must never look verified.
+        if rec and rec.get("trust") == "not_independently_verified":
+            verdict = "⚠ 未独立复核"
+        elif rec and rec.get("consistent"):
+            verdict = "✓ 一致"
+        elif rec:
+            verdict = "🚩 分歧"
+        else:
+            verdict = "—"
+        rows.append([
+            fname,
+            _fmt(primary) if primary is not None else "n/a",
+            _fmt(secondary) if secondary is not None else "n/a",
+            verdict,
+            _short_digest(prov.get("dataset_fingerprint")) if prov else "—",
+            str(prov.get("code_version") or "—") if prov else "—",
+            _short_digest(prov.get("params_digest")) if prov else "—",
+            str(prov.get("seed")) if prov and prov.get("seed") is not None else "—",
+        ])
+    return rows
+
+
+def _short_digest(value) -> str:
+    """Truncate a ``sha256:<hex>`` digest to a readable prefix for gate display."""
+    text = str(value or "")
+    if text.startswith("sha256:"):
+        body = text[len("sha256:"):]
+        return f"sha256:{body[:12]}…" if len(body) > 12 else text
+    return text[:16] + "…" if len(text) > 16 else text
 
 
 def _render_confirm_join(o: dict):
     # Internal plumbing step (marks engine specs confirmed). It is a dependency of
     # the execute_join gate, but its summary would show "已确认…" before the human
     # actually confirms, which is confusing — so render nothing at the gate…
+    # T1-B8: a red key-dtype mismatch blocks confirmation until the user acknowledges it.
+    needs_dtype = o.get("needs_dtype_ack") or []
+    if needs_dtype:
+        labels = o.get("needs_dtype_ack_labels") or {}
+        listed = "、".join(f"`{labels.get(f, f)}`" for f in needs_dtype)
+        return (
+            f"⚠️ 特征 {listed} 的**拼接键类型不一致**（一侧文本、一侧浮点：可能已丢失精度/前导零，"
+            "导致静默漏配）。请确认这是同一标识后回复「确认键类型」继续；或以字符串重导入该列后重试。"
+        ), []
     needs = o.get("needs_dedup") or []
     if needs:
         # …UNLESS a feature has a same-key conflict (spec §6): surface it so the user knows
@@ -1684,7 +1879,12 @@ def _render_el_estimate(o: dict):
     chain = [row for row in (o.get("chain") or []) if isinstance(row, dict)]
     el_by_month = [row for row in (o.get("el_by_month") or []) if isinstance(row, dict)]
     red_flags = [f for f in (o.get("red_flags") or []) if isinstance(f, dict)]
-    text = f"**预期损失估计完成**:损失态 `{o.get('loss_state', '')}`，合计 EL {_fmt(o.get('total_el'))}。"
+    assumptions = o.get("assumptions") if isinstance(o.get("assumptions"), dict) else {}
+    ref = assumptions.get("reference_snapshot")
+    # total_el is a reference-snapshot口径 (latest month), NOT a cross-month sum;
+    # annotate the headline so the user ties合计 EL to a specific month.
+    basis_note = f"（参考快照 {ref} 口径）" if ref else ""
+    text = f"**预期损失估计完成**:损失态 `{o.get('loss_state', '')}`，合计 EL {_fmt(o.get('total_el'))}{basis_note}。"
     tables = []
     if chain:
         tables.append({
@@ -1696,7 +1896,14 @@ def _render_el_estimate(o: dict):
         tables.append({
             "title": "逐月预期损失",
             "columns": ["月份", "余额", "预期损失"],
-            "rows": [[str(r.get("month") or ""), _fmt(r.get("balance")), _fmt(r.get("expected_loss"))] for r in el_by_month],
+            "rows": [
+                [
+                    ("★ " if r.get("is_reference") else "") + str(r.get("month") or ""),
+                    _fmt(r.get("balance")),
+                    _fmt(r.get("expected_loss")),
+                ]
+                for r in el_by_month
+            ],
         })
     if red_flags:
         tables.append(_data_quality_flag_table(red_flags))

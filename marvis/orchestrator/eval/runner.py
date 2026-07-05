@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import tempfile
-from typing import Any, Protocol
+from typing import Any
 
 from marvis.db import PluginRepository, init_db
 from marvis.orchestrator.capability import resolve_tier
@@ -34,10 +34,6 @@ from marvis.plugins.registry import PluginRegistry, ToolRegistry
 
 
 PACKS_ROOT = Path(__file__).resolve().parents[2] / "packs"
-
-
-class LLMClient(Protocol):
-    def complete(self, **kwargs: Any) -> str: ...
 
 
 def build_tool_registry(*, db_path: Path | None = None) -> ToolRegistry:

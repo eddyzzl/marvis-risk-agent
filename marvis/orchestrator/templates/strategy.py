@@ -81,6 +81,12 @@ VINTAGE_ANALYSIS = WorkflowTemplate(
         SlotSpec("bad_col", True, "task_context", "Binary bad/default target column"),
         SlotSpec("mob_max", False, "task_context", "Maximum MOB to render"),
         SlotSpec("ref_mob", False, "task_context", "Reference MOB for trend summary"),
+        # A1: label_semantics has no default slot value on purpose -- an undeclared
+        # basis makes tool_vintage_curve raise LabelSemanticsNotDeclaredError so the
+        # user is forced to pick incremental vs snapshot; drop_nan_labels threads the
+        # NaN-label confirmation through the same gate.
+        SlotSpec("label_semantics", False, "user", "Bad-column cumulation basis: incremental or snapshot"),
+        SlotSpec("drop_nan_labels", False, "user", "Confirm dropping NaN-label rows"),
     ),
     steps=(
         StepTemplate(
@@ -93,6 +99,17 @@ VINTAGE_ANALYSIS = WorkflowTemplate(
                 "bad_col": "{slot:bad_col}",
                 "mob_max": "{slot:mob_max}",
                 "ref_mob": "{slot:ref_mob}",
+                # Literal null default (not {slot:label_semantics}), mirroring
+                # design_cutoff_bands' band_edges: apply_adjust's gate override only
+                # reaches a key already present in the instantiated inputs, and an
+                # omitted slot would be dropped by planner._fill_inputs. Baking null
+                # here (a valid ["string","null"] per the manifest) is what lets the
+                # gate write the user's incremental/snapshot choice onto this step;
+                # an unanswered gate leaves null -> the tool raises the semantics gate.
+                "label_semantics": None,
+                # Baked False (a valid boolean per the manifest) for the same reason,
+                # so a "drop the NaN rows" confirmation can be written onto the step.
+                "drop_nan_labels": False,
             },
             depends_on_titles=(),
             post_checks=(PostCheck("nonempty", {"field": "cohorts"}),),

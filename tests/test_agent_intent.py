@@ -10,6 +10,7 @@ import pytest
 from marvis.agent.service import (
     is_agent_advance_intent,
     is_continue_validation_intent,
+    is_start_validation_intent,
 )
 
 
@@ -76,3 +77,74 @@ def test_continue_intent_recognized(phrasing):
 )
 def test_non_continue_inputs_stay_chat(phrasing):
     assert not is_continue_validation_intent(phrasing), phrasing
+    # The advance gate (validation_agent.py:219) is what actually dispatches a
+    # run, so a chat-only 继续-family phrasing must also fail the advance gate.
+    assert not is_agent_advance_intent(phrasing), phrasing
+
+
+@pytest.mark.parametrize(
+    "phrasing",
+    [
+        # Direct start phrases must stay recognized.
+        "开始验证",
+        "启动验证",
+        "执行验证",
+        "运行验证",
+        "开始执行",
+        "跑起来",
+        # Bare affirmative commands.
+        "开始",
+        "启动",
+        "start",
+        "run",
+        "validate",
+        # 吧-suffixed affirmatives — the '吧$' collision decision must keep
+        # these True (they are explicit direct_commands, not questions).
+        "开始吧",
+        "启动吧",
+        "运行吧",
+        "跑吧",
+    ],
+)
+def test_start_intent_recognized(phrasing):
+    assert is_start_validation_intent(phrasing), phrasing
+    assert is_agent_advance_intent(phrasing), phrasing
+
+
+@pytest.mark.parametrize(
+    "phrasing",
+    [
+        # Negated starts: the substring branch would otherwise fire because
+        # "开始验证" appears inside these strings.
+        "先别开始验证",
+        "不要开始验证",
+        "别开始验证",
+        "暂不开始验证",
+        "不用开始验证",
+        "不需要开始验证",
+        "先不开始",
+        # English negation parity with plan_driver._NEGATED_CONFIRM.
+        "do not start validation",
+        "don't run validation",
+    ],
+)
+def test_start_negations_stay_chat(phrasing):
+    assert not is_start_validation_intent(phrasing), phrasing
+    assert not is_agent_advance_intent(phrasing), phrasing
+
+
+@pytest.mark.parametrize(
+    "phrasing",
+    [
+        # Interrogatives must route to chat, not launch a run.
+        "什么时候开始验证?",
+        "什么时候开始验证？",
+        "要不要开始验证",
+        "能不能开始验证",
+        "开始验证吗？",
+        "现在可以开始验证吗",
+    ],
+)
+def test_start_questions_stay_chat(phrasing):
+    assert not is_start_validation_intent(phrasing), phrasing
+    assert not is_agent_advance_intent(phrasing), phrasing

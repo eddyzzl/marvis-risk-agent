@@ -40,11 +40,3 @@ class ToolExecutionError(PluginError):
 
 class ToolTimeoutError(PluginError):
     """Tool execution exceeded its timeout."""
-
-
-class ToolResourceError(PluginError):
-    """Tool execution exceeded a resource limit."""
-
-
-class WorkerProtocolError(PluginError):
-    """Worker did not return a valid protocol response."""

@@ -399,7 +399,12 @@ def test_agent_mode_autodrives_strategy_to_completion(client: TestClient, tmp_pa
     assert any(m["metadata"].get("intent") == "agent_decision" for m in msgs if m["role"] == "assistant")
 
 
-def test_agent_mode_autodrives_vintage_to_completion(client: TestClient, tmp_path: Path, monkeypatch):
+def test_agent_mode_vintage_halts_on_undeclared_label_semantics(client: TestClient, tmp_path: Path, monkeypatch):
+    # A1: the vintage kernel always accumulates the bad column across MOBs; on a
+    # snapshot/ever-bad flag that silently double-counts. So the strategy vintage tool
+    # refuses to guess the cumulation basis -- an undeclared label_semantics raises the
+    # LabelSemanticsNotDeclaredError gate (mirrors the NaN-label gate), even under AUTO,
+    # handing the user both concrete semantics to choose from before the curve is trusted.
     fake = _FakeLLM(action="confirm", reason="字段已识别,继续")
     monkeypatch.setattr("marvis.routers.validation_agent.resolve_driver_agent_client", lambda request, task, payload: fake)
     src = _vintage_dir(tmp_path)
@@ -417,9 +422,19 @@ def test_agent_mode_autodrives_vintage_to_completion(client: TestClient, tmp_pat
 
     assert resp.status_code == 202, resp.text
     msgs = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    # The curve is NOT trusted/completed; the run halts at the semantics gate instead.
+    assert not any("Vintage 曲线完成" in m["content"] for m in msgs)
     done = _last_assistant(msgs)
-    assert "Vintage 曲线完成" in done["content"]
-    assert len(fake.calls) >= 1
+    assert "label_semantics" in done["content"]
+    # Both concrete choices are offered so the user can pick incremental vs snapshot.
+    assert "incremental" in done["content"]
+    assert "snapshot" in done["content"]
+    # The failure envelope carries the structured error kind (never parsed from text).
+    error_msgs = [m for m in msgs if m.get("metadata", {}).get("failure_envelope")]
+    assert any(
+        m["metadata"]["failure_envelope"].get("error_kind") == "label_semantics_not_declared"
+        for m in error_msgs
+    )
 
 
 # -- unit: gate-decision parsing ---------------------------------------------

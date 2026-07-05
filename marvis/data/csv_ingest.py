@@ -62,9 +62,18 @@ def sniff_long_id_columns(path: Path, *, encoding: str, sample_rows: int = 2000)
         long_digit_like = digit_like & (values.str.len() >= LONG_ID_DIGIT_THRESHOLD)
         if digit_like.sum() == 0:
             continue
+        digit_total = max(int(digit_like.sum()), 1)
         # Require the column to be predominantly long-digit-shaped (not just a
         # handful of values that happen to look numeric) before flagging it.
-        if long_digit_like.sum() / max(int(digit_like.sum()), 1) >= 0.9 and long_digit_like.sum() > 0:
+        if long_digit_like.sum() / digit_total >= 0.9 and long_digit_like.sum() > 0:
+            flagged.append(str(column))
+            continue
+        # T1-B8: also protect zero-padded SHORT codes (leading zero, below the long-id
+        # length rule) -- e.g. a 6-digit org code "000123". Under int/float promotion the
+        # leading zero is stripped, so the SAME code diverges dtype across files and silently
+        # mis-matches. Force them to string (2+ digits so a bare '0' row can't trip it).
+        zero_padded = digit_like & values.str.match(r"^0\d+$")
+        if zero_padded.sum() / digit_total >= 0.9 and zero_padded.sum() > 0:
             flagged.append(str(column))
     return tuple(flagged)
 

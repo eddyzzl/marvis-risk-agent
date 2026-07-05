@@ -292,6 +292,75 @@ def test_modeling_template_does_not_shadow_standard_modeling_goal_routing(tmp_pa
     assert set(modeling.goal_patterns).isdisjoint(set(standard.goal_patterns))
 
 
+def test_modeling_template_select_step_does_not_inherit_screen_holdout(tmp_path):
+    """D11/FS-2: when an OOT split exists (holdout_values slot = ['oot']), the screen
+    step must still hold out only OOT (train+test pooled as dev), but the 精选特征
+    (select_features) step must NOT inherit that ['oot'] holdout — otherwise IV/corr/
+    VIF/top_k fit on train+test and leak the test-split labels. Select must fall back
+    to its own safe ('test','oot') default, so the resolved step carries no
+    holdout_values=['oot'] key."""
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("modeling"),
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "long_y",
+            "feature_cols": ["sig1", "sig2", "sig3"],
+            "split_col": "model_flag",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "recipe": "lgb",
+            "recipes": ["lgb"],
+            "seed": 23,
+            "holdout_values": ["oot"],
+            "selection_policy": {"require_pmml": True, "require_handoff": True},
+        },
+        task_id="task-1",
+    )
+
+    screen = plan.steps[2]
+    refine = plan.steps[3]
+    # screen still holds out OOT only (pools train+test as dev) — untouched
+    assert screen.inputs["holdout_values"] == ["oot"]
+    # select must not receive the screen's ['oot'] holdout (would leak test labels)
+    assert refine.inputs.get("holdout_values") != ["oot"]
+    assert "holdout_values" not in refine.inputs
+
+
+def test_modeling_templates_select_step_never_binds_holdout_values(tmp_path):
+    """D11 re-introduction guard: neither the single-table `modeling` nor the
+    multi-table `modeling_with_join` 精选特征 (select_features) step template may bind
+    a `holdout_values` input — that binding is the screen's holdout and forwarding it
+    to select re-opens the FS-2 test-label leak. select_features applies its own safe
+    ('test','oot') default when the key is absent."""
+    load_builtin_templates()
+    for template_id in ("modeling", "modeling_with_join"):
+        template = get_template(template_id)
+        select_steps = [
+            step
+            for step in template.steps
+            if step.tool_ref == ToolRef("modeling", "select_features")
+        ]
+        assert select_steps, f"{template_id} has no select_features step"
+        for step in select_steps:
+            assert "holdout_values" not in step.inputs_template, (
+                f"{template_id} {step.title} must not bind holdout_values into select"
+            )
+        # regression guard: the screen step MUST still bind holdout_values
+        screen_steps = [
+            step
+            for step in template.steps
+            if step.tool_ref == ToolRef("modeling", "screen_features")
+        ]
+        assert screen_steps, f"{template_id} has no screen_features step"
+        for step in screen_steps:
+            assert "holdout_values" in step.inputs_template, (
+                f"{template_id} {step.title} must keep its holdout_values binding"
+            )
+
+
 def test_data_join_template_phases_gate_and_refs(tmp_path):
     load_builtin_templates()
     tool_registry = _tool_registry(tmp_path)
@@ -558,6 +627,30 @@ def test_vintage_analysis_template_runs_vintage_curve(tmp_path):
     assert PlanValidator(tool_registry).validate(plan) == []
     assert [step.tool_ref for step in plan.steps] == [ToolRef("strategy", "vintage_curve")]
     assert [step.title for step in plan.steps if step.decision_point] == ["计算 Vintage 曲线"]
+
+
+def test_vintage_template_threads_label_semantics_and_drop_nan_labels(tmp_path):
+    # A1: the vintage step must carry label_semantics (baked literal-null so the
+    # gate override reaches it) and drop_nan_labels so the confirmation choices
+    # thread through to tool_vintage_curve.
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("vintage_analysis"),
+        {"dataset_id": "dataset-1", "cohort_col": "cohort", "mob_col": "mob", "bad_col": "bad"},
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    step = next(step for step in plan.steps if step.tool_ref == ToolRef("strategy", "vintage_curve"))
+    # label_semantics is baked as a literal null default (mirrors band_edges) so
+    # the apply_adjust gate override can write the user's choice onto the step.
+    assert "label_semantics" in step.inputs
+    assert step.inputs["label_semantics"] is None
+    assert "drop_nan_labels" in step.inputs
+    assert step.inputs["drop_nan_labels"] is False
 
 
 def test_monitoring_run_template_chains_score_then_monitor_with_alert_gate(tmp_path):

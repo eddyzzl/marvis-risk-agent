@@ -97,5 +97,3 @@ export function unmountGovernanceExtensionPanels(root) {
     delete root.dataset.governanceExtensionsMounted;
   }
 }
-
-export const governanceExtensionPanelDefinitions = panelDefinitions.map((definition) => ({ ...definition }));

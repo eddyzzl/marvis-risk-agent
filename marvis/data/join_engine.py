@@ -4,8 +4,10 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
+import pandas as pd
+
 from marvis.artifacts import ArtifactUnitOfWork, TransactionalArtifactStore
-from marvis.data.align import ColumnAligner
+from marvis.data.align import ColumnAligner, _divergence_level, _dtype_family
 from marvis.data.backend import DataBackend, transformed_key_names
 from marvis.data.contracts import (
     LARGE_ROW_THRESHOLD,
@@ -17,6 +19,7 @@ from marvis.data.contracts import (
     JoinPlan,
     JoinSpec,
     KeyAlternative,
+    KeyDtypeDivergence,
     KeyPair,
 )
 from marvis.data.dedup import two_level_dedup
@@ -25,7 +28,9 @@ from marvis.data.errors import (
     DedupRequiredError,
     FanOutError,
     JoinNotConfirmedError,
+    KeyDtypeMismatchError,
 )
+from marvis.data.excel_ingest import LONG_ID_FLOAT_THRESHOLD
 
 
 _ALLOWED_DEDUP_STRATEGIES = frozenset({"abort", "first", "last", "agg_mean", "agg_max"})
@@ -201,6 +206,14 @@ class JoinEngine:
             for column in feature.columns
             if column.name not in anchor_column_names
         ])
+        # T1-A6: flag any key column that is float64-stored AND holds ids large enough that
+        # float precision may already be lost -- the join can silently mis-match those rows.
+        precision_loss_columns = self._precision_loss_columns(
+            anchor, anchor_path, feature, feature_path, key_pairs, seed=seed
+        )
+        # T1-B8: surface key pairs whose two sides are stored under different dtype families
+        # across files (text<->float is red / forces confirmation; other mismatches warn).
+        key_dtype_divergences = _key_dtype_divergences(anchor, feature, key_pairs)
         return JoinDiagnostics(
             anchor_rows=anchor_rows,
             feature_rows=feature_rows,
@@ -214,7 +227,54 @@ class JoinEngine:
             new_columns_null_rate=round(1 - match_rate, 4),
             conflict_report=conflict_report,
             key_alternatives=key_alternatives,
+            precision_loss_columns=precision_loss_columns,
+            key_dtype_divergences=key_dtype_divergences,
         )
+
+    def _precision_loss_columns(
+        self,
+        anchor: Dataset,
+        anchor_path: Path,
+        feature: Dataset,
+        feature_path: Path,
+        key_pairs: list[KeyPair],
+        *,
+        seed: int,
+    ) -> tuple[str, ...]:
+        """T1-A6: names of key columns whose stored dtype is floating AND whose sampled
+        magnitude reaches ``LONG_ID_FLOAT_THRESHOLD`` (1e15) -- the point where a float64 id
+        may have already lost its trailing digits, so the join can silently mis-match. Only a
+        floating dtype is flagged (a correctly string-stored 18-digit id is safe); reported so
+        the user re-imports the column as string (the true fix lives at ingest -- see B8)."""
+        anchor_profiles = _profiles_by_name(anchor.columns)
+        feature_profiles = _profiles_by_name(feature.columns)
+        flagged: list[str] = []
+        seen: set[str] = set()
+        for pair in key_pairs:
+            for profile, path, column in (
+                (anchor_profiles.get(pair.anchor_col), anchor_path, pair.anchor_col),
+                (feature_profiles.get(pair.feature_col), feature_path, pair.feature_col),
+            ):
+                if profile is None or column in seen:
+                    continue
+                if not _is_floating_dtype(profile.dtype):
+                    continue
+                if self._column_reaches_long_id_magnitude(path, column, seed=seed):
+                    flagged.append(column)
+                    seen.add(column)
+        return tuple(flagged)
+
+    def _column_reaches_long_id_magnitude(self, path: Path, column: str, *, seed: int) -> bool:
+        try:
+            frame = self._backend.sample_rows(path, SMALL_SAMPLE_N, seed=seed)
+        except DataBackendError:
+            return False
+        if column not in frame.columns:
+            return False
+        series = pd.to_numeric(frame[column], errors="coerce").dropna()
+        if series.empty:
+            return False
+        return bool((series.abs() >= LONG_ID_FLOAT_THRESHOLD).any())
 
     def _relaxation_alternatives(
         self,
@@ -281,6 +341,7 @@ class JoinEngine:
         feature_dataset_id: str,
         *,
         dedup_strategy: str | None,
+        ack_dtype_mismatch: bool = False,
     ) -> None:
         if dedup_strategy is not None:
             dedup_strategy = str(dedup_strategy).strip() or None
@@ -288,6 +349,16 @@ class JoinEngine:
             raise DataBackendError(f"unsupported dedup_strategy: {dedup_strategy}")
         plan = self._repo.load_join_plan(join_plan_id)
         spec = _find_spec(plan, feature_dataset_id)
+        # T1-B8: a RED (text<->float) key-dtype divergence can silently mis-match rows; block
+        # confirmation until the user acknowledges it (mirrors the dedup gate).
+        red_divergences = [
+            d for d in spec.diagnostics.key_dtype_divergences if d.level == "red"
+        ]
+        if red_divergences and not ack_dtype_mismatch:
+            raise KeyDtypeMismatchError(
+                feature_dataset_id=feature_dataset_id,
+                divergences=red_divergences,
+            )
         if not spec.diagnostics.feature_key_unique and dedup_strategy in (None, "abort"):
             raise DedupRequiredError(
                 f"feature {feature_dataset_id} key is not unique; choose dedup strategy",
@@ -532,6 +603,43 @@ def _key_fps(
 
 def _profiles_by_name(columns: tuple[ColumnProfile, ...]) -> dict[str, ColumnProfile]:
     return {column.name: column for column in columns}
+
+
+def _is_floating_dtype(dtype: str) -> bool:
+    return "float" in str(dtype).lower()
+
+
+def _key_dtype_divergences(
+    anchor: Dataset,
+    feature: Dataset,
+    key_pairs: list[KeyPair],
+) -> tuple[KeyDtypeDivergence, ...]:
+    """T1-B8: for each key pair, compare the two sides' stored dtype family (from the
+    authoritative ColumnProfiles, so it holds for explicit KeyPairs too) and record a
+    divergence when they differ. text<->float is 'red' (forces confirmation); other
+    mismatches are 'warn'. A key whose profile is missing is skipped conservatively."""
+    anchor_profiles = _profiles_by_name(anchor.columns)
+    feature_profiles = _profiles_by_name(feature.columns)
+    divergences: list[KeyDtypeDivergence] = []
+    for pair in key_pairs:
+        anchor_profile = anchor_profiles.get(pair.anchor_col)
+        feature_profile = feature_profiles.get(pair.feature_col)
+        if anchor_profile is None or feature_profile is None:
+            continue
+        if _dtype_family(anchor_profile) == _dtype_family(feature_profile):
+            continue
+        anchor_dtype = str(anchor_profile.dtype)
+        feature_dtype = str(feature_profile.dtype)
+        divergences.append(
+            KeyDtypeDivergence(
+                anchor_col=pair.anchor_col,
+                feature_col=pair.feature_col,
+                anchor_dtype=anchor_dtype,
+                feature_dtype=feature_dtype,
+                level=_divergence_level(anchor_dtype, feature_dtype),
+            )
+        )
+    return tuple(divergences)
 
 
 def _new_id(prefix: str) -> str:

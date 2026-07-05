@@ -1214,3 +1214,37 @@ def test_score_band_rows_falls_back_to_first_available_split_when_train_empty(tm
 
     assert rows
     assert all(row["bin_edges_source"] == "test" for row in rows)
+
+
+def test_mob_resolver_matches_pre_dedup_regexes():
+    """T2-5 two-sided consistency: the single _mob_number_tokens resolver (and the
+    _mob_col / _mob_number built on it) must reproduce the two divergent regexes that
+    parsed MOB info from column names before the dedup, for every column-name shape."""
+    import re as _re
+
+    from marvis.packs.modeling import report_compute as rc
+
+    def old_mob_col(columns, mob_label):
+        pattern = _re.compile(rf"(?:^|[^0-9]){_re.escape(mob_label)}(?:[^0-9]|$)")
+        for column in columns:
+            lower = column.lower()
+            if lower == f"mob{mob_label}" or pattern.search(lower):
+                return column
+        return None
+
+    def old_mob_number(column, fallback):
+        match = _re.search(r"(\d+)", str(column))
+        return int(match.group(1)) if match else fallback
+
+    names = [
+        "mob1", "mob2", "mob3", "mob6", "mob12", "mob30", "mob36", "m3ob", "3mob",
+        "x3", "MOB3", "Mob6", "delinq_3", "od6", "mob_3", "mob 6", "overdue6m",
+        "3", "6", "mob16", "16mob", "mob3x", "a3b6", "mob3_6", "6mob3", "no_number",
+    ]
+    for column in names:
+        assert rc._mob_number(column, fallback=99) == old_mob_number(column, 99)
+    for label in ("3", "6", "1", "2", "12", "30", "16", "36"):
+        for length in (1, 2, 3):
+            for start in range(len(names) - length + 1):
+                combo = tuple(names[start:start + length])
+                assert rc._mob_col(combo, label) == old_mob_col(list(combo), label)

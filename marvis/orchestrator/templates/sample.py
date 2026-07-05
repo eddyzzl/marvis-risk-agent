@@ -7,6 +7,7 @@ from marvis.orchestrator.templates.feature import (
     FEATURE_DERIVATION,
 )
 from marvis.orchestrator.templates.join import DATA_JOIN
+from marvis.orchestrator.templates.labeling import LABEL_CONSTRUCTION
 from marvis.orchestrator.templates.modeling import (
     MODELING,
     MODELING_WITH_JOIN,
@@ -36,6 +37,7 @@ _register_builtin_template(SAMPLE_ECHO)
 _register_builtin_template(MODEL_VALIDATION)
 _register_builtin_template(STANDARD_MODELING)
 _register_builtin_template(DATA_JOIN)
+_register_builtin_template(LABEL_CONSTRUCTION)
 _register_builtin_template(MODELING)
 _register_builtin_template(MODELING_WITH_JOIN)
 _register_builtin_template(FEATURE_ANALYSIS)

@@ -124,6 +124,11 @@ class ColumnAligner:
                 sample_n=SMALL_SAMPLE_N,
                 seed=seed,
             )
+            # T1-B8: record each side's stored dtype-family and whether they diverge across
+            # files, so the diagnostics/gate can surface a precision-loss / silent-miss risk.
+            anchor_family = _dtype_family(anchor_col)
+            feature_family = _dtype_family(feature_col)
+            dtype_divergent = anchor_family != feature_family
             for method, (matched, sampled) in zip(methods, rates):
                 rate = matched / sampled if sampled else 0.0
                 if rate < MIN_KEY_MATCH_RATE:
@@ -135,6 +140,9 @@ class ColumnAligner:
                     transform_side=_raw_side(anchor_col, feature_col, method),
                     match_rate=round(rate, 4),
                     resolved_by=resolved_by,
+                    anchor_dtype=str(anchor_col.dtype),
+                    feature_dtype=str(feature_col.dtype),
+                    dtype_divergent=dtype_divergent,
                 )
                 if best is None or candidate.match_rate > best.match_rate:
                     best = candidate
@@ -181,6 +189,36 @@ class ColumnAligner:
         ]
 
 
+def _dtype_family(profile: ColumnProfile) -> str:
+    """T1-B8: coarse dtype family for a key column -- 'text' | 'float' | 'int' | 'date' |
+    'other'. Divergence between families across the two files is what silently mis-matches a
+    join key (a float64-stored id vs a string-stored id)."""
+    return _dtype_family_from_str(profile.dtype)
+
+
+def _dtype_family_from_str(dtype: str) -> str:
+    dt = str(dtype).lower()
+    if dt in {"object", "string", "str"} or dt.startswith("string"):
+        return "text"
+    if "float" in dt:
+        return "float"
+    if "datetime" in dt or dt.startswith("date"):
+        return "date"
+    if "int" in dt:
+        return "int"
+    return "other"
+
+
+def _divergence_level(anchor_dtype: str, feature_dtype: str) -> str:
+    """T1-B8: 'red' only for text<->float, the precision-loss / leading-zero-loss case that
+    silently drops rows -- it forces confirmation. Every other family mismatch is lossless
+    under the VARCHAR-cast join, so it is 'warn' (surfaced, not blocked)."""
+    families = {_dtype_family_from_str(anchor_dtype), _dtype_family_from_str(feature_dtype)}
+    if families == {"text", "float"}:
+        return "red"
+    return "warn"
+
+
 def _raw_side(anchor_col: ColumnProfile, feature_col: ColumnProfile, method: str) -> str:
     if not method.startswith("hash:"):
         return "both"
@@ -218,4 +256,6 @@ __all__ = [
     "FUZZY_NAME_THRESHOLD",
     "KEY_DICTIONARY",
     "ColumnAligner",
+    "_divergence_level",
+    "_dtype_family",
 ]

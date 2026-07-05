@@ -38,6 +38,28 @@ def load_feature_categories(
     return grouped
 
 
+def _model_features(config: ValidationConfig, feature_importance: list) -> list[str]:
+    if config.feature_columns:
+        return list(config.feature_columns)
+    return [str(row.feature) for row in feature_importance]
+
+
+def _filter_feature_categories(
+    feature_categories: dict[str, list[str]],
+    *,
+    model_features: list[str],
+) -> dict[str, list[str]]:
+    if not model_features:
+        return feature_categories
+    allowed = set(model_features)
+    filtered: dict[str, list[str]] = {}
+    for category, features in feature_categories.items():
+        in_model = [feature for feature in features if feature in allowed]
+        if in_model:
+            filtered[category] = in_model
+    return filtered
+
+
 def run_stress_test(
     *,
     oot_sample: pd.DataFrame,

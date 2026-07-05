@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import dataclasses
 from dataclasses import asdict, dataclass
 import math
 
@@ -40,9 +41,12 @@ def compute_vintage_curve(
     target_col: str,
     balance_col: str | None = None,
     denominator: str = "count",
+    label_semantics: str = "incremental",
 ) -> list[VintagePoint]:
     if denominator not in {"count", "balance"}:
         raise ValueError("denominator must be count or balance")
+    if label_semantics not in {"incremental", "snapshot"}:
+        raise ValueError("label_semantics must be incremental or snapshot")
     required = [cohort_col, mob_col, target_col]
     if denominator == "balance":
         if not balance_col:
@@ -66,7 +70,20 @@ def compute_vintage_curve(
         frame["_balance"] = np.nan
 
     points: list[VintagePoint] = []
+    # A1: red-flag heuristic. A snapshot/ever-bad flag produces a per-MOB bad_count
+    # that never DECREASES within a cohort (a loan once bad stays bad). If EVERY
+    # cohort is non-decreasing yet the caller declared "incremental", the data most
+    # likely carries snapshot flags and the accumulation double-counts -- advisory
+    # only, it never mutates the curve (mirrors RollRateMatrix.data_quality_warnings).
+    # Conservative to avoid false positives on genuinely-incremental small cohorts:
+    # every cohort must span >=3 MOBs, be non-decreasing, and at least one cohort must
+    # strictly increase somewhere (an all-flat / single-2-point sequence is too weak a
+    # signal to call snapshot).
+    all_cohorts_snapshot_shaped = True
+    any_strict_increase = False
+    cohort_count = 0
     for cohort, cohort_frame in frame.groupby("_cohort", sort=True):
+        cohort_count += 1
         # First pass: per-(cohort, mob) marginal metrics (unchanged semantics).
         rows: list[dict] = []
         for mob, group in cohort_frame.groupby("_mob", sort=True):
@@ -98,6 +115,19 @@ def compute_vintage_curve(
                 }
             )
 
+        # Per-cohort snapshot heuristic: >=3 MOBs and bad_count non-decreasing across
+        # ascending MOB. Fewer than 3 MOBs is too weak a signal (a 2-point rise is
+        # perfectly ordinary incremental data), so it disqualifies the whole dataset.
+        bad_counts = [row["bad_count"] for row in rows]
+        pairs = list(zip(bad_counts, bad_counts[1:]))
+        cohort_snapshot_shaped = len(bad_counts) >= 3 and all(
+            later >= earlier for earlier, later in pairs
+        )
+        if not cohort_snapshot_shaped:
+            all_cohorts_snapshot_shaped = False
+        if any(later > earlier for earlier, later in pairs):
+            any_strict_increase = True
+
         # Fixed cohort-level denominator: max observed base across the cohort's MOBs.
         if denominator == "balance":
             cohort_denominator = max(
@@ -107,21 +137,27 @@ def compute_vintage_curve(
         else:
             cohort_denominator = float(max((row["sample_count"] for row in rows), default=0))
 
-        # Second pass: accumulate the bad numerator across MOBs in ascending order.
+        # Second pass. incremental: accumulate the bad numerator across MOBs in
+        # ascending order (current behaviour). snapshot: the per-MOB marginal rate
+        # IS the true cumulative rate -- the flag is already cumulative per loan, so
+        # accumulating would double-count (exactly report_compute's metric='bad_rate').
         cumulative_bad = 0.0
         for row in rows:
-            cumulative_bad += row["bad_numerator"]
-            if cohort_denominator == 0:
-                raw_cum_ratio = 0.0
-            else:
-                raw_cum_ratio = cumulative_bad / cohort_denominator
-            cum_bad_rate = min(raw_cum_ratio, 1.0)
             warnings: tuple[str, ...] = ()
-            if raw_cum_ratio > 1.0 + 1e-9:
-                warnings = (
-                    f"cum_bad_rate clipped for cohort {cohort} at mob {row['mob']}: "
-                    f"raw ratio {raw_cum_ratio:.4f} exceeds cohort denominator",
-                )
+            if label_semantics == "snapshot":
+                cum_bad_rate = row["bad_rate"]
+            else:
+                cumulative_bad += row["bad_numerator"]
+                if cohort_denominator == 0:
+                    raw_cum_ratio = 0.0
+                else:
+                    raw_cum_ratio = cumulative_bad / cohort_denominator
+                cum_bad_rate = min(raw_cum_ratio, 1.0)
+                if raw_cum_ratio > 1.0 + 1e-9:
+                    warnings = (
+                        f"cum_bad_rate clipped for cohort {cohort} at mob {row['mob']}: "
+                        f"raw ratio {raw_cum_ratio:.4f} exceeds cohort denominator",
+                    )
             points.append(
                 VintagePoint(
                     cohort=str(cohort),
@@ -135,6 +171,27 @@ def compute_vintage_curve(
                     data_quality_warnings=warnings,
                 )
             )
+
+    # Advisory snapshot red flag: attach once (to every point) when the data looks
+    # cumulative but was declared incremental, so the accumulation is likely wrong.
+    if (
+        label_semantics == "incremental"
+        and cohort_count > 0
+        and all_cohorts_snapshot_shaped
+        and any_strict_increase
+    ):
+        flag = (
+            "per-MOB bad_count non-decreasing across all cohorts -- data looks like a "
+            "SNAPSHOT flag (每列/行=截至该MOB是否曾坏, 已单调); declared=incremental, "
+            "so cum_bad_rate re-accumulates and may double-count. Confirm label_semantics."
+        )
+        points = [
+            dataclasses.replace(
+                point,
+                data_quality_warnings=(*point.data_quality_warnings, flag),
+            )
+            for point in points
+        ]
     return points
 
 

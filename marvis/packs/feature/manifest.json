@@ -88,7 +88,8 @@
           "max_missing_rate": {"type": "number"},
           "top_k": {"type": "integer", "minimum": 1},
           "batch_size": {"type": "integer", "minimum": 1},
-          "max_ks_decay": {"type": "number"}
+          "max_ks_decay": {"type": "number"},
+          "drop_nan_labels": {"type": "boolean"}
         },
         "required": ["dataset_id", "features", "target_col"],
         "additionalProperties": false
@@ -103,6 +104,7 @@
           "unusable": {"type": "array", "items": {"type": "array"}},
           "scores": {"type": "object"},
           "n_screened": {"type": "integer", "minimum": 0},
+          "nan_labels_dropped": {"type": "integer", "minimum": 0},
           "excluded_categorical": {"type": "array", "items": {"type": "object", "properties": {"column": {"type": "string"}, "cardinality": {"type": "integer", "minimum": 0}}, "required": ["column", "cardinality"], "additionalProperties": false}},
           "suspected_categorical": {"type": "array", "items": {"type": "object", "properties": {"column": {"type": "string"}, "cardinality": {"type": "integer", "minimum": 0}}, "required": ["column", "cardinality"], "additionalProperties": false}},
           "sentinel_columns": {"type": "object"},

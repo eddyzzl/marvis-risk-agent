@@ -60,6 +60,20 @@ def _frame() -> pd.DataFrame:
     })
 
 
+def _partial_label_frame() -> pd.DataFrame:
+    """A4: group G has bad labels [1,1,0,NULL,'x'] -> labeled bad_rate = 2/3, 2 unlabeled;
+    decision [approve,reject,NULL,pending,approve] -> approval_rate = 2/3, 2 unlabeled.
+    group H is entirely unlabeled (all bad NULL) -> bad_rate None, unlabeled == group size."""
+    return pd.DataFrame({
+        "channel": ["G", "G", "G", "G", "G", "H", "H"],
+        # non-binary / non-castable / NULL must all fall out of the bad_rate denominator
+        "bad": ["1", "1", "0", "", "x", "", ""],
+        # only affirmatively approve/reject count; NULL/pending drop out of approval_rate
+        "decision": ["approve", "reject", "", "pending", "approve", "", "reject"],
+        "amount": [100, 200, 300, 400, 500, 600, 700],
+    })
+
+
 def test_slice_aggregate_hand_calculated_group_metrics(tmp_path):
     runner, registry, _settings = _runtime(tmp_path)
     ds = _register(registry, tmp_path, _frame())
@@ -93,6 +107,12 @@ def test_slice_aggregate_hand_calculated_group_metrics(tmp_path):
     assert rows["B"]["bad_rate_bad"] == 1.0
     assert rows["B"]["approval_rate_decision"] == 0.5
     assert rows["B"]["mean_amount"] == 400.0
+    # A4: fully-labeled groups carry a companion unlabeled_count that is exactly 0
+    # (harmless extra column) and no unlabeled_present red flag fires.
+    assert rows["A"]["unlabeled_count_bad"] == 0
+    assert rows["A"]["unlabeled_count_decision"] == 0
+    assert rows["B"]["unlabeled_count_bad"] == 0
+    assert rows["B"]["unlabeled_count_decision"] == 0
     assert result.output["n_rows_scanned"] == 4
     assert result.output["red_flags"] == []
     # spec_echo mirrors the口径 verbatim (all filters/months/ops echoed)
@@ -189,3 +209,127 @@ def test_slice_aggregate_writes_audit_row(tmp_path):
     assert len(rows) == 1
     assert rows[0]["target_ref"] == ds.id
     assert '"task_id":"task-1"' in rows[0]["detail_json"]
+
+
+def test_bad_rate_excludes_null_and_nonbinary_labels(tmp_path):
+    # A4: NULL / empty / non-castable / non-binary labels must fall OUT of the
+    # denominator, not be counted as good. Group G = [1,1,0,'', 'x'] -> 2 bad /
+    # 3 labeled = 0.666..., NOT 2/5 = 0.4.
+    runner, registry, _settings = _runtime(tmp_path)
+    ds = _register(registry, tmp_path, _partial_label_frame())
+
+    result = runner.invoke(
+        ToolRef("data_ops", "slice_aggregate"),
+        {
+            "dataset_id": ds.id,
+            "group_by": ["channel"],
+            "metrics": [{"op": "bad_rate", "col": "bad"}],
+        },
+        task_id="task-1",
+    )
+
+    assert result.ok is True, result.error
+    rows = {row["channel"]: row for row in result.output["rows"]}
+    assert rows["G"]["bad_rate_bad"] == 2 / 3
+
+
+def test_bad_rate_exposes_unlabeled_count(tmp_path):
+    # A4: the companion unlabeled_count_<col> column counts NULL/non-binary rows,
+    # and is 0 for a fully-labeled group.
+    runner, registry, _settings = _runtime(tmp_path)
+    ds = _register(registry, tmp_path, _partial_label_frame())
+
+    result = runner.invoke(
+        ToolRef("data_ops", "slice_aggregate"),
+        {
+            "dataset_id": ds.id,
+            "group_by": ["channel"],
+            "metrics": [{"op": "bad_rate", "col": "bad"}],
+        },
+        task_id="task-1",
+    )
+
+    assert result.ok is True, result.error
+    assert "unlabeled_count_bad" in result.output["columns"]
+    rows = {row["channel"]: row for row in result.output["rows"]}
+    # group G: '' and 'x' are unlabeled (2 rows)
+    assert rows["G"]["unlabeled_count_bad"] == 2
+
+
+def test_approval_rate_excludes_unknown_decisions(tmp_path):
+    # A4/D2: approval_rate = approvals / (approve + reject); NULL/pending/unknown
+    # tokens drop out of BOTH numerator and denominator and count as unlabeled.
+    runner, registry, _settings = _runtime(tmp_path)
+    ds = _register(registry, tmp_path, _partial_label_frame())
+
+    result = runner.invoke(
+        ToolRef("data_ops", "slice_aggregate"),
+        {
+            "dataset_id": ds.id,
+            "group_by": ["channel"],
+            "metrics": [{"op": "approval_rate", "col": "decision"}],
+        },
+        task_id="task-1",
+    )
+
+    assert result.ok is True, result.error
+    rows = {row["channel"]: row for row in result.output["rows"]}
+    # group G decision = [approve, reject, '', pending, approve]
+    # decided = {approve x2, reject x1} -> 2/3; '' and 'pending' are unlabeled.
+    assert rows["G"]["approval_rate_decision"] == 2 / 3
+    assert rows["G"]["unlabeled_count_decision"] == 2
+
+
+def test_all_unlabeled_group_reports_null_rate(tmp_path):
+    # A4: a group whose label column is entirely unlabeled reports None (rendered
+    # n/a), not 0.0, and unlabeled_count == group size; the tool does not raise.
+    runner, registry, _settings = _runtime(tmp_path)
+    ds = _register(registry, tmp_path, _partial_label_frame())
+
+    result = runner.invoke(
+        ToolRef("data_ops", "slice_aggregate"),
+        {
+            "dataset_id": ds.id,
+            "group_by": ["channel"],
+            "metrics": [{"op": "bad_rate", "col": "bad"}],
+        },
+        task_id="task-1",
+    )
+
+    assert result.ok is True, result.error
+    rows = {row["channel"]: row for row in result.output["rows"]}
+    # group H: bad = ['', ''] -> entirely unlabeled
+    assert rows["H"]["bad_rate_bad"] is None
+    assert rows["H"]["unlabeled_count_bad"] == 2
+
+
+def test_unlabeled_present_emits_red_flag(tmp_path):
+    # A4: any group with unlabeled rows raises a stable-coded amber red flag; a
+    # fully-labeled slice does not.
+    runner, registry, _settings = _runtime(tmp_path)
+
+    partial = _register(registry, tmp_path, _partial_label_frame())
+    flagged = runner.invoke(
+        ToolRef("data_ops", "slice_aggregate"),
+        {
+            "dataset_id": partial.id,
+            "group_by": ["channel"],
+            "metrics": [{"op": "bad_rate", "col": "bad"}],
+        },
+        task_id="task-1",
+    )
+    assert flagged.ok is True, flagged.error
+    assert any(f["code"] == "unlabeled_present" for f in flagged.output["red_flags"])
+
+    fully = _register(registry, tmp_path, _frame())
+    clean = runner.invoke(
+        ToolRef("data_ops", "slice_aggregate"),
+        {
+            "dataset_id": fully.id,
+            "group_by": ["channel"],
+            "metrics": [{"op": "bad_rate", "col": "bad"}],
+        },
+        task_id="task-1",
+    )
+    assert clean.ok is True, clean.error
+    assert not any(f["code"] == "unlabeled_present" for f in clean.output["red_flags"])

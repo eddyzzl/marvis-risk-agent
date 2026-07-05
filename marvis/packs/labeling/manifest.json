@@ -1,0 +1,305 @@
+{
+  "name": "labeling",
+  "version": "0.1.0",
+  "display_name": "Labeling Pack",
+  "description": "从还款/DPD 长表按观察期/表现期/逾期阈值构造 0/1 坏标签，含 cohort 成熟度检查确认门与 roll-rate 定坏口径建议桥接。",
+  "module": "marvis.packs.labeling.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "define_label",
+      "summary": "从 DPD 长表按观察期/表现期/逾期阈值构造 0/1 坏标签，落带 target 的衍生数据集 + 定坏口径元数据；未成熟 cohort 走强制确认门。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "id_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mob_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "observation_window": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "performance_window": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "at_mob": {
+            "type": ["integer", "null"],
+            "minimum": 1
+          },
+          "dpd_col": {
+            "type": ["string", "null"],
+            "minLength": 1
+          },
+          "threshold_dpd": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "status_col": {
+            "type": ["string", "null"],
+            "minLength": 1
+          },
+          "threshold_status": {
+            "type": ["string", "null"],
+            "minLength": 1
+          },
+          "states": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "cohort_col": {
+            "type": ["string", "null"],
+            "minLength": 1
+          },
+          "confirm_immature_cohorts": {
+            "type": "boolean"
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "dataset_id",
+          "id_col",
+          "mob_col",
+          "observation_window",
+          "performance_window"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {
+            "type": "string"
+          },
+          "target_col": {
+            "type": "string"
+          },
+          "bad_definition": {
+            "type": "object"
+          },
+          "n_loans": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "n_bad": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "n_good": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "n_unmatured": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bad_rate": {
+            "type": ["number", "null"]
+          },
+          "maturity": {
+            "type": ["object", "null"]
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "result_dataset_id",
+          "target_col",
+          "bad_definition",
+          "n_loans",
+          "n_bad",
+          "n_good",
+          "n_unmatured",
+          "red_flags"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_define_label",
+      "side_effects": [
+        "read:dataset",
+        "write:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "check_cohort_maturity",
+      "summary": "按 vintage cohort 判定各放款 cohort 的表现期是否闭合到定坏判定 MOB；未成熟 cohort 报红旗（纳入建模将低估坏率）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "id_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mob_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cohort_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "required_mob": {
+            "type": ["integer", "null"],
+            "minimum": 1
+          },
+          "observation_window": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "performance_window": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "dataset_id",
+          "id_col",
+          "mob_col",
+          "cohort_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "required_mob": {
+            "type": "integer"
+          },
+          "cohorts": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "immature_cohorts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "all_matured": {
+            "type": "boolean"
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "required_mob",
+          "cohorts",
+          "immature_cohorts",
+          "all_matured",
+          "red_flags"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_check_cohort_maturity",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "suggest_bad_definition",
+      "summary": "从既有 roll_rate_matrix 输出推定坏口径建议（回滚率低的最轻逾期桶 + MOB），作为 define_label 的推荐默认值。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 2
+          },
+          "matrix": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          },
+          "at_mob": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "roll_back_threshold": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": [
+          "states",
+          "matrix",
+          "at_mob"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "suggestion": {
+            "type": ["object", "null"]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "suggestion",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_suggest_bad_definition",
+      "side_effects": [],
+      "memory_limit_mb": 1024
+    }
+  ],
+  "hooks": [],
+  "permissions": [
+    "read:dataset",
+    "write:dataset"
+  ]
+}

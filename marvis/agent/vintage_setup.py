@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from marvis.agent.data_dictionary import resolve_data_dictionary_id
+from marvis.data.data_dictionary import resolve_data_dictionary_id
 from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole
 from marvis.files import scan_source_dir
@@ -43,10 +43,14 @@ class VintageProposal:
     bad_col: str
     mob_max: int = 12
     ref_mob: int = 6
+    # A1: cumulation basis for the bad column. None (undeclared) is the safe default
+    # -- tool_vintage_curve then raises LabelSemanticsNotDeclaredError so the user
+    # picks incremental vs snapshot at the gate instead of the kernel guessing.
+    label_semantics: str | None = None
     template_id: str = "vintage_analysis"
 
     def template_slots(self) -> dict:
-        return {
+        slots = {
             "dataset_id": self.dataset_id,
             "cohort_col": self.cohort_col,
             "mob_col": self.mob_col,
@@ -54,6 +58,11 @@ class VintageProposal:
             "mob_max": self.mob_max,
             "ref_mob": self.ref_mob,
         }
+        # Only surface a declared basis; an omitted/None slot lets the template's baked
+        # literal-null default flow through so the semantics gate still fires.
+        if self.label_semantics is not None:
+            slots["label_semantics"] = self.label_semantics
+        return slots
 
 
 def build_vintage_proposal(

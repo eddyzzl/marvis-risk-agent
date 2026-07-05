@@ -139,12 +139,19 @@ def compute_vintage_report(
         long_frame = long_frame[["cohort", "mob", "target", "amount"]]
     else:
         long_frame = long_frame[["cohort", "mob", "target"]]
+    # mob_observe_cols are cumulative-by-construction snapshot flags: each column
+    # already means "bad as of this MOB" and is monotonic per loan. Declaring
+    # label_semantics="snapshot" is the canonical snapshot code path (A1): the kernel
+    # sets cum_bad_rate = the per-MOB marginal bad_rate instead of re-accumulating,
+    # which would double-count the already-cumulative bads (a loan bad at mob1/2/3
+    # counted three times). The metric='bad_rate' read below yields the same numbers.
     points = compute_vintage_curve(
         long_frame,
         cohort_col="cohort",
         mob_col="mob",
         target_col="target",
         balance_col="amount" if amount_col else None,
+        label_semantics="snapshot",
     )
     counts, amounts = _vintage_cohort_business_columns(points)
     return {
@@ -152,11 +159,6 @@ def compute_vintage_report(
         "headers": _vintage_headers(points, mob_observe_cols),
         "counts": counts,
         "amounts": amounts,
-        # mob_observe_cols are cumulative-by-construction snapshot flags: each
-        # column already means "bad as of this MOB" and is monotonic per loan, so
-        # the kernel's per-MOB bad_rate IS the true cumulative rate here. Using
-        # cum_bad_rate would re-accumulate and double-count the already-cumulative
-        # bads (e.g. a loan bad at mob1/2/3 counted three times).
         "curves": vintage_curve_wide(points, metric="bad_rate"),
         "points": [asdict(point) for point in points],
     }
@@ -356,18 +358,32 @@ def _add_mean(payload: dict, key: str, frame: pd.DataFrame, column: str | None) 
         payload[key] = float(pd.to_numeric(frame[column], errors="coerce").mean())
 
 
+_MOB_NUMBER_RE = re.compile(r"\d+")
+
+
+def _mob_number_tokens(column: str) -> list[int]:
+    """Single MOB-number resolver (T2-5): every integer token in a column name.
+
+    Replaces the two divergent regexes that previously parsed MOB info from column
+    names in this module -- ``_mob_col``'s label-delimited substring match and
+    ``_mob_number``'s first-integer extraction -- with one primitive both build on.
+    (Unrelated to :func:`marvis.validation.vintage._parse_mob`, which parses numeric
+    *data values*, not column names, and is intentionally left untouched.)
+    """
+    return [int(token) for token in _MOB_NUMBER_RE.findall(str(column))]
+
+
 def _mob_col(columns: tuple[str, ...], mob_label: str) -> str | None:
-    pattern = re.compile(rf"(?:^|[^0-9]){re.escape(mob_label)}(?:[^0-9]|$)")
+    target = int(mob_label)
     for column in columns:
-        lower = column.lower()
-        if lower == f"mob{mob_label}" or pattern.search(lower):
+        if target in _mob_number_tokens(column):
             return column
     return None
 
 
 def _mob_number(column: str, *, fallback: int) -> int:
-    match = re.search(r"(\d+)", str(column))
-    return int(match.group(1)) if match else fallback
+    tokens = _mob_number_tokens(column)
+    return tokens[0] if tokens else fallback
 
 
 def _ratio(numerator: float, denominator: float) -> float:

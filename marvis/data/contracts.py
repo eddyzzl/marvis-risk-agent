@@ -79,6 +79,12 @@ class KeyPair:
     transform_side: str
     match_rate: float
     resolved_by: str
+    # T1-B8: the stored dtype of each side of this key, and whether they diverge across files.
+    # Defaulted so existing constructors / stored plans keep working. Divergence coupling
+    # text<->float is the dangerous precision-loss / silent-miss case (see _divergence_level).
+    anchor_dtype: str = ""
+    feature_dtype: str = ""
+    dtype_divergent: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,21 @@ class ConflictReport:
     @property
     def has_conflicts(self) -> bool:
         return self.n_conflict_keys > 0
+
+
+@dataclass(frozen=True)
+class KeyDtypeDivergence:
+    """T1-B8: a proposed join key whose two sides are stored under different dtype families
+    across files (e.g. text one side, float the other). ``level`` == "red" for text<->float
+    (precision loss / leading-zero loss -> silent miss; forces confirmation); "warn" for the
+    lossless-at-VARCHAR-cast cases (int<->float, text<->int) which are surfaced but not blocked.
+    REPORTED, never silently swapped or dropped."""
+
+    anchor_col: str
+    feature_col: str
+    anchor_dtype: str
+    feature_dtype: str
+    level: str
 
 
 @dataclass(frozen=True)
@@ -135,6 +156,13 @@ class JoinDiagnostics:
     # Relaxed-key proposals (spec §4/§5), present when the full key matches poorly: each
     # drops one identity element to raise the match rate (with its re-checked fan-out).
     key_alternatives: tuple["KeyAlternative", ...] = ()
+    # T1-A6: key columns stored as float64 whose ids exceed ~15 significant digits, where the
+    # true id may already be corrupted by float precision loss (join can silently mis-match).
+    # Reported so the C2 gate can warn the user to re-import the column as string (see B8).
+    precision_loss_columns: tuple[str, ...] = ()
+    # T1-B8: proposed keys whose two sides have divergent stored dtypes across files. A "red"
+    # (text<->float) divergence forces confirmation before execute; "warn" is surfaced only.
+    key_dtype_divergences: tuple["KeyDtypeDivergence", ...] = ()
 
 
 @dataclass
@@ -172,5 +200,6 @@ __all__ = [
     "JoinPlan",
     "JoinSpec",
     "KeyAlternative",
+    "KeyDtypeDivergence",
     "KeyPair",
 ]

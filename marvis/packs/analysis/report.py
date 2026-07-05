@@ -44,6 +44,11 @@ def gate_summary_payload(
     highlights: dict = {}
     if expected_loss:
         highlights["total_el"] = expected_loss.get("total_el")
+        # annotate the total_el 口径 (reference-snapshot basis) so the gate headline
+        # is self-documenting; pure pass-through of assumptions (INV-1, no recompute).
+        el_assumptions = expected_loss.get("assumptions") or {}
+        highlights["total_el_basis"] = el_assumptions.get("total_el_basis")
+        highlights["reference_snapshot"] = el_assumptions.get("reference_snapshot")
     if segment and isinstance(segment.get("concentration"), dict):
         highlights["hhi"] = segment["concentration"].get("hhi")
         highlights["top1_pct"] = segment["concentration"].get("top1_pct")

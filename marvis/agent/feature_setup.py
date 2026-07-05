@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from marvis.agent.data_dictionary import resolve_data_dictionary_id
+from marvis.data.data_dictionary import resolve_data_dictionary_id
 from marvis.agent.join_setup import propose_roles
 from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole

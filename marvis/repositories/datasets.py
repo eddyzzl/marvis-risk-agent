@@ -12,6 +12,7 @@ from marvis.data.contracts import (
     JoinDiagnostics,
     JoinPlan,
     JoinSpec,
+    KeyDtypeDivergence,
     KeyPair,
 )
 from marvis.db_schema import connect
@@ -378,13 +379,36 @@ def _join_spec_from_dict(payload: dict) -> JoinSpec:
                 transform_side=str(item["transform_side"]),
                 match_rate=float(item["match_rate"]),
                 resolved_by=str(item["resolved_by"]),
+                # T1-B8: dtype provenance survives the plan round-trip (defaulted for legacy).
+                anchor_dtype=str(item.get("anchor_dtype", "")),
+                feature_dtype=str(item.get("feature_dtype", "")),
+                dtype_divergent=bool(item.get("dtype_divergent", False)),
             )
             for item in payload.get("key_pairs") or []
         ],
-        diagnostics=JoinDiagnostics(**dict(payload["diagnostics"])),
+        diagnostics=_diagnostics_from_dict(dict(payload["diagnostics"])),
         dedup_strategy=_optional_str(payload.get("dedup_strategy")),
         confirmed=bool(payload.get("confirmed", False)),
     )
+
+
+def _diagnostics_from_dict(payload: dict) -> JoinDiagnostics:
+    # T1-B8: re-hydrate key_dtype_divergences into typed KeyDtypeDivergence objects so the
+    # forced-confirmation gate can read `.level` after a plan reload (the other nested fields
+    # -- conflict_report / key_alternatives -- are consumed as dicts downstream and left as-is).
+    data = dict(payload)
+    divergences = data.get("key_dtype_divergences") or ()
+    data["key_dtype_divergences"] = tuple(
+        item if isinstance(item, KeyDtypeDivergence) else KeyDtypeDivergence(
+            anchor_col=str(item.get("anchor_col", "")),
+            feature_col=str(item.get("feature_col", "")),
+            anchor_dtype=str(item.get("anchor_dtype", "")),
+            feature_dtype=str(item.get("feature_dtype", "")),
+            level=str(item.get("level", "warn")),
+        )
+        for item in divergences
+    )
+    return JoinDiagnostics(**data)
 
 
 def _write_audit_row(

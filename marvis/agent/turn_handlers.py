@@ -664,6 +664,7 @@ def _run_modeling_setup(
         target_type=_modeling_target_type(task),
         recipes=_modeling_recipes(task),
         sample_weight_col=getattr(task, "sample_weight_col", "") or None,
+        time_col=getattr(task, "time_col", "") or None,
         anchor_id=(c1_assignment or {}).get("anchor_id"),
         join_feature_ids=(c1_assignment or {}).get("feature_ids"),
         target_col=(c1_assignment or {}).get("target_col"),

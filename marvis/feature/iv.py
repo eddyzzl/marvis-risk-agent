@@ -7,6 +7,30 @@ from marvis.feature.contracts import Bin, BinningResult, WOEResult
 from marvis.feature.errors import FeatureError
 
 
+def _smoothed_woe_iv(
+    bad: int,
+    good: int,
+    total_bad: int,
+    total_good: int,
+    n_groups: int,
+    *,
+    smoothing: float,
+) -> tuple[float, float]:
+    """Single platform-wide Laplace-smoothed WOE/IV kernel (T2-5).
+
+    ``WOE = ln(good_dist / bad_dist)`` and ``IV_contribution = (good_dist - bad_dist) * WOE``,
+    where each distribution is Laplace-smoothed by ``smoothing`` over ``n_groups`` groups.
+    Shared verbatim by :func:`compute_woe_iv` (numeric bins) and
+    :func:`marvis.feature.encode.categorical_woe_encode` (raw categories + NaN bucket) so
+    the two never drift. Higher WOE means the group is more good-customer heavy.
+    """
+    bad_dist = (bad + smoothing) / (total_bad + smoothing * n_groups)
+    good_dist = (good + smoothing) / (total_good + smoothing * n_groups)
+    woe = float(np.log(good_dist / bad_dist))
+    iv_contribution = float((good_dist - bad_dist) * woe)
+    return woe, iv_contribution
+
+
 def compute_woe_iv(
     values: np.ndarray,
     target: np.ndarray,
@@ -60,10 +84,9 @@ def compute_woe_iv(
         count = int(np.sum(mask))
         bad = int(np.sum(target_int[mask] == 1))
         good = count - bad
-        bad_dist = (bad + smoothing) / (total_bad + smoothing * group_count)
-        good_dist = (good + smoothing) / (total_good + smoothing * group_count)
-        woe = float(np.log(good_dist / bad_dist))
-        iv_contribution = float((good_dist - bad_dist) * woe)
+        woe, iv_contribution = _smoothed_woe_iv(
+            bad, good, total_bad, total_good, group_count, smoothing=smoothing
+        )
         total_iv += iv_contribution
         bins.append(
             Bin(

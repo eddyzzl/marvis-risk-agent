@@ -86,12 +86,80 @@ AGENT_RESPONSE_PREAMBLE_PATTERNS = (
 )
 AGENT_RESPONSE_LEADING_SEPARATOR_PATTERN = re.compile(r"^(?:[-*_]\s*){3,}\s*")
 
+# Start-family negation markers — mirror is_continue_validation_intent's
+# negation_markers so "先别开始验证" / "不要开始验证" short-circuit to chat
+# before the direct-phrase substring branch can fire. Includes the generic
+# negators plan_driver._NEGATED_CONFIRM already trusts (先别/别/不要/不用/
+# 不需要/先不/暂不) so phrasings not enumerated below are still caught.
+START_VALIDATION_NEGATION_MARKERS = (
+    "不开始",
+    "不要开始",
+    "先别开始",
+    "别开始",
+    "暂不开始",
+    "暂时不开始",
+    "不用开始",
+    "无需开始",
+    "不需要开始",
+    "不想开始",
+    "没必要开始",
+    "不打算开始",
+    "不会开始",
+    "先不开始",
+    "不启动",
+    "不要启动",
+    "别启动",
+    "不执行",
+    "不要执行",
+    "别执行",
+    "不运行",
+    "不要运行",
+    "不跑",
+    "不要跑",
+    "先别",
+    "别",
+    "不要",
+    "不用",
+    "不需要",
+    "先不",
+    "暂不",
+    "暂停",
+)
+# English-negation parity with plan_driver._NEGATED_CONFIRM's do-not / don't
+# family, so "do not start validation" / "don't run validation" stay chat.
+_START_VALIDATION_ENGLISH_NEGATION = re.compile(
+    r"\b(?:do\s*not|don't|dont|not)\s+(?:start|run|validate)\b",
+    re.IGNORECASE,
+)
+# Interrogative guard — mirror plan_driver._QUESTION's particle set plus
+# start-context interrogatives. NOTE: bare trailing '吧' is intentionally
+# EXCLUDED (unlike plan_driver._QUESTION) because '开始吧'/'启动吧'/'运行吧'/
+# '跑吧' are legitimate start affirmatives in direct_commands, not questions.
+_START_QUESTION = re.compile(
+    r"[?？]|吗|呢$|什么时候|何时|要不要|需不需要|能不能|可不可以|是不是",
+    re.IGNORECASE,
+)
+
 
 def is_start_validation_intent(content: str) -> bool:
     text = content.strip().lower()
     if not text:
         return False
+    # Question guard on RAW text (like plan_driver.is_confirm) so trailing
+    # particles / question marks disqualify interrogatives before any positive
+    # match. '吧$' is deliberately not treated as a question here.
+    if _START_QUESTION.search(text):
+        return False
+    if _START_VALIDATION_ENGLISH_NEGATION.search(text):
+        return False
     compact = "".join(text.split())
+    # Drop interior punctuation for the negation scan, same as
+    # is_continue_validation_intent, so "先别，开始验证" normalizes cleanly.
+    compact_np = compact
+    for ch in "，。、；：,;:":
+        compact_np = compact_np.replace(ch, "")
+    if any(marker in compact_np for marker in START_VALIDATION_NEGATION_MARKERS):
+        return False
     direct_phrases = (
         "开始验证",
         "启动验证",

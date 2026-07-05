@@ -168,6 +168,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         top_k=int(top_k) if top_k is not None else None,
         batch_size=int(inputs.get("batch_size", 500)),
         max_ks_decay=float(inputs["max_ks_decay"]) if inputs.get("max_ks_decay") is not None else None,
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     payload = {
         "selected": list(result.selected),
@@ -177,6 +178,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         "unusable": [[feature, reason] for feature, reason in result.unusable],
         "scores": _jsonable(result.scores),
         "n_screened": result.n_screened,
+        "nan_labels_dropped": result.nan_labels_dropped,
         "excluded_categorical": excluded_categorical,
     }
     if suspected_categorical:
@@ -417,13 +419,17 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
         out[encoded.name] = encoded
         new_columns.append(encoded.name)
         woe_maps[feature] = _jsonable(woe)
+    sentinel_step = _sentinel_step(sentinel_values)
     result = _register_frame(
         runtime,
         out,
         dataset,
         ctx,
         "woe",
-        preprocessing_step={"kind": "woe", "columns": features, "params": _jsonable(woe_maps)},
+        preprocessing_steps=[
+            *([sentinel_step] if sentinel_step else []),
+            {"kind": "woe", "columns": features, "params": _jsonable(woe_maps)},
+        ],
     )
     return {
         "result_dataset_id": result.id,
@@ -560,13 +566,17 @@ def tool_normalize(inputs: dict, ctx) -> dict:
             raise FeatureError("method must be minmax or zscore")
         out[col] = values
         params[col] = column_params
+    sentinel_step = _sentinel_step(sentinel_values)
     result = _register_frame(
         runtime,
         out,
         dataset,
         ctx,
         "normalize",
-        preprocessing_step={"kind": "normalize", "columns": columns, "params": _jsonable(params)},
+        preprocessing_steps=[
+            *([sentinel_step] if sentinel_step else []),
+            {"kind": "normalize", "columns": columns, "params": _jsonable(params)},
+        ],
     )
     return {
         "result_dataset_id": result.id,
@@ -608,6 +618,11 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
         out[column] = masked.fillna(value)
         fill_values[column] = value
     preprocessing_steps = []
+    sentinel_step = _sentinel_step(sentinel_values)
+    if sentinel_step:
+        # A3: mask raw sentinels to NaN first so the missing_indicator/impute steps
+        # below see NaN, reproducing the fit-time indicator and train-only fill.
+        preprocessing_steps.append(sentinel_step)
     if indicators:
         # Ordered before "impute" so replay computes the pre-fill NaN mask first.
         preprocessing_steps.append(
@@ -659,13 +674,17 @@ def tool_cap_outliers(inputs: dict, ctx) -> dict:
             clipped[mask] = np.clip(clipped[mask], lower, upper)
         out[column] = clipped
         bounds[column] = params
+    sentinel_step = _sentinel_step(sentinel_values)
     result = _register_frame(
         runtime,
         out,
         dataset,
         ctx,
         "cap",
-        preprocessing_step={"kind": "cap", "columns": columns, "params": _jsonable(bounds)},
+        preprocessing_steps=[
+            *([sentinel_step] if sentinel_step else []),
+            {"kind": "cap", "columns": columns, "params": _jsonable(bounds)},
+        ],
     )
     return {
         "result_dataset_id": result.id,
@@ -692,6 +711,23 @@ def _sentinel_values_for(inputs: dict, columns: list[str]) -> dict[str, list[flo
         }
     flat = [float(v) for v in raw]
     return {column: flat for column in columns} if flat else {}
+
+
+def _sentinel_step(sentinel_values: dict[str, list[float]]) -> dict[str, Any] | None:
+    """A3: build a ``sentinel`` preprocessing step carrying the per-column sentinel
+    values a tool masked before fitting, or ``None`` when no sentinels were used.
+
+    Emitted *first* in the tool's chain (ahead of the paired impute/cap/normalize/
+    woe step) so scoring-time replay masks raw sentinels to NaN before any downstream
+    transform runs -- without it, a raw ``-999`` at serve time is treated as a genuine
+    value (train/serve skew)."""
+    if not sentinel_values:
+        return None
+    return {
+        "kind": "sentinel",
+        "columns": list(sentinel_values),
+        "params": _jsonable(sentinel_values),
+    }
 
 
 def _unique_column_name(candidate: str, existing) -> str:

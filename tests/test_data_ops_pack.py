@@ -387,3 +387,30 @@ def test_data_ops_confirm_join_reports_needs_dedup_without_hard_failing(tmp_path
     executed = runner.invoke(ToolRef("data_ops", "execute_join"), {"join_plan_id": plan_id}, task_id="task-1")
     assert executed.ok is True
     assert executed.output["anchor_rows"] == executed.output["joined_rows"] == 2
+
+
+def test_data_ops_confirm_join_warn_dtype_divergence_does_not_block(tmp_path):
+    # T1-B8: an int<->text key-dtype divergence is lossless under the VARCHAR-cast join (WARN,
+    # not RED), so confirm_join must proceed WITHOUT requiring a dtype ack.
+    runner, registry, repo = _runtime(tmp_path)
+    phones_int = [13800138000 + i for i in range(12)]
+    anchor = _register_csv(
+        registry, tmp_path, "anchor",
+        pd.DataFrame({"mobile": phones_int}), role="sample",
+    )
+    feature = _register_csv(
+        registry, tmp_path, "feature",
+        pd.DataFrame({"mobile": [f"{p}" for p in phones_int], "balance": list(range(12))}),
+        role="feature",
+    )
+    plan_id = runner.invoke(
+        ToolRef("data_ops", "propose_join"),
+        {"anchor_id": anchor.id, "feature_ids": [feature.id]},
+        task_id="task-1",
+    ).output["join_plan_id"]
+
+    confirmed = runner.invoke(
+        ToolRef("data_ops", "confirm_join"), {"join_plan_id": plan_id}, task_id="task-1"
+    )
+    assert confirmed.output["status"] == "confirmed"
+    assert not confirmed.output.get("needs_dtype_ack")

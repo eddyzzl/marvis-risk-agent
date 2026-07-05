@@ -12,6 +12,10 @@ class VintageCurve:
     curves: dict[str, list[float | None]]
     counts: dict[str, int]
     mob_axis: tuple[int, ...] = ()
+    #: A1: point-level data-quality warnings surfaced by the vintage kernel (e.g. the
+    #: snapshot-flag red flag when data looks cumulative but was declared incremental),
+    #: mirroring RollRateMatrix.data_quality_warnings. Advisory only.
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

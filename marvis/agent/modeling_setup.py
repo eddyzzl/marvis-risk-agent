@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from marvis.agent.data_dictionary import resolve_data_dictionary_id
+from marvis.data.data_dictionary import resolve_data_dictionary_id
 from marvis.agent.join_setup import propose_roles
 from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole
@@ -147,6 +147,7 @@ def build_modeling_proposal(
     recipe: str | None = None, recipes: list[str] | None = None,
     target_type: str | None = None,
     sample_weight_col: str | None = None,
+    time_col: str | None = None,
     anchor_id: str | None = None,
     join_feature_ids: list[str] | None = None,
     target_col: str | None = None,
@@ -206,6 +207,12 @@ def build_modeling_proposal(
         if target_type == "multiclass":
             raise ModelingSetupError("未能识别多分类目标列；请指定 3-20 类的目标列（如 风险等级/评级）后重试。")
         raise ModelingSetupError("未能识别 0/1 目标列；请确认数据含标签列后重试。")
+    # D12: the column that drives time-extrapolated OOT. An explicit user time_col
+    # (from task creation) wins over the alias heuristic when it names a real anchor
+    # column; a time col that IS the label is nonsensical (leakage) and is dropped.
+    effective_time_col = _resolve_effective_time_col(time_col, available_columns, business_columns)
+    if effective_time_col and effective_time_col == setup.target_col:
+        effective_time_col = None
     # The tuner is lgb-specific, so the "primary" recipe (the one tuned) is lgb when
     # it is among the chosen recipes, else the first one (tuning is skipped for it).
     primary_recipe = "lgb" if "lgb" in recipe_list else recipe_list[0]
@@ -251,6 +258,14 @@ def build_modeling_proposal(
         split_col = setup.split_col
         split_values = dict(setup.split_values)
         counts = dict(setup.counts)
+        # D12 conflict policy: a detected split column wins (conservative — no change
+        # for existing-split datasets). When the user explicitly requested a DIFFERENT
+        # time_col, tell them the detected split shadowed the requested time-OOT.
+        if effective_time_col and effective_time_col != split_col:
+            notes.append(
+                f"检测到切分列 `{split_col}`，将按其切分（未按请求的时间列 `{effective_time_col}` "
+                "做时间外推 OOT）；如需时间外推 OOT，请移除切分列或改用日期列切分。"
+            )
     elif joined:
         dataset_id = dataset.id
         split_col = ""
@@ -264,12 +279,11 @@ def build_modeling_proposal(
         # single-file and joined paths consistent.
         auto_split_config = {"test_size": 0.25, "group_cols": group_cols}
         grouping = f"（按 `{group_cols[0]}` 分组防泄漏）" if group_cols else "（逐行随机）"
-        time_col = business_columns.get("loan_month_col")
-        if isinstance(time_col, str) and time_col:
-            auto_split_config["oot_by_time"] = time_col
+        if effective_time_col:
+            auto_split_config["oot_by_time"] = effective_time_col
             auto_split_config["oot_size"] = DEFAULT_OOT_SIZE
             notes.append(
-                f"多文件建模将在拼接后按 `{time_col}` 时间外推 OOT（最近约 {int(DEFAULT_OOT_SIZE * 100)}% 时间跨度）；"
+                f"多文件建模将在拼接后按 `{effective_time_col}` 时间外推 OOT（最近约 {int(DEFAULT_OOT_SIZE * 100)}% 时间跨度）；"
                 f"其余按 75/25 分组随机切 train/test{grouping}。"
             )
         else:
@@ -289,7 +303,7 @@ def build_modeling_proposal(
                 *weight_candidates,
                 *_business_passthrough_cols(business_columns),
             ]),
-            time_col=business_columns.get("loan_month_col") if isinstance(business_columns.get("loan_month_col"), str) else None,
+            time_col=effective_time_col,
         )
         notes.append(note)
     if len(recipe_list) > 1:
@@ -370,6 +384,34 @@ def _first_matching_column(by_lower: dict[str, str], aliases: tuple[str, ...]) -
         if matched:
             return matched
     return ""
+
+
+def _resolve_effective_time_col(
+    requested: str | None,
+    available_columns: list[str],
+    business_columns: dict[str, object],
+) -> str | None:
+    """Resolve the column that drives time-extrapolated OOT (D12).
+
+    Precedence mirrors vintage_setup._resolve_named_col: an explicit user
+    ``requested`` column wins when it exists in the anchor frame (case-insensitive,
+    real column name preserved); otherwise fall back to the alias-detected
+    loan_month column. A requested-but-absent value (including the inert default
+    ``apply_month`` when no such column exists) is NOT fabricated — returning it
+    would crash make_split (prepare.py raises 'missing columns'), so it falls
+    through to the alias. Returns ``None`` when nothing resolves.
+    """
+    req = str(requested or "").strip()
+    if req:
+        if req in available_columns:
+            return req
+        lower = {str(col).strip().lower(): str(col) for col in available_columns}
+        hit = lower.get(req.lower())
+        if hit:
+            return hit
+        # requested but absent -> do not fabricate; fall through to alias
+    alias = business_columns.get("loan_month_col")
+    return alias if isinstance(alias, str) and alias else None
 
 
 def _is_mob_observe_column(column: str) -> bool:

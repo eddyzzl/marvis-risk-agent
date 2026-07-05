@@ -458,6 +458,9 @@
           },
           "max_feature_psi": {
             "type": "number"
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -504,6 +507,10 @@
             "type": "object"
           },
           "n_screened": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "nan_labels_dropped": {
             "type": "integer",
             "minimum": 0
           },

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from marvis.packs.modeling._common import PMML_SUPPORTED_ALGORITHMS, _format_number_token, _is_metric_key, _json_safe, _optional_float, _resolve_artifact_path, _unique_strings
 from marvis.packs.modeling._runtime import _Runtime, _artifact, _artifact_base_dir, _runtime
+from marvis.packs.modeling.recipes.common import REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY
 from marvis.packs.modeling.report_tools import _scorecard_table_rows
 from marvis.packs.modeling.scoring import _artifact_calibration_metadata
 
@@ -354,6 +355,18 @@ def _monitoring_policy_payload(
     target_type = str(getattr(experiment.config, "target_type", "binary") or "binary")
     thresholds = _monitoring_thresholds(source_policy.get("thresholds"), target_type=target_type)
     baseline_metrics = _json_safe(experiment.metrics) or {}
+    # D14: on a refit artifact the test_*/psi_test_vs_train family came from the
+    # random 5% __refit_holdout__ slice, which is in-distribution with __refit_train__.
+    # psi_test_vs_train there compares two draws of the same population (~0), so it
+    # would seed a spuriously-green baseline. Drop the tainted family from the baseline;
+    # the psi_test_vs_train check stays listed (thresholds are unchanged) but reads a
+    # None value and is reported "missing" -- an honest "needs a real baseline".
+    if _artifact_is_refit(artifact):
+        baseline_metrics = {
+            key: value
+            for key, value in baseline_metrics.items()
+            if not _is_refit_holdout_tainted_metric(key)
+        }
     checks = [
         _monitoring_check_payload(check_id, spec, baseline_metrics)
         for check_id, spec in thresholds.items()
@@ -787,6 +800,7 @@ def _model_card_payload(
 ) -> dict:
     config = experiment.config
     metrics = _json_safe(experiment.metrics) or {}
+    is_refit = _artifact_is_refit(artifact)
     sample_weight_policy = _sample_weight_policy_payload(experiment=experiment, artifact=artifact)
     selection_policy = (
         selection_policy_decision.get("policy")
@@ -802,6 +816,7 @@ def _model_card_payload(
         selection_policy_decision=selection_policy_decision,
         monitoring_policy=monitoring_policy,
         challenger_comparison=challenger_comparison,
+        is_refit=is_refit,
     )
     return _json_safe({
         "schema_version": 1,
@@ -825,7 +840,7 @@ def _model_card_payload(
         "training": {
             "sample_weight": sample_weight_policy,
         },
-        "key_metrics": _model_card_key_metrics(metrics),
+        "key_metrics": _model_card_key_metrics(metrics, is_refit=is_refit),
         "governance": {
             "selection_policy_status": str(selection_policy_decision.get("status") or "not_requested"),
             "selection_policy": _json_safe(selection_policy),
@@ -861,7 +876,27 @@ def _model_card_payload(
     })
 
 
-def _model_card_key_metrics(metrics: dict) -> list[dict]:
+def _artifact_is_refit(artifact: ModelArtifact) -> bool:
+    """D14: True when this artifact was produced by the TUNE-4 champion refit on
+    train+test combined. Detected via the platform-only param that artifact_params()
+    intentionally keeps in ModelArtifact.params so the delivery/monitoring口径 can
+    tell a refit artifact apart from a train-only one."""
+    params = getattr(artifact, "params", None) or {}
+    return bool(params.get(REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY))
+
+
+#: D14: for a refit artifact these metric keys came from the random 5%
+#: ``__refit_holdout__`` slice (in-distribution with the training pool, optimistically
+#: biased) and must be dropped from the model card's key-metrics table -- they are
+#: NOT a genuine held-out test evaluation. Mirrors select_tools._is_refit_holdout_tainted_key.
+def _is_refit_holdout_tainted_metric(key: str) -> bool:
+    return (
+        key in ("psi_test_vs_train", "weighted_psi_test_vs_train")
+        or key.startswith(("test_", "weighted_test_"))
+    )
+
+
+def _model_card_key_metrics(metrics: dict, *, is_refit: bool = False) -> list[dict]:
     rows = []
     for metric in [
         "oot_ks",
@@ -891,6 +926,12 @@ def _model_card_key_metrics(metrics: dict) -> list[dict]:
         "weighted_oot_auc",
         "weighted_test_auc",
     ]:
+        # D14: for a refit artifact the test_*/psi_test_vs_train family came from
+        # the random 5% __refit_holdout__ slice (in-distribution, optimistically
+        # biased) -- never surface it as a headline model-card metric. OOT/train
+        # stay honest and pass through.
+        if is_refit and _is_refit_holdout_tainted_metric(metric):
+            continue
         if metric in metrics and metrics.get(metric) is not None:
             rows.append({"metric": metric, "value": metrics.get(metric)})
     return rows
@@ -909,12 +950,24 @@ def _model_card_limitations(
     selection_policy_decision: dict,
     monitoring_policy: dict,
     challenger_comparison: dict,
+    is_refit: bool = False,
 ) -> list[str]:
     limitations: list[str] = [
         str(item)
         for item in (capabilities.get("limitations") or [])
         if str(item)
     ]
+    # D14: the deployed artifact was refit on train+test combined, so no
+    # independent held-out test set survives. State this honestly: OOT is the
+    # only genuine held-out evaluation, and the reported held-out KS is the
+    # pre-refit champion's value -- the refit artifact was not independently
+    # re-evaluated on test.
+    if is_refit:
+        limitations.append(
+            "本交付产物以 train+test 全量重训得到,已无独立留出 test 集;"
+            "OOT 为唯一独立留出评估,模型卡所列留出 KS 为重训前冠军在真实 test 上的值,"
+            "重训后的产物未独立在 test 上重新评估。"
+        )
     if not capabilities.get("pmml_supported"):
         reason = str(capabilities.get("reason") or "PMML export is not supported for this artifact.")
         limitations.append(reason)

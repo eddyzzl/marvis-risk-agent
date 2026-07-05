@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from marvis.agent.data_dictionary import first_data_dictionary_id, load_business_names
+from marvis.data.data_dictionary import first_data_dictionary_id, load_business_names
 from marvis.feature.candidates import excluded_categorical_columns, suspected_categorical_columns
 from marvis.feature.screen import screen_features, screen_features_non_binary, sentinel_screen_notice
 from marvis.packs.modeling.errors import ModelingError
@@ -98,6 +98,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         batch_size=int(inputs.get("batch_size", 500)),
         max_ks_decay=float(inputs["max_ks_decay"]) if inputs.get("max_ks_decay") is not None else None,
         max_feature_psi=float(inputs["max_feature_psi"]) if inputs.get("max_feature_psi") is not None else None,
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     payload = {
         "selected": list(result.selected),
@@ -107,6 +108,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         "unusable": [[feature, reason] for feature, reason in result.unusable],
         "scores": _jsonable(result.scores),
         "n_screened": result.n_screened,
+        "nan_labels_dropped": result.nan_labels_dropped,
         "excluded_categorical": excluded_categorical,
     }
     if suspected_categorical:

@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from marvis.data.direction import check_score_direction, normalize_score_direction
+from marvis.data.errors import LabelSemanticsNotDeclaredError
 from marvis.data.labels import resolve_labeled_frame
 from marvis.db import StrategyRepository
 from marvis.packs.strategy.backtest import backtest_strategy
@@ -46,26 +47,44 @@ from marvis.packs.strategy.tradeoff import (
 )
 from marvis.packs.strategy.vintage import vintage_curve, vintage_summary
 from marvis.plugins.sdk import PackRuntime
+from marvis.validation.vintage import compute_vintage_curve
 
 
 def tool_vintage_curve(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
+    cohort_col = str(inputs["cohort_col"])
+    mob_col = str(inputs["mob_col"])
+    bad_col = str(inputs["bad_col"])
     frame = _dataset_frame(
         runtime,
         str(inputs["dataset_id"]),
-        columns=[str(inputs["cohort_col"]), str(inputs["mob_col"]), str(inputs["bad_col"])],
+        columns=[cohort_col, mob_col, bad_col],
     )
+    # NaN-label gate runs FIRST (an unusable label is a harder problem than an
+    # undeclared cumulation basis); label_semantics is checked on the resolved frame.
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame,
-        str(inputs["bad_col"]),
+        bad_col,
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
+    # A1: the strategy path must NOT guess the cumulation basis. The kernel always
+    # accumulates the target across MOBs; on a snapshot/ever-bad flag that double-counts
+    # silently. When the caller has not declared label_semantics, stop at a gate and hand
+    # the two concrete semantics to the user (mirrors the NaN-label gate).
+    label_semantics = _optional_str(inputs.get("label_semantics"))
+    if label_semantics is None:
+        raise LabelSemanticsNotDeclaredError(
+            target_col=bad_col,
+            n_cohorts=_vintage_cohort_count(frame, cohort_col),
+            monotone_heuristic=_vintage_looks_like_snapshot(frame, cohort_col, mob_col, bad_col),
+        )
     curve = vintage_curve(
         frame,
-        cohort_col=str(inputs["cohort_col"]),
-        mob_col=str(inputs["mob_col"]),
-        bad_col=str(inputs["bad_col"]),
+        cohort_col=cohort_col,
+        mob_col=mob_col,
+        bad_col=bad_col,
         mob_max=int(inputs.get("mob_max", 12)),
+        label_semantics=label_semantics,
     )
     return {
         "cohorts": list(curve.cohorts),
@@ -74,7 +93,36 @@ def tool_vintage_curve(inputs: dict, ctx) -> dict:
         "counts": _jsonable(curve.counts),
         "summary": vintage_summary(curve, ref_mob=int(inputs.get("ref_mob", 6))),
         "nan_labels_dropped": nan_labels_dropped,
+        "warnings": list(curve.warnings),
     }
+
+
+def _vintage_cohort_count(frame, cohort_col: str) -> int:
+    try:
+        return int(frame[cohort_col].nunique(dropna=True))
+    except Exception:
+        return 0
+
+
+def _vintage_looks_like_snapshot(frame, cohort_col: str, mob_col: str, bad_col: str) -> bool:
+    """Reuse the kernel's own conservative snapshot heuristic (single source of truth):
+    the incremental path attaches a snapshot red flag exactly when the data looks
+    cumulative. If any point carries it, the data looks snapshot-shaped."""
+    try:
+        points = compute_vintage_curve(
+            frame,
+            cohort_col=cohort_col,
+            mob_col=mob_col,
+            target_col=bad_col,
+            label_semantics="incremental",
+        )
+    except Exception:
+        return False
+    return any(
+        "snapshot" in warning.lower() or "快照" in warning
+        for point in points
+        for warning in point.data_quality_warnings
+    )
 
 
 def tool_roll_rate(inputs: dict, ctx) -> dict:

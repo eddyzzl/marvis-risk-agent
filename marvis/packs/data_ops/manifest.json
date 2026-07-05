@@ -217,6 +217,9 @@
           },
           "dictionary": {
             "type": "object"
+          },
+          "reconcile_summary": {
+            "type": "object"
           }
         },
         "required": [
@@ -248,6 +251,12 @@
           },
           "dedup_strategies": {
             "type": "object"
+          },
+          "ack_dtype_mismatch": {
+            "type": ["boolean", "array"],
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
@@ -277,6 +286,15 @@
             "type": "string"
           },
           "needs_dedup_labels": {
+            "type": "object"
+          },
+          "needs_dtype_ack": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "needs_dtype_ack_labels": {
             "type": "object"
           }
         },
@@ -502,7 +520,7 @@
     },
     {
       "name": "slice_aggregate",
-      "summary": "Deterministic whitelisted group-by aggregate over a registered dataset (LLM produces only a structured spec; a single parameterized DuckDB SQL computes the numbers).",
+      "summary": "Deterministic whitelisted group-by aggregate over a registered dataset (LLM produces only a structured spec; a single parameterized DuckDB SQL computes the numbers). bad_rate/approval_rate compute over labeled samples only: rows whose label is NULL/non-binary (bad_rate) or whose decision is NULL/unrecognized (approval_rate) are excluded from the denominator, and each such metric emits a companion unlabeled_count_<col> column reporting the excluded rows per group.",
       "input_schema": {
         "type": "object",
         "properties": {

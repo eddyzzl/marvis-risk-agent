@@ -22,7 +22,7 @@ def test_kernel_imported_modules_defer_annotations_at_runtime():
         "marvis/output/styles.py",
         "marvis/validation/results.py",
         "marvis/validation/reproducibility.py",
-        "marvis/validation/engine.py",
+        "marvis/validation/stress_test.py",
     ]:
         source = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
 

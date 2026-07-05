@@ -23,6 +23,26 @@
 10. 本清单全部条目 ✅ 或 ⏸️（⏸️ 必须写明"为什么不做"并进最终 review 的产品选择清单）；长线区（§12）不阻塞完全体 v1。
 11. **收官双 review 循环（2026-07-03 用户新增）**：全部条目完成后 → (a) **落地核验 review**：逐项对照本清单验证每个 ✅ 是否真实按计划落地（抽真代码证据，不信 commit message）；(b) **全量 code review**：对最终代码做新一轮多镜头审查（bug+可提升点）；(c) 发现项修复后**再循环**，直至一轮 review 无新 critical/high 发现为止。
 
+11.（**2026-07-04 修订，已批准 · 取代原第 11 条的循环出口**）**收口出口判据 = 数据判据为主 + 范围化 review 不循环**。依据 2026-07-04 全量读码报告 Q2：审查发现能力随投入弹性增长，"审到无新发现"这个出口结构性达不到（全绿树上仍审出 8 条确认级），且审查审不出数据契约类问题（8 条全穿过了双循环）。故收口出口改为：
+   - (a) **第一层 · 对抗形状注入器全绿**：`tests/test_dirty_shape_regression.py` 等把 8 类脏形状固化成 CI 回归，进 fast tier（T4-1）。
+   - (b) **第二层 · 公开数据集端到端 + KS 达标**：GiveMeSomeCredit/Home Credit（用户投放）跑通、`agent KS ≥ 人工精调基线 − 0.005`（T4-2；基线地面真值落盘）。
+   - (c) **第三层 · 真实材料对账 checklist 至少一份签字**：[v2-real-materials-reconciliation-checklist.md](v2-real-materials-reconciliation-checklist.md) 全项通过（T4-3）。
+   - (d) **一轮范围化 review**：只审本期 diff、只修 critical/high、**不循环**；全量 review 降为大重构后按需触发。
+   - 三层数据判据全绿 + 一轮范围化 review = 收口。审查轮数封顶，真实数据 smoke 作为出口。
+
+**产品选择清单（DoD-7 · 2026-07-04 拍板记录 · 显式"不做/推迟"而非未完成）**：以下能力经用户拍板明确不在完全体 v1 范围，记为产品选择，不阻塞收口：
+
+| 项 | 决策 | 理由 |
+|---|---|---|
+| 反欺诈（名单/设备指纹/关系图谱） | **不做但留口** | 另一门学科（规则+名单+设备+图），与评分建模的方法论和基础设施都不同；通用建模漏斗仍可训练欺诈标签模型。记入长线区候选，视业务需要再评估。 |
+| 实时评分 API + 决策引擎对接 | **推迟** | 批量评分 API + 影子运行是 Phase C 的短路径候选；实时 serving 需独立工程。 |
+| 监控调度器 + 推送告警 | **推迟** | 监控指标齐全，缺 cron 调度与 webhook/邮件出口；Phase C 候选。 |
+| 征信报文解析（人行二代/三方报文） | **推迟** | 工程量最大，需另立探索 spec 后评估。 |
+| maker-checker 多角色审批 | **推迟** | 单机单用户是既定架构决策；可低成本补"审批留痕导出"（审计路由已有 80% 地基）。 |
+| 可信数字层：一键重放 + 全链血缘图 | **推迟** | T3 MVP 交付双路对账 + 轻血缘元组；一键重放与跨报告血缘查询是后续扩展。 |
+| 可信数字层：EL total 双路对账 | **推迟** | reconcile 框架已就绪，但 EL 的马尔可夫迁移矩阵参考实现复杂到"很可能复现生产 bug 而非抓到它"，故 4/5 headline 数字有交叉核对、EL 诚实推迟。 |
+| import 环拆解 + app.js/renderers.py 拆分 | **推迟（增量策略）** | 执行"新功能进新文件 + 搬一个算一个"，renderers.py 因安全部件属性优先；不停下大重构。 |
+
 ---
 
 ## 1. 阶段〇：PR 前收口（0.5–1 天）
@@ -283,6 +303,75 @@
 | ✅ | FIN-1 | 落地核验完成（docs/reviews/2026-07-03-fin1-landing-verification.md）：182/182 全落地零落偏（13 核验 agent+对抗复核层零触发+协调者 5 条高风险抽检一致）；双向核验含 SEL-1 反向陈旧记账与 DOM-8/11/12 吸收不完整的先行补齐 |
 | ✅ | FIN-2 | 全量审查完成（docs/reviews/2026-07-03-fin2-fin3-closing-review.md）：8 镜头+三席对抗表决（47 agents）；4 确认 HIGH、11 条驳杀、bandit 42 中危全裁误报、10 新工具 manifest 零漂移、失败镜头补跑收口 |
 | ✅ | FIN-3 | 修复循环停机（同报告）：15 commits（4 HIGH 含 .staging 目录 TOCTOU 40 连跑零失败）；第二轮逐 commit 复审 14/14 correct、零新 critical/high → 停机条件达成；收官门禁 2779 passed / 0 failed |
+
+## 11.6 信任优先计划 Phase T / Phase C（2026-07-04 批准）
+
+> 总纲与 6 项拍板记录见 [v2-trust-first-plan.md](v2-trust-first-plan.md)；依据 [2026-07-04 全量读码报告](../reviews/2026-07-04-full-read-and-owner-qa.md)。**DoD-11 修订案已批准**（数据判据为主 + 范围化 review 不循环），文本改写随 T4-4 落地。收口 = 三层数据判据全绿 + 一轮仅限本期 diff 的范围化 review。
+
+**T0 清障 PR（无 spec，可与 T1 spec 评审并行）**
+
+| 状态 | ID | 事项 |
+|---|---|---|
+| ✅ | T0-1 | 删 `run_validation`+`EngineInputs`（先迁 `_filter_feature_categories`/`_model_features` 并更新 cellgen 字符串 import；同步处理 test_engine.py 与 test_e2e 的 engine 分支） |
+| ✅ | T0-2 | 删 `LLMClient` Protocol、`ToolResourceError`、`WorkerProtocolError`（保留 `ToolTimeoutError`）、`ModelingRepository.set_model_artifact_baseline_distributions`(+helper)、`attach_experiment_result` |
+| ✅ | T0-3 | 删 glow 帧图 00-09、`readErrorMessage`、`governanceExtensionPanelDefinitions` |
+| ✅ | T0-4 | `data_dictionary` 从 agent/ 挪至共享层，消除 3 个 pack 向上 import |
+| ✅ | T0-5 | CSS 死选择器 token 级手术清理（严格按 2026-07-04 报告 Q4.3 警告执行） |
+| ✅ | T0-6 | 产品判断×2：join gate 取消按钮接线与否；`_sample` 包保留/loader 跳过 |
+
+**T1 语义正确性修复包（spec 先行审）**
+
+| 状态 | ID | 事项 |
+|---|---|---|
+| ✅ | T1-A1 | vintage `label_semantics`（incremental/snapshot）参数+强制确认门；`VintageCurve.warnings` 贯通至 renderer |
+| ✅ | T1-A2 | EL `total_el` 改参考快照月口径，求和基础进 assumptions |
+| ✅ | T1-A3 | 预处理链新增 `sentinel` step kind，重放先行掩码 |
+| ✅ | T1-A4 | slice bad_rate/approval_rate NULL 剔除分母，附 `unlabeled_count` |
+| ✅ | T1-A5 | join 空白键 `nullif('')` 三方统一（执行/诊断/pandas fallback） |
+| ✅ | T1-A6 | float64 整数键规范化统一+超精度红旗，SQL/Python 双路一致 |
+| ✅ | T1-B7 | 匹配率诊断与执行 join 读取器统一（all_varchar vs typed 分裂） |
+| ✅ | T1-B8 | join 键跨文件 dtype 一致性检查+红旗（长 ID 阈值门控问题） |
+| ✅ | T1-C9 | 冠军证据渲染真实 `selection_metric`，方向词按符号 |
+| ✅ | T1-C10 | `is_start_validation_intent` 否定标记+疑问句护栏 |
+| ✅ | T1-D11 | select_features holdout 恢复安全默认（修 templates 传参覆盖） |
+| ✅ | T1-D12 | `task.time_col` 传入建模 setup，非别名列名可触发时间 OOT |
+| ✅ | T1-D13 | screen 接入 NaN 标签确认门 |
+| ✅ | T1-D14 | refit 5% carve 指标剔出 headline metrics |
+
+**T2 重复实现收敛**
+
+| 状态 | ID | 事项 |
+|---|---|---|
+| ✅ | T2-1 | 标签 0/1 强转收敛至 labels.py（~30 处）+ 裸 to_numeric 守卫 |
+| ✅ | T2-2 | 分数分段累计表参数化单内核，5 处调用面迁移 |
+| ✅ | T2-3 | strategy/bands 边界改用 equal_frequency_edges |
+| ✅ | T2-4 | 删 effectiveness.compute_auc；KS 标量取自 feature_ks |
+| ✅ | T2-5 | 顺手三条：WOE/IV helper 提取、格式化 helper 合并、MOB resolver 统一 |
+
+**T3 可信数字层 MVP**
+
+| 状态 | ID | 事项 |
+|---|---|---|
+| ✅ | T3-1 | 5 个 gate 数字双路对账+阻断红旗（join 匹配/vintage/EL/KS/bad_rate） |
+| ✅ | T3-2 | 轻血缘元组（dataset_fingerprint/code_version/params_digest/seed）进 gate 渲染 |
+
+**T4 三层数据判据 harness**
+
+| 状态 | ID | 事项 |
+|---|---|---|
+| ✅ | T4-1 | 对抗形状注入器（全部已知脏形状，进 CI fast tier，T1 每项绑定用例） |
+| ✅ | T4-2 | 公开数据集端到端（GiveMeSomeCredit+Home Credit）+ KS 基线地面真值实验与达标线 |
+| ✅ | T4-3 | 真实材料人工对账 checklist（vintage 对财务口径/EL 对拨备/bad_rate 对报表） |
+| ✅ | T4-4 | DoD-11 文本改写落地；DoD-7 产品选择清单追加（反欺诈留口、评分 API/监控调度/征信解析显式推迟） |
+
+**Phase C（Phase T 收口后启动）**
+
+| 状态 | ID | 事项 |
+|---|---|---|
+| ✅ | C1-1 | `tool_define_label`：观察期/表现期/逾期阈值参数化构造 0/1 目标 |
+| ✅ | C1-2 | cohort 成熟度检查+不成熟强制确认门 |
+| ✅ | C1-3 | roll_rate→定坏口径建议桥接 |
+| ✅ | C1-4 | 标签构造 stage 接入 workflow 模板 |
 
 ## 12. 长线追踪（不阻塞完全体 v1；⏸️ 需写明理由）
 

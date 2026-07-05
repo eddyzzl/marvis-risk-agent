@@ -131,6 +131,89 @@ def test_vintage_summary_uses_actual_mob_axis_for_non_contiguous_mobs():
     }
 
 
+def _snapshot_flag_frame() -> pd.DataFrame:
+    # Snapshot/ever-bad flags: a loan bad at an earlier MOB stays bad at later MOBs.
+    return pd.DataFrame({
+        "loan_month": ["202601"] * 12,
+        "mob": [0, 0, 0, 0] + [1, 1, 1, 1] + [2, 2, 2, 2],
+        "bad": [1, 0, 0, 0] + [1, 1, 0, 0] + [1, 1, 0, 0],
+    })
+
+
+def test_vintage_curve_snapshot_picks_bad_rate_metric():
+    frame = _snapshot_flag_frame()
+    points = compute_vintage_curve(
+        frame,
+        cohort_col="loan_month",
+        mob_col="mob",
+        target_col="bad",
+        label_semantics="snapshot",
+    )
+    bad_rate_wide = vintage_curve_wide(points, metric="bad_rate")
+
+    snapshot_curve = vintage_curve(
+        frame,
+        cohort_col="loan_month",
+        mob_col="mob",
+        bad_col="bad",
+        mob_max=3,
+        label_semantics="snapshot",
+    )
+    # Snapshot path drives the wide curve off metric='bad_rate' (no double-count).
+    assert snapshot_curve.curves["2026-01"] == list(bad_rate_wide["2026-01"])
+    assert snapshot_curve.curves["2026-01"] == [pytest.approx(1 / 4), pytest.approx(2 / 4), pytest.approx(2 / 4)]
+
+    incremental_points = compute_vintage_curve(
+        frame,
+        cohort_col="loan_month",
+        mob_col="mob",
+        target_col="bad",
+        label_semantics="incremental",
+    )
+    cum_wide = vintage_curve_wide(incremental_points, metric="cum_bad_rate")
+    incremental_curve = vintage_curve(
+        frame,
+        cohort_col="loan_month",
+        mob_col="mob",
+        bad_col="bad",
+        mob_max=3,
+        label_semantics="incremental",
+    )
+    assert incremental_curve.curves["2026-01"] == list(cum_wide["2026-01"])
+
+
+def test_vintage_curve_threads_warnings_into_contract():
+    frame = _snapshot_flag_frame()
+    # Snapshot-flag data declared incremental -> monotone red flag threads through.
+    curve = vintage_curve(
+        frame,
+        cohort_col="loan_month",
+        mob_col="mob",
+        bad_col="bad",
+        mob_max=3,
+        label_semantics="incremental",
+    )
+    assert curve.warnings
+    assert any("snapshot" in w.lower() or "快照" in w for w in curve.warnings)
+
+
+def test_vintage_curve_defaults_to_incremental_when_semantics_omitted():
+    frame = pd.DataFrame({
+        "loan_month": ["202601", "202601", "202601", "202601", "202601", "202601"],
+        "mob": [0, 0, 1, 1, 2, 2],
+        "bad": [0, 0, 1, 0, 1, 0],
+    })
+    # The pure wrapper keeps an incremental default so validation/modeling callers stay
+    # green; the *tool* is what hard-gates on an undeclared value. Incremental accumulates
+    # the per-MOB bads (0, then 0+1, then 0+1+1) over the cohort denominator (2).
+    default_curve = vintage_curve(frame, cohort_col="loan_month", mob_col="mob", bad_col="bad", mob_max=3)
+    explicit_curve = vintage_curve(
+        frame, cohort_col="loan_month", mob_col="mob", bad_col="bad", mob_max=3, label_semantics="incremental"
+    )
+    assert default_curve.curves["2026-01"] == [0.0, pytest.approx(1 / 2), pytest.approx(2 / 2)]
+    assert default_curve.curves == explicit_curve.curves
+
+
 def test_strategy_package_exports_vintage_functions():
     assert strategy_pack.vintage_curve is vintage_curve
     assert strategy_pack.vintage_summary is vintage_summary

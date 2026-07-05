@@ -138,11 +138,14 @@ def test_vintage_agent_start_builds_plan_and_returns_curve(client, tmp_path):
     confirmed = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
     assert confirmed.status_code == 202, confirmed.text
     done = confirmed.json()["messages"][-1]
-    assert "Vintage 曲线完成" in done["content"]
-    assert any(
-        table["title"] == "Vintage 累计坏账率"
-        for table in done["metadata"]["tables"]
-    )
+    # A1: the vintage kernel always accumulates the bad column across MOBs; on a
+    # snapshot/ever-bad flag that silently double-counts. The strategy vintage tool now
+    # refuses to guess the cumulation basis, so an undeclared label_semantics halts at a
+    # gate (mirrors the NaN-label gate) offering both concrete semantics to the user.
+    assert "label_semantics" in done["content"]
+    assert "incremental" in done["content"] and "snapshot" in done["content"]
+    envelope = done["metadata"].get("failure_envelope") or {}
+    assert envelope.get("error_kind") == "label_semantics_not_declared"
 
 
 def _bare_strategy_task(**overrides) -> TaskRecord:

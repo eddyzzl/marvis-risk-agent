@@ -38,3 +38,6 @@ docs/assets/
 .preview-workspace/
 marvis.egg-info/
 .playwright-cli/
+
+# user-provided public datasets for the KS-baseline harness (T4-2); never checked in
+datasets/

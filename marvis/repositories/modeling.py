@@ -119,23 +119,6 @@ class ModelingRepository:
             for row in rows
         ]
 
-    def attach_experiment_result(
-        self,
-        experiment_id: str,
-        *,
-        metrics: ModelMetrics,
-        artifact_id: str,
-        status: str = "trained",
-    ) -> None:
-        with connect(self.db_path) as conn:
-            _attach_experiment_result_row(
-                conn,
-                experiment_id,
-                metrics=metrics,
-                artifact_id=artifact_id,
-                status=status,
-            )
-
     def attach_experiment_result_with_artifact_and_audit(
         self,
         experiment_id: str,
@@ -212,10 +195,6 @@ class ModelingRepository:
     def set_model_artifact_params(self, artifact_id: str, params: dict) -> None:
         with connect(self.db_path) as conn:
             _set_model_artifact_params_row(conn, artifact_id, params)
-
-    def set_model_artifact_baseline_distributions(self, artifact_id: str, baseline_distributions: dict) -> None:
-        with connect(self.db_path) as conn:
-            _set_model_artifact_baseline_distributions_row(conn, artifact_id, baseline_distributions)
 
     def set_model_artifact_params_with_audit(
         self,
@@ -439,21 +418,6 @@ def _set_model_artifact_params_row(
         raise KeyError(artifact_id)
 
 
-def _set_model_artifact_baseline_distributions_row(
-    conn: sqlite3.Connection,
-    artifact_id: str,
-    baseline_distributions: dict,
-) -> None:
-    cursor = conn.execute(
-        """
-        UPDATE model_artifacts
-           SET baseline_distributions_json = ?
-         WHERE id = ?
-        """,
-        (_dump_json_any(baseline_distributions), artifact_id),
-    )
-    if cursor.rowcount == 0:
-        raise KeyError(artifact_id)
 
 
 def _model_artifact_from_row(row: sqlite3.Row) -> ModelArtifact:
