@@ -33,6 +33,7 @@ generated-word-html-preview.png
 marvis-download-buttons-snapshot.md
 docs/assets/
 .scratch_mascot/
+.scratch_confirm_dialog/
 
 # runtime / build artifacts (not source)
 .preview-workspace/

@@ -140,6 +140,9 @@
   --tone-validation: #2aa158;
   --tone-strategy: #df9326;
   --tone-vintage: #d35d87;
+  /* 确认弹窗 glyph 的琥珀:文字级 --warning(#8a5400) 做实心填充会发黑,
+     取 --warning-subtle 的基色 #d97706,与 welcome 图标的 tone 亮度一致 */
+  --tone-confirm-warn: #d97706;
   --report-tone-cool-blue: #3A6EA5;
   --report-tone-cool-blue-soft: #E4ECF6;
   --report-tone-warm-orange: #D97706;
@@ -281,6 +284,7 @@ body[data-theme="dark"] {
   --tone-validation: #54c47e;
   --tone-strategy: #ecb24f;
   --tone-vintage: #e389aa;
+  --tone-confirm-warn: #ffd166;
   --report-tone-cool-blue: #7db7f0;
   --report-tone-cool-blue-soft: #1d3f63;
   --report-tone-warm-orange: #f0b35d;
@@ -1958,7 +1962,7 @@ body.is-resizing {
 }
 
 .platform-confirm-dialog {
-  width: min(420px, calc(100vw - 32px));
+  width: min(380px, calc(100vw - 32px));
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
   background: var(--surface);
@@ -1967,86 +1971,318 @@ body.is-resizing {
     var(--glass-edge);
 }
 
+/* Stronger, glassier scrim than the default task-dialog backdrop — the confirm
+   is a hero moment and the content behind it should fall away. */
+.platform-confirm-dialog::backdrop {
+  background: var(--scrim-bg);
+  -webkit-backdrop-filter: blur(9px) saturate(1.25);
+  backdrop-filter: blur(9px) saturate(1.25);
+}
+
 .platform-confirm-panel {
   margin: 0;
-  padding: 20px;
+  padding: 25px 24px 20px;
+  text-align: center;
 }
 
-.platform-confirm-head {
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
-  gap: 12px;
-  align-items: flex-start;
-}
-
-.platform-confirm-icon {
+/* Glyph follows the welcome task-card icon language: no tile, solid silhouette
+   filled with the tone color, opaque 30%/62% shade layers for depth, details
+   carved with the surface color, and a sheen streak masked to the silhouette. */
+.platform-confirm-glyph {
+  position: relative;
   display: inline-flex;
-  width: 38px;
-  height: 38px;
+  width: 48px;
+  height: 48px;
   align-items: center;
   justify-content: center;
-  color: var(--warning);
-  background: transparent;
-  box-shadow: none;
+  margin-bottom: 12px;
+  color: var(--tone-confirm-warn);
 }
 
-.platform-confirm-icon svg {
+.platform-confirm-glyph svg {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  width: 42px;
+  height: 42px;
+  fill: currentColor;
+  stroke: none;
+}
+
+.platform-confirm-glyph svg .back {
+  fill: color-mix(in srgb, currentColor 30%, var(--surface));
+}
+
+.platform-confirm-glyph svg .mid {
+  fill: color-mix(in srgb, currentColor 62%, var(--surface));
+}
+
+.platform-confirm-glyph svg .cs {
+  fill: none;
+  stroke: var(--surface);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.platform-confirm-glyph svg .platform-confirm-warn-dot {
+  stroke-width: 2.6;
+}
+
+.platform-confirm-glyph-trash {
+  display: none;
+}
+
+.platform-confirm-dialog[data-tone="danger"] .platform-confirm-glyph {
+  color: var(--danger);
+}
+
+.platform-confirm-dialog[data-tone="danger"] .platform-confirm-glyph-trash {
   display: block;
-  width: 32px;
-  height: 32px;
+}
+
+.platform-confirm-dialog[data-tone="danger"] .platform-confirm-glyph-warn {
+  display: none;
+}
+
+.platform-confirm-sheen {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20d%3D%27M9.98%205.1a2.33%202.33%200%200%201%204.04%200l6.0%2010.5a2.33%202.33%200%200%201-2.02%203.5H6.0a2.33%202.33%200%200%201-2.02-3.5Z%27%20fill%3D%27black%27%2F%3E%3C%2Fsvg%3E");
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: 42px 42px;
+  mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20d%3D%27M9.98%205.1a2.33%202.33%200%200%201%204.04%200l6.0%2010.5a2.33%202.33%200%200%201-2.02%203.5H6.0a2.33%202.33%200%200%201-2.02-3.5Z%27%20fill%3D%27black%27%2F%3E%3C%2Fsvg%3E");
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: 42px 42px;
+}
+
+.platform-confirm-dialog[data-tone="danger"] .platform-confirm-sheen {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Crect%20x%3D%275.1%27%20y%3D%2717.2%27%20width%3D%2713.8%27%20height%3D%273.5%27%20rx%3D%271.75%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%279.5%27%20y%3D%273.5%27%20width%3D%275%27%20height%3D%272.5%27%20rx%3D%271.25%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%274.5%27%20y%3D%275.9%27%20width%3D%2715%27%20height%3D%272.7%27%20rx%3D%271.35%27%20fill%3D%27black%27%2F%3E%3Cpath%20d%3D%27M6.7%209.5%20L7.4%2018.7%20A2.35%202.35%200%200%200%209.74%2020.85%20H14.26%20A2.35%202.35%200%200%200%2016.6%2018.7%20L17.3%209.5%20Z%27%20fill%3D%27black%27%2F%3E%3C%2Fsvg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Crect%20x%3D%275.1%27%20y%3D%2717.2%27%20width%3D%2713.8%27%20height%3D%273.5%27%20rx%3D%271.75%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%279.5%27%20y%3D%273.5%27%20width%3D%275%27%20height%3D%272.5%27%20rx%3D%271.25%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%274.5%27%20y%3D%275.9%27%20width%3D%2715%27%20height%3D%272.7%27%20rx%3D%271.35%27%20fill%3D%27black%27%2F%3E%3Cpath%20d%3D%27M6.7%209.5%20L7.4%2018.7%20A2.35%202.35%200%200%200%209.74%2020.85%20H14.26%20A2.35%202.35%200%200%200%2016.6%2018.7%20L17.3%209.5%20Z%27%20fill%3D%27black%27%2F%3E%3C%2Fsvg%3E");
+}
+
+.platform-confirm-sheen::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: -18px;
+  width: 9px;
+  height: 68px;
+  border-radius: var(--radius-pill);
+  opacity: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.42) 28%,
+    rgba(255, 255, 255, 0.98) 50%,
+    rgba(255, 255, 255, 0.42) 72%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  transform: translateX(0) skewX(-18deg);
+  will-change: transform, opacity;
+}
+
+.platform-confirm-panel h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.2px;
+}
+
+.platform-confirm-panel p {
+  margin: 7px 0 0;
+  color: var(--text-secondary);
+  font-size: 13.5px;
+  line-height: 1.62;
+}
+
+.platform-confirm-panel p strong {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.platform-confirm-purge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 13px;
+}
+
+.platform-confirm-purge[hidden] {
+  display: none;
+}
+
+.platform-confirm-purge-label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.platform-confirm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3.5px 10px 3.5px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--danger-soft);
+  border: 1px solid color-mix(in srgb, var(--danger-border) 72%, transparent);
+  color: var(--danger-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.platform-confirm-chip svg {
+  width: 12px;
+  height: 12px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
+  opacity: 0.85;
 }
 
-.platform-confirm-icon-plate {
-  fill: color-mix(in srgb, currentColor 8%, transparent);
-  stroke: color-mix(in srgb, currentColor 28%, transparent);
-  stroke-width: 1.2;
-}
-
-.platform-confirm-icon-triangle {
-  fill: color-mix(in srgb, currentColor 7%, transparent);
-  stroke-width: 1.7;
-}
-
-.platform-confirm-icon-mark {
-  stroke-width: 2.1;
-}
-
-.platform-confirm-icon-dot {
-  stroke-width: 2.4;
-}
-
-.platform-confirm-dialog[data-tone="danger"] .platform-confirm-icon {
-  color: var(--danger);
-}
-
-.platform-confirm-copy h2 {
-  margin: 1px 0 7px;
-  font-size: 18px;
-  line-height: 1.25;
-}
-
-.platform-confirm-copy p {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 14px;
-  line-height: 1.55;
+.platform-confirm-chip b {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 .platform-confirm-actions {
   display: flex;
-  justify-content: flex-end;
   gap: 10px;
   margin-top: 22px;
 }
 
 .platform-confirm-actions .button {
-  min-width: 82px;
+  flex: 1;
   min-height: 38px;
+}
+
+/* Entrance: panel pops in, the glyph lands, the sheen sweeps once (the same
+   streak the welcome task cards flash on hover), then the trash lid peeks. */
+.platform-confirm-dialog[open] {
+  animation: platform-confirm-in 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.platform-confirm-dialog[open]::backdrop {
+  animation: platform-confirm-backdrop-in 240ms ease;
+}
+
+.platform-confirm-dialog[open] .platform-confirm-glyph {
+  animation: platform-confirm-glyph-pop 300ms cubic-bezier(0.3, 1.25, 0.45, 1) 70ms both;
+}
+
+.platform-confirm-dialog[open] .platform-confirm-sheen::before {
+  animation: platform-confirm-sheen-sweep 560ms ease-out 430ms both;
+}
+
+.platform-confirm-dialog[open] .platform-confirm-trash-lid {
+  animation: platform-confirm-lid-peek 560ms cubic-bezier(0.34, 1.3, 0.5, 1) 480ms both;
+  transform-origin: 17px 7.2px;
+}
+
+.platform-confirm-dialog[open] .platform-confirm-purge:not([hidden]) {
+  animation: platform-confirm-rise 260ms ease 150ms both;
+}
+
+.platform-confirm-dialog[open] .platform-confirm-actions {
+  animation: platform-confirm-rise 260ms ease 210ms both;
+}
+
+@keyframes platform-confirm-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes platform-confirm-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes platform-confirm-glyph-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.7);
+  }
+  62% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes platform-confirm-sheen-sweep {
+  0% {
+    opacity: 0;
+    transform: translateX(0) skewX(-18deg);
+  }
+  8% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(80px) skewX(-18deg);
+  }
+}
+
+@keyframes platform-confirm-lid-peek {
+  0% {
+    transform: none;
+  }
+  40% {
+    transform: translateY(-1px) rotate(-6deg);
+  }
+  74% {
+    transform: translateY(-0.2px) rotate(1.6deg);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+@keyframes platform-confirm-rise {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .platform-confirm-dialog[open],
+  .platform-confirm-dialog[open]::backdrop,
+  .platform-confirm-dialog[open] .platform-confirm-glyph,
+  .platform-confirm-dialog[open] .platform-confirm-sheen::before,
+  .platform-confirm-dialog[open] .platform-confirm-trash-lid,
+  .platform-confirm-dialog[open] .platform-confirm-purge:not([hidden]),
+  .platform-confirm-dialog[open] .platform-confirm-actions {
+    animation: none;
+  }
 }
 
 .platform-confirm-dialog[data-tone="danger"] .platform-confirm-affirmative {
@@ -2060,6 +2296,11 @@ body.is-resizing {
   background: color-mix(in srgb, var(--danger) 88%, #000000);
   border-color: color-mix(in srgb, var(--danger) 88%, #000000);
   box-shadow: var(--button-solid-shadow-hover);
+}
+
+/* 暗色的 --danger 是浅鲑鱼红,白字对比不足,按苹果暗色危险键用深色字 */
+body[data-theme="dark"] .platform-confirm-dialog[data-tone="danger"] .platform-confirm-affirmative {
+  color: #2a1512;
 }
 
 .dialog-head {
