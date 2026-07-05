@@ -637,7 +637,14 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
             feature_columns=["x1", "x2"],
         )
     )
-    frame = pd.concat([_business_frame().assign(split="train", x1=[0.1, 0.2, 0.3, 0.4], x2=[0.4, 0.3, 0.2, 0.1])] * 40, ignore_index=True)
+    # Non-collinear fixture with x1 as the clearly dominant predictor of y:
+    # x1 separates the classes (low @ y=0, high @ y=1) while x2 is orthogonal
+    # to y (equal means across classes). A prior fixture used x2 = 0.5 - x1
+    # (perfect collinearity), which made |coef_x1| ~= |coef_x2| and let
+    # BLAS/solver noise flip the feature-importance ordering across
+    # environments -- an intermittent `first_row["feature"] == "x1"` CI
+    # failure on the 特征重要性 sheet.
+    frame = pd.concat([_business_frame().assign(split="train", x1=[0.1, 0.8, 0.2, 0.9], x2=[0.2, 0.7, 0.7, 0.2])] * 40, ignore_index=True)
     frame = frame.drop(columns=["score"])
     frame.loc[80:119, "split"] = "test"
     frame.loc[120:, "split"] = "oot"
@@ -830,7 +837,14 @@ def _report_runner(tmp_path):
             feature_columns=["x1", "x2"],
         )
     )
-    frame = pd.concat([_business_frame().assign(split="train", x1=[0.1, 0.2, 0.3, 0.4], x2=[0.4, 0.3, 0.2, 0.1])] * 40, ignore_index=True)
+    # Non-collinear fixture with x1 as the clearly dominant predictor of y:
+    # x1 separates the classes (low @ y=0, high @ y=1) while x2 is orthogonal
+    # to y (equal means across classes). A prior fixture used x2 = 0.5 - x1
+    # (perfect collinearity), which made |coef_x1| ~= |coef_x2| and let
+    # BLAS/solver noise flip the feature-importance ordering across
+    # environments -- an intermittent `first_row["feature"] == "x1"` CI
+    # failure on the 特征重要性 sheet.
+    frame = pd.concat([_business_frame().assign(split="train", x1=[0.1, 0.8, 0.2, 0.9], x2=[0.2, 0.7, 0.7, 0.2])] * 40, ignore_index=True)
     frame = frame.drop(columns=["score"])
     frame.loc[80:119, "split"] = "test"
     frame.loc[120:, "split"] = "oot"
