@@ -78,6 +78,12 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
   const renderMarkdown = renderers.renderAgentMarkdown || markdownRenderer;
   const renderTables = renderers.renderTables || emptyRenderer;
   const renderModelDelivery = renderers.renderModelDelivery || emptyRenderer;
+  // The plain-gate confirm control (a gate with no structured widget). In manual
+  // mode ALL interactive controls live in this middle region now, so the pending
+  // gate section renders its own confirm button here instead of the rail. Widget
+  // gates (join_c1 / screen / modeling_setup / dedup) already carry their own
+  // primary action inside the widget, so this renders nothing for them.
+  const renderGateConfirm = renderers.renderGateConfirm || emptyRenderer;
 
   const sections = [];
   const latestScreenMessageId = latestInteractiveScreenMessageId(messages);
@@ -87,6 +93,12 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
     const meta = message.metadata || {};
     if (meta.kind === "overview" || meta.kind === "plan_overview") continue;
     const isPendingGate = meta.kind === "gate" && String(message.id || "") === lastMessageId;
+    // A stable per-step anchor so the rail's lightweight "待确认" locate entry can
+    // scroll to (and flash) exactly this middle gate section.
+    const stepId = meta.step_id ? String(meta.step_id) : "";
+    const gateAttr = isPendingGate
+      ? ` data-driver-gate-section="${escapeAttr(stepId)}"`
+      : "";
     const sectionClass = isPendingGate ? "driver-analysis-section is-gate-pending" : "driver-analysis-section";
     if (meta.error) {
       sections.push(
@@ -96,32 +108,46 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
     }
     const intro = renderMarkdown(stripChatInstructions(message.content || ""));
     if (meta.join_c1) {
-      sections.push(`<section class="${sectionClass}">${intro}${driverGateBodyHtml(message, renderers)}</section>`);
+      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers)}</section>`);
       continue;
     }
     if (meta.screen) {
       const interactive = String(message.id || "") === latestScreenMessageId;
       sections.push(
-        `<section class="${sectionClass}">${intro}${driverGateBodyHtml(message, renderers, { interactive })}</section>`,
+        `<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive })}</section>`,
       );
       continue;
     }
     if (meta.modeling_setup) {
       const interactive = meta.kind === "gate";
-      sections.push(`<section class="${sectionClass}">${intro}${driverGateBodyHtml(message, renderers, { interactive })}</section>`);
+      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive })}</section>`);
       continue;
     }
     if (meta.dedup) {
-      sections.push(`<section class="${sectionClass}">${intro}${driverGateBodyHtml(message, renderers)}</section>`);
+      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers)}</section>`);
       continue;
     }
     if (meta.model_delivery) {
-      sections.push(`<section class="${sectionClass}">${intro}${renderModelDelivery(message)}${renderTables(message)}</section>`);
+      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${renderModelDelivery(message)}${renderTables(message)}</section>`);
       continue;
     }
     const tables = renderTables(message);
-    if (!String(message.content || "").trim() && !tables) continue;
-    sections.push(`<section class="${sectionClass}">${intro}${tables}</section>`);
+    // A plain gate (no widget) still needs its confirm control; render it in this
+    // middle section. Non-gate plain sections with no text and no tables are
+    // skipped as before.
+    const confirm = isPendingGate ? renderGateConfirm(message) : "";
+    if (!String(message.content || "").trim() && !tables && !confirm) continue;
+    sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${tables}${confirm}</section>`);
   }
   return sections.join("") || '<div class="plan-rail-empty">尚无分析结果，请在右侧步骤栏操作。</div>';
+}
+
+// Minimal attribute escaper for the anchor id (backend step slugs are safe, but
+// guard the attribute value so a stray quote can't break the section markup).
+function escapeAttr(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }

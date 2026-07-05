@@ -1446,6 +1446,11 @@ body.search-active .app-shell.sidebar-collapsed .delete-task-button {
 .task-list {
   display: grid;
   gap: 8px;
+  /* overflow-y:auto alone leaves the x-axis computed as auto (CSS spec), so a
+     stray wide child could let the whole task list slide sideways. Pin it: the
+     rows already wrap long names (overflow-wrap:anywhere), so this only ever
+     scrolls vertically. */
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 3px 10px 14px;
 }
@@ -4218,6 +4223,13 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* Per CSS spec, setting one axis to `auto` makes the other axis compute to
+     `auto` too — so a single overflow-y:auto here silently allowed horizontal
+     scrolling. An overlong unbreakable token (step id, error message, reset
+     list) then made the whole rail slide left and clip its content. Pin the
+     horizontal axis so the rail can only ever scroll vertically; long tokens
+     wrap instead (see overflow-wrap rules on the step text below). */
+  overflow-x: hidden;
   overflow-y: auto;
   /* Leave room below the last step so button drop-shadows are not
      clipped into a hard line by this scroll container's bottom edge. */
@@ -5919,6 +5931,20 @@ body[data-theme="dark"] .gate-card[data-gate-tone="review"] {
   border-left: 3px solid var(--warning);
   padding-left: 13px;
   background: color-mix(in srgb, var(--warning) 6%, transparent);
+}
+/* Locate-and-flash: the rail's lightweight "待确认" entry scrolls to this middle
+   gate section and restarts this highlight so the user's eye lands on the actual
+   confirm control (which lives here, not in the rail). */
+.driver-analysis-section.is-gate-pending.is-flash {
+  animation: driver-gate-section-flash 1.1s ease-out;
+}
+@keyframes driver-gate-section-flash {
+  0% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 45%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
 }
 
 .agent-memory-references {

@@ -840,38 +840,211 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   padding: 3px 9px;
   font-size: 12px;
 }
-.plan-step-retry {
-  display: grid;
+/* Rail keeps only a lightweight entry button for a failed step; the editable
+   form itself renders in the middle workspace (#planRetryPanel). */
+.plan-rail-substeps .plan-step-retry-open {
   grid-column: 1 / -1;
-  gap: 8px;
-  width: 100%;
+  justify-self: start;
   margin-top: 4px;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-}
-.plan-step-retry summary {
-  cursor: pointer;
-  color: var(--text);
+  min-height: 26px;
+  padding: 3px 10px;
   font-size: 12px;
-  font-weight: 650;
+}
+
+/* --- middle-workspace retry panel: the "编辑参数后重试" form(s) live here now,
+   with the same glass gate-card language as the other middle-region cards, and
+   room to breathe (no narrow-rail squeeze). --- */
+.plan-retry-panel {
+  display: grid;
+  gap: 14px;
+  width: 100%;
+  max-width: 100%;
+}
+.plan-retry-panel.hidden {
+  display: none;
+}
+.plan-retry-panel-head {
+  display: grid;
+  gap: 4px;
+}
+.plan-retry-panel-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+.plan-retry-panel-sub {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.plan-retry-panel-body {
+  display: grid;
+  gap: 14px;
+}
+.plan-retry-card {
+  position: relative;
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  max-width: 100%;
+  padding: 14px 16px 16px 18px;
+  border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--border));
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius, 14px);
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+  -webkit-backdrop-filter: blur(12px) saturate(1.4);
+  backdrop-filter: blur(12px) saturate(1.4);
+  box-shadow: var(--glass-edge);
+}
+body[data-theme="dark"] .plan-retry-card {
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+}
+.plan-retry-card.is-flash {
+  animation: plan-retry-card-flash 1.1s ease-out;
+}
+@keyframes plan-retry-card-flash {
+  0% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 45%, transparent), var(--glass-edge);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent, var(--glass-edge);
+  }
+}
+/* Open-state emphasis: when the user follows a rail locate entry into a middle
+   panel, the panel gets a highlighted left edge until the next task switch — a
+   persistent "this is the panel you were sent to" cue beyond the one-shot flash.
+   (Previously the .is-open class was toggled but had no CSS rule at all.) */
+.plan-retry-panel.is-open,
+.plan-driver-actions.is-open {
+  border-left: 3px solid var(--accent, var(--brand-primary));
+  padding-left: 12px;
+  border-radius: var(--radius, 14px);
+}
+
+/* --- middle-workspace driver-actions panel: the 开始执行 / 下载报告 controls
+   live here now (moved out of the narrow rail), sharing the glass card language
+   of the retry panel so all middle-region actions read as one family. --- */
+.plan-driver-actions {
+  display: grid;
+  gap: 14px;
+  width: 100%;
+  max-width: 100%;
+}
+.plan-driver-actions.hidden {
+  display: none;
+}
+.plan-driver-actions-body {
+  display: grid;
+  gap: 14px;
+}
+.plan-driver-action-card {
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  max-width: 100%;
+  padding: 14px 16px 16px 18px;
+  border: 1px solid color-mix(in srgb, var(--accent, var(--brand-primary)) 24%, var(--border));
+  border-left: 3px solid var(--accent, var(--brand-primary));
+  border-radius: var(--radius, 14px);
+  background: color-mix(in srgb, var(--accent, var(--brand-primary)) 6%, var(--surface));
+  -webkit-backdrop-filter: blur(12px) saturate(1.4);
+  backdrop-filter: blur(12px) saturate(1.4);
+  box-shadow: var(--glass-edge);
+}
+body[data-theme="dark"] .plan-driver-action-card {
+  background: color-mix(in srgb, var(--accent, var(--brand-primary)) 12%, var(--surface));
+}
+.plan-driver-action-card.is-flash {
+  animation: plan-driver-action-flash 1.1s ease-out;
+}
+@keyframes plan-driver-action-flash {
+  0% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, var(--brand-primary)) 45%, transparent), var(--glass-edge);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent, var(--glass-edge);
+  }
+}
+.plan-driver-action-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.plan-driver-action-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--accent, var(--brand-primary));
+  background: color-mix(in srgb, var(--accent, var(--brand-primary)) 15%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent, var(--brand-primary)) 38%, transparent);
+}
+.plan-driver-action-title {
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.plan-driver-action-card > .button {
+  justify-self: start;
+}
+.plan-retry-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.plan-retry-card-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 15%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--danger) 38%, transparent);
+}
+.plan-retry-card-title {
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.plan-retry-card-body {
+  display: grid;
+  gap: 12px;
 }
 .plan-retry-scope {
   margin: 0;
   color: var(--text-muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
+/* Roomy middle-region grid: wider min column than the old narrow rail so the
+   fields stretch out instead of stacking single-file. */
 .plan-retry-schema-fields {
   display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 .plan-retry-schema-field {
   display: grid;
-  gap: 4px;
+  gap: 5px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 .plan-retry-schema-field span {
   display: flex;
@@ -886,7 +1059,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 .plan-retry-schema-field input,
 .plan-retry-schema-field select {
   width: 100%;
-  min-height: 32px;
+  min-height: 36px;
 }
 .plan-retry-required {
   margin-left: 2px;
@@ -901,27 +1074,27 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
    retry_failed_step), it does not merge with the step's existing inputs. */
 .plan-retry-warning {
   margin: 0;
-  padding: 6px 8px;
+  padding: 8px 10px;
   color: var(--warning-strong);
   background: var(--warning-soft);
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 1.45;
 }
-.plan-step-retry label {
+.plan-retry-json-label {
   display: grid;
   gap: 6px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
 }
-.plan-step-retry textarea {
+.plan-retry-inputs {
   width: 100%;
-  min-height: 112px;
+  min-height: 128px;
   resize: vertical;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
 }
-.plan-step-retry button {
+.plan-retry-card-body > .button {
   justify-self: start;
 }
 .plan-step-await {
@@ -933,6 +1106,42 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   padding: 2px 9px;
   border-radius: var(--radius-pill);
   white-space: nowrap;
+}
+/* "报告已就绪" status badge on the rail's report step row (the actual 下载报告
+   button lives in the middle driver-actions panel). Quiet success tone. */
+.plan-step-ready {
+  align-self: center;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--success-strong, var(--text-secondary));
+  background: color-mix(in srgb, var(--success, #2f9e6a) 14%, var(--surface));
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+/* Lightweight rail "定位" entry — a quiet, link-like button that scrolls the
+   matching middle card into view and flashes it. Deliberately understated so it
+   reads as a locator, not an action (all real actions live in the middle now). */
+.plan-step-locate {
+  align-self: center;
+  min-height: 22px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-pill);
+  box-shadow: none;
+  white-space: nowrap;
+}
+.plan-step-locate:hover:not(:disabled),
+.plan-step-locate:focus-visible:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-soft);
+  border-color: var(--button-outline-border, var(--border-strong));
+  box-shadow: none;
 }
 /* UX-5: replan/no_progress event strip + replan badge + active sub-agent rows,
    rendered above the phase list in plan_rail_controller.js. Kept quiet (no
@@ -973,6 +1182,13 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   color: var(--warning-strong);
   background: var(--warning-soft);
   border: 1px solid var(--warning-border);
+}
+/* The event label interpolates a reason / user instruction that can carry long
+   unbreakable tokens. Let it shrink and wrap so the row never widens the rail. */
+.plan-rail-event > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .plan-rail-intervene {
   flex: 0 0 auto;
@@ -1018,6 +1234,10 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   padding: 16px 6px;
   color: var(--text-muted);
   font-size: 13px;
+  /* The open-gate variant interpolates a backend step name (等待确认：<name>);
+     a long unbroken slug must wrap, not push the rail into a horizontal scroll. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 /* VD-3: plan rail's genuine first load (no cached response yet) — see
    planRailSkeletonHtml() in plan_rail_controller.js. */
@@ -1043,6 +1263,14 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+/* Error banners pair a text child with a 重试 button; let the text shrink and
+   wrap so a long message can never push the rail into a horizontal scroll. */
+.plan-rail-fetch-error > span,
+.plan-rail-error > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 /* Manual-mode gate confirm, lives in the step rail (not the middle) */
 .plan-step-confirm {
@@ -1129,15 +1357,24 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   background: var(--surface-soft);
 }
 
-/* Plan-level 开始 control, shown under the steps before the plan starts */
+/* Plan-level 开始 status row, shown under the steps before the plan starts. The
+   actual 开始执行 button lives in the middle driver-actions panel; this rail row
+   is only a status line plus a lightweight locate entry. */
 .plan-rail-start {
   display: flex;
-  justify-content: stretch;
+  align-items: center;
+  gap: 8px;
   margin-top: 14px;
 }
-.plan-rail-start .plan-step-confirm {
-  margin-left: 0;
-  width: 100%;
+.plan-rail-start-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warning-strong);
+}
+.plan-rail-start .plan-step-locate {
+  flex: 0 0 auto;
 }
 /* --- Manual-mode analysis view (driver tasks) --- */
 /* Manual mode is a tool, not a conversation: render step outputs as plain analysis
