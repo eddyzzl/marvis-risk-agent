@@ -23,6 +23,29 @@ const tierLimitLabels = {
   max_replans: "最大重规划",
   allow_parallel: "允许并行",
   allow_network: "允许联网",
+  default_autonomy_level: "默认自治级别",
+  max_replan_iterations: "最大重规划",
+  max_plan_depth: "计划步数上限",
+  allow_explore_mode: "探索模式",
+  max_auto_gates: "单轮自动审查上限",
+};
+
+// Internal orchestrator knobs that mean nothing to a user reading a settings
+// page; name/summary already render as the card title/description.
+const hiddenTierLimitKeys = new Set([
+  "name",
+  "summary",
+  "failure_driven_replan",
+  "decision_point_replan",
+  "explore_segment_size",
+]);
+
+// 档位只调节自治预算（重规划次数、计划步数、探索模式），确认门和安全护栏在所有档位下都一致
+// （见 marvis/domain.py 的 capability_tier 说明）。摘要只描述预算差异，具体数值在下方标签里。
+const tierNameSummaries = {
+  conservative: "自治预算最小：重规划次数少、计划步数浅、关闭探索模式，适合高风险材料或首次试跑。",
+  balanced: "默认档位：自治预算适中、允许探索模式，适合常规分析和建模任务。",
+  autonomous: "自治预算最大：重规划次数多、计划步数深，适合熟悉的数据和探索性任务。",
 };
 
 function closest(target, selector) {
@@ -35,11 +58,21 @@ function tierDisplayName(tier = {}) {
 
 function tierSummary(tier = {}) {
   const raw = String(tier.summary || "");
-  return {
+  const translated = {
     "Guarded execution": "保守执行，适合高风险材料和首次试跑。",
     "Default autonomy": "默认自治，适合常规分析和建模任务。",
     "Higher autonomy": "更高自治，适合探索性任务和多步计划。",
   }[raw] || raw;
+  return translated || tierNameSummaries[tier.name] || "";
+}
+
+function tierLimitValue(key, value) {
+  if (typeof value === "boolean") return value ? "允许" : "关闭";
+  if (key === "default_autonomy_level") return `L${value}`;
+  if (key === "max_replan_iterations" || key === "max_replans") return `${value} 次`;
+  if (key === "max_plan_depth" || key === "max_steps") return `${value} 步`;
+  if (key === "max_auto_gates") return `${value} 个确认门`;
+  return String(value);
 }
 
 function tierOptionHtml(tier, defaultTier) {
@@ -68,8 +101,8 @@ export async function capabilitySelectHtml(deps = {}) {
 
 function tierLimitsHtml(tier) {
   const entries = Object.entries(tier)
-    .filter(([key]) => !["name", "summary"].includes(key))
-    .map(([key, value]) => `<span class="tier-limit"><b>${escapeHtml(tierLimitLabels[key] || key)}</b>: ${escapeHtml(value)}</span>`)
+    .filter(([key]) => !hiddenTierLimitKeys.has(key))
+    .map(([key, value]) => `<span class="tier-limit"><b>${escapeHtml(tierLimitLabels[key] || key)}</b>${escapeHtml(tierLimitLabels[key] ? "：" : ": ")}${escapeHtml(tierLimitValue(key, value))}</span>`)
     .join("");
   return entries || '<span class="tier-limit">暂无公开限制</span>';
 }
@@ -79,11 +112,17 @@ export function tierSettingsHtml(data = {}) {
   const selected = data.selected || data.default || "";
   const rows = tiers.map((tier) => {
     const isSelected = tier.name === selected;
+    const summary = tierSummary(tier);
     return `<label class="tier-row${isSelected ? " is-selected" : ""}">
       <input class="tier-row-radio" type="radio" name="capabilityTier" value="${escapeHtml(tier.name)}"${isSelected ? " checked" : ""} />
-      <h4>${escapeHtml(tierDisplayName(tier))}</h4>
-      <p>${escapeHtml(tierSummary(tier))}</p>
-      <div class="tier-limits">${tierLimitsHtml(tier)}</div>
+      <span class="tier-check" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false"><path d="M5 13l4 4L19 7"></path></svg>
+      </span>
+      <span class="tier-row-body">
+        <h4>${escapeHtml(tierDisplayName(tier))}</h4>
+        ${summary ? `<p>${escapeHtml(summary)}</p>` : ""}
+        <div class="tier-limits">${tierLimitsHtml(tier)}</div>
+      </span>
     </label>`;
   }).join("");
   return `<section class="tier-settings">

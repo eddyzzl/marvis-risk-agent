@@ -6722,16 +6722,19 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert "padding: 0" in runtime_panel_rule
     assert "border: 0" in runtime_panel_rule
     assert "background: transparent" in runtime_panel_rule
+    # Upload row is a flat prompt + a real shared-.button file picker (was a
+    # bespoke dashed ::after pseudo-button). The picker's native input is hidden.
     plugin_upload_rule = _css_rule(v2_css, ".governance-settings-dialog .plugin-upload")
-    assert "grid-template-columns: minmax(0, 1fr) auto" in plugin_upload_rule
-    plugin_upload_action_rule = _css_rule(v2_css, ".governance-settings-dialog .plugin-upload::after")
-    assert 'content: "选择文件"' in plugin_upload_action_rule
-    assert "border: 1px dashed var(--button-outline-border)" in plugin_upload_action_rule
-    assert "color: var(--button-outline-text)" in plugin_upload_action_rule
-    skill_reload_rule = _css_rule(v2_css, ".governance-settings-dialog .skill-manager > button")
-    assert "background: var(--button-primary-bg)" in skill_reload_rule
-    assert "color: var(--button-primary-text)" in skill_reload_rule
-    assert "box-shadow: var(--button-solid-shadow)" in skill_reload_rule
+    assert "display: flex" in plugin_upload_rule
+    assert "justify-content: space-between" in plugin_upload_rule
+    assert ".governance-settings-dialog .plugin-upload::after" not in v2_css
+    assert 'content: "选择文件"' not in v2_css
+    upload_input_rule = _css_rule(v2_css, ".plugin-upload-button input[type=\"file\"]")
+    assert "opacity: 0" in upload_input_rule
+    # In-dialog buttons all use the shared .button classes now — no bespoke
+    # .plugin-action / reload-skills button rules left to drift out of sync.
+    assert ".plugin-action {" not in v2_css
+    assert ".governance-settings-dialog .skill-manager button[data-reload-skills]" not in v2_css
     memory_toolbar_rule = _css_rule(v2_css, ".governance-settings-dialog .memory-manager-toolbar")
     assert "padding: 0 2px 2px" in memory_toolbar_rule
     memory_row_rule = _css_rule(
@@ -6754,21 +6757,37 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     )
     assert "border: 0" in memory_policy_group_rule
     assert "background: transparent" in memory_policy_group_rule
+    # Memory policy rows are flat preference rows (like 执行环境/模型引擎),
+    # separated by the shared hairline rule — not per-row boxed cards.
     memory_policy_row_rule = _css_rule(
         styles_css, '.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group > .settings-row'
     )
-    assert "border-radius: var(--radius-control)" in memory_policy_row_rule
-    assert "background: var(--surface-soft)" in memory_policy_row_rule
-    memory_policy_row_gap_rule = _css_rule(
-        styles_css, '.governance-panel[data-governance-panel-content="memory-policy"] .settings-row + .settings-row'
+    assert "padding: 13px 2px" in memory_policy_row_rule
+    assert "border-radius" not in memory_policy_row_rule
+    assert "background" not in memory_policy_row_rule
+    assert (
+        '.governance-panel[data-governance-panel-content="memory-policy"] .settings-row + .settings-row'
+        not in styles_css
     )
-    assert "border-top: 0" in memory_policy_row_gap_rule
+    # Empty status lines collapse so panels don't open with a blank band on top.
+    status_empty_rule = _css_rule(styles_css, ".governance-settings-dialog .status:empty")
+    assert "display: none" in status_empty_rule
+    # 查看与管理记忆 is an always-visible section now, not a collapsible fold:
+    # the <details>/<summary>/chevron are gone, replaced by a plain header with a
+    # top divider, and the raw-vs-distillation explainer is rendered inline.
     memory_manage_rule = _css_rule(styles_css, ".memory-manage")
-    assert "border: 0" in memory_manage_rule
     assert "background: transparent" in memory_manage_rule
-    memory_manage_summary_rule = _css_rule(styles_css, ".memory-manage-summary")
-    assert "border-radius: var(--radius-control)" in memory_manage_summary_rule
-    assert "background: var(--surface-soft)" in memory_manage_summary_rule
+    assert "border-top: 1px solid var(--border)" in memory_manage_rule
+    assert 'id="memoryManageSection"' in index_html
+    assert 'id="memoryManageDetails"' not in index_html
+    assert ".memory-manage-summary" not in styles_css
+    assert ".memory-manage-chevron" not in styles_css
+    memory_manage_head_rule = _css_rule(styles_css, ".memory-manage-head strong")
+    assert "font-weight: 600" in memory_manage_head_rule
+    assert 'class="agent-memory-view-hint"' in index_html
+    assert "进化沉淀</strong>" in index_html
+    memory_hint_rule = _css_rule(styles_css, ".agent-memory-view-hint")
+    assert "background: var(--surface-soft)" in memory_hint_rule
 
 
 def test_agent_conversation_panel_layout_and_message_shapes():
