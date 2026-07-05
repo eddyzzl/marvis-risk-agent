@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -148,6 +149,29 @@ def update_release_files(old_tag: str, new_tag: str) -> list[Path]:
     return changed
 
 
+def sync_uv_lock() -> list[Path]:
+    """Regenerate uv.lock for the bumped version so CI's ``uv sync --locked`` stays green.
+
+    ``update_release_files`` bumps the version in pyproject.toml, but uv.lock pins the
+    local ``marvis`` package at its own version; unless it is regenerated in the same
+    release commit, CI's ``uv sync --locked`` fails on the pyproject-vs-lock mismatch.
+    """
+    lock_path = Path("uv.lock")
+    if not lock_path.exists():
+        return []
+    if shutil.which("uv") is None:
+        raise RuntimeError(
+            "uv not found on PATH but uv.lock exists: the release commit must include a "
+            "synced uv.lock or CI's `uv sync --locked` will fail. Install uv "
+            "(https://docs.astral.sh/uv/) or regenerate uv.lock manually before release."
+        )
+    before = lock_path.read_bytes()
+    run(["uv", "lock"])
+    if lock_path.read_bytes() != before:
+        return [lock_path]
+    return []
+
+
 def release_commit_message(tag: str) -> str:
     return f"""Advance MARVIS release to {tag}
 
@@ -207,12 +231,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print(f"verified clean worktree on branch {args.branch}")
         print(f"would update release metadata: {old_tag} -> {new_tag}")
+        print("would sync uv.lock to the bumped version")
         print(f"would create annotated tag: {new_tag}")
         if not args.no_push:
             print(f"would push {args.branch} and {new_tag} to {args.remote}")
         return 0
 
     changed = update_release_files(old_tag, new_tag)
+    changed += sync_uv_lock()
     create_release_commit(new_tag, changed)
     run(["git", "tag", "-a", new_tag, "-m", f"MARVIS-Agent {new_tag}"])
     if not args.no_push:
