@@ -107,6 +107,48 @@ def test_push_release_uses_atomic_push(monkeypatch):
     assert calls == [["git", "push", "--atomic", "origin", "main", "V1.0.1"]]
 
 
+def test_sync_uv_lock_regenerates_and_stages_lock_when_changed(monkeypatch, tmp_path):
+    release_push = _load_release_push_module()
+    calls = []
+    lock = tmp_path / "uv.lock"
+    lock.write_text('version = "2.0.0"\n', encoding="utf-8")
+
+    def fake_run(command):
+        calls.append(command)
+        lock.write_text('version = "2.1.0"\n', encoding="utf-8")  # simulate `uv lock`
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(release_push.shutil, "which", lambda name: "/usr/bin/uv")
+    monkeypatch.setattr(release_push, "run", fake_run)
+
+    changed = release_push.sync_uv_lock()
+
+    assert calls == [["uv", "lock"]]
+    assert changed == [Path("uv.lock")]
+
+
+def test_sync_uv_lock_no_op_when_lock_absent(monkeypatch, tmp_path):
+    release_push = _load_release_push_module()
+    monkeypatch.chdir(tmp_path)  # no uv.lock here
+    monkeypatch.setattr(release_push, "run", lambda command: (_ for _ in ()).throw(AssertionError("run should not be called")))
+
+    assert release_push.sync_uv_lock() == []
+
+
+def test_sync_uv_lock_requires_uv_when_lock_present(monkeypatch, tmp_path):
+    release_push = _load_release_push_module()
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(release_push.shutil, "which", lambda name: None)
+
+    try:
+        release_push.sync_uv_lock()
+    except RuntimeError as exc:
+        assert "uv sync --locked" in str(exc)
+    else:
+        raise AssertionError("missing uv should raise so the release is not left CI-broken")
+
+
 def test_dry_run_release_verifies_clean_main_before_reporting(monkeypatch, capsys):
     release_push = _load_release_push_module()
     calls = []
