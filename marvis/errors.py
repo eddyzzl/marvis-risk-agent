@@ -4,10 +4,14 @@ Two concerns live here, both *convergence only* -- no behaviour changes:
 
 1. :class:`ErrorKind` -- the machine-readable ``error_kind`` / ``to_detail()["kind"]``
    vocabulary. Historically these were bare string literals scattered across the
-   plugin runner, the data layer, and the pack typed-errors. The *string values*
-   are load-bearing (tests and the subprocess protocol assert on them), so every
-   constant below is byte-for-byte identical to the literal it replaces. This
-   class is the single place to look up "what error kinds exist".
+   plugin runner, the data layer, and the pack typed-errors. It is now *defined*
+   in the zero-dependency leaf module :mod:`marvis.error_kinds` and re-exported
+   here so ``from marvis.errors import ErrorKind`` keeps working on the host
+   side. The pack typed-errors import it from the leaf module directly, because
+   they load inside the tool worker's execution environment where ``fastapi``
+   may be absent; importing this module (which pulls in ``fastapi`` below) would
+   crash there. The *string values* are load-bearing (tests and the subprocess
+   protocol assert on them) and live untouched in the leaf module.
 
 2. HTTP error factories (:func:`not_found`, :func:`conflict`, ...) -- thin
    wrappers over :class:`fastapi.HTTPException` that pin the status code and pass
@@ -23,36 +27,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-
-class ErrorKind:
-    """Canonical ``error_kind`` string values (the structured error taxonomy).
-
-    These are *not* an ``enum.Enum``: the raw ``str`` values cross the subprocess
-    protocol boundary and are asserted on directly by tests, so plain string
-    constants keep the wire format and comparisons unchanged. Grouped by origin.
-    """
-
-    # --- Plugin subprocess runner / hook dispatcher (marvis/plugins) ---
-    RESOURCE_LIMIT = "resource_limit"
-    PROTOCOL = "protocol"
-    PROTOCOL_VERSION_MISMATCH = "protocol_version_mismatch"
-    SCHEMA = "schema"
-    PERMISSION = "permission"
-    EXECUTION = "execution"
-    HOOK = "hook"
-    AUDIT = "audit"
-
-    # --- Data layer typed errors (marvis/data/errors.py to_detail kinds) ---
-    NAN_LABEL_NOT_CONFIRMED = "nan_label_not_confirmed"
-    LABEL_SEMANTICS_NOT_DECLARED = "label_semantics_not_declared"
-    SCORE_DIRECTION_CONFLICT = "score_direction_conflict"
-    PERFORMANCE_FRAME_INVALID = "performance_frame_invalid"
-    DATASET_TOO_LARGE = "dataset_too_large"
-
-    # --- Pack typed errors (marvis/packs/*/errors.py to_detail kinds) ---
-    STRATEGY_NOT_ADOPTED = "strategy_not_adopted"
-    MISSING_BASELINE = "missing_baseline"
-    REPORT_SCORE_MISSING = "report_score_missing"
+from marvis.error_kinds import ErrorKind
 
 
 def not_found(detail: str) -> HTTPException:
