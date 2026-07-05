@@ -479,4 +479,3 @@ def _roc_ks_curve(*, split: str, scores, labels) -> RocKsCurve:
         ks=float(_feature_ks(scores, labels.astype(float))),
         population_at_ks=float(population[ks_index]),
     )
-

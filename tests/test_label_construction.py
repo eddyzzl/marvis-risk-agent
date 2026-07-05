@@ -10,7 +10,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from marvis.data.errors import CohortMaturityNotConfirmedError
 from marvis.data.label_construction import (
     BadDefinition,
     check_cohort_maturity,

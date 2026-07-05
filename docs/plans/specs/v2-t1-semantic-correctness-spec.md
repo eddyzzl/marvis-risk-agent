@@ -2071,4 +2071,3 @@ Consumer break to fix in-PR: existing test at L1919-1920 asserts test_ks IS in m
 Monitoring-baseline change (dropping psi_test_vs_train for refit) is a behavior change a monitoring consumer could notice — it flips that check from a spuriously-green baseline to 'missing', which is more honest but should be called out in the reason/limitations text.
 
 Determinism preserved: the holdout carve stays deterministic (seed-derived), we only change how its metrics are labeled/surfaced, so no metric-value or artifact-hash changes — only the headline/model-card/monitoring dictionaries change key names. train_*/oot_* on the refit remain genuinely valid (refit was trained on train+test, OOT untouched) and stay in the headline, so the caller still sees a real before/after OOT comparison (oot_ks_before/after_refit unchanged).
-
