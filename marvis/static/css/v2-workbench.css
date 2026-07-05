@@ -184,39 +184,73 @@
   min-height: 32px;
 }
 
-/* Capability tiers: each row is a selectable radio card. */
+/* Capability tiers: single-select list — the selected row shows a LEFT
+   checkmark, matching the 执行环境 (.exec-env-row) list so both "从列表选一项"
+   lists share one visual language. The radio input stays for form semantics and
+   the change handler but is visually replaced by the .tier-check glyph. */
 .tier-row {
-  position: relative;
   display: grid;
-  gap: 4px;
-  padding-right: 38px;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 4px 10px;
+  align-items: start;
   cursor: pointer;
   transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
 }
 
-.tier-row > h4 {
+.tier-row-radio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.tier-check {
+  grid-row: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--accent);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.tier-row:has(.tier-row-radio:checked) .tier-check {
+  opacity: 1;
+}
+
+.tier-check svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tier-row-body {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.tier-row-body h4 {
   margin: 0;
   font-size: 14px;
   font-weight: 650;
   line-height: 1.35;
 }
 
-.tier-row > p {
+.tier-row-body p {
   margin: 0;
   color: var(--text-secondary);
   font-size: 12.5px;
   line-height: 1.5;
-}
-
-.tier-row-radio {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 18px;
-  height: 18px;
-  margin: 0;
-  accent-color: var(--accent);
-  cursor: pointer;
 }
 
 .tier-row:hover {
@@ -238,7 +272,6 @@
   gap: 12px;
 }
 
-.plugin-upload,
 .memory-manager-toolbar,
 .skill-validator {
   display: grid;
@@ -252,7 +285,12 @@
   line-height: 1.5;
 }
 
-.plugin-upload input,
+/* The dialog header subtitle already says exactly this; don't repeat it as a
+   lone first line inside the panel. */
+.governance-settings-dialog .tier-guardrail-note {
+  display: none;
+}
+
 .skill-validator textarea,
 .plugin-tools pre {
   max-width: 100%;
@@ -348,33 +386,6 @@
   display: flex;
   align-items: center;
   gap: 6px;
-}
-
-.plugin-action {
-  min-height: 28px;
-  padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--surface);
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
-}
-
-.plugin-action:hover {
-  background: var(--surface-soft);
-  color: var(--text);
-}
-
-.plugin-action.danger {
-  color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
-}
-
-.plugin-action.danger:hover {
-  background: var(--danger-soft);
 }
 
 .plugin-version,
@@ -573,70 +584,188 @@
   background: var(--danger-soft);
 }
 
+/* Upload row: a labelled prompt on the left and a real shared-.button file
+   picker on the right (was a bespoke dashed ::after pseudo-button before —
+   unified so 选择文件 matches every other button in the dialog). */
 .governance-settings-dialog .plugin-upload {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 34px;
+  justify-content: space-between;
+  gap: 20px;
   padding: 0 2px 2px;
   color: var(--text);
+}
+
+.plugin-upload-text {
+  display: block;
+  min-width: 0;
+}
+
+.plugin-upload-text strong {
+  display: block;
   font-size: 14px;
   font-weight: 600;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.plugin-upload-text > span {
+  display: block;
+  margin-top: 3px;
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* The .button styling comes from the shared class; here we only need to flag it
+   as a file-picker trigger and hide the native <input type=file>. */
+.plugin-upload-button {
+  flex: none;
   cursor: pointer;
 }
 
-.governance-settings-dialog .plugin-upload::after {
-  content: "选择文件";
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 32px;
-  padding: 5px 12px;
-  border: 1px dashed var(--button-outline-border);
-  border-radius: var(--radius-control);
-  color: var(--button-outline-text);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.governance-settings-dialog .plugin-upload:hover::after {
-  color: var(--button-outline-text-hover);
-  border-color: var(--button-outline-border-hover);
-  background: var(--button-outline-bg-hover);
-}
-
-.governance-settings-dialog .plugin-upload input {
+.plugin-upload-button input[type="file"] {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  width: 1px;
+  height: 1px;
   opacity: 0;
-  cursor: pointer;
+  pointer-events: none;
 }
 
-.governance-settings-dialog .skill-manager > button {
-  justify-self: start;
-  min-height: 34px;
-  padding: 6px 12px;
-  border: 1px solid var(--button-primary-border);
-  border-radius: var(--radius-control);
-  color: var(--button-primary-text);
-  background: var(--button-primary-bg);
-  box-shadow: var(--button-solid-shadow);
-  font: inherit;
-  font-size: 13px;
+.governance-settings-dialog .skill-manager {
+  gap: 24px;
+}
+
+.skill-section {
+  display: grid;
+  gap: 10px;
+}
+
+.skill-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.skill-toolbar-text {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+}
+
+.skill-section-label {
+  margin: 0;
+  font-size: 14px;
   font-weight: 600;
-  cursor: pointer;
+  line-height: 1.35;
+  color: var(--text);
 }
 
-.governance-settings-dialog .skill-manager > button:hover,
-.governance-settings-dialog .skill-manager > button:focus-visible {
-  border-color: var(--button-primary-border-hover);
-  color: var(--button-primary-text-hover);
-  background: var(--button-primary-bg-hover);
-  box-shadow: var(--button-solid-shadow-hover);
+.skill-section-hint {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.skill-builtin-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.skill-builtin-chip {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-soft);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.skill-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.skill-row-head strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.skill-id {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.governance-settings-dialog .skill {
+  display: grid;
+  gap: 4px;
+}
+
+.governance-settings-dialog .skill-validator-details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.governance-settings-dialog .skill-validator-details > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.governance-settings-dialog .skill-validator-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.governance-settings-dialog .skill-validator-details > summary:hover {
+  background: var(--option-hover);
+}
+
+.skill-validator-summary-text strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.skill-validator-summary-text span {
+  display: block;
+  margin-top: 3px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.skill-validator-chevron {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  transition: transform 0.18s ease;
+}
+
+.governance-settings-dialog .skill-validator-details[open] > summary .skill-validator-chevron {
+  transform: rotate(90deg);
+}
+
+.governance-settings-dialog .skill-validator-body {
+  display: grid;
+  gap: 10px;
+  padding: 4px 16px 16px;
 }
 
 .governance-settings-dialog .skill-validator {

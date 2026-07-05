@@ -242,8 +242,10 @@ const agentMemoryPanel = createAgentMemoryPanelController({
   showPlatformConfirm,
   openMemorySettings: (navKey) => openGovernanceSettingsCenter(navKey),
   openMemoryDetails: () => {
-    const details = $("memoryManageDetails");
-    if (details) details.open = true;
+    // The management workspace is always visible now (no longer a fold), so
+    // "查看记忆" just scrolls it into view within the 记忆 panel.
+    const section = $("memoryManageSection");
+    if (section) section.scrollIntoView({ block: "nearest" });
   },
 });
 const draftToolsPanel = createDraftToolsPanelController({
@@ -592,7 +594,7 @@ const governanceSettingsCopy = {
   },
   "memory-policy": {
     title: "记忆",
-    subtitle: "控制 Agent 记忆的引用范围、沉淀规则；展开下方可查看与管理记忆。",
+    subtitle: "控制 Agent 记忆的引用范围与沉淀规则；下方可查看与管理已积累的记忆。",
   },
   plugins: {
     title: "插件",
@@ -602,9 +604,9 @@ const governanceSettingsCopy = {
   },
   workflows: {
     title: "Workflow 模板",
-    subtitle: "加载、校验和复用用户可编写的 Workflow 模板。",
+    subtitle: "任务编排模板：内置模板开箱即用，也可以编写自定义模板扩展平台能力。",
     extensionTitle: "Workflow 模板",
-    extensionDescription: "加载、校验和复用用户可编写的 Workflow 模板。",
+    extensionDescription: "任务编排模板：内置模板开箱即用，也可以编写自定义模板扩展平台能力。",
   },
   capabilities: {
     title: "能力档位",
@@ -699,6 +701,11 @@ function refreshGovernancePanel(navKey = activeGovernanceNav, options = {}) {
   }
   if (button?.dataset?.governancePanel === "memory-policy" && options.load !== false) {
     runAction(loadMemoryPolicySettings, { actionId: "memoryPolicy", busyText: "正在读取记忆策略..." });
+    // The management workspace is always visible now, so load its records when
+    // the panel opens (once) instead of lazily on a fold's toggle event.
+    if (!agentMemoryPanel.hasItems()) {
+      runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
+    }
   }
 }
 
@@ -6193,11 +6200,6 @@ $("agentMemoryList").addEventListener("click", handleAgentMemoryListClick);
 document.addEventListener("click", handleAgentMemoryInlineInspect);
 $("refreshAgentMemoryButton").onclick = () =>
   runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
-$("memoryManageDetails").addEventListener("toggle", (event) => {
-  if (event.target.open && !agentMemoryPanel.hasItems()) {
-    runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
-  }
-});
 $("draftManageDetails").addEventListener("toggle", (event) => {
   if (event.target.open && !draftToolsPanel.hasLoaded()) {
     runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具..." });

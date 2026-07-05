@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from marvis.orchestrator.templates import clear_user_templates
+from marvis.orchestrator.templates import clear_user_templates, list_templates
 from marvis.orchestrator.templates.skills import (
     SkillLoadReport,
     SkillTemplateError,
@@ -52,13 +52,14 @@ def validate_skill(request: Request, body: dict) -> dict:
 
 
 def _report_payload(report: SkillLoadReport) -> dict:
+    titles = {template.id: template.title for template in list_templates()}
     skills = []
     for skill_id in report.active:
-        skills.append({"id": skill_id, "status": "active", "problems": []})
+        skills.append({"id": skill_id, "status": "active", "problems": [], "title": titles.get(skill_id, "")})
     for skill_id in report.disabled:
-        skills.append({"id": skill_id, "status": "disabled", "problems": []})
+        skills.append({"id": skill_id, "status": "disabled", "problems": [], "title": titles.get(skill_id, "")})
     for skill_id, problems in report.rejected:
-        skills.append({"id": skill_id, "status": "rejected", "problems": list(problems)})
+        skills.append({"id": skill_id, "status": "rejected", "problems": list(problems), "title": titles.get(skill_id, "")})
     return {
         "skills": skills,
         "counts": {
@@ -66,4 +67,9 @@ def _report_payload(report: SkillLoadReport) -> dict:
             "disabled": len(report.disabled),
             "rejected": len(report.rejected),
         },
+        "builtin": [
+            {"id": template.id, "title": template.title}
+            for template in list_templates()
+            if template.source == "builtin"
+        ],
     }

@@ -216,8 +216,13 @@ def test_skills_api_lists_reloads_and_validates_user_skills(tmp_path):
 
     assert reloaded.status_code == 200
     assert reloaded.json()["counts"] == {"active": 1, "disabled": 1, "rejected": 1}
-    assert {"id": "user_echo", "status": "active", "problems": []} in skills
+    assert {"id": "user_echo", "status": "active", "problems": [], "title": "User Echo"} in skills
     assert any(skill["id"] == "sample_echo" and skill["status"] == "rejected" for skill in skills)
+    # Builtin templates ride along so the settings page can show what ships
+    # with the platform instead of rendering an inexplicably empty list.
+    builtin = reloaded.json()["builtin"]
+    assert all(entry["id"] and entry["title"] for entry in builtin)
+    assert any(entry["id"] == "sample_echo" for entry in builtin)
 
     valid = client.post("/api/skills/validate", json=_skill_data(id="preview_echo"))
     frontend_valid = client.post(

@@ -146,16 +146,24 @@ def test_plugin_handlers_upload_toggle_remove_and_show_tools():
         await listeners.click({ target: removeTarget, preventDefault() {} });
         assert.deepEqual(calls.splice(0), [["removePlugin", "demo"], ["refreshPlugins"]]);
 
+        const toolsButton = { dataset: { showTools: "demo" } };
         const toolsTarget = {
           closest(selector) {
-            return selector === "[data-show-tools]"
-              ? { dataset: { showTools: "demo" } }
-              : null;
+            return selector === "[data-show-tools]" ? toolsButton : null;
           },
         };
+        // First click fetches + shows the tools and flips the button to 收起工具.
         await listeners.click({ target: toolsTarget, preventDefault() {} });
         assert.deepEqual(calls.splice(0), [["listPluginTools", "demo"]]);
         assert.ok(toolSlot.innerHTML.includes("tool"));
+        assert.equal(toolsButton.dataset.expanded, "true");
+        assert.equal(toolsButton.textContent, "收起工具");
+        // Second click folds them back up without re-fetching (was stuck open before).
+        await listeners.click({ target: toolsTarget, preventDefault() {} });
+        assert.deepEqual(calls.splice(0), []);
+        assert.equal(toolSlot.innerHTML, "");
+        assert.equal(toolsButton.dataset.expanded, "false");
+        assert.equal(toolsButton.textContent, "查看工具");
 
         const emptyUploadTarget = {
           files: [],

@@ -2715,12 +2715,16 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
 }
 
 .governance-panel[data-governance-panel-content="memory-policy"] > .settings-group {
-  display: grid;
-  gap: 8px;
   border: 0;
   border-radius: 0;
   background: transparent;
   overflow: visible;
+}
+
+/* Empty status lines otherwise reserve min-height + margin and leave a blank
+   band at the top of the extension panels / between memory groups. */
+.governance-settings-dialog .status:empty {
+  display: none;
 }
 
 .governance-panel .settings-row {
@@ -2739,19 +2743,14 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
   padding: 0 2px 2px;
 }
 
+/* Memory policy rows read as plain preference rows (like 执行环境/模型引擎),
+   not as per-row boxed cards: flat rows separated by hairlines. */
 .governance-panel[data-governance-panel-content="memory-policy"] > .settings-group > .settings-row {
-  padding: 11px 13px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--surface-soft);
+  padding: 13px 2px;
 }
 
 .governance-panel .settings-row + .settings-row {
   border-top: 1px solid var(--border);
-}
-
-.governance-panel[data-governance-panel-content="memory-policy"] .settings-row + .settings-row {
-  border-top: 0;
 }
 
 .governance-panel .settings-row-text strong {
@@ -3147,54 +3146,32 @@ dialog.agent-memory-dialog,
   align-items: stretch;
 }
 
-/* "查看与管理记忆" drill-in inside the consolidated 记忆 settings page */
+/* "查看与管理记忆" — an always-visible management section inside the 记忆
+   settings page (previously a collapsible <details> fold, which read as a
+   togglable settings row and hid the workspace). A top divider separates it
+   from the policy switches above. */
 .memory-manage {
-  margin-top: 10px;
+  margin-top: 6px;
+  padding-top: 18px;
   border: 0;
+  border-top: 1px solid var(--border);
   border-radius: 0;
   background: transparent;
   overflow: visible;
 }
 
-.memory-manage-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 11px 13px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--surface-soft);
-  cursor: pointer;
-  list-style: none;
-  transition: border-color 0.15s ease, background 0.15s ease;
+.memory-manage-head {
+  display: block;
 }
 
-.memory-manage-summary::-webkit-details-marker {
-  display: none;
-}
-
-.memory-manage-summary:hover {
-  border-color: var(--option-hover);
-  background: var(--option-hover);
-}
-
-/* The global summary:focus-visible outline (offset 2px) is clipped by the
-   parent .memory-manage overflow:hidden; use an inset ring instead. */
-.memory-manage-summary:focus-visible {
-  outline: 3px solid var(--option-focus-ring);
-  outline-offset: 2px;
-  box-shadow: none;
-}
-
-.memory-manage-summary-text strong {
+.memory-manage-head strong {
   display: block;
   font-size: 14px;
   font-weight: 600;
   color: var(--text);
 }
 
-.memory-manage-summary-text span {
+.memory-manage-head span {
   display: block;
   margin-top: 3px;
   font-size: 12.5px;
@@ -3202,23 +3179,31 @@ dialog.agent-memory-dialog,
   color: var(--text-secondary);
 }
 
-.memory-manage-chevron {
-  flex: none;
-  width: 18px;
-  height: 18px;
-  color: var(--text-muted);
-  transition: transform 0.15s ease;
-}
-
-.memory-manage[open] > .memory-manage-summary .memory-manage-chevron {
-  transform: rotate(90deg);
-}
-
 .memory-manage-body {
   display: grid;
   gap: 10px;
-  padding: 10px 0 0;
+  padding: 12px 0 0;
   border-top: 0;
+}
+
+/* Plain-language 原始记忆 / 进化沉淀 explainer under the type switch, so the two
+   tab labels aren't unexplained jargon. */
+.agent-memory-view-hint {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.agent-memory-view-hint strong {
+  color: var(--text);
+  font-weight: 650;
 }
 
 .agent-memory-toolbar {

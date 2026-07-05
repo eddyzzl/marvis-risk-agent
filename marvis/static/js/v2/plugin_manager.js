@@ -23,6 +23,17 @@ function schemaText(schema) {
   return escapeHtml(JSON.stringify(schema || {}, null, 2));
 }
 
+// Keeps the 查看工具 / 收起工具 toggle button's label, aria-expanded and
+// data-expanded state in sync. Guards setAttribute so unit-test mock buttons
+// (plain objects with only a dataset) don't throw.
+function setToolsButtonExpanded(button, expanded) {
+  button.dataset.expanded = expanded ? "true" : "false";
+  if (typeof button.setAttribute === "function") {
+    button.setAttribute("aria-expanded", expanded ? "true" : "false");
+  }
+  button.textContent = expanded ? "收起工具" : "查看工具";
+}
+
 export function pluginToolsHtml(data = {}) {
   const tools = data.tools || [];
   if (!tools.length) {
@@ -53,7 +64,7 @@ export function pluginRowHtml(plugin) {
   const description = plugin?.description || "";
   const remove = builtin
     ? ""
-    : `<button type="button" class="plugin-action danger" data-remove-plugin="${escapeHtml(name)}">移除</button>`;
+    : `<button type="button" class="button secondary compact danger" data-remove-plugin="${escapeHtml(name)}">移除</button>`;
   return `<section class="plugin-row${builtin ? " plugin-builtin" : ""}" data-plugin-row="${escapeHtml(name)}">
     <div class="plugin-row-head">
       <div class="plugin-row-id">
@@ -67,7 +78,7 @@ export function pluginRowHtml(plugin) {
     <div class="plugin-row-foot">
       <span class="plugin-tool-count">${escapeHtml(plugin?.tool_count ?? 0)} 个工具</span>
       <div class="plugin-row-actions">
-        <button type="button" class="plugin-action" data-show-tools="${escapeHtml(name)}">查看工具</button>
+        <button type="button" class="button secondary compact" data-show-tools="${escapeHtml(name)}" data-expanded="false" aria-expanded="false">查看工具</button>
         ${remove}
       </div>
     </div>
@@ -81,10 +92,16 @@ export function pluginManagerHtml(data = {}) {
     ? plugins.map(pluginRowHtml).join("")
     : '<div class="v2-empty" data-v2-empty="plugins">暂无插件</div>';
   return `<section class="plugin-manager">
-    <label class="plugin-upload">
-      <input type="file" data-upload-plugin accept=".zip,.tar,.gz,.tgz">
-      上传插件
-    </label>
+    <div class="plugin-upload">
+      <span class="plugin-upload-text">
+        <strong>上传插件</strong>
+        <span>仅支持 .zip 插件包，安装后出现在下方列表，可随时启停或移除。</span>
+      </span>
+      <label class="button secondary compact plugin-upload-button">
+        选择文件
+        <input type="file" data-upload-plugin accept=".zip">
+      </label>
+    </div>
     <div class="plugin-list">${rows}</div>
   </section>`;
 }
@@ -210,12 +227,20 @@ export function attachPluginHandlers(root, deps = {}) {
     if (toolsButton?.dataset?.showTools) {
       event.preventDefault?.();
       const name = toolsButton.dataset.showTools;
+      const slot = root.querySelector?.(`[data-plugin-tools="${cssEscape(name)}"]`);
+      // 查看工具 is a toggle: a second click folds the tool list back up instead
+      // of re-fetching and leaving it stuck open (the old one-way behavior).
+      if (toolsButton.dataset.expanded === "true") {
+        if (slot) slot.innerHTML = "";
+        setToolsButtonExpanded(toolsButton, false);
+        return;
+      }
       try {
         const data = await actions.listPluginTools(name);
-        const slot = root.querySelector?.(`[data-plugin-tools="${cssEscape(name)}"]`);
         if (slot) {
           slot.innerHTML = pluginToolsHtml(data);
         }
+        setToolsButtonExpanded(toolsButton, true);
       } catch (error) {
         actions.showError(error?.message || "插件工具读取失败");
       }

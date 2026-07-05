@@ -521,14 +521,11 @@
               </div>
               <div id="memoryPolicyStatus" class="status" role="status" aria-live="polite"></div>
 
-              <details id="memoryManageDetails" class="memory-manage">
-                <summary class="memory-manage-summary">
-                  <span class="memory-manage-summary-text">
-                    <strong>查看与管理记忆</strong>
-                    <span>浏览、停用或回滚原始记忆与进化沉淀。</span>
-                  </span>
-                  <svg class="memory-manage-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
-                </summary>
+              <section id="memoryManageSection" class="memory-manage">
+                <div class="memory-manage-head">
+                  <strong>查看与管理记忆</strong>
+                  <span>浏览、停用或回滚 Agent 积累的记忆。</span>
+                </div>
                 <div class="memory-manage-body">
                   <div class="agent-memory-toolbar">
                     <div class="agent-memory-view-switch" role="tablist" aria-label="记忆类型">
@@ -537,6 +534,10 @@
                     </div>
                     <button id="refreshAgentMemoryButton" class="button secondary" type="button">刷新</button>
                   </div>
+                  <p class="agent-memory-view-hint">
+                    <span><strong>原始记忆</strong>：每条来自单个任务的独立经验（字段口径、验证坑点、任务/模型经验），可追溯到来源任务。</span>
+                    <span><strong>进化沉淀</strong>：平台把多条同类原始记忆合并、提炼成的一条更高置信度经验，会标注支持它的原始记忆条数，可随时回滚。</span>
+                  </p>
                   <div class="agent-memory-filter-card">
                     <div class="agent-memory-filter-grid">
                       <label>
@@ -588,7 +589,7 @@
                     </section>
                   </div>
                 </div>
-              </details>
+              </section>
             </section>
 
             <section class="governance-panel governance-extension-panel" data-governance-panel-content="extensions">
@@ -598,8 +599,8 @@
                   <p id="governanceExtensionDescription">管理可调用工具包，启停插件并查看插件暴露的工具。</p>
                 </div>
               </div>
-              <div id="governanceExtensionStatus" class="status" role="status" aria-live="polite"></div>
               <div id="governanceExtensionMount" class="governance-extension-shell" aria-label="扩展设置"></div>
+              <div id="governanceExtensionStatus" class="status" role="status" aria-live="polite"></div>
               <details id="draftManageDetails" class="memory-manage draft-manage">
                 <summary class="memory-manage-summary">
                   <span class="memory-manage-summary-text">
