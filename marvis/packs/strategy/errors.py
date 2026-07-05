@@ -1,4 +1,4 @@
-from marvis.errors import ErrorKind
+from marvis.error_kinds import ErrorKind
 
 
 class StrategyError(ValueError):

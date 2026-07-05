@@ -279,19 +279,39 @@ function planRetryReplaceWarningHtml() {
     + "</p>";
 }
 
-function planRetryControlHtml(step, realSchema = null) {
+// The right rail only carries a lightweight entry now: the full "编辑参数后重试"
+// form lives in the middle workspace (#planRetryPanel) so filling/selecting is
+// done in the roomy middle region, not squeezed into the narrow rail. Clicking
+// this opens the middle panel and scrolls its matching step card into view.
+function planRetryRailEntryHtml(step) {
   const stepId = String(step?.id || "");
-  return `<details class="plan-step-retry" data-plan-step-retry="${escapeHtml(stepId)}">
-    <summary>编辑参数后重试</summary>
-    ${planRetryScopeHtml(step)}
-    ${planRetrySchemaFieldsHtml(step, realSchema)}
-    ${planRetryReplaceWarningHtml()}
-    <label>
-      参数 JSON
-      <textarea class="plan-retry-inputs" data-plan-retry-inputs="${escapeHtml(stepId)}" rows="5" spellcheck="false">${escapeHtml(planRetryInputsText(step))}</textarea>
-    </label>
-    <button type="button" class="button compact primary" data-plan-retry-step="${escapeHtml(stepId)}">使用这些参数重试</button>
-  </details>`;
+  return `<button type="button" class="button compact secondary plan-step-retry-open" data-plan-retry-open="${escapeHtml(stepId)}">编辑参数后重试</button>`;
+}
+
+// The full retry form, rendered into the middle workspace panel (not the rail).
+// Markup below the <form> is byte-identical to the previous rail form so the
+// submit path (retryPlanStep / parsePlanRetryInputs, scoped by
+// [data-plan-step-retry]) is unchanged — only the mount location and the outer
+// card shell differ.
+function planRetryCardHtml(step, realSchema = null) {
+  const stepId = String(step?.id || "");
+  const stepTitle = String(step?.title || "未命名步骤");
+  return `<section class="plan-retry-card" data-plan-step-retry="${escapeHtml(stepId)}" data-plan-retry-card="${escapeHtml(stepId)}">
+    <header class="plan-retry-card-head">
+      <span class="plan-retry-card-pill">编辑参数后重试</span>
+      <span class="plan-retry-card-title">${escapeHtml(stepTitle)}</span>
+    </header>
+    <div class="plan-retry-card-body">
+      ${planRetryScopeHtml(step)}
+      ${planRetrySchemaFieldsHtml(step, realSchema)}
+      ${planRetryReplaceWarningHtml()}
+      <label class="plan-retry-json-label">
+        参数 JSON
+        <textarea class="plan-retry-inputs" data-plan-retry-inputs="${escapeHtml(stepId)}" rows="5" spellcheck="false">${escapeHtml(planRetryInputsText(step))}</textarea>
+      </label>
+      <button type="button" class="button compact primary" data-plan-retry-step="${escapeHtml(stepId)}">使用这些参数重试</button>
+    </div>
+  </section>`;
 }
 
 function planOutputButtonHtml(step) {
@@ -507,55 +527,67 @@ export function createPlanRailController({
     return key ? v2ToolSchemaCache.get(key) || null : null;
   }
 
+  // Single substep `.notebook-step` block. Factored out of planSubstepGroupHtml
+  // so the keyed reconciler can rebuild one substep's markup in place (keyed by
+  // step id) without touching its sibling substep nodes — that keeps a hovered
+  // substep card from being destroyed on a poll tick.
+  function planSubstepHtml(step, subNumber) {
+    const status = step.status || "pending";
+    const checkerStatus = planStepToCheckerStatus(status);
+    const ref = step.tool_ref || {};
+    const description = step.description || step.summary || PLAN_STEP_HINTS[`${ref.plugin}.${ref.tool}`] || "";
+    // Interactive gate confirm no longer lives in the rail. The middle
+    // conversation area already renders the pending gate section (plain confirm
+    // button or a structured widget); the rail keeps only a "待确认" status badge
+    // plus a lightweight locate entry that scrolls to (and flashes) that middle
+    // gate section — no confirm control is rendered here in either mode.
+    const stepId = String(step?.id || "");
+    const awaiting = status === "awaiting_confirm"
+      ? (isAgentMode?.()
+        ? '<span class="plan-step-await">待确认</span>'
+        : '<span class="plan-step-await">待确认</span>'
+          + `<button type="button" class="button compact plan-step-locate" data-plan-gate-locate="${escapeHtml(stepId)}" title="跳到中间的确认卡片">定位</button>`)
+      : "";
+    // Report download no longer sits inline on the rail step row: the actual
+    // 下载报告 button lives in the middle driver-actions panel (renderDriverActionsPanel
+    // below). The rail step row only marks that the report is ready plus a locate
+    // entry that scrolls to (and flashes) the middle download card.
+    const isReportDone = (ref.tool === "generate_model_report" || ref.tool === "generate_feature_report")
+      && status === "done";
+    const download = isReportDone
+      ? '<span class="plan-step-ready">报告已就绪</span>'
+        + '<button type="button" class="button compact plan-step-locate" data-plan-report-locate="1" title="跳到中间的下载卡片">定位</button>'
+      : "";
+    const output = planOutputButtonHtml(step);
+    if (status === "failed") maybeFetchToolSchema(ref);
+    // Rail keeps only a lightweight entry; the editable form itself renders
+    // in the middle workspace (#planRetryPanel via renderRetryPanel below).
+    const retry = status === "failed" ? planRetryRailEntryHtml(step) : "";
+    const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";
+    return [
+      `<div class="notebook-step ${escapeHtml(checkerStatus)}">`,
+      renderStepChecker(checkerStatus),
+      `<span class="notebook-step-no">${escapeHtml(subNumber)}</span>`,
+      '<span class="plan-substep-copy">',
+      `<strong>${escapeHtml(step.title || "未命名步骤")}</strong>`,
+      descriptionHtml,
+      "</span>",
+      awaiting,
+      download,
+      output,
+      retry,
+      "</div>",
+    ].join("");
+  }
+
   function planSubstepGroupHtml(steps = [], parentNumber = "") {
     if (!steps.length) return "";
     return [
       '<section class="notebook-step-group plan-rail-substeps">',
       `<h4>子任务 · ${steps.length}</h4>`,
       ...steps.map((step, index) => {
-        const status = step.status || "pending";
-        const checkerStatus = planStepToCheckerStatus(status);
-        const ref = step.tool_ref || {};
-        const description = step.description || step.summary || PLAN_STEP_HINTS[`${ref.plugin}.${ref.tool}`] || "";
         const subNumber = parentNumber ? `${parentNumber}.${index + 1}` : `${index + 1}`;
-        // Manual mode confirms each gate from the rail (the middle is analysis
-        // only); agent mode shows a read-only "待确认" badge because the LLM
-        // operates the gate. The button reuses the document-level
-        // data-driver-confirm handler.
-        // UX-10: manual mode's step-rail confirm button states the consequence
-        // (确认并执行拼接/确认所选特征/...) instead of a bare "确认" for every
-        // gate — the step's own tool_ref IS the tool the gate confirms.
-        const confirmLabel = escapeHtml(gateConfirmLabel(ref.tool || ""));
-        const awaiting = status === "awaiting_confirm"
-          ? (isAgentMode?.()
-            ? '<span class="plan-step-await">待确认</span>'
-            : `<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1">${confirmLabel}</button>`)
-          : "";
-        // Download sits inline on the producing report step (spec §9: like validation's
-        // step-action-button), not floating at the rail bottom.
-        const isReportDone = (ref.tool === "generate_model_report" || ref.tool === "generate_feature_report")
-          && status === "done";
-        const download = isReportDone
-          ? '<button type="button" class="button compact secondary plan-step-download" data-driver-report-download="1">下载报告</button>'
-          : "";
-        const output = planOutputButtonHtml(step);
-        if (status === "failed") maybeFetchToolSchema(ref);
-        const retry = status === "failed" ? planRetryControlHtml(step, toolSchemaFor(ref)) : "";
-        const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";
-        return [
-          `<div class="notebook-step ${escapeHtml(checkerStatus)}">`,
-          renderStepChecker(checkerStatus),
-          `<span class="notebook-step-no">${escapeHtml(subNumber)}</span>`,
-          '<span class="plan-substep-copy">',
-          `<strong>${escapeHtml(step.title || "未命名步骤")}</strong>`,
-          descriptionHtml,
-          "</span>",
-          awaiting,
-          download,
-          output,
-          retry,
-          "</div>",
-        ].join("");
+        return planSubstepHtml(step, subNumber);
       }),
       "</section>",
     ].join("");
@@ -686,6 +718,47 @@ export function createPlanRailController({
     ].join("");
   }
 
+  // Ordered phase plan: groups sorted steps by their `phase`, preserving first-
+  // seen phase order. Shared by planRailHtml (string build) and the keyed
+  // reconciler so both agree on phase identity/order.
+  function planPhasePlan(plan) {
+    const steps = [...(plan?.steps || [])].sort(
+      (left, right) => (Number(left.index) || 0) - (Number(right.index) || 0),
+    );
+    const order = [];
+    const byPhase = new Map();
+    for (const step of steps) {
+      const phase = step.phase || "步骤";
+      if (!byPhase.has(phase)) {
+        byPhase.set(phase, []);
+        order.push(phase);
+      }
+      byPhase.get(phase).push(step);
+    }
+    return order.map((phase, phaseIndex) => ({
+      phase,
+      phaseSteps: byPhase.get(phase) || [],
+      phaseNumber: phaseIndex + 1,
+    }));
+  }
+
+  // The `.step-head` block for a phase card (checker + number + title + hint).
+  // Extracted so the reconciler can refresh a persisted phase node's head in
+  // place without rebuilding the whole phase card (which holds the substeps).
+  function planPhaseHeadHtml(phase, phaseSteps, phaseNumber) {
+    const phaseStatus = planPhaseStatus(phaseSteps);
+    return [
+      '<div class="step-head">',
+      renderStepChecker(phaseStatus),
+      `<span class="step-number">${phaseNumber}</span>`,
+      '<span class="step-copy">',
+      `<strong class="step-title">${escapeHtml(phase)}</strong>`,
+      `<small class="step-hint">${escapeHtml(planPhaseHint(phase, phaseSteps))}</small>`,
+      "</span>",
+      "</div>",
+    ].join("");
+  }
+
   function planRailHtml(plan, { blocked = false, fetchError = "", firstLoad = false } = {}) {
     const fetchErrorBanner = fetchError
       ? '<div class="plan-rail-fetch-error" role="status">'
@@ -721,45 +794,29 @@ export function createPlanRailController({
       // still-empty state (this should be rare after the first response).
       return firstLoad ? planRailSkeletonHtml() : '<div class="plan-rail-empty">计划生成中…</div>';
     }
-    const steps = [...plan.steps].sort(
-      (left, right) => (Number(left.index) || 0) - (Number(right.index) || 0),
-    );
-    const order = [];
-    const byPhase = new Map();
-    for (const step of steps) {
-      const phase = step.phase || "步骤";
-      if (!byPhase.has(phase)) {
-        byPhase.set(phase, []);
-        order.push(phase);
-      }
-      byPhase.get(phase).push(step);
-    }
-    const phasesHtml = order
-      .map((phase, phaseIndex) => {
-        const phaseSteps = byPhase.get(phase) || [];
-        const phaseNumber = phaseIndex + 1;
+    const phases = planPhasePlan(plan);
+    const phasesHtml = phases
+      .map(({ phase, phaseSteps, phaseNumber }) => {
         const phaseStatus = planPhaseStatus(phaseSteps);
         return [
           `<div class="step plan-rail-step ${escapeHtml(phaseStatus)}" role="group" aria-label="${phaseNumber}. ${escapeHtml(phase)}">`,
-          '<div class="step-head">',
-          renderStepChecker(phaseStatus),
-          `<span class="step-number">${phaseNumber}</span>`,
-          '<span class="step-copy">',
-          `<strong class="step-title">${escapeHtml(phase)}</strong>`,
-          `<small class="step-hint">${escapeHtml(planPhaseHint(phase, phaseSteps))}</small>`,
-          "</span>",
-          "</div>",
+          planPhaseHeadHtml(phase, phaseSteps, phaseNumber),
           planSubstepGroupHtml(phaseSteps, phaseNumber),
           "</div>",
         ].join("");
       })
       .join("");
     // Plan-level overview gate: the plan is built but has not started (status
-    // "validated"). In manual mode the user confirms 开始 from the rail; agent mode
-    // auto-confirms (AUTO) or uses the composer (NORMAL), so no button.
+    // "validated"). The interactive 开始执行 button now lives in the middle
+    // driver-actions panel (renderDriverActionsPanel); the rail keeps only a
+    // status line plus a locate entry that scrolls to (and flashes) it. Agent
+    // mode auto-confirms (AUTO) or uses the composer (NORMAL), so no entry.
     const awaitingStart = plan.status === "validated" && !isAgentMode?.();
     const startControl = awaitingStart
-      ? '<div class="plan-rail-start"><button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1">开始执行</button></div>'
+      ? '<div class="plan-rail-start">'
+        + '<span class="plan-rail-start-status">等待开始执行</span>'
+        + '<button type="button" class="button compact plan-step-locate" data-plan-start-locate="1" title="跳到中间的开始执行卡片">定位</button>'
+        + "</div>"
       : "";
     // The report download now lives inline on the producing step row (see
     // planSubstepGroupHtml), not as a floating button at the rail bottom.
@@ -771,6 +828,459 @@ export function createPlanRailController({
     const eventStrip = loopEventStripHtml(plan);
     const subAgentRows = subAgentRowsHtml(plan);
     return fetchErrorBanner + headerBadge + eventStrip + subAgentRows + phasesHtml + startControl;
+  }
+
+  // Failed steps in plan order, so the middle retry panel lists them the same
+  // way the rail shows them.
+  function failedPlanSteps(plan) {
+    const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+    return [...steps]
+      .filter((step) => (step?.status || "pending") === "failed")
+      .sort((left, right) => (Number(left.index) || 0) - (Number(right.index) || 0));
+  }
+
+  // Builds the middle-workspace retry panel body: one editable card per failed
+  // step. Returns "" when there is nothing to retry (the caller then hides the
+  // panel entirely). The tool schema for each failed step is fetched lazily via
+  // the same maybeFetchToolSchema() path the rail uses, so enum/required upgrades
+  // apply here too.
+  function planRetryPanelHtml(plan) {
+    const failed = failedPlanSteps(plan);
+    if (!failed.length) return "";
+    const cards = failed.map((step) => {
+      const ref = step?.tool_ref || {};
+      maybeFetchToolSchema(ref);
+      return planRetryCardHtml(step, toolSchemaFor(ref));
+    });
+    return [
+      '<header class="plan-retry-panel-head">',
+      '<h3>编辑参数后重试</h3>',
+      '<p class="plan-retry-panel-sub">修改失败步骤的输入后重新执行。此处提交将整体替换该步骤输入（非合并）。</p>',
+      "</header>",
+      `<div class="plan-retry-panel-body">${cards.join("")}</div>`,
+    ].join("");
+  }
+
+  // The done report step whose output the 下载报告 button drives, if any. Mirrors
+  // planSubstepHtml's isReportDone predicate so the middle download card appears
+  // exactly when the rail marks a report ready.
+  function doneReportStep(plan) {
+    const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+    return steps.find((step) => {
+      const ref = step?.tool_ref || {};
+      const tool = ref.tool;
+      return (tool === "generate_model_report" || tool === "generate_feature_report")
+        && (step?.status || "pending") === "done";
+    }) || null;
+  }
+
+  // Builds the middle-workspace driver-actions panel body: the 开始执行 control
+  // (plan built but not started, manual mode) and/or the 下载报告 control (a
+  // report step has completed). Both reuse the existing document-level handlers
+  // (data-driver-confirm / data-driver-report-download) — only the mount moves
+  // out of the narrow rail into the roomy middle region. Returns "" when there is
+  // no driver action to surface (the caller then hides the panel).
+  function planDriverActionsHtml(plan) {
+    const cards = [];
+    const awaitingStart = plan?.status === "validated" && !isAgentMode?.();
+    if (awaitingStart) {
+      cards.push([
+        '<section class="plan-driver-action-card" data-driver-action="start">',
+        '<header class="plan-driver-action-head">',
+        '<span class="plan-driver-action-pill">开始执行</span>',
+        '<span class="plan-driver-action-title">计划已生成，确认后开始逐步执行。</span>',
+        "</header>",
+        '<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1">开始执行</button>',
+        "</section>",
+      ].join(""));
+    }
+    if (doneReportStep(plan)) {
+      cards.push([
+        '<section class="plan-driver-action-card" data-driver-action="report-download">',
+        '<header class="plan-driver-action-head">',
+        '<span class="plan-driver-action-pill">报告已就绪</span>',
+        '<span class="plan-driver-action-title">模型开发报告已生成，可下载查看。</span>',
+        "</header>",
+        '<button type="button" class="button compact secondary plan-step-download" data-driver-report-download="1">下载报告</button>',
+        "</section>",
+      ].join(""));
+    }
+    if (!cards.length) return "";
+    return `<div class="plan-driver-actions-body">${cards.join("")}</div>`;
+  }
+
+  // A stable signature of the driver-actions panel state, so an unchanged panel
+  // is not rebuilt on every poll tick (which would drop focus / restart flashes).
+  function planDriverActionsSignature(plan) {
+    const report = doneReportStep(plan);
+    return JSON.stringify({
+      start: plan?.status === "validated" && !isAgentMode?.(),
+      report: report ? String(report.id || report.output_ref || "1") : "",
+    });
+  }
+
+  // Mounts the driver-actions panel into the middle workspace (#planDriverActions).
+  // Shows it only when there is at least one driver action (开始执行 / 下载报告);
+  // otherwise clears and hides it so a healthy in-progress plan never leaves a
+  // stale action card in the middle region.
+  function renderDriverActionsPanel(plan) {
+    const panel = $("planDriverActions");
+    if (!panel) return;
+    const html = planDriverActionsHtml(plan);
+    if (!html) {
+      if (panel.dataset.driverActionsSignature !== "") {
+        panel.dataset.driverActionsSignature = "";
+        panel.innerHTML = "";
+      }
+      panel.classList.add("hidden");
+      panel.classList.remove("is-open");
+      panel.setAttribute("aria-hidden", "true");
+      return;
+    }
+    const signature = planDriverActionsSignature(plan);
+    if (panel.dataset.driverActionsSignature !== signature) {
+      panel.dataset.driverActionsSignature = signature;
+      panel.innerHTML = html;
+    }
+    panel.classList.remove("hidden");
+    panel.setAttribute("aria-hidden", "false");
+  }
+
+  // Hides and empties the middle driver-actions panel. Called alongside
+  // clearRetryPanel when leaving a plan-rail task.
+  function clearDriverActionsPanel() {
+    const panel = $("planDriverActions");
+    if (!panel) return;
+    panel.dataset.driverActionsSignature = "";
+    panel.innerHTML = "";
+    panel.classList.add("hidden");
+    panel.classList.remove("is-open");
+    panel.setAttribute("aria-hidden", "true");
+  }
+
+  // Reveals the middle driver-actions panel, scrolls the requested action card
+  // into view, and flashes it — the locate-and-flash bridge from the rail's
+  // lightweight 开始执行 / 下载报告 status entries (mirrors openRetryCard).
+  function openDriverActionCard(action) {
+    const panel = $("planDriverActions");
+    if (!panel) return;
+    panel.classList.remove("hidden");
+    panel.classList.add("is-open");
+    panel.setAttribute("aria-hidden", "false");
+    const card = action
+      ? panel.querySelector(`[data-driver-action="${cssEscape(action)}"]`)
+      : null;
+    flashLocatedCard(panel, card);
+  }
+
+  // Scrolls the middle conversation gate section into view and flashes it — the
+  // locate-and-flash bridge from the rail's lightweight "待确认" gate entry. The
+  // actual confirm control (plain button or a structured widget) already lives in
+  // that middle gate section; this only brings the user's eye to it.
+  function openGateCard(stepId) {
+    const container = $("agentMessages");
+    if (!container) return;
+    const escapedStep = stepId ? cssEscape(String(stepId)) : "";
+    const bySection = escapedStep
+      ? container.querySelector(`[data-driver-gate-section="${escapedStep}"]`)
+      : null;
+    // Fall back to the single pending gate section (only ever one) when the
+    // section carries no per-step id.
+    const card = bySection || container.querySelector(".driver-analysis-section.is-gate-pending");
+    flashLocatedCard(container, card);
+  }
+
+  // Shared scroll-into-view + restart-flash routine for the middle locate
+  // entries. Scrolls the card (or the container as a fallback) into view, then
+  // restarts the flash highlight on the card via a reflow, and focuses the first
+  // actionable control so keyboard users land on it.
+  function flashLocatedCard(container, card) {
+    const target = card || container;
+    if (target && typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if (card) {
+      card.classList.remove("is-flash");
+      void card.offsetWidth;
+      card.classList.add("is-flash");
+      const focusable = card.querySelector("button, input, select, textarea");
+      if (focusable && typeof focusable.focus === "function") {
+        try { focusable.focus({ preventScroll: true }); } catch (_) { focusable.focus(); }
+      }
+    }
+  }
+
+  // Mounts the retry panel into the middle workspace (#planRetryPanel). Shows it
+  // only when there is at least one failed step to retry; otherwise clears and
+  // hides it so it never occupies the middle region on a healthy plan. Cards are
+  // only rebuilt when their content signature changes, so an open panel with an
+  // in-progress edit is not wiped on every poll tick.
+  function renderRetryPanel(plan) {
+    const panel = $("planRetryPanel");
+    if (!panel) return;
+    const html = planRetryPanelHtml(plan);
+    if (!html) {
+      if (panel.dataset.planRetrySignature !== "") {
+        panel.dataset.planRetrySignature = "";
+        panel.innerHTML = "";
+      }
+      panel.classList.add("hidden");
+      panel.setAttribute("aria-hidden", "true");
+      panel.classList.remove("is-open");
+      return;
+    }
+    const failed = failedPlanSteps(plan);
+    const signature = JSON.stringify(failed.map((step) => {
+      const ref = step?.tool_ref || {};
+      return { id: step?.id, inputs: planRetryInputsText(step), schema: toolSchemaFor(ref) };
+    }));
+    if (panel.dataset.planRetrySignature !== signature) {
+      panel.dataset.planRetrySignature = signature;
+      panel.innerHTML = html;
+    }
+    panel.classList.remove("hidden");
+    panel.setAttribute("aria-hidden", "false");
+  }
+
+  // Hides and empties the middle retry panel. Called when leaving a plan-rail
+  // task (e.g. switching to a validation task) so a leftover retry form never
+  // lingers in the middle workspace of an unrelated task.
+  function clearRetryPanel() {
+    const panel = $("planRetryPanel");
+    if (!panel) return;
+    panel.dataset.planRetrySignature = "";
+    panel.innerHTML = "";
+    panel.classList.add("hidden");
+    panel.classList.remove("is-open");
+    panel.setAttribute("aria-hidden", "true");
+  }
+
+  // Reveals the middle retry panel and scrolls the requested step's card into
+  // view. Called when the user clicks the rail's lightweight "编辑参数后重试"
+  // entry — the heavy form lives in the middle, so this is the bridge.
+  function openRetryCard(stepId) {
+    const panel = $("planRetryPanel");
+    if (!panel) return;
+    panel.classList.remove("hidden");
+    panel.classList.add("is-open");
+    panel.setAttribute("aria-hidden", "false");
+    const card = panel.querySelector(`[data-plan-retry-card="${cssEscape(stepId)}"]`);
+    const target = card || panel;
+    if (typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if (card) {
+      card.classList.remove("is-flash");
+      // Reflow so re-adding the class restarts the highlight animation.
+      void card.offsetWidth;
+      card.classList.add("is-flash");
+      const focusable = card.querySelector("input, select, textarea");
+      if (focusable && typeof focusable.focus === "function") {
+        try { focusable.focus({ preventScroll: true }); } catch (_) { focusable.focus(); }
+      }
+    }
+  }
+
+  // Minimal CSS.escape fallback for attribute selectors (step ids are backend
+  // slugs, but guard against special chars so querySelector never throws).
+  function cssEscape(value) {
+    const raw = String(value == null ? "" : value);
+    if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(raw);
+    return raw.replace(/["\\\]]/g, "\\$&");
+  }
+
+  // True only for a real DOM element that supports the operations the keyed
+  // reconciler needs. The static tests pass a bare `{ innerHTML: '' }` mock;
+  // those exercise the innerHTML fallback below (which still lets them assert on
+  // the produced markup), while a live browser gets node-preserving patching.
+  function supportsReconciliation(el) {
+    return Boolean(
+      el
+      && typeof el.insertBefore === "function"
+      && typeof el.querySelector === "function"
+      && typeof el.appendChild === "function"
+      && typeof document !== "undefined"
+      && typeof document.createElement === "function"
+      && el.children,
+    );
+  }
+
+  // Builds a detached node from an HTML string via a throwaway container. Used
+  // to mint fresh keyed nodes (phase cards, substeps, chrome blocks) that the
+  // reconciler then splices into the live rail.
+  function nodeFromHtml(html) {
+    const holder = document.createElement("div");
+    holder.innerHTML = html;
+    return holder.firstElementChild;
+  }
+
+  // Reconciles the substeps inside a phase card's `.plan-rail-substeps` section.
+  // Each `.notebook-step` is keyed by its step id; a persisting step keeps its
+  // node object (so a :hover on that substep survives the tick) and only has its
+  // innerHTML/class refreshed when the step's own markup changed.
+  function reconcileSubsteps(section, phaseSteps, phaseNumber) {
+    const heading = section.querySelector("h4");
+    if (heading) {
+      const headingText = `子任务 · ${phaseSteps.length}`;
+      if (heading.textContent !== headingText) heading.textContent = headingText;
+    }
+    const existing = new Map();
+    section.querySelectorAll(":scope > .notebook-step").forEach((node) => {
+      if (node.dataset.stepKey) existing.set(node.dataset.stepKey, node);
+    });
+    let cursor = heading || null;
+    phaseSteps.forEach((step, index) => {
+      const subNumber = phaseNumber ? `${phaseNumber}.${index + 1}` : `${index + 1}`;
+      const key = String(step?.id || `idx:${index}`);
+      const html = planSubstepHtml(step, subNumber);
+      let node = existing.get(key);
+      if (node) {
+        existing.delete(key);
+        if (node.dataset.stepSignature !== html) {
+          const fresh = nodeFromHtml(html);
+          if (fresh) {
+            node.className = fresh.className;
+            node.innerHTML = fresh.innerHTML;
+          }
+          node.dataset.stepSignature = html;
+        }
+      } else {
+        node = nodeFromHtml(html);
+        if (!node) return;
+        node.dataset.stepKey = key;
+        node.dataset.stepSignature = html;
+      }
+      const desiredNext = cursor ? cursor.nextSibling : section.firstChild;
+      if (node !== desiredNext) section.insertBefore(node, desiredNext);
+      cursor = node;
+    });
+    for (const node of existing.values()) node.remove();
+  }
+
+  // Keyed reconciliation of the whole plan rail. Chrome blocks (fetch error /
+  // header badge / event strip / sub-agent rows / start control) are keyed by a
+  // fixed slot id and their node is reused-or-replaced only when their markup
+  // changed. Phase cards are keyed by phase name so a persisting phase keeps its
+  // node (and its hovered substeps) across ticks. Returns false when the target
+  // cannot be reconciled so the caller can fall back to innerHTML.
+  function reconcilePlanRail(container, plan, opts) {
+    if (!supportsReconciliation(container)) return false;
+    const phases = planPhasePlan(plan);
+    // Ordered slot descriptors. `phase` slots recurse into substep keying; all
+    // other slots are simple keyed HTML blocks (may be empty -> absent).
+    const slots = [
+      { key: "fetch-error", html: opts.fetchError
+        ? '<div class="plan-rail-fetch-error" role="status">'
+          + '<span>计划读取失败，当前显示的是上次缓存的计划。</span>'
+          + '<button type="button" class="button compact secondary" data-plan-rail-retry="1">重试</button>'
+          + "</div>"
+        : "" },
+      { key: "header-badge", html: (() => {
+        const replanBadge = replanBadgeHtml(plan);
+        return replanBadge ? `<div class="plan-rail-header">${replanBadge}</div>` : "";
+      })() },
+      { key: "event-strip", html: loopEventStripHtml(plan) },
+      { key: "subagent-rows", html: subAgentRowsHtml(plan) },
+      ...phases.map((entry) => ({ key: `phase:${entry.phase}`, phase: entry })),
+      { key: "start-control", html: (plan.status === "validated" && !isAgentMode?.())
+        ? '<div class="plan-rail-start">'
+          + '<span class="plan-rail-start-status">等待开始执行</span>'
+          + '<button type="button" class="button compact plan-step-locate" data-plan-start-locate="1" title="跳到中间的开始执行卡片">定位</button>'
+          + "</div>"
+        : "" },
+    ];
+    // Index current top-level children by their data-rail-slot key. Any child
+    // without a slot key is leftover from a previous innerHTML-fallback render
+    // (empty/error/skeleton state) and must be cleared so the keyed slots start
+    // from a clean container.
+    const existing = new Map();
+    for (const node of Array.from(container.children)) {
+      if (node.dataset && node.dataset.railSlot) {
+        existing.set(node.dataset.railSlot, node);
+      } else {
+        node.remove();
+      }
+    }
+    let cursor = null;
+    for (const slot of slots) {
+      if (slot.phase) {
+        const { phase, phaseSteps, phaseNumber } = slot.phase;
+        const phaseStatus = planPhaseStatus(phaseSteps);
+        let node = existing.get(slot.key);
+        if (!node) {
+          const shell = [
+            `<div class="step plan-rail-step ${escapeHtml(phaseStatus)}" role="group" aria-label="${phaseNumber}. ${escapeHtml(phase)}">`,
+            planPhaseHeadHtml(phase, phaseSteps, phaseNumber),
+            '<section class="notebook-step-group plan-rail-substeps"><h4></h4></section>',
+            "</div>",
+          ].join("");
+          node = nodeFromHtml(shell);
+          if (!node) continue;
+          node.dataset.railSlot = slot.key;
+        } else {
+          // Refresh phase card class + head in place (node preserved).
+          node.className = `step plan-rail-step ${phaseStatus}`;
+          node.setAttribute("aria-label", `${phaseNumber}. ${phase}`);
+          const head = node.querySelector(":scope > .step-head");
+          const headHtml = planPhaseHeadHtml(phase, phaseSteps, phaseNumber);
+          if (head && head.dataset.headSignature !== headHtml) {
+            const fresh = nodeFromHtml(headHtml);
+            if (fresh) head.innerHTML = fresh.innerHTML;
+            head.dataset.headSignature = headHtml;
+          } else if (!head) {
+            const fresh = nodeFromHtml(headHtml);
+            if (fresh) node.insertBefore(fresh, node.firstChild);
+          }
+        }
+        existing.delete(slot.key);
+        // Ensure a substeps section exists, then key its substeps.
+        let section = node.querySelector(":scope > .plan-rail-substeps");
+        if (phaseSteps.length && !section) {
+          section = nodeFromHtml('<section class="notebook-step-group plan-rail-substeps"><h4></h4></section>');
+          if (section) node.appendChild(section);
+        }
+        if (section) {
+          if (!phaseSteps.length) {
+            section.remove();
+          } else {
+            reconcileSubsteps(section, phaseSteps, phaseNumber);
+          }
+        }
+        const desiredNext = cursor ? cursor.nextSibling : container.firstChild;
+        if (node !== desiredNext) container.insertBefore(node, desiredNext);
+        cursor = node;
+        continue;
+      }
+      // Plain keyed HTML slot.
+      let node = existing.get(slot.key);
+      if (!slot.html) {
+        if (node) node.remove();
+        existing.delete(slot.key);
+        continue;
+      }
+      if (node) {
+        existing.delete(slot.key);
+        if (node.dataset.slotSignature !== slot.html) {
+          const fresh = nodeFromHtml(slot.html);
+          if (fresh) {
+            node.className = fresh.className;
+            node.innerHTML = fresh.innerHTML;
+          }
+          node.dataset.slotSignature = slot.html;
+        }
+      } else {
+        node = nodeFromHtml(slot.html);
+        if (!node) continue;
+        node.dataset.railSlot = slot.key;
+        node.dataset.slotSignature = slot.html;
+      }
+      const desiredNext = cursor ? cursor.nextSibling : container.firstChild;
+      if (node !== desiredNext) container.insertBefore(node, desiredNext);
+      cursor = node;
+    }
+    // Drop any slot node that no longer has a descriptor (removed phase/chrome).
+    for (const node of existing.values()) node.remove();
+    return true;
   }
 
   function render({ force = false, renderSignatures = {} } = {}) {
@@ -793,17 +1303,73 @@ export function createPlanRailController({
     if (force || renderSignatures.workflowStepper !== planSignature) {
       renderSignatures.workflowStepper = planSignature;
       const planStepper = $("workflowStepper");
-      if (planStepper) planStepper.innerHTML = planRailHtml(plan, { blocked, fetchError, firstLoad });
+      if (planStepper) {
+        // A populated plan gets node-preserving keyed reconciliation so hovering
+        // a step card during the per-second poll does not rebuild the node under
+        // the cursor (the flicker fix). Empty/error/skeleton states are single
+        // transient blocks with no hover target, and the static test harness
+        // passes a bare innerHTML mock — both fall back to a plain innerHTML set.
+        const hasSteps = Boolean(plan && (plan.steps || []).length);
+        const reconciled = hasSteps
+          && !fetchError
+          && reconcilePlanRail(planStepper, plan, { fetchError });
+        if (!reconciled) {
+          planStepper.innerHTML = planRailHtml(plan, { blocked, fetchError, firstLoad });
+          // Leaving the keyed path (e.g. plan emptied out) invalidates any slot
+          // bookkeeping so the next populated render rebuilds slots cleanly.
+          if (planStepper.dataset) delete planStepper.dataset.railReconciled;
+        } else if (planStepper.dataset) {
+          planStepper.dataset.railReconciled = "1";
+        }
+      }
     }
+    // The editable retry form(s) and the driver actions (开始执行 / 下载报告)
+    // render into the middle workspace, not the rail.
+    renderRetryPanel(plan);
+    renderDriverActionsPanel(plan);
     return true;
   }
 
   function handleClick(event) {
+    // Rail's lightweight entry: open the middle retry panel and scroll to the
+    // step's card. The heavy form itself lives in the middle workspace.
+    const planRetryOpen = event.target?.closest?.("[data-plan-retry-open]");
+    if (planRetryOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      openRetryCard(planRetryOpen.dataset.planRetryOpen || "");
+      return true;
+    }
     const planRetryButton = event.target?.closest?.("[data-plan-retry-step]");
     if (planRetryButton) {
       event.preventDefault();
       event.stopPropagation();
       void retryPlanStep(planRetryButton);
+      return true;
+    }
+    // Rail's lightweight "待确认" gate entry: scroll the middle gate section into
+    // view and flash it (the confirm control itself already lives there).
+    const gateLocate = event.target?.closest?.("[data-plan-gate-locate]");
+    if (gateLocate) {
+      event.preventDefault();
+      event.stopPropagation();
+      openGateCard(gateLocate.dataset.planGateLocate || "");
+      return true;
+    }
+    // Rail's lightweight 开始执行 / 下载报告 entries: reveal the middle
+    // driver-actions panel and flash the matching action card.
+    const startLocate = event.target?.closest?.("[data-plan-start-locate]");
+    if (startLocate) {
+      event.preventDefault();
+      event.stopPropagation();
+      openDriverActionCard("start");
+      return true;
+    }
+    const reportLocate = event.target?.closest?.("[data-plan-report-locate]");
+    if (reportLocate) {
+      event.preventDefault();
+      event.stopPropagation();
+      openDriverActionCard("report-download");
       return true;
     }
     const retryButton = event.target?.closest?.("[data-plan-rail-retry]");
@@ -851,6 +1417,8 @@ export function createPlanRailController({
   return {
     artifactPreviewContainer,
     clearArtifactPanel,
+    clearDriverActionsPanel,
+    clearRetryPanel,
     handleClick,
     installArtifactHandlers,
     maybeFetchPlan,

@@ -170,6 +170,15 @@ let agentSelectedEffort = agentComposerPreferences.effort || "high";
 let agentAcceptanceMode = agentComposerPreferences.acceptance_mode || "normal";
 let lastAgentRenderSignature = null;
 let lastAgentStructuralSignature = null;
+// Manual-mode driver tasks now host every interactive control (gate confirm,
+// retry entry, download, analysis cards) in the middle #agentMessages region.
+// The per-second poll re-enters renderAgentConversation → renderDriverManualAnalysis
+// each tick even though manual mode never reloads agentMessages, so guard the
+// unconditional innerHTML rebuild with a content signature: unchanged messages =
+// skip the rebuild, preserving :hover / focus / text selection / entry animation
+// on whatever card the user is interacting with. Reset at the same task-switch /
+// leave-mode points as lastAgentRenderSignature.
+let lastDriverManualAnalysisSignature = null;
 // Cached render-input signatures so the per-second polling loop can skip
 // rewriting DOM regions whose visible inputs have not changed. Reset only
 // when task selection, validation run, or filter/sort/search state changes.
@@ -3138,6 +3147,8 @@ function renderWorkflowStepper({ force = false } = {}) {
   }
   progressRail?.setAttribute("aria-label", "验证步骤");
   planRailController.clearArtifactPanel();
+  planRailController.clearRetryPanel();
+  planRailController.clearDriverActionsPanel();
   if (railTitle) railTitle.textContent = "验证步骤";
   const nextSignature = workflowStepperSignature(selectedTask);
   if (!force && renderSignatures.workflowStepper === nextSignature) {
@@ -3290,18 +3301,28 @@ function taskKindIconHtml(taskOrType = selectedTask, extraClass = "") {
   return `<svg class="${cls}" data-kind="${escapeHtml(safeKind)}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${TASK_KIND_GLYPHS[safeKind] || ""}</svg>`;
 }
 
-function appendTaskRow(list, task) {
-  const item = document.createElement("div");
-  item.className = "task-row-shell";
-  item.setAttribute("role", "listitem");
+// Per-row content fingerprint. When two poll ticks produce the same value the
+// row's inner DOM is left untouched, so the :hover target node under the cursor
+// is never rebuilt (the flicker fix) — only the shell node's mutable children
+// (name/status/validator/date/selected) refresh when this actually changes.
+function taskRowContentSignature(task) {
+  return signatureFromParts([
+    task.id === selectedTaskId ? 1 : 0,
+    task.model_name || "",
+    task.task_type || "",
+    taskStatusTone(task),
+    taskStatusLabel(task),
+    task.validator || "-",
+    formatDate(task.updated_at),
+  ]);
+}
 
-  const row = document.createElement("button");
-  row.type = "button";
-  row.className = "task-row" + (task.id === selectedTaskId ? " selected" : "");
-  row.setAttribute("aria-current", task.id === selectedTaskId ? "true" : "false");
+// Builds the innerHTML for the `.task-row` button. Shared by fresh creation and
+// in-place content refresh so both paths stay byte-for-byte identical.
+function taskRowInnerHtml(task) {
   const tone = taskStatusTone(task);
   const validatorName = escapeHtml(task.validator || "-");
-  row.innerHTML = [
+  return [
     '<span class="task-row-top">',
     '<span class="task-row-title">',
     taskKindIconHtml(task),
@@ -3320,6 +3341,22 @@ function appendTaskRow(list, task) {
     `<small class="task-row-date">${escapeHtml(formatDate(task.updated_at))}</small>`,
     "</span>",
   ].join("");
+}
+
+// Creates a brand-new `.task-row-shell` node for a task (used when a row first
+// appears). The returned node carries data-task-id / data-row-signature so the
+// reconciler can key on it and skip untouched rows on later ticks.
+function createTaskRowShell(task) {
+  const item = document.createElement("div");
+  item.className = "task-row-shell";
+  item.setAttribute("role", "listitem");
+  item.dataset.taskId = task.id || "";
+
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "task-row" + (task.id === selectedTaskId ? " selected" : "");
+  row.setAttribute("aria-current", task.id === selectedTaskId ? "true" : "false");
+  row.innerHTML = taskRowInnerHtml(task);
   row.onclick = () => selectTask(task);
 
   const deleteButton = document.createElement("button");
@@ -3343,15 +3380,86 @@ function appendTaskRow(list, task) {
 
   item.appendChild(row);
   item.appendChild(deleteButton);
-  list.appendChild(item);
+  item.dataset.rowSignature = taskRowContentSignature(task);
+  return item;
 }
 
-function appendTaskGroup(list, groupName, groupTasks) {
-  const heading = document.createElement("div");
-  heading.className = "task-group-title";
-  heading.textContent = groupName;
-  list.appendChild(heading);
-  groupTasks.forEach((task) => appendTaskRow(list, task));
+// Refreshes an existing `.task-row-shell` in place: the shell/row/delete-button
+// nodes are all preserved (so :hover never drops), and the row's inner content +
+// selected class + click closure are rewritten only when the signature changed.
+function updateTaskRowShell(item, task) {
+  const nextSignature = taskRowContentSignature(task);
+  const row = item.querySelector(".task-row");
+  // The click closure captures the task object; refresh it every tick so a
+  // click always fires selectTask with the latest task snapshot even when the
+  // visible signature is unchanged.
+  if (row) row.onclick = () => selectTask(task);
+  const deleteButton = item.querySelector(".delete-task-button");
+  if (deleteButton) {
+    deleteButton.onclick = (event) => {
+      event.stopPropagation();
+      deleteTask(task);
+    };
+    deleteButton.setAttribute("aria-label", `删除任务 ${task.model_name}`);
+  }
+  if (item.dataset.rowSignature === nextSignature) return;
+  item.dataset.rowSignature = nextSignature;
+  if (row) {
+    row.className = "task-row" + (task.id === selectedTaskId ? " selected" : "");
+    row.setAttribute("aria-current", task.id === selectedTaskId ? "true" : "false");
+    row.innerHTML = taskRowInnerHtml(task);
+  }
+}
+
+// Keyed reconciliation of task-row shells inside a container. Existing rows are
+// reused (kept as the same node object so hover survives), new rows inserted,
+// removed rows dropped, and order fixed with insertBefore. `stopBefore` marks
+// the first node that is NOT a managed task row (e.g. the next group heading),
+// so grouped rendering can reconcile one group's slice without disturbing the
+// rest of the list.
+// Splices `tasks` into `container` as keyed `.task-row-shell` nodes starting
+// right after `anchor`. Existing shells (matched by data-task-id) are reused so
+// the hovered node survives; missing/new/reordered rows are handled by move or
+// create. Returns the last node placed (the next group's anchor).
+//
+// `removeMissing`: when true, shells left unmatched are removed here. In grouped
+// rendering this MUST be false — the same container holds other groups' rows, so
+// per-group removal would nuke sibling groups. The grouped caller
+// (reconcileTaskListGroups) does one authoritative removal pass instead.
+function reconcileTaskRows(container, tasks, { anchor = null, stopBefore = null, removeMissing = true } = {}) {
+  // Index the shells currently present in this container by task id.
+  const existing = new Map();
+  for (const node of Array.from(container.children)) {
+    if (node === stopBefore) break;
+    if (node.classList && node.classList.contains("task-row-shell") && node.dataset.taskId) {
+      existing.set(node.dataset.taskId, node);
+    }
+  }
+  let cursor = anchor;
+  for (const task of tasks) {
+    const key = task.id || "";
+    let node = existing.get(key);
+    if (node) {
+      updateTaskRowShell(node, task);
+      existing.delete(key);
+    } else {
+      node = createTaskRowShell(task);
+    }
+    const desiredNext = cursor ? cursor.nextSibling : container.firstChild;
+    if (node !== desiredNext) {
+      container.insertBefore(node, desiredNext);
+    } else if (!node.parentNode) {
+      container.insertBefore(node, desiredNext);
+    }
+    cursor = node;
+  }
+  // Any shell left in `existing` corresponds to a task that vanished.
+  if (removeMissing) {
+    for (const node of existing.values()) {
+      node.remove();
+    }
+  }
+  return cursor;
 }
 
 function renderTaskSnapshot() {
@@ -3364,13 +3472,105 @@ function renderTaskSnapshot() {
   });
 }
 
+// Computes the ordered group plan for the current group mode: an array of
+// { key, name, tasks } entries. Plain (ungrouped) mode returns a single
+// synthetic group so the reconciler has one uniform shape to consume.
+function taskListGroupPlan(tasks) {
+  if (taskGroupMode === "validator") {
+    const groups = new Map();
+    for (const task of tasks) {
+      const key = task.validator || "未填写验证人员";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(task);
+    }
+    return [...groups.entries()]
+      .sort(([left], [right]) => left.localeCompare(right, "zh-CN"))
+      .map(([key, groupTasks]) => ({ key: `validator:${key}`, name: key, tasks: groupTasks }));
+  }
+  if (taskGroupMode === "task_type") {
+    const groups = new Map();
+    for (const task of tasks) {
+      const key = task.task_type || defaultTaskType;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(task);
+    }
+    return [...groups.entries()]
+      .sort(sortTaskTypeGroups)
+      .map(([taskType, groupTasks]) => ({
+        key: `task_type:${taskType}`,
+        name: taskTypeLabel(taskType),
+        tasks: groupTasks,
+      }));
+  }
+  if (taskGroupMode === "created_month") {
+    const groups = new Map();
+    for (const task of tasks) {
+      const key = taskCreatedMonth(task);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(task);
+    }
+    return [...groups.entries()]
+      .sort(sortMonthGroups)
+      .map(([key, groupTasks]) => ({ key: `created_month:${key}`, name: key, tasks: groupTasks }));
+  }
+  return [{ key: "__all__", name: null, tasks }];
+}
+
+// Reconciles the whole task list against the desired group plan without ever
+// replacing the shell node under the cursor. Group headings are keyed by their
+// group key and task rows by task id, so a poll tick that only bumps updated_at
+// touches nothing structural — the :hover'd card node survives intact.
+function reconcileTaskListGroups(list, plan) {
+  // Existing headings (by key) so a group that persists keeps its heading node.
+  const existingHeadings = new Map();
+  for (const node of Array.from(list.children)) {
+    if (node.classList && node.classList.contains("task-group-title") && node.dataset.groupKey) {
+      existingHeadings.set(node.dataset.groupKey, node);
+    }
+  }
+  // Drop any stale empty-state placeholder left over from a previous render.
+  for (const node of Array.from(list.children)) {
+    if (node.classList && node.classList.contains("empty-state")) node.remove();
+  }
+  const keptTaskIds = new Set();
+  let cursor = null;
+  for (const group of plan) {
+    if (group.name !== null) {
+      let heading = existingHeadings.get(group.key);
+      if (!heading) {
+        heading = document.createElement("div");
+        heading.className = "task-group-title";
+        heading.dataset.groupKey = group.key;
+      }
+      if (heading.textContent !== group.name) heading.textContent = group.name;
+      const desiredNext = cursor ? cursor.nextSibling : list.firstChild;
+      if (heading !== desiredNext) list.insertBefore(heading, desiredNext);
+      existingHeadings.delete(group.key);
+      cursor = heading;
+    }
+    for (const task of group.tasks) keptTaskIds.add(task.id || "");
+    cursor = reconcileTaskRows(list, group.tasks, { anchor: cursor, removeMissing: false });
+  }
+  // Remove headings for groups that disappeared.
+  for (const heading of existingHeadings.values()) heading.remove();
+  // Remove task-row shells whose task is no longer present anywhere in the plan.
+  for (const node of Array.from(list.children)) {
+    if (
+      node.classList
+      && node.classList.contains("task-row-shell")
+      && !keptTaskIds.has(node.dataset.taskId || "")
+    ) {
+      node.remove();
+    }
+  }
+}
+
 function renderTaskList(tasks = applyTaskFilters(taskCache), { force = false } = {}) {
   const nextSignature = taskListSignature(tasks, taskCache.length);
   if (!force && renderSignatures.taskList === nextSignature) return;
   renderSignatures.taskList = nextSignature;
 
   const list = $("taskList");
-  list.innerHTML = "";
   if (taskCache.length === 0) {
     list.innerHTML = '<div class="empty-state">暂无任务</div>';
     return;
@@ -3380,46 +3580,7 @@ function renderTaskList(tasks = applyTaskFilters(taskCache), { force = false } =
     return;
   }
 
-  if (taskGroupMode === "validator") {
-    const groups = new Map();
-    for (const task of tasks) {
-      const key = task.validator || "未填写验证人员";
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(task);
-    }
-    [...groups.entries()]
-      .sort(([left], [right]) => left.localeCompare(right, "zh-CN"))
-      .forEach(([groupName, groupTasks]) => appendTaskGroup(list, groupName, groupTasks));
-    return;
-  }
-
-  if (taskGroupMode === "task_type") {
-    const groups = new Map();
-    for (const task of tasks) {
-      const key = task.task_type || defaultTaskType;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(task);
-    }
-    [...groups.entries()]
-      .sort(sortTaskTypeGroups)
-      .forEach(([taskType, groupTasks]) => appendTaskGroup(list, taskTypeLabel(taskType), groupTasks));
-    return;
-  }
-
-  if (taskGroupMode === "created_month") {
-    const groups = new Map();
-    for (const task of tasks) {
-      const key = taskCreatedMonth(task);
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(task);
-    }
-    [...groups.entries()]
-      .sort(sortMonthGroups)
-      .forEach(([groupName, groupTasks]) => appendTaskGroup(list, groupName, groupTasks));
-    return;
-  }
-
-  tasks.forEach((task) => appendTaskRow(list, task));
+  reconcileTaskListGroups(list, taskListGroupPlan(tasks));
 }
 
 function selectTask(task) {
@@ -4093,6 +4254,11 @@ function renderAgentConversation() {
     renderWorkflowStepper({ force: true });
     return;
   }
+  // Any render that is NOT the driver-manual path leaves #agentMessages in a
+  // different state (agent timeline buckets, or emptied). Drop the manual-analysis
+  // cache so a later switch back into a manual driver task rebuilds it even if the
+  // messages are byte-identical to the last manual render.
+  lastDriverManualAnalysisSignature = null;
   if (!showConversation) {
     agentMessages = [];
     lastAgentRenderSignature = null;
@@ -4450,6 +4616,11 @@ function driverManualAnalysisHtml(messages) {
     renderScreenTable: agentMessageScreenTableHtml,
     renderTables: agentMessageTablesHtml,
     renderModelDelivery: agentMessageModelDeliveryHtml,
+    // The plain-gate confirm control now lives in the middle analysis section
+    // (not the rail). renderDriverGateButton already returns "" for gates that
+    // carry a structured widget, so only genuinely plain gates get this button —
+    // reusing the same document-level data-driver-confirm handler.
+    renderGateConfirm: agentMessageGateButtonHtml,
   });
 }
 
@@ -4461,6 +4632,13 @@ function renderDriverManualAnalysis(messages) {
   const panel = $("agentConversationPanel");
   const container = $("agentMessages");
   if (!panel || !container) return;
+  // driverManualAnalysisHtml is a pure function of `messages` (all interactive /
+  // latest-gate decisions derive from messages), so the messages alone are a
+  // complete cache key for the produced DOM. Skip the destroy-and-rebuild when
+  // nothing changed — otherwise every poll tick wipes the node the user is
+  // hovering / reading / selecting inside and re-runs the entry animation.
+  const signature = JSON.stringify(messages || []);
+  if (signature === lastDriverManualAnalysisSignature) return;
   removeAgentTimelineBuckets();
   resetAgentTypingState();
   panel.classList.remove("hidden");
@@ -4468,6 +4646,7 @@ function renderDriverManualAnalysis(messages) {
   panel.setAttribute("aria-hidden", "false");
   panel.setAttribute("aria-label", "分析结果");
   container.innerHTML = driverManualAnalysisHtml(messages);
+  lastDriverManualAnalysisSignature = signature;
   attachCalibrationInteractions(container);
   // Keep the (hidden-for-driver) validation sections ordered after the analysis
   // panel so a later switch to a validation task restores cleanly.
@@ -5995,6 +6174,12 @@ $("createTaskButton").onclick = () =>
   runAction(createTaskAndScan);
 $("workflowStepper").onclick = handleWorkflowStepperClick;
 $("workflowStepper").onkeydown = handleWorkflowStepperKeydown;
+// The editable "编辑参数后重试" form now lives in the middle workspace
+// (#planRetryPanel), not the rail. Route its clicks (submit / schema fields)
+// through the same plan-rail controller handler so retryPlanStep runs.
+$("planRetryPanel").onclick = (event) => {
+  planRailController.handleClick(event);
+};
 $("taskSearchInput").oninput = (event) => {
   taskSearchQuery = event.target.value;
   renderTaskList();

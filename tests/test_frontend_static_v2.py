@@ -441,18 +441,32 @@ def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
     plan_js = _read_static("js/v2/plan_rail_controller.js")
     v2_css = _read_static("css/v2-workbench.css")
 
-    plan_start = plan_js.index("function planRailHtml")
+    # The phase card build is now split: planPhasePlan() groups steps into phases
+    # (and computes phaseNumber), planPhaseHeadHtml() emits the `.step-head`, and
+    # planRailHtml() stitches them. The window spans planPhasePlan .. render({ so
+    # it captures all three plus the keyed reconciler that mirrors the same markup.
+    plan_start = plan_js.index("function planPhasePlan")
     plan_end = plan_js.index("function render({", plan_start)
     plan_renderer = plan_js[plan_start:plan_end]
-    substeps_start = plan_js.index("function planSubstepGroupHtml")
+    # The single-substep markup moved into planSubstepHtml (keyed-reconcile
+    # friendly); planSubstepGroupHtml now wraps it. Span both.
+    substeps_start = plan_js.index("function planSubstepHtml")
     substeps_end = plan_js.index("function driverHasBlockingError", substeps_start)
     substeps_renderer = plan_js[substeps_start:substeps_end]
 
     assert "function planPhaseStatus" in plan_js
     assert "function planPhaseHint" in plan_js
-    assert "function planRetryControlHtml" in plan_js
+    # The editable retry form moved out of the rail into the middle workspace;
+    # the rail now renders only a lightweight entry button (planRetryRailEntryHtml)
+    # and the form itself is planRetryCardHtml, mounted in #planRetryPanel.
+    assert "function planRetryRailEntryHtml" in plan_js
+    assert "function planRetryCardHtml" in plan_js
+    assert "function planRetryControlHtml" not in plan_js
     assert "function planSubstepGroupHtml" in plan_js
-    assert "const phaseNumber = phaseIndex + 1;" in plan_renderer
+    assert "function planSubstepHtml" in plan_js
+    assert "function planPhasePlan" in plan_js
+    assert "function planPhaseHeadHtml" in plan_js
+    assert "phaseIndex + 1," in plan_renderer
     assert 'class="step plan-rail-step' in plan_renderer
     assert '<span class="step-number">${phaseNumber}</span>' in plan_renderer
     assert '<strong class="step-title">${escapeHtml(phase)}</strong>' in plan_renderer
@@ -464,17 +478,36 @@ def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
     assert '<span class="plan-substep-copy">' in substeps_renderer
     assert "const description = step.description || step.summary || PLAN_STEP_HINTS" in substeps_renderer
     assert 'const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";' in substeps_renderer
-    assert 'const retry = status === "failed" ? planRetryControlHtml(step, toolSchemaFor(ref)) : "";' in substeps_renderer
+    # Rail failed-step branch now yields the lightweight entry, not the form.
+    assert 'const retry = status === "failed" ? planRetryRailEntryHtml(step) : "";' in substeps_renderer
+    assert "planRetryControlHtml" not in substeps_renderer
     assert "`<strong>${escapeHtml(step.title || \"未命名步骤\")}</strong>`" in substeps_renderer
     assert "descriptionHtml" in substeps_renderer
     assert "retry" in substeps_renderer
+    # All interactive controls moved to the middle: the rail substep row no longer
+    # renders a gate confirm button or a report download button. Only status
+    # badges + lightweight locate entries remain.
+    assert "data-driver-confirm" not in substeps_renderer
+    assert "data-driver-report-download" not in substeps_renderer
+    # awaiting_confirm -> "待确认" badge (both modes) + a locate entry in manual mode.
+    assert '<span class="plan-step-await">待确认</span>' in substeps_renderer
+    assert 'data-plan-gate-locate="${escapeHtml(stepId)}"' in substeps_renderer
+    # a done report step -> "报告已就绪" badge + a locate entry to the middle card.
+    assert '<span class="plan-step-ready">报告已就绪</span>' in substeps_renderer
+    assert 'data-plan-report-locate="1"' in substeps_renderer
+    # Rail entry carries data-plan-retry-open (opens the middle panel); the actual
+    # submit button + JSON editor live in the middle-workspace card.
+    assert 'data-plan-retry-open="${escapeHtml(stepId)}"' in plan_js
     assert 'data-plan-retry-step="${escapeHtml(stepId)}"' in plan_js
     assert 'class="plan-retry-inputs"' in plan_js
     assert ': "";' in substeps_renderer
     assert '<section class="plan-rail-phase"' not in plan_renderer
     assert "plan-rail-major-number" not in plan_renderer
     assert "plan-rail-phase-name" not in plan_renderer
-    assert "plan-rail-substep" not in plan_renderer
+    # Retired singular class name — the current design uses the plural
+    # `.plan-rail-substeps` section (which the keyed reconciler also references),
+    # so match the retired token exactly rather than as a loose substring.
+    assert 'class="plan-rail-substep"' not in plan_renderer
     assert "let number = 0;" not in plan_renderer
 
     plan_step_rule = _css_rule(v2_css, ".plan-rail-step")
@@ -485,8 +518,9 @@ def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
     assert ".plan-substep-copy" in v2_css
     assert "display: grid" in _css_rule(v2_css, ".plan-substep-copy")
     assert "white-space: nowrap" in _css_rule(v2_css, ".plan-substep-copy small")
-    assert "grid-column: 1 / -1" in _css_rule(v2_css, ".plan-step-retry")
-    assert "width: 100%" in _css_rule(v2_css, ".plan-step-retry")
+    # Middle-workspace retry card is roomy (full width, glass card language).
+    assert "width: 100%" in _css_rule(v2_css, ".plan-retry-card")
+    assert "backdrop-filter" in _css_rule(v2_css, ".plan-retry-card")
 
     assert ".plan-rail-phase" not in v2_css
     assert ".plan-rail-major-number" not in v2_css
@@ -625,7 +659,8 @@ def test_plan_rail_retry_step_posts_edited_inputs():
     assert "step?.failure_envelope" in retry_scope_body
     assert "downstream_reset_steps" in retry_scope_body
     assert "plan-retry-scope" in retry_scope_body
-    assert "grid-template-columns: repeat(auto-fit, minmax(160px, 1fr))" in _css_rule(v2_css, ".plan-retry-schema-fields")
+    # Roomier middle-region grid (wider min column than the old narrow rail).
+    assert "grid-template-columns: repeat(auto-fit, minmax(220px, 1fr))" in _css_rule(v2_css, ".plan-retry-schema-fields")
     assert "color: var(--text-muted)" in _css_rule(v2_css, ".plan-retry-scope")
     assert 'button?.dataset?.planRetryStep || ""' in retry_body
     assert 'parsePlanRetryInputs(button.closest("[data-plan-step-retry]"))' in retry_body
@@ -635,6 +670,9 @@ def test_plan_rail_retry_step_posts_edited_inputs():
     assert "[data-plan-retry-step]" in click_body
     assert "void retryPlanStep(planRetryButton);" in click_body
     assert "[data-plan-rail-retry]" in click_body
+    # Rail's lightweight entry opens the middle retry panel.
+    assert "[data-plan-retry-open]" in click_body
+    assert "openRetryCard(" in click_body
 
 
 def test_plan_retry_replace_semantics_warning_is_always_present():
@@ -649,7 +687,9 @@ def test_plan_retry_replace_semantics_warning_is_always_present():
     v2_css = _read_static("css/v2-workbench.css")
 
     warning_body = _slice_function(plan_js, "function planRetryReplaceWarningHtml")
-    control_body = _slice_function(plan_js, "function planRetryControlHtml")
+    # The form (with the warning + JSON editor) now renders in the middle
+    # workspace via planRetryCardHtml, not the old rail planRetryControlHtml.
+    control_body = _slice_function(plan_js, "function planRetryCardHtml")
 
     assert "整体替换" in warning_body
     assert "非合并" in warning_body
@@ -673,9 +713,21 @@ def test_plan_retry_schema_form_marks_required_fields_and_falls_back_to_inferred
     script = "\n".join(
         [
             f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "function fakeEl() {",
+            "  return {",
+            "    _html: '',",
+            "    get innerHTML() { return this._html; },",
+            "    set innerHTML(value) { this._html = value; },",
+            "    dataset: {},",
+            "    classList: { add() {}, remove() {}, toggle() {} },",
+            "    setAttribute() {},",
+            "    querySelector() { return null; },",
+            "  };",
+            "}",
             "const elements = {",
             "  progressRail: { setAttribute() {} },",
             "  workflowStepper: { innerHTML: '' },",
+            "  planRetryPanel: fakeEl(),",
             "};",
             "function $(id) { return elements[id] || null; }",
             "globalThis.document = { querySelector() { return { textContent: '' }; } };",
@@ -728,15 +780,16 @@ def test_plan_retry_schema_form_marks_required_fields_and_falls_back_to_inferred
             "await new Promise((resolve) => setTimeout(resolve, 20));",
             "controller.render({ force: true, renderSignatures: {} });",
             "await new Promise((resolve) => setTimeout(resolve, 20));",
-            "const withRealSchema = elements.workflowStepper.innerHTML;",
+            "const withRealSchema = elements.planRetryPanel.innerHTML;",
             "",
             "elements.workflowStepper.innerHTML = '';",
+            "elements.planRetryPanel = fakeEl();",
             "controller = makeController((name) => Promise.reject(new Error('network down')));",
             "controller.render({ force: true, renderSignatures: {} });",
             "await new Promise((resolve) => setTimeout(resolve, 20));",
             "controller.render({ force: true, renderSignatures: {} });",
             "await new Promise((resolve) => setTimeout(resolve, 20));",
-            "const withFailedFetch = elements.workflowStepper.innerHTML;",
+            "const withFailedFetch = elements.planRetryPanel.innerHTML;",
             "process.stdout.write(JSON.stringify({ withRealSchema, withFailedFetch }));",
         ]
     )
@@ -2809,7 +2862,7 @@ def test_sidebar_task_card_is_two_line_compact_without_icon():
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
 
-    append_start = app_js.index("function appendTaskRow")
+    append_start = app_js.index("function taskRowContentSignature")
     append_end = app_js.index("function renderTaskSnapshot", append_start)
     append_renderer = app_js[append_start:append_end]
 
@@ -4073,7 +4126,7 @@ def test_task_group_setting_supports_created_month_and_task_type():
     assert 'taskGroupMode === "created_month"' in app_js
     assert 'export const taskTypeDisplayOrder = ["data_join", "feature_analysis", "vintage", "modeling", "validation", "strategy"];' in task_types_js
     assert "sortTaskTypeGroups" in app_js
-    assert "appendTaskGroup(list, taskTypeLabel(taskType), groupTasks)" in app_js
+    assert "name: taskTypeLabel(taskType)," in app_js
     assert "function taskCreatedMonth" in app_js
     assert "task.created_at || task.updated_at" in app_js
     assert "未知创建月份" in app_js
@@ -5381,7 +5434,7 @@ def test_failed_task_error_detail_moves_to_current_status_only():
     app_js = _read_static("app.js")
     workspace_view_js = _read_static("js/task-workspace-view.js")
 
-    append_start = app_js.index("function appendTaskRow")
+    append_start = app_js.index("function taskRowContentSignature")
     append_end = app_js.index("function renderTaskSnapshot", append_start)
     append_renderer = app_js[append_start:append_end]
     assert "task.status_message" not in append_renderer
@@ -10141,6 +10194,141 @@ def test_gate_confirm_button_states_consequence_by_tool():
     assert ">确认<" in payload["genericHtml"]
 
 
+def test_all_rail_interactions_move_to_middle_workspace():
+    """所有交互（确认/开始执行/下载报告）都在中间主区进行，右侧 rail 只保留
+    状态徽标 + 轻量定位入口。
+
+    - 开始执行 (plan validated, manual mode) and 下载报告 (a report step done)
+      render as real buttons in the MIDDLE #planDriverActions panel, driven by
+      the same document-level handlers (data-driver-confirm /
+      data-driver-report-download).
+    - The rail's start slot and report step row carry NO such button — only a
+      status line + a lightweight locate entry (data-plan-*-locate).
+    """
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+    driver_analysis_js = _read_static("js/v2/driver_manual_analysis.js")
+    app_js = _read_static("app.js")
+    v2_css = _read_static("css/v2-workbench.css")
+
+    # These plan-rail helpers are nested inside createPlanRailController, so their
+    # closing brace is indented — _slice_function (which stops at a column-0 `}`)
+    # would over-capture. Use a brace-counting slice for nested functions.
+    def _nested(source: str, signature: str) -> str:
+        start = source.index(signature)
+        depth = 0
+        seen = False
+        for i in range(start, len(source)):
+            if source[i] == "{":
+                depth += 1
+                seen = True
+            elif source[i] == "}":
+                depth -= 1
+                if seen and depth == 0:
+                    return source[start : i + 1]
+        return source[start:]
+
+    # The rail never emits an interactive confirm/download button anymore — its
+    # HTML builders only carry status badges + locate entries. (The middle
+    # planDriverActionsHtml / planRetryCardHtml own the real buttons; the plain
+    # gate confirm is rendered by driverManualAnalysisHtml via renderGateConfirm.)
+    rail_html_builders = "".join(
+        _nested(plan_js, sig)
+        for sig in ("function planSubstepHtml", "function planRailHtml", "function reconcilePlanRail")
+    )
+    assert "data-driver-confirm" not in rail_html_builders
+    assert "data-driver-report-download" not in rail_html_builders
+    assert 'data-plan-gate-locate="${escapeHtml(stepId)}"' in rail_html_builders
+    assert 'data-plan-start-locate="1"' in rail_html_builders
+    assert 'data-plan-report-locate="1"' in rail_html_builders
+
+    # The middle driver-actions panel owns the real buttons.
+    actions_body = _nested(plan_js, "function planDriverActionsHtml")
+    assert 'data-driver-confirm="1"' in actions_body
+    assert "开始执行" in actions_body
+    assert 'data-driver-report-download="1"' in actions_body
+    assert "下载报告" in actions_body
+
+    # driverManualAnalysisHtml renders the plain-gate confirm control in the
+    # middle section (renderGateConfirm) and anchors the pending gate section so
+    # the rail locate entry can scroll to it.
+    assert "renderGateConfirm" in driver_analysis_js
+    assert "data-driver-gate-section=" in driver_analysis_js
+    assert "renderGateConfirm: agentMessageGateButtonHtml" in app_js
+
+    # The .is-open dead class now has a meaningful rule (open-state left edge).
+    is_open_rule = _css_rule(v2_css, ".plan-retry-panel.is-open,\n.plan-driver-actions.is-open")
+    assert "border-left" in is_open_rule
+    assert ".plan-driver-action-card" in v2_css
+
+    # Executable proof: drive the controller against a mini-DOM and read the
+    # middle panel's produced markup for both the start gate and a done report.
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = _MINI_DOM_JS + "\n" + "\n".join(
+        [
+            f"const {{ createPlanRailController }} = await import({json.dumps(module_url)});",
+            "const __doc = makeDocument();",
+            "const workflowStepper = __doc.createElement('div');",
+            "const planDriverActions = __doc.createElement('section');",
+            "const elements = { progressRail: { setAttribute() {} }, workflowStepper, planDriverActions };",
+            "function $(id) { return elements[id] || null; }",
+            "let plan;",
+            "globalThis.document = { createElement: (t) => __doc.createElement(t), querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
+            "const controller = createPlanRailController({ $, getSelectedTask: () => ({ task_type: 'modeling' }), getSelectedTaskId: () => 'task-A', getAgentMessages: () => [], isAgentMode: () => false, renderWorkflowStepper: () => {}, setActionStatus: () => {} });",
+            "const rs = {};",
+            "// Plan built but not started -> middle panel shows 开始执行.",
+            "plan = { id: 'plan-1', status: 'validated', steps: [",
+            "  { id: 's1', index: 0, phase: '建模', title: 'Train', status: 'pending', tool_ref: { plugin: 'modeling', tool: 'train_model' }, depends_on: [] },",
+            "] };",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((r) => setTimeout(r, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "// The mini-DOM serializer only re-emits class (drops data-*), so read",
+            "// live nodes: query by class, then confirm the parsed dataset flag.",
+            "const startBtn = planDriverActions.querySelector('.driver-confirm');",
+            "const startRailBtn = workflowStepper.querySelector('.driver-confirm');",
+            "const startLocate = workflowStepper.querySelector('.plan-step-locate');",
+            "// A report step completed -> middle panel shows 下载报告.",
+            "plan = { id: 'plan-1', status: 'running', steps: [",
+            "  { id: 's1', index: 0, phase: '建模', title: 'Train', status: 'done', tool_ref: { plugin: 'modeling', tool: 'train_model' }, depends_on: [] },",
+            "  { id: 's2', index: 1, phase: '报告', title: 'Report', status: 'done', tool_ref: { plugin: 'modeling', tool: 'generate_model_report' }, depends_on: ['s1'] },",
+            "] };",
+            "controller.resetFetchThrottle('task-A');",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((r) => setTimeout(r, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const dlBtn = planDriverActions.querySelector('.plan-step-download');",
+            "const railDlBtn = workflowStepper.querySelector('.plan-step-download');",
+            "const railReady = workflowStepper.querySelector('.plan-step-ready');",
+            "process.stdout.write(JSON.stringify({",
+            "  startPanelConfirm: startBtn ? (startBtn.dataset.driverConfirm || '') : null,",
+            "  startPanelLabel: startBtn ? startBtn.textContent : '',",
+            "  railHasConfirm: startRailBtn != null,",
+            "  railHasLocate: startLocate != null,",
+            "  reportPanelDownload: dlBtn ? (dlBtn.dataset.driverReportDownload || '') : null,",
+            "  reportPanelLabel: dlBtn ? dlBtn.textContent : '',",
+            "  railHasDownloadBtn: railDlBtn != null,",
+            "  railHasReadyBadge: railReady != null,",
+            "  railReadyText: railReady ? railReady.textContent : '',",
+            "}));",
+        ]
+    )
+    data = _run_node_capture_json(script)
+
+    # Middle panel: real actionable buttons wired to the document-level handlers.
+    assert data["startPanelConfirm"] == "1", data
+    assert "开始执行" in data["startPanelLabel"]
+    assert data["reportPanelDownload"] == "1", data
+    assert "下载报告" in data["reportPanelLabel"]
+
+    # Rail: only status + locate, never an interactive confirm/download button.
+    assert data["railHasConfirm"] is False, data
+    assert data["railHasLocate"] is True, data
+    assert data["railHasDownloadBtn"] is False, data
+    assert data["railHasReadyBadge"] is True, data
+    assert "报告已就绪" in data["railReadyText"]
+
+
 def test_acceptance_mode_chip_explains_auto_mode_scope():
     """UX-10: the acceptance-mode chip/select must explain, on hover, that auto
     mode confirms every gate (including destructive ones) on the user's
@@ -10397,3 +10585,307 @@ def test_driver_table_chart_html_mounts_above_table_and_skips_when_absent():
     assert "agent-inline-table-chart" in with_chart
     assert 'class="calibration-point"' in with_chart
     assert with_chart.index("agent-inline-table-chart") < with_chart.index("<table>")
+
+
+# ---------------------------------------------------------------------------
+# Hover-flicker regression: keyed reconciliation must preserve the DOM node
+# under the cursor across poll ticks. Both the task list and the plan-rail
+# stepper rebuilt their whole innerHTML every second (updated_at churn),
+# destroying the :hover'd node and making its grey hover background flash.
+# These two tests drive the REAL renderers against a minimal DOM and assert the
+# first-render node object still IS the node after a second render whose data
+# differs only by a churny timestamp field.
+# ---------------------------------------------------------------------------
+
+_MINI_DOM_JS = r"""
+// Minimal DOM good enough for the task-list + plan-rail keyed reconcilers.
+function makeDocument() {
+  class ClassList {
+    constructor(el) { this._el = el; }
+    _list() { return (this._el._className || "").split(/\s+/).filter(Boolean); }
+    _set(list) { this._el._className = list.join(" "); }
+    contains(c) { return this._list().includes(c); }
+    add(c) { const l = this._list(); if (!l.includes(c)) { l.push(c); this._set(l); } }
+    remove(c) { this._set(this._list().filter((x) => x !== c)); }
+    toggle(c, force) {
+      const has = this.contains(c);
+      const want = force === undefined ? !has : force;
+      if (want) this.add(c); else this.remove(c);
+      return want;
+    }
+  }
+
+  class El {
+    constructor(tag) {
+      this.tagName = String(tag || "div").toUpperCase();
+      this._className = "";
+      this.dataset = {};
+      this.attributes = {};
+      this.childNodes = [];
+      this.parentNode = null;
+      this.classList = new ClassList(this);
+      this.onclick = null;
+      this._textContent = "";
+    }
+    get className() { return this._className; }
+    set className(v) { this._className = String(v == null ? "" : v); }
+    get children() { return this.childNodes.filter((n) => n instanceof El); }
+    get firstChild() { return this.childNodes[0] || null; }
+    get firstElementChild() { return this.children[0] || null; }
+    get nextSibling() {
+      if (!this.parentNode) return null;
+      const sibs = this.parentNode.childNodes;
+      const i = sibs.indexOf(this);
+      return i >= 0 ? sibs[i + 1] || null : null;
+    }
+    setAttribute(name, value) { this.attributes[name] = String(value); }
+    getAttribute(name) { return name in this.attributes ? this.attributes[name] : null; }
+    appendChild(node) {
+      if (node.parentNode) node.parentNode.removeChild(node);
+      node.parentNode = this;
+      this.childNodes.push(node);
+      return node;
+    }
+    insertBefore(node, ref) {
+      if (node.parentNode) node.parentNode.removeChild(node);
+      node.parentNode = this;
+      if (ref == null) { this.childNodes.push(node); return node; }
+      const i = this.childNodes.indexOf(ref);
+      if (i < 0) this.childNodes.push(node);
+      else this.childNodes.splice(i, 0, node);
+      return node;
+    }
+    removeChild(node) {
+      const i = this.childNodes.indexOf(node);
+      if (i >= 0) this.childNodes.splice(i, 1);
+      node.parentNode = null;
+      return node;
+    }
+    remove() { if (this.parentNode) this.parentNode.removeChild(this); }
+    addEventListener() {}
+    removeEventListener() {}
+    contains() { return false; }
+    getBoundingClientRect() { return { width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 }; }
+    focus() {}
+    scrollIntoView() {}
+    get textContent() { return this._textContent || this.children.map((c) => c.textContent).join(""); }
+    set textContent(v) { this._textContent = String(v == null ? "" : v); this.childNodes = []; }
+    set innerHTML(html) { this._textContent = ""; this.childNodes = parseHtml(String(html), this); }
+    get innerHTML() { return serialize(this); }
+    _match(sel) {
+      sel = sel.trim();
+      if (sel.startsWith(".")) return this.classList.contains(sel.slice(1));
+      return this.tagName === sel.toUpperCase();
+    }
+    _descendants() {
+      const out = [];
+      for (const c of this.children) { out.push(c); out.push(...c._descendants()); }
+      return out;
+    }
+    querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+    querySelectorAll(sel) {
+      sel = sel.trim();
+      if (sel.startsWith(":scope >")) {
+        const rest = sel.slice(":scope >".length).trim();
+        return this.children.filter((c) => c._match(rest));
+      }
+      return this._descendants().filter((c) => c._match(sel));
+    }
+  }
+
+  function parseHtml(html, ownerParent) {
+    const nodes = [];
+    let i = 0;
+    const stack = [];
+    let current = null;
+    const push = (node) => {
+      node.parentNode = current || ownerParent;
+      if (current) current.childNodes.push(node);
+      else nodes.push(node);
+    };
+    const voidTags = new Set(["br", "img", "input", "hr", "path", "circle", "rect"]);
+    while (i < html.length) {
+      if (html[i] === "<") {
+        const close = html[i + 1] === "/";
+        const end = html.indexOf(">", i);
+        if (end < 0) break;
+        const selfClose = html[end - 1] === "/";
+        const tagContent = html.slice(i + (close ? 2 : 1), end).replace(/\/$/, "").trim();
+        i = end + 1;
+        if (close) { current = stack.pop() || null; continue; }
+        const spaceIdx = tagContent.search(/\s/);
+        const tag = (spaceIdx < 0 ? tagContent : tagContent.slice(0, spaceIdx)).toLowerCase();
+        const el = new El(tag);
+        const attrStr = spaceIdx < 0 ? "" : tagContent.slice(spaceIdx);
+        const attrRe = /([a-zA-Z0-9_-]+)(?:="([^"]*)")?/g;
+        let m;
+        while ((m = attrRe.exec(attrStr))) {
+          const name = m[1];
+          const val = m[2] == null ? "" : m[2];
+          if (name === "class") el.className = val;
+          else if (name.startsWith("data-")) {
+            const key = name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+            el.dataset[key] = val;
+          } else el.setAttribute(name, val);
+        }
+        push(el);
+        if (!voidTags.has(tag) && !selfClose) { stack.push(current); current = el; }
+      } else {
+        const next = html.indexOf("<", i);
+        const text = html.slice(i, next < 0 ? html.length : next);
+        i = next < 0 ? html.length : next;
+        if (text && current) current._textContent += text;
+      }
+    }
+    return nodes;
+  }
+
+  function serialize(el) {
+    let out = el._textContent || "";
+    for (const n of el.childNodes) {
+      if (!(n instanceof El)) continue;
+      const cls = n._className ? ` class="${n._className}"` : "";
+      out += `<${n.tagName.toLowerCase()}${cls}>${serialize(n)}</${n.tagName.toLowerCase()}>`;
+    }
+    return out;
+  }
+
+  return { createElement: (t) => new El(t), El };
+}
+
+"""
+
+
+def test_task_list_reconciliation_preserves_hovered_row_node_across_poll_ticks():
+    """Two renderTaskList calls with tasks that differ ONLY by updated_at must
+    keep the same .task-row-shell / .task-row node objects (so a :hover under
+    the cursor never drops), not wipe the list via innerHTML="" and rebuild."""
+    app_js = _read_static("app.js")
+    boot_marker = 'document.addEventListener(\n  "mousedown"'
+    app_js = app_js[: app_js.index(boot_marker)].replace(
+        'from "./js/', 'from "./marvis/static/js/'
+    )
+
+    stubs = _MINI_DOM_JS + r"""
+const __doc = makeDocument();
+const __taskList = __doc.createElement("div");
+const __storage = new Map();
+globalThis.localStorage = { getItem: (k) => (__storage.has(k) ? __storage.get(k) : null), setItem: (k, v) => __storage.set(k, String(v)), removeItem: (k) => __storage.delete(k), clear: () => __storage.clear() };
+function __mockEl() { return new Proxy({ dataset: {}, className: '', innerHTML: '', textContent: '', value: '', checked: false, scrollTop: 0, scrollHeight: 0, clientHeight: 0, children: [], childNodes: [], style: new Proxy({}, { get: () => () => {}, set: () => true }), classList: { add() {}, remove() {}, toggle() { return false; }, contains() { return false; } } }, { get(t, p) { if (p in t) return t[p]; return (...a) => { if (p === 'querySelector' || p === 'closest') return null; if (p === 'querySelectorAll') return []; if (p === 'getBoundingClientRect') return { width: 0, height: 0, top: 0, left: 0 }; return undefined; }; }, set(t, p, v) { t[p] = v; return true; } }); }
+const __els = new Map();
+function __get(id) { if (id === 'taskList') return __taskList; if (!__els.has(id)) __els.set(id, __mockEl()); return __els.get(id); }
+globalThis.document = new Proxy({ getElementById: __get, createElement: (t) => __doc.createElement(t), querySelector(s) { if (s && s.startsWith('#')) return __get(s.slice(1)); return null; }, querySelectorAll() { return []; }, addEventListener() {}, removeEventListener() {}, body: __mockEl(), activeElement: null }, { get(t, p) { if (p in t) return t[p]; return () => undefined; } });
+globalThis.window = new Proxy({ addEventListener() {}, removeEventListener() {}, matchMedia() { return { matches: false, addEventListener() {}, removeEventListener() {} }; } }, { get(t, p) { return p in t ? t[p] : () => undefined; } });
+globalThis.requestAnimationFrame = () => 0;
+globalThis.cancelAnimationFrame = () => {};
+globalThis.getComputedStyle = () => ({ getPropertyValue: () => '' });
+globalThis.MutationObserver = class { observe() {} disconnect() {} };
+globalThis.AbortController = globalThis.AbortController || class { constructor() { this.signal = {}; } abort() {} };
+globalThis.fetch = async () => ({ ok: true, json: async () => ({}), text: async () => '' });
+globalThis.__taskList = __taskList;
+"""
+
+    driver = r"""
+taskGroupMode = "none";
+selectedTaskId = "t1";
+function mk(u) { return [
+  { id: "t1", model_name: "模型A", task_type: "modeling", status: "running", validator: "张三", updated_at: u },
+  { id: "t2", model_name: "模型B", task_type: "validation", status: "scanned", validator: "李四", updated_at: u },
+]; }
+taskCache = mk("2026-07-05T10:00:00Z");
+renderTaskList(applyTaskFilters(taskCache), { force: true });
+const shellsA = globalThis.__taskList.querySelectorAll(".task-row-shell");
+const firstShellA = shellsA[0];
+const firstRowA = firstShellA.querySelector(".task-row");
+// Second render: identical shape, only the churny updated_at differs (same
+// minute -> even the formatted date text is unchanged).
+taskCache = mk("2026-07-05T10:00:30Z");
+renderTaskList(applyTaskFilters(taskCache), { force: true });
+const shellsB = globalThis.__taskList.querySelectorAll(".task-row-shell");
+const firstShellB = shellsB[0];
+const firstRowB = firstShellB.querySelector(".task-row");
+process.stdout.write(JSON.stringify({
+  countA: shellsA.length,
+  countB: shellsB.length,
+  sameShellNode: firstShellA === firstShellB,
+  sameRowNode: firstRowA === firstRowB,
+  shellStillAttached: firstShellB.parentNode === globalThis.__taskList,
+}));
+"""
+
+    data = _run_node_capture_json(stubs + "\n" + app_js + "\n" + driver)
+    assert data["countA"] == 2, data
+    assert data["countB"] == 2, data
+    # The core flicker guarantee: the hovered card node objects survive the tick.
+    assert data["sameShellNode"] is True, data
+    assert data["sameRowNode"] is True, data
+    assert data["shellStillAttached"] is True, data
+
+
+def test_plan_rail_reconciliation_preserves_hovered_step_node_across_poll_ticks():
+    """The plan-rail stepper keys phases by name and substeps by step id. Across
+    two renders of the same plan (only a running substep advances) the phase
+    card, its substeps section, and each substep node object must be preserved
+    (hover survives), while the advancing substep's content updates in place."""
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = _MINI_DOM_JS + "\n" + "\n".join(
+        [
+            f"const {{ createPlanRailController }} = await import({json.dumps(module_url)});",
+            "const __doc = makeDocument();",
+            "const workflowStepper = __doc.createElement('div');",
+            "const elements = { progressRail: { setAttribute() {} }, workflowStepper };",
+            "function $(id) { return elements[id] || null; }",
+            "let plan;",
+            "globalThis.document = { createElement: (t) => __doc.createElement(t), querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
+            "function mk(st) { return { id: 'plan-1', status: 'running', steps: [",
+            "  { id: 's1', index: 0, phase: '拼接', title: 'Propose join', status: 'done', tool_ref: { plugin: 'data_ops', tool: 'propose_join' }, depends_on: [] },",
+            "  { id: 's2', index: 1, phase: '拼接', title: 'Execute join', status: st, tool_ref: { plugin: 'data_ops', tool: 'execute_join' }, depends_on: ['s1'] },",
+            "  { id: 's3', index: 2, phase: '建模', title: 'Train', status: 'pending', tool_ref: { plugin: 'modeling', tool: 'train_model' }, depends_on: ['s2'] },",
+            "] }; }",
+            "plan = mk('running');",
+            "const controller = createPlanRailController({ $, getSelectedTask: () => ({ task_type: 'data_join' }), getSelectedTaskId: () => 'task-A', getAgentMessages: () => [], isAgentMode: () => false, renderWorkflowStepper: () => {}, setActionStatus: () => {} });",
+            "const rs = {};",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((r) => setTimeout(r, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const phaseA = workflowStepper.querySelectorAll(':scope > .plan-rail-step')[0];",
+            "const sectionA = phaseA.querySelector(':scope > .plan-rail-substeps');",
+            "const substepsA = sectionA.querySelectorAll(':scope > .notebook-step');",
+            "const s2NodeA = substepsA[1];",
+            "const s2ClassA = s2NodeA.className;",
+            "// Advance the plan: s2 running -> done. Clear the fetch throttle and",
+            "// await the fetch so the new plan actually lands in the controller cache.",
+            "plan = mk('done');",
+            "controller.resetFetchThrottle('task-A');",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "await new Promise((r) => setTimeout(r, 20));",
+            "controller.render({ force: true, renderSignatures: rs });",
+            "const phaseB = workflowStepper.querySelectorAll(':scope > .plan-rail-step')[0];",
+            "const sectionB = phaseB.querySelector(':scope > .plan-rail-substeps');",
+            "const substepsB = sectionB.querySelectorAll(':scope > .notebook-step');",
+            "const s2NodeB = substepsB[1];",
+            "process.stdout.write(JSON.stringify({",
+            "  phaseCount: workflowStepper.querySelectorAll(':scope > .plan-rail-step').length,",
+            "  samePhaseNode: phaseA === phaseB,",
+            "  sameSectionNode: sectionA === sectionB,",
+            "  sameSubstepNode: s2NodeA === s2NodeB,",
+            "  substepStillAttached: s2NodeB.parentNode === sectionB,",
+            "  classBefore: s2ClassA,",
+            "  classAfter: s2NodeB.className,",
+            "  contentAdvancedInPlace: s2ClassA !== s2NodeB.className,",
+            "}));",
+        ]
+    )
+
+    data = _run_node_capture_json(script)
+    assert data["phaseCount"] == 2, data
+    # Hover targets preserved across the tick.
+    assert data["samePhaseNode"] is True, data
+    assert data["sameSectionNode"] is True, data
+    assert data["sameSubstepNode"] is True, data
+    assert data["substepStillAttached"] is True, data
+    # ...and the advancing substep's content actually changed in place.
+    assert data["classBefore"] == "notebook-step running", data
+    assert data["classAfter"] == "notebook-step succeeded", data
+    assert data["contentAdvancedInPlace"] is True, data
