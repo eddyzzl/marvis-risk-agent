@@ -312,20 +312,29 @@
 
     <dialog id="platformConfirmDialog" class="task-dialog platform-confirm-dialog" aria-labelledby="platformConfirmTitle" aria-describedby="platformConfirmMessage">
       <form class="platform-confirm-panel" method="dialog">
-        <header class="platform-confirm-head">
-          <span class="platform-confirm-icon" aria-hidden="true">
-            <svg viewBox="0 0 32 32" focusable="false">
-              <rect class="platform-confirm-icon-plate" x="4.5" y="4.5" width="23" height="23" rx="7"></rect>
-              <path class="platform-confirm-icon-triangle" d="M16 10.2 22.4 21.8H9.6L16 10.2Z"></path>
-              <path class="platform-confirm-icon-mark" d="M16 14.3v3.9"></path>
-              <path class="platform-confirm-icon-dot" d="M16 21.1h.01"></path>
-            </svg>
-          </span>
-          <div class="platform-confirm-copy">
-            <h2 id="platformConfirmTitle">确认操作</h2>
-            <p id="platformConfirmMessage">此操作不能撤销。</p>
-          </div>
-        </header>
+        <span class="platform-confirm-glyph" aria-hidden="true">
+          <svg class="platform-confirm-glyph-trash" viewBox="0 0 24 24" focusable="false">
+            <rect class="back" x="5.1" y="17.2" width="13.8" height="3.5" rx="1.75"></rect>
+            <g class="platform-confirm-trash-lid">
+              <rect class="mid" x="9.5" y="3.5" width="5" height="2.5" rx="1.25"></rect>
+              <rect x="4.5" y="5.9" width="15" height="2.7" rx="1.35"></rect>
+            </g>
+            <path d="M6.7 9.5 L7.4 18.7 A2.35 2.35 0 0 0 9.74 20.85 H14.26 A2.35 2.35 0 0 0 16.6 18.7 L17.3 9.5 Z"></path>
+            <path class="cs" d="M10.35 12.3v4.7M13.65 12.3v4.7"></path>
+          </svg>
+          <svg class="platform-confirm-glyph-warn" viewBox="0 0 24 24" focusable="false">
+            <path class="back" transform="translate(1.6 -1.2)" d="M9.98 5.1a2.33 2.33 0 0 1 4.04 0l6.0 10.5a2.33 2.33 0 0 1-2.02 3.5H6.0a2.33 2.33 0 0 1-2.02-3.5Z"></path>
+            <path d="M9.98 5.1a2.33 2.33 0 0 1 4.04 0l6.0 10.5a2.33 2.33 0 0 1-2.02 3.5H6.0a2.33 2.33 0 0 1-2.02-3.5Z"></path>
+            <path class="cs" d="M12 9.7v4.1"></path>
+            <path class="cs platform-confirm-warn-dot" d="M12 16.9h.01"></path>
+          </svg>
+          <span class="platform-confirm-sheen" aria-hidden="true"></span>
+        </span>
+        <h2 id="platformConfirmTitle">确认操作</h2>
+        <p id="platformConfirmMessage">此操作不能撤销。</p>
+        <div id="platformConfirmPurge" class="platform-confirm-purge" hidden>
+          <span class="platform-confirm-purge-label">将一并清理</span>
+        </div>
         <div class="platform-confirm-actions">
           <button id="platformConfirmCancelButton" class="button secondary" type="button">取消</button>
           <button id="platformConfirmConfirmButton" class="button primary platform-confirm-affirmative" type="button">确认</button>

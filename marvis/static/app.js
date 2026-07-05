@@ -5710,22 +5710,27 @@ function previewWordReport() {
   openWordPreviewDialog();
 }
 
-async function loadTaskPurgeSummaryText(taskId) {
+const PURGE_SUMMARY_FIELDS = [
+  ["datasets", "数据集"],
+  ["joins", "JOIN"],
+  ["plans", "计划"],
+  ["experiments", "实验"],
+  ["model_artifacts", "模型产物"],
+  ["strategies", "策略"],
+];
+
+async function loadTaskPurgeSummary(taskId) {
   try {
     const preview = await api(`api/tasks/${taskId}/purge-preview`);
     const summary = preview && preview.purge_summary ? preview.purge_summary : null;
-    if (!summary) return "";
-    const parts = [];
-    if (summary.datasets) parts.push(`数据集 ${summary.datasets}`);
-    if (summary.joins) parts.push(`JOIN ${summary.joins}`);
-    if (summary.plans) parts.push(`计划 ${summary.plans}`);
-    if (summary.experiments) parts.push(`实验 ${summary.experiments}`);
-    if (summary.model_artifacts) parts.push(`模型产物 ${summary.model_artifacts}`);
-    if (summary.strategies) parts.push(`策略 ${summary.strategies}`);
-    if (!parts.length) return "";
-    return `\n\n将一并清理：${parts.join("、")}。`;
+    if (!summary) return [];
+    const items = [];
+    for (const [key, label] of PURGE_SUMMARY_FIELDS) {
+      if (summary[key]) items.push({ key, label, count: summary[key] });
+    }
+    return items;
   } catch (error) {
-    return "";
+    return [];
   }
 }
 
@@ -5765,10 +5770,17 @@ async function deleteTask(task) {
     setActionStatus("运行中的任务不能删除。", "error");
     return;
   }
-  const purgeSummaryText = await loadTaskPurgeSummaryText(targetTask.id);
+  const purgeItems = await loadTaskPurgeSummary(targetTask.id);
+  const taskName = taskDisplayName(targetTask);
   const confirmed = await showPlatformConfirm({
     title: "删除任务",
-    message: `确认删除任务「${taskDisplayName(targetTask)}」？删除后将移除任务记录和本地输出文件，不能撤销。${purgeSummaryText}`,
+    message: `确认删除任务「${taskName}」？任务记录与本地输出文件将被移除，不能撤销。`,
+    messageParts: [
+      { text: "确认删除任务" },
+      { text: `「${taskName}」`, strong: true },
+      { text: "？任务记录与本地输出文件将被移除，不能撤销。" },
+    ],
+    purgeItems,
     confirmText: "删除",
     cancelText: "取消",
     tone: "danger",

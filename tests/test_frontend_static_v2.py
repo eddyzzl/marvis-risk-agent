@@ -5973,40 +5973,54 @@ def test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm():
     assert 'id="platformConfirmMessage"' in index_html
     assert 'id="platformConfirmCancelButton"' in index_html
     assert 'id="platformConfirmConfirmButton"' in index_html
-    assert '<svg viewBox="0 0 32 32" focusable="false">' in index_html
-    assert 'class="platform-confirm-icon-plate"' in index_html
-    assert 'class="platform-confirm-icon-triangle"' in index_html
-    assert 'class="platform-confirm-icon-mark"' in index_html
-    assert 'class="platform-confirm-icon-dot"' in index_html
-    assert 'M10.35 4.8 2.9 17.6' not in index_html
+    assert 'id="platformConfirmPurge"' in index_html
+    # Glyph follows the welcome task-card icon language: solid silhouette, no
+    # tile, layered depth shades. Both tone glyphs live in the DOM; CSS toggles.
+    assert 'class="platform-confirm-glyph"' in index_html
+    assert 'class="platform-confirm-glyph-trash"' in index_html
+    assert 'class="platform-confirm-glyph-warn"' in index_html
+    assert 'class="platform-confirm-trash-lid"' in index_html
+    assert 'class="platform-confirm-sheen"' in index_html
+    # The old flat plate/triangle warning icon must be gone.
+    assert 'class="platform-confirm-icon-plate"' not in index_html
+    assert 'class="platform-confirm-icon-triangle"' not in index_html
+    assert '<svg viewBox="0 0 32 32" focusable="false">' not in index_html
     assert ".platform-confirm-dialog" in styles_css
     assert ".platform-confirm-panel" in styles_css
-    confirm_icon_rule = _css_rule(styles_css, ".platform-confirm-icon")
-    assert "border-radius: 50%" not in confirm_icon_rule
-    assert "background: transparent" in confirm_icon_rule
-    assert "box-shadow: none" in confirm_icon_rule
-    confirm_icon_svg_rule = _css_rule(styles_css, ".platform-confirm-icon svg")
-    assert "display: block" in confirm_icon_svg_rule
-    assert "width: 32px" in confirm_icon_svg_rule
-    assert "height: 32px" in confirm_icon_svg_rule
-    assert "stroke-width: 1.8" in confirm_icon_svg_rule
-    confirm_icon_plate_rule = _css_rule(styles_css, ".platform-confirm-icon-plate")
-    assert "fill: color-mix(in srgb, currentColor 8%, transparent)" in confirm_icon_plate_rule
-    assert "stroke: color-mix(in srgb, currentColor 28%, transparent)" in confirm_icon_plate_rule
-    assert "stroke-width: 1.2" in confirm_icon_plate_rule
-    confirm_icon_triangle_rule = _css_rule(styles_css, ".platform-confirm-icon-triangle")
-    assert "fill: color-mix(in srgb, currentColor 7%, transparent)" in confirm_icon_triangle_rule
-    assert "stroke-width: 1.7" in confirm_icon_triangle_rule
-    confirm_icon_mark_rule = _css_rule(styles_css, ".platform-confirm-icon-mark")
-    assert "stroke-width: 2.1" in confirm_icon_mark_rule
-    confirm_icon_dot_rule = _css_rule(styles_css, ".platform-confirm-icon-dot")
-    assert "stroke-width: 2.4" in confirm_icon_dot_rule
-    confirm_icon_danger_rule = _css_rule(
-        styles_css, '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-icon'
+    # Glyph tile is bare (no background/tile), tone-colored, welcome-icon sized.
+    confirm_glyph_rule = _css_rule(styles_css, ".platform-confirm-glyph")
+    assert "color: var(--tone-confirm-warn)" in confirm_glyph_rule
+    assert "background:" not in confirm_glyph_rule
+    confirm_glyph_svg_rule = _css_rule(styles_css, ".platform-confirm-glyph svg")
+    assert "fill: currentColor" in confirm_glyph_svg_rule
+    assert "stroke: none" in confirm_glyph_svg_rule
+    # Depth layers reuse the welcome back/mid opaque-shade recipe.
+    confirm_glyph_back_rule = _css_rule(styles_css, ".platform-confirm-glyph svg .back")
+    assert "fill: color-mix(in srgb, currentColor 30%, var(--surface))" in confirm_glyph_back_rule
+    confirm_glyph_mid_rule = _css_rule(styles_css, ".platform-confirm-glyph svg .mid")
+    assert "fill: color-mix(in srgb, currentColor 62%, var(--surface))" in confirm_glyph_mid_rule
+    confirm_glyph_cs_rule = _css_rule(styles_css, ".platform-confirm-glyph svg .cs")
+    assert "stroke: var(--surface)" in confirm_glyph_cs_rule
+    # Danger tone recolors to --danger and swaps warn glyph for the trash glyph.
+    confirm_glyph_danger_rule = _css_rule(
+        styles_css, '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-glyph'
     )
-    assert "color: var(--danger)" in confirm_icon_danger_rule
-    assert "background:" not in confirm_icon_danger_rule
-    assert "box-shadow:" not in confirm_icon_danger_rule
+    assert "color: var(--danger)" in confirm_glyph_danger_rule
+    assert (
+        '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-glyph-trash {'
+        in styles_css
+    )
+    assert (
+        '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-glyph-warn {'
+        in styles_css
+    )
+    # New tone token must exist in both light (default :root) and dark themes.
+    assert styles_css.count("--tone-confirm-warn:") >= 2
+    # Entrance animation + reduced-motion escape hatch.
+    assert "@keyframes platform-confirm-glyph-pop" in styles_css
+    assert "@keyframes platform-confirm-sheen-sweep" in styles_css
+    assert "@keyframes platform-confirm-lid-peek" in styles_css
+    assert "prefers-reduced-motion: reduce" in styles_css
     assert "export function createPlatformConfirmController" in platform_confirm_js
     assert 'from "./js/platform-confirm.js"' in app_js
     assert "const platformConfirm = createPlatformConfirmController({ getElementById: $ });" in app_js
@@ -6016,6 +6030,12 @@ def test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm():
     assert "function bindPlatformConfirmDialog" not in app_js
     assert "bindPlatformConfirmDialog();" in app_js
     assert "window.confirm" not in app_js
+
+    # Controller renders the danger-list as structured chips and supports an
+    # emphasized (strong) task name, without ever using innerHTML for user text.
+    assert "renderPlatformConfirmPurge" in platform_confirm_js
+    assert "renderPlatformConfirmMessage" in platform_confirm_js
+    assert "createTextNode" in platform_confirm_js
 
     delete_start = app_js.index("async function deleteTask")
     delete_end = app_js.index("async function runAction", delete_start)
@@ -6027,6 +6047,11 @@ def test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm():
     assert 'confirmText: "删除"' in delete_body
     assert 'cancelText: "取消"' in delete_body
     assert 'tone: "danger"' in delete_body
+    # Purge counts now flow through as structured chip items, not appended text.
+    assert "loadTaskPurgeSummary(targetTask.id)" in delete_body
+    assert "purgeItems," in delete_body
+    assert "messageParts:" in delete_body
+    assert "strong: true" in delete_body
 
     confirm_action_rule = _css_rule(
         styles_css, '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-affirmative'
@@ -6167,7 +6192,7 @@ def test_delete_task_reconciles_stale_local_agent_busy_before_delete():
             "function renderStoredStateSummaries() {}",
             "async function loadReportFields() {}",
             "function renderAll() {}",
-            "async function loadTaskPurgeSummaryText() { return \"\"; }",
+            "async function loadTaskPurgeSummary() { return []; }",
             "function showPlatformConfirm() { return true; }",
             "function persistResultScrollPositions() {}",
             "async function api(endpoint, options = {}) {",
