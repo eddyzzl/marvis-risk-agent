@@ -335,9 +335,8 @@ def test_v1_validation_appended_policy_matches_generated_cell_kinds(tmp_path: Pa
         algorithm="lgb",
     )
 
-    reproducibility_kinds = {
-        kind
-        for kind, _source in pipeline_module._build_reproducibility_cell_sources(
+    reproducibility_sources = dict(
+        pipeline_module._build_reproducibility_cell_sources(
             package_root=tmp_path,
             task=task,
             settings=settings,
@@ -345,7 +344,8 @@ def test_v1_validation_appended_policy_matches_generated_cell_kinds(tmp_path: Pa
             contract_meta_path=tmp_path / "runtime_contract.json",
             output_path=tmp_path / "reproducibility_result.json",
         )
-    }
+    )
+    reproducibility_kinds = set(reproducibility_sources)
     metrics_kinds = {
         kind
         for kind, _source in pipeline_module._build_metrics_cell_sources(
@@ -370,6 +370,8 @@ def test_v1_validation_appended_policy_matches_generated_cell_kinds(tmp_path: Pa
         )
         == generated_kinds
     )
+    assert "_rmc_consistency_status(" in reproducibility_sources["repro-compare"]
+    assert "PASS if _rmc_mismatch_count == 0" not in reproducibility_sources["repro-compare"]
 
 
 def test_metrics_cell_handles_null_split_and_time_columns_in_history(tmp_path: Path):

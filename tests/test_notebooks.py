@@ -11,6 +11,7 @@ import pytest
 from marvis.notebook_cancellation import NotebookCancellationToken
 from marvis.notebooks import (
     _build_step_events,
+    _finalize_successful_cell_events,
     _notebook_worker_env,
     _parse_notebook_worker_result,
     _record_cell_complete,
@@ -667,6 +668,38 @@ def test_cell_complete_marks_running_step_succeeded_when_executed_callback_is_mi
 
     assert progress["steps"][0]["status"] == "succeeded"
     assert progress["cells"][0]["status"] == "succeeded"
+
+
+def test_successful_execution_finalizes_stray_running_cell_events():
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_markdown_cell("# 数据准备"),
+            nbformat.v4.new_code_cell("load_data()"),
+        ]
+    )
+    plan = notebook_step_plan(notebook)
+    cell_events = {
+        0: {
+            "cell_index": 0,
+            "cell_type": "markdown",
+            "status": "running",
+            "started_at": "2026-05-25T00:00:00+00:00",
+            "ended_at": None,
+        },
+        1: {
+            "cell_index": 1,
+            "cell_type": "code",
+            "status": "running",
+            "started_at": "2026-05-25T00:00:01+00:00",
+            "ended_at": None,
+        },
+    }
+
+    _finalize_successful_cell_events(cell_events, notebook)
+    progress = _build_step_events(plan, cell_events)
+
+    assert {cell["status"] for cell in progress["cells"]} == {"succeeded"}
+    assert progress["steps"][0]["status"] == "succeeded"
 
 
 def test_step_events_include_elapsed_time_for_running_and_completed_steps():

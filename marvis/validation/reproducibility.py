@@ -12,7 +12,8 @@ from marvis.validation.results import (
 )
 from marvis.validation.scorer import Scorer
 
-_REVIEW_MISMATCH_RATIO_THRESHOLD = 0.01
+_PASS_ROUNDED_MATCH_RATIO_THRESHOLD = 0.99
+_REVIEW_ROUNDED_MATCH_RATIO_THRESHOLD = 0.98
 _REVIEW_MAX_ABS_DIFF_THRESHOLD = 1e-4
 
 
@@ -144,10 +145,11 @@ def _consistency_status(
         return ConsistencyStatus.PASS
     if sample_size <= 0 or unknown_diff_mismatch_count > 0:
         return ConsistencyStatus.FAIL
-    mismatch_ratio = mismatch_count / sample_size
-    if (
-        mismatch_ratio <= _REVIEW_MISMATCH_RATIO_THRESHOLD
-        and max_abs_diff <= _REVIEW_MAX_ABS_DIFF_THRESHOLD
-    ):
+    match_ratio = (sample_size - mismatch_count) / sample_size
+    if max_abs_diff > _REVIEW_MAX_ABS_DIFF_THRESHOLD:
+        return ConsistencyStatus.FAIL
+    if match_ratio >= _PASS_ROUNDED_MATCH_RATIO_THRESHOLD:
+        return ConsistencyStatus.PASS
+    if match_ratio >= _REVIEW_ROUNDED_MATCH_RATIO_THRESHOLD:
         return ConsistencyStatus.REVIEW
     return ConsistencyStatus.FAIL

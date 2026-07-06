@@ -60,7 +60,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", "tests"]
 addopts = "--strict-markers --timeout=600 --timeout-method=thread"
 markers = [
   "slow: real training/real subprocess/JVM-warm-up tests that take more than ~5s",

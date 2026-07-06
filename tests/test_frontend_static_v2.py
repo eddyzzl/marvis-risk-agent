@@ -5554,6 +5554,33 @@ def test_stopped_agent_task_does_not_spin_running_substeps():
     assert _notebook_step_tones_for(task, notebook_steps) == ["succeeded", "stopped"]
 
 
+def test_completed_parent_stage_does_not_spin_stale_running_substeps():
+    app_js = _read_static("app.js")
+    notebook_start = app_js.index("function notebookStepTone")
+    notebook_end = app_js.index("function stepWorkflowStage", notebook_start)
+    script = "\n".join(
+        [
+            "let selectedTask = { status: 'succeeded' };",
+            "function taskStopped() { return false; }",
+            app_js[notebook_start:notebook_end],
+            "const tones = [",
+            "  notebookStepToneForRail({ status: 'running' }, 'succeeded'),",
+            "  notebookStepToneForRail({ status: 'running' }, 'running'),",
+            "  notebookStepToneForRail({ status: 'failed' }, 'succeeded'),",
+            "];",
+            "process.stdout.write(JSON.stringify(tones));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == ["succeeded", "running", "failed"]
+
+
 def test_stopped_step_checker_has_no_stop_square_mark():
     step_checker_js = _read_static("js/step-checker.js")
     source = step_checker_js[step_checker_js.index("export function stepCheckerHtml"):]

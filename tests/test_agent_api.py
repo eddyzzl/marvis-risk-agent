@@ -1147,6 +1147,105 @@ def test_agent_plain_chat_question_uses_llm_answer_instead_of_start_guidance(
     assert prompt["task"]["model_name"] == "A卡"
 
 
+def test_agent_plain_chat_compacts_large_validation_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    calls = []
+
+    class FakeLLMClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def complete(self, **kwargs):
+            calls.append(kwargs)
+            return "当前模型 OOT KS 约 0.33，整体区分能力可接受，但需关注 PMML 分数一致性。"
+
+    huge_curve = [{"x": index / 1000, "y": index / 2000} for index in range(1200)]
+    huge_rows = [
+        {
+            "row_index": index,
+            "score_code_model": "0." + ("1" * 500),
+            "score_submitted_pmml": "0." + ("2" * 500),
+            "abs_diff": 0.022,
+        }
+        for index in range(80)
+    ]
+
+    def fake_agent_evidence(_settings, _task_id):
+        return {
+            "scan": {"checks": [{"label": "PMML 模型", "status": "success"}]},
+            "notebook_steps": {
+                "steps": [
+                    {
+                        "title": "模型训练",
+                        "source_previews": ["print('" + ("x" * 5000) + "')"],
+                    }
+                ],
+            },
+            "contract": {"source": "RMC_SAMPLE_DF = " + ("x" * 5000)},
+            "reproducibility": {
+                "summary": {"status": "fail", "max_abs_diff": 0.022},
+                "sample_size": 1000,
+                "rows": huge_rows,
+            },
+            "validation_results": {
+                "model_name": "A卡",
+                "algorithm": "lgb",
+                "reproducibility": {
+                    "summary": {"status": "fail", "max_abs_diff": 0.022},
+                    "rows": huge_rows,
+                },
+                "effectiveness": {
+                    "overall": [{"split": "oot", "ks": 0.333, "auc": 0.72}],
+                    "monthly_ks": [{"month": f"2025{index:02d}", "ks": 0.31} for index in range(1, 30)],
+                    "monthly_psi": [
+                        {"month": f"2025{index:02d}", "psi_vs_train": 0.02}
+                        for index in range(1, 30)
+                    ],
+                    "psi_stability_table": [{"bin": index, "psi": 0.01} for index in range(40)],
+                    "bin_tables": {"oot": [{"bin": index, "bad_rate": 0.01} for index in range(80)]},
+                    "roc_ks_curves": {"oot": {"roc": huge_curve, "ks": huge_curve}},
+                },
+                "stress_test": {
+                    "baseline": {"ks": 0.333, "bin_table": [{"bin": index} for index in range(80)]},
+                    "per_category": [{"category": "京东", "ks_delta": -0.039, "bin_table": []}],
+                },
+            },
+        }
+
+    monkeypatch.setattr(
+        "marvis.agent.service.OpenAICompatibleLLMClient",
+        FakeLLMClient,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.agent_evidence_from_settings_impl",
+        fake_agent_evidence,
+    )
+    client = _client(tmp_path)
+    _configure_llm(client)
+    task_id = _create_task(client, tmp_path)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "这个模型效果怎么样", "model_id": "m1"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert calls
+    prompt = json.loads(calls[0]["user_prompt"])
+    evidence = prompt["available_evidence"]
+    payload = json.dumps(evidence, ensure_ascii=False)
+    assert len(payload) < 16000
+    assert "roc_ks_curves" not in payload
+    assert "score_code_model" not in payload
+    assert "source_previews" not in payload
+    assert evidence["validation_results"]["effectiveness"]["overall"] == [
+        {"split": "oot", "ks": 0.333, "auc": 0.72}
+    ]
+    assert evidence["reproducibility"]["summary"]["status"] == "fail"
+
+
 def test_agent_plain_chat_follow_up_uses_same_task_conversation_memory(
     tmp_path,
     monkeypatch,

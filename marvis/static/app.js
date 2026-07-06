@@ -2902,6 +2902,12 @@ function notebookStepTone(status) {
   return "pending";
 }
 
+function notebookStepToneForRail(step, parentStatus = "") {
+  const tone = notebookStepTone(step?.status);
+  if (parentStatus === "succeeded" && tone === "running") return "succeeded";
+  return tone;
+}
+
 function stepWorkflowStage(step) {
   const id = String(step?.id || "");
   if (id.startsWith("system-metrics-")) return "metrics";
@@ -3107,7 +3113,7 @@ function renderNotebookStepRail(
   if (!Array.isArray(notebookSteps) || notebookSteps.length === 0) {
     return "";
   }
-  const tones = notebookSteps.map((step) => notebookStepTone(step.status));
+  const tones = notebookSteps.map((step) => notebookStepToneForRail(step, parentStatus));
   // When the parent stage is running but the backend has not flagged a specific
   // sub-step as running yet, spin the first unfinished sub-step so it stays in
   // sync with the parent's spinner instead of sitting on a hollow circle.

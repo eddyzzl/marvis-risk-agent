@@ -84,6 +84,9 @@ GREETING_CHAT_FALLBACK = (
     "你好，我在。你可以直接问我验证结果、指标含义、PMML 或报告结论，"
     "也可以告诉我下一步想处理什么。"
 )
+STAGE_SUMMARY_MAX_TOKENS = {
+    "metrics": 4096,
+}
 AGENT_RESPONSE_PREAMBLE_PATTERNS = (
     r"^(?:好的|好|收到|明白|可以)[，,。！!\s]*",
     r"^(?:我会|我将)?(?:遵照|根据|按照)(?:您|你)?的?(?:指示|要求)[，,。！!\s]*",
@@ -587,6 +590,7 @@ def summarize_stage(
             system_prompt=AGENT_SYSTEM_PROMPT,
             user_prompt=prompt,
             temperature=0.2,
+            max_tokens=STAGE_SUMMARY_MAX_TOKENS.get(stage),
             on_delta=on_delta,
             truncated=truncated,
         )
@@ -1256,7 +1260,9 @@ def _chat_prompt(
             "task": _llm_task_meta(task),
             "user_message": _sanitize_llm_text(user_message, task),
             "conversation_memory": conversation_memory,
-            "available_evidence": _sanitize_llm_payload(evidence, task),
+            "available_evidence": _sanitize_llm_payload(
+                _chat_evidence_for_llm(evidence), task
+            ),
             "instructions": _chat_instructions(user_message),
         }
     payload = add_memory_to_prompt_payload(payload, memory_context)
@@ -1330,6 +1336,14 @@ def _fit_conversation_memory(messages: list[dict]) -> tuple[list[dict], int]:
         total_chars += content_length
     kept.reverse()
     return kept, max(0, len(messages) - len(kept))
+
+
+def _chat_evidence_for_llm(evidence: dict) -> dict:
+    if not isinstance(evidence, dict):
+        return evidence
+    if not _looks_like_global_agent_evidence(evidence):
+        return _slim_evidence_for_llm(evidence)
+    return _word_conclusion_stage_evidence(evidence)
 
 
 def _last_message_content(messages: list[dict], *, role: str) -> str:
@@ -1454,6 +1468,8 @@ def _stage_instructions(stage: str) -> str:
         return (
             reference_instruction
             + "只针对当前效果与稳定性阶段，分为“总体判断、效果表现、稳定性表现、压力测试风险、建议”。"
+            "压力测试风险必须完整覆盖高/中/低风险分层或明确说明证据不足，并用一句完整结论收束；"
+            "不得停在半句话、项目符号中途或只有“KS 降幅”等未完成表述。"
             "不要回顾材料完备性或分数一致性的执行过程，不要生成最终报告综合结论。"
             "解释 KS、PSI、AUC、稳定性或区分能力时必须按以下业务口径判断，不能脱离模型场景："
             + RISK_METRIC_INTERPRETATION_GUIDANCE

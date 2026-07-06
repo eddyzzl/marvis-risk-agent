@@ -394,6 +394,7 @@ class NotebookExecutionSession:
                 resource_usage=monitor.snapshot(),
             )
         self._finalize_pending_cell_completions()
+        _finalize_successful_cell_events(self.cell_events, self.notebook)
         nbformat.write(self.notebook, self.executed_path)
         write_text_atomic(log_path, "succeeded\n")
         self._write_progress()
@@ -1434,6 +1435,25 @@ def _finalize_cell_event_after_execute(
     stdout, stderr = _output_previews(cell)
     event["stdout_preview"] = stdout
     event["stderr_preview"] = stderr
+
+
+def _finalize_successful_cell_events(
+    cell_events: dict[int, dict[str, Any]],
+    notebook,
+) -> None:
+    for cell_index, event in sorted(cell_events.items()):
+        if event.get("status") == "failed":
+            continue
+        if event.get("status") == "succeeded" and event.get("ended_at"):
+            continue
+        if not isinstance(cell_index, int) or cell_index < 0 or cell_index >= len(notebook.cells):
+            continue
+        _finalize_cell_event_after_execute(
+            cell_events,
+            cell=notebook.cells[cell_index],
+            cell_index=cell_index,
+            succeeded=True,
+        )
 
 
 def _output_previews(cell) -> tuple[str, str]:

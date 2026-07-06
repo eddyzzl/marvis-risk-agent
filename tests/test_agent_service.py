@@ -139,7 +139,7 @@ def test_summarize_stage_includes_bounded_memory_context_and_metadata(monkeypatc
 
     class CapturingClient:
         def complete(self, **kwargs):
-            captured["user_prompt"] = kwargs["user_prompt"]
+            captured.update(kwargs)
             return "当前模型 KS 相比历史版本提升，需要继续关注 PSI。"
 
     monkeypatch.setattr(
@@ -180,7 +180,10 @@ def test_summarize_stage_includes_bounded_memory_context_and_metadata(monkeypatc
     )
 
     prompt = json.loads(captured["user_prompt"])
+    assert captured["max_tokens"] == 4096
     assert content == "当前模型 KS 相比历史版本提升，需要继续关注 PSI。"
+    assert "压力测试风险必须完整覆盖" in prompt["instructions"]
+    assert "不得停在半句话" in prompt["instructions"]
     assert prompt["cross_task_memory"]["memories"][0]["id"] == "mem-1"
     assert "不能改变" in prompt["cross_task_memory"]["usage_rules"]
     assert metadata["memory_references"] == [
