@@ -1649,6 +1649,105 @@ def test_task_evidence_endpoint_reads_notebook_stage_reproducibility_artifact(
     assert payload["reproducibility"]["rows"][0]["score_code_model"] == 0.1
 
 
+def test_task_evidence_endpoint_merges_only_metric_system_progress_during_metrics(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "model_version": "v1",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{
+            **asdict(FakeTaskRepository.tasks[task_id]),
+            "status": TaskStatus.COMPUTING_METRICS,
+        }
+    )
+    execution_dir = tmp_path / "tasks" / task_id / "execution"
+    execution_dir.mkdir(parents=True)
+    (execution_dir / "notebook_steps.json").write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {"id": "step-2", "title": "导入库函数", "status": "succeeded"},
+                    {
+                        "id": "system-repro-compare",
+                        "title": "分数一致性对比",
+                        "status": "succeeded",
+                    },
+                    {
+                        "id": "system-metrics-prepare",
+                        "title": "旧指标数据准备",
+                        "status": "succeeded",
+                    },
+                ],
+                "cells": [
+                    {"cell_index": 2, "step_id": "step-2", "status": "succeeded"},
+                    {
+                        "cell_index": 38,
+                        "step_id": "system-metrics-prepare",
+                        "status": "succeeded",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (execution_dir / "metrics_steps.json").write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {"id": "step-18", "title": "划分tain、test、oot", "status": "running"},
+                    {
+                        "id": "system-metrics-prepare",
+                        "title": "指标数据准备",
+                        "status": "running",
+                    },
+                ],
+                "cells": [
+                    {"cell_index": 18, "step_id": "step-18", "status": "running"},
+                    {
+                        "cell_index": 46,
+                        "step_id": "system-metrics-prepare",
+                        "status": "running",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/tasks/{task_id}/evidence")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["notebook_steps"] == [
+        {"id": "step-2", "title": "导入库函数", "status": "succeeded"},
+        {
+            "id": "system-repro-compare",
+            "title": "分数一致性对比",
+            "status": "succeeded",
+        },
+        {
+            "id": "system-metrics-prepare",
+            "title": "指标数据准备",
+            "status": "running",
+        },
+    ]
+    assert payload["notebook_cells"] == [
+        {"cell_index": 2, "step_id": "step-2", "status": "succeeded"},
+        {"cell_index": 46, "step_id": "system-metrics-prepare", "status": "running"},
+    ]
+
+
 def test_notebook_metrics_and_report_endpoints_dispatch_stages(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     calls: list[tuple[str, str, object]] = []

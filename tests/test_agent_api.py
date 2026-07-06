@@ -2258,6 +2258,84 @@ def test_agent_reproducibility_summary_prompt_excludes_other_stage_evidence(
     assert "不要给出整体验证结论" in repro_prompt["instructions"]
 
 
+def test_agent_reproducibility_summary_prompt_compacts_large_score_rows(tmp_path):
+    from marvis.agent.service import _stage_prompt
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
+    rows = [
+        {
+            "row_index": index,
+            "score_code_model": 0.100001 + index / 1_000_000,
+            "score_submitted_pmml": 0.100002 + index / 1_000_000,
+            "abs_diff": 0.000001,
+            "matched": False,
+        }
+        for index in range(1000)
+    ]
+
+    prompt = json.loads(
+        _stage_prompt(
+            task=task,
+            stage="reproducibility",
+            evidence={
+                "notebook_steps": {
+                    "steps": [
+                        {
+                            "id": "system-repro-compare",
+                            "title": "分数一致性对比",
+                            "status": "succeeded",
+                            "source_previews": ["very large source that should be dropped"],
+                        }
+                    ],
+                    "cells": [
+                        {
+                            "cell_index": 39,
+                            "outputs": ["large cell outputs should be dropped"],
+                        }
+                    ],
+                },
+                "contract": {
+                    "algorithm": "lgb",
+                    "target_col": "y",
+                    "pmml_output_field": "probability_1",
+                    "feature_columns": [f"x{i}" for i in range(200)],
+                },
+                "reproducibility": {
+                    "sample_size": 1000,
+                    "seed": 42,
+                    "summary": {
+                        "match_count": 0,
+                        "mismatch_count": 1000,
+                        "max_abs_diff": 0.0223,
+                        "status": "fail",
+                    },
+                    "rows": rows,
+                },
+                "validation_results": {
+                    "reproducibility": {
+                        "summary": {"status": "pass"},
+                        "rows": rows,
+                    },
+                    "effectiveness": {"overall": [{"split": "oot", "ks": 0.33}]},
+                },
+            },
+        )
+    )
+
+    evidence = prompt["evidence"]
+    assert evidence["reproducibility"]["summary"]["status"] == "fail"
+    assert evidence["reproducibility"]["sample_size"] == 1000
+    assert "rows" not in evidence["reproducibility"]
+    assert evidence["contract"]["feature_count"] == 200
+    assert len(evidence["contract"]["feature_columns_sample"]) == 20
+    assert "source_previews" not in evidence["notebook_steps"][0]
+    prompt_text = json.dumps(prompt, ensure_ascii=False)
+    assert "score_code_model" not in prompt_text
+    assert "0.3215" not in prompt_text
+
+
 def test_agent_continue_retries_notebook_stage_after_notebook_failure(
     tmp_path,
     monkeypatch,

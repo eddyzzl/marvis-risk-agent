@@ -435,6 +435,7 @@ def run_metrics_stage(
     execution_dir = task_dir / "execution"
     outputs_dir = task_dir / "outputs"
     metrics_work_dir = outputs_dir / ".metrics-stage-work"
+    metrics_steps_path = execution_dir / "metrics_steps.json"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     metrics_uow: ArtifactUnitOfWork | None = None
     logger.info("metrics stage starting task_id=%s stage_claimed=%s", task_id, stage_claimed)
@@ -491,6 +492,7 @@ def run_metrics_stage(
                 metrics_uow = ArtifactUnitOfWork()
             else:
                 _remove_dir_if_exists(metrics_work_dir)
+                _unlink_if_exists(metrics_steps_path)
                 metrics_work_dir.mkdir(parents=True, exist_ok=True)
                 contract = load_runtime_contract(execution_dir / "runtime_contract.json")
                 task = _sync_task_algorithm(repo, task, contract.algorithm)
@@ -517,7 +519,7 @@ def run_metrics_stage(
                         code_scores_path=execution_dir / "code_model_scores.csv",
                         feature_importance_path=execution_dir / "feature_importance.csv",
                         model_params_path=execution_dir / "model_params.json",
-                        notebook_steps_path=execution_dir / "notebook_steps.json",
+                        notebook_steps_path=metrics_steps_path,
                         kernel_name=_execution_kernel_name(settings),
                         notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
                         stage_claimed=True,

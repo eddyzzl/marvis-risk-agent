@@ -61,6 +61,8 @@ WORD_CONCLUSION_STRESS_CATEGORY_LIMIT = 20
 WORD_CONCLUSION_PSI_BIN_LIMIT = 12
 WORD_CONCLUSION_VISIBLE_SUMMARY_LIMIT = 8
 WORD_CONCLUSION_VISIBLE_SUMMARY_CHARS = 1200
+REPRODUCIBILITY_NOTEBOOK_STEP_LIMIT = 16
+REPRODUCIBILITY_CONTRACT_FEATURE_LIMIT = 20
 # Raw chart series that balloon the prompt without helping LLM reasoning
 # (each curve carries thousands of (x, y) samples — easily 10+ MB total).
 # AUC/KS summary numbers used in image-1's analysis already live in
@@ -814,6 +816,8 @@ def _stage_scoped_evidence(stage: str, evidence: dict) -> dict:
         return evidence
     if stage == "scan":
         return _scan_stage_evidence(evidence)
+    if stage == "reproducibility":
+        return _reproducibility_stage_evidence(evidence)
     if stage == "metrics":
         return _metrics_stage_evidence(evidence)
     if stage == "word_conclusion_draft":
@@ -845,6 +849,83 @@ def _metrics_stage_evidence(evidence: dict) -> dict:
             }
         )
     }
+
+
+def _reproducibility_stage_evidence(evidence: dict) -> dict:
+    if not _looks_like_global_agent_evidence(evidence):
+        return _slim_evidence_for_llm(evidence)
+    validation_results = evidence.get("validation_results")
+    scoped: dict[str, object] = {}
+
+    notebook_steps = _compact_notebook_steps_for_reproducibility(
+        evidence.get("notebook_steps")
+    )
+    if notebook_steps or "notebook_steps" in evidence:
+        scoped["notebook_steps"] = notebook_steps
+
+    contract = _compact_contract_for_reproducibility(evidence.get("contract"))
+    if contract or "contract" in evidence:
+        scoped["contract"] = contract
+
+    reproducibility = _compact_reproducibility_evidence(
+        evidence.get("reproducibility"),
+        validation_results.get("reproducibility") if isinstance(validation_results, dict) else None,
+    )
+    if reproducibility or "reproducibility" in evidence:
+        scoped["reproducibility"] = reproducibility
+
+    return scoped
+
+
+def _compact_notebook_steps_for_reproducibility(steps: object) -> list[dict]:
+    if isinstance(steps, dict):
+        steps = steps.get("steps")
+    if not isinstance(steps, list):
+        return []
+    compact = []
+    for step in steps[:REPRODUCIBILITY_NOTEBOOK_STEP_LIMIT]:
+        if not isinstance(step, dict):
+            continue
+        compact.append(
+            {
+                key: step.get(key)
+                for key in (
+                    "id",
+                    "title",
+                    "status",
+                    "cell_count",
+                    "elapsed_seconds",
+                    "system",
+                )
+                if step.get(key) not in (None, "")
+            }
+        )
+    return compact
+
+
+def _compact_contract_for_reproducibility(contract: object) -> dict:
+    if not isinstance(contract, dict):
+        return {}
+    compact = {
+        key: contract.get(key)
+        for key in (
+            "algorithm",
+            "target_col",
+            "score_col",
+            "split_col",
+            "time_col",
+            "pmml_output_field",
+            "score_decimal_places",
+        )
+        if contract.get(key) not in (None, "")
+    }
+    feature_columns = contract.get("feature_columns")
+    if isinstance(feature_columns, list):
+        compact["feature_count"] = len(feature_columns)
+        compact["feature_columns_sample"] = feature_columns[
+            :REPRODUCIBILITY_CONTRACT_FEATURE_LIMIT
+        ]
+    return compact
 
 
 def _slim_evidence_for_llm(evidence: dict) -> dict:

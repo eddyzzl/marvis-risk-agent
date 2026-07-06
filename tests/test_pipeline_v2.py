@@ -933,6 +933,7 @@ def test_metrics_stage_reruns_isolated_notebook_even_with_stale_live_session(
         assert kwargs["keep_alive"] is False
         assert kwargs["isolated"] is True
         assert kwargs["stage_claimed"] is True
+        assert kwargs["notebook_steps_path"] == execution_dir / "metrics_steps.json"
         assert [kind for kind, _source in extra_code_cells] == [
             "metrics-prepare",
             "metrics-score",
