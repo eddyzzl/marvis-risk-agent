@@ -55,6 +55,12 @@ METRICS_VALIDATION_RESULT_KEYS = (
     "overfitting_check",
     "stress_test",
 )
+WORD_CONCLUSION_MONTHLY_LIMIT = 12
+WORD_CONCLUSION_FEATURE_LIMIT = 20
+WORD_CONCLUSION_STRESS_CATEGORY_LIMIT = 20
+WORD_CONCLUSION_PSI_BIN_LIMIT = 12
+WORD_CONCLUSION_VISIBLE_SUMMARY_LIMIT = 8
+WORD_CONCLUSION_VISIBLE_SUMMARY_CHARS = 1200
 # Raw chart series that balloon the prompt without helping LLM reasoning
 # (each curve carries thousands of (x, y) samples — easily 10+ MB total).
 # AUC/KS summary numbers used in image-1's analysis already live in
@@ -810,6 +816,8 @@ def _stage_scoped_evidence(stage: str, evidence: dict) -> dict:
         return _scan_stage_evidence(evidence)
     if stage == "metrics":
         return _metrics_stage_evidence(evidence)
+    if stage == "word_conclusion_draft":
+        return _word_conclusion_stage_evidence(evidence)
     keys = STAGE_EVIDENCE_KEYS.get(stage)
     if not keys or not _looks_like_global_agent_evidence(evidence):
         return _slim_evidence_for_llm(evidence)
@@ -847,6 +855,206 @@ def _slim_evidence_for_llm(evidence: dict) -> dict:
     if isinstance(validation_results, dict):
         slim["validation_results"] = _slim_validation_results_for_llm(validation_results)
     return slim
+
+
+def _word_conclusion_stage_evidence(evidence: dict) -> dict:
+    if not _looks_like_global_agent_evidence(evidence):
+        return _slim_evidence_for_llm(evidence)
+    validation_results = evidence.get("validation_results")
+    scoped: dict[str, object] = {}
+
+    scan = _compact_scan_evidence(evidence.get("scan"))
+    if scan:
+        scoped["scan"] = scan
+
+    reproducibility = _compact_reproducibility_evidence(
+        evidence.get("reproducibility"),
+        validation_results.get("reproducibility") if isinstance(validation_results, dict) else None,
+    )
+    if reproducibility:
+        scoped["reproducibility"] = reproducibility
+
+    compact_validation = _compact_word_validation_results(validation_results)
+    if compact_validation:
+        scoped["validation_results"] = compact_validation
+
+    report_fields = evidence.get("report_fields")
+    if report_fields is not None:
+        scoped["report_fields"] = report_fields
+
+    visible_summaries = _compact_visible_stage_summaries(
+        evidence.get("visible_stage_summaries")
+    )
+    if visible_summaries:
+        scoped["visible_stage_summaries"] = visible_summaries
+
+    return scoped
+
+
+def _compact_scan_evidence(scan: object) -> dict:
+    if not isinstance(scan, dict):
+        return {}
+    checks = scan.get("checks")
+    if not isinstance(checks, list):
+        checks = []
+    compact_checks = []
+    for check in checks[:20]:
+        if not isinstance(check, dict):
+            continue
+        compact_checks.append(
+            {
+                key: check.get(key)
+                for key in ("id", "label", "status", "message")
+                if check.get(key) not in (None, "")
+            }
+        )
+    return {
+        "checks": compact_checks,
+        "scan_interpretation": _scan_interpretation(compact_checks),
+    }
+
+
+def _compact_reproducibility_evidence(*candidates: object) -> dict:
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        compact = {
+            key: candidate.get(key)
+            for key in ("summary", "sample_size", "seed")
+            if candidate.get(key) is not None
+        }
+        if compact:
+            return compact
+    return {}
+
+
+def _compact_word_validation_results(validation_results: object) -> dict:
+    if not isinstance(validation_results, dict):
+        return {}
+    slim = _slim_validation_results_for_llm(validation_results)
+    compact: dict[str, object] = {}
+    for key in ("model_name", "model_version", "algorithm", "target_type"):
+        if slim.get(key) is not None:
+            compact[key] = slim.get(key)
+
+    basic_info = _compact_basic_info_for_word(slim.get("basic_info"))
+    if basic_info:
+        compact["basic_info"] = basic_info
+
+    reproducibility = _compact_reproducibility_evidence(slim.get("reproducibility"))
+    if reproducibility:
+        compact["reproducibility"] = reproducibility
+
+    effectiveness = _compact_effectiveness_for_word(slim.get("effectiveness"))
+    if effectiveness:
+        compact["effectiveness"] = effectiveness
+
+    overfitting = slim.get("overfitting_check")
+    if isinstance(overfitting, dict):
+        compact["overfitting_check"] = dict(overfitting)
+
+    stress_test = _compact_stress_test_for_word(slim.get("stress_test"))
+    if stress_test:
+        compact["stress_test"] = stress_test
+    return compact
+
+
+def _compact_basic_info_for_word(basic_info: object) -> dict:
+    if not isinstance(basic_info, dict):
+        return {}
+    compact: dict[str, object] = {}
+    for key in ("sample_period", "split_summary", "monthly_distribution"):
+        value = basic_info.get(key)
+        if isinstance(value, list):
+            compact[key] = _tail_list(value, WORD_CONCLUSION_MONTHLY_LIMIT)
+        elif value is not None:
+            compact[key] = value
+    feature_importance = basic_info.get("feature_importance")
+    if isinstance(feature_importance, list):
+        compact["feature_importance"] = feature_importance[:WORD_CONCLUSION_FEATURE_LIMIT]
+    return compact
+
+
+def _compact_effectiveness_for_word(effectiveness: object) -> dict:
+    if not isinstance(effectiveness, dict):
+        return {}
+    compact: dict[str, object] = {}
+    for key in ("overall", "monthly_ks", "monthly_psi", "psi_stability_table"):
+        value = effectiveness.get(key)
+        if not isinstance(value, list):
+            if value is not None:
+                compact[key] = value
+            continue
+        if key in {"monthly_ks", "monthly_psi"}:
+            compact[key] = _tail_list(value, WORD_CONCLUSION_MONTHLY_LIMIT)
+        elif key == "psi_stability_table":
+            compact[key] = value[:WORD_CONCLUSION_PSI_BIN_LIMIT]
+        else:
+            compact[key] = value
+    return compact
+
+
+def _compact_stress_test_for_word(stress_test: object) -> dict:
+    if not isinstance(stress_test, dict):
+        return {}
+    compact: dict[str, object] = {}
+    baseline = stress_test.get("baseline")
+    if isinstance(baseline, dict):
+        compact["baseline"] = {
+            key: value
+            for key, value in baseline.items()
+            if key != "bin_table"
+        }
+    elif baseline is not None:
+        compact["baseline"] = baseline
+    per_category = stress_test.get("per_category")
+    if isinstance(per_category, list):
+        compact["per_category"] = [
+            _compact_stress_category(item)
+            for item in per_category[:WORD_CONCLUSION_STRESS_CATEGORY_LIMIT]
+            if isinstance(item, dict)
+        ]
+    if stress_test.get("status") is not None:
+        compact["status"] = stress_test.get("status")
+    return compact
+
+
+def _compact_stress_category(category: dict) -> dict:
+    compact = {
+        key: value
+        for key, value in category.items()
+        if key != "bin_table"
+    }
+    dropped = compact.get("dropped_features")
+    if isinstance(dropped, list):
+        compact["dropped_features"] = dropped[:WORD_CONCLUSION_FEATURE_LIMIT]
+    return compact
+
+
+def _compact_visible_stage_summaries(summaries: object) -> list[dict]:
+    if not isinstance(summaries, list):
+        return []
+    compact = []
+    for item in summaries[-WORD_CONCLUSION_VISIBLE_SUMMARY_LIMIT:]:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or "")
+        compact.append(
+            {
+                "stage": str(item.get("stage") or ""),
+                "content": _truncate_llm_text(
+                    content,
+                    WORD_CONCLUSION_VISIBLE_SUMMARY_CHARS,
+                ),
+            }
+        )
+    return compact
+
+
+def _tail_list(value: list, limit: int) -> list:
+    if len(value) <= limit:
+        return value
+    return value[-limit:]
 
 
 def _slim_validation_results_for_llm(validation_results: dict) -> dict:
@@ -1174,6 +1382,22 @@ def _stage_instructions(stage: str) -> str:
             reference_instruction
             + "只针对当前报告输出阶段，最多 2 句，说明报告产物生成、预览或下载状态。"
             "不要重新分析材料完备性、分数一致性或效果稳定性指标。"
+        )
+    if stage == "word_conclusion_draft":
+        return (
+            reference_instruction
+            + "生成最终 Word 报告中的三段候选文字。只能使用 evidence 中已给出的结构化指标、"
+            "复现结论、压力测试分层和阶段总结；不得编造未提供的 KS、AUC、PSI、样本量、"
+            "数据源名称或监管结论。输出必须是 JSON 对象，且必须完整包含三段键值："
+            "TEXT:pressure_test_summary、TEXT:pressure_impact_recommendation、"
+            "TEXT:final_validation_conclusion。TEXT:pressure_test_summary 必须说明压力测试目的、"
+            "方法和观察到的高/中/低风险数据源分层；证据不足时明确说明无法完成某一档分层。"
+            "TEXT:pressure_impact_recommendation 必须围绕上述风险分层给出监控、替代、降级、"
+            "人工复核或上线限制建议。TEXT:final_validation_conclusion 必须比前两段更完整，"
+            "建议 1 到 2 个自然段，覆盖开发过程或材料完备性、Notebook 可复现性、分数一致性、"
+            "区分效果、稳定性、压力测试主要发现、报告产出状态和最终审慎判断；"
+            "如果 evidence.visible_stage_summaries 中已有复现性或效果稳定性解读，必须吸收其要点，"
+            "不能退化成一句泛泛结论。"
         )
     if stage == "failure":
         return reference_instruction + "分为“失败阶段、直接原因、可能原因、下一步”。"

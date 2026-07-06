@@ -679,6 +679,72 @@ def test_agent_word_conclusion_stage_passes_rewrite_instruction_to_llm(
     assert messages[-1]["metadata"]["awaiting_confirmation"] is True
 
 
+def test_agent_word_conclusion_stage_passes_prior_stage_summaries_to_llm(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.api import _run_agent_word_conclusion_stage
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    _advance_to_writing_artifacts(repo, task_id)
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="reproducibility",
+        content="分数一致性阶段已通过，最大差异为 0。",
+    )
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="chat",
+        content="普通聊天不应进入 Word 草稿证据。",
+    )
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="metrics",
+        content="效果稳定性解读：OOT KS 约 33 个点，PSI 总体可接受。",
+    )
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="word_conclusion_draft",
+        content="旧草稿不应作为新草稿证据。",
+    )
+    seen_evidence: list[dict] = []
+
+    def fake_generate_word_conclusions(**kwargs):
+        seen_evidence.append(kwargs["evidence"])
+        return REQUIRED_AGENT_CONCLUSIONS, {"source": "test"}
+
+    monkeypatch.setattr("marvis.agent.validation_app_service.generate_word_conclusions", fake_generate_word_conclusions)
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.agent_evidence_from_settings_impl",
+        lambda _settings, _task_id: {"validation_results": {"model_name": "A卡"}},
+    )
+
+    assert _run_agent_word_conclusion_stage(
+        repo,
+        SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+        task_id,
+        {"model_id": "m1", "effort": "high"},
+    )
+
+    assert seen_evidence
+    assert seen_evidence[0]["visible_stage_summaries"] == [
+        {
+            "stage": "reproducibility",
+            "content": "分数一致性阶段已通过，最大差异为 0。",
+        },
+        {
+            "stage": "metrics",
+            "content": "效果稳定性解读：OOT KS 约 33 个点，PSI 总体可接受。",
+        },
+    ]
+
+
 def test_metrics_stage_evidence_drops_oversized_roc_curve_arrays():
     # Raw roc_ks_curves points are ~12 MB on realistic tasks; if they reach
     # the LLM the prompt is too large and the call falls back to the
@@ -743,6 +809,141 @@ def test_word_conclusion_draft_evidence_drops_oversized_roc_curves():
     ]
     # report_fields and other non-validation keys are kept intact.
     assert scoped["report_fields"] == {"text_values": {}}
+
+
+def test_word_conclusion_draft_evidence_is_compact_and_keeps_business_summaries():
+    from marvis.agent.service import _stage_scoped_evidence
+
+    huge_rows = [
+        {
+            "row_index": index,
+            "score_code_model": "0." + ("1" * 600),
+            "score_submitted_pmml": "0." + ("2" * 600),
+        }
+        for index in range(80)
+    ]
+    huge_curve = [{"x": index, "y": index} for index in range(1200)]
+    huge_bin_table = [{"bin": index, "bad_rate": index / 1000} for index in range(100)]
+    evidence = {
+        "scan": {
+            "checks": [{"label": "Notebook 文件", "status": "success", "message": "已识别"}],
+            "artifacts": [{"path": "/tmp/" + ("x" * 4000)}],
+        },
+        "notebook_steps": {
+            "steps": [
+                {
+                    "id": "notebook-long",
+                    "title": "长源码步骤",
+                    "source_previews": ["print('" + ("x" * 5000) + "')"],
+                }
+            ]
+        },
+        "contract": {"source": "RMC_SAMPLE_DF = " + ("x" * 5000)},
+        "reproducibility": {
+            "summary": {"status": "pass", "max_abs_diff": 0.0, "mismatch_count": 0},
+            "rows": huge_rows,
+            "sample_size": 200,
+            "seed": 42,
+        },
+        "validation_results": {
+            "model_name": "A卡",
+            "algorithm": "lgb",
+            "reproducibility": {
+                "summary": {"status": "pass", "max_abs_diff": 0.0},
+                "rows": huge_rows,
+            },
+            "basic_info": {
+                "split_summary": [{"split": "train", "sample_count": 1000}],
+                "feature_importance": [
+                    {"rank": index, "feature": f"f{index}", "importance": index}
+                    for index in range(60)
+                ],
+            },
+            "effectiveness": {
+                "overall": [{"split": "oot", "ks": 0.33, "auc": 0.72}],
+                "monthly_ks": [{"month": f"2025{index:02d}", "ks": 0.3} for index in range(1, 30)],
+                "monthly_psi": [
+                    {"month": f"2025{index:02d}", "psi_vs_train": 0.02}
+                    for index in range(1, 30)
+                ],
+                "psi_stability_table": huge_bin_table,
+                "bin_tables": {"train": huge_bin_table},
+                "roc_ks_curves": {"train": huge_curve},
+            },
+            "stress_test": {
+                "baseline": {"ks": 0.33, "sample_count": 1000, "bin_table": huge_bin_table},
+                "per_category": [
+                    {
+                        "category": f"数据源{index}",
+                        "ks_after": 0.30,
+                        "ks_delta": -0.03,
+                        "psi_vs_baseline": 0.02,
+                        "bin_table": huge_bin_table,
+                        "dropped_features": [f"f{index}", f"g{index}"],
+                    }
+                    for index in range(30)
+                ],
+            },
+            "overfitting_check": {"status": "pass", "train_oot_abs_diff": 0.01},
+        },
+        "report_fields": {"text_values": {"TEXT:report_title": "A卡模型验证"}},
+        "visible_stage_summaries": [
+            {"stage": "reproducibility", "content": "分数一致性已通过，最大差异为 0。"},
+            {"stage": "metrics", "content": "OOT KS 约 33 个点，PSI 总体可接受。"}
+        ],
+    }
+
+    scoped = _stage_scoped_evidence("word_conclusion_draft", evidence)
+    payload = json.dumps(scoped, ensure_ascii=False)
+
+    assert len(payload) < 16000
+    assert "notebook_steps" not in scoped
+    assert "contract" not in scoped
+    assert scoped["reproducibility"]["summary"]["status"] == "pass"
+    assert "rows" not in scoped["reproducibility"]
+    validation_results = scoped["validation_results"]
+    assert "rows" not in validation_results["reproducibility"]
+    assert "roc_ks_curves" not in validation_results["effectiveness"]
+    assert "bin_tables" not in validation_results["effectiveness"]
+    assert len(validation_results["effectiveness"]["monthly_ks"]) <= 12
+    assert len(validation_results["basic_info"]["feature_importance"]) <= 20
+    assert "bin_table" not in validation_results["stress_test"]["baseline"]
+    assert "bin_table" not in validation_results["stress_test"]["per_category"][0]
+    assert scoped["visible_stage_summaries"][0]["stage"] == "reproducibility"
+    assert scoped["visible_stage_summaries"][1]["content"].startswith("OOT KS")
+
+
+def test_word_conclusion_prompt_requires_detailed_final_conclusion(tmp_path):
+    from marvis.agent.service import _stage_prompt
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
+
+    prompt = json.loads(
+        _stage_prompt(
+            task=task,
+            stage="word_conclusion_draft",
+            evidence={
+                "validation_results": {
+                    "effectiveness": {
+                        "overall": [{"split": "oot", "ks": 0.33, "auc": 0.72}]
+                    }
+                },
+                "visible_stage_summaries": [
+                    {"stage": "metrics", "content": "OOT KS 约 33 个点，PSI 总体可接受。"}
+                ],
+            },
+        )
+    )
+
+    instructions = prompt["instructions"]
+    assert "TEXT:final_validation_conclusion" in instructions
+    assert "1 到 2 个自然段" in instructions
+    assert "Notebook 可复现性" in instructions
+    assert "分数一致性" in instructions
+    assert "压力测试主要发现" in instructions
+    assert "不能退化成一句泛泛结论" in instructions
 
 
 def test_scan_stage_prompt_tells_llm_completed_materials_are_not_missing(tmp_path):
@@ -2374,6 +2575,56 @@ def test_agent_word_conclusion_stage_shows_thinking_while_llm_generates_draft(
     assert "压力测试总结" in draft["content"]
     assert "最终验证结论" in draft["content"]
     assert messages[1]["metadata"]["awaiting_confirmation"] is True
+
+
+def test_agent_word_conclusion_stage_rejects_empty_draft_without_confirmation(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.api import _run_agent_word_conclusion_stage
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    _advance_to_writing_artifacts(repo, task_id)
+
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.generate_word_conclusions",
+        lambda **_kwargs: (
+            {},
+            {
+                "llm_error": "上下文过长：prompt 超过模型窗口。",
+                "fallback": True,
+                "confirmable": False,
+            },
+        ),
+    )
+    monkeypatch.setattr("marvis.agent.validation_app_service.agent_evidence_from_settings_impl", lambda _settings, _task_id: {})
+
+    finished = _run_agent_word_conclusion_stage(
+        repo,
+        client.app.state.settings,
+        task_id,
+        model_profile={
+            "model_id": "m1",
+            "display_name": "主模型",
+            "model_name": "credit-risk-gpt",
+        },
+    )
+
+    assert finished is False
+    messages = repo.list_agent_messages(task_id)
+    assert [message["stage"] for message in messages] == [
+        "word_conclusion_draft",
+        "chat",
+    ]
+    assert messages[0]["content"] == ""
+    assert messages[0]["metadata"]["draft_values"] == {}
+    assert "三段 Word 结论草稿已生成" not in messages[1]["content"]
+    assert "草稿生成失败" in messages[1]["content"]
+    assert "上下文过长" in messages[1]["content"]
+    assert messages[1]["metadata"]["word_draft_failed"] is True
+    assert "awaiting_confirmation" not in messages[1]["metadata"]
 
 
 def test_agent_word_conclusion_display_uses_fixed_business_order():

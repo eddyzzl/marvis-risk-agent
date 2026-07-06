@@ -503,6 +503,44 @@ def test_find_placeholders_reads_paragraphs_and_tables(tmp_path):
     assert placeholders == ["{{TEXT:model_name}}", "{{TEXT:oot_ks}}"]
 
 
+def test_render_template_report_replaces_placeholders_in_later_table_cells(tmp_path):
+    document = Document()
+    table = document.add_table(rows=2, cols=5)
+    for column in range(5):
+        table.cell(0, column).text = f"标签 {column}"
+        table.cell(1, column).text = f"{{{{TEXT:revision_{column}}}}}"
+    template = tmp_path / "template.docx"
+    output = tmp_path / "output.docx"
+    document.save(template)
+
+    result = render_template_report(
+        TemplateReportPayload(
+            template_path=template,
+            output_path=output,
+            text_values={
+                f"TEXT:revision_{column}": f"值 {column}"
+                for column in range(5)
+            },
+            image_values={},
+        )
+    )
+
+    generated = Document(output)
+    table_text = "\n".join(
+        paragraph.text
+        for table in generated.tables
+        for row in table.rows
+        for cell in row.cells
+        for paragraph in cell.paragraphs
+    )
+    placeholders = find_placeholders(output)
+    assert result.unresolved_placeholders == []
+    assert placeholders == []
+    for column in range(5):
+        assert f"值 {column}" in table_text
+        assert f"{{{{TEXT:revision_{column}}}}}" not in table_text
+
+
 def test_render_template_report_replaces_placeholders_inside_nested_tables(tmp_path):
     document = Document()
     outer = document.add_table(rows=1, cols=1)

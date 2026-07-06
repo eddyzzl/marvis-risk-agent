@@ -302,18 +302,18 @@ def _document_text_parts(document) -> list[str]:
 
 
 def _iter_unique_table_cells(tables):
-    seen: set[int] = set()
+    seen: set[object] = set()
     for table in tables:
         yield from _iter_unique_table_cells_in_table(table, seen)
 
 
-def _iter_unique_table_cells_in_table(table, seen: set[int]):
+def _iter_unique_table_cells_in_table(table, seen: set[object]):
     for row in table.rows:
         for cell in row.cells:
-            cell_id = id(cell._tc)
-            if cell_id in seen:
+            cell_key = cell._tc
+            if cell_key in seen:
                 continue
-            seen.add(cell_id)
+            seen.add(cell_key)
             yield cell
             for nested_table in cell.tables:
                 yield from _iter_unique_table_cells_in_table(nested_table, seen)

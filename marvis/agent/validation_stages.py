@@ -363,6 +363,7 @@ def run_agent_word_conclusion_stage(
 ) -> bool:
     task = repo.get_task(task_id)
     evidence = deps.agent_evidence_from_settings(settings, task_id)
+    evidence = _word_conclusion_evidence_with_stage_summaries(repo, task_id, evidence)
     memory_store = AgentMemoryStore(settings.db_path)
     memory_context = agent_memory_context_from_store(
         memory_store,
@@ -383,6 +384,7 @@ def run_agent_word_conclusion_stage(
             user_instruction=rewrite_instruction,
         )
         draft_result["values"] = values
+        draft_result["metadata"] = metadata
         draft_result["report_revision"] = report_revision
         return (
             format_conclusion_values(values),
@@ -408,6 +410,15 @@ def run_agent_word_conclusion_stage(
             raise_if_cancelled=raise_if_agent_cancelled,
         )
     audit_agent_memory_use_from_store(memory_store, message, task_id=task_id)
+    values = draft_result.get("values")
+    if not isinstance(values, dict) or not agent_conclusions_confirmed(values):
+        add_agent_word_draft_failure_message(
+            repo,
+            task_id=task_id,
+            model_profile=model_profile,
+            metadata=draft_result.get("metadata"),
+        )
+        return False
     if auto_accept:
         return auto_confirm_agent_report_conclusions(
             repo=repo,
@@ -426,6 +437,66 @@ def run_agent_word_conclusion_stage(
         metadata={**model_metadata(model_profile), "awaiting_confirmation": True},
     )
     return True
+
+
+def _word_conclusion_evidence_with_stage_summaries(
+    repo: TaskRepository,
+    task_id: str,
+    evidence: object,
+) -> dict:
+    payload = dict(evidence) if isinstance(evidence, dict) else {}
+    summaries = _visible_stage_summaries_for_word_conclusion(
+        repo.list_agent_messages(task_id)
+    )
+    if summaries:
+        payload["visible_stage_summaries"] = summaries
+    return payload
+
+
+def _visible_stage_summaries_for_word_conclusion(messages: list[dict]) -> list[dict]:
+    summaries: list[dict] = []
+    excluded_stages = {
+        "chat",
+        "word_conclusion_draft",
+        "word_conclusion_confirmed",
+        "word_report_ready",
+    }
+    for message in messages[-16:]:
+        if message.get("role") != "assistant":
+            continue
+        stage = str(message.get("stage") or "")
+        content = str(message.get("content") or "").strip()
+        if not stage or stage in excluded_stages or not content:
+            continue
+        summaries.append({"stage": stage, "content": content})
+    return summaries
+
+
+def add_agent_word_draft_failure_message(
+    repo: TaskRepository,
+    *,
+    task_id: str,
+    model_profile: dict,
+    metadata: object,
+) -> None:
+    llm_error = ""
+    if isinstance(metadata, dict):
+        llm_error = str(metadata.get("llm_error") or "").strip()
+    detail = f"直接原因：{llm_error}" if llm_error else "直接原因：大模型未返回完整的三段 JSON 草稿。"
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="chat",
+        content=(
+            "报告结论草稿生成失败，未生成可确认的三段 Word 结论，也不会写入 Word。"
+            f"{detail} 请缩小输入、换用更大上下文窗口的模型，或重新生成报告结论草稿。"
+        ),
+        metadata={
+            **model_metadata(model_profile),
+            "word_draft_failed": True,
+            **({"llm_error": llm_error} if llm_error else {}),
+        },
+    )
 
 
 def auto_confirm_agent_report_conclusions(
