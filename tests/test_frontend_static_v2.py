@@ -6790,6 +6790,31 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert "background: var(--surface-soft)" in memory_hint_rule
 
 
+def test_execution_environment_exposes_notebook_memory_limit_field():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    state_js = _read_static("js/state.js")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="notebookMemoryLimitInput"' in index_html
+    assert 'placeholder="不限制"' in index_html
+    assert "Notebook 内存上限" in index_html
+    # Default settings shape carries the field so PUT payloads round-trip it.
+    assert "notebook_memory_limit_mb" in state_js
+    # Save-on-change wiring exists and is bound.
+    assert "function handleNotebookMemoryLimitChange" in app_js
+    assert (
+        '$("notebookMemoryLimitInput").addEventListener("change", handleNotebookMemoryLimitChange)'
+        in app_js
+    )
+    # Selecting a kernel must preserve the configured limit, not reset it.
+    assert (
+        "settings.notebook_memory_limit_mb = executionEnvironmentSettings?.notebook_memory_limit_mb"
+        in app_js
+    )
+    assert ".exec-env-memory-field" in styles_css
+
+
 def test_agent_conversation_panel_layout_and_message_shapes():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")

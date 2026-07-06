@@ -1051,17 +1051,22 @@ def _run_notebook_in_subprocess(
         )
     protocol = _parse_notebook_worker_result(stdout)
     if protocol is None:
+        # Surface the worker's stderr tail: when the worker dies before emitting
+        # a result (missing dep, import crash, Windows env issue), the real
+        # traceback is on stderr, and hiding it turns a clear error into an
+        # opaque protocol failure that takes many round-trips to diagnose.
+        protocol_error = _worker_protocol_error_message(process.returncode, stderr)
         _write_failure_log(
             Path(log_path),
             None,
             "NotebookWorkerProtocolError",
-            f"worker returned invalid protocol with exit code {process.returncode}",
+            protocol_error,
         )
         return NotebookRunResult(
             succeeded=False,
             failed_cell_index=None,
             error_name="NotebookWorkerProtocolError",
-            error_value=f"worker returned invalid protocol with exit code {process.returncode}",
+            error_value=protocol_error,
             resource_usage={
                 "subprocess_isolated": True,
                 "worker_pid": process.pid,
@@ -1166,15 +1171,50 @@ def notebook_run_result_from_dict(payload: dict) -> NotebookRunResult:
     )
 
 
-def _parse_notebook_worker_result(stdout: str) -> dict[str, Any] | None:
-    line = stdout.strip().splitlines()[-1] if stdout.strip() else ""
-    if not line:
-        return None
+# The notebook worker tags its result line with this sentinel. On Windows the
+# Jupyter kernel talks over TCP (no Unix IPC) and prints chatter like
+# "[IPKernelApp] WARNING | Kernel is running over TCP ..." plus zmq/asyncio
+# warnings onto the worker's stdout. A bare "last line is the JSON" parse then
+# picks up that chatter and reports an opaque NotebookWorkerProtocolError,
+# masking the real cell error. Scanning for the sentinel makes the protocol
+# immune to any such stdout pollution.
+NOTEBOOK_RESULT_SENTINEL = "@@MARVIS_NB_RESULT@@"
+
+
+def _loads_result_dict(text: str) -> dict[str, Any] | None:
     try:
-        payload = json.loads(line)
+        payload = json.loads(text)
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _worker_protocol_error_message(returncode: int | None, stderr: str | None) -> str:
+    base = f"worker returned invalid protocol with exit code {returncode}"
+    tail = _tail_text(stderr, limit=800).strip() if stderr else ""
+    if not tail:
+        return base
+    # Collapse the traceback to its last, most informative lines on one line so
+    # it fits the single-line error surface without losing the actual cause.
+    last_lines = [line for line in tail.splitlines() if line.strip()][-3:]
+    return f"{base}; worker stderr: {' | '.join(last_lines)}"
+
+
+def _parse_notebook_worker_result(stdout: str) -> dict[str, Any] | None:
+    if not stdout:
+        return None
+    # Prefer the sentinel-tagged line (last one wins), ignoring kernel chatter.
+    for line in reversed(stdout.splitlines()):
+        index = line.rfind(NOTEBOOK_RESULT_SENTINEL)
+        if index != -1:
+            payload = _loads_result_dict(line[index + len(NOTEBOOK_RESULT_SENTINEL):])
+            if payload is not None:
+                return payload
+    # Legacy fallback: a bare last non-empty line that is itself the JSON.
+    stripped = stdout.strip()
+    if not stripped:
+        return None
+    return _loads_result_dict(stripped.splitlines()[-1])
 
 
 def _write_subprocess_timeout_artifacts(

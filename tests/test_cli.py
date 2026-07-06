@@ -102,6 +102,7 @@ def test_delegate_to_dedicated_env_creates_env_installs_and_runs(monkeypatch, tm
     monkeypatch.setattr(cli, "_git_root", lambda path: tmp_path)
     monkeypatch.setattr(cli, "_ensure_conda_env", lambda env_name, *, cwd: True)
     monkeypatch.setattr(cli, "_conda_env_has_marvis", lambda env_name: pytest.fail("new env skips probe"))
+    monkeypatch.setattr(cli, "_conda_env_can_serve", lambda env_name: pytest.fail("new env skips serve probe"))
     monkeypatch.setattr(cli, "_conda_command", lambda: "conda")
     monkeypatch.setattr(
         cli,
@@ -127,7 +128,10 @@ def test_delegate_to_dedicated_env_creates_env_installs_and_runs(monkeypatch, tm
             ],
             tmp_path,
         ),
-        (["conda", "run", "-n", "marvis", "marvis", "--port", "8017"], Path.cwd()),
+        (
+            ["conda", "run", "--no-capture-output", "-n", "marvis", "marvis", "--port", "8017"],
+            Path.cwd(),
+        ),
     ]
 
 
@@ -138,6 +142,7 @@ def test_delegate_to_existing_dedicated_env_runs_without_reinstall(monkeypatch, 
     monkeypatch.setattr(cli, "_git_root", lambda path: tmp_path)
     monkeypatch.setattr(cli, "_ensure_conda_env", lambda env_name, *, cwd: False)
     monkeypatch.setattr(cli, "_conda_env_has_marvis", lambda env_name: True)
+    monkeypatch.setattr(cli, "_conda_env_can_serve", lambda env_name: True)
     monkeypatch.setattr(cli, "_conda_command", lambda: "conda")
     monkeypatch.setattr(
         cli,
@@ -148,8 +153,40 @@ def test_delegate_to_existing_dedicated_env_runs_without_reinstall(monkeypatch, 
     cli._delegate_to_dedicated_conda_env(["serve", "--port", "8017"], env_name="marvis")
 
     assert process_commands == [
-        (["conda", "run", "-n", "marvis", "marvis", "serve", "--port", "8017"], Path.cwd())
+        (
+            ["conda", "run", "--no-capture-output", "-n", "marvis", "marvis", "serve", "--port", "8017"],
+            Path.cwd(),
+        )
     ]
+
+
+def test_delegate_reinstalls_when_env_has_marvis_but_cannot_serve(monkeypatch, tmp_path):
+    # marvis is installed but its runtime deps are missing (a `marvis version`
+    # passes but the server would crash on `import uvicorn`): reinstall deps.
+    process_commands = []
+
+    monkeypatch.setattr(cli, "_package_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_git_root", lambda path: tmp_path)
+    monkeypatch.setattr(cli, "_ensure_conda_env", lambda env_name, *, cwd: False)
+    monkeypatch.setattr(cli, "_conda_env_has_marvis", lambda env_name: True)
+    monkeypatch.setattr(cli, "_conda_env_can_serve", lambda env_name: False)
+    monkeypatch.setattr(cli, "_conda_command", lambda: "conda")
+    monkeypatch.setattr(
+        cli,
+        "_run_process",
+        lambda command, *, cwd: process_commands.append((command, cwd)),
+    )
+
+    cli._delegate_to_dedicated_conda_env(["serve"], env_name="marvis")
+
+    assert process_commands[0] == (
+        ["conda", "run", "-n", "marvis", "python", "-m", "pip", "install", "-e", "."],
+        tmp_path,
+    )
+    assert process_commands[1] == (
+        ["conda", "run", "--no-capture-output", "-n", "marvis", "marvis", "serve"],
+        Path.cwd(),
+    )
 
 
 def test_launcher_env_name_prefers_env_var(monkeypatch, tmp_path):

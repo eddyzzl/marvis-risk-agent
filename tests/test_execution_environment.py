@@ -31,6 +31,25 @@ def test_execution_environment_defaults_to_python3_kernel(tmp_path: Path):
     assert settings.kernel_name == "python3"
 
 
+def test_notebook_memory_limit_defaults_to_none_and_round_trips(tmp_path: Path):
+    # Default is no cap (large datasets); a positive value is a real ceiling.
+    assert load_execution_environment(tmp_path).notebook_memory_limit_mb is None
+
+    settings = ExecutionEnvironmentSettings(notebook_memory_limit_mb=16384)
+    save_execution_environment(tmp_path, settings)
+    assert load_execution_environment(tmp_path).notebook_memory_limit_mb == 16384
+
+
+def test_notebook_memory_limit_treats_zero_and_junk_as_no_cap(tmp_path: Path):
+    normalize = execution_environment._normalize_notebook_memory_limit_mb
+    assert normalize(None) is None
+    assert normalize(0) is None
+    assert normalize(-1) is None
+    assert normalize("nonsense") is None
+    assert normalize("8192") == 8192
+    assert normalize(8192) == 8192
+
+
 def test_validate_jupyter_kernel_reports_missing_kernel(monkeypatch):
     monkeypatch.setattr(
         "marvis.execution_environment.available_kernel_names",

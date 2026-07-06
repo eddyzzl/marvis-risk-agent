@@ -476,6 +476,14 @@
                 <div id="executionEnvironmentList" class="exec-env-list" role="radiogroup" aria-label="Python 环境"></div>
                 <p class="exec-env-hint">Notebook、验证脚本和工具运行所用的 Python 环境，仅显示平台识别到的 Jupyter Kernel。点击任意一行即选用并保存。</p>
               </div>
+              <div class="exec-env-section">
+                <p class="exec-env-section-label">Notebook 内存上限</p>
+                <div class="exec-env-memory-field">
+                  <input id="notebookMemoryLimitInput" type="number" min="0" step="512" inputmode="numeric" placeholder="不限制" aria-label="Notebook 内存上限（MB）" />
+                  <span class="exec-env-memory-unit">MB</span>
+                </div>
+                <p class="exec-env-hint">模型复现 Notebook 内核的内存软上限。留空或填 0 表示不限制（默认，适合大数据集）；填正整数则内核超过即中止，防止跑飞占满内存。改动后失焦即保存。</p>
+              </div>
               <div id="executionEnvironmentStatus" class="status" role="status" aria-live="polite"></div>
             </section>
 

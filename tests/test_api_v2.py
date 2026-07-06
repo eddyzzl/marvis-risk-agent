@@ -1402,6 +1402,69 @@ def test_execution_environment_settings_round_trip_api(tmp_path: Path, monkeypat
     assert got.json()["settings"]["kernel_name"] == "marvis-kernel"
 
 
+def test_execution_environment_notebook_memory_limit_persists_and_preserves_rss(
+    tmp_path: Path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "marvis.execution_environment.available_kernel_names",
+        lambda: ["python3"],
+    )
+    # Pre-seed a non-default plugin RSS limit to prove the PUT preserves it.
+    from marvis.execution_environment import (
+        ExecutionEnvironmentSettings,
+        load_execution_environment,
+        save_execution_environment,
+    )
+
+    save_execution_environment(
+        tmp_path, ExecutionEnvironmentSettings(rss_memory_limit_mb=2048)
+    )
+
+    response = client.put(
+        "/api/settings/execution-environment",
+        json={
+            "execution_mode": "jupyter_kernel",
+            "kernel_name": "python3",
+            "conda_env_name": "",
+            "python_executable": "",
+            "notebook_memory_limit_mb": 16384,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["settings"]["notebook_memory_limit_mb"] == 16384
+
+    reloaded = load_execution_environment(tmp_path)
+    assert reloaded.notebook_memory_limit_mb == 16384
+    # Selecting a kernel / setting the notebook limit must not wipe the plugin cap.
+    assert reloaded.rss_memory_limit_mb == 2048
+
+
+def test_agent_pipeline_settings_wires_notebook_memory_limit(tmp_path: Path):
+    # The Agent flow must forward the configured notebook memory ceiling; before
+    # the fix it silently dropped it and notebooks were stuck at 4096 MB.
+    from types import SimpleNamespace
+
+    from marvis.api_stage_helpers import pipeline_settings_from_settings
+    from marvis.execution_environment import (
+        ExecutionEnvironmentSettings,
+        save_execution_environment,
+    )
+
+    save_execution_environment(
+        tmp_path, ExecutionEnvironmentSettings(notebook_memory_limit_mb=32768)
+    )
+    settings = SimpleNamespace(
+        workspace=tmp_path,
+        db_path=tmp_path / "marvis.db",
+        report_template_path=tmp_path / "template.docx",
+    )
+    task = SimpleNamespace(feature_columns=[])
+
+    pipeline_settings = pipeline_settings_from_settings(settings, task, None)
+    assert pipeline_settings.notebook_memory_limit_mb == 32768
+
+
 def test_execution_environment_options_api(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     monkeypatch.setattr(

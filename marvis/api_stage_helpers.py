@@ -161,12 +161,17 @@ def pipeline_settings_from_settings(
     task: TaskRecord,
     feature_columns: list[str] | None,
 ) -> PipelineSettings:
+    environment = load_execution_environment(settings.workspace)
     return PipelineSettings(
         workspace=settings.workspace,
         db_path=settings.db_path,
         report_template_path=settings.report_template_path,
         feature_columns=feature_columns or task.feature_columns,
-        notebook_kernel_name=load_execution_environment(settings.workspace).kernel_name,
+        notebook_kernel_name=environment.kernel_name,
+        # Wire the configured notebook memory ceiling through -- previously this
+        # was dropped, so notebooks were stuck at the hardcoded 4096 MB default
+        # regardless of the execution-environment setting.
+        notebook_memory_limit_mb=environment.notebook_memory_limit_mb,
     )
 
 

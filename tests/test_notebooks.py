@@ -12,14 +12,70 @@ from marvis.notebook_cancellation import NotebookCancellationToken
 from marvis.notebooks import (
     _build_step_events,
     _notebook_worker_env,
+    _parse_notebook_worker_result,
     _record_cell_complete,
     _record_cell_start,
+    _worker_protocol_error_message,
     AppendedCellExecutionPolicy,
+    NOTEBOOK_RESULT_SENTINEL,
     NotebookExecutionSession,
     prepare_execution_notebook_v3,
     run_notebook,
 )
 from marvis.notebook_steps import notebook_step_plan
+
+
+def test_parse_worker_result_finds_sentinel_amid_kernel_chatter():
+    # Windows kernels print TCP/zmq chatter to the worker's stdout; the sentinel
+    # line must still be recovered even when it is NOT the last line.
+    payload = {"ok": True, "result": {"succeeded": True}}
+    stdout = "\n".join([
+        "[IPKernelApp] WARNING | Kernel is running over TCP without encryption.",
+        NOTEBOOK_RESULT_SENTINEL + json.dumps(payload),
+        "[IPKernelApp] WARNING | Parent appears to have exited, shutting down.",
+    ])
+    assert _parse_notebook_worker_result(stdout) == payload
+
+
+def test_parse_worker_result_legacy_bare_last_line_still_parsed():
+    payload = {"ok": False, "error": "boom"}
+    assert _parse_notebook_worker_result(json.dumps(payload)) == payload
+
+
+def test_parse_worker_result_returns_none_on_pure_chatter():
+    assert _parse_notebook_worker_result("[IPKernelApp] WARNING | over TCP\nshutting down") is None
+    assert _parse_notebook_worker_result("") is None
+
+
+def test_worker_emit_output_round_trips_through_parser():
+    # The worker prefixes with the sentinel; the host parser must read it back.
+    from marvis.notebook_worker import _emit as worker_emit  # noqa: PLC0415
+    import io
+
+    captured = io.BytesIO()
+
+    class _Stdout:
+        buffer = captured
+
+    original = __import__("sys").stdout
+    try:
+        __import__("sys").stdout = _Stdout()
+        worker_emit({"ok": True, "result": {"succeeded": True}})
+    finally:
+        __import__("sys").stdout = original
+
+    text = captured.getvalue().decode("utf-8")
+    assert text.startswith(NOTEBOOK_RESULT_SENTINEL)
+    assert _parse_notebook_worker_result(text) == {"ok": True, "result": {"succeeded": True}}
+
+
+def test_worker_protocol_error_message_surfaces_stderr_tail():
+    stderr = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'sklearn_pandas'"
+    message = _worker_protocol_error_message(1, stderr)
+    assert "exit code 1" in message
+    assert "sklearn_pandas" in message
+    # No stderr -> just the base message, no dangling separator.
+    assert _worker_protocol_error_message(1, "") == "worker returned invalid protocol with exit code 1"
 
 
 def test_run_notebook_executes_relative_to_notebook_directory(tmp_path: Path):

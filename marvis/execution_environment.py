@@ -23,6 +23,12 @@ class ExecutionEnvironmentSettings:
     # via marvis.resource_monitor.ProcessTreeResourceMonitor (REL-3). None
     # disables RSS monitoring; setrlimit remains active regardless.
     rss_memory_limit_mb: int | None = 4096
+    # Soft RSS ceiling (MB) for the notebook kernel that runs model
+    # reproducibility / metrics. Real credit datasets are memory-hungry and this
+    # is a single-user local tool, so it defaults to None (no cap -- let the
+    # machine's RAM be the limit). Set a positive MB value in 执行环境 settings
+    # to re-enable a guard against a runaway notebook.
+    notebook_memory_limit_mb: int | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,9 @@ def load_execution_environment(workspace: Path) -> ExecutionEnvironmentSettings:
         rss_memory_limit_mb=_normalize_rss_memory_limit_mb(
             payload.get("rss_memory_limit_mb", 4096)
         ),
+        notebook_memory_limit_mb=_normalize_notebook_memory_limit_mb(
+            payload.get("notebook_memory_limit_mb")
+        ),
     )
 
 
@@ -90,6 +99,19 @@ def _normalize_rss_memory_limit_mb(value: object) -> int | None:
         limit = int(value)
     except (TypeError, ValueError):
         return 4096
+    return limit if limit > 0 else None
+
+
+def _normalize_notebook_memory_limit_mb(value: object) -> int | None:
+    # None / missing / 0 / negative / junk all mean "no cap" -- unlike the plugin
+    # limit, the notebook default is unlimited, so we never silently impose a
+    # surprise ceiling. Only a positive integer sets a real cap.
+    if value is None:
+        return None
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return None
     return limit if limit > 0 else None
 
 

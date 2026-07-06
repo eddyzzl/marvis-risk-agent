@@ -24,6 +24,8 @@ export const defaultExecutionEnvironment = {
   kernel_name: "python3",
   conda_env_name: "",
   python_executable: "",
+  // Notebook kernel RSS soft cap (MB). null = no cap (default).
+  notebook_memory_limit_mb: null,
 };
 
 export function createRenderSignatures() {
