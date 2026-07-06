@@ -1268,28 +1268,54 @@ def _kill_process_tree(process: subprocess.Popen) -> None:
         pass
 
 
+_NOTEBOOK_WORKER_ENV_PASSTHROUGH = {
+    "CONDA_PREFIX",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "PATH",
+    "PYTHONHASHSEED",
+    "PYTHONIOENCODING",
+    "PYTHONPATH",
+    "PYTHONUTF8",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    # Windows-essential vars. Dropping SYSTEMROOT in particular breaks Winsock
+    # initialization in the spawned worker -- `import _overlapped` (and any
+    # socket, incl. the Jupyter kernel's localhost ZMQ transport) then fails with
+    # OSError [WinError 10106/10104] "service provider could not be initialized".
+    # These are absent on POSIX, so listing them here is a no-op off Windows.
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "USERNAME",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "PROGRAMDATA",
+    # Home-directory resolution. Path.home() / expanduser("~") on Windows needs
+    # USERPROFILE (or HOMEDRIVE+HOMEPATH); without them the worker dies with
+    # RuntimeError "Could not determine home directory" (jupyter/ipython, and
+    # notebook code, resolve ~ during startup).
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "HOMESHARE",
+}
+
+
 def _notebook_worker_env() -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
-        if key in {
-            "CONDA_PREFIX",
-            "HOME",
-            "LANG",
-            "LC_ALL",
-            "LC_CTYPE",
-            "PATH",
-            "PYTHONHASHSEED",
-            "PYTHONIOENCODING",
-            "PYTHONPATH",
-            "PYTHONUTF8",
-            "REQUESTS_CA_BUNDLE",
-            "SSL_CERT_FILE",
-            "TEMP",
-            "TMP",
-            "TMPDIR",
-        }
-        and value
+        if key in _NOTEBOOK_WORKER_ENV_PASSTHROUGH and value
     }
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
