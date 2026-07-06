@@ -152,12 +152,20 @@ def test_notebook_worker_env_passes_windows_systemroot(monkeypatch):
     # Jupyter kernel's localhost transport never comes up. Secrets stay stripped.
     monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
     monkeypatch.setenv("SYSTEMDRIVE", "C:")
+    # Home-directory resolution: Path.home() needs these or the worker dies with
+    # RuntimeError "Could not determine home directory".
+    monkeypatch.setenv("USERPROFILE", r"C:\Users\eddy")
+    monkeypatch.setenv("HOMEDRIVE", "C:")
+    monkeypatch.setenv("HOMEPATH", r"\Users\eddy")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
 
     env = _notebook_worker_env()
 
     assert env["SYSTEMROOT"] == r"C:\Windows"
     assert env["SYSTEMDRIVE"] == "C:"
+    assert env["USERPROFILE"] == r"C:\Users\eddy"
+    assert env["HOMEDRIVE"] == "C:"
+    assert env["HOMEPATH"] == r"\Users\eddy"
     assert "OPENAI_API_KEY" not in env
 
 

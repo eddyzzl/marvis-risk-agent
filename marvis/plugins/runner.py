@@ -53,11 +53,15 @@ _WORKER_ENV_ALLOWLIST = frozenset({
     "PATHEXT",
     "NUMBER_OF_PROCESSORS",
     "PROCESSOR_ARCHITECTURE",
-    "USERPROFILE",
     "USERNAME",
     "LOCALAPPDATA",
     "APPDATA",
     "PROGRAMDATA",
+    # Home-directory resolution (Path.home()/expanduser("~") on Windows).
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "HOMESHARE",
 })
 
 
