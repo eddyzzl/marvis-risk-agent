@@ -62,13 +62,19 @@ def update_execution_environment_settings(
     payload: ExecutionEnvironmentRequest,
     request: Request,
 ) -> dict:
+    workspace = request.app.state.settings.workspace
+    # Preserve the plugin RSS limit, which this request never carries -- otherwise
+    # saving a kernel selection would silently reset it to the default.
+    current = load_execution_environment(workspace)
     settings = ExecutionEnvironmentSettings(
         execution_mode=payload.execution_mode,
         kernel_name=payload.kernel_name,
         conda_env_name=payload.conda_env_name,
         python_executable=payload.python_executable,
+        rss_memory_limit_mb=current.rss_memory_limit_mb,
+        notebook_memory_limit_mb=payload.notebook_memory_limit_mb,
     )
-    saved = save_execution_environment(request.app.state.settings.workspace, settings)
+    saved = save_execution_environment(workspace, settings)
     validation = validate_execution_environment(saved)
     return {
         "settings": asdict(saved),

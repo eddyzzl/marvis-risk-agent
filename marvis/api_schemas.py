@@ -41,6 +41,8 @@ class ExecutionEnvironmentRequest(BaseModel):
     kernel_name: str = "python3"
     conda_env_name: str = ""
     python_executable: str = ""
+    # Soft RSS cap (MB) for the notebook kernel; None / 0 / omitted = no cap.
+    notebook_memory_limit_mb: int | None = None
 
 
 class LLMSettingsRequest(BaseModel):

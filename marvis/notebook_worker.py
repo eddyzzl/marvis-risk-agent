@@ -7,10 +7,30 @@ from pathlib import Path
 import sys
 import traceback
 
-from marvis.notebooks import notebook_run_result_to_dict, run_notebook
+from marvis.notebooks import (
+    NOTEBOOK_RESULT_SENTINEL,
+    notebook_run_result_to_dict,
+    run_notebook,
+)
+
+
+def _configure_windows_event_loop() -> None:
+    # On Windows, Python 3.8+ defaults to the Proactor event loop, but
+    # jupyter_client / pyzmq need the selector loop to start a kernel cleanly
+    # (otherwise a noisy "Proactor event loop does not implement add_reader"
+    # warning + a slower selector-thread fallback). Isolated to this subprocess.
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import asyncio
+
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
 
 
 def worker_main() -> None:
+    _configure_windows_event_loop()
     raw = sys.stdin.buffer.read().decode("utf-8")
     try:
         job = json.loads(raw)
@@ -46,8 +66,18 @@ def _optional_path(value) -> Path | None:
 
 
 def _emit(payload: dict) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    # Tag the result with the sentinel so the host can find it even when the
+    # kernel prints TCP/zmq chatter onto this stdout (Windows), and write raw
+    # UTF-8 bytes so we never depend on the platform's stdout text encoding
+    # (cp936 on Chinese Windows) -- the host reads this pipe as UTF-8.
+    line = NOTEBOOK_RESULT_SENTINEL + json.dumps(payload, ensure_ascii=False) + "\n"
+    data = line.encode("utf-8")
+    try:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+    except (AttributeError, ValueError):
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":

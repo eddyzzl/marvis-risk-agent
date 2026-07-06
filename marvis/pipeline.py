@@ -132,7 +132,9 @@ class PipelineSettings:
     report_template_path: Path
     feature_columns: list[str] = field(default_factory=list)
     notebook_kernel_name: str = "python3"
-    notebook_memory_limit_mb: int | None = 4096
+    # None = no soft RSS cap on the notebook kernel (the new default; real
+    # datasets are large). The execution-environment setting overrides this.
+    notebook_memory_limit_mb: int | None = None
     notebook_isolated_execution: bool = True
     allow_legacy_live_notebook_execution: bool = False
     bin_count: int = 10

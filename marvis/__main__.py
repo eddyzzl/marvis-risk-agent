@@ -235,10 +235,18 @@ def _profile_slug(profile: str | None) -> str:
 
 
 def _serve(args: argparse.Namespace) -> None:
-    import uvicorn
+    try:
+        import uvicorn
 
-    from marvis.app import create_app
-    from marvis.logging_setup import configure_logging, uvicorn_log_config
+        from marvis.app import create_app
+        from marvis.logging_setup import configure_logging, uvicorn_log_config
+    except ImportError as exc:
+        # A dedicated env that has marvis but not its dependencies would otherwise
+        # crash here with a bare ModuleNotFoundError; give an actionable message.
+        raise RuntimeError(
+            f"MARVIS runtime dependencies are missing ({exc}). "
+            "Install them from the checkout with: python -m pip install -e ."
+        ) from exc
 
     options = _resolve_serve_options(args)
     log_path = configure_logging(options.workspace)
@@ -461,9 +469,16 @@ def _write_launcher_env_name(repo: Path, env_name: str) -> None:
 def _delegate_to_dedicated_conda_env(raw_argv: list[str], *, env_name: str) -> None:
     repo = _git_root(_package_root())
     created = _ensure_conda_env(env_name, cwd=repo)
-    if created or not _conda_env_has_marvis(env_name):
+    # Reinstall when marvis is absent OR present-but-missing-its-deps: a
+    # `marvis version` check passes even for a deps-less env (version needs no
+    # runtime deps), so verify the env can actually serve before delegating --
+    # otherwise the server dies on `import uvicorn` with the error swallowed.
+    if created or not _conda_env_has_marvis(env_name) or not _conda_env_can_serve(env_name):
         _run_process(_conda_env_install_command(env_name, with_deps=True), cwd=repo)
-    command = [_conda_command(), "run", "-n", env_name, "marvis", *raw_argv]
+    # --no-capture-output streams the delegated process's stdout/stderr live to
+    # this console; without it conda run buffers everything until exit, so a
+    # long-running server shows nothing and a startup crash is hidden.
+    command = [_conda_command(), "run", "--no-capture-output", "-n", env_name, "marvis", *raw_argv]
     _run_process(command, cwd=Path.cwd())
 
 
@@ -471,6 +486,25 @@ def _conda_env_has_marvis(env_name: str) -> bool:
     try:
         completed = subprocess.run(
             [_conda_command(), "run", "-n", env_name, "marvis", "version"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "marvis detected conda base, but the conda command was not found; "
+            "activate conda first"
+        ) from exc
+    return completed.returncode == 0
+
+
+def _conda_env_can_serve(env_name: str) -> bool:
+    # The dedicated env must have marvis's runtime deps to actually start the
+    # server; `marvis version` succeeds without them.
+    try:
+        completed = subprocess.run(
+            [_conda_command(), "run", "-n", env_name, "python", "-c", "import uvicorn, fastapi"],
             check=False,
             text=True,
             stdout=subprocess.PIPE,

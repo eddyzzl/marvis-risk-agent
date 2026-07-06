@@ -2921,6 +2921,30 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
   color: var(--text-muted);
 }
 
+.exec-env-memory-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.exec-env-memory-field input {
+  width: 160px;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.exec-env-memory-unit {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 .governance-panel .settings-row-block {
   display: block;
 }

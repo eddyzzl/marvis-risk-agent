@@ -1956,7 +1956,32 @@ function populateExecutionEnvironmentForm(settings = {}, options = executionEnvi
   const normalized = normalizeExecutionEnvironment(settings);
   executionEnvironmentSettings = normalized;
   renderExecutionEnvironmentOptions(options, normalized);
+  renderNotebookMemoryLimitInput(normalized);
   renderExecutionEnvironmentSummary();
+}
+
+function renderNotebookMemoryLimitInput(settings = executionEnvironmentSettings) {
+  const input = $("notebookMemoryLimitInput");
+  if (!input || document.activeElement === input) return; // don't clobber mid-edit
+  const limit = settings?.notebook_memory_limit_mb;
+  input.value = Number.isFinite(limit) && limit > 0 ? String(limit) : "";
+}
+
+function handleNotebookMemoryLimitChange() {
+  const input = $("notebookMemoryLimitInput");
+  if (!input) return;
+  const raw = String(input.value || "").trim();
+  let limit = null;
+  if (raw !== "") {
+    const parsed = Number(raw);
+    limit = Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
+  }
+  // No-op if unchanged, so a plain focus/blur doesn't trigger a save round-trip.
+  if ((executionEnvironmentSettings?.notebook_memory_limit_mb ?? null) === limit) {
+    renderNotebookMemoryLimitInput();
+    return;
+  }
+  saveExecutionEnvironmentSettings({ ...executionEnvironmentSettings, notebook_memory_limit_mb: limit });
 }
 
 function handleExecutionEnvironmentListClick(event) {
@@ -1969,6 +1994,8 @@ function handleExecutionEnvironmentListClick(event) {
     setExecutionEnvironmentStatus("执行环境配置解析失败，请重新扫描后再选择。", "error");
     return;
   }
+  // Selecting a kernel must not wipe a configured notebook memory cap.
+  settings.notebook_memory_limit_mb = executionEnvironmentSettings?.notebook_memory_limit_mb ?? null;
   // Optimistically move the checkmark; saveExecutionEnvironmentSettings reverts on failure.
   for (const item of $("executionEnvironmentList").querySelectorAll(".exec-env-row")) {
     const on = item === row;
@@ -6168,6 +6195,7 @@ $("closeWordPreviewButton").onclick = closeWordPreviewDialog;
 $("refreshExecutionEnvironmentOptionsButton").onclick = refreshExecutionEnvironmentOptions;
 $("executionEnvironmentList").addEventListener("click", handleExecutionEnvironmentListClick);
 $("executionEnvironmentList").addEventListener("keydown", handleExecutionEnvironmentListKeydown);
+$("notebookMemoryLimitInput").addEventListener("change", handleNotebookMemoryLimitChange);
 $("addLLMModelButton").onclick = addLLMModelProfile;
 $("closeLLMEngineEditButton").onclick = closeLLMEngineEdit;
 $("cancelLLMEngineEditButton").onclick = closeLLMEngineEdit;
