@@ -146,6 +146,21 @@ def test_notebook_worker_env_strips_host_secrets(monkeypatch):
     assert "ANTHROPIC_API_KEY" not in env
 
 
+def test_notebook_worker_env_passes_windows_systemroot(monkeypatch):
+    # Without SYSTEMROOT the spawned worker cannot initialize Winsock on Windows
+    # (`import _overlapped` / any socket fails with WinError 10106/10104), so the
+    # Jupyter kernel's localhost transport never comes up. Secrets stay stripped.
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
+    monkeypatch.setenv("SYSTEMDRIVE", "C:")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+
+    env = _notebook_worker_env()
+
+    assert env["SYSTEMROOT"] == r"C:\Windows"
+    assert env["SYSTEMDRIVE"] == "C:"
+    assert "OPENAI_API_KEY" not in env
+
+
 def test_run_notebook_passes_env_allowlist_to_kernel_client(tmp_path: Path, monkeypatch):
     # TST-7: the live interactive-modeling kernel previously inherited the
     # full host os.environ with no filtering, unlike the isolated batch

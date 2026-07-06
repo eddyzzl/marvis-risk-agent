@@ -43,6 +43,21 @@ _WORKER_ENV_ALLOWLIST = frozenset({
     "TEMP",
     "TMP",
     "TMPDIR",
+    # Windows-essential vars (absent on POSIX, so a no-op there). Dropping
+    # SYSTEMROOT breaks Winsock init in the spawned worker -- any socket then
+    # fails with OSError [WinError 10106/10104].
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "USERPROFILE",
+    "USERNAME",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "PROGRAMDATA",
 })
 
 
