@@ -445,34 +445,46 @@
   color: var(--text-secondary);
 }
 
+/* macOS grouped-row list: the enclosing .plugin-tool is already a card, so the
+   impl rows bleed to its edges and separate with hairlines (icon | label |
+   value) rather than nesting a second boxed grid of chips. */
 .plugin-tool-impl {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 6px;
-  margin: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 2px -12px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 66%, transparent);
 }
 
 .plugin-tool-impl div {
   display: grid;
-  gap: 2px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
   min-width: 0;
-  padding: 7px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-soft);
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.plugin-tool-impl div + div {
+  border-top: 1px solid color-mix(in srgb, var(--border) 66%, transparent);
 }
 
 .plugin-tool-impl dt {
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 700;
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .plugin-tool-impl dd {
   margin: 0;
-  color: var(--text);
-  font-size: 12px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
   line-height: 1.35;
+  text-align: right;
+  justify-self: end;
   overflow-wrap: anywhere;
 }
 
@@ -1285,6 +1297,7 @@
   .exec-env-row-title,
   .llm-engine-item-name,
   .memory-manage-head strong,
+  .draft-manage-summary-text strong,
   .agent-memory-pane-head strong,
   .agent-memory-item-main strong,
   .plugin-upload-text strong,
@@ -1315,6 +1328,7 @@
   .llm-engine-empty,
   .llm-engine-item-url,
   .memory-manage-head span,
+  .draft-manage-summary-text span,
   .agent-memory-view-hint,
   .agent-memory-pane-head span,
   .agent-memory-item-main span,

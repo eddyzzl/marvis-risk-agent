@@ -2713,32 +2713,24 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
 
 /* Apple-style grouped settings rows (scoped to governance panels so they
    don't collide with the sidebar settings popover's own .settings-row) */
+/* ================================================================
+   Settings panels — macOS System-Settings-style grouped cards.
+   Every .settings-group is ONE rounded card; the rows inside are
+   split by hairlines, each with an optional monochrome leading icon
+   (.settings-row-ico) and the control/value pinned to the right.
+   (Previously the exec-env / llm / memory panels stripped the card to
+   transparent, which read as loose floating rows.)
+   ================================================================ */
 .governance-panel .settings-group {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface);
   overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
-.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group {
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  overflow: visible;
-}
-
-.governance-panel[data-governance-panel-content="llm"] > .settings-group {
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  overflow: visible;
-}
-
-.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group {
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  overflow: visible;
+body[data-theme="dark"] .governance-panel .settings-group {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.32);
 }
 
 /* Empty status lines otherwise reserve min-height + margin and leave a blank
@@ -2750,34 +2742,46 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
 .governance-panel .settings-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 20px;
+  gap: 16px;
   align-items: center;
-  padding: 14px 16px;
+  padding: 13px 16px;
 }
 
-.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group > .settings-row {
-  padding: 0 2px 2px;
+/* Hairline divider between stacked rows in one card. */
+.governance-panel .settings-group > .settings-row + .settings-row {
+  border-top: 1px solid color-mix(in srgb, var(--border) 66%, transparent);
 }
 
-.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group > .exec-env-memory-row {
-  padding: 13px 2px 0;
+/* Block rows carry a heading + inline action button, then a list beneath, so
+   they stack full-width instead of using the two-column row grid. */
+.governance-panel .settings-row.settings-row-block {
+  display: block;
 }
 
-.governance-panel[data-governance-panel-content="llm"] > .settings-group > .settings-row {
-  padding: 0 2px 2px;
+/* Monochrome leading icon: a faint neutral tile (no colour), matching macOS
+   restraint. Only rows that opt in with a .settings-row-ico get the 3rd column. */
+.settings-row-ico {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 6.5%, transparent);
+  color: var(--text-secondary);
 }
 
-/* Memory policy rows read as plain preference rows (like 执行环境/模型引擎),
-   not as per-row boxed cards: flat rows separated by hairlines. */
-.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group > .settings-row {
-  padding: 13px 2px;
+.settings-row-ico svg {
+  width: 16px;
+  height: 16px;
 }
 
-.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group > .memory-policy-protection-row {
-  padding: 9px 2px 8px;
+.governance-panel .settings-row:has(> .settings-row-ico) {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 13px;
 }
 
-.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group > .memory-policy-protection-row .settings-row-text span {
+.governance-panel[data-governance-panel-content="memory-policy"] .memory-policy-protection-row .settings-row-text span {
   margin-top: 2px;
   line-height: 1.35;
 }
@@ -2884,6 +2888,12 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
 .exec-env-row:disabled:hover {
   border-color: var(--border);
   background: var(--surface-soft);
+}
+
+.exec-env-row.selected {
+  border-color: var(--option-selected);
+  background: var(--option-selected);
+  box-shadow: none;
 }
 
 .exec-env-check {
@@ -2999,6 +3009,18 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
 
 .governance-panel[data-governance-panel-content="execution-environment"] .settings-row-head {
   align-items: center;
+}
+
+/* Block-row heading with a leading monochrome icon: icon | text (grows) | action. */
+.governance-panel .settings-row-head:has(> .settings-row-ico) {
+  justify-content: flex-start;
+  align-items: center;
+  gap: 13px;
+}
+
+.governance-panel .settings-row-head:has(> .settings-row-ico) > .settings-row-text {
+  flex: 1;
+  min-width: 0;
 }
 
 .governance-panel .settings-row-block .llm-model-profiles {
@@ -3246,6 +3268,69 @@ dialog.agent-memory-dialog,
   font-size: 12.5px;
   line-height: 1.5;
   color: var(--text-secondary);
+}
+
+.draft-manage-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 0 2px;
+  color: var(--text);
+  cursor: pointer;
+  list-style: none;
+}
+
+.draft-manage-summary::marker {
+  content: "";
+  font-size: 0;
+}
+
+.draft-manage-summary::-webkit-details-marker {
+  display: none;
+}
+
+.draft-manage-summary-text {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.draft-manage-summary-text strong {
+  display: block;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.draft-manage-summary-text span {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.draft-manage-chevron {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--text-muted);
+  transition:
+    color 140ms ease,
+    transform 160ms ease;
+}
+
+.draft-manage-summary:hover .draft-manage-chevron,
+.draft-manage-summary:focus-visible .draft-manage-chevron {
+  color: var(--text);
+}
+
+.draft-manage[open] .draft-manage-chevron {
+  color: var(--text-secondary);
+  transform: rotate(90deg);
 }
 
 .memory-manage-body {
@@ -4582,11 +4667,77 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
 
 .task-hero > * { position: relative; z-index: 1; }
 
+/* The whole hero is a click target that folds everything below the title row
+   down to just the name + status pill (see .task-hero-details). */
+.task-hero { cursor: pointer; }
+
 .task-hero-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.task-hero-top-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.task-hero-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+.task-hero-toggle:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--text);
+}
+.task-hero-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.task-hero-toggle-icon {
+  width: 18px;
+  height: 18px;
+  /* Expanded: chevron points up ("fold up"). Collapsed: rotates to point down
+     ("expand"). The SVG path is a downward chevron, so up is the rotated state. */
+  transform: rotate(180deg);
+  transition: transform 340ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+.task-hero.is-collapsed .task-hero-toggle-icon {
+  transform: rotate(0deg);
+}
+
+/* Collapsible body: grid-rows 1fr↔0fr animates the natural height to zero with
+   no JS measurement; the inner wrapper clips content during the transition. */
+.task-hero-details {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 340ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+.task-hero-details-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+.task-hero.is-collapsed .task-hero-details {
+  grid-template-rows: 0fr;
+}
+@media (prefers-reduced-motion: reduce) {
+  .task-hero-details,
+  .task-hero-toggle-icon {
+    transition: none;
+  }
 }
 
 .task-hero-name {
@@ -5286,13 +5437,19 @@ body[data-theme="dark"] .progress-rail {
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(4, minmax(176px, 1fr));
   gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-gutter: stable;
 }
 
 .summary-item {
   display: grid;
   gap: 4px;
+  min-width: 176px;
   padding: 9px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -6718,9 +6875,10 @@ body[data-theme="dark"] .agent-composer {
   display: none;
 }
 
-/* Paint an opaque bottom matte behind the rounded bar. It sits behind the bar
-   itself but above the transcript, covering anti-aliased corner slivers and the
-   1px bottom seam where scrolled content used to leak through. */
+/* Mask ONLY the two bottom-corner slivers that fall outside the bar's rounded
+   shape (mirrors .workspace-head's top-corner masks). The center stays clear so
+   the glass bar blurs the transcript scrolling behind it instead of sitting on
+   an opaque block. */
 .agent-composer::before {
   content: "";
   position: absolute;
@@ -6729,7 +6887,13 @@ body[data-theme="dark"] .agent-composer {
   bottom: -1px;
   z-index: -1;
   height: calc(var(--radius) + 2px);
-  background: var(--agent-composer-mask-bg, var(--workspace-mask-bg, var(--surface)));
+  background: transparent;
+  background-image:
+    radial-gradient(circle calc(var(--radius) - 1px) at 100% 0, transparent calc(var(--radius) - 1px), var(--agent-composer-mask-bg, var(--workspace-mask-bg, var(--surface))) calc(var(--radius) - 0.5px)),
+    radial-gradient(circle calc(var(--radius) - 1px) at 0 0, transparent calc(var(--radius) - 1px), var(--agent-composer-mask-bg, var(--workspace-mask-bg, var(--surface))) calc(var(--radius) - 0.5px));
+  background-repeat: no-repeat;
+  background-position: left -1px bottom -1px, right -1px bottom -1px;
+  background-size: calc(var(--radius) + 2px) calc(var(--radius) + 2px);
   pointer-events: none;
 }
 
@@ -6738,23 +6902,30 @@ body[data-theme="dark"] .agent-composer {
 }
 
 /* input bar — the composer "框": textarea on top, a control toolbar below.
-   Solid fill instead of backdrop-filter so center-column scrolling stays smooth. */
+   Translucent glass that mirrors .task-hero so the input and the status card at
+   the top of the workspace read as the same material. */
 .agent-composer-bar {
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 10px 10px 8px 16px;
   border-radius: var(--radius);
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--surface) 76%, transparent) 0%,
+    color-mix(in srgb, var(--surface) 52%, transparent) 100%
+  );
+  -webkit-backdrop-filter: blur(18px) saturate(1.55);
+  backdrop-filter: blur(18px) saturate(1.55);
+  border: 1px solid color-mix(in srgb, var(--border) 54%, transparent);
   box-shadow:
     0 2px 8px rgba(0, 0, 0, 0.05),
-    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
   transition: border-color 180ms ease;
 }
 
 .agent-composer-bar:focus-within {
-  border-color: var(--border-strong);
+  border-color: color-mix(in srgb, var(--border-strong) 72%, transparent);
 }
 
 .agent-composer-bar textarea {
@@ -7042,11 +7213,17 @@ body[data-theme="dark"] .agent-composer-effort:hover select {
 }
 
 body[data-theme="dark"] .agent-composer-bar {
-  background: var(--surface);
-  border-color: var(--border-strong);
+  /* Translucent glass mirroring the dark .task-hero so the input and the status
+     card read as the same material. */
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--surface) 82%, transparent) 0%,
+    color-mix(in srgb, var(--surface-soft) 46%, transparent) 100%
+  );
+  border-color: color-mix(in srgb, var(--border) 58%, transparent);
   box-shadow:
-    0 2px 8px rgba(0, 0, 0, 0.22),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    0 2px 8px rgba(0, 0, 0, 0.28),
+    var(--glass-edge);
 }
 
 body[data-theme="dark"] .agent-send {

@@ -57,11 +57,28 @@ function toolImplementationRows(tool = {}, data = {}) {
   ];
 }
 
+// Monochrome leading glyphs per implementation field — same faint-tile language
+// as the static settings rows (.settings-row-ico).
+const TOOL_IMPL_ICONS = {
+  "实现": '<path d="M8 6l-5 6 5 6"/><path d="M16 6l5 6-5 6"/>',
+  "触发": '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+  "确定性": '<path d="M12 3l7 3v5c0 4-3 7-7 8-4-1-7-4-7-8V6z"/><path d="M9 12l2 2 4-4"/>',
+  "失败策略": '<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>',
+  "超时": '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>',
+  "内存上限": '<rect x="4" y="6" width="16" height="12" rx="2"/><path d="M8 6V3M12 6V3M16 6V3M8 21v-3M12 21v-3M16 21v-3"/>',
+  "副作用": '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>',
+};
+
+function toolImplIconHtml(label) {
+  const path = TOOL_IMPL_ICONS[label] || "";
+  return `<span class="settings-row-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span>`;
+}
+
 function toolImplementationHtml(tool, data) {
   return [
     '<dl class="plugin-tool-impl">',
     ...toolImplementationRows(tool, data).map(([label, value]) => (
-      `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`
+      `<div>${toolImplIconHtml(label)}<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`
     )),
     "</dl>",
   ].join("");

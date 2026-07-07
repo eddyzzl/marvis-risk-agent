@@ -2757,6 +2757,38 @@ function syncTaskHeroGlassLayout() {
   updateTaskHeroGlassState({ measureScroll: true });
 }
 
+function setTaskHeroCollapsed(collapsed) {
+  const hero = $("taskHero");
+  if (!hero) return;
+  hero.classList.toggle("is-collapsed", collapsed);
+  const toggle = $("taskHeroToggle");
+  if (toggle) {
+    const label = collapsed ? "展开任务详情" : "收起任务详情";
+    toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    toggle.setAttribute("aria-label", label);
+    toggle.setAttribute("title", label);
+  }
+  // The head shrank/grew, so scroll padding, composer clearance and the
+  // scroll-driven glass tint all need a recompute once layout settles.
+  requestAnimationFrame(syncTaskHeroGlassLayout);
+}
+
+function handleTaskHeroToggle(event) {
+  // Interactive descendants (path-copy button, form controls) keep their own
+  // behaviour instead of folding the card.
+  if (event.target.closest("a[href], button:not(#taskHeroToggle), [data-copy], input, select, textarea")) {
+    return;
+  }
+  // Don't fold when the user is finishing a text selection inside the card.
+  const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
+  const hero = $("taskHero");
+  if (!hero) return;
+  if (selection && !selection.isCollapsed && selection.anchorNode && hero.contains(selection.anchorNode)) {
+    return;
+  }
+  setTaskHeroCollapsed(!hero.classList.contains("is-collapsed"));
+}
+
 function syncAgentComposerClearance() {
   const workspace = $("resultWorkspace");
   const composer = $("agentComposer");
@@ -4005,7 +4037,6 @@ function renderReproducibilityEvidence(reproducibility = {}) {
     `<div class="summary-item"><span>抽样行数</span><strong>${escapeHtml(reproducibility.sample_size ?? "-")}</strong></div>`,
     `<div class="summary-item"><span>6位小数不一致条数</span><strong>${escapeHtml(summary.mismatch_count ?? 0)}</strong></div>`,
     `<div class="summary-item"><span>最大绝对差</span><strong>${escapeHtml(formatScoreValue(summary.max_abs_diff))}</strong></div>`,
-    `<div class="summary-item"><span>随机种子</span><strong>${escapeHtml(reproducibility.seed ?? "-")}</strong></div>`,
     "</div>",
     precisionChartHtml,
     rowsHtml,
@@ -6430,6 +6461,11 @@ document.addEventListener("wheel", noteAgentUserScrollInput, { passive: true });
 document.addEventListener("touchstart", noteAgentUserScrollInput, { passive: true });
 document.addEventListener("touchmove", noteAgentUserScrollInput, { passive: true });
 window.addEventListener("resize", syncTaskHeroGlassLayout);
+
+$("taskHero")?.addEventListener("click", handleTaskHeroToggle);
+// Re-measure once the fold animation settles so scroll padding and the glass
+// tint reflect the hero's final height, not its mid-transition height.
+$("taskHeroDetails")?.addEventListener("transitionend", () => syncTaskHeroGlassLayout());
 
 $("taskList").onkeydown = handleTaskListKeydown;
 

@@ -2709,8 +2709,17 @@ def test_dark_workspace_masks_match_center_background():
     assert "right: -1px" in composer_mask_rule
     assert "bottom: -1px" in composer_mask_rule
     assert "height: calc(var(--radius) + 2px)" in composer_mask_rule
-    assert "background: var(--agent-composer-mask-bg, var(--workspace-mask-bg, var(--surface)))" in composer_mask_rule
-    assert "radial-gradient" not in composer_mask_rule
+    # The composer bar is now translucent glass, so the matte only masks the two
+    # bottom-corner slivers (mirroring .workspace-head's top-corner masks) instead
+    # of painting an opaque block behind the whole bar.
+    assert "radial-gradient" in composer_mask_rule
+    assert "transparent calc(var(--radius) - 1px)" in composer_mask_rule
+    assert (
+        "var(--agent-composer-mask-bg, var(--workspace-mask-bg, var(--surface))) calc(var(--radius) - 0.5px)"
+        in composer_mask_rule
+    )
+    assert "background-position: left -1px bottom -1px, right -1px bottom -1px" in composer_mask_rule
+    assert "background-size: calc(var(--radius) + 2px) calc(var(--radius) + 2px)" in composer_mask_rule
     assert "var(--workspace-mask-bg, var(--surface)) calc(var(--radius) + 0.5px)" not in composer_mask_rule
     assert "transparent 24px, var(--surface) 24.5px" not in composer_mask_rule
 
@@ -4426,22 +4435,20 @@ def test_system_settings_exposes_execution_environment_panel():
     assert "选择后用于 Notebook、验证脚本和工具运行" in index_html
     assert "留空或填 0 表示不限制" in index_html
 
-    env_settings_group_rule = _css_rule(
-        styles_css, '.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group'
-    )
-    assert "border: 0" in env_settings_group_rule
-    assert "background: transparent" in env_settings_group_rule
-    assert "overflow: visible" in env_settings_group_rule
-    env_settings_row_rule = _css_rule(
-        styles_css,
-        '.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group > .settings-row',
-    )
-    assert "padding: 0 2px 2px" in env_settings_row_rule
-    env_memory_row_rule = _css_rule(
-        styles_css,
-        '.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group > .exec-env-memory-row',
-    )
-    assert "padding: 13px 2px 0" in env_memory_row_rule
+    # The settings group is now a unified macOS-style card (the per-panel
+    # card-stripping was removed); rows sit inside it, split by hairlines, and
+    # each carries a leading monochrome icon.
+    settings_group_rule = _css_rule(styles_css, ".governance-panel .settings-group")
+    assert "border: 1px solid var(--border)" in settings_group_rule
+    assert "border-radius: var(--radius-lg)" in settings_group_rule
+    assert "background: var(--surface)" in settings_group_rule
+    assert "overflow: hidden" in settings_group_rule
+    settings_row_rule = _css_rule(styles_css, ".governance-panel .settings-row")
+    assert "padding: 13px 16px" in settings_row_rule
+    assert 'class="settings-row-ico"' in index_html[
+        index_html.index('data-governance-panel-content="execution-environment"'):
+        index_html.index('data-governance-panel-content="llm"')
+    ]
 
     env_list_rule = _css_rule(styles_css, ".exec-env-list")
     assert "display: flex" in env_list_rule
@@ -4459,6 +4466,10 @@ def test_system_settings_exposes_execution_environment_panel():
     env_row_hover_rule = _css_rule(styles_css, ".exec-env-row:hover")
     assert "border-color: var(--option-hover)" in env_row_hover_rule
     assert "background: var(--option-hover)" in env_row_hover_rule
+    env_row_selected_rule = _css_rule(styles_css, ".exec-env-row.selected")
+    assert "border-color: var(--option-selected)" in env_row_selected_rule
+    assert "background: var(--option-selected)" in env_row_selected_rule
+    assert "box-shadow: none" in env_row_selected_rule
 
 
 def test_capability_tier_rows_match_execution_environment_density():
@@ -4583,6 +4594,7 @@ def test_governance_settings_uses_shared_typography_scale():
         "  .exec-env-row-title,\n"
         "  .llm-engine-item-name,\n"
         "  .memory-manage-head strong,\n"
+        "  .draft-manage-summary-text strong,\n"
         "  .agent-memory-pane-head strong,\n"
         "  .agent-memory-item-main strong,\n"
         "  .plugin-upload-text strong,\n"
@@ -4614,6 +4626,7 @@ def test_governance_settings_uses_shared_typography_scale():
         "  .llm-engine-empty,\n"
         "  .llm-engine-item-url,\n"
         "  .memory-manage-head span,\n"
+        "  .draft-manage-summary-text span,\n"
         "  .agent-memory-view-hint,\n"
         "  .agent-memory-pane-head span,\n"
         "  .agent-memory-item-main span,\n"
@@ -5317,8 +5330,17 @@ def test_reproducibility_summary_omits_six_decimal_match_count_and_keeps_status_
     assert "<span>6位小数一致条数</span>" not in renderer
     assert "match_count: summary.match_count" not in app_js
     assert "<span>6位小数不一致条数</span>" in renderer
+    assert "<span>随机种子</span>" not in renderer
     assert "reproducibilityStatusClass(summary.status)" in renderer
     assert "function reproducibilityStatusClass" in app_js
+    summary_grid_rule = _css_rule(styles_css, ".summary-grid")
+    summary_item_rule = _css_rule(styles_css, ".summary-item")
+    assert "grid-template-columns: repeat(4, minmax(176px, 1fr))" in summary_grid_rule
+    assert "repeat(auto-fit" not in summary_grid_rule
+    assert "overflow-x: auto" in summary_grid_rule
+    assert "overflow-y: hidden" in summary_grid_rule
+    assert "overscroll-behavior-x: contain" in summary_grid_rule
+    assert "min-width: 176px" in summary_item_rule
     assert ".summary-item.repro-status-pass" in styles_css
     assert ".summary-item.repro-status-fail" in styles_css
 
@@ -5928,7 +5950,7 @@ def test_current_status_error_detail_is_always_visible_and_turns_red_for_failure
     assert 'id="actionErrorDetail"' in index_html
     assert 'class="action-error-detail"' in index_html
     assert "暂无报错" in index_html
-    assert 'id="actionErrorDetail"\n                  class="action-error-detail"' in index_html
+    assert 'id="actionErrorDetail"\n                      class="action-error-detail"' in index_html
     assert 'role="alert"' not in index_html[index_html.index('id="actionErrorDetail"'):index_html.index('id="taskSnapshot"')]
     assert 'aria-live="assertive"' not in index_html[index_html.index('id="actionErrorDetail"'):index_html.index('id="taskSnapshot"')]
 
@@ -6758,16 +6780,17 @@ def test_llm_settings_panel_and_agent_model_selector_exist():
     assert ".llm-engine-item" in styles_css
     assert ".checkbox-field" in styles_css
 
-    llm_settings_group_rule = _css_rule(
-        styles_css, '.governance-panel[data-governance-panel-content="llm"] > .settings-group'
-    )
-    assert "border: 0" in llm_settings_group_rule
-    assert "background: transparent" in llm_settings_group_rule
-    assert "overflow: visible" in llm_settings_group_rule
-    llm_settings_row_rule = _css_rule(
-        styles_css, '.governance-panel[data-governance-panel-content="llm"] > .settings-group > .settings-row'
-    )
-    assert "padding: 0 2px 2px" in llm_settings_row_rule
+    # The LLM group shares the unified macOS-style card (no per-panel
+    # card-stripping), and its heading carries a leading monochrome icon.
+    settings_group_rule = _css_rule(styles_css, ".governance-panel .settings-group")
+    assert "border: 1px solid var(--border)" in settings_group_rule
+    assert "background: var(--surface)" in settings_group_rule
+    assert "overflow: hidden" in settings_group_rule
+    llm_markup = index_html[
+        index_html.index('data-governance-panel-content="llm"'):
+        index_html.index('data-governance-panel-content="memory-policy"')
+    ]
+    assert 'class="settings-row-ico"' in llm_markup
     llm_settings_head_rule = _css_rule(
         styles_css, '.governance-panel[data-governance-panel-content="llm"] .settings-row-head'
     )
@@ -6906,6 +6929,9 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     # Drafts live in a collapsible <details> that lazy-loads on toggle; the
     # standalone refresh button was retired.
     assert 'id="draftManageDetails"' in index_html
+    assert 'class="draft-manage-summary"' in index_html
+    assert 'class="draft-manage-summary-text"' in index_html
+    assert 'class="draft-manage-chevron"' in index_html
     assert 'id="refreshDraftToolsButton"' not in index_html
     assert 'id="draftRunInputs"' in index_html
     assert 'id="draftPromotionTestCases"' in index_html
@@ -7105,6 +7131,22 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert ".draft-tool-section" in styles_css
     assert ".draft-tool-detail" in styles_css
     assert ".draft-code-block" in styles_css
+    draft_summary_rule = _css_rule(styles_css, ".draft-manage-summary")
+    assert "display: flex" in draft_summary_rule
+    assert "list-style: none" in draft_summary_rule
+    assert "cursor: pointer" in draft_summary_rule
+    draft_summary_marker_rule = _css_rule(styles_css, ".draft-manage-summary::marker")
+    assert 'content: ""' in draft_summary_marker_rule
+    assert "font-size: 0" in draft_summary_marker_rule
+    draft_summary_webkit_marker_rule = _css_rule(
+        styles_css, ".draft-manage-summary::-webkit-details-marker"
+    )
+    assert "display: none" in draft_summary_webkit_marker_rule
+    draft_chevron_rule = _css_rule(styles_css, ".draft-manage-chevron")
+    assert "width: 20px" in draft_chevron_rule
+    assert "height: 20px" in draft_chevron_rule
+    draft_open_rule = _css_rule(styles_css, ".draft-manage[open] .draft-manage-chevron")
+    assert "transform: rotate(90deg)" in draft_open_rule
 
     assert ".v2-workspace-summary" in v2_css
     assert "grid-template-areas:" not in v2_css
@@ -7172,24 +7214,24 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     )
     assert "color: var(--danger)" in memory_rollback_rule
 
-    memory_policy_group_rule = _css_rule(
-        styles_css, '.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group'
+    # Memory policy now uses the unified grouped card (macOS System-Settings
+    # pattern): the rows sit inside ONE card split by hairlines, each with a
+    # leading monochrome icon and a switch/badge pinned right.
+    memory_group_rule = _css_rule(styles_css, ".governance-panel .settings-group")
+    assert "border: 1px solid var(--border)" in memory_group_rule
+    assert "background: var(--surface)" in memory_group_rule
+    assert "overflow: hidden" in memory_group_rule
+    divider_rule = _css_rule(
+        styles_css, ".governance-panel .settings-group > .settings-row + .settings-row"
     )
-    assert "border: 0" in memory_policy_group_rule
-    assert "background: transparent" in memory_policy_group_rule
-    # Memory policy rows are flat preference rows (like 执行环境/模型引擎),
-    # separated by the shared hairline rule — not per-row boxed cards.
-    memory_policy_row_rule = _css_rule(
-        styles_css, '.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group > .settings-row'
-    )
-    assert "padding: 13px 2px" in memory_policy_row_rule
-    assert "border-radius" not in memory_policy_row_rule
-    assert "background" not in memory_policy_row_rule
-    memory_policy_protection_row_rule = _css_rule(
-        styles_css,
-        '.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group > .memory-policy-protection-row',
-    )
-    assert "padding: 9px 2px 8px" in memory_policy_protection_row_rule
+    assert "border-top" in divider_rule
+    ico_rule = _css_rule(styles_css, ".settings-row-ico")
+    assert "border-radius" in ico_rule
+    memory_markup = index_html[
+        index_html.index('data-governance-panel-content="memory-policy"'):
+        index_html.index('id="memoryPolicyStatus"')
+    ]
+    assert memory_markup.count('class="settings-row-ico"') == 3
     memory_policy_selected_rule = _css_rule(
         styles_css, '.governance-panel[data-governance-panel-content="memory-policy"].selected'
     )
@@ -7210,6 +7252,8 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert "padding-top: 12px" in memory_manage_rule
     assert 'id="memoryManageSection"' in index_html
     assert 'id="memoryManageDetails"' not in index_html
+    assert 'class="memory-manage-summary"' not in index_html
+    assert 'class="memory-manage-chevron"' not in index_html
     assert ".memory-manage-summary" not in styles_css
     assert ".memory-manage-chevron" not in styles_css
     memory_manage_head_rule = _css_rule(styles_css, ".memory-manage-head strong")
@@ -9258,13 +9302,21 @@ def test_reproducibility_pass_status_hides_score_compare_rows():
             "  hasRows: html.includes('score-compare-list'),",
             "  hasHeader: html.includes('行号'),",
             "  hasStatus: html.includes('一致'),",
+            "  hasRandomSeed: html.includes('随机种子'),",
+            "  summaryItemCount: (html.match(/class=\"summary-item/g) || []).length,",
             "}));",
         ]
     )
 
     data = _run_node_capture_json(_BROWSER_STUBS + "\n" + app_js + "\n" + test_driver)
 
-    assert data == {"hasRows": False, "hasHeader": False, "hasStatus": True}
+    assert data == {
+        "hasRows": False,
+        "hasHeader": False,
+        "hasStatus": True,
+        "hasRandomSeed": False,
+        "summaryItemCount": 4,
+    }
 
 
 def test_reproducibility_render_skips_replay_and_disables_animation_on_rebuild():
@@ -11516,3 +11568,138 @@ def test_plan_rail_reconciliation_preserves_hovered_step_node_across_poll_ticks(
     assert data["classBefore"] == "notebook-step running", data
     assert data["classAfter"] == "notebook-step succeeded", data
     assert data["contentAdvancedInPlace"] is True, data
+
+
+def test_task_hero_click_collapses_to_title_and_status_only():
+    """Clicking the top card folds everything below the name+status row down to
+    zero height, and clicking again expands it back."""
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+
+    # DOM: a details wrapper holds only the subtitle/error/snapshot, so the title
+    # row (name + status pill + chevron) stays visible when collapsed.
+    hero_start = index_html.index('id="taskHero"')
+    hero_markup = index_html[hero_start:index_html.index("</header>", hero_start)]
+    assert 'class="task-hero-top-right"' in hero_markup
+    assert 'id="taskHeroToggle"' in hero_markup
+    assert 'aria-controls="taskHeroDetails"' in hero_markup
+    assert 'aria-expanded="true"' in hero_markup
+    assert 'class="task-hero-details"' in hero_markup
+    assert 'id="taskHeroDetails"' in hero_markup
+    assert 'class="task-hero-details-inner"' in hero_markup
+    # The always-visible title row precedes the collapsible details.
+    assert hero_markup.index('class="task-hero-top"') < hero_markup.index('id="taskHeroDetails"')
+    # Everything that folds away lives inside the details wrapper; the status
+    # pill stays out of it so it is always visible.
+    details_at = hero_markup.index('id="taskHeroDetails"')
+    for hidden_id in ("currentTaskSubtitle", "actionErrorDetail", "taskSnapshot"):
+        assert f'id="{hidden_id}"' in hero_markup[details_at:]
+    assert 'id="actionStatus"' in hero_markup[:details_at]
+
+    # CSS: grid-rows 1fr<->0fr animates the height; the inner wrapper clips.
+    details_rule = _css_rule(styles_css, ".task-hero-details")
+    assert "grid-template-rows: 1fr" in details_rule
+    assert "transition: grid-template-rows" in details_rule
+    inner_rule = _css_rule(styles_css, ".task-hero-details-inner")
+    assert "overflow: hidden" in inner_rule
+    assert "min-height: 0" in inner_rule
+    collapsed_rule = _css_rule(styles_css, ".task-hero.is-collapsed .task-hero-details")
+    assert "grid-template-rows: 0fr" in collapsed_rule
+    # The whole card advertises itself as clickable, and the chevron flips.
+    assert ".task-hero { cursor: pointer; }" in styles_css
+    assert ".task-hero.is-collapsed .task-hero-toggle-icon" in styles_css
+    # Reduced-motion users get an instant fold, not an animation.
+    rm_group = styles_css.index(".task-hero-details,")
+    rm_block = styles_css[rm_group:rm_group + 140]
+    assert ".task-hero-toggle-icon" in rm_block
+    assert "transition: none" in rm_block
+
+    # JS: one hero-level click handler toggles .is-collapsed, guards interactive
+    # descendants (the path copy button) and text selection, and syncs layout.
+    assert "function handleTaskHeroToggle" in app_js
+    assert "function setTaskHeroCollapsed" in app_js
+    assert 'hero.classList.toggle("is-collapsed", collapsed)' in app_js
+    assert "button:not(#taskHeroToggle)" in app_js
+    assert "[data-copy]" in app_js
+    assert '$("taskHero")?.addEventListener("click", handleTaskHeroToggle)' in app_js
+    assert 'toggle.setAttribute("aria-expanded"' in app_js
+
+
+def test_agent_composer_bar_is_translucent_glass_like_the_task_hero():
+    """The bottom input bar uses the same frosted-glass material as the top status
+    card: a translucent surface gradient plus a backdrop blur, not an opaque fill."""
+    styles_css = _read_static("styles.css")
+
+    bar_rule = _css_rule(styles_css, ".agent-composer-bar")
+    assert "backdrop-filter: blur(18px) saturate(1.55)" in bar_rule
+    assert "-webkit-backdrop-filter: blur(18px) saturate(1.55)" in bar_rule
+    assert "color-mix(in srgb, var(--surface) 76%, transparent)" in bar_rule
+    assert "color-mix(in srgb, var(--surface) 52%, transparent)" in bar_rule
+    # No longer a flat opaque surface fill.
+    assert "background: var(--surface);" not in bar_rule
+
+    # Dark theme carries its own translucent gradient and the shared glass edge.
+    dark_bar_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-composer-bar')
+    assert "var(--glass-edge)" in dark_bar_rule
+    assert "color-mix(in srgb, var(--surface) 82%, transparent)" in dark_bar_rule
+
+
+def test_settings_panels_use_macos_grouped_cards_with_monochrome_icons():
+    """All row-based settings panels share ONE rounded card per group, with
+    hairline dividers between rows and a faint monochrome leading icon —
+    the macOS System Settings pattern, replacing the old loose flat rows."""
+    styles_css = _read_static("styles.css")
+
+    # Unified card (no per-panel card-stripping overrides survive).
+    group_rule = _css_rule(styles_css, ".governance-panel .settings-group")
+    assert "border: 1px solid var(--border)" in group_rule
+    assert "border-radius: var(--radius-lg)" in group_rule
+    assert "background: var(--surface)" in group_rule
+    assert "overflow: hidden" in group_rule
+    assert "box-shadow" in group_rule
+    for panel in ("execution-environment", "llm", "memory-policy"):
+        assert (
+            f'.governance-panel[data-governance-panel-content="{panel}"] > .settings-group {{'
+            not in styles_css
+        ), f"{panel} must not strip the shared card"
+
+    # Hairline divider between stacked rows.
+    divider_rule = _css_rule(
+        styles_css, ".governance-panel .settings-group > .settings-row + .settings-row"
+    )
+    assert "border-top:" in divider_rule
+
+    # Monochrome leading-icon tile: faint neutral fill, no colour.
+    ico_rule = _css_rule(styles_css, ".settings-row-ico")
+    assert "border-radius: 8px" in ico_rule
+    assert "color: var(--text-secondary)" in ico_rule
+    assert "color-mix(in srgb, var(--text)" in ico_rule
+    # Rows that opt into an icon get a 3-column grid (icon | text | control).
+    assert ".governance-panel .settings-row:has(> .settings-row-ico)" in styles_css
+
+
+def test_tool_detail_rows_render_as_grouped_list_with_right_aligned_values():
+    """The plugin tool detail is a divided row-list (icon | label | value) inside
+    the tool card, not a loose grid of boxed chips."""
+    plugin_js = _read_static("js/v2/plugin_manager.js")
+    v2_css = _read_static("css/v2-workbench.css")
+
+    # JS renders a leading monochrome icon per implementation field.
+    assert "const TOOL_IMPL_ICONS" in plugin_js
+    assert "function toolImplIconHtml" in plugin_js
+    assert 'class="settings-row-ico"' in plugin_js
+    for field in ("实现", "触发", "确定性", "失败策略", "超时", "内存上限", "副作用"):
+        assert f'"{field}":' in plugin_js
+    assert "${toolImplIconHtml(label)}<dt>" in plugin_js
+
+    # CSS: a divided row-list with hairlines and right-aligned values, no longer
+    # a per-chip boxed grid.
+    impl_rule = _css_rule(v2_css, ".plugin-tool-impl")
+    assert "flex-direction: column" in impl_rule
+    assert "repeat(auto-fit" not in impl_rule
+    row_rule = _css_rule(v2_css, ".plugin-tool-impl div")
+    assert "grid-template-columns: auto minmax(0, 1fr) auto" in row_rule
+    dd_rule = _css_rule(v2_css, ".plugin-tool-impl dd")
+    assert "text-align: right" in dd_rule
+    assert "justify-self: end" in dd_rule

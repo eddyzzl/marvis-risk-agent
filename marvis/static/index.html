@@ -463,6 +463,9 @@
               <div class="settings-group">
                 <div class="settings-row settings-row-block exec-env-picker-row">
                   <div class="settings-row-head">
+                    <span class="settings-row-ico" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2.4"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
+                    </span>
                     <div class="settings-row-text">
                       <strong>重新扫描环境</strong>
                       <span>重新检测本机已注册、可用的 Jupyter Kernel；选择后用于 Notebook、验证脚本和工具运行。</span>
@@ -472,6 +475,9 @@
                   <div id="executionEnvironmentList" class="exec-env-list" role="radiogroup" aria-label="Python 环境"></div>
                 </div>
                 <div class="settings-row exec-env-memory-row">
+                  <span class="settings-row-ico" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="2"/><path d="M8 6V3M12 6V3M16 6V3M8 21v-3M12 21v-3M16 21v-3M4 10H1M4 14H1M23 10h-3M23 14h-3"/></svg>
+                  </span>
                   <div class="settings-row-text">
                     <strong>Notebook 内存上限</strong>
                     <span>模型复现 Notebook 内核的内存软上限。留空或填 0 表示不限制；填正整数则内核超过即中止，防止跑飞占满内存。改动后失焦即保存。</span>
@@ -491,6 +497,9 @@
               <div class="settings-group">
                 <div class="settings-row settings-row-block">
                   <div class="settings-row-head">
+                    <span class="settings-row-ico" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 1 3 3 3 3 0 0 1 0 6 3 3 0 0 1-3 3 3 3 0 0 1-3-3 3 3 0 0 1 0-6 3 3 0 0 1 3-3z"/><path d="M12 14v5M8 22h8"/></svg>
+                    </span>
                     <div class="settings-row-text">
                       <strong>模型连接</strong>
                       <span>配置本地会话可调用的大模型连接信息；具体用哪个仍在 Agent 输入框选择。这里只保存连接配置，密钥不会写入任务记录或报告。</span>
@@ -506,6 +515,9 @@
             <section class="governance-panel" data-governance-panel-content="memory-policy">
               <div class="settings-group">
                 <div class="settings-row">
+                  <span class="settings-row-ico" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
+                  </span>
                   <div class="settings-row-text">
                     <strong>引用跨任务记忆</strong>
                     <span>允许 Agent 在回复、风险提醒和报告口径建议里引用已审计记忆。</span>
@@ -513,6 +525,9 @@
                   <div class="settings-row-control"><input type="checkbox" class="memory-policy-switch" data-memory-policy="reference_cross_task" aria-label="引用跨任务记忆" checked></div>
                 </div>
                 <div class="settings-row">
+                  <span class="settings-row-ico" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 3.6L17 8l-3.4 1.4L12 13l-1.6-3.6L7 8l3.4-1.4z"/><path d="M18 14l.8 1.9L21 17l-2.2.9L18 20l-.8-2.1L15 17l2.2-1.1z"/></svg>
+                  </span>
                   <div class="settings-row-text">
                     <strong>自动沉淀任务经验</strong>
                     <span>从已完成任务中沉淀字段口径、验证坑点和模型经验，沉淀后仍可审计和回滚。</span>
@@ -520,6 +535,9 @@
                   <div class="settings-row-control"><input type="checkbox" class="memory-policy-switch" data-memory-policy="auto_distill" aria-label="自动沉淀任务经验" checked></div>
                 </div>
                 <div class="settings-row memory-policy-protection-row">
+                  <span class="settings-row-ico" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2.2"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>
+                  </span>
                   <div class="settings-row-text">
                     <strong>敏感材料保护</strong>
                     <span>原始样本、客户明细、完整 Notebook、模型文件和密钥不会写入记忆。</span>
@@ -610,12 +628,12 @@
               <div id="governanceExtensionMount" class="governance-extension-shell" aria-label="扩展设置"></div>
               <div id="governanceExtensionStatus" class="status" role="status" aria-live="polite"></div>
               <details id="draftManageDetails" class="memory-manage draft-manage">
-                <summary class="memory-manage-summary">
-                  <span class="memory-manage-summary-text">
+                <summary class="draft-manage-summary">
+                  <span class="draft-manage-summary-text">
                     <strong>待转正草稿</strong>
                     <span>复核 Agent 产出的工具草稿，完成试运行、转正或拒绝；转正后成为插件工具。</span>
                   </span>
-                  <svg class="memory-manage-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                  <svg class="draft-manage-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
                 </summary>
                 <div class="memory-manage-body">
                   <div class="draft-tools-layout">
@@ -1168,17 +1186,36 @@
               <div class="task-hero" id="taskHero">
                 <div class="task-hero-top">
                   <h2 id="currentTaskTitle" class="task-hero-name">验证任务</h2>
-                  <span id="actionStatus" class="task-pill" role="status" aria-live="polite"></span>
+                  <div class="task-hero-top-right">
+                    <span id="actionStatus" class="task-pill" role="status" aria-live="polite"></span>
+                    <button
+                      type="button"
+                      id="taskHeroToggle"
+                      class="task-hero-toggle"
+                      aria-expanded="true"
+                      aria-controls="taskHeroDetails"
+                      aria-label="收起任务详情"
+                      title="收起任务详情"
+                    >
+                      <svg class="task-hero-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                        <path d="M6 9l6 6 6-6" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
-                <p id="currentTaskSubtitle" class="workspace-subtitle">
-                  创建任务或从左侧选择已有任务
-                </p>
-                <p
-                  id="actionErrorDetail"
-                  class="action-error-detail"
-                >暂无报错</p>
-                <div id="taskSnapshot" class="workspace-task-meta empty">
-                  核心任务信息
+                <div class="task-hero-details" id="taskHeroDetails">
+                  <div class="task-hero-details-inner">
+                    <p id="currentTaskSubtitle" class="workspace-subtitle">
+                      创建任务或从左侧选择已有任务
+                    </p>
+                    <p
+                      id="actionErrorDetail"
+                      class="action-error-detail"
+                    >暂无报错</p>
+                    <div id="taskSnapshot" class="workspace-task-meta empty">
+                      核心任务信息
+                    </div>
+                  </div>
                 </div>
               </div>
             </header>

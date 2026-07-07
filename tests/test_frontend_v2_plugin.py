@@ -68,17 +68,44 @@ def test_plugin_tools_html_escapes_schema_payloads():
             {
               name: "join<script>",
               description: "Run <join>",
-              input_schema: { type: "object", title: "<input>" },
-              output_schema: { type: "object", title: "<output>" },
+              // schema is rendered as a structured field table (schemaTableHtml),
+              // so inject payloads into the fields it actually shows: property
+              // name, type, and enum/description constraints.
+              input_schema: {
+                type: "object",
+                properties: {
+                  "field<script>": {
+                    type: "string<x>",
+                    description: "danger <b>bold</b>",
+                    enum: ["a<script>", "b"],
+                  },
+                },
+                required: ["field<script>"],
+              },
+              output_schema: {
+                type: "object",
+                properties: { "out<img>": { type: "number" } },
+              },
             },
           ],
         });
 
+        // No raw markup from any user-controlled field may reach the DOM.
         assert.equal(html.includes("<script>"), false);
+        assert.equal(html.includes("<b>bold</b>"), false);
+        assert.equal(html.includes("<img>"), false);
+        assert.equal(html.includes("string<x>"), false);
+
+        // Tool name + description stay escaped.
         assert.ok(html.includes("join&lt;script&gt;"));
         assert.ok(html.includes("Run &lt;join&gt;"));
-        assert.ok(html.includes("&quot;&lt;input&gt;&quot;"));
-        assert.ok(html.includes("&quot;&lt;output&gt;&quot;"));
+
+        // Schema field name / type / constraint text render escaped in the table.
+        assert.ok(html.includes("field&lt;script&gt;"));
+        assert.ok(html.includes("string&lt;x&gt;"));
+        assert.ok(html.includes("a&lt;script&gt;"));
+        assert.ok(html.includes("danger &lt;b&gt;bold&lt;/b&gt;"));
+        assert.ok(html.includes("out&lt;img&gt;"));
         """
     )
 
