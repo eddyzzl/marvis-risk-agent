@@ -18,7 +18,7 @@ export const taskTypeDefinitions = {
     manualEnabled: true,
     manualModeDescription: "选择指标并查看 IV/KS/AUC/PSI/coverage/lift/共线结果，导出分析报告",
     agentModeDescription: "Agent 根据字段和字典建议补算指标、解释异常特征，并按你的反馈重跑",
-    initialGoal: "请基于当前任务材料做特征分析。先识别可用数据集、目标列、时间切分和候选特征；如果缺少字段请先提问。随后生成 V2 Workflow，执行字段画像、IV/KS/PSI、分箱或衍生变量检查，并把关键风险点整理给我确认。",
+    initialGoal: "开始特征分析",
   },
   data_join: {
     label: "数据处理",
@@ -36,7 +36,7 @@ export const taskTypeDefinitions = {
     manualEnabled: true,
     manualModeDescription: "用结构化控件确认主表、目标列、join key、去重策略，再执行左连接",
     agentModeDescription: "Agent 先读 schema 提议角色和键，汇总命中率/膨胀风险，等你确认后执行",
-    initialGoal: "请基于当前任务材料做数据处理。先识别主表、特征表和候选 join key；对命中率、行数膨胀、键不唯一和去重策略做诊断。任何 join 执行前都要把风险和方案列出来让我确认。",
+    initialGoal: "开始数据处理",
   },
   modeling: {
     label: "模型开发",
@@ -55,7 +55,7 @@ export const taskTypeDefinitions = {
     manualEnabled: true,
     manualModeDescription: "确认目标列、train/test/OOT 切分和算法，执行泄漏筛选、调参、训练和报告",
     agentModeDescription: "Agent 组织读样本、切分确认、泄漏筛选、调参训练与结果解释",
-    initialGoal: "开始建模吧。请读取建模样本，先和我确认目标列与 train/test/oot 切分，再做泄漏感知的特征筛选交我过目，然后调参、训练，开发出尽量高 KS 的 LightGBM 模型。",
+    initialGoal: "开始建模",
   },
   validation: {
     label: "模型验证",
@@ -72,7 +72,7 @@ export const taskTypeDefinitions = {
     manualEnabled: true,
     manualModeDescription: "逐步完成材料扫描、Notebook 复现、分数一致性、效果稳定性和报告生成",
     agentModeDescription: "Agent 辅助扫描材料、解释验证证据、推进确认步骤并起草验证报告",
-    initialGoal: "请基于当前任务材料开始模型验证。先扫描材料并确认 Notebook、样本、PMML 和数据字典是否齐全；如果材料完备，再按平台证据逐步完成一致性、效果、稳定性、压力测试和报告草稿。",
+    initialGoal: "开始模型验证",
   },
   strategy: {
     label: "策略开发",
@@ -89,7 +89,7 @@ export const taskTypeDefinitions = {
     manualEnabled: true,
     manualModeDescription: "识别评分列和目标列，生成候选规则，在回测前确认并查看收益权衡",
     agentModeDescription: "Agent 根据评分、目标和客群起草规则，回测通过率、坏账、swap 和收益权衡",
-    initialGoal: "请基于当前任务材料做策略开发。先识别评分列、目标列、客群字段和候选规则；如果缺少规则口径请先提问。随后生成 V2 Workflow，构造策略、执行回测、计算收益和 swap 分析，并给出阈值权衡建议。",
+    initialGoal: "开始策略开发",
   },
   vintage: {
     label: "风险分析",
@@ -106,7 +106,7 @@ export const taskTypeDefinitions = {
     manualEnabled: true,
     manualModeDescription: "识别 cohort、MOB 和坏账列，计算 Vintage 曲线并展示风险趋势",
     agentModeDescription: "Agent 识别 Vintage 字段，计算曲线并解释 cohort 风险变化",
-    initialGoal: "请基于当前任务材料做风险分析。先识别 cohort、MOB 和坏账标签字段；如果缺少字段请先提问。随后生成 V2 Workflow，计算资产 Vintage 曲线并给出风险观察。",
+    initialGoal: "开始风险分析",
   },
 };
 

@@ -87,9 +87,13 @@ def test_non_continue_inputs_stay_chat(phrasing):
     [
         # Direct start phrases must stay recognized.
         "开始验证",
+        "开始模型验证",
         "启动验证",
+        "启动模型验证",
         "执行验证",
+        "执行模型验证",
         "运行验证",
+        "运行模型验证",
         "开始执行",
         "跑起来",
         # Bare affirmative commands.
@@ -117,7 +121,9 @@ def test_start_intent_recognized(phrasing):
         # Negated starts: the substring branch would otherwise fire because
         # "开始验证" appears inside these strings.
         "先别开始验证",
+        "先别开始模型验证",
         "不要开始验证",
+        "不要开始模型验证",
         "别开始验证",
         "暂不开始验证",
         "不用开始验证",
@@ -139,9 +145,12 @@ def test_start_negations_stay_chat(phrasing):
         # Interrogatives must route to chat, not launch a run.
         "什么时候开始验证?",
         "什么时候开始验证？",
+        "什么时候开始模型验证?",
         "要不要开始验证",
+        "要不要开始模型验证",
         "能不能开始验证",
         "开始验证吗？",
+        "开始模型验证吗？",
         "现在可以开始验证吗",
     ],
 )

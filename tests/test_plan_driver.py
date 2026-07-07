@@ -2072,6 +2072,17 @@ def test_is_confirm_matches_common_phrasings():
     assert not is_confirm("把 age 去掉")
 
 
+def test_is_confirm_accepts_task_start_shortcuts():
+    assert is_confirm("开始数据处理")
+    assert is_confirm("请开始特征分析吧")
+    assert is_confirm("开始风险分析")
+    assert is_confirm("开始建模")
+    assert is_confirm("开始模型开发")
+    assert is_confirm("开始策略开发")
+    assert not is_confirm("不要开始建模")
+    assert not is_confirm("开始建模吗？")
+
+
 def test_is_confirm_rejects_negated_or_contrasting_confirm_phrases():
     assert not is_confirm("好的但先别执行")
     assert not is_confirm("可以，不过先不要继续")
@@ -2090,6 +2101,8 @@ def test_is_confirm_rejects_questions_and_embedded_affirmatives():
     assert not is_confirm("结果不是很好的")
     assert not is_confirm("对不起，这个结果有问题")
     assert not is_confirm("KS高吗，可以到0.3吗")
+    assert not is_confirm("这样可以吧")
+    assert not is_confirm("开始建模吧？")
 
 
 def test_is_confirm_accepts_short_full_string_affirmatives():

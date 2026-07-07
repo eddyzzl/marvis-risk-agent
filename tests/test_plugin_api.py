@@ -74,16 +74,21 @@ def test_app_startup_registers_sample_plugin(tmp_path):
     assert payload["plugins"][0]["builtin"] is True
 
 
-def test_plugin_tools_endpoint_exposes_schema_without_entrypoints(tmp_path):
+def test_plugin_tools_endpoint_exposes_tool_contract_and_runtime_metadata(tmp_path):
     client = TestClient(create_app(tmp_path))
 
     response = client.get("/api/plugins/_sample/tools")
 
     assert response.status_code == 200
-    tools = response.json()["tools"]
+    payload = response.json()
+    tools = payload["tools"]
+    assert payload["module"]
+    assert isinstance(payload["hooks"], list)
     assert {tool["name"] for tool in tools} >= {"echo", "sleep"}
     assert "input_schema" in tools[0]
-    assert "entrypoint" not in tools[0]
+    assert "output_schema" in tools[0]
+    assert "entrypoint" in tools[0]
+    assert "memory_limit_mb" in tools[0]
 
 
 def test_builtin_plugin_can_be_disabled_and_enabled(tmp_path):

@@ -44,11 +44,22 @@ from marvis.orchestrator.templates import get_template
 # from being misread as confirmation (AGT-1 / H4).
 _CONFIRM_TOKEN = r"(?:好的|好|可以|确认|确定|没问题|同意|就这样|继续|开始|对的|对|行|ok|okay|yes|y|go|proceed)"
 _CONFIRM_FULLMATCH = re.compile(rf"(?:{_CONFIRM_TOKEN})+", re.IGNORECASE)
-# Interrogative guard: any question mark, or a trailing/whole-string question particle,
-# disqualifies a reply from being read as confirmation even if it also contains an
-# affirmative token (e.g. “这样可以吗？”, “KS高吗，可以到0.3吗”, “行不行”).
+_CONFIRM_DIRECT_COMMANDS = {
+    "开始数据处理",
+    "开始特征分析",
+    "开始风险分析",
+    "开始建模",
+    "开始模型开发",
+    "开始模型验证",
+    "开始策略开发",
+}
+# Interrogative guard: any hard question mark/particle disqualifies a reply from
+# being read as confirmation even if it also contains an affirmative token (e.g.
+# “这样可以吗？”, “KS高吗，可以到0.3吗”, “行不行”). A trailing “吧” is handled
+# after direct-command normalization so “请开始建模吧” can still confirm while
+# “这样可以吧” stays chat.
 _QUESTION = re.compile(
-    r"[?？]|吗|吧$|行不行|可不可以|能不能|好不好|对不对|是不是|呢$",
+    r"[?？]|吗|行不行|可不可以|能不能|好不好|对不对|是不是|呢$",
     re.IGNORECASE,
 )
 _NEGATED_CONFIRM = re.compile(
@@ -60,19 +71,42 @@ _STRIP_PUNCT = re.compile(
     "[\\s" + "，。.!！~～、·；;:：" + chr(39) + chr(34)
     + "“”‘’()（）" + "\\-]+"
 )
+_CONFIRM_DIRECT_PREFIXES = ("好的", "好", "那", "请", "麻烦", "帮我", "先", "可以", "确认")
+_CONFIRM_DIRECT_SUFFIXES = ("一下", "下", "吧", "了")
+
+
+def _strip_direct_confirm_affixes(value: str) -> str:
+    content = value
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _CONFIRM_DIRECT_PREFIXES:
+            if content.startswith(prefix) and len(content) > len(prefix):
+                content = content[len(prefix):]
+                changed = True
+        for suffix in _CONFIRM_DIRECT_SUFFIXES:
+            if content.endswith(suffix) and len(content) > len(suffix):
+                content = content[:-len(suffix)]
+                changed = True
+    return content
 
 
 def is_confirm(text: str) -> bool:
     raw = text or ""
+    compact = _STRIP_PUNCT.sub("", raw)
+    direct_confirm = compact in _CONFIRM_DIRECT_COMMANDS or _strip_direct_confirm_affixes(compact) in _CONFIRM_DIRECT_COMMANDS
     if _QUESTION.search(raw):
+        return False
+    if compact.endswith("吧") and not direct_confirm:
         return False
     if _NEGATED_CONFIRM.search(raw):
         return False
-    compact = _STRIP_PUNCT.sub("", raw)
     if not compact:
         return False
     if _NEGATED_CONFIRM.search(compact):
         return False
+    if direct_confirm:
+        return True
     return bool(_CONFIRM_FULLMATCH.fullmatch(compact))
 
 

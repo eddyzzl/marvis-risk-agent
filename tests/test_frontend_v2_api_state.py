@@ -31,6 +31,7 @@ def test_v2_static_modules_are_packaged_and_present():
         "state_v2.js",
         "governance_extensions.js",
         "plugin_manager.js",
+        "schema_table.js",
         "skill_manager.js",
         "artifact_view.js",
         "model_delivery_panel.js",
@@ -81,6 +82,175 @@ def test_api_wrappers_keep_formdata_boundary_under_fetch_control():
         assert.equal(calls.at(-1).url, "/api/plugins/demo");
         assert.equal(calls.at(-1).options.method, "DELETE");
         """
+    )
+
+
+def test_plugin_tools_render_contract_tables_and_runtime_metadata():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { pluginToolsHtml } from "./marvis/static/js/v2/plugin_manager.js";
+
+        const html = pluginToolsHtml({
+          module: "marvis.packs.feature.tools",
+          hooks: [{ event: "step.completed", tool: "screen_features" }],
+          tools: [{
+            name: "screen_features",
+            summary: "Leakage-aware feature screening.",
+            entrypoint: "tool_screen_features",
+            determinism: "deterministic",
+            timeout_seconds: 300,
+            failure_policy: "fail",
+            memory_limit_mb: 4096,
+            side_effects: ["read:dataset"],
+            input_schema: {
+              type: "object",
+              properties: {
+                dataset_id: { type: "string", minLength: 1 },
+                top_k: { type: "integer", minimum: 1 },
+                mode: { type: "string", enum: ["fast", "full"] },
+              },
+              required: ["dataset_id"],
+            },
+            output_schema: {
+              type: "object",
+              properties: {
+                selected: { type: "array", items: { type: "string" } },
+                n_screened: { type: "integer", minimum: 0 },
+              },
+              required: ["selected"],
+            },
+          }],
+        });
+
+        assert.ok(html.includes("plugin-tool-impl"));
+        assert.ok(html.includes("marvis.packs.feature.tools.tool_screen_features"));
+        assert.ok(html.includes("Hook: step.completed"));
+        assert.ok(html.includes("<table class=\\"plugin-schema-table\\">"));
+        assert.ok(html.includes("<caption>输入</caption>"));
+        assert.ok(html.includes("<caption>输出</caption>"));
+        assert.ok(html.includes("<code>dataset_id</code>"));
+        assert.ok(html.includes("最短 1"));
+        assert.ok(html.includes("可选：fast / full"));
+        assert.ok(!html.includes("<pre><code>"));
+      """
+    )
+
+
+def test_plugin_and_workflow_managers_show_upload_format_examples():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { pluginManagerHtml } from "./marvis/static/js/v2/plugin_manager.js";
+        import { skillManagerHtml } from "./marvis/static/js/v2/skill_manager.js";
+
+        const pluginHtml = pluginManagerHtml({ plugins: [] });
+        assert.ok(pluginHtml.includes("插件包格式示例"));
+        assert.ok(pluginHtml.includes("sample_pack.zip"));
+        assert.ok(pluginHtml.includes("manifest.json"));
+        assert.ok(pluginHtml.includes("tools.py"));
+        assert.ok(pluginHtml.includes("&quot;entrypoint&quot;"));
+        assert.ok(pluginHtml.includes("def tool_echo"));
+        assert.ok(pluginHtml.includes("data-upload-plugin"));
+
+        const workflowHtml = skillManagerHtml({ active: [], disabled: [], rejected: [] });
+        assert.ok(workflowHtml.includes("模板 JSON 示例"));
+        assert.ok(workflowHtml.includes("workspace/skills/*.json"));
+        assert.ok(workflowHtml.includes("custom_echo_review.json"));
+        assert.ok(workflowHtml.includes("&quot;slots&quot;"));
+        assert.ok(workflowHtml.includes("&quot;steps&quot;"));
+        assert.ok(workflowHtml.includes("&quot;tool&quot;"));
+      """
+    )
+
+
+def test_draft_tool_detail_renders_schema_tables_instead_of_raw_json():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { createDraftToolsPanelController } from "./marvis/static/js/draft-tools-panel.js";
+
+        class Element {
+          constructor() {
+            this.dataset = {};
+            this.disabled = false;
+            this.innerHTML = "";
+            this.textContent = "";
+            this.value = "";
+            this.classes = new Set();
+            this.classList = {
+              add: (...names) => names.forEach((name) => this.classes.add(name)),
+              remove: (...names) => names.forEach((name) => this.classes.delete(name)),
+            };
+          }
+        }
+
+        const ids = Object.fromEntries([
+          "draftToolBody",
+          "draftToolEmpty",
+          "draftToolsList",
+          "draftToolName",
+          "draftToolSummary",
+          "draftToolStatus",
+          "draftToolMeta",
+          "draftToolCode",
+          "draftInputSchema",
+          "draftOutputSchema",
+          "draftLearningNote",
+          "draftRunHistory",
+          "draftRunInputs",
+          "draftPromotionTestCases",
+          "runDraftButton",
+          "promoteDraftButton",
+          "rejectDraftButton",
+        ].map((id) => [id, new Element()]));
+
+        const controller = createDraftToolsPanelController({
+          $: (id) => ids[id],
+          api: async () => ({}),
+          runAction: (fn) => fn(),
+          showPlatformConfirm: async () => true,
+        });
+
+        controller.renderDetail({
+          draft: {
+            id: "draft-1",
+            task_id: "task-1",
+            name: "calc_margin",
+            summary: "Calculate margin.",
+            code: "def calc_margin(inputs, ctx):\\n    return {'margin': inputs['revenue'] - inputs['cost']}\\n",
+            input_schema: {
+              type: "object",
+              properties: {
+                revenue: { type: "number", minimum: 0 },
+                cost: { type: "number" },
+              },
+              required: ["revenue", "cost"],
+            },
+            output_schema: {
+              type: "object",
+              properties: {
+                margin: { type: "number", description: "Revenue minus cost." },
+              },
+              required: ["margin"],
+            },
+            determinism: "deterministic",
+            source: "hand_written",
+            status: "tested",
+            created_at: "2026-06-19T00:00:00Z",
+          },
+          learning_note: null,
+          runs: [],
+        });
+
+        assert.ok(ids.draftInputSchema.innerHTML.includes("<table class=\\"plugin-schema-table\\">"));
+        assert.ok(ids.draftOutputSchema.innerHTML.includes("<caption>输出</caption>"));
+        assert.ok(ids.draftInputSchema.innerHTML.includes("<code>revenue</code>"));
+        assert.ok(ids.draftInputSchema.innerHTML.includes("最小 0"));
+        assert.ok(ids.draftOutputSchema.innerHTML.includes("Revenue minus cost."));
+        assert.equal(ids.draftInputSchema.innerHTML.includes('"properties"'), false);
+        assert.equal(ids.draftOutputSchema.innerHTML.includes('"properties"'), false);
+      """
     )
 
 

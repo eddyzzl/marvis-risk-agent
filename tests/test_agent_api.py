@@ -1851,9 +1851,11 @@ def test_agent_question_about_validation_conclusion_does_not_restart_validation(
     assert payload["messages"][-1]["content"] == "这是一段围绕当前验证结论的解释。"
 
 
+@pytest.mark.parametrize("start_content", ["开始验证", "开始模型验证"])
 def test_agent_start_message_runs_only_material_scan_and_waits_for_continue(
     tmp_path,
     monkeypatch,
+    start_content,
 ):
     unexpected: list[str] = []
 
@@ -1914,7 +1916,7 @@ def test_agent_start_message_runs_only_material_scan_and_waits_for_continue(
 
     response = client.post(
         f"/api/tasks/{task_id}/agent/messages",
-        json={"content": "开始验证", "model_id": "m1"},
+        json={"content": start_content, "model_id": "m1"},
     )
 
     assert response.status_code == 202, response.text
@@ -1924,7 +1926,7 @@ def test_agent_start_message_runs_only_material_scan_and_waits_for_continue(
     assert repo.get_task(task_id).status == TaskStatus.SCANNED
     messages = repo.list_agent_messages(task_id)
     assert messages[0]["role"] == "user"
-    assert messages[0]["content"] == "开始验证"
+    assert messages[0]["content"] == start_content
     assert messages[0]["metadata"]["intent"] == "advance"
     assert [message["stage"] for message in messages[1:]] == [
         "chat",

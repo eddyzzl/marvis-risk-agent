@@ -3348,9 +3348,68 @@ def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
     action_start = app_js.index("async function runAction")
     action_end = app_js.index("function handleTaskListKeydown", action_start)
     action_runner = app_js[action_start:action_end]
-    assert "const taskId = options.taskId || selectedTaskId;" in action_runner
-    assert 'setBusy(actionId, options.busyText || "正在处理...", taskId)' in action_runner
-    assert 'setBusy(null, "", taskId)' in action_runner
+    assert "const taskScoped = options.taskScoped !== false;" in action_runner
+    assert 'Object.prototype.hasOwnProperty.call(options, "taskId")' in action_runner
+    assert 'if (actionId && taskScoped) setBusy(actionId, options.busyText || "正在处理...", taskId);' in action_runner
+    assert 'if (actionId && taskScoped) setBusy(null, "", taskId);' in action_runner
+
+
+def test_global_settings_actions_do_not_mark_selected_task_busy():
+    app_js = _read_static("app.js")
+    set_busy_start = app_js.index("function setBusy")
+    set_busy_end = app_js.index("function setAgentMemoryStatus", set_busy_start)
+    run_action_start = app_js.index("async function runAction")
+    run_action_end = app_js.index("function handleTaskListKeydown", run_action_start)
+    script = "\n".join(
+        [
+            "const taskBusyActions = new Map();",
+            "let globalBusyAction = null;",
+            "let selectedTaskId = 'task-done';",
+            "const events = [];",
+            "function setActionStatus(...args) { events.push(['status', ...args]); }",
+            "function renderWorkflowStepper() { events.push(['stepper']); }",
+            "function renderPetState() { events.push(['pet']); }",
+            "function updateAgentSendDisabled() { events.push(['send']); }",
+            "function renderAll() { events.push(['render']); }",
+            "function setAgentMemoryStatus(...args) { events.push(['memory', ...args]); }",
+            "function setDraftToolsStatus(...args) { events.push(['draft', ...args]); }",
+            "function renderActionError(...args) { events.push(['action-error', ...args]); }",
+            "function setCreateStatus(...args) { events.push(['create', ...args]); }",
+            "function actionCancelledStatusTitle(actionId) { return `${actionId} cancelled`; }",
+            "function actionFailureStatusTitle(actionId) { return `${actionId} failed`; }",
+            "async function refreshTasks() { events.push(['refresh']); }",
+            app_js[set_busy_start:set_busy_end],
+            app_js[run_action_start:run_action_end],
+            "await runAction(async () => { events.push(['global-action', taskBusyActions.size]); }, {",
+            "  actionId: 'executionEnvironment',",
+            "  taskScoped: false,",
+            "});",
+            "let taskScopedSizeDuringAction = null;",
+            "await runAction(async () => {",
+            "  taskScopedSizeDuringAction = taskBusyActions.get('task-done');",
+            "}, { actionId: 'scan' });",
+            "process.stdout.write(JSON.stringify({",
+            "  globalActionDidNotMarkTask: events.some((event) => event[0] === 'global-action' && event[1] === 0),",
+            "  taskScopedSizeDuringAction,",
+            "  finalTaskBusySize: taskBusyActions.size,",
+            "  statusEvents: events.filter((event) => event[0] === 'status').length,",
+            "}));",
+        ]
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == {
+        "globalActionDidNotMarkTask": True,
+        "taskScopedSizeDuringAction": "scan",
+        "finalTaskBusySize": 0,
+        "statusEvents": 1,
+    }
 
 
 def test_workflow_actions_are_gated_by_completed_previous_steps():
@@ -4361,6 +4420,11 @@ def test_system_settings_exposes_execution_environment_panel():
     # the old <select> + explicit save button were retired.
     assert 'id="executionEnvironmentSelect"' not in index_html
     assert 'id="saveExecutionEnvironmentButton"' not in index_html
+    assert 'class="settings-row settings-row-block exec-env-picker-row"' in index_html
+    assert 'class="settings-row exec-env-memory-row"' in index_html
+    assert '<p class="exec-env-section-label">Python 环境</p>' not in index_html
+    assert "选择后用于 Notebook、验证脚本和工具运行" in index_html
+    assert "留空或填 0 表示不限制" in index_html
 
     env_settings_group_rule = _css_rule(
         styles_css, '.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group'
@@ -4373,6 +4437,11 @@ def test_system_settings_exposes_execution_environment_panel():
         '.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group > .settings-row',
     )
     assert "padding: 0 2px 2px" in env_settings_row_rule
+    env_memory_row_rule = _css_rule(
+        styles_css,
+        '.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group > .exec-env-memory-row',
+    )
+    assert "padding: 13px 2px 0" in env_memory_row_rule
 
     env_list_rule = _css_rule(styles_css, ".exec-env-list")
     assert "display: flex" in env_list_rule
@@ -4390,6 +4459,236 @@ def test_system_settings_exposes_execution_environment_panel():
     env_row_hover_rule = _css_rule(styles_css, ".exec-env-row:hover")
     assert "border-color: var(--option-hover)" in env_row_hover_rule
     assert "background: var(--option-hover)" in env_row_hover_rule
+
+
+def test_capability_tier_rows_match_execution_environment_density():
+    styles_css = _read_static("styles.css")
+    v2_css = _read_static("css/v2-workbench.css")
+
+    env_list_rule = _css_rule(styles_css, ".exec-env-list")
+    tier_settings_rule = _css_rule(v2_css, ".tier-settings")
+    assert "gap: 8px" in env_list_rule
+    assert "gap: 8px" in tier_settings_rule
+    tier_settings_head_rule = _css_rule(v2_css, ".tier-settings-head")
+    assert "padding: 0 2px 2px" in tier_settings_head_rule
+    tier_settings_list_rule = _css_rule(v2_css, ".tier-settings-list")
+    assert "display: grid" in tier_settings_list_rule
+    assert "gap: 8px" in tier_settings_list_rule
+
+    capability_tier_start = v2_css.index("/* Capability tiers:")
+    tier_row_start = v2_css.index(".tier-row {", capability_tier_start)
+    tier_row_rule = v2_css[tier_row_start : v2_css.index("}", tier_row_start)]
+    assert "grid-template-columns: 22px minmax(0, 1fr)" in tier_row_rule
+    assert "padding: 9px 12px" in tier_row_rule
+    assert "align-items: center" in tier_row_rule
+    assert "margin: 0" in tier_row_rule
+
+    governance_tier_row_rule = _css_rule(v2_css, ".governance-settings-dialog .tier-row")
+    assert "padding: 9px 12px" in governance_tier_row_rule
+    assert "padding: 11px 13px" not in governance_tier_row_rule
+
+    tier_body_rule = _css_rule(v2_css, ".tier-row-body")
+    assert "gap: 3px" in tier_body_rule
+
+    tier_summary_rule = _css_rule(v2_css, ".tier-row-body p")
+    assert "line-height: 1.35" in tier_summary_rule
+
+    tier_limits_rule = _css_rule(v2_css, ".tier-limits")
+    assert "gap: 4px 10px" in tier_limits_rule
+
+
+def test_governance_settings_text_buttons_match_scan_environment_size():
+    styles_css = _read_static("styles.css")
+    v2_css = _read_static("css/v2-workbench.css")
+
+    scan_rule = _css_rule(
+        styles_css,
+        "#refreshExecutionEnvironmentOptionsButton.button.primary,\n#addLLMModelButton.button.primary",
+    )
+    for expected in [
+        "width: 84px",
+        "min-height: 34px",
+        "padding: 6px 12px",
+        "font-size: 13px",
+        "font-weight: 600",
+    ]:
+        assert expected in scan_rule
+
+    settings_button_rule = _css_rule(
+        styles_css,
+        ".governance-settings-dialog :is(\n"
+        "  .settings-row-control > .button,\n"
+        "  .agent-memory-toolbar > .button,\n"
+        "  .agent-memory-load-more .button,\n"
+        "  .agent-memory-actions .button,\n"
+        "  .agent-memory-view-tab,\n"
+        "  .draft-tool-run-section > .button,\n"
+        "  .draft-governance-actions .button\n"
+        ")",
+    )
+    for expected in [
+        "display: inline-flex",
+        "align-items: center",
+        "justify-content: center",
+        "min-width: 84px",
+        "min-height: 34px",
+        "padding: 6px 12px",
+        "font-size: 13px",
+        "font-weight: 600",
+        "line-height: 1.2",
+    ]:
+        assert expected in settings_button_rule
+
+    extension_button_rule = _css_rule(
+        v2_css,
+        ".governance-settings-dialog :is(\n"
+        "  .plugin-row-actions .button,\n"
+        "  .plugin-upload-button,\n"
+        "  .skill-toolbar .button,\n"
+        "  .memory-manager-toolbar button,\n"
+        "  .memory-distillation-row button[data-rollback-memory-distillation]\n"
+        ")",
+    )
+    for expected in [
+        "display: inline-flex",
+        "align-items: center",
+        "justify-content: center",
+        "min-width: 84px",
+        "min-height: 34px",
+        "padding: 6px 12px",
+        "font-size: 13px",
+        "font-weight: 600",
+        "line-height: 1.2",
+    ]:
+        assert expected in extension_button_rule
+
+
+def test_governance_settings_uses_shared_typography_scale():
+    v2_css = _read_static("css/v2-workbench.css")
+
+    token_vars = _css_vars(_css_rule(v2_css, ".governance-settings-dialog"))
+    assert token_vars["--settings-row-title-size"] == "14px"
+    assert token_vars["--settings-row-title-weight"] == "650"
+    assert token_vars["--settings-body-size"] == "12.5px"
+    assert token_vars["--settings-body-line-height"] == "1.45"
+    assert token_vars["--settings-label-size"] == "12px"
+    assert token_vars["--settings-control-size"] == "13px"
+    assert token_vars["--settings-control-weight"] == "600"
+
+    title_rule = _css_rule(
+        v2_css,
+        ".governance-settings-dialog :is(\n"
+        "  .governance-panel .settings-row-text strong,\n"
+        "  .governance-setting-row strong,\n"
+        "  .exec-env-row-title,\n"
+        "  .llm-engine-item-name,\n"
+        "  .memory-manage-head strong,\n"
+        "  .agent-memory-pane-head strong,\n"
+        "  .agent-memory-item-main strong,\n"
+        "  .plugin-upload-text strong,\n"
+        "  .plugin-row-id strong,\n"
+        "  .plugin-tool-head strong,\n"
+        "  .tier-row-body h4,\n"
+        "  .skill-section-label,\n"
+        "  .skill-row-head strong,\n"
+        "  .skill-validator-summary-text strong,\n"
+        "  .memory-distillation-row button:first-child strong,\n"
+        "  .extension-format-guide > summary strong,\n"
+        "  .skill-builtin-workflow-title strong,\n"
+        "  .draft-tool-head h3,\n"
+        "  .draft-tool-section h4\n"
+        ")",
+    )
+    assert "font-size: var(--settings-row-title-size)" in title_rule
+    assert "font-weight: var(--settings-row-title-weight)" in title_rule
+    assert "line-height: var(--settings-row-line-height)" in title_rule
+
+    body_rule = _css_rule(
+        v2_css,
+        ".governance-settings-dialog :is(\n"
+        "  .governance-panel .settings-row-text span,\n"
+        "  .governance-setting-row span,\n"
+        "  .exec-env-row-sub,\n"
+        "  .exec-env-hint,\n"
+        "  .exec-env-empty,\n"
+        "  .llm-engine-empty,\n"
+        "  .llm-engine-item-url,\n"
+        "  .memory-manage-head span,\n"
+        "  .agent-memory-view-hint,\n"
+        "  .agent-memory-pane-head span,\n"
+        "  .agent-memory-item-main span,\n"
+        "  .agent-memory-item-main p,\n"
+        "  .agent-memory-detail-meta,\n"
+        "  .agent-memory-empty,\n"
+        "  .plugin-upload-text > span,\n"
+        "  .plugin-row-desc,\n"
+        "  .plugin-tool-head span,\n"
+        "  .plugin-tool-impl dd,\n"
+        "  .plugin-schema-empty,\n"
+        "  .tier-row-body p,\n"
+        "  .tier-guardrail-note,\n"
+        "  .skill-section-hint,\n"
+        "  .skill-builtin-workflow-title span,\n"
+        "  .skill-workflow-goals,\n"
+        "  .skill-validator-summary-text span,\n"
+        "  .skill-problems,\n"
+        "  .skill-validation,\n"
+        "  .draft-tools-hint,\n"
+        "  .draft-tool-meta,\n"
+        "  .draft-learning-note,\n"
+        "  .draft-run-history,\n"
+        "  .extension-format-guide > summary span span\n"
+        ")",
+    )
+    assert "font-size: var(--settings-body-size)" in body_rule
+    assert "font-weight: var(--settings-body-weight)" in body_rule
+    assert "line-height: var(--settings-body-line-height)" in body_rule
+
+    label_rule = _css_rule(
+        v2_css,
+        ".governance-settings-dialog :is(\n"
+        "  .exec-env-section-label,\n"
+        "  .agent-memory-filter-grid label > span,\n"
+        "  .memory-manager-toolbar label,\n"
+        "  .plugin-tool-impl dt,\n"
+        "  .plugin-schema-table caption,\n"
+        "  .plugin-schema-table th,\n"
+        "  .extension-format-guide-body strong,\n"
+        "  .skill-builtin-workflow-body h4,\n"
+        "  .skill-workflow-slots dt,\n"
+        "  .skill-workflow-step-inputs > strong,\n"
+        "  .skill-workflow-checks > strong,\n"
+        "  .agent-memory-detail-eyebrow,\n"
+        "  .agent-memory-summary-card strong,\n"
+        "  .agent-memory-evidence-card h4,\n"
+        "  .agent-memory-audit-panel h4,\n"
+        "  .agent-memory-source-list strong,\n"
+        "  .draft-status-filter span,\n"
+        "  .draft-schema-grid strong\n"
+        ")",
+    )
+    assert "font-size: var(--settings-label-size)" in label_rule
+    assert "font-weight: var(--settings-label-weight)" in label_rule
+
+    control_rule = _css_rule(
+        v2_css,
+        ".governance-settings-dialog :is(\n"
+        "  .settings-row-control > .button,\n"
+        "  .agent-memory-toolbar > .button,\n"
+        "  .agent-memory-load-more .button,\n"
+        "  .agent-memory-actions .button,\n"
+        "  .agent-memory-view-tab,\n"
+        "  .draft-tool-run-section > .button,\n"
+        "  .draft-governance-actions .button,\n"
+        "  .plugin-row-actions .button,\n"
+        "  .plugin-upload-button,\n"
+        "  .skill-toolbar .button,\n"
+        "  .memory-manager-toolbar button,\n"
+        "  .memory-distillation-row button[data-rollback-memory-distillation]\n"
+        ")",
+    )
+    assert "font-size: var(--settings-control-size)" in control_rule
+    assert "font-weight: var(--settings-control-weight)" in control_rule
 
 
 def test_pet_setting_includes_naitang_xiaojiu_auditbots_and_none():
@@ -5581,6 +5880,34 @@ def test_completed_parent_stage_does_not_spin_stale_running_substeps():
     assert json.loads(result.stdout) == ["succeeded", "running", "failed"]
 
 
+def test_later_started_substep_clears_stale_running_rail_tone():
+    app_js = _read_static("app.js")
+    notebook_start = app_js.index("function notebookStepTone")
+    notebook_end = app_js.index("function stepWorkflowStage", notebook_start)
+    script = "\n".join(
+        [
+            "let selectedTask = { status: 'running' };",
+            "function taskStopped() { return false; }",
+            app_js[notebook_start:notebook_end],
+            "const steps = [",
+            "  { status: 'running', started_at: '2026-07-06T10:00:00+00:00' },",
+            "  { status: 'succeeded', started_at: '2026-07-06T10:00:05+00:00' },",
+            "  { status: 'pending' },",
+            "];",
+            "const tones = steps.map((step, index) => notebookStepToneForRail(step, 'running', steps[index + 1]));",
+            "process.stdout.write(JSON.stringify(tones));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == ["succeeded", "succeeded", "pending"]
+
+
 def test_stopped_step_checker_has_no_stop_square_mark():
     step_checker_js = _read_static("js/step-checker.js")
     source = step_checker_js[step_checker_js.index("export function stepCheckerHtml"):]
@@ -5914,8 +6241,18 @@ def test_agent_task_creation_prefills_conversation_composer_with_goal():
     assert "autoGrowComposerInput();" in helper_body
     assert "updateAgentSendDisabled();" in helper_body
     assert "上传资产Vintage&滚动率分析、FPD、入催回收率分析数据" in task_types_js
-    assert "先识别 cohort、MOB 和坏账标签字段" in task_types_js
-    assert "计算资产 Vintage 曲线并给出风险观察" in task_types_js
+    for goal in (
+        'initialGoal: "开始数据处理"',
+        'initialGoal: "开始特征分析"',
+        'initialGoal: "开始风险分析"',
+        'initialGoal: "开始建模"',
+        'initialGoal: "开始模型验证"',
+        'initialGoal: "开始策略开发"',
+    ):
+        assert goal in task_types_js
+    assert "请基于当前任务材料" not in task_types_js
+    assert "先识别 cohort、MOB 和坏账标签字段" not in task_types_js
+    assert "计算资产 Vintage 曲线并给出风险观察" not in task_types_js
     assert "营利性测算" not in app_js
 
     # createTask() invokes the prefill once the task is created.
@@ -6552,6 +6889,7 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     # (sensitive-material) row still renders a status badge.
     assert 'class="memory-policy-switch" data-memory-policy="reference_cross_task"' in index_html
     assert 'class="memory-policy-switch" data-memory-policy="auto_distill"' in index_html
+    assert 'class="settings-row memory-policy-protection-row"' in index_html
     assert 'class="governance-status-badge required">平台强制</span>' in index_html
     assert 'class="governance-toggle"' not in index_html
     assert "复核 Agent 产出的工具草稿" in index_html
@@ -6623,6 +6961,25 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert "handleGovernanceSettingsSearch" in app_js
     assert '$("openGovernanceSettingsButton").onclick = openGovernanceSettingsFromSidebar;' in app_js
     assert '$("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);' in app_js
+    assert (
+        'runAction(loadExecutionEnvironmentSettings, {\n'
+        '      actionId: "executionEnvironment",\n'
+        '      busyText: "正在读取执行环境...",\n'
+        "      taskScoped: false,\n"
+        "    });"
+    ) in app_js
+    assert (
+        'runAction(loadLLMSettings, { actionId: "llmSettings", busyText: "正在读取大模型配置...", taskScoped: false });'
+        in app_js
+    )
+    assert (
+        'runAction(loadMemoryPolicySettings, { actionId: "memoryPolicy", busyText: "正在读取记忆策略...", taskScoped: false });'
+        in app_js
+    )
+    assert (
+        'runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆...", taskScoped: false });'
+        in app_js
+    )
     assert 'openGovernanceSettingsCenter("execution-environment")' in app_js
     assert 'openGovernanceSettingsCenter("llm")' in app_js
     assert '$("governanceSettingsDialog").addEventListener("click", handleGovernanceSettingsNavClick);' in app_js
@@ -6634,7 +6991,33 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     # status filter, not a dedicated dialog or nav key.
     assert '$("draftManageDetails").addEventListener("toggle"' in app_js
     assert "!draftToolsPanel.hasLoaded()" in app_js
-    assert 'runAction(loadDraftTools, { actionId: "draftTools"' in app_js
+    assert (
+        'runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具...", taskScoped: false });'
+        in app_js
+    )
+    assert (
+        'runAction(runDraftTool, { actionId: "draftTools", busyText: "正在试运行草稿...", taskScoped: false });'
+        in app_js
+    )
+    assert (
+        'runAction(promoteDraftTool, { actionId: "draftTools", busyText: "正在转正草稿...", taskScoped: false });'
+        in app_js
+    )
+    assert (
+        'runAction(rejectDraftTool, { actionId: "draftTools", busyText: "正在拒绝草稿...", taskScoped: false });'
+        in app_js
+    )
+    assert (
+        'runAction(saveLLMEngineEdit, { actionId: "llmSettings", busyText: "正在保存模型...", taskScoped: false });'
+        in app_js
+    )
+    assert (
+        'runAction(() => removeLLMModelProfile(Number(removeButton.dataset.llmRemove)), {\n'
+        '      actionId: "llmSettings",\n'
+        '      busyText: "正在删除模型...",\n'
+        "      taskScoped: false,\n"
+        "    });"
+    ) in app_js
     assert "function openDraftToolsDialog" not in app_js
     assert 'openGovernanceSettingsCenter("drafts")' not in app_js
     assert "async function loadDraftTools" in app_js
@@ -6758,6 +7141,16 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert 'content: "选择文件"' not in v2_css
     upload_input_rule = _css_rule(v2_css, ".plugin-upload-button input[type=\"file\"]")
     assert "opacity: 0" in upload_input_rule
+    for selector in [
+        ".plugin-tool-impl",
+        ".plugin-schema-table-wrap",
+        ".plugin-schema-table",
+        ".plugin-required",
+        ".plugin-schema-empty",
+    ]:
+        assert selector in v2_css
+    assert ".plugin-tool-schemas" not in v2_css
+    assert ".plugin-tools pre" not in v2_css
     # In-dialog buttons all use the shared .button classes now — no bespoke
     # .plugin-action / reload-skills button rules left to drift out of sync.
     assert ".plugin-action {" not in v2_css
@@ -6792,6 +7185,15 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert "padding: 13px 2px" in memory_policy_row_rule
     assert "border-radius" not in memory_policy_row_rule
     assert "background" not in memory_policy_row_rule
+    memory_policy_protection_row_rule = _css_rule(
+        styles_css,
+        '.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group > .memory-policy-protection-row',
+    )
+    assert "padding: 9px 2px 8px" in memory_policy_protection_row_rule
+    memory_policy_selected_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="memory-policy"].selected'
+    )
+    assert "gap: 8px" in memory_policy_selected_rule
     assert (
         '.governance-panel[data-governance-panel-content="memory-policy"] .settings-row + .settings-row'
         not in styles_css
@@ -6805,6 +7207,7 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     memory_manage_rule = _css_rule(styles_css, ".memory-manage")
     assert "background: transparent" in memory_manage_rule
     assert "border-top: 1px solid var(--border)" in memory_manage_rule
+    assert "padding-top: 12px" in memory_manage_rule
     assert 'id="memoryManageSection"' in index_html
     assert 'id="memoryManageDetails"' not in index_html
     assert ".memory-manage-summary" not in styles_css
@@ -7247,7 +7650,13 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert 'params.set("limit", String(pageLimit));' in memory_panel_js
     assert 'params.set("offset", String(offset));' in memory_panel_js
     assert "hasMoreItems = Boolean(payload?.has_more)" in memory_panel_js
+    assert "function mergeRawMemoryItems" in memory_panel_js
+    assert "function rawMemoryGroupKey" in memory_panel_js
+    assert "data-agent-memory-merged-count" in memory_panel_js
+    assert "合并 ${memory._merged_count} 条原始记忆" in memory_panel_js
+    assert "合并展示为 ${displayCount} 组" in memory_panel_js
     assert ".agent-memory-load-more" in styles_css
+    assert ".agent-memory-item.merged" in styles_css
     assert 'memoryStatus === "active" && !memory.superseded_by' in memory_panel_js
 
     assert '"api/agent-memory"' in memory_panel_js
@@ -7275,6 +7684,71 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert "border-radius: var(--radius-control)" in memory_switch_rule
     memory_tab_rule = _css_rule(styles_css, ".agent-memory-view-tab")
     assert "border-radius: var(--radius-control)" in memory_tab_rule
+
+
+def test_agent_memory_item_actions_do_not_overlap_long_text():
+    styles_css = _read_static("styles.css")
+
+    workspace_rule = _css_rule(styles_css, ".agent-memory-workspace")
+    assert "height: clamp(420px, 58dvh, 620px);" in workspace_rule
+    assert "max-height: 620px;" in workspace_rule
+    assert "min-height: 0;" in workspace_rule
+
+    list_rule = _css_rule(styles_css, ".agent-memory-list")
+    assert "align-content: start;" in list_rule
+    assert "grid-auto-rows: max-content;" in list_rule
+
+    list_and_detail_rule = _css_rule(styles_css, ".agent-memory-list,\n.agent-memory-detail")
+    assert "overflow: auto;" in list_and_detail_rule
+    assert "min-height: 0;" in list_and_detail_rule
+
+    pane_rule = _css_rule(styles_css, ".agent-memory-list-pane,\n.agent-memory-detail-pane")
+    assert "overflow: hidden;" in pane_rule
+
+    item_rule = _css_rule(styles_css, ".agent-memory-item")
+    assert "grid-template-columns: minmax(0, 1fr);" in item_rule
+    assert "grid-template-columns: minmax(0, 1fr) auto;" not in item_rule
+
+    main_rule = _css_rule(styles_css, ".agent-memory-item-main")
+    assert "overflow-wrap: anywhere;" in main_rule
+
+    actions_rule = _css_rule(styles_css, ".agent-memory-actions")
+    assert "justify-content: flex-start;" in actions_rule
+    assert "justify-content: flex-end;" not in actions_rule
+
+
+def test_agent_memory_detail_view_uses_structured_cards():
+    memory_panel_js = _read_static("js/agent-memory-panel.js")
+    styles_css = _read_static("styles.css")
+
+    for fragment in [
+        "agent-memory-detail-header",
+        "agent-memory-title-block",
+        "agent-memory-badges",
+        "agent-memory-summary-card",
+        "agent-memory-detail-grid",
+        "agent-memory-evidence-card",
+        "agent-memory-audit-panel",
+        "agent-memory-audit-timeline",
+        "agent-memory-audit-event",
+    ]:
+        assert fragment in memory_panel_js
+        assert f".{fragment}" in styles_css
+
+    assert "<h3>${escapeHtml(memoryTitle(memory))}</h3>" not in memory_panel_js
+
+    detail_start = styles_css.index("\n.agent-memory-detail-inner {")
+    detail_rule = styles_css[detail_start : styles_css.index("}", detail_start)]
+    assert "grid-template-rows: auto auto minmax(0, 1fr);" in detail_rule
+
+    header_rule = _css_rule(styles_css, ".agent-memory-detail-header")
+    assert "align-items: start;" in header_rule
+
+    title_rule = _css_rule(styles_css, ".agent-memory-title-block h3")
+    assert "overflow-wrap: anywhere;" in title_rule
+
+    grid_rule = _css_rule(styles_css, ".agent-memory-detail-grid")
+    assert "grid-template-columns:" in grid_rule
 
 
 def test_agent_memory_delete_keeps_audit_detail_visible():
@@ -7336,6 +7810,41 @@ def test_agent_timeline_keeps_messages_in_occurrence_order_around_stage_outputs(
         {"type": "stage", "stage": "reproducibility"},
         {"type": "messages", "contents": ["正在执行 Notebook。"]},
     ]
+
+
+def test_agent_advance_intent_accepts_task_start_shortcuts():
+    module_url = (STATIC_DIR / "js" / "agent-conversation-view.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ agentMessageIsAdvanceIntent }} from {json.dumps(module_url)};",
+            "const positive = [",
+            "  '开始模型验证',",
+            "  '请开始模型验证吧',",
+            "  '开始特征分析',",
+            "  '开始数据处理',",
+            "  '开始建模',",
+            "  '开始策略开发',",
+            "  '开始风险分析',",
+            "];",
+            "const negative = ['不要继续', '先不继续', '这是开始模型验证吗？'];",
+            "const result = {",
+            "  positive: positive.map((content) => agentMessageIsAdvanceIntent({ role: 'user', content })),",
+            "  negative: negative.map((content) => agentMessageIsAdvanceIntent({ role: 'user', content })),",
+            "};",
+            "process.stdout.write(JSON.stringify(result));",
+        ]
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["positive"] == [True] * 7
+    assert payload["negative"] == [False] * 3
 
 
 def test_agent_timeline_places_metric_output_before_metric_analysis_after_chat():
@@ -8709,6 +9218,53 @@ globalThis.MutationObserver = class { observe() {} disconnect() {} };
 globalThis.AbortController = globalThis.AbortController || class { constructor() { this.signal = {}; } abort() {} };
 globalThis.fetch = async () => ({ ok: true, json: async () => ({}), text: async () => '' });
 """
+
+
+def test_reproducibility_pass_status_hides_score_compare_rows():
+    app_js = _read_static("app.js")
+    boot_marker = 'document.addEventListener(\n  "mousedown"'
+    boot_idx = app_js.index(boot_marker)
+    app_js = app_js[:boot_idx].replace('from "./js/', 'from "./marvis/static/js/')
+
+    rows = [
+        {
+            "row_index": 1,
+            "score_code_model": 0.5,
+            "score_submitted_pmml": 0.50005,
+            "abs_diff": 0.00005,
+            "matched": False,
+        },
+        {
+            "row_index": 2,
+            "score_code_model": 0.6,
+            "score_submitted_pmml": 0.6,
+            "abs_diff": 0.0,
+            "matched": True,
+        },
+    ]
+    payload = {
+        "summary": {"status": "pass", "mismatch_count": 1, "max_abs_diff": 0.00005},
+        "sample_size": 1000,
+        "seed": 42,
+        "rows": rows,
+    }
+    test_driver = "\n".join(
+        [
+            "selectedTaskId = 'task-pass';",
+            "selectedTask = { id: 'task-pass', status: 'executed' };",
+            f"renderReproducibilityEvidence({json.dumps(payload)});",
+            "const html = globalThis.__writes.at(-1) || '';",
+            "process.stdout.write(JSON.stringify({",
+            "  hasRows: html.includes('score-compare-list'),",
+            "  hasHeader: html.includes('行号'),",
+            "  hasStatus: html.includes('一致'),",
+            "}));",
+        ]
+    )
+
+    data = _run_node_capture_json(_BROWSER_STUBS + "\n" + app_js + "\n" + test_driver)
+
+    assert data == {"hasRows": False, "hasHeader": False, "hasStatus": True}
 
 
 def test_reproducibility_render_skips_replay_and_disables_animation_on_rebuild():

@@ -1,4 +1,5 @@
 import { escapeHtml } from "./ui-utils.js";
+import { schemaTableHtml } from "./v2/schema_table.js";
 
 // The plugin-admin token replaces the old fixed "local-dev" magic header. The
 // server embeds the per-workspace token into <body data-marvis-plugin-admin-
@@ -26,14 +27,6 @@ function draftSourceLabel(source) {
     llm_generated: "LLM 生成",
     hand_written: "人工编写",
   }[source] || source || "未知来源";
-}
-
-function prettyDraftJson(value) {
-  try {
-    return JSON.stringify(value ?? {}, null, 2);
-  } catch (_) {
-    return String(value ?? "");
-  }
 }
 
 export function createDraftToolsPanelController({
@@ -145,8 +138,8 @@ export function createDraftToolsPanelController({
       draft.created_at || "",
     ].filter(Boolean).join(" · ");
     $("draftToolCode").textContent = draft.code || "";
-    $("draftInputSchema").textContent = prettyDraftJson(draft.input_schema || {});
-    $("draftOutputSchema").textContent = prettyDraftJson(draft.output_schema || {});
+    $("draftInputSchema").innerHTML = schemaTableHtml(draft.input_schema || {}, "输入");
+    $("draftOutputSchema").innerHTML = schemaTableHtml(draft.output_schema || {}, "输出");
     renderLearningNote(payload.learning_note || null);
     renderRunHistory(payload.runs || []);
     $("draftRunInputs").value = "{}";

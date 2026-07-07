@@ -173,10 +173,15 @@ def is_start_validation_intent(content: str) -> bool:
         return False
     direct_phrases = (
         "开始验证",
+        "开始模型验证",
         "启动验证",
+        "启动模型验证",
         "执行验证",
+        "执行模型验证",
         "运行验证",
+        "运行模型验证",
         "跑验证",
+        "跑模型验证",
         "开始执行",
         "开始运行",
         "开始跑",

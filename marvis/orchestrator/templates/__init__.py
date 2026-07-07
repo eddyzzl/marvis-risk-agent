@@ -89,13 +89,15 @@ def clear_user_templates() -> None:
 
 
 def load_builtin_templates() -> None:
-    import_module("marvis.orchestrator.templates.sample")
+    module = import_module("marvis.orchestrator.templates.sample")
+    module.register_all_builtin_templates()
 
 
 def _register_builtin_template(template: WorkflowTemplate) -> None:
     existing = _TEMPLATES.get(template.id)
     if existing is not None:
         if existing.source == "builtin":
+            _TEMPLATES[template.id] = _with_source(template, "builtin")
             return
         raise ValueError(f"builtin template id conflicts with user template: {template.id}")
     _TEMPLATES[template.id] = _with_source(template, "builtin")

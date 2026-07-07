@@ -44,14 +44,14 @@ def _memory_model_experience_payload(
         "task_id": task.id,
         "source_task_id": task.id,
         "model_name": results.get("model_name") or task.model_name,
-        "model_version": results.get("model_version") or task.model_version,
+        "model_version": results.get("model_version") or task.model_version or "未标注",
         "scope": results.get("scope") or f"{task.model_name}验证任务",
         "channel": results.get("channel") or "未标注",
         "month": results.get("month") or _memory_latest_month(results) or "未标注",
         "metrics": {
-            "ks": metrics_row.get("ks"),
-            "auc": metrics_row.get("auc"),
-            "psi": metrics_row.get("psi_vs_train") or metrics_row.get("psi"),
+            "ks": _memory_metric_value(metrics_row, "ks"),
+            "auc": _memory_metric_value(metrics_row, "auc"),
+            "psi": _memory_metric_value(metrics_row, "psi_vs_train", "psi"),
         },
         "important_feature_sources": _memory_important_feature_sources(results),
     }
@@ -75,6 +75,14 @@ def _memory_preferred_overall_row(results: dict) -> dict:
             if str(row.get("split") or "").strip().lower() == split_name:
                 return row
     return rows[0] if rows else {}
+
+
+def _memory_metric_value(row: dict, *keys: str):
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return None
 
 
 def _memory_latest_month(results: dict) -> str:

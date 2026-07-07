@@ -3,9 +3,11 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+import marvis.orchestrator.templates as templates_module
 from marvis.app import create_app
 from marvis.db import PluginRepository, init_db
 from marvis.orchestrator.templates import (
+    WorkflowTemplate,
     clear_user_templates,
     get_template,
     load_builtin_templates,
@@ -194,10 +196,20 @@ def test_load_user_skill_templates_registers_active_and_reports_rejected(tmp_pat
 def test_skills_api_lists_reloads_and_validates_user_skills(tmp_path):
     app = create_app(tmp_path)
     client = TestClient(app)
+    templates_module._TEMPLATES["data_join"] = WorkflowTemplate(
+        id="data_join",
+        title="数据拼接",
+        goal_patterns=("数据拼接",),
+        slots=(),
+        steps=(),
+        source="builtin",
+    )
 
     initial = client.get("/api/skills")
     assert initial.status_code == 200
     assert initial.json()["counts"] == {"active": 0, "disabled": 0, "rejected": 0}
+    initial_by_id = {entry["id"]: entry for entry in initial.json()["builtin"]}
+    assert [step["title"] for step in initial_by_id["data_join"]["steps"]] == ["拼接诊断", "确认拼接", "执行拼接"]
 
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir()
@@ -222,7 +234,35 @@ def test_skills_api_lists_reloads_and_validates_user_skills(tmp_path):
     # with the platform instead of rendering an inexplicably empty list.
     builtin = reloaded.json()["builtin"]
     assert all(entry["id"] and entry["title"] for entry in builtin)
-    assert any(entry["id"] == "sample_echo" for entry in builtin)
+    by_id = {entry["id"]: entry for entry in builtin}
+    assert len(by_id["data_join"]["slots"]) == 3
+    assert [step["title"] for step in by_id["data_join"]["steps"]] == ["拼接诊断", "确认拼接", "执行拼接"]
+    assert len(by_id["feature_analysis"]["steps"]) == 2
+    assert len(by_id["feature_analysis_with_join"]["steps"]) == 5
+    assert len(by_id["feature_derivation"]["steps"]) == 4
+    assert len(by_id["label_construction"]["steps"]) == 2
+    assert [step["tool"] for step in by_id["model_validation"]["steps"]] == [
+        {"plugin": "v1_compat", "tool": "scan_materials", "version": ""},
+        {"plugin": "v1_compat", "tool": "run_notebook", "version": ""},
+        {"plugin": "v1_compat", "tool": "compute_validation_metrics", "version": ""},
+        {"plugin": "v1_compat", "tool": "render_reports", "version": ""},
+    ]
+    sample_echo = next(entry for entry in builtin if entry["id"] == "sample_echo")
+    assert sample_echo["goal_patterns"] == ["echo", "sample echo", "测试编排"]
+    assert sample_echo["slots"] == [
+        {
+            "name": "message",
+            "required": True,
+            "source": "user",
+            "description": "Message to echo",
+        }
+    ]
+    assert sample_echo["steps"][0]["title"] == "Echo"
+    assert sample_echo["steps"][0]["tool"] == {"plugin": "_sample", "tool": "echo", "version": ""}
+    assert sample_echo["steps"][0]["inputs"] == {"message": "{slot:message}"}
+    assert sample_echo["steps"][0]["post_checks"] == [
+        {"kind": "nonempty", "spec": {"field": "echoed"}}
+    ]
 
     valid = client.post("/api/skills/validate", json=_skill_data(id="preview_echo"))
     frontend_valid = client.post(

@@ -124,7 +124,12 @@ def list_plugin_tools(request: Request, name: str) -> dict:
         manifest = request.app.state.plugin_registry.get(name)
     except PluginNotFoundError as exc:
         raise not_found(str(exc)) from exc
-    return {"tools": [_public_tool(tool) for tool in manifest.tools]}
+    return {
+        "module": manifest.module,
+        "permissions": list(manifest.permissions),
+        "hooks": [{"event": hook.event, "tool": hook.tool} for hook in manifest.hooks],
+        "tools": [_public_tool(tool) for tool in manifest.tools],
+    }
 
 
 def _set_enabled(request: Request, name: str, enabled: bool) -> dict:
@@ -164,6 +169,8 @@ def _public_tool(tool: ToolSpec) -> dict:
         "determinism": tool.determinism,
         "timeout_seconds": tool.timeout_seconds,
         "failure_policy": tool.failure_policy,
+        "entrypoint": tool.entrypoint,
+        "memory_limit_mb": tool.memory_limit_mb,
         "side_effects": list(tool.side_effects),
     }
 

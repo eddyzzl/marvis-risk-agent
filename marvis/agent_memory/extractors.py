@@ -26,8 +26,9 @@ def extract_model_experience(result: dict[str, Any]) -> MemoryCandidate | None:
         memory_type="model_experience",
         summary=(
             f"{payload['model_name']}{payload['model_version']}在{payload['month']}"
-            f"{payload['channel']}渠道KS为{payload['ks']}，AUC为{payload['auc']}，"
-            f"PSI为{payload['psi']}。"
+            f"{payload['channel']}渠道KS为{_metric_display(payload['ks'])}，"
+            f"AUC为{_metric_display(payload['auc'])}，"
+            f"PSI为{_metric_display(payload['psi'])}。"
         ),
         payload=payload,
         source_task_id=str(payload["source_task_id"]),
@@ -284,7 +285,7 @@ def _model_experience_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "month": _first_value(result, metrics, "month"),
         "channel": _first_value(result, metrics, "channel"),
         "model_name": _first_value(result, metrics, "model_name"),
-        "model_version": _first_value(result, metrics, "model_version"),
+        "model_version": _first_value(result, metrics, "model_version") or "未标注",
         "scope": _first_value(result, metrics, "scope"),
         "source_task_id": _first_value(result, metrics, "source_task_id", "task_id"),
         "important_feature_sources": _first_value(
@@ -389,6 +390,12 @@ def _first_value(
             if key in source and not _is_missing(source[key]):
                 return source[key]
     return None
+
+
+def _metric_display(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        return f"{value:.6f}".rstrip("0").rstrip(".")
+    return str(value)
 
 
 def _first_text(source: dict[str, Any], *keys: str) -> str | None:

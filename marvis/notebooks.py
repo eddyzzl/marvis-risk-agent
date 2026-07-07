@@ -436,6 +436,7 @@ class NotebookExecutionSession:
         self._raise_if_cancelled()
         cell_index = kwargs.get("cell_index")
         if isinstance(cell_index, int):
+            self._finalize_prior_running_cell_events(before_cell_index=cell_index)
             self._finalize_pending_cell_completions(exclude_cell_index=cell_index)
         _record_cell_start(self.cell_events, **kwargs)
         self._write_progress()
@@ -488,6 +489,22 @@ class NotebookExecutionSession:
             event = self.cell_events.get(cell_index)
             if event is None or event.get("status") == "failed":
                 self._pending_completion_cell_indexes.discard(cell_index)
+                continue
+            _finalize_cell_event_after_execute(
+                self.cell_events,
+                cell=self.notebook.cells[cell_index],
+                cell_index=cell_index,
+                succeeded=True,
+            )
+            self._pending_completion_cell_indexes.discard(cell_index)
+
+    def _finalize_prior_running_cell_events(self, *, before_cell_index: int) -> None:
+        for cell_index, event in sorted(self.cell_events.items()):
+            if not isinstance(cell_index, int) or cell_index >= before_cell_index:
+                continue
+            if event.get("status") != "running":
+                continue
+            if cell_index < 0 or cell_index >= len(self.notebook.cells):
                 continue
             _finalize_cell_event_after_execute(
                 self.cell_events,

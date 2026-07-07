@@ -694,17 +694,18 @@ function refreshGovernancePanel(navKey = activeGovernanceNav, options = {}) {
     runAction(loadExecutionEnvironmentSettings, {
       actionId: "executionEnvironment",
       busyText: "正在读取执行环境...",
+      taskScoped: false,
     });
   }
   if (button?.dataset?.governancePanel === "llm" && options.load !== false) {
-    runAction(loadLLMSettings, { actionId: "llmSettings", busyText: "正在读取大模型配置..." });
+    runAction(loadLLMSettings, { actionId: "llmSettings", busyText: "正在读取大模型配置...", taskScoped: false });
   }
   if (button?.dataset?.governancePanel === "memory-policy" && options.load !== false) {
-    runAction(loadMemoryPolicySettings, { actionId: "memoryPolicy", busyText: "正在读取记忆策略..." });
+    runAction(loadMemoryPolicySettings, { actionId: "memoryPolicy", busyText: "正在读取记忆策略...", taskScoped: false });
     // The management workspace is always visible now, so load its records when
     // the panel opens (once) instead of lazily on a fold's toggle event.
     if (!agentMemoryPanel.hasItems()) {
-      runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
+      runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆...", taskScoped: false });
     }
   }
 }
@@ -2902,9 +2903,15 @@ function notebookStepTone(status) {
   return "pending";
 }
 
-function notebookStepToneForRail(step, parentStatus = "") {
+function notebookStepStartedOrFinished(step) {
+  const tone = notebookStepTone(step?.status);
+  return tone !== "pending" || Boolean(step?.started_at || step?.ended_at);
+}
+
+function notebookStepToneForRail(step, parentStatus = "", nextStep = null) {
   const tone = notebookStepTone(step?.status);
   if (parentStatus === "succeeded" && tone === "running") return "succeeded";
+  if (tone === "running" && notebookStepStartedOrFinished(nextStep)) return "succeeded";
   return tone;
 }
 
@@ -3113,7 +3120,9 @@ function renderNotebookStepRail(
   if (!Array.isArray(notebookSteps) || notebookSteps.length === 0) {
     return "";
   }
-  const tones = notebookSteps.map((step) => notebookStepToneForRail(step, parentStatus));
+  const tones = notebookSteps.map((step, index) => (
+    notebookStepToneForRail(step, parentStatus, notebookSteps[index + 1] || null)
+  ));
   // When the parent stage is running but the backend has not flagged a specific
   // sub-step as running yet, spin the first unfinished sub-step so it stays in
   // sync with the parent's spinner instead of sitting on a hollow circle.
@@ -3966,7 +3975,10 @@ function renderReproducibilityEvidence(reproducibility = {}) {
       "</div>",
     ].join("");
   });
-  const rowsHtml = rows.length
+  const shouldShowRows = summary.status !== "pass";
+  const rowsHtml = !shouldShowRows
+    ? ""
+    : rows.length
     ? [
         '<div class="score-compare-list">',
         '<div class="score-compare-row score-compare-head">',
@@ -6035,18 +6047,21 @@ async function deleteTask(task) {
 
 async function runAction(action, options = {}) {
   const actionId = options.actionId || null;
-  const taskId = options.taskId || selectedTaskId;
+  const taskScoped = options.taskScoped !== false;
+  const taskId = Object.prototype.hasOwnProperty.call(options, "taskId")
+    ? options.taskId
+    : selectedTaskId;
   let shouldRenderAfter = options.renderAfter !== false;
   try {
-    if (actionId) setBusy(actionId, options.busyText || "正在处理...", taskId);
+    if (actionId && taskScoped) setBusy(actionId, options.busyText || "正在处理...", taskId);
     await action();
   } catch (error) {
     shouldRenderAfter = true;
     if (error?.name === "AbortError") {
-      if (actionId) setActionStatus(actionCancelledStatusTitle(actionId), "success");
+      if (actionId && taskScoped) setActionStatus(actionCancelledStatusTitle(actionId), "success");
       return;
     }
-    if (selectedTaskId) {
+    if (selectedTaskId && taskScoped) {
       try {
         await refreshTasks();
       } catch (_) {
@@ -6056,11 +6071,11 @@ async function runAction(action, options = {}) {
     const message = error.message || "操作失败";
     if (actionId === "agentMemory") setAgentMemoryStatus(message, "error");
     if (actionId === "draftTools") setDraftToolsStatus(message, "error");
-    if (actionId) renderActionError(actionId, message);
-    if (actionId) setActionStatus(actionFailureStatusTitle(actionId), "error", message);
-    else setCreateStatus(message, "error");
+    if (actionId && taskScoped) renderActionError(actionId, message);
+    if (actionId && taskScoped) setActionStatus(actionFailureStatusTitle(actionId), "error", message);
+    else if (!actionId) setCreateStatus(message, "error");
   } finally {
-    if (actionId) setBusy(null, "", taskId);
+    if (actionId && taskScoped) setBusy(null, "", taskId);
     if (shouldRenderAfter) renderAll();
   }
 }
@@ -6206,7 +6221,7 @@ $("addLLMModelButton").onclick = addLLMModelProfile;
 $("closeLLMEngineEditButton").onclick = closeLLMEngineEdit;
 $("cancelLLMEngineEditButton").onclick = closeLLMEngineEdit;
 $("saveLLMEngineEditButton").onclick = () =>
-  runAction(saveLLMEngineEdit, { actionId: "llmSettings", busyText: "正在保存模型..." });
+  runAction(saveLLMEngineEdit, { actionId: "llmSettings", busyText: "正在保存模型...", taskScoped: false });
 $("testLLMEngineConnectionButton").onclick = testLLMEngineConnection;
 $("sidebarCollapseButton").onclick = toggleSidebarCollapsed;
 $("sidebarBrandTrigger").onclick = expandSidebarFromBrand;
@@ -6233,22 +6248,22 @@ $("settingsMenu").onchange = handleSettingsMenuChange;
 $("agentMemoryList").addEventListener("click", handleAgentMemoryListClick);
 document.addEventListener("click", handleAgentMemoryInlineInspect);
 $("refreshAgentMemoryButton").onclick = () =>
-  runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
+  runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆...", taskScoped: false });
 $("draftManageDetails").addEventListener("toggle", (event) => {
   if (event.target.open && !draftToolsPanel.hasLoaded()) {
-    runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具..." });
+    runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具...", taskScoped: false });
   }
 });
 $("draftStatusFilter").onchange = () =>
-  runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具..." });
+  runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具...", taskScoped: false });
 $("draftToolsList").addEventListener("click", handleDraftToolsListClick);
 $("draftToolsList").addEventListener("keydown", handleDraftToolsListKeydown);
 $("runDraftButton").onclick = () =>
-  runAction(runDraftTool, { actionId: "draftTools", busyText: "正在试运行草稿..." });
+  runAction(runDraftTool, { actionId: "draftTools", busyText: "正在试运行草稿...", taskScoped: false });
 $("promoteDraftButton").onclick = () =>
-  runAction(promoteDraftTool, { actionId: "draftTools", busyText: "正在转正草稿..." });
+  runAction(promoteDraftTool, { actionId: "draftTools", busyText: "正在转正草稿...", taskScoped: false });
 $("rejectDraftButton").onclick = () =>
-  runAction(rejectDraftTool, { actionId: "draftTools", busyText: "正在拒绝草稿..." });
+  runAction(rejectDraftTool, { actionId: "draftTools", busyText: "正在拒绝草稿...", taskScoped: false });
 $("llmModelProfiles").addEventListener("click", (event) => {
   const removeButton = event.target.closest("[data-llm-remove]");
   if (removeButton) {
@@ -6257,6 +6272,7 @@ $("llmModelProfiles").addEventListener("click", (event) => {
     runAction(() => removeLLMModelProfile(Number(removeButton.dataset.llmRemove)), {
       actionId: "llmSettings",
       busyText: "正在删除模型...",
+      taskScoped: false,
     });
     return;
   }

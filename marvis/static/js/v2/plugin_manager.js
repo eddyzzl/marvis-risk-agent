@@ -1,4 +1,5 @@
 import { escapeHtml } from "../ui-utils.js";
+import { schemaTableHtml } from "./schema_table.js";
 import {
   listPluginTools as listPluginToolsApi,
   listPlugins as listPluginsApi,
@@ -19,8 +20,123 @@ function closest(target, selector) {
   return typeof target?.closest === "function" ? target.closest(selector) : null;
 }
 
-function schemaText(schema) {
-  return escapeHtml(JSON.stringify(schema || {}, null, 2));
+function failurePolicyLabel(value) {
+  return {
+    fail: "失败即中止",
+    retry: "失败可重试",
+    skip: "失败可跳过",
+  }[value] || value || "未声明";
+}
+
+function determinismLabel(value) {
+  return {
+    deterministic: "确定性",
+    stochastic: "非确定性",
+  }[value] || value || "未声明";
+}
+
+function toolTriggerText(tool, hooks = []) {
+  const events = hooks
+    .filter((hook) => hook?.tool === tool.name)
+    .map((hook) => hook.event)
+    .filter(Boolean);
+  return events.length ? `Hook: ${events.join(" / ")}` : "手动/Planner 调用";
+}
+
+function toolImplementationRows(tool = {}, data = {}) {
+  const moduleName = data.module || "";
+  const entrypoint = tool.entrypoint ? [moduleName, tool.entrypoint].filter(Boolean).join(".") : moduleName;
+  return [
+    ["实现", entrypoint || "未声明"],
+    ["触发", toolTriggerText(tool, data.hooks || [])],
+    ["确定性", determinismLabel(tool.determinism)],
+    ["失败策略", failurePolicyLabel(tool.failure_policy)],
+    ["超时", tool.timeout_seconds ? `${tool.timeout_seconds}s` : "未声明"],
+    ["内存上限", tool.memory_limit_mb ? `${tool.memory_limit_mb} MB` : "未声明"],
+    ["副作用", Array.isArray(tool.side_effects) && tool.side_effects.length ? tool.side_effects.join(" / ") : "无"],
+  ];
+}
+
+function toolImplementationHtml(tool, data) {
+  return [
+    '<dl class="plugin-tool-impl">',
+    ...toolImplementationRows(tool, data).map(([label, value]) => (
+      `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`
+    )),
+    "</dl>",
+  ].join("");
+}
+
+const PLUGIN_ZIP_TREE_EXAMPLE = `sample_pack.zip
+└── sample_pack/
+    ├── manifest.json
+    └── tools.py`;
+
+const PLUGIN_MANIFEST_EXAMPLE = {
+  name: "sample_pack",
+  version: "0.1.0",
+  display_name: "Sample Pack",
+  description: "Demo plugin with one deterministic tool.",
+  module: "sample_pack.tools",
+  python_requires: ">=3.10,<3.14",
+  permissions: ["read:input"],
+  tools: [
+    {
+      name: "echo",
+      summary: "Echo a message.",
+      entrypoint: "tool_echo",
+      determinism: "deterministic",
+      timeout_seconds: 10,
+      failure_policy: "fail",
+      side_effects: ["read:input"],
+      input_schema: {
+        type: "object",
+        properties: { message: { type: "string", minLength: 1 } },
+        required: ["message"],
+        additionalProperties: false,
+      },
+      output_schema: {
+        type: "object",
+        properties: { echoed: { type: "string" } },
+        required: ["echoed"],
+        additionalProperties: false,
+      },
+    },
+  ],
+  hooks: [],
+};
+
+const PLUGIN_TOOL_EXAMPLE = `def tool_echo(inputs, ctx):
+    return {"echoed": inputs["message"]}`;
+
+function codeBlockHtml(code) {
+  return `<pre><code>${escapeHtml(code)}</code></pre>`;
+}
+
+function pluginFormatGuideHtml() {
+  return `<details class="extension-format-guide plugin-format-guide">
+    <summary>
+      <span>
+        <strong>插件包格式示例</strong>
+        <span>上传 zip；包内放 manifest.json 和实现模块，manifest 里声明工具、入口函数、权限和输入输出 schema。</span>
+      </span>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+    </summary>
+    <div class="extension-format-guide-body">
+      <div>
+        <strong>zip 结构</strong>
+        ${codeBlockHtml(PLUGIN_ZIP_TREE_EXAMPLE)}
+      </div>
+      <div>
+        <strong>manifest.json</strong>
+        ${codeBlockHtml(JSON.stringify(PLUGIN_MANIFEST_EXAMPLE, null, 2))}
+      </div>
+      <div>
+        <strong>tools.py</strong>
+        ${codeBlockHtml(PLUGIN_TOOL_EXAMPLE)}
+      </div>
+    </div>
+  </details>`;
 }
 
 // Keeps the 查看工具 / 收起工具 toggle button's label, aria-expanded and
@@ -43,15 +159,13 @@ export function pluginToolsHtml(data = {}) {
     `<section class="plugin-tool">
       <div class="plugin-tool-head">
         <strong>${escapeHtml(tool.name || "")}</strong>
-        ${tool.description ? `<span>${escapeHtml(tool.description)}</span>` : ""}
+        ${tool.summary || tool.description ? `<span>${escapeHtml(tool.summary || tool.description)}</span>` : ""}
       </div>
-      <details class="plugin-tool-schemas">
-        <summary>输入 / 输出 schema</summary>
-        <div class="plugin-tool-schema">
-          <div><span class="plugin-schema-label">输入</span><pre><code>${schemaText(tool.input_schema)}</code></pre></div>
-          <div><span class="plugin-schema-label">输出</span><pre><code>${schemaText(tool.output_schema)}</code></pre></div>
-        </div>
-      </details>
+      ${toolImplementationHtml(tool, data)}
+      <div class="plugin-tool-schema">
+        ${schemaTableHtml(tool.input_schema, "输入")}
+        ${schemaTableHtml(tool.output_schema, "输出")}
+      </div>
     </section>`
   )).join("");
 }
@@ -102,6 +216,7 @@ export function pluginManagerHtml(data = {}) {
         <input type="file" data-upload-plugin accept=".zip">
       </label>
     </div>
+    ${pluginFormatGuideHtml()}
     <div class="plugin-list">${rows}</div>
   </section>`;
 }

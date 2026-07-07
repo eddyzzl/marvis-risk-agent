@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import json
 import re
 from typing import Any, Iterable
 
@@ -127,21 +128,34 @@ def retrieve_with_distillations(
     query = _query_from_context(query_context)
     context = _query_context_dict(query)
     packets: list[dict[str, Any]] = []
+    covered_source_ids: set[str] = set()
     distillation_limit = limit if raw_quota is None else max(0, limit - raw_quota)
     distillations = store.search_distillations(context, active_only=True, limit=limit)
-    for distillation in distillations:
-        if distillation.confidence == "low":
-            continue
-        packets.append(_distillation_packet(distillation))
-        if len(packets) >= distillation_limit:
-            break
+    if distillation_limit > 0:
+        for distillation in distillations:
+            if distillation.confidence == "low":
+                continue
+            packet = _distillation_packet(distillation)
+            packets.append(packet)
+            covered_source_ids.update(_source_memory_ids(packet))
+            if len(packets) >= distillation_limit:
+                break
 
     remaining = limit - len(packets)
     if raw_quota is not None:
         remaining = min(remaining, raw_quota)
     if remaining <= 0:
         return packets[:limit]
-    raw_results = retrieve_relevant_memories(_recall_raw_entries(store), query, limit=remaining)
+    raw_results = retrieve_relevant_memories(
+        _recall_raw_entries(store),
+        query,
+        limit=max(remaining * 4, remaining),
+    )
+    raw_results = _dedupe_raw_results(
+        raw_results,
+        covered_source_ids=covered_source_ids,
+        limit=remaining,
+    )
     packets.extend(_raw_packet(result.context_packet) for result in raw_results)
     return packets[:limit]
 
@@ -448,6 +462,51 @@ def _raw_packet(packet: dict[str, Any]) -> dict[str, Any]:
     out = dict(packet)
     out["kind"] = "raw"
     return out
+
+
+def _source_memory_ids(packet: dict[str, Any]) -> set[str]:
+    ids = packet.get("source_memory_ids")
+    if not isinstance(ids, (list, tuple, set)):
+        return set()
+    return {str(item) for item in ids if str(item).strip()}
+
+
+def _dedupe_raw_results(
+    raw_results: Iterable[MemorySearchResult],
+    *,
+    covered_source_ids: set[str],
+    limit: int,
+) -> list[MemorySearchResult]:
+    selected: list[MemorySearchResult] = []
+    seen_fingerprints: set[tuple[str, str, str]] = set()
+    for result in raw_results:
+        packet = result.context_packet
+        raw_id = str(packet.get("id") or "")
+        if raw_id and raw_id in covered_source_ids:
+            continue
+        fingerprint = _raw_memory_fingerprint(packet)
+        if fingerprint in seen_fingerprints:
+            continue
+        seen_fingerprints.add(fingerprint)
+        selected.append(result)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _raw_memory_fingerprint(packet: dict[str, Any]) -> tuple[str, str, str]:
+    payload = packet.get("payload")
+    return (
+        str(packet.get("memory_type") or ""),
+        _normalize_text(packet.get("summary")),
+        json.dumps(
+            payload if isinstance(payload, dict) else {},
+            default=str,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
 
 
 def _query_from_context(query_context: dict[str, Any] | MemoryQuery) -> MemoryQuery:

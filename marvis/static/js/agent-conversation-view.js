@@ -91,7 +91,22 @@ export function agentMessageIsAdvanceIntent(message) {
   if (["不继续", "不要继续", "先不继续", "暂不继续", "不用继续", "别继续", "无需继续"].some((marker) => content.includes(marker))) {
     return false;
   }
-  const phrases = ["开始", "开始验证", "继续", "继续吧", "继续执行", "继续下一步", "下一步"];
+  const phrases = [
+    "开始",
+    "开始验证",
+    "开始模型验证",
+    "开始特征分析",
+    "开始数据处理",
+    "开始建模",
+    "开始模型开发",
+    "开始策略开发",
+    "开始风险分析",
+    "继续",
+    "继续吧",
+    "继续执行",
+    "继续下一步",
+    "下一步",
+  ];
   if (phrases.includes(content)) return true;
   return phrases.includes(stripAgentAdvanceIntentAffixes(content));
 }

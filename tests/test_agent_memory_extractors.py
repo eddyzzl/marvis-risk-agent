@@ -40,6 +40,51 @@ def test_extract_model_experience_from_structured_validation_results():
     }
 
 
+def test_extract_model_experience_keeps_metrics_when_model_version_missing():
+    result = {
+        "task_id": "task-202601",
+        "model_name": "分润通用A卡模型",
+        "model_version": "",
+        "month": "202601",
+        "channel": "自营",
+        "scope": "mob3贷前A卡",
+        "metrics": {"ks": 30.4, "auc": 0.721, "psi": 0.083},
+        "important_feature_sources": ["征信", "交易"],
+    }
+
+    candidate = extract_model_experience(result)
+
+    assert candidate is not None
+    assert candidate.memory_type == "model_experience"
+    assert candidate.payload["model_version"] == "未标注"
+    assert "PSI为0.083" in candidate.summary
+
+
+def test_extract_model_experience_summary_formats_long_float_metrics():
+    result = {
+        "task_id": "task-202601",
+        "model_name": "A卡模型",
+        "model_version": "",
+        "month": "202601",
+        "channel": "自营",
+        "scope": "mob3贷前A卡",
+        "metrics": {
+            "ks": 0.33306610440224665,
+            "auc": 0.7244784277697583,
+            "psi": 0.048773171474789045,
+        },
+        "important_feature_sources": ["征信"],
+    }
+
+    candidate = extract_model_experience(result)
+
+    assert candidate is not None
+    assert "KS为0.333066" in candidate.summary
+    assert "AUC为0.724478" in candidate.summary
+    assert "PSI为0.0487732" not in candidate.summary
+    assert "PSI为0.048773" in candidate.summary
+
+
 def test_extract_validation_pitfall_from_notebook_pmml_field_execution_and_report_failures():
     failures = [
         {"kind": "notebook", "message": "RMC_SCORE_FN missing, notebook cannot score sample"},

@@ -55,6 +55,10 @@ def test_tier_settings_show_guardrail_constant_note_and_tier_limits():
           ],
         });
 
+        assert.ok(html.includes('class="tier-settings-head"'));
+        assert.ok(html.includes('class="tier-settings-list"'));
+        assert.ok(html.includes("能力档位"));
+        assert.ok(html.includes("选择 Agent 默认自治预算"));
         assert.ok(html.includes("安全护栏保持一致"));
         assert.ok(html.includes("均衡"));
         assert.ok(html.includes("autonomy_level"));

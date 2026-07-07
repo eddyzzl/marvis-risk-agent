@@ -126,8 +126,13 @@ export function tierSettingsHtml(data = {}) {
     </label>`;
   }).join("");
   return `<section class="tier-settings">
-    <p class="tier-guardrail-note">能力档位只影响自治程度；证据、确认门和安全护栏保持一致。</p>
-    ${rows}
+    <div class="tier-settings-head">
+      <div class="settings-row-text">
+        <strong>能力档位</strong>
+        <span>选择 Agent 默认自治预算。档位只影响重规划、计划深度和探索模式；证据、确认门和安全护栏保持一致。</span>
+      </div>
+    </div>
+    <div class="tier-settings-list">${rows}</div>
   </section>`;
 }
 

@@ -54,6 +54,96 @@ def test_retrieve_with_distillations_prefers_high_confidence_and_backfills_raw(t
     assert packets[1]["source_task_id"] == "task-raw"
 
 
+def test_retrieve_with_distillations_skips_raw_entries_covered_by_distillation(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    covered = store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary="A卡验证里坏样本字段常用 bad_flag。",
+            payload={"target_col": "bad_flag"},
+            source_task_id="task-covered",
+            confidence="high",
+        )
+    )
+    uncovered = store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary="A卡验证里备用坏样本字段也可能使用 bad_flag_alt。",
+            payload={"target_col": "bad_flag_alt"},
+            source_task_id="task-uncovered",
+            confidence="high",
+        )
+    )
+    distillation = store.create_distillation(
+        new_distillation(
+            category="field_convention",
+            scope_key="field_convention:target_col",
+            distilled_summary="A卡坏样本字段常见取值包括 bad_flag。",
+            structured={"fields": {"target_col": ["bad_flag"]}},
+            source_memory_ids=(covered.id,),
+            support_count=3,
+        )
+    )
+
+    packets = retrieve_with_distillations(
+        store,
+        {"keywords": ["bad_flag"], "scope": "A卡"},
+        limit=3,
+        raw_quota=2,
+    )
+
+    assert packets[0]["kind"] == "distillation"
+    assert packets[0]["id"] == distillation.id
+    raw_ids = {packet["id"] for packet in packets if packet["kind"] == "raw"}
+    assert covered.id not in raw_ids
+    assert uncovered.id in raw_ids
+
+
+def test_retrieve_with_distillations_dedupes_identical_raw_prompt_packets(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    payload = {
+        "target_col": "y",
+        "score_col": "pred",
+        "split_col": "split",
+        "time_col": "apply_month",
+    }
+    summary = "字段口径：目标字段=y，分数字段=pred，样本分组字段=split，时间字段=apply_month"
+    first = store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary=summary,
+            payload=dict(payload),
+            source_task_id="task-1",
+            confidence="high",
+        )
+    )
+    second = store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary=summary,
+            payload=dict(payload),
+            source_task_id="task-2",
+            confidence="high",
+        )
+    )
+
+    packets = retrieve_with_distillations(
+        store,
+        {"keywords": ["pred", "apply_month"], "scope": "字段口径"},
+        limit=4,
+        raw_quota=4,
+    )
+
+    raw_packets = [packet for packet in packets if packet["kind"] == "raw"]
+    raw_ids = {packet["id"] for packet in raw_packets}
+    assert len(raw_packets) == 1
+    assert raw_ids <= {first.id, second.id}
+
+
 def test_retrieve_with_distillations_raw_quota_reserves_slots_for_raw_entries(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

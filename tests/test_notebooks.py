@@ -670,6 +670,61 @@ def test_cell_complete_marks_running_step_succeeded_when_executed_callback_is_mi
     assert progress["cells"][0]["status"] == "succeeded"
 
 
+def test_next_cell_start_finalizes_prior_running_cell_when_complete_callback_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    notebook_path = tmp_path / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    progress_path = tmp_path / "notebook_steps.json"
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_markdown_cell("# Notebook 建模"),
+            nbformat.v4.new_code_cell("fit_model()"),
+            nbformat.v4.new_code_cell("check_contract()"),
+        ],
+        metadata={"kernelspec": {"name": "python3", "display_name": "Python 3"}},
+    )
+    notebook.cells[2].metadata["marvis"] = "tail"
+    nbformat.write(notebook, notebook_path)
+
+    progress_at_tail_start = {}
+
+    class FakeNotebookClient:
+        def __init__(self, notebook, timeout, kernel_name, **callbacks):
+            self.notebook = notebook
+            self.callbacks = callbacks
+
+        def execute(self, **_kwargs):
+            self.callbacks["on_cell_start"](cell=self.notebook.cells[1], cell_index=1)
+            self.callbacks["on_cell_start"](cell=self.notebook.cells[2], cell_index=2)
+            progress_at_tail_start.update(json.loads(progress_path.read_text(encoding="utf-8")))
+            self.callbacks["on_cell_executed"](cell=self.notebook.cells[2], cell_index=2)
+            self.callbacks["on_cell_complete"](cell=self.notebook.cells[2], cell_index=2)
+
+    monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
+
+    session = NotebookExecutionSession(
+        notebook_path=notebook_path,
+        executed_path=executed_path,
+        log_path=log_path,
+        timeout=60,
+        kernel_name="python3",
+        progress_path=progress_path,
+    )
+    try:
+        result = session.execute_notebook(keep_alive=False)
+    finally:
+        session.close()
+
+    assert result.succeeded is True
+    assert [step["status"] for step in progress_at_tail_start["steps"]] == [
+        "succeeded",
+        "running",
+    ]
+
+
 def test_successful_execution_finalizes_stray_running_cell_events():
     notebook = nbformat.v4.new_notebook(
         cells=[

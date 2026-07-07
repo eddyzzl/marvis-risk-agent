@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import marvis.orchestrator.templates as templates_module
 
 from marvis.db import PluginRepository, init_db
 from marvis.orchestrator.contracts import PostCheck
@@ -77,6 +78,30 @@ def test_load_builtin_templates_registers_sample_echo_idempotently():
     assert not any(step.decision_point for step in standard_modeling.steps)
     assert standard_modeling.success_criteria == ()
     assert "standard_modeling" in builtin_template_ids()
+
+
+def test_load_builtin_templates_refreshes_stale_builtin_placeholders():
+    load_builtin_templates()
+    templates_module._TEMPLATES["data_join"] = WorkflowTemplate(
+        id="data_join",
+        title="数据拼接",
+        goal_patterns=("数据拼接",),
+        slots=(),
+        steps=(),
+        source="builtin",
+    )
+    assert len(get_template("data_join").steps) == 0
+
+    load_builtin_templates()
+
+    refreshed = get_template("data_join")
+    assert refreshed.source == "builtin"
+    assert len(refreshed.slots) == 3
+    assert [step.tool_ref for step in refreshed.steps] == [
+        ToolRef("data_ops", "propose_join"),
+        ToolRef("data_ops", "confirm_join"),
+        ToolRef("data_ops", "execute_join"),
+    ]
 
 
 def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):

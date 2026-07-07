@@ -45,6 +45,53 @@ def test_skill_manager_html_renders_states_and_escapes_rejected_problems():
     )
 
 
+def test_skill_manager_html_renders_clickable_builtin_workflow_details():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { skillManagerHtml } from "./marvis/static/js/v2/skill_manager.js";
+
+        const html = skillManagerHtml({
+          active: [],
+          disabled: [],
+          rejected: [],
+          builtin: [{
+            id: "sample_echo",
+            title: "Sample Echo Workflow",
+            goal_patterns: ["echo", "sample echo"],
+            default_autonomy: 1,
+            slots: [{
+              name: "message",
+              required: true,
+              source: "user",
+              description: "Message to echo",
+            }],
+            steps: [{
+              title: "Echo",
+              tool: { plugin: "_sample", tool: "echo", version: "" },
+              inputs: { message: "{slot:message}" },
+              depends_on: [],
+              post_checks: [{ kind: "nonempty", spec: { field: "echoed" } }],
+              needs_confirmation: false,
+              decision_point: false,
+            }],
+          }],
+        });
+
+        assert.ok(html.includes("skill-builtin-workflow"));
+        assert.ok(html.includes("<summary>"));
+        assert.ok(html.includes("点击任一 Workflow 查看槽位、步骤、工具和输入模板"));
+        assert.ok(html.includes("Sample Echo Workflow"));
+        assert.ok(html.includes("sample_echo · 1 步 · L1"));
+        assert.ok(html.includes("触发意图：echo / sample echo"));
+        assert.ok(html.includes("Message to echo"));
+        assert.ok(html.includes("_sample.echo"));
+        assert.ok(html.includes("&quot;message&quot;: &quot;{slot:message}&quot;"));
+        assert.ok(html.includes("nonempty"));
+      """
+    )
+
+
 def test_skill_handlers_reload_validate_and_report_local_json_errors():
     run_node(
         """
