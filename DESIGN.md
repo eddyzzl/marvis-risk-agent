@@ -2,8 +2,8 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-06-04
-- Primary product surfaces: local MARVIS credit-risk-agent workbench, current model-validation workflow, Agent-assisted explanations and report drafting, generated evidence, Excel/Word reports, and runtime branding.
+- Last refreshed: 2026-07-08
+- Primary product surfaces: local MARVIS credit-risk-agent workbench, V2 workflow task entries, Agent-driven plan/gate execution, model-validation compatibility flow, structured evidence, downloads/reports, audit history, Agent memory, and runtime branding.
 - Evidence reviewed: current `README.md`, `README.zh-CN.md`, `docs/roadmap.md`, `docs/versioning.md`, `docs/branding.md`, `docs/notebook_contract.md`, `docs/runbook.md`, and the static FastAPI-served frontend.
 - Roadmap reference: use `docs/roadmap.md` for version phases and Plugin/Tool/Hook/Workflow terminology. Keep this file focused on product experience and interface decisions.
 
@@ -18,26 +18,27 @@
 
 ## Product goals
 - Goals: make MARVIS a local-first credit-risk agent that assists governed validation, modeling, analysis, strategy, and monitoring work through structured workflows.
-- Current V1 goal: keep model validation stable and demonstrable through task creation, material scanning, notebook execution, deterministic validation evidence, Agent explanations, report conclusion confirmation, and Excel/Word output.
-- V1.1 experience goal: let Agent use auditable cross-task memory for user preferences, field conventions, validation pitfalls, task experience, model experience, and future skill-experience hooks while preserving deterministic validation results.
-- V2+ experience goal: let Agent understand a user goal, plan with available plugins/tools/hooks, execute controlled Python capabilities, and return structured evidence and report content.
+- Current V2 goal: let users run real credit-risk workflows for data processing, feature analysis, model development, model validation, strategy, Vintage/risk analysis, monitoring, and portfolio-style analysis through governed Agent conversations and structured controls.
+- Compatibility goal: keep model validation stable and demonstrable through task creation, material scanning, notebook execution, deterministic validation evidence, Agent explanations, report conclusion confirmation, and Excel/Word output.
+- Memory goal: let Agent use auditable cross-task memory for user preferences, field conventions, validation/modeling/strategy pitfalls, task experience, model experience, and workflow experience while preserving deterministic results.
+- Runtime goal: let Agent understand a user goal, plan with available plugins/tools/hooks, execute controlled Python capabilities, and return structured evidence, artifacts, and report content.
 - Non-goals: marketing homepage, arbitrary unreviewed code execution, report styling rewrites unrelated to structured task output, hidden memory use, or overclaiming unsupported workflows before their plugins exist.
 - Success signals: one obvious next action, evidence readable without code knowledge, Agent explanations traceable to current evidence or memory references, and generated reports grounded in structured results.
 
 ## Personas and jobs
 - Primary personas: credit-risk modelers, risk analysts, strategy operators, and model validation staff who can operate a local web tool but should not need to read raw JSON or manually wire scripts together.
-- Current V1 user jobs: choose a project folder, verify model-validation materials, execute notebook logic, inspect key metrics, complete fixed report fields, export Word/Excel.
-- V1.1 user jobs: receive useful historical reminders inside Agent analysis, understand whether a new validation result improved or declined compared with comparable historical models, reuse known field conventions and validation pitfalls, and manage memory entries when needed.
-- Future user jobs: prepare modeling evidence, compare risk segments, evaluate strategy changes, monitor portfolio quality, and let governed plugins turn those tasks into structured outputs.
+- Current user jobs: join and clean datasets, analyze features, train and compare models, validate submitted models, design and backtest strategies, inspect Vintage/risk signals, run monitoring or portfolio-style analysis, and export auditable reports/artifacts.
+- Memory-backed user jobs: receive useful historical reminders inside Agent analysis, understand whether a new result improved or declined compared with comparable historical work, reuse known field conventions and pitfalls, and manage memory entries when needed.
+- Future user jobs: scheduled monitoring, multi-user review/approval, real-time scoring handoff, stronger portfolio management loops, and governed third-party workflow packs.
 - Key contexts of use: local Jupyter terminal / notebook proxy, internal network, repeated credit-risk analysis and validation tasks.
 
 ## Information architecture
 - Primary navigation: brand-configurable left task sidebar with platform title, task list, task search, create action, and settings for sort/group/theme.
 - Core current screen: single resizable workbench with task management on the left, live task evidence in the center, and report/output canvas on the right.
 - Agent surface: center-column conversation that sits with task evidence, not as a detached chatbot unrelated to the current task.
-- V1.1 memory surface: memory should appear inside Agent explanations, warnings, comparison summaries, report-draft rationale, and future workflow choices. Do not add a fixed top/center memory block that lists matched memories.
+- Memory surface: memory should appear inside Agent explanations, warnings, comparison summaries, report-draft rationale, and workflow choices. Do not add a fixed top/center memory block that lists matched memories.
 - Memory management surface: settings or audit management view for listing, inspecting, disabling, deleting, and exporting memory audit records. It is not a default task dashboard panel.
-- V2+ plugin surface: plugin/tool execution output should appear as native evidence sections, tables, charts, findings, and report sections.
+- Plugin/tool surface: plugin/tool execution output should appear as native evidence sections, tables, charts, findings, and report sections.
 
 ## Design principles
 - Principle 1: keep creation-time configuration in the create-task dialog, including manual/Agent mode selection.
@@ -59,8 +60,8 @@
 - Existing components to reuse: static FastAPI-served HTML/CSS/JS, current task/report API ids, existing task evidence sections, current Agent conversation UI.
 - Existing Agent components: LLM settings, center-column conversation, asymmetric user/Agent messages, staged evidence summaries, Word conclusion confirmation gate.
 - Branding components: runtime brand loader, brand config schema, sidebar logo/name binding, favicon/title binding, CSS primary-color token, and public default MARVIS logo/favicon.
-- V1.1 components to design: inline memory-aware Agent statements, expandable memory references on Agent messages, memory management/audit view, memory disable/delete actions, and memory-use audit metadata.
-- V2 components to design later: plugin registry, tool run evidence panel, hook run evidence panel, workflow plan view, extension metric tables, extension report sections, and plugin output display declarations.
+- Memory components: inline memory-aware Agent statements, expandable memory references on Agent messages, memory management/audit view, memory disable/delete actions, and memory-use audit metadata.
+- Workflow/runtime components: plugin registry, tool run evidence panel, hook run evidence panel, workflow plan/right-rail view, extension metric tables, extension report sections, and plugin output display declarations.
 - Variants and states: primary/secondary/disabled/loading/error/success buttons; empty/loading/error/success summaries; high/medium/low confidence memory comparison states; disabled memory state; deleted-memory reference state.
 - Token/component ownership: `marvis/static/styles.css`.
 
@@ -101,6 +102,7 @@
 - Plugin constraints: plugin/tool/hook outputs must return structured results; platform owns Word/Excel/chart rendering.
 
 ## Open questions
-- [ ] V1.1 memory management UI placement: settings modal first, then dedicated audit screen if volume requires it.
-- [ ] V2 plugin upload UI: administrator-only, ordinary user with confirmation, or local developer-only in the first release.
-- [ ] V2 execution isolation: process-local controlled execution for alpha, subprocess boundary, or container boundary before public use.
+- [ ] Memory management UI placement: settings modal first, then dedicated audit screen if volume requires it.
+- [ ] Plugin upload UI: administrator-only, ordinary user with confirmation, or local developer-only for public builds.
+- [ ] Portfolio/monitoring exposure: decide which backend-supported analysis workflows deserve first-screen task cards versus being launched from modeling/strategy outputs.
+- [ ] Multi-user governance: decide whether maker-checker, role permissions, and approval exports belong in V3 or remain explicit deployment guidance.

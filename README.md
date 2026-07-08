@@ -16,7 +16,7 @@
 
 ---
 
-MARVIS-Agent V2 is the development line for a usable credit-risk Agent workbench. It keeps governed work close to local files, local runtimes, and auditable evidence while expanding beyond the stable V1.1 model-validation workflow.
+MARVIS-Agent V2 is the current mainline for a usable credit-risk Agent workbench. It keeps governed work close to local files, local runtimes, and auditable evidence while expanding beyond the stable V1.1 model-validation workflow.
 
 V2 is not just a runtime shell: every task entry shown on the welcome screen is a real end-to-end workflow with human-in-the-loop confirmation, tool execution, structured results, downloads or reports, and audit history. As of V2.0 this covers data join, feature analysis, model development and delivery, scoring and monitoring, strategy development (cutoff bands, rule mining, adoption with versioning), portfolio analysis, limit/pricing, and ad-hoc slice analytics — see `docs/plans/v2-master-backlog.md` and `docs/reviews/` for the full evidence trail.
 
@@ -37,7 +37,7 @@ Current status in this checkout:
 
 ## Core Docs
 
-- [Roadmap](docs/roadmap.md): V1/V1.1/V2/V3/V4 phases and Plugin/Tool/Hook/Workflow terminology.
+- [Roadmap](docs/roadmap.md): current V2 platform map, V1 compatibility boundary, future V3/V4 directions, and Plugin/Tool/Hook/Workflow terminology.
 - [Versioning](docs/versioning.md): release helper, tags, version bumps, and forward-port rules.
 - [Notebook contract](docs/notebook_contract.md): the current model-validation notebook runtime contract.
 - [Design](DESIGN.md): product experience and UI/UX decision source of truth.

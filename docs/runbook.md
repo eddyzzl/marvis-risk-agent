@@ -1,6 +1,6 @@
 # MARVIS 本地运行手册（V2.1.8）
 
-MARVIS-Agent 的产品边界是面向建模、分析、策略和验证的信贷风控智能体。当前 V2.1.8 公开版已经稳定落地的是模型验证工作流，因此本手册的流水线部分以该工作流为例。
+MARVIS-Agent 的产品边界是面向数据处理、特征分析、建模、验证、策略、监控和组合分析的本地优先信贷风控智能体。当前 V2.1.8 公开版已经进入多工作流 Agent 平台主线；本手册的直接 CLI 流水线部分仍以模型验证兼容工作流为例，因为它是最稳定、最适合脚本化演示的路径。
 
 ## 本地部署要求
 
@@ -126,15 +126,15 @@ export MARVIS_TRUSTED_PROXY_HOSTS="127.0.0.1"
 marvis serve --profile main
 # http://127.0.0.1:8000, workspace ./workspace-main
 
-# V1.1 开发或对比
-marvis serve --profile v1-1
-# http://127.0.0.1:8001, workspace ./workspace-v1-1
+# V2 开发或对比
+marvis serve --profile v2
+# http://127.0.0.1:8200, workspace ./workspace-v2
 ```
 
 显式参数优先：
 
 ```bash
-marvis serve --profile v1-1 --port 8017 --workspace ./custom-workspace
+marvis serve --profile v2 --port 8217 --workspace ./custom-workspace
 ```
 
 ## 升级
