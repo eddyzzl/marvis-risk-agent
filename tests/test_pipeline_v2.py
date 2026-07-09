@@ -361,7 +361,16 @@ def test_v1_validation_appended_policy_matches_generated_cell_kinds(tmp_path: Pa
             excel_path=tmp_path / "validation.xlsx",
         )
     }
-    generated_kinds = reproducibility_kinds | metrics_kinds
+    stress_sources = dict(
+        pipeline_module._build_stress_scenario_score_cell_sources(
+            task=task,
+            settings=settings,
+            dictionary_path=tmp_path / "dictionary.csv",
+            contract_meta_path=tmp_path / "runtime_contract.json",
+            output_path=tmp_path / "stress_scenario_scores.json",
+        )
+    )
+    generated_kinds = reproducibility_kinds | metrics_kinds | set(stress_sources)
 
     assert generated_kinds == set(pipeline_module.V1_VALIDATION_APPENDED_CELL_KINDS)
     assert (
@@ -372,6 +381,7 @@ def test_v1_validation_appended_policy_matches_generated_cell_kinds(tmp_path: Pa
     )
     assert "_rmc_consistency_status(" in reproducibility_sources["repro-compare"]
     assert "PASS if _rmc_mismatch_count == 0" not in reproducibility_sources["repro-compare"]
+    assert "from marvis" not in stress_sources["stress-scores"]
 
 
 def test_metrics_cell_handles_null_split_and_time_columns_in_history(tmp_path: Path):
@@ -809,10 +819,7 @@ def test_notebook_stage_can_write_reproducibility_in_isolated_worker(
         assert kwargs["keep_alive"] is False
         assert kwargs["isolated"] is True
         assert kwargs["mark_executed"] is False
-        assert [kind for kind, _source in extra_code_cells] == [
-            "repro-pmml",
-            "repro-compare",
-        ]
+        assert [kind for kind, _source in extra_code_cells] == []
         contract_meta_path.write_text(
             json.dumps(
                 {
@@ -830,13 +837,8 @@ def test_notebook_stage_can_write_reproducibility_in_isolated_worker(
             encoding="utf-8",
         )
         code_scores_path.write_text("row_index,code_model_score\n0,0.1\n")
-        output_path = (
-            workspace
-            / "tasks"
-            / task.id
-            / "outputs"
-            / REPRODUCIBILITY_RESULT_JSON
-        )
+
+    def fake_write_reproducibility_result(*, output_path, **_kwargs):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
             json.dumps({"summary": {"status": "pass"}, "rows": []}),
@@ -844,6 +846,10 @@ def test_notebook_stage_can_write_reproducibility_in_isolated_worker(
         )
 
     monkeypatch.setattr("marvis.pipeline._notebook_step_v3", fake_notebook_step_v3)
+    monkeypatch.setattr(
+        "marvis.pipeline.write_reproducibility_result",
+        fake_write_reproducibility_result,
+    )
 
     run_notebook_stage(
         task_id=task.id,
@@ -936,21 +942,23 @@ def test_metrics_stage_reruns_isolated_notebook_even_with_stale_live_session(
         assert kwargs["isolated"] is True
         assert kwargs["stage_claimed"] is True
         assert kwargs["notebook_steps_path"] == execution_dir / "metrics_steps.json"
-        assert [kind for kind, _source in extra_code_cells] == [
-            "metrics-prepare",
-            "metrics-score",
-            "metrics-basic",
-            "metrics-ks",
-            "metrics-psi",
-            "metrics-binning",
-            "metrics-stress",
-            "metrics-output",
-        ]
+        assert [kind for kind, _source in extra_code_cells] == ["stress-scores"]
+        (execution_dir / "stress_scenario_scores.json").write_text(
+            json.dumps({"categories": []}),
+            encoding="utf-8",
+        )
+
+    def fake_write_platform_validation_metrics(*, results_json_path, excel_path, **_kwargs):
         metrics_work_dir = outputs_dir / ".metrics-stage-work"
+        metrics_work_dir.mkdir(parents=True, exist_ok=True)
         (metrics_work_dir / "validation_results.json").write_text("{}", encoding="utf-8")
         (metrics_work_dir / "validation.xlsx").write_bytes(b"xlsx")
 
     monkeypatch.setattr("marvis.pipeline._notebook_step_v3", fake_notebook_step_v3)
+    monkeypatch.setattr(
+        "marvis.pipeline.write_platform_validation_metrics",
+        fake_write_platform_validation_metrics,
+    )
 
     run_metrics_stage(
         task_id=task.id,
@@ -2236,9 +2244,7 @@ def test_staged_pipeline_isolated_mode_merged_run_calls_notebook_step_once(
         assert kwargs["keep_alive"] is False
         assert kwargs["isolated"] is True
         kinds = [kind for kind, _source in extra_code_cells]
-        assert kinds[:2] == ["repro-pmml", "repro-compare"]
-        assert "metrics-prepare" in kinds
-        assert "metrics-output" in kinds
+        assert kinds == ["stress-scores"]
         if not stage_claimed:
             repo.update_status(
                 task.id,
@@ -2268,22 +2274,41 @@ def test_staged_pipeline_isolated_mode_merged_run_calls_notebook_step_once(
             encoding="utf-8",
         )
         code_scores_path.write_text("row_index,code_model_score\n0,0.1\n")
+        (execution_dir / "stress_scenario_scores.json").write_text(
+            json.dumps({"categories": []}),
+            encoding="utf-8",
+        )
         (execution_dir / "model_meta.json").write_text(
             json.dumps({"algorithm": "lgb", "feature_importance": [], "hyperparameters": {}}),
             encoding="utf-8",
         )
         outputs_dir = workspace / "tasks" / task.id / "outputs"
         outputs_dir.mkdir(parents=True, exist_ok=True)
-        (outputs_dir / REPRODUCIBILITY_RESULT_JSON).write_text(
+
+    def fake_write_reproducibility_result(*, output_path, **_kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
             json.dumps({"summary": {"status": "pass"}, "rows": []}),
             encoding="utf-8",
         )
+
+    def fake_write_platform_validation_metrics(*, results_json_path, excel_path, **_kwargs):
+        outputs_dir = workspace / "tasks" / task.id / "outputs"
+        outputs_dir.mkdir(parents=True, exist_ok=True)
         metrics_work_dir = outputs_dir / ".metrics-stage-work"
         metrics_work_dir.mkdir(parents=True, exist_ok=True)
-        (metrics_work_dir / "validation_results.json").write_text("{}", encoding="utf-8")
-        (metrics_work_dir / "validation.xlsx").write_bytes(b"xlsx")
+        results_json_path.write_text("{}", encoding="utf-8")
+        excel_path.write_bytes(b"xlsx")
 
     monkeypatch.setattr("marvis.pipeline._notebook_step_v3", fake_notebook_step_v3)
+    monkeypatch.setattr(
+        "marvis.pipeline.write_reproducibility_result",
+        fake_write_reproducibility_result,
+    )
+    monkeypatch.setattr(
+        "marvis.pipeline.write_platform_validation_metrics",
+        fake_write_platform_validation_metrics,
+    )
 
     settings = PipelineSettings(
         workspace=workspace,

@@ -72,98 +72,72 @@ function Read-CondaListFile {
     return $rows
 }
 
-function Assert-ValidationPackageListIsSupported {
-    param([string] $Path)
-    if (-not (Test-Path $Path)) {
-        throw "Validation package list was not found at $Path"
-    }
-    $packages = Read-CondaListFile -Path $Path
-    $python = $packages["python"]
-    $jpype = $packages["jpype1"]
-    $platformOnly = @("ld_impl_linux-64", "libgcc-ng", "libstdcxx-ng", "dbus", "gst-plugins-base", "gstreamer")
-    $presentPlatformOnly = @()
-    foreach ($name in $platformOnly) {
-        if ($packages.ContainsKey($name)) {
-            $presentPlatformOnly += $name
+function Write-ValidationCompatibilityReport {
+    param(
+        [string] $Path,
+        [string] $PackageListPath,
+        [string[]] $SkippedPackages,
+        [string[]] $FailedOptionalPackages
+    )
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("MARVIS validation runtime compatibility report")
+    $lines.Add("")
+    $lines.Add("Source package list: $PackageListPath")
+    $lines.Add("Runtime role: selectable Jupyter kernel for user model-validation notebooks only.")
+    $lines.Add("Platform validation metrics run in the MARVIS platform runtime, not in this Python 3.7 kernel.")
+    $lines.Add("")
+    $lines.Add("Known source conflicts handled by the Windows packaging bridge:")
+    $lines.Add("- Linux-only conda packages from pkg.txt are not installed into the native Windows runtime.")
+    $lines.Add("- The current MARVIS package is not installed into this Python 3.7 runtime.")
+    $lines.Add("- PMML/JVM-backed validation runs in the platform runtime, so jpype1 from pkg.txt is not required here.")
+    $lines.Add("")
+    if ($SkippedPackages.Count -gt 0) {
+        $lines.Add("Skipped packages:")
+        foreach ($entry in $SkippedPackages) {
+            $lines.Add("- $entry")
         }
+        $lines.Add("")
     }
-    $pythonVersion = if ($python) { $python.Version } else { "unknown" }
-    $jpypeVersion = if ($jpype) { $jpype.Version } else { "not listed" }
-    $reasons = @()
-    if ($pythonVersion.StartsWith("3.7.")) {
-        $reasons += "pkg.txt pins Python $pythonVersion, but the current MARVIS package and injected validation cells require Python >=3.11."
+    if ($FailedOptionalPackages.Count -gt 0) {
+        $lines.Add("Optional packages that failed to install:")
+        foreach ($entry in $FailedOptionalPackages) {
+            $lines.Add("- $entry")
+        }
+        $lines.Add("")
     }
-    if ($presentPlatformOnly.Count -gt 0) {
-        $reasons += "pkg.txt contains Linux-only conda packages that cannot be installed into a native Windows runtime: $($presentPlatformOnly -join ', ')."
-    }
-    if ($jpypeVersion -eq "1.5.0") {
-        $reasons += "pkg.txt pins jpype1==1.5.0; Windows cp37 wheel resolution fails because that version requires a newer Python than 3.7."
-    }
-    if ($reasons.Count -gt 0) {
-        throw @"
-The requested validation execution environment cannot be bundled as a working Windows kernel yet.
-
-$($reasons -join "`n")
-
-Keep the MARVIS platform runtime separate. To support this legacy validation package list, the validation pipeline needs a compatibility bridge that runs the user notebook in the legacy kernel but runs MARVIS injected deterministic validation cells in the platform runtime, or the package list needs to be rebuilt on Python >=3.11 with compatible package versions.
-"@
-    }
+    $lines.Add("Core packages are installed from packaging/windows/validation/requirements-core-win-py37.txt.")
+    $lines.Add("Optional packages are attempted from packaging/windows/validation/requirements-optional-win-py37.txt.")
+    Set-Content -Encoding utf8 -Path $Path -Value $lines.ToArray()
 }
 
-function Write-ValidationPackageInstallSpecs {
+function Install-PipRequirementLines {
     param(
-        [string] $PackageListPath,
-        [string] $CondaSpecPath,
-        [string] $PipRequirementsPath
+        [string] $PythonExe,
+        [string] $RequirementsPath,
+        [string] $ConstraintPath = "",
+        [switch] $Required
     )
-
-    $packages = Read-CondaListFile -Path $PackageListPath
-    $skipConda = @(
-        "_libgcc_mutex",
-        "anaconda",
-        "anaconda-client",
-        "anaconda-navigator",
-        "anaconda-project",
-        "conda",
-        "conda-build",
-        "conda-env",
-        "conda-package-handling",
-        "conda-verify",
-        "ipykernel",
-        "ld_impl_linux-64",
-        "navigator-updater",
-        "pip",
-        "python",
-        "setuptools",
-        "wheel"
-    )
-    $skip = @{}
-    foreach ($name in $skipConda) {
-        $skip[$name] = $true
+    $failed = New-Object System.Collections.Generic.List[string]
+    foreach ($line in Get-Content $RequirementsPath) {
+        $requirement = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($requirement) -or $requirement.StartsWith("#")) {
+            continue
+        }
+        Write-Host "Installing validation package $requirement"
+        if ([string]::IsNullOrWhiteSpace($ConstraintPath)) {
+            & $PythonExe -m pip install --no-cache-dir --only-binary=:all: $requirement
+        } else {
+            & $PythonExe -m pip install --no-cache-dir --only-binary=:all: -c $ConstraintPath $requirement
+        }
+        if ($LASTEXITCODE -ne 0) {
+            if ($Required) {
+                throw "Installing required validation package failed: $requirement"
+            }
+            Write-Warning "Optional validation package failed and will be reported: $requirement"
+            $failed.Add($requirement)
+        }
     }
-
-    $condaSpecs = New-Object System.Collections.Generic.List[string]
-    $pipRequirements = New-Object System.Collections.Generic.List[string]
-    foreach ($row in ($packages.Values | Sort-Object { $_.Name.ToLowerInvariant() })) {
-        $name = [string] $row.Name
-        $version = [string] $row.Version
-        $build = [string] $row.Build
-        $channel = [string] $row.Channel
-        if ([string]::IsNullOrWhiteSpace($name) -or [string]::IsNullOrWhiteSpace($version)) {
-            continue
-        }
-        if ($channel -eq "pypi" -or $build -eq "pypi_0") {
-            $pipRequirements.Add("$name==$version")
-            continue
-        }
-        if ($skip.ContainsKey($name.ToLowerInvariant())) {
-            continue
-        }
-        $condaSpecs.Add("$name=$version")
-    }
-
-    Set-Content -Encoding ascii -Path $CondaSpecPath -Value $condaSpecs.ToArray()
-    Set-Content -Encoding ascii -Path $PipRequirementsPath -Value $pipRequirements.ToArray()
+    return $failed.ToArray()
 }
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
@@ -242,35 +216,60 @@ if ($IncludeValidationEnvironment) {
     if ([string]::IsNullOrWhiteSpace($ValidationPackageList)) {
         $ValidationPackageList = Join-Path $ScriptRoot "validation\pkg.txt"
     }
-    Assert-ValidationPackageListIsSupported -Path $ValidationPackageList
+    $ValidationPackages = Read-CondaListFile -Path $ValidationPackageList
+    $SkippedValidationPackages = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @(
+        "ld_impl_linux-64",
+        "libgcc-ng",
+        "libgfortran-ng",
+        "libstdcxx-ng",
+        "dbus",
+        "gst-plugins-base",
+        "gstreamer",
+        "jeepney",
+        "jpype1"
+    )) {
+        if ($ValidationPackages.ContainsKey($name)) {
+            $row = $ValidationPackages[$name]
+            $SkippedValidationPackages.Add("$($row.Name)==$($row.Version)")
+        }
+    }
     Write-Host "Creating optional validation execution runtime at $ValidationRuntimeRoot"
     & $MicromambaExe create -y -p $ValidationRuntimeRoot -f (Join-Path $ScriptRoot "validation\environment.yml")
     if ($LASTEXITCODE -ne 0) {
         throw "Validation execution runtime creation failed"
     }
-    $ValidationCondaSpecs = Join-Path $BuildRoot "validation-conda-specs.txt"
-    $ValidationPipRequirements = Join-Path $BuildRoot "validation-requirements.txt"
-    Write-ValidationPackageInstallSpecs `
-        -PackageListPath $ValidationPackageList `
-        -CondaSpecPath $ValidationCondaSpecs `
-        -PipRequirementsPath $ValidationPipRequirements
-    if ((Get-Item $ValidationCondaSpecs).Length -gt 0) {
-        & $MicromambaExe install -y -p $ValidationRuntimeRoot --file $ValidationCondaSpecs
-        if ($LASTEXITCODE -ne 0) {
-            throw "Installing validation conda package specs failed"
-        }
-    }
     $ValidationPython = Join-Path $ValidationRuntimeRoot "python.exe"
-    if ((Get-Item $ValidationPipRequirements).Length -gt 0) {
-        & $ValidationPython -m pip install --no-cache-dir -r $ValidationPipRequirements
-        if ($LASTEXITCODE -ne 0) {
-            throw "Installing validation pip requirements failed"
-        }
+    & $ValidationPython -m pip install --no-cache-dir --upgrade "pip<25"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Upgrading pip in the validation runtime failed"
+    }
+    $ValidationCoreRequirements = Join-Path $ScriptRoot "validation\requirements-core-win-py37.txt"
+    $ValidationOptionalRequirements = Join-Path $ScriptRoot "validation\requirements-optional-win-py37.txt"
+    [void](Install-PipRequirementLines `
+        -PythonExe $ValidationPython `
+        -RequirementsPath $ValidationCoreRequirements `
+        -Required)
+    $FailedOptionalPackages = Install-PipRequirementLines `
+        -PythonExe $ValidationPython `
+        -RequirementsPath $ValidationOptionalRequirements `
+        -ConstraintPath $ValidationCoreRequirements
+    if ($null -eq $FailedOptionalPackages) {
+        $FailedOptionalPackages = @()
     }
     & $ValidationPython -m ipykernel --version
     if ($LASTEXITCODE -ne 0) {
         throw "Validation runtime ipykernel smoke check failed"
     }
+    & $ValidationPython -c "import numpy, pandas, sklearn, scipy; print('validation core imports ok')"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Validation runtime core import smoke check failed"
+    }
+    Write-ValidationCompatibilityReport `
+        -Path (Join-Path $ValidationRuntimeRoot "MARVIS_VALIDATION_ENV_REPORT.txt") `
+        -PackageListPath $ValidationPackageList `
+        -SkippedPackages $SkippedValidationPackages.ToArray() `
+        -FailedOptionalPackages $FailedOptionalPackages
     # Start-MARVIS.ps1 registers validation-runtime\python.exe as a Jupyter
     # kernel at first launch using the final install path, so the kernel argv is
     # never baked with a build-machine absolute path.

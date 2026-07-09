@@ -73,10 +73,12 @@ from marvis.notebooks import (
 from marvis.output.word import write_validation_word
 from marvis.pipeline_cellgen import (
     RMC_PMML_SCORE_COL as RMC_PMML_SCORE_COL,
+    STRESS_SCENARIO_SCORES_JSON,
     _build_deferred_contract_resolution_lines as _build_deferred_contract_resolution_lines,  # noqa: F401
     _build_metrics_cell_source as _build_metrics_cell_source,  # noqa: F401
     _build_metrics_cell_sources,
     _build_reproducibility_cell_sources,
+    _build_stress_scenario_score_cell_sources,
     _json_literal as _json_literal,  # noqa: F401
     _notebook_package_prelude as _notebook_package_prelude,  # noqa: F401
     _package_root_for_notebook,
@@ -117,6 +119,10 @@ from marvis.pipeline_memory import (
     _read_validation_results_payload,
 )
 from marvis.state_machine import IllegalTransition
+from marvis.validation.platform_metrics import (
+    write_platform_validation_metrics,
+    write_reproducibility_result,
+)
 from marvis.validation.results import (
     ConsistencyStatus,
     validation_results_from_dict as validation_results_from_dict,  # noqa: F401
@@ -162,6 +168,7 @@ LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE = (
 )
 LEGACY_LIVE_NOTEBOOK_ENV_VAR = "MARVIS_ALLOW_LEGACY_LIVE_NOTEBOOK_EXECUTION"
 V1_VALIDATION_APPENDED_CELL_KINDS = (
+    "stress-scores",
     "repro-pmml",
     "repro-compare",
     "metrics-prepare",
@@ -246,14 +253,8 @@ def run_notebook_stage(
             if settings.notebook_isolated_execution:
                 outputs_dir = task_dir / "outputs"
                 metrics_work_dir = outputs_dir / ".metrics-stage-work"
-                extra_code_cells = _build_reproducibility_cell_sources(
-                    package_root=_package_root_for_notebook(),
-                    task=task,
-                    settings=settings,
-                    input_pmml_path=input_pmml_path,
-                    contract_meta_path=execution_dir / "runtime_contract.json",
-                    output_path=outputs_dir / REPRODUCIBILITY_RESULT_JSON,
-                )
+                extra_code_cells: list[tuple[str, str]] = []
+                dictionary_path: Path | None = None
                 if merge_metrics:
                     dictionary_path = _required_path(
                         task,
@@ -264,18 +265,12 @@ def run_notebook_stage(
                     )
                     _remove_dir_if_exists(metrics_work_dir)
                     metrics_work_dir.mkdir(parents=True, exist_ok=True)
-                    extra_code_cells = extra_code_cells + _build_metrics_cell_sources(
-                        package_root=_package_root_for_notebook(),
+                    extra_code_cells = _build_stress_scenario_score_cell_sources(
                         task=task,
                         settings=settings,
                         dictionary_path=dictionary_path,
-                        input_pmml_path=input_pmml_path,
                         contract_meta_path=execution_dir / "runtime_contract.json",
-                        model_meta_path=execution_dir / "model_meta.json",
-                        reproducibility_json_path=outputs_dir
-                        / REPRODUCIBILITY_RESULT_JSON,
-                        results_json_path=metrics_work_dir / "validation_results.json",
-                        excel_path=metrics_work_dir / "validation.xlsx",
+                        output_path=execution_dir / STRESS_SCENARIO_SCORES_JSON,
                     )
                 _notebook_step_v3(
                     repo=repo,
@@ -300,13 +295,39 @@ def run_notebook_stage(
                 if repo.get_task(task_id).status != TaskStatus.RUNNING:
                     return
                 contract = load_runtime_contract(execution_dir / "runtime_contract.json")
-                _sync_task_algorithm(repo, task, contract.algorithm)
+                task = _sync_task_algorithm(repo, task, contract.algorithm)
                 output_path = outputs_dir / REPRODUCIBILITY_RESULT_JSON
+                write_reproducibility_result(
+                    task=task,
+                    contract=contract,
+                    settings=settings,
+                    input_pmml_path=input_pmml_path,
+                    output_path=output_path,
+                    fallback_sample_path=sample_path,
+                )
                 if not output_path.exists():
                     raise PipelineError(
                         "notebook reproducibility evidence did not produce output"
                     )
                 if merge_metrics:
+                    if dictionary_path is None:
+                        raise PipelineError("data dictionary is required for metrics")
+                    model_meta_path = _write_model_meta_from_contract(
+                        contract,
+                        execution_dir / "model_meta.json",
+                    )
+                    write_platform_validation_metrics(
+                        task=task,
+                        contract=contract,
+                        settings=settings,
+                        dictionary_path=dictionary_path,
+                        model_meta_path=model_meta_path,
+                        reproducibility_json_path=output_path,
+                        results_json_path=metrics_work_dir / "validation_results.json",
+                        excel_path=metrics_work_dir / "validation.xlsx",
+                        stress_scores_path=execution_dir / STRESS_SCENARIO_SCORES_JSON,
+                        fallback_sample_path=sample_path,
+                    )
                     _require_metrics_outputs(metrics_work_dir)
                 repo.update_status(
                     task_id,
@@ -503,49 +524,71 @@ def run_metrics_stage(
                     execution_dir,
                 )
                 if live_session is None:
-                    notebook_path = _required_path(
-                        task, artifacts, FileRole.NOTEBOOK, "notebook", "notebook_path"
-                    )
                     sample_path = _required_path(
                         task, artifacts, FileRole.SAMPLE, "sample", "sample_path"
                     )
-                    _notebook_step_v3(
-                        repo=repo,
-                        task=task,
-                        source_notebook=notebook_path,
-                        sample_path=sample_path,
-                        execution_dir=execution_dir,
-                        contract_meta_path=execution_dir / "runtime_contract.json",
-                        code_scores_path=execution_dir / "code_model_scores.csv",
-                        feature_importance_path=execution_dir / "feature_importance.csv",
-                        model_params_path=execution_dir / "model_params.json",
-                        notebook_steps_path=metrics_steps_path,
-                        kernel_name=_execution_kernel_name(settings),
-                        notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
-                        stage_claimed=True,
-                        cancellation_token=cancellation_token,
-                        keep_alive=False,
-                        isolated=True,
-                        mark_executed=False,
-                        cancel_message="metrics cancelled",
-                        cancel_resume_status=TaskStatus.EXECUTED,
-                        extra_code_cells=_build_metrics_cell_sources(
-                            package_root=_package_root_for_notebook(),
+                    stress_scores_path = execution_dir / STRESS_SCENARIO_SCORES_JSON
+                    if not stress_scores_path.exists():
+                        notebook_path = _required_path(
+                            task,
+                            artifacts,
+                            FileRole.NOTEBOOK,
+                            "notebook",
+                            "notebook_path",
+                        )
+                        _notebook_step_v3(
+                            repo=repo,
                             task=task,
-                            settings=settings,
-                            dictionary_path=dictionary_path,
-                            input_pmml_path=input_pmml_path,
-                            contract=contract,
-                            model_meta_path=model_meta_path,
-                            reproducibility_json_path=outputs_dir
-                            / REPRODUCIBILITY_RESULT_JSON,
-                            results_json_path=metrics_work_dir / "validation_results.json",
-                            excel_path=metrics_work_dir / "validation.xlsx",
-                        ),
+                            source_notebook=notebook_path,
+                            sample_path=sample_path,
+                            execution_dir=execution_dir,
+                            contract_meta_path=execution_dir / "runtime_contract.json",
+                            code_scores_path=execution_dir / "code_model_scores.csv",
+                            feature_importance_path=execution_dir / "feature_importance.csv",
+                            model_params_path=execution_dir / "model_params.json",
+                            notebook_steps_path=metrics_steps_path,
+                            kernel_name=_execution_kernel_name(settings),
+                            notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
+                            stage_claimed=True,
+                            cancellation_token=cancellation_token,
+                            keep_alive=False,
+                            isolated=True,
+                            mark_executed=False,
+                            cancel_message="metrics cancelled",
+                            cancel_resume_status=TaskStatus.EXECUTED,
+                            extra_code_cells=_build_stress_scenario_score_cell_sources(
+                                task=task,
+                                settings=settings,
+                                dictionary_path=dictionary_path,
+                                contract_meta_path=execution_dir / "runtime_contract.json",
+                                output_path=stress_scores_path,
+                            ),
+                        )
+                        if repo.get_task(task_id).status != TaskStatus.COMPUTING_METRICS:
+                            _rollback_artifact_uow(metrics_uow)
+                            return
+                        contract = load_runtime_contract(
+                            execution_dir / "runtime_contract.json"
+                        )
+                        task = _sync_task_algorithm(repo, task, contract.algorithm)
+                        model_meta_path = _stage_model_meta_from_contract(
+                            metrics_uow,
+                            contract,
+                            execution_dir,
+                        )
+                    write_platform_validation_metrics(
+                        task=task,
+                        contract=contract,
+                        settings=settings,
+                        dictionary_path=dictionary_path,
+                        model_meta_path=model_meta_path,
+                        reproducibility_json_path=outputs_dir
+                        / REPRODUCIBILITY_RESULT_JSON,
+                        results_json_path=metrics_work_dir / "validation_results.json",
+                        excel_path=metrics_work_dir / "validation.xlsx",
+                        stress_scores_path=stress_scores_path,
+                        fallback_sample_path=sample_path,
                     )
-                    if repo.get_task(task_id).status != TaskStatus.COMPUTING_METRICS:
-                        _rollback_artifact_uow(metrics_uow)
-                        return
                     _require_metrics_outputs(metrics_work_dir)
                 else:
                     previous_token = getattr(live_session, "cancellation_token", None)
@@ -1352,6 +1395,7 @@ def _notebook_step_v3(
         sample_path=sample_path,
         contract_meta_path=contract_meta_path,
         code_scores_path=code_scores_path,
+        runtime_sample_path=execution_dir / "runtime_sample.csv",
         feature_importance_path=feature_importance_path,
         model_params_path=model_params_path,
         extra_code_cells=extra_code_cells,

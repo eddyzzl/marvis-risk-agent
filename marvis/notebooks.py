@@ -692,6 +692,7 @@ def prepare_execution_notebook_v3(
     code_scores_path: Path,
     feature_importance_path: Path,
     model_params_path: Path,
+    runtime_sample_path: Path | None = None,
     extra_code_cells: list[tuple[str, str]] | None = None,
 ) -> Path:
     if source_notebook.resolve() == output_notebook.resolve():
@@ -711,6 +712,7 @@ def prepare_execution_notebook_v3(
             sample_path=sample_path,
             contract_meta_path=contract_meta_path,
             code_scores_path=code_scores_path,
+            runtime_sample_path=runtime_sample_path,
             feature_importance_path=feature_importance_path,
             model_params_path=model_params_path,
             package_root=Path(__file__).resolve().parents[1],

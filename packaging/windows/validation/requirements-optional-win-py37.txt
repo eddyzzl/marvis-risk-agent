@@ -1,0 +1,14 @@
+# Best-effort optional modeling packages selected from pkg.txt.
+# Failures are recorded in MARVIS_VALIDATION_ENV_REPORT.txt without failing the installer build.
+pyarrow==12.0.1
+xgboost==1.2.0
+lightgbm==2.3.1
+catboost==1.2.7
+shap==0.42.1
+scorecardpy==0.1.9.7
+optbinning==0.20.0
+boruta==0.4.3
+bayesian-optimization==1.4.3
+hyperopt==0.2.7
+imbalanced-learn==0.7.0
+eli5==0.13.0

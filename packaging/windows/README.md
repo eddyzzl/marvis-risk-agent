@@ -86,11 +86,12 @@ To attempt bundling a separate validation execution environment:
 powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build-installer.ps1 -IncludeValidationEnvironment
 ```
 
-For the current `packaging\windows\validation\pkg.txt`, this intentionally fails
-with a conflict report: the supplied environment is a Linux Python 3.7.6
-Anaconda environment, while current MARVIS injected validation cells require
-Python 3.11+ in the selected kernel. The conflict is documented in
-`packaging/windows/validation/README.md`.
+For the current `packaging\windows\validation\pkg.txt`, the build creates a
+native Windows Python 3.7 kernel and installs a Windows-compatible package
+subset pinned to versions from `pkg.txt`. Core packages must install
+successfully; optional model packages are attempted best-effort and any skipped
+or failed packages are written to
+`validation-runtime\MARVIS_VALIDATION_ENV_REPORT.txt`.
 
 ## Manual Launcher Test
 

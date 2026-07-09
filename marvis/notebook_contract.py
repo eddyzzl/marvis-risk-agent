@@ -52,6 +52,7 @@ class RuntimeContract:
     code_model_scores_path: Path
     feature_importance_path: Path | None
     model_params_path: Path | None
+    sample_snapshot_path: Path | None = None
     algorithm: str = ""
 
 
@@ -299,6 +300,7 @@ def build_contract_head_cell_source(
     sample_path: Path,
     contract_meta_path: Path,
     code_scores_path: Path,
+    runtime_sample_path: Path | None = None,
     feature_importance_path: Path,
     model_params_path: Path,
     package_root: Path | None = None,
@@ -318,6 +320,7 @@ def build_contract_head_cell_source(
             f"RMC_SAMPLE_PATH = {Path(sample_path).as_posix()!r}",
             f"RMC_CONTRACT_META_PATH = {Path(contract_meta_path).as_posix()!r}",
             f"RMC_CODE_SCORES_PATH = {Path(code_scores_path).as_posix()!r}",
+            f"RMC_RUNTIME_SAMPLE_PATH = {Path(runtime_sample_path or code_scores_path.with_name('runtime_sample.csv')).as_posix()!r}",
             f"RMC_FEATURE_IMPORTANCE_PATH = {Path(feature_importance_path).as_posix()!r}",
             f"RMC_MODEL_PARAMS_PATH = {Path(model_params_path).as_posix()!r}",
         ]
@@ -443,6 +446,10 @@ _rmc_pd.DataFrame({
     "code_model_score": _rmc_score_series.astype(float),
 }).to_csv(_rmc_scores_path, index=False)
 
+_rmc_runtime_sample_path = _RmcPath(RMC_RUNTIME_SAMPLE_PATH)
+_rmc_runtime_sample_path.parent.mkdir(parents=True, exist_ok=True)
+_rmc_sample.reset_index(drop=True).to_csv(_rmc_runtime_sample_path, index=False)
+
 _rmc_importance_path = None
 _rmc_importance = globals().get("RMC_FEATURE_IMPORTANCE", globals().get("FEATURE_IMPORTANCE"))
 if _rmc_importance is not None:
@@ -490,6 +497,7 @@ _rmc_meta = {
     "pmml_output_field": globals().get("RMC_PMML_OUTPUT_FIELD", "probability_1"),
     "score_decimal_places": int(globals().get("RMC_SCORE_DECIMAL_PLACES", 6)),
     "code_model_scores_path": str(_rmc_scores_path),
+    "sample_snapshot_path": str(_rmc_runtime_sample_path),
     "feature_importance_path": str(_rmc_importance_path) if _rmc_importance_path else None,
     "model_params_path": str(_rmc_params_path) if _rmc_params_path else None,
 }
@@ -510,6 +518,7 @@ def load_runtime_contract(path: Path) -> RuntimeContract:
         pmml_output_field=str(payload.get("pmml_output_field") or "probability_1"),
         score_decimal_places=int(payload.get("score_decimal_places") or 6),
         code_model_scores_path=Path(payload["code_model_scores_path"]),
+        sample_snapshot_path=_optional_path(payload.get("sample_snapshot_path")),
         feature_importance_path=_optional_path(payload.get("feature_importance_path")),
         model_params_path=_optional_path(payload.get("model_params_path")),
         algorithm=normalize_algorithm(payload.get("algorithm")),
