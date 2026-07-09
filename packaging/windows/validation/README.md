@@ -45,9 +45,9 @@ The supplied list is not directly installable as-is on native Windows:
 
 The Windows installer therefore builds a native Python 3.7 validation runtime
 from `environment.yml`, installs core packages pinned from `pkg.txt` via
-`requirements-core-win-py37.txt`, and attempts optional model packages from
-`requirements-optional-win-py37.txt` best-effort. Any skipped Linux-only package
-or failed optional package is written into
+`requirements-conda-core-win-py37.txt` and `requirements-core-win-py37.txt`,
+and attempts optional model packages from `requirements-optional-win-py37.txt`
+best-effort. Any skipped Linux-only package or failed optional package is written into
 `validation-runtime\MARVIS_VALIDATION_ENV_REPORT.txt`.
 
 The selected validation kernel only runs the user's Notebook code and scoring

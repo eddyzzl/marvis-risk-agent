@@ -70,6 +70,7 @@ def test_windows_build_script_produces_payload_before_compiling_installer():
     assert "SkipInstaller" in text
     assert "IncludeValidationEnvironment" in text
     assert '$ValidationRuntimeRoot = Join-Path $PayloadRoot "validation-runtime"' in text
+    assert "requirements-conda-core-win-py37.txt" in text
     assert "requirements-core-win-py37.txt" in text
     assert "requirements-optional-win-py37.txt" in text
     assert "MARVIS_VALIDATION_ENV_REPORT.txt" in text
@@ -89,6 +90,7 @@ def test_validation_pkg_source_and_conflict_notes_are_kept_with_packaging():
     assert "python                    3.7.6" in pkg_text
     assert "jpype1                    1.5.0" in pkg_text
     assert "Windows Packaging Bridge" in readme
+    assert "requirements-conda-core-win-py37.txt" in readme
     assert "requirements-core-win-py37.txt" in readme
     assert "registered as a Jupyter" in readme
 
@@ -99,6 +101,9 @@ def test_validation_windows_requirements_are_pinned_from_pkg_source():
     )
     core = (
         WINDOWS_PACKAGING / "validation" / "requirements-core-win-py37.txt"
+    ).read_text(encoding="utf-8")
+    conda_core = (
+        WINDOWS_PACKAGING / "validation" / "requirements-conda-core-win-py37.txt"
     ).read_text(encoding="utf-8")
     optional = (
         WINDOWS_PACKAGING / "validation" / "requirements-optional-win-py37.txt"
@@ -113,4 +118,12 @@ def test_validation_windows_requirements_are_pinned_from_pkg_source():
     ]:
         name, version = requirement.split("==", 1)
         assert requirement in core + optional
+        assert re.search(rf"^{re.escape(name)}\s+{re.escape(version)}\s", pkg_text, re.M)
+    for requirement in [
+        "cloudpickle=1.3.0",
+        "openpyxl=3.0.3",
+        "xlrd=1.2.0",
+    ]:
+        name, version = requirement.split("=", 1)
+        assert requirement in conda_core
         assert re.search(rf"^{re.escape(name)}\s+{re.escape(version)}\s", pkg_text, re.M)

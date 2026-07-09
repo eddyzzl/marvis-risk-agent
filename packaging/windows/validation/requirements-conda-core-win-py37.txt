@@ -1,0 +1,4 @@
+# Windows-compatible core conda packages selected from pkg.txt.
+cloudpickle=1.3.0
+openpyxl=3.0.3
+xlrd=1.2.0

@@ -105,7 +105,8 @@ function Write-ValidationCompatibilityReport {
         }
         $lines.Add("")
     }
-    $lines.Add("Core packages are installed from packaging/windows/validation/requirements-core-win-py37.txt.")
+    $lines.Add("Core conda packages are installed from packaging/windows/validation/requirements-conda-core-win-py37.txt.")
+    $lines.Add("Core pip packages are installed from packaging/windows/validation/requirements-core-win-py37.txt.")
     $lines.Add("Optional packages are attempted from packaging/windows/validation/requirements-optional-win-py37.txt.")
     Set-Content -Encoding utf8 -Path $Path -Value $lines.ToArray()
 }
@@ -240,15 +241,20 @@ if ($IncludeValidationEnvironment) {
         throw "Validation execution runtime creation failed"
     }
     $ValidationPython = Join-Path $ValidationRuntimeRoot "python.exe"
-    & $ValidationPython -m pip install --no-cache-dir --upgrade "pip<25"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Upgrading pip in the validation runtime failed"
-    }
+    $ValidationCondaRequirements = Join-Path $ScriptRoot "validation\requirements-conda-core-win-py37.txt"
     $ValidationCoreRequirements = Join-Path $ScriptRoot "validation\requirements-core-win-py37.txt"
     $ValidationOptionalRequirements = Join-Path $ScriptRoot "validation\requirements-optional-win-py37.txt"
+    & $MicromambaExe install -y -p $ValidationRuntimeRoot --file $ValidationCondaRequirements
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installing required validation conda packages failed"
+    }
     $PreviousPath = $env:PATH
     try {
         $env:PATH = "$ValidationRuntimeRoot;$ValidationRuntimeRoot\Scripts;$ValidationRuntimeRoot\Library\bin;$env:PATH"
+        & $ValidationPython -m pip install --disable-pip-version-check --no-cache-dir --upgrade "pip<25"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Upgrading pip in the validation runtime failed"
+        }
         [void](Install-PipRequirementLines `
             -PythonExe $ValidationPython `
             -RequirementsPath $ValidationCoreRequirements `

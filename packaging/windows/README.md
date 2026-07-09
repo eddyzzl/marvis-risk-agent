@@ -87,8 +87,8 @@ powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build-installer
 ```
 
 For the current `packaging\windows\validation\pkg.txt`, the build creates a
-native Windows Python 3.7 kernel and installs a Windows-compatible package
-subset pinned to versions from `pkg.txt`. Core packages must install
+native Windows Python 3.7 kernel and installs a Windows-compatible conda/pip
+package subset pinned to versions from `pkg.txt`. Core packages must install
 successfully; optional model packages are attempted best-effort and any skipped
 or failed packages are written to
 `validation-runtime\MARVIS_VALIDATION_ENV_REPORT.txt`.
