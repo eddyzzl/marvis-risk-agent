@@ -15,6 +15,10 @@ def test_windows_runtime_environment_bundles_python_pip_and_java():
     assert "- pip" in text
     assert "openjdk=17" in text
     assert "numpy==1.26.4" in constraints
+    assert "pandas==2.2.3" in constraints
+    assert "scipy==1.13.1" in constraints
+    assert "scikit-learn==1.5.2" in constraints
+    assert "pyarrow==16.1.0" in constraints
     assert "X86_V2" in constraints
 
 
