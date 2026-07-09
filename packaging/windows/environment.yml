@@ -1,0 +1,9 @@
+name: marvis-runtime
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  # Private Java runtime for PMML scoring. The installer does not modify
+  # system JAVA_HOME or the user's system PATH.
+  - openjdk=17

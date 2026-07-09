@@ -75,10 +75,21 @@ workspace/branding/brand.json
 
 ## 本地部署要求
 
-- Python 3.11 或更新版本。全新本地安装推荐 Python 3.12。
-- 当前已验证的本地工作流覆盖 macOS 和 Linux。
-- 如果需要 PMML 打分，需要安装与 `pypmml` 兼容的 Java 运行时。
+- Windows 用户可以使用后续 release 附带的一键安装包；安装包内置私有 Python runtime 和 Java runtime。
+- 源码安装需要 Python 3.11 或更新版本。全新本地安装推荐 Python 3.12。
+- 当前已验证的源码安装工作流覆盖 macOS 和 Linux。
+- 源码安装如果需要 PMML 打分，需要安装与 `pypmml` 兼容的 Java 运行时。
 - Node.js 只用于前端语法检查；应用本身通过 FastAPI 提供静态 HTML/CSS/JS。
+
+## Windows 一键安装包
+
+个人 Windows 电脑优先使用 release 中的安装包：
+
+```text
+MARVIS-Setup-<version>-win-x64.exe
+```
+
+用户机器不需要预装 Python、Java、Git、conda、WSL 或 Docker。安装包按当前用户安装，双击后启动本地 MARVIS 服务，并打开 `http://127.0.0.1:8000/`。Windows 安装包构建资产位于 `packaging/windows/`。
 
 ## 从 GitHub 安装
 

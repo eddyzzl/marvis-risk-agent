@@ -75,10 +75,27 @@ See `docs/branding.md` for details.
 
 ## Local Deployment Requirements
 
-- Python 3.11 or newer. Python 3.12 is recommended for a new local install.
-- macOS or Linux for the currently verified local workflow.
-- A Java runtime compatible with `pypmml` if you need PMML scoring.
+- Windows users can use the one-click installer once a Windows release artifact
+  is attached. It bundles a private Python runtime and Java runtime.
+- Source installs need Python 3.11 or newer. Python 3.12 is recommended for a
+  new local install.
+- macOS or Linux for the currently verified source-install workflow.
+- Source installs need a Java runtime compatible with `pypmml` if you need PMML
+  scoring.
 - Node.js is only needed for frontend syntax checks; the app itself serves static HTML/CSS/JS through FastAPI.
+
+## Windows One-Click Installer
+
+For personal Windows machines, use the release asset named:
+
+```text
+MARVIS-Setup-<version>-win-x64.exe
+```
+
+The installer does not require Python, Java, Git, conda, WSL, or Docker on the
+user's machine. It installs per user, starts the local MARVIS service, and opens
+the browser at `http://127.0.0.1:8000/`. Windows installer build assets live in
+`packaging/windows/`.
 
 ## Install From GitHub
 

@@ -118,6 +118,16 @@ python scripts/release_push.py --version V1.1.0
 
 发布 tag 视为不可变。发布后发现问题时，修复后创建下一个 patch 版本，不移动旧 tag。
 
+### Windows 安装包
+
+发布 tag 推送完成后，Windows 个人电脑安装包作为 release 附加工件构建，不由 `scripts/release_push.py` 直接生成。构建机必须是 Windows x64，并安装 Python、micromamba 和 Inno Setup：
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build-installer.ps1
+```
+
+产物为 `dist\windows\MARVIS-Setup-<version>-win-x64.exe` 和同名 `.sha256`。安装包内置私有 Python runtime 与 OpenJDK runtime，用户机器不需要预装 Python、Java、Git、conda、WSL 或 Docker。构建脚本会先运行 `marvis version`、核心 import 和内置 Java smoke check；上传 release 前还应在干净 Windows 用户环境中双击安装并确认 `/api/health` 和首页可打开。
+
 ## 并行维护与 forward-port
 
 V1 可以保持稳定，同时 V2+ 在独立 worktree 或分支开发。V2 及后续版本不能丢失 V1 已确认行为。
