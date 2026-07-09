@@ -38,6 +38,8 @@ function Initialize-ValidationKernelSpec {
         return
     }
 
+    $ValidationRoot = Split-Path -Parent $ValidationPython
+    $ValidationPath = "$ValidationRoot;$ValidationRoot\Scripts;$ValidationRoot\Library\bin;$env:PATH"
     $KernelDir = Join-Path $InstallRoot "kernels\marvis-validation-pkg"
     New-Item -ItemType Directory -Force -Path $KernelDir | Out-Null
 
@@ -51,6 +53,11 @@ function Initialize-ValidationKernelSpec {
         )
         display_name = "MARVIS Validation (pkg.txt)"
         language = "python"
+        env = @{
+            CONDA_DEFAULT_ENV = $ValidationRoot
+            CONDA_PREFIX = $ValidationRoot
+            PATH = $ValidationPath
+        }
         metadata = @{
             marvis = @{
                 role = "validation"

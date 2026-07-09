@@ -36,6 +36,8 @@ def test_windows_launcher_registers_optional_validation_kernel():
     assert "marvis-validation-pkg" in text
     assert "MARVIS Validation (pkg.txt)" in text
     assert "JUPYTER_PATH" in text
+    assert "CONDA_PREFIX" in text
+    assert "$ValidationRoot\\Library\\bin" in text
 
 
 def test_windows_cmd_launcher_uses_powershell_without_profile():
@@ -72,6 +74,8 @@ def test_windows_build_script_produces_payload_before_compiling_installer():
     assert "requirements-optional-win-py37.txt" in text
     assert "MARVIS_VALIDATION_ENV_REPORT.txt" in text
     assert "validation core imports ok" in text
+    assert "$ValidationRuntimeRoot\\Library\\bin" in text
+    assert "-ConstraintPath $ValidationCoreRequirements" in text
 
 
 def test_validation_pkg_source_and_conflict_notes_are_kept_with_packaging():

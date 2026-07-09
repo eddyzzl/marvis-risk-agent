@@ -246,24 +246,31 @@ if ($IncludeValidationEnvironment) {
     }
     $ValidationCoreRequirements = Join-Path $ScriptRoot "validation\requirements-core-win-py37.txt"
     $ValidationOptionalRequirements = Join-Path $ScriptRoot "validation\requirements-optional-win-py37.txt"
-    [void](Install-PipRequirementLines `
-        -PythonExe $ValidationPython `
-        -RequirementsPath $ValidationCoreRequirements `
-        -Required)
-    $FailedOptionalPackages = Install-PipRequirementLines `
-        -PythonExe $ValidationPython `
-        -RequirementsPath $ValidationOptionalRequirements `
-        -ConstraintPath $ValidationCoreRequirements
-    if ($null -eq $FailedOptionalPackages) {
-        $FailedOptionalPackages = @()
+    $PreviousPath = $env:PATH
+    try {
+        $env:PATH = "$ValidationRuntimeRoot;$ValidationRuntimeRoot\Scripts;$ValidationRuntimeRoot\Library\bin;$env:PATH"
+        [void](Install-PipRequirementLines `
+            -PythonExe $ValidationPython `
+            -RequirementsPath $ValidationCoreRequirements `
+            -Required)
+        $FailedOptionalPackages = Install-PipRequirementLines `
+            -PythonExe $ValidationPython `
+            -RequirementsPath $ValidationOptionalRequirements `
+            -ConstraintPath $ValidationCoreRequirements
+        if ($null -eq $FailedOptionalPackages) {
+            $FailedOptionalPackages = @()
+        }
+        & $ValidationPython -m ipykernel --version
+        if ($LASTEXITCODE -ne 0) {
+            throw "Validation runtime ipykernel smoke check failed"
+        }
+        & $ValidationPython -c "import numpy, pandas, sklearn, scipy; print('validation core imports ok')"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Validation runtime core import smoke check failed"
+        }
     }
-    & $ValidationPython -m ipykernel --version
-    if ($LASTEXITCODE -ne 0) {
-        throw "Validation runtime ipykernel smoke check failed"
-    }
-    & $ValidationPython -c "import numpy, pandas, sklearn, scipy; print('validation core imports ok')"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Validation runtime core import smoke check failed"
+    finally {
+        $env:PATH = $PreviousPath
     }
     Write-ValidationCompatibilityReport `
         -Path (Join-Path $ValidationRuntimeRoot "MARVIS_VALIDATION_ENV_REPORT.txt") `
