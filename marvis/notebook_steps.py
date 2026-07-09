@@ -1,3 +1,4 @@
+import ast
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
@@ -44,6 +45,7 @@ def notebook_step_plan(notebook: Any) -> NotebookStepPlan:
     cell_to_step: dict[int, str] = {}
     current_step_id = "notebook-init"
     current_title = "Notebook 初始化"
+    has_headings = _has_markdown_headings(notebook)
 
     for cell_index, cell in enumerate(notebook.cells):
         system_kind = cell.get("metadata", {}).get("marvis")
@@ -69,6 +71,9 @@ def notebook_step_plan(notebook: Any) -> NotebookStepPlan:
 
         if cell.cell_type != "code":
             continue
+        if not has_headings:
+            current_step_id = f"cell-{cell_index + 1}"
+            current_title = _infer_code_cell_title(str(cell.source))
         _append_cell(
             steps_by_id,
             cell_to_step,
@@ -105,6 +110,270 @@ def _first_heading(source: str) -> str | None:
         match = _HEADING_RE.match(line)
         if match:
             return match.group(2).strip()
+    return None
+
+
+def _has_markdown_headings(notebook: Any) -> bool:
+    return any(
+        cell.cell_type == "markdown" and _first_heading(str(cell.source))
+        for cell in notebook.cells
+    )
+
+
+def _infer_code_cell_title(source: str) -> str:
+    compact = _compact_code(source)
+    call_names = _call_names(source)
+    if not compact:
+        return "执行代码"
+    if _contains_all(compact, ("rmc_sample_df", "rmc_target_col")) or "rmc_score_fn" in compact:
+        return "Notebook 契约配置"
+    if _imports_only(source):
+        return "导入依赖"
+    if _calls_pmml_export(call_names):
+        return "PMML 导出"
+    if _contains_any(
+        compact,
+        (
+            "readcsv",
+            "readexcel",
+            "readparquet",
+            "readfeather",
+            "readdata",
+            "loaddata",
+            "loadsample",
+            "readtable",
+        ),
+    ):
+        return "读取数据"
+    if _contains_any(compact, ("merge(", ".merge(", "join(", ".join(", "concat(", "leftjoin", "innerjoin")):
+        return "数据拼接"
+    if _contains_any(
+        compact,
+        (
+            "columns.tolist",
+            "columns.tolist()",
+            "columns.values",
+            "vars1.remove",
+            "feature_columns",
+            "selectcolumns",
+            "select_columns",
+        ),
+    ):
+        return "特征筛选"
+    if _contains_any(
+        compact,
+        (
+            "train_test_split",
+            "traintestsplit",
+            "split_col",
+            "split_tag",
+            "sample_split",
+            "splitdata",
+        ),
+    ):
+        return "样本切分"
+    train_like = _contains_any(
+        compact,
+        (
+            "fitmodel",
+            "trainmodel",
+            "xgbclassifier",
+            "lgbmclassifier",
+            "catboostclassifier",
+            "logisticregression",
+            "randomforestclassifier",
+        ),
+    ) or _has_call_suffix(call_names, ("fit",))
+    score_like = _contains_any(
+        compact,
+        (
+            "predictproba",
+            "predict_proba",
+            "scorefn",
+            "score_fn",
+            "rmc_score_fn",
+            "modelscore",
+            "model_score",
+        ),
+    ) or _has_call_suffix(call_names, ("predict", "predict_proba", "score"))
+    metric_like = _contains_any(
+        compact,
+        (
+            "rocaucscore",
+            "auc",
+            "ks",
+            "psi",
+            "confusionmatrix",
+            "classificationreport",
+            "metric",
+            "evaluate",
+            "validation",
+        ),
+    )
+    if train_like and score_like:
+        return "模型训练与打分"
+    if train_like:
+        return "模型训练"
+    if "pmml" in compact and _contains_any(compact, ("predict", "score", "evaluate")):
+        return "PMML 打分"
+    if score_like and metric_like:
+        return "模型打分与指标计算"
+    if score_like:
+        return "模型打分"
+    if _contains_any(
+        compact,
+        (
+            "fillna",
+            "dropna",
+            "dropduplicates",
+            "astype",
+            "clip(",
+            "replace(",
+            "getdummies",
+            "onehot",
+            "standardscaler",
+            "minmaxscaler",
+            "woe",
+            "binning",
+            "chimerge",
+            "preprocess",
+            "cleandata",
+        ),
+    ):
+        return "数据清洗与预处理"
+    if _contains_any(
+        compact,
+        (
+            "featureimportance",
+            "feature_importance",
+            "featureimportances",
+            "feature_importances",
+            "varimportance",
+            "shap",
+            "selectfeatures",
+            "select_features",
+            "ivvalue",
+            "informationvalue",
+        ),
+    ):
+        return "特征分析"
+    if _contains_any(
+        compact,
+        ("tocsv", "toexcel", "toparquet", "tojson", "pickle.dump", "joblib.dump", "json.dump"),
+    ):
+        return "保存结果"
+    if metric_like:
+        return "指标计算"
+    if _contains_any(compact, ("savefig", ".plot(", "plt.", "seaborn", "matplotlib")):
+        return "图表绘制"
+
+    first_call = _first_call_name(source)
+    if first_call:
+        return f"执行 {first_call}"
+    first_line = _source_preview(source, limit=36)
+    return f"执行代码：{first_line}" if first_line else "执行代码"
+
+
+def _compact_code(source: str) -> str:
+    return re.sub(r"[\W_]+", "", source.casefold(), flags=re.UNICODE)
+
+
+def _contains_any(source: str, needles: tuple[str, ...]) -> bool:
+    return any(_compact_code(needle) in source for needle in needles)
+
+
+def _contains_all(source: str, needles: tuple[str, ...]) -> bool:
+    return all(_compact_code(needle) in source for needle in needles)
+
+
+def _imports_only(source: str) -> bool:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    body = [
+        node
+        for node in tree.body
+        if not (
+            isinstance(node, ast.Expr)
+            and isinstance(getattr(node, "value", None), ast.Constant)
+            and isinstance(node.value.value, str)
+        )
+    ]
+    return bool(body) and all(isinstance(node, (ast.Import, ast.ImportFrom)) for node in body)
+
+
+def _first_call_name(source: str) -> str | None:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    finder = _FirstCallName()
+    finder.visit(tree)
+    return finder.name
+
+
+def _call_names(source: str) -> set[str]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    collector = _CallNameCollector()
+    collector.visit(tree)
+    return collector.names
+
+
+def _has_call_suffix(call_names: set[str], suffixes: tuple[str, ...]) -> bool:
+    normalized_suffixes = {suffix.casefold() for suffix in suffixes}
+    for name in call_names:
+        parts = [part.casefold() for part in name.split(".") if part]
+        if parts and parts[-1] in normalized_suffixes:
+            return True
+    return False
+
+
+def _calls_pmml_export(call_names: set[str]) -> bool:
+    return _has_call_suffix(
+        call_names,
+        (
+            "sklearn2pmml",
+            "to_pmml",
+            "topmml",
+            "skl_to_pmml",
+            "export_pmml",
+            "save_pmml",
+        ),
+    )
+
+
+class _FirstCallName(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.name: str | None = None
+
+    def visit_Call(self, node: ast.Call) -> Any:
+        if self.name is None:
+            self.name = _call_name(node.func)
+        if self.name is None:
+            self.generic_visit(node)
+
+
+class _CallNameCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit_Call(self, node: ast.Call) -> Any:
+        name = _call_name(node.func)
+        if name:
+            self.names.add(name)
+        self.generic_visit(node)
+
+
+def _call_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        owner = _call_name(node.value)
+        return f"{owner}.{node.attr}" if owner else node.attr
     return None
 
 

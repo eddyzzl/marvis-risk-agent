@@ -840,6 +840,7 @@ def add_agent_failure_summary(
     stage_label: str,
     error: str,
     model_profile: dict,
+    evidence: dict | None = None,
 ) -> None:
     return add_agent_failure_summary_impl(
         repo_,
@@ -848,6 +849,7 @@ def add_agent_failure_summary(
         stage_label=stage_label,
         error=error,
         model_profile=model_profile,
+        evidence=evidence,
         deps=validation_stage_dependencies(),
     )
 

@@ -47,6 +47,7 @@ export function createRenderSignatures() {
     // first populated render of a given task - not every time a transient
     // empty evidence payload arrives between populated ones.
     reproducibilityEvidence: "",
+    reproducibilityEmpty: "",
     reproducibilityTaskId: "",
     reproducibilityAnimatedTaskId: "",
   };

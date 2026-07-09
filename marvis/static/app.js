@@ -27,6 +27,7 @@ import {
 } from "./js/dialogs.js";
 import { installFormControlFocusRingGuard } from "./js/focus-ring.js";
 import { createLayoutResizeController } from "./js/layout-resize.js";
+import { createMaterialBindingDialogController } from "./js/material-binding-dialog.js";
 import { createPlatformConfirmController } from "./js/platform-confirm.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
@@ -235,6 +236,7 @@ const createTaskDialog = createCreateTaskDialogController({
     setActionStatus(message, "info", "这个入口会继续展示在任务启动页，但当前不会打开创建弹窗。");
   },
 });
+const materialBindingDialog = createMaterialBindingDialogController({ $, api });
 const agentMemoryPanel = createAgentMemoryPanelController({
   $,
   api,
@@ -437,6 +439,7 @@ function currentTaskSignature(task) {
     task.id || "",
     task.name || "",
     task.status || "",
+    task.failure_stage || "",
     task.active_job_kind || "",
     task.status_message || "",
     task.report_available ? 1 : 0,
@@ -465,6 +468,8 @@ function workflowStepperSignature(task) {
   return signatureFromParts([
     task.id || "",
     task.status || "",
+    task.failure_stage || "",
+    taskFailureStage(task) || "",
     task.status_message || "",
     task.active_job_kind || "",
     task.report_available ? 1 : 0,
@@ -495,9 +500,10 @@ function taskListSignature(tasks, totalTaskCount) {
   ]);
 }
 
-function metricPreviewSignature(taskId, metricValues, tableSections) {
+function metricPreviewSignature(taskId, metricValues, tableSections, emptyMessage = "") {
   return signatureFromParts([
     taskId || "",
+    emptyMessage || "",
     metricValues || {},
     tableSections || [],
   ]);
@@ -510,6 +516,7 @@ function resetMetricPreviewRenderSignature() {
 
 function resetReproducibilityRenderSignatures() {
   renderSignatures.reproducibilityEvidence = "";
+  renderSignatures.reproducibilityEmpty = "";
   renderSignatures.reproducibilityTaskId = "";
   renderSignatures.reproducibilityAnimatedTaskId = "";
 }
@@ -1361,11 +1368,39 @@ function normalizedFailureStage(stage) {
   return ["scan", "notebook", "metrics", "report"].includes(value) ? value : null;
 }
 
+function failureStageRank(stage) {
+  return {
+    scan: 0,
+    notebook: 1,
+    metrics: 2,
+    report: 3,
+  }[stage] ?? Number.POSITIVE_INFINITY;
+}
+
+function earliestFailureStage(...stages) {
+  const normalizedStages = stages
+    .map((stage) => normalizedFailureStage(stage))
+    .filter(Boolean);
+  if (normalizedStages.length === 0) return null;
+  return normalizedStages.reduce((earliest, stage) => (
+    failureStageRank(stage) < failureStageRank(earliest) ? stage : earliest
+  ));
+}
+
+function notebookStepStageFailure() {
+  if (notebookStepsForRail().some((step) => notebookStepTone(step?.status) === "failed")) {
+    return "notebook";
+  }
+  if (metricStepsForRail().some((step) => notebookStepTone(step?.status) === "failed")) {
+    return "metrics";
+  }
+  return null;
+}
+
 function taskFailureStage(task = selectedTask) {
   if (!task || task.status !== "failed") return null;
   const structuredStage = normalizedFailureStage(task.failure_stage);
-  if (structuredStage) return structuredStage;
-  return null;
+  return earliestFailureStage(structuredStage, notebookStepStageFailure());
 }
 
 function taskFailedDuringMetrics(task = selectedTask) {
@@ -1526,6 +1561,7 @@ function taskStatusTone(task) {
 function notebookReproducibilityComplete(task = selectedTask) {
   return (
     notebookReproducibilityCompleteStatuses.has(task?.status || "") ||
+    taskFailedDuringNotebook(task) ||
     taskFailedDuringMetrics(task) ||
     taskFailedDuringReport(task) ||
     (taskFailureWasRestartReclaim(task) && workflowStageCompleteFromEvidence("notebook"))
@@ -1555,7 +1591,11 @@ function metricOverviewComplete(task = selectedTask) {
 }
 
 function shouldShowMetricSection() {
-  return Boolean(selectedTaskId && metricOverviewComplete(selectedTask));
+  return Boolean(selectedTaskId && (
+    metricOverviewComplete(selectedTask) ||
+    taskFailedDuringNotebook(selectedTask) ||
+    taskFailedDuringMetrics(selectedTask)
+  ));
 }
 
 function renderMetricSectionVisibility() {
@@ -3729,10 +3769,12 @@ function renderMetricPreview(
   // leave the existing DOM intact so charts and KPI cards do not replay their
   // animations or drop hover state during the per-second polling loop.
   const previewTaskId = lastMetricValuesTaskId || "";
+  const emptyMessage = metricPreviewEmptyMessage();
   const nextSignature = metricPreviewSignature(
     previewTaskId,
     lastMetricValues,
     lastMetricTableSections,
+    emptyMessage,
   );
   if (
     renderSignatures.metricPreviewTaskId === previewTaskId
@@ -3766,8 +3808,7 @@ function renderMetricPreview(
   });
 
   if (visibleSections.length === 0) {
-    $("metricPreview").innerHTML =
-      '<div class="result-summary empty">效果&稳定性验证完成后展示</div>';
+    renderMetricPreviewEmpty(emptyMessage);
     return;
   }
   const sectionHtml = visibleSections
@@ -3792,6 +3833,15 @@ function roleCounts(artifacts) {
   }, {});
 }
 
+function materialRoleField(role) {
+  return {
+    notebook: "notebook_path",
+    sample: "sample_path",
+    model_pmml: "pmml_path",
+    data_dictionary: "dictionary_path",
+  }[role] || "";
+}
+
 function scanCheckTone(status) {
   if (status === "success") return "success";
   if (status === "warning") return "warning";
@@ -3803,7 +3853,12 @@ function renderScanResult(result, notebookCells = []) {
   const artifacts = result.artifacts || [];
   const checks = result.checks || [];
   const counts = roleCounts(artifacts);
+  const selectedMaterials = result.selected_materials || {};
   const materialChecks = requiredMaterialRoles.map(({ role, label }) => {
+    const selected = selectedMaterials[materialRoleField(role)];
+    if (selected) {
+      return `<span class="pill success">${escapeHtml(label)} · 已指定</span>`;
+    }
     const found = counts[role] || 0;
     const tone = found === 0 ? "danger" : found > 1 ? "warning" : "success";
     const text = found === 0 ? "缺失" : found > 1 ? `${found} 个候选` : "已识别";
@@ -3852,9 +3907,41 @@ function evidenceEmpty(id, message) {
   element.textContent = message;
 }
 
+function reproducibilityEmptyMessage(task = selectedTask) {
+  const stage = taskFailureStage(task);
+  if (stage === "notebook") {
+    return "模型可复现性验证失败，修复 Notebook 后重新运行该阶段。";
+  }
+  if (stage === "scan") {
+    return "材料完备性验证未通过，暂不展示分数一致性。";
+  }
+  return "暂无分数一致性证据，运行完建模代码后展示结果";
+}
+
+function metricPreviewEmptyMessage(task = selectedTask) {
+  const stage = taskFailureStage(task);
+  if (stage === "notebook") {
+    return "模型可复现性验证未通过，暂不展示效果&稳定性指标。";
+  }
+  if (stage === "metrics") {
+    return "模型效果&稳定性验证失败，修复后重新生成指标概览。";
+  }
+  if (stage === "scan") {
+    return "材料完备性验证未通过，暂不展示效果&稳定性指标。";
+  }
+  return "效果&稳定性验证完成后展示";
+}
+
+function renderMetricPreviewEmpty(message = metricPreviewEmptyMessage()) {
+  const element = $("metricPreview");
+  if (!element) return;
+  element.innerHTML = `<div class="result-summary empty">${escapeHtml(message)}</div>`;
+}
+
 function resetEvidenceSummaries() {
   latestNotebookSteps = [];
-  evidenceEmpty("reproducibilitySummary", "暂无分数一致性证据，运行完建模代码后展示结果");
+  evidenceEmpty("reproducibilitySummary", reproducibilityEmptyMessage());
+  renderMetricPreviewEmpty();
   resetReproducibilityRenderSignatures();
   renderWorkflowStepper();
 }
@@ -3955,6 +4042,7 @@ function renderReproducibilityEvidence(reproducibility = {}) {
   const element = $("reproducibilitySummary");
   const taskId = currentReproducibilityTaskId();
   if (!summary || Object.keys(summary).length === 0) {
+    const emptyMessage = reproducibilityEmptyMessage();
     // While polling an active run, evidence payloads may transiently arrive
     // empty between populated ones (different backend writers update at
     // different times). Don't clobber a chart we've already rendered for
@@ -3962,13 +4050,23 @@ function renderReproducibilityEvidence(reproducibility = {}) {
     // precision-bar CSS entry animation, causing the bars to "keep
     // bouncing" each second.
     if (
-      renderSignatures.reproducibilityEvidence
+      !taskFailedDuringNotebook(selectedTask)
+      && renderSignatures.reproducibilityEvidence
       && renderSignatures.reproducibilityTaskId === taskId
     ) {
       return;
     }
-    evidenceEmpty("reproducibilitySummary", "暂无分数一致性证据，运行完建模代码后展示结果");
-    resetReproducibilityRenderSignatures();
+    if (
+      !renderSignatures.reproducibilityEvidence
+      && emptyMessage === renderSignatures.reproducibilityEmpty
+      && renderSignatures.reproducibilityTaskId === taskId
+    ) {
+      return;
+    }
+    evidenceEmpty("reproducibilitySummary", emptyMessage);
+    renderSignatures.reproducibilityTaskId = taskId;
+    renderSignatures.reproducibilityEvidence = "";
+    renderSignatures.reproducibilityEmpty = emptyMessage;
     return;
   }
   const evidenceSignature = reproducibilityEvidenceSignature(reproducibility, summary, rows);
@@ -4043,6 +4141,7 @@ function renderReproducibilityEvidence(reproducibility = {}) {
   ].join("");
   renderSignatures.reproducibilityTaskId = taskId;
   renderSignatures.reproducibilityEvidence = evidenceSignature;
+  renderSignatures.reproducibilityEmpty = "";
   if (shouldAnimatePrecisionChart) {
     renderSignatures.reproducibilityAnimatedTaskId = taskId;
   }
@@ -5669,19 +5768,35 @@ async function refreshTasks() {
   ensureActiveTaskProgressPolling();
 }
 
+async function ensureValidationMaterialSelection(task) {
+  if (!task || (task.task_type || "validation") !== "validation") return task;
+  const selectedMaterialsTask = await materialBindingDialog.ensureMaterialSelection(task);
+  if (!selectedMaterialsTask) {
+    setActionStatus("等待选择验证材料。", "info");
+    return null;
+  }
+  selectedTaskId = selectedMaterialsTask.id;
+  selectedTask = selectedMaterialsTask;
+  rememberSelectedTaskId(selectedMaterialsTask.id);
+  await refreshTasks();
+  return selectedTask || selectedMaterialsTask;
+}
+
 async function scanCurrentTask() {
   const taskId = selectedTaskId;
-  if (!taskId) return;
+  const task = await ensureValidationMaterialSelection(selectedTask);
+  const resolvedTaskId = task?.id || taskId;
+  if (!resolvedTaskId) return;
   const controller = new AbortController();
   scanAbortController = controller;
   try {
-    const result = await api(`api/tasks/${taskId}/scan`, {
+    const result = await api(`api/tasks/${resolvedTaskId}/scan`, {
       method: "POST",
       signal: controller.signal,
     });
-    if (selectedTaskId === taskId) renderScanResult(result);
+    if (selectedTaskId === resolvedTaskId) renderScanResult(result);
     await refreshTasks();
-    if (selectedTaskId === taskId) {
+    if (selectedTaskId === resolvedTaskId) {
       if (selectedTask?.status === "failed") {
         setTaskFailureActionStatus(selectedTask);
         return;
@@ -5705,13 +5820,15 @@ async function createTaskAndScan() {
   createTaskInFlight = true;
   setCreateTaskSubmitting(true);
   try {
-    const task = await createTask();
+    let task = await createTask();
     if (!task) return;
+    task = await ensureValidationMaterialSelection(task);
+    if (!task) return;
+    const isValidationTask = (task.task_type || createTaskDialog.activeTaskType() || defaultTaskType) === "validation";
     if (task.run_mode === "agent") {
       const taskId = task.id || selectedTaskId;
       const activeDialogTaskType = createTaskDialog.activeTaskType();
       const definition = taskTypeDefinition(task.task_type || activeDialogTaskType);
-      const isValidationTask = (task.task_type || activeDialogTaskType || defaultTaskType) === "validation";
       setBusy(null, "", taskId);
       await loadAgentMessages(taskId);
       renderAll();
@@ -6444,6 +6561,7 @@ function agentAcceptanceModeValue() {
 bindRunModeDeselectableCards();
 bindDialogBackdropDismissal();
 bindPlatformConfirmDialog();
+materialBindingDialog.bind();
 mountGovernanceExtensions();
 onSelectedTierChange(syncCreateTaskTierDefault);
 createTaskDialog.bindMaterialSourceControls();

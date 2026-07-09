@@ -3945,6 +3945,120 @@ dialog.agent-memory-dialog,
   stroke-linejoin: round;
 }
 
+.material-binding-dialog {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.material-binding-dialog .task-dialog-panel {
+  width: 100%;
+}
+
+.material-binding-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px 16px;
+  overflow: hidden;
+}
+
+.material-binding-rows {
+  display: grid;
+  min-height: 0;
+  gap: 10px;
+  overflow-y: auto;
+  padding-right: 2px;
+  overscroll-behavior: contain;
+}
+
+.material-binding-row {
+  display: grid;
+  grid-template-columns: minmax(170px, 190px) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+}
+
+.material-binding-role {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.material-binding-role-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  border-radius: var(--radius-control);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+}
+
+.material-binding-role-icon svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.material-binding-role-text {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.material-binding-role-text strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.material-binding-role-text small {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.material-binding-row select {
+  min-width: 0;
+}
+
+.material-binding-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .material-binding-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .material-binding-actions {
+    flex-direction: column-reverse;
+  }
+
+  .material-binding-actions .button {
+    width: 100%;
+  }
+}
+
 .task-form-section .checkbox-field {
   align-items: center;
   color: var(--muted);

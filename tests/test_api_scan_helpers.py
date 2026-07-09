@@ -1,8 +1,9 @@
 from types import SimpleNamespace
 
+import nbformat
 import pytest
 
-from marvis.api_scan_helpers import perform_scan_task
+from marvis.api_scan_helpers import material_candidates_payload, perform_scan_task
 from marvis.db import TaskRepository, init_db
 from marvis.domain import TaskCreate, TaskStatus
 
@@ -45,3 +46,41 @@ def test_perform_scan_task_rolls_back_artifacts_when_status_update_fails(tmp_pat
     assert (outputs_dir / "validation.xlsx").read_bytes() == b"old-xlsx"
     assert (images_dir / "roc.png").read_bytes() == b"old-png"
     assert repo.get_task(task.id).status == TaskStatus.CREATED
+
+
+def test_material_candidates_payload_lists_extra_csv_without_selecting_it(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    notebook_path = source / "model.ipynb"
+    sample_path = source / "sample.parquet"
+    extra_csv = source / "feature_importance_best.csv"
+    pmml_path = source / "model.pmml"
+    dictionary_path = source / "dictionary.csv"
+    nbformat.write(nbformat.v4.new_notebook(cells=[]), notebook_path)
+    sample_path.write_bytes(b"PAR1")
+    extra_csv.write_text("feature,importance\nx1,1\n", encoding="utf-8")
+    pmml_path.write_text("<PMML/>", encoding="utf-8")
+    dictionary_path.write_text("特征名,类别\nx1,基础信息\n", encoding="utf-8")
+
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(source),
+            sample_path="sample.parquet",
+        )
+    )
+
+    payload = material_candidates_payload(task)
+
+    sample_candidates = payload["candidates"]["sample"]
+    assert {item["relative_path"] for item in sample_candidates} == {
+        "dictionary.csv",
+        "feature_importance_best.csv",
+        "sample.parquet",
+    }
+    assert payload["selection"]["sample_path"] == "sample.parquet"

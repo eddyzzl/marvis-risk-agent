@@ -1626,6 +1626,64 @@ process.stdout.write("ok");
     assert result.stdout == "ok"
 
 
+def test_validation_material_binding_dialog_is_wired_before_scan():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    binding_js = _read_static("js/material-binding-dialog.js")
+
+    assert 'id="materialBindingDialog"' in index_html
+    assert 'id="materialBindingRows"' in index_html
+    assert 'id="materialBindingConfirmButton"' in index_html
+    assert 'createMaterialBindingDialogController' in app_js
+    assert 'materialBindingDialog.ensureMaterialSelection(task)' in app_js
+    assert 'materialBindingDialog.bind();' in app_js
+    assert 'label: "Notebook"' in binding_js
+    assert 'label: "Sample"' in binding_js
+    assert 'label: "PMML"' in binding_js
+    assert 'label: "Dictionary"' in binding_js
+    assert "material-binding-role-icon" in binding_js
+    assert "material-binding-role-text" in binding_js
+    assert '`/api/tasks/${activeTask.id}/materials`' in binding_js
+    assert 'method: "PUT"' in binding_js
+    assert 'sample_path' in binding_js
+    assert 'feature_importance_best.csv' not in binding_js
+    assert "selected_materials" in app_js
+    assert "已指定" in app_js
+
+
+def test_validation_material_binding_dialog_keeps_content_inside_viewport():
+    styles_css = _read_static("styles.css")
+
+    dialog_rule = _css_rule(styles_css, ".material-binding-dialog")
+    assert "width: min(760px, calc(100vw - 32px))" in dialog_rule
+
+    panel_rule = _css_rule(styles_css, ".material-binding-dialog .task-dialog-panel")
+    assert "width: 100%" in panel_rule
+
+    body_rule = _css_rule(styles_css, ".material-binding-body")
+    assert "flex: 1 1 auto" in body_rule
+    assert "min-height: 0" in body_rule
+    assert "overflow: hidden" in body_rule
+
+    rows_rule = _css_rule(styles_css, ".material-binding-rows")
+    assert "overflow-y: auto" in rows_rule
+    assert "overscroll-behavior: contain" in rows_rule
+
+
+def test_validation_failure_stage_drives_rail_and_empty_evidence_copy():
+    app_js = _read_static("app.js")
+
+    assert "task.failure_stage || \"\"" in app_js
+    assert "function earliestFailureStage" in app_js
+    assert "function notebookStepStageFailure" in app_js
+    assert "return earliestFailureStage(structuredStage, notebookStepStageFailure());" in app_js
+    assert "taskFailedDuringNotebook(task) ||" in app_js
+    assert "taskFailedDuringNotebook(selectedTask) ||" in app_js
+    assert "模型可复现性验证失败，修复 Notebook 后重新运行该阶段。" in app_js
+    assert "模型可复现性验证未通过，暂不展示效果&稳定性指标。" in app_js
+    assert "metricPreviewSignature(\n    previewTaskId,\n    lastMetricValues,\n    lastMetricTableSections,\n    emptyMessage," in app_js
+
+
 def test_create_task_upload_mode_posts_materials_before_creating_task():
     create_dialog_js = _read_static("js/create-task-dialog.js")
     api_js = _read_static("js/api.js")
@@ -3679,7 +3737,7 @@ def test_stage_failures_keep_completed_previous_steps_green():
     assert "function normalizedFailureStage" in app_js
     assert "const structuredStage = normalizedFailureStage(task.failure_stage);" in helper_renderer
     assert "status_message" not in helper_renderer
-    assert "if (structuredStage) return structuredStage;\n  return null;" in helper_renderer
+    assert "return earliestFailureStage(structuredStage, notebookStepStageFailure());" in helper_renderer
     assert "const failedIndex = workflowSteps.findIndex((candidate) => candidate.id === failedStepId);" in status_renderer
     assert 'if (step.id === failedStepId) return "failed";' in status_renderer
     assert 'if (failedIndex >= 0) return index < failedIndex ? "succeeded" : "pending";' in status_renderer
@@ -6198,9 +6256,9 @@ def test_agent_mode_creation_routes_non_validation_tasks_to_conversation_compose
     agent_branch_end = create_scan_body.index('setBusy(null, "", null);', agent_branch_start)
     agent_branch = create_scan_body[agent_branch_start:agent_branch_end]
 
+    assert 'const isValidationTask = (task.task_type || createTaskDialog.activeTaskType() || defaultTaskType) === "validation";' in create_scan_body
     assert "const activeDialogTaskType = createTaskDialog.activeTaskType();" in agent_branch
     assert "const definition = taskTypeDefinition(task.task_type || activeDialogTaskType);" in agent_branch
-    assert 'const isValidationTask = (task.task_type || activeDialogTaskType || defaultTaskType) === "validation";' in agent_branch
     # Non-validation agent tasks route to the inline conversation composer:
     # createTask() already seeded it via prefillAgentTaskInstruction, so the
     # branch only focuses the composer (the V2 plan dialog is retired).
@@ -6346,6 +6404,7 @@ def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
             "function renderAll() { renderAllCalls += 1; }",
             "async function scanCurrentTask() { throw new Error('agent mode should not scan'); }",
             "async function loadTaskEvidence() {}",
+            "async function ensureValidationMaterialSelection(task) { return task; }",
             "async function api(endpoint) {",
             "  throw new Error(`unexpected endpoint ${endpoint}`);",
             "}",

@@ -29,6 +29,8 @@ class ContractPrecheckResult:
     missing_names: list[str]
     target_col: str | None = None
     algorithm: str | None = None
+    algorithm_raw: str | None = None
+    algorithm_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -39,7 +41,19 @@ class _ContractBindings:
     algorithm_defined: bool = False
     target_col: str | None = None
     algorithm: str | None = None
+    algorithm_raw: str | None = None
+    algorithm_source: str | None = None
+    algorithm_error: str | None = None
     invalid_names: tuple[str, ...] = ()
+    contract_cell_indexes: tuple[int, ...] = ()
+    source_previews: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _AlgorithmLiteral:
+    raw: str | None
+    normalized: str | None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,15 +73,7 @@ class RuntimeContract:
 def precheck_notebook_contract(notebook_or_path: Any) -> ContractPrecheckResult:
     notebook = _read_notebook(notebook_or_path)
     bindings = _contract_bindings(notebook)
-    missing = []
-    if not bindings.sample_df_defined:
-        missing.append("RMC_SAMPLE_DF")
-    if not bindings.score_fn_defined:
-        missing.append("RMC_SCORE_FN")
-    if not bindings.target_col_defined:
-        missing.append("RMC_TARGET_COL")
-    if not bindings.algorithm_defined:
-        missing.append("RMC_ALGORITHM")
+    missing = _missing_contract_names(bindings)
     if missing:
         raise NotebookContractError(
             "Notebook contract check failed before execution: missing "
@@ -82,7 +88,52 @@ def precheck_notebook_contract(notebook_or_path: Any) -> ContractPrecheckResult:
         missing_names=[],
         target_col=bindings.target_col,
         algorithm=bindings.algorithm,
+        algorithm_raw=bindings.algorithm_raw,
+        algorithm_source=bindings.algorithm_source,
     )
+
+
+def inspect_notebook_contract(notebook_or_path: Any) -> dict[str, Any]:
+    """Return a bounded, read-only static summary of the notebook RMC contract."""
+    notebook = _read_notebook(notebook_or_path)
+    bindings = _contract_bindings(notebook)
+    missing = _missing_contract_names(bindings)
+    algorithm_valid: bool | None
+    if not bindings.algorithm_defined:
+        algorithm_valid = None
+    else:
+        algorithm_valid = bindings.algorithm is not None and bindings.algorithm_error is None
+    return {
+        "read_only": True,
+        "source": "notebook_static_scan",
+        "sample_df_defined": bindings.sample_df_defined,
+        "score_fn_defined": bindings.score_fn_defined,
+        "target_col_defined": bindings.target_col_defined,
+        "algorithm_defined": bindings.algorithm_defined,
+        "target_col": bindings.target_col,
+        "algorithm": bindings.algorithm,
+        "algorithm_raw": bindings.algorithm_raw,
+        "algorithm_source": bindings.algorithm_source,
+        "algorithm_valid": algorithm_valid,
+        "algorithm_error": bindings.algorithm_error,
+        "missing_names": missing,
+        "invalid_names": list(bindings.invalid_names),
+        "contract_cell_indexes": list(bindings.contract_cell_indexes),
+        "source_previews": list(bindings.source_previews),
+    }
+
+
+def _missing_contract_names(bindings: _ContractBindings) -> list[str]:
+    missing = []
+    if not bindings.sample_df_defined:
+        missing.append("RMC_SAMPLE_DF")
+    if not bindings.score_fn_defined:
+        missing.append("RMC_SCORE_FN")
+    if not bindings.target_col_defined:
+        missing.append("RMC_TARGET_COL")
+    if not bindings.algorithm_defined:
+        missing.append("RMC_ALGORITHM")
+    return missing
 
 
 def _contract_bindings(notebook: Any) -> _ContractBindings:
@@ -93,13 +144,27 @@ def _contract_bindings(notebook: Any) -> _ContractBindings:
     fallback_algorithm_defined = False
     target_col: str | None = None
     algorithm: str | None = None
+    algorithm_raw: str | None = None
+    algorithm_source: str | None = None
+    algorithm_error: str | None = None
     invalid_names: list[str] = []
     fallback_invalid_names: list[str] = []
+    fallback_algorithm_raw: str | None = None
+    fallback_algorithm_source: str | None = None
+    fallback_algorithm_error: str | None = None
+    contract_cell_indexes: list[int] = []
+    source_previews: list[str] = []
 
     for cell_index, cell in enumerate(notebook.cells):
         if cell.cell_type != "code":
             continue
-        tree = _parse_contract_scan_cell(str(cell.source), cell_index)
+        source = str(cell.source)
+        if _mentions_required_contract_name(source):
+            contract_cell_indexes.append(cell_index)
+            preview = _contract_source_preview(source)
+            if preview:
+                source_previews.append(preview)
+        tree = _parse_contract_scan_cell(source, cell_index)
         if tree is None:
             continue
         for node in tree.body:
@@ -125,24 +190,37 @@ def _contract_bindings(notebook: Any) -> _ContractBindings:
                             invalid_names.append("RMC_TARGET_COL must be a string")
                 if "RMC_ALGORITHM" in target_names:
                     explicit_algorithm_defined = True
-                    algorithm = _algorithm_literal(
+                    algorithm_literal = _algorithm_literal(
                         "RMC_ALGORITHM",
                         node.value,
                         invalid_names,
                     )
+                    algorithm = algorithm_literal.normalized
+                    algorithm_raw = algorithm_literal.raw
+                    algorithm_source = "RMC_ALGORITHM"
+                    algorithm_error = algorithm_literal.error
                 if not explicit_algorithm_defined and (
                     "RMC_MODEL_PARAMS" in target_names
                     or "MODEL_HYPERPARAMETERS" in target_names
                 ):
+                    params_name = (
+                        "RMC_MODEL_PARAMS"
+                        if "RMC_MODEL_PARAMS" in target_names
+                        else "MODEL_HYPERPARAMETERS"
+                    )
                     invalid_count = len(fallback_invalid_names)
                     params_algorithm = _model_params_algorithm_literal(
                         node.value,
+                        params_name,
                         fallback_invalid_names,
                     )
                     if params_algorithm is not None or len(fallback_invalid_names) > invalid_count:
                         fallback_algorithm_defined = True
                         if params_algorithm is not None:
-                            algorithm = params_algorithm
+                            algorithm = params_algorithm.normalized
+                            fallback_algorithm_raw = params_algorithm.raw
+                            fallback_algorithm_source = f"{params_name}.algorithm"
+                            fallback_algorithm_error = params_algorithm.error
                 continue
             if isinstance(node, ast.AnnAssign):
                 target_names = _assigned_names([node.target])
@@ -162,11 +240,15 @@ def _contract_bindings(notebook: Any) -> _ContractBindings:
                             invalid_names.append("RMC_TARGET_COL must be a string")
                 if "RMC_ALGORITHM" in target_names and node.value is not None:
                     explicit_algorithm_defined = True
-                    algorithm = _algorithm_literal(
+                    algorithm_literal = _algorithm_literal(
                         "RMC_ALGORITHM",
                         node.value,
                         invalid_names,
                     )
+                    algorithm = algorithm_literal.normalized
+                    algorithm_raw = algorithm_literal.raw
+                    algorithm_source = "RMC_ALGORITHM"
+                    algorithm_error = algorithm_literal.error
                 if (
                     not explicit_algorithm_defined
                     and node.value is not None
@@ -175,18 +257,31 @@ def _contract_bindings(notebook: Any) -> _ContractBindings:
                         or "MODEL_HYPERPARAMETERS" in target_names
                     )
                 ):
+                    params_name = (
+                        "RMC_MODEL_PARAMS"
+                        if "RMC_MODEL_PARAMS" in target_names
+                        else "MODEL_HYPERPARAMETERS"
+                    )
                     invalid_count = len(fallback_invalid_names)
                     params_algorithm = _model_params_algorithm_literal(
                         node.value,
+                        params_name,
                         fallback_invalid_names,
                     )
                     if params_algorithm is not None or len(fallback_invalid_names) > invalid_count:
                         fallback_algorithm_defined = True
                         if params_algorithm is not None:
-                            algorithm = params_algorithm
+                            algorithm = params_algorithm.normalized
+                            fallback_algorithm_raw = params_algorithm.raw
+                            fallback_algorithm_source = f"{params_name}.algorithm"
+                            fallback_algorithm_error = params_algorithm.error
 
     if not explicit_algorithm_defined and fallback_invalid_names:
         invalid_names.extend(fallback_invalid_names)
+    if not explicit_algorithm_defined and fallback_algorithm_defined:
+        algorithm_raw = fallback_algorithm_raw
+        algorithm_source = fallback_algorithm_source
+        algorithm_error = fallback_algorithm_error
 
     return _ContractBindings(
         sample_df_defined=sample_df_defined,
@@ -195,7 +290,12 @@ def _contract_bindings(notebook: Any) -> _ContractBindings:
         algorithm_defined=explicit_algorithm_defined or fallback_algorithm_defined,
         target_col=target_col,
         algorithm=algorithm,
+        algorithm_raw=algorithm_raw,
+        algorithm_source=algorithm_source,
+        algorithm_error=algorithm_error,
         invalid_names=tuple(sorted(set(invalid_names))),
+        contract_cell_indexes=tuple(dict.fromkeys(contract_cell_indexes)),
+        source_previews=tuple(source_previews[:3]),
     )
 
 
@@ -257,25 +357,42 @@ def _looks_callable_binding(value: ast.expr) -> bool:
     return True
 
 
+def _contract_source_preview(source: str) -> str:
+    lines = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if any(name in stripped for name in CONTRACT_SCAN_NAMES):
+            lines.append(stripped[:180])
+        if len(lines) >= 12:
+            break
+    return "\n".join(lines)
+
+
 def _algorithm_literal(
     name: str,
     value: ast.expr,
     invalid_names: list[str],
-) -> str | None:
+) -> _AlgorithmLiteral:
     if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
-        invalid_names.append(f"{name} must be a string literal")
-        return None
+        error = "must be a string literal"
+        invalid_names.append(f"{name} {error}")
+        return _AlgorithmLiteral(raw=None, normalized=None, error=error)
+    raw = value.value
     try:
-        return normalize_algorithm(value.value)
+        return _AlgorithmLiteral(raw=raw, normalized=normalize_algorithm(raw))
     except ValueError as exc:
-        invalid_names.append(f"{name} {exc}")
-        return None
+        error = str(exc)
+        invalid_names.append(f"{name} value {raw!r} {error}")
+        return _AlgorithmLiteral(raw=raw, normalized=None, error=error)
 
 
 def _model_params_algorithm_literal(
     value: ast.expr,
+    params_name: str,
     invalid_names: list[str],
-) -> str | None:
+) -> _AlgorithmLiteral | None:
     if not isinstance(value, ast.Dict):
         return None
     for key_node, value_node in zip(value.keys, value.values, strict=True):
@@ -285,13 +402,16 @@ def _model_params_algorithm_literal(
             and isinstance(value_node, ast.Constant)
         ):
             if not isinstance(value_node.value, str):
-                invalid_names.append("RMC_MODEL_PARAMS algorithm must be a string")
-                return None
+                error = "algorithm must be a string"
+                invalid_names.append(f"{params_name} {error}")
+                return _AlgorithmLiteral(raw=None, normalized=None, error=error)
+            raw = value_node.value
             try:
-                return normalize_algorithm(value_node.value)
+                return _AlgorithmLiteral(raw=raw, normalized=normalize_algorithm(raw))
             except ValueError as exc:
-                invalid_names.append(f"RMC_MODEL_PARAMS algorithm {exc}")
-                return None
+                error = str(exc)
+                invalid_names.append(f"{params_name} algorithm value {raw!r} {error}")
+                return _AlgorithmLiteral(raw=raw, normalized=None, error=error)
     return None
 
 
@@ -341,6 +461,8 @@ _RMC_SUPPORTED_ALGORITHM_TEXT = "xgb, lgb, lr, catboost, scorecard, dnn"
 _RMC_ALLOWED_ALGORITHMS = {"xgb", "lgb", "lr", "catboost", "scorecard", "dnn"}
 _RMC_ALGORITHM_ALIASES = {
     "xgb": "xgb",
+    "xgbm": "xgb",
+    "xgbmclassifier": "xgb",
     "xgboost": "xgb",
     "xgbclassifier": "xgb",
     "xgboostclassifier": "xgb",

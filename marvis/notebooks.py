@@ -1,4 +1,5 @@
 import asyncio
+import ast
 from dataclasses import asdict
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -92,6 +93,42 @@ class NotebookSubprocessTimeout(TimeoutError):
 
 _LIVE_SESSIONS_LOCK = threading.Lock()
 _LIVE_SESSIONS: dict[str, "NotebookExecutionSession"] = {}
+_SOURCE_PREVIEW_LINE_LIMIT = 18
+_SOURCE_PREVIEW_LINE_WIDTH = 220
+_SOURCE_PREVIEW_CHAR_LIMIT = 2400
+_FILE_ACCESS_LINE_LIMIT = 16
+_FILE_REFERENCE_LIMIT = 40
+_FILE_REFERENCE_SUFFIXES = frozenset(
+    {
+        ".csv",
+        ".tsv",
+        ".txt",
+        ".json",
+        ".jsonl",
+        ".xlsx",
+        ".xls",
+        ".parquet",
+        ".feather",
+        ".pkl",
+        ".pickle",
+        ".joblib",
+        ".pmml",
+        ".py",
+    }
+)
+_FILE_ACCESS_TOKENS = (
+    "read_csv",
+    "read_excel",
+    "read_parquet",
+    "read_feather",
+    "read_table",
+    "read_json",
+    "open(",
+    ".open(",
+    "joblib.load",
+    "pickle.load",
+    "load(",
+)
 
 
 class NotebookExecutionSession:
@@ -1361,6 +1398,102 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _cell_source_evidence(cell) -> dict[str, Any]:
+    if getattr(cell, "cell_type", None) != "code":
+        return {}
+    source = str(getattr(cell, "source", "") or "")
+    return {
+        "source_preview": _source_preview(source),
+        "referenced_files": _referenced_files(source),
+        "file_access_lines": _file_access_lines(source),
+    }
+
+
+def _apply_cell_source_evidence(event: dict[str, Any], cell) -> None:
+    event.update(_cell_source_evidence(cell))
+
+
+def _source_preview(source: str) -> str:
+    lines: list[str] = []
+    for line in source.splitlines():
+        if not line.strip():
+            continue
+        lines.append(line.rstrip()[:_SOURCE_PREVIEW_LINE_WIDTH])
+        if len(lines) >= _SOURCE_PREVIEW_LINE_LIMIT:
+            break
+    return _preview("\n".join(lines), _SOURCE_PREVIEW_CHAR_LIMIT)
+
+
+def _referenced_files(source: str) -> list[str]:
+    values: list[str] = []
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return _referenced_files_from_text(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            values.append(node.value)
+        elif isinstance(node, ast.JoinedStr):
+            literal = "".join(
+                part.value
+                for part in node.values
+                if isinstance(part, ast.Constant) and isinstance(part.value, str)
+            )
+            if literal:
+                values.append(literal)
+    return _unique_file_references(values)
+
+
+def _referenced_files_from_text(source: str) -> list[str]:
+    candidates: list[str] = []
+    for quote in ("'", '"'):
+        parts = source.split(quote)
+        candidates.extend(parts[index] for index in range(1, len(parts), 2))
+    return _unique_file_references(candidates)
+
+
+def _unique_file_references(values: list[str]) -> list[str]:
+    references: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        candidate = str(value or "").strip()
+        if not _looks_like_file_reference(candidate):
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        references.append(candidate)
+        if len(references) >= _FILE_REFERENCE_LIMIT:
+            break
+    return references
+
+
+def _looks_like_file_reference(value: str) -> bool:
+    if not value or "\n" in value or len(value) > 300:
+        return False
+    if "://" in value:
+        return False
+    suffix = Path(value.replace("\\", "/")).suffix.lower()
+    return suffix in _FILE_REFERENCE_SUFFIXES
+
+
+def _file_access_lines(source: str) -> list[str]:
+    references = _referenced_files(source)
+    lines: list[str] = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        compact = stripped.replace(" ", "").casefold()
+        if any(token in compact for token in _FILE_ACCESS_TOKENS) or any(
+            reference in stripped for reference in references
+        ):
+            lines.append(stripped[:_SOURCE_PREVIEW_LINE_WIDTH])
+            if len(lines) >= _FILE_ACCESS_LINE_LIMIT:
+                break
+    return lines
+
+
 def _record_cell_start(
     cell_events: dict[int, dict[str, Any]],
     *,
@@ -1380,6 +1513,7 @@ def _record_cell_start(
         "exception_value": None,
         "traceback_preview": "",
     }
+    _apply_cell_source_evidence(cell_events[cell_index], cell)
 
 
 def _record_cell_error(
@@ -1401,6 +1535,7 @@ def _record_cell_error(
             "traceback_preview": _preview("\n".join(content.get("traceback", []))),
         }
     )
+    _apply_cell_source_evidence(event, cell)
 
 
 def _record_cell_executed(
@@ -1415,6 +1550,7 @@ def _record_cell_executed(
     if event.get("status") != "failed" and not defer_completion:
         event["status"] = "succeeded"
     event["cell_type"] = cell.cell_type
+    _apply_cell_source_evidence(event, cell)
 
 
 def _record_cell_complete(
@@ -1433,6 +1569,7 @@ def _record_cell_complete(
     stdout, stderr = _output_previews(cell)
     event["stdout_preview"] = stdout
     event["stderr_preview"] = stderr
+    _apply_cell_source_evidence(event, cell)
 
 
 def _finalize_cell_event_after_execute(
@@ -1454,6 +1591,7 @@ def _finalize_cell_event_after_execute(
     stdout, stderr = _output_previews(cell)
     event["stdout_preview"] = stdout
     event["stderr_preview"] = stderr
+    _apply_cell_source_evidence(event, cell)
 
 
 def _finalize_successful_cell_events(

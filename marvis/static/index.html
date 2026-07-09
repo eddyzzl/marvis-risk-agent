@@ -342,6 +342,26 @@
       </form>
     </dialog>
 
+    <dialog id="materialBindingDialog" class="task-dialog material-binding-dialog" aria-labelledby="materialBindingTitle">
+      <form class="task-dialog-panel material-binding-panel" method="dialog">
+        <header class="dialog-head">
+          <h2 id="materialBindingTitle">选择验证材料</h2>
+          <p class="dialog-subtitle">确认 Notebook、样本数据、PMML 模型和数据字典后，再执行契约检查。</p>
+          <button id="closeMaterialBindingDialogButton" class="button compact secondary dialog-close-button" type="button" aria-label="关闭" title="关闭">
+            <span aria-hidden="true">&times;</span>
+          </button>
+        </header>
+        <div class="material-binding-body">
+          <div id="materialBindingRows" class="material-binding-rows"></div>
+          <div id="materialBindingStatus" class="status" role="status" aria-live="polite"></div>
+          <div class="material-binding-actions">
+            <button id="materialBindingCancelButton" class="button secondary" type="button">稍后选择</button>
+            <button id="materialBindingConfirmButton" class="button primary" type="button">确认材料并继续</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="llmEngineEditDialog" class="task-dialog environment-dialog llm-engine-edit-dialog" aria-labelledby="llmEngineEditTitle">
       <form class="task-dialog-panel" method="dialog">
         <header class="dialog-head">

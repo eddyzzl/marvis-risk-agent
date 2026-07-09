@@ -176,6 +176,7 @@ def run_agent_scan_stage(
             error=task.status_message,
             model_profile=model_profile,
             deps=deps,
+            evidence={"scan": scan_payload},
         )
         return False
     add_and_stream_agent_message(
@@ -226,6 +227,7 @@ def run_agent_reproducibility_stage(
     raise_if_agent_cancelled(task_id)
     task = repo.get_task(task_id)
     if task.status == TaskStatus.FAILED:
+        evidence = deps.agent_evidence_from_settings(settings, task_id)
         add_agent_failure_summary(
             repo,
             task_id=task_id,
@@ -234,6 +236,7 @@ def run_agent_reproducibility_stage(
             error=task.status_message,
             model_profile=model_profile,
             deps=deps,
+            evidence=evidence,
         )
         return False
     evidence = deps.agent_evidence_from_settings(settings, task_id)
@@ -307,6 +310,7 @@ def run_agent_metrics_stage(
     raise_if_agent_cancelled(task_id)
     task = repo.get_task(task_id)
     if task.status == TaskStatus.FAILED:
+        evidence = deps.agent_evidence_from_settings(settings, task_id)
         add_agent_failure_summary(
             repo,
             task_id=task_id,
@@ -315,6 +319,7 @@ def run_agent_metrics_stage(
             error=task.status_message,
             model_profile=model_profile,
             deps=deps,
+            evidence=evidence,
         )
         return False
     evidence = deps.agent_evidence_from_settings(settings, task_id)
@@ -578,6 +583,7 @@ def add_agent_failure_summary(
     error: str,
     model_profile: dict,
     deps: ValidationStageDependencies,
+    evidence: dict | None = None,
 ) -> None:
     add_and_stream_agent_message(
         repo,
@@ -588,6 +594,7 @@ def add_agent_failure_summary(
             task=task,
             stage=stage_label,
             error=error,
+            evidence=evidence,
             model_profile=model_profile,
             on_delta=on_delta,
         ),

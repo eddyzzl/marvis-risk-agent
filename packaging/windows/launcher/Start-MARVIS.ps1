@@ -98,7 +98,119 @@ function Test-MarvisHealth {
     }
 }
 
-if (-not (Test-MarvisHealth -Url $HealthUrl)) {
+function Get-MarvisListenerProcessInfo {
+    param([int] $Port)
+    try {
+        $Connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -eq $Connection) {
+            return $null
+        }
+        $Process = Get-Process -Id $Connection.OwningProcess -ErrorAction SilentlyContinue
+        $CimProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($Connection.OwningProcess)" -ErrorAction SilentlyContinue
+        return [pscustomobject]@{
+            Id = $Connection.OwningProcess
+            Process = $Process
+            Path = if ($null -ne $Process) { $Process.Path } else { "" }
+            CommandLine = if ($null -ne $CimProcess) { $CimProcess.CommandLine } else { "" }
+            StartTime = if ($null -ne $Process) { $Process.StartTime } else { $null }
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Test-SamePath {
+    param(
+        [string] $Left,
+        [string] $Right
+    )
+    if ([string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right)) {
+        return $false
+    }
+    try {
+        return ([System.IO.Path]::GetFullPath($Left) -ieq [System.IO.Path]::GetFullPath($Right))
+    }
+    catch {
+        return ($Left -ieq $Right)
+    }
+}
+
+function Test-MarvisServeProcess {
+    param($ProcessInfo)
+    if ($null -eq $ProcessInfo) {
+        return $false
+    }
+    $CommandLine = "$($ProcessInfo.CommandLine)"
+    return ($CommandLine -match "(?i)\bmarvis\b" -and $CommandLine -match "(?i)\bserve\b")
+}
+
+function Test-CurrentInstallProcess {
+    param(
+        $ProcessInfo,
+        [string] $PythonExe,
+        [string] $InstallRoot
+    )
+    if ($null -eq $ProcessInfo) {
+        return $false
+    }
+    if (-not (Test-SamePath -Left $ProcessInfo.Path -Right $PythonExe)) {
+        return $false
+    }
+    $VersionFile = Join-Path $InstallRoot "VERSION.txt"
+    if (Test-Path $VersionFile) {
+        try {
+            $VersionWriteTime = (Get-Item $VersionFile).LastWriteTime
+            if ($ProcessInfo.StartTime -and $ProcessInfo.StartTime -lt $VersionWriteTime) {
+                return $false
+            }
+        }
+        catch {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Wait-PortRelease {
+    param(
+        [int] $Port,
+        [int] $TimeoutSeconds = 10
+    )
+    $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $Deadline) {
+        $Connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -eq $Connection) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
+$ShouldStart = $true
+if (Test-MarvisHealth -Url $HealthUrl) {
+    $ExistingProcess = Get-MarvisListenerProcessInfo -Port $Port
+    if (Test-CurrentInstallProcess -ProcessInfo $ExistingProcess -PythonExe $PythonExe -InstallRoot $InstallRoot) {
+        $ShouldStart = $false
+    }
+    elseif (Test-MarvisServeProcess -ProcessInfo $ExistingProcess) {
+        Write-Host "Stopping stale MARVIS process on port $Port (PID $($ExistingProcess.Id)) before launching this installation."
+        Stop-Process -Id $ExistingProcess.Id -Force
+        if (-not (Wait-PortRelease -Port $Port)) {
+            Write-Error "Port $Port did not become available after stopping stale MARVIS process $($ExistingProcess.Id)."
+            exit 1
+        }
+    }
+    else {
+        Write-Error "Port $Port is already serving /api/health but is not a MARVIS process from this installation. Stop that process or launch MARVIS-Agent with a different -Port."
+        exit 1
+    }
+}
+
+if ($ShouldStart) {
     $Timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $StdoutLog = Join-Path $LogRoot "marvis-$Timestamp.out.log"
     $StderrLog = Join-Path $LogRoot "marvis-$Timestamp.err.log"

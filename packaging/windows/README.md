@@ -38,8 +38,8 @@ The installer payload contains:
   runtime when a compatible validation environment is bundled.
 - `MARVIS-Agent.cmd`: shortcut target.
 - `bin\Start-MARVIS.ps1`: starts `marvis serve` and opens the browser.
-- `assets\MARVIS-Agent.ico`: installer and shortcut icon generated from the
-  MARVIS web app icon.
+- `assets\MARVIS-Agent.ico`: white-background installer and shortcut icon
+  generated from the MARVIS web app icon.
 
 `constraints-runtime-win.txt` pins NumPy to a conservative Windows wheel for
 older personal-computer CPUs that do not support the `X86_V2` baseline used by
@@ -50,8 +50,9 @@ does not register Python, does not modify system Java, and does not require
 administrator privileges.
 
 If `validation-runtime\python.exe` exists, the launcher registers it as a
-Jupyter kernel named `MARVIS Validation (pkg.txt)` and prepends the install
-directory to `JUPYTER_PATH`. That makes the environment visible in MARVIS's
+Jupyter kernel named `MARVIS Validation (pkg.txt)` under both the install
+directory and `%APPDATA%\jupyter\kernels`, then prepends the install directory
+to `JUPYTER_PATH`. That makes the environment visible in MARVIS's
 execution-environment picker without replacing the platform runtime.
 
 ## Build Prerequisites

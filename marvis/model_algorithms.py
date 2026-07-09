@@ -19,6 +19,8 @@ ALLOWED_ALGORITHMS = frozenset(ALGORITHM_LABELS)
 
 _ALGORITHM_ALIASES = {
     "xgb": "xgb",
+    "xgbm": "xgb",
+    "xgbmclassifier": "xgb",
     "xgboost": "xgb",
     "xgbclassifier": "xgb",
     "xgboostclassifier": "xgb",

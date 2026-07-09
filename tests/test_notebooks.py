@@ -375,6 +375,80 @@ def test_run_notebook_streams_step_progress_file(tmp_path: Path, monkeypatch):
     assert final_progress["steps"][1]["title"] == "模型训练"
 
 
+def test_run_notebook_records_failed_cell_source_file_references(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    notebook_path = tmp_path / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    progress_path = tmp_path / "notebook_steps.json"
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_markdown_cell("# 数据读取"),
+            nbformat.v4.new_code_cell(
+                "import pandas as pd\n"
+                "sample = pd.read_csv('missing_sample.csv')\n"
+                "model = joblib.load('model_feature.py')\n"
+            ),
+        ],
+        metadata={"kernelspec": {"name": "python3", "display_name": "Python 3"}},
+    )
+    nbformat.write(notebook, notebook_path)
+
+    class FakeNotebookClient:
+        def __init__(self, notebook, timeout, kernel_name, **callbacks):
+            self.notebook = notebook
+            self.callbacks = callbacks
+
+        def execute(self, **_kwargs):
+            cell = self.notebook.cells[1]
+            self.callbacks["on_cell_start"](cell=cell, cell_index=1)
+            cell.outputs = [
+                nbformat.v4.new_output(
+                    "error",
+                    ename="FileNotFoundError",
+                    evalue="[Errno 2] No such file or directory",
+                    traceback=["FileNotFoundError: [Errno 2] No such file or directory"],
+                )
+            ]
+            self.callbacks["on_cell_error"](
+                cell=cell,
+                cell_index=1,
+                execute_reply={
+                    "content": {
+                        "ename": "FileNotFoundError",
+                        "evalue": "[Errno 2] No such file or directory",
+                        "traceback": [
+                            "FileNotFoundError: [Errno 2] No such file or directory"
+                        ],
+                    }
+                },
+            )
+            raise RuntimeError("kernel failed")
+
+    monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
+
+    result = run_notebook(
+        notebook_path,
+        executed_path,
+        log_path,
+        timeout=60,
+        progress_path=progress_path,
+    )
+
+    assert result.succeeded is False
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    failed_cell = progress["cells"][0]
+    assert failed_cell["status"] == "failed"
+    assert "pd.read_csv('missing_sample.csv')" in failed_cell["source_preview"]
+    assert failed_cell["referenced_files"] == [
+        "missing_sample.csv",
+        "model_feature.py",
+    ]
+    assert any("missing_sample.csv" in line for line in failed_cell["file_access_lines"])
+
+
 def test_run_notebook_defers_step_elapsed_until_next_cell_or_return(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

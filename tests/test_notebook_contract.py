@@ -9,6 +9,7 @@ from marvis.notebook_contract import (
     NotebookContractError,
     build_contract_head_cell_source,
     build_contract_tail_cell_source,
+    inspect_notebook_contract,
     load_runtime_contract,
     precheck_notebook_contract,
 )
@@ -99,6 +100,45 @@ def test_precheck_accepts_model_params_algorithm_alias_for_transition():
     result = precheck_notebook_contract(notebook)
 
     assert result.algorithm == "xgb"
+    assert result.algorithm_raw == "XGBClassifier"
+    assert result.algorithm_source == "RMC_MODEL_PARAMS.algorithm"
+    summary = inspect_notebook_contract(notebook)
+    assert summary["read_only"] is True
+    assert summary["algorithm_raw"] == "XGBClassifier"
+    assert summary["algorithm"] == "xgb"
+    assert summary["algorithm_valid"] is True
+    assert summary["contract_cell_indexes"] == [0]
+    assert (
+        "RMC_MODEL_PARAMS = {'algorithm': 'XGBClassifier'}"
+        in summary["source_previews"][0]
+    )
+
+
+def test_precheck_accepts_xgbm_algorithm_alias():
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_code_cell(
+                "RMC_SAMPLE_DF = sample_df\n"
+                "RMC_TARGET_COL = 'y'\n"
+                "RMC_ALGORITHM = 'xgbm'\n"
+                "def RMC_SCORE_FN(df):\n"
+                "    return [0.1] * len(df)\n"
+            )
+        ]
+    )
+
+    result = precheck_notebook_contract(notebook)
+
+    assert result.algorithm == "xgb"
+    assert result.algorithm_raw == "xgbm"
+    assert result.algorithm_source == "RMC_ALGORITHM"
+    summary = inspect_notebook_contract(notebook)
+    assert summary["read_only"] is True
+    assert summary["algorithm_raw"] == "xgbm"
+    assert summary["algorithm"] == "xgb"
+    assert summary["algorithm_valid"] is True
+    assert summary["contract_cell_indexes"] == [0]
+    assert "RMC_ALGORITHM = 'xgbm'" in summary["source_previews"][0]
 
 
 def test_precheck_prefers_explicit_algorithm_over_legacy_model_params():
@@ -133,8 +173,17 @@ def test_precheck_rejects_unknown_algorithm_contract_value():
         ]
     )
 
-    with pytest.raises(NotebookContractError, match="unsupported model algorithm"):
+    with pytest.raises(NotebookContractError) as excinfo:
         precheck_notebook_contract(notebook)
+
+    assert "RMC_ALGORITHM value 'random forest' unsupported model algorithm" in str(
+        excinfo.value
+    )
+    summary = inspect_notebook_contract(notebook)
+    assert summary["algorithm_raw"] == "random forest"
+    assert summary["algorithm"] is None
+    assert summary["algorithm_valid"] is False
+    assert "unsupported model algorithm" in summary["algorithm_error"]
 
 
 def test_precheck_rejects_blank_algorithm_contract_value():
@@ -309,6 +358,41 @@ def test_contract_tail_cell_uses_positional_row_index_for_custom_sample_index(
 
     scores = pd.read_csv(scores_path)
     assert scores["row_index"].tolist() == [0, 1]
+
+
+def test_contract_tail_cell_accepts_xgbm_algorithm_alias(tmp_path: Path):
+    sample_path = tmp_path / "sample.csv"
+    meta_path = tmp_path / "contract.json"
+    scores_path = tmp_path / "scores.csv"
+    pd.DataFrame({"x": [1.0, 2.0], "y": [0, 1]}).to_csv(sample_path, index=False)
+    namespace: dict = {}
+    exec(
+        build_contract_head_cell_source(
+            sample_path=sample_path,
+            contract_meta_path=meta_path,
+            code_scores_path=scores_path,
+            feature_importance_path=tmp_path / "importance.csv",
+            model_params_path=tmp_path / "params.json",
+        ),
+        namespace,
+    )
+    exec(
+        "\n".join(
+            [
+                "import pandas as pd",
+                "RMC_SAMPLE_DF = pd.DataFrame({'x': [1.0, 2.0], 'y': [0, 1]})",
+                "RMC_TARGET_COL = 'y'",
+                "RMC_ALGORITHM = 'xgbm'",
+                "def RMC_SCORE_FN(df):",
+                "    return df['x'] / 10",
+            ]
+        ),
+        namespace,
+    )
+
+    exec(build_contract_tail_cell_source(), namespace)
+
+    assert json.loads(meta_path.read_text(encoding="utf-8"))["algorithm"] == "xgb"
 
 
 def test_contract_tail_cell_rejects_blank_algorithm(tmp_path: Path):

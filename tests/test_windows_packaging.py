@@ -36,6 +36,20 @@ def test_windows_launcher_uses_private_runtime_and_user_workspace():
     assert "$response.StatusCode -eq 200" in text
 
 
+def test_windows_launcher_does_not_reuse_stale_or_foreign_port_8000_service():
+    text = (WINDOWS_PACKAGING / "launcher" / "Start-MARVIS.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Get-MarvisListenerProcessInfo" in text
+    assert "Get-NetTCPConnection -LocalPort $Port -State Listen" in text
+    assert "Get-CimInstance Win32_Process" in text
+    assert "Test-CurrentInstallProcess" in text
+    assert "Test-MarvisServeProcess" in text
+    assert "Stopping stale MARVIS process on port $Port" in text
+    assert "not a MARVIS process from this installation" in text
+
+
 def test_windows_launcher_registers_optional_validation_kernel():
     text = (WINDOWS_PACKAGING / "launcher" / "Start-MARVIS.ps1").read_text(
         encoding="utf-8"

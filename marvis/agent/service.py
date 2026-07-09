@@ -63,6 +63,12 @@ WORD_CONCLUSION_VISIBLE_SUMMARY_LIMIT = 8
 WORD_CONCLUSION_VISIBLE_SUMMARY_CHARS = 1200
 REPRODUCIBILITY_NOTEBOOK_STEP_LIMIT = 16
 REPRODUCIBILITY_CONTRACT_FEATURE_LIMIT = 20
+NOTEBOOK_CONTRACT_SOURCE_PREVIEW_LIMIT = 3
+NOTEBOOK_CONTRACT_SOURCE_PREVIEW_CHARS = 500
+NOTEBOOK_FAILURE_CELL_LIMIT = 3
+NOTEBOOK_FAILURE_SOURCE_CHARS = 1200
+NOTEBOOK_FAILURE_FILE_LIMIT = 20
+NOTEBOOK_FAILURE_LINE_LIMIT = 12
 # Raw chart series that balloon the prompt without helping LLM reasoning
 # (each curve carries thousands of (x, y) samples — easily 10+ MB total).
 # AUC/KS summary numbers used in image-1's analysis already live in
@@ -359,6 +365,9 @@ def agent_rerun_stage(content: str) -> str | None:
         "再生成",
         "再写",
         "从头",
+        "从一开始",
+        "从最开始",
+        "从开始",
     )
     if not any(marker in compact for marker in rerun_markers):
         return None
@@ -366,6 +375,9 @@ def agent_rerun_stage(content: str) -> str | None:
         compact,
         (
             "从头",
+            "从一开始",
+            "从最开始",
+            "从开始",
             "从第一步",
             "从第1步",
             "从步骤1",
@@ -644,14 +656,25 @@ def failure_summary(
     task: TaskRecord,
     stage: str,
     error: str,
+    evidence: dict | None = None,
     memory_context: dict | None = None,
     model_profile: dict,
     on_delta: Callable[[str], None] | None = None,
 ) -> tuple[str, dict]:
+    failure_evidence = {"failed_stage": stage, "error": error}
+    if isinstance(evidence, dict):
+        notebook_failure = _compact_notebook_failure_evidence(
+            evidence.get("notebook_steps")
+        )
+        if notebook_failure:
+            failure_evidence["notebook_failure"] = notebook_failure
+        scan = _compact_scan_evidence(evidence.get("scan"))
+        if scan:
+            failure_evidence["scan"] = scan
     prompt = _stage_prompt(
         task=task,
         stage="failure",
-        evidence={"failed_stage": stage, "error": error},
+        evidence=failure_evidence,
         memory_context=memory_context,
     )
     fallback = f"失败阶段：{stage}\n直接原因：{error}\n可能原因：请检查该阶段输入材料、执行环境和上游产物。\n下一步：修正后重新从失败阶段执行。"
@@ -872,6 +895,12 @@ def _reproducibility_stage_evidence(evidence: dict) -> dict:
     if notebook_steps or "notebook_steps" in evidence:
         scoped["notebook_steps"] = notebook_steps
 
+    notebook_failure = _compact_notebook_failure_evidence(
+        evidence.get("notebook_steps")
+    )
+    if notebook_failure:
+        scoped["notebook_failure"] = notebook_failure
+
     contract = _compact_contract_for_reproducibility(evidence.get("contract"))
     if contract or "contract" in evidence:
         scoped["contract"] = contract
@@ -910,6 +939,79 @@ def _compact_notebook_steps_for_reproducibility(steps: object) -> list[dict]:
             }
         )
     return compact
+
+
+def _compact_notebook_failure_evidence(notebook_steps: object) -> dict:
+    if not isinstance(notebook_steps, dict):
+        return {}
+    cells = notebook_steps.get("cells")
+    if not isinstance(cells, list):
+        return {}
+    steps_by_id = _notebook_steps_by_id(notebook_steps.get("steps"))
+    failed_cells: list[dict] = []
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        if str(cell.get("status") or "").lower() != "failed":
+            continue
+        compact = {
+            key: cell.get(key)
+            for key in (
+                "cell_index",
+                "step_id",
+                "exception_name",
+                "exception_value",
+                "traceback_preview",
+            )
+            if cell.get(key) not in (None, "")
+        }
+        step = steps_by_id.get(str(cell.get("step_id") or ""))
+        if step:
+            compact["step_title"] = step.get("title")
+        source_preview = str(cell.get("source_preview") or "").strip()
+        if source_preview:
+            compact["source_preview"] = _truncate_llm_text(
+                source_preview,
+                NOTEBOOK_FAILURE_SOURCE_CHARS,
+            )
+        referenced_files = cell.get("referenced_files")
+        if isinstance(referenced_files, list) and referenced_files:
+            compact["referenced_files"] = [
+                str(item)
+                for item in referenced_files[:NOTEBOOK_FAILURE_FILE_LIMIT]
+                if str(item).strip()
+            ]
+        access_lines = cell.get("file_access_lines")
+        if isinstance(access_lines, list) and access_lines:
+            compact["file_access_lines"] = [
+                _truncate_llm_text(str(item), NOTEBOOK_FAILURE_SOURCE_CHARS)
+                for item in access_lines[:NOTEBOOK_FAILURE_LINE_LIMIT]
+                if str(item).strip()
+            ]
+        failed_cells.append(compact)
+        if len(failed_cells) >= NOTEBOOK_FAILURE_CELL_LIMIT:
+            break
+    if not failed_cells:
+        return {}
+    return {
+        "source": "notebook_execution_progress",
+        "read_only": True,
+        "failed_cells": failed_cells,
+        "interpretation_rule": (
+            "回答 Notebook 缺文件或失败 cell 问题时，优先使用 failed_cells 中的 "
+            "source_preview、referenced_files 和 file_access_lines；不要只根据错误文本猜测。"
+        ),
+    }
+
+
+def _notebook_steps_by_id(steps: object) -> dict[str, dict]:
+    if not isinstance(steps, list):
+        return {}
+    return {
+        str(step.get("id") or ""): step
+        for step in steps
+        if isinstance(step, dict) and step.get("id")
+    }
 
 
 def _compact_contract_for_reproducibility(contract: object) -> dict:
@@ -998,10 +1100,52 @@ def _compact_scan_evidence(scan: object) -> dict:
                 if check.get(key) not in (None, "")
             }
         )
-    return {
+    compact = {
         "checks": compact_checks,
         "scan_interpretation": _scan_interpretation(compact_checks),
     }
+    notebook_contract = _compact_notebook_contract_evidence(
+        scan.get("notebook_contract")
+    )
+    if notebook_contract:
+        compact["notebook_contract"] = notebook_contract
+    return compact
+
+
+def _compact_notebook_contract_evidence(contract: object) -> dict:
+    if not isinstance(contract, dict):
+        return {}
+    compact = {
+        key: contract.get(key)
+        for key in (
+            "read_only",
+            "source",
+            "sample_df_defined",
+            "score_fn_defined",
+            "target_col_defined",
+            "algorithm_defined",
+            "target_col",
+            "algorithm",
+            "algorithm_raw",
+            "algorithm_source",
+            "algorithm_valid",
+            "algorithm_error",
+            "error",
+        )
+        if contract.get(key) not in (None, "")
+    }
+    for key in ("missing_names", "invalid_names", "contract_cell_indexes"):
+        value = contract.get(key)
+        if isinstance(value, list) and value:
+            compact[key] = value[:20]
+    previews = contract.get("source_previews")
+    if isinstance(previews, list) and previews:
+        compact["source_previews"] = [
+            _truncate_llm_text(str(preview), NOTEBOOK_CONTRACT_SOURCE_PREVIEW_CHARS)
+            for preview in previews[:NOTEBOOK_CONTRACT_SOURCE_PREVIEW_LIMIT]
+            if str(preview).strip()
+        ]
+    return compact
 
 
 def _compact_reproducibility_evidence(*candidates: object) -> dict:
@@ -1166,6 +1310,17 @@ def _scan_stage_evidence(evidence: dict) -> dict:
     checks = scoped.get("checks")
     if not isinstance(checks, list) and isinstance(scoped.get("scan"), dict):
         checks = scoped["scan"].get("checks")
+        notebook_contract = _compact_notebook_contract_evidence(
+            scoped["scan"].get("notebook_contract")
+        )
+        if notebook_contract:
+            scoped["scan"] = {**scoped["scan"], "notebook_contract": notebook_contract}
+    else:
+        notebook_contract = _compact_notebook_contract_evidence(
+            scoped.get("notebook_contract")
+        )
+        if notebook_contract:
+            scoped["notebook_contract"] = notebook_contract
     scoped["scan_interpretation"] = _scan_interpretation(
         checks if isinstance(checks, list) else []
     )
@@ -1348,7 +1503,13 @@ def _chat_evidence_for_llm(evidence: dict) -> dict:
         return evidence
     if not _looks_like_global_agent_evidence(evidence):
         return _slim_evidence_for_llm(evidence)
-    return _word_conclusion_stage_evidence(evidence)
+    scoped = _word_conclusion_stage_evidence(evidence)
+    notebook_failure = _compact_notebook_failure_evidence(
+        evidence.get("notebook_steps")
+    )
+    if notebook_failure:
+        scoped["notebook_failure"] = notebook_failure
+    return scoped
 
 
 def _last_message_content(messages: list[dict], *, role: str) -> str:
@@ -1376,6 +1537,13 @@ def _chat_instructions(user_message: str) -> str:
         "优先使用 available_evidence.validation_results、report_fields.metric_values、"
         "report_fields.text_values 和 visible_stage_summaries 作答；图表应按其底层结构化数据解释，"
         "不要假装直接看到了像素图。"
+        "若用户询问 Notebook、RMC 契约字段或 RMC_ALGORITHM 当前值，优先使用 "
+        "available_evidence.scan.notebook_contract；该证据来自平台对 Notebook 的只读静态扫描，"
+        "可以说明原始填写值、归一化算法和错误原因，但不得声称修改过 Notebook，也不得要求用户手动打开"
+        "Notebook 来查找已在 evidence 中提供的字段。"
+        "若用户询问 Notebook 执行失败、缺少哪个文件、或某个 cell 为什么报错，优先使用 "
+        "available_evidence.notebook_failure.failed_cells 中的失败 cell 源码摘要、referenced_files "
+        "和 file_access_lines；不要只根据 FileNotFoundError 文本、任务名、文件名或历史经验猜测。"
         "同一验证任务内的 conversation_memory 是任务内会话记忆。若当前 user_message 是承接式追问、"
         "省略主语或只问影响/原因/继续说明，必须先根据 conversation_memory.previous_user_question "
         "和 previous_assistant_answer 补全主题；回答时要围绕上一轮用户问题的主题，不要自动扩展到"
@@ -1452,6 +1620,9 @@ def _stage_instructions(stage: str) -> str:
         return (
             reference_instruction
             + "只针对当前材料完备性阶段，最多 2 句，说明材料识别、材料缺失或 Notebook RMC 契约检查状况。"
+            "如果 evidence.scan.notebook_contract 或 evidence.notebook_contract 存在，"
+            "它是平台只读静态扫描得到的 Notebook 契约摘要，可用于说明 RMC_ALGORITHM、"
+            "RMC_TARGET_COL 等字段的原始值和归一化结果；不得声称无法读取这些已提供证据。"
             "必须以 evidence.scan_interpretation.required_materials_complete 和 "
             "missing_required_materials 为准；当 required_materials_complete=true 时，"
             "只能说明 Notebook、样本数据、PMML 模型、数据字典和 Notebook RMC 契约均已满足，"
@@ -1502,7 +1673,12 @@ def _stage_instructions(stage: str) -> str:
             "不能退化成一句泛泛结论。"
         )
     if stage == "failure":
-        return reference_instruction + "分为“失败阶段、直接原因、可能原因、下一步”。"
+        return (
+            reference_instruction
+            + "分为“失败阶段、直接原因、可能原因、下一步”。如果 evidence.notebook_failure 存在，"
+            "必须优先基于其中的失败 cell 源码摘要、referenced_files 和 file_access_lines 判断 Notebook "
+            "实际引用了哪些文件；不要只根据错误文本猜测，也不要把任务名或模型名误当成缺失文件。"
+        )
     return reference_instruction + "生成审慎、专业、基于证据的中文说明。"
 
 

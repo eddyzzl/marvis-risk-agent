@@ -60,6 +60,90 @@ def test_notebook_step_plan_marks_injected_cells_as_system_steps():
     assert plan.cell_to_step[3] == "system-tail"
 
 
+def test_notebook_step_plan_infers_titles_for_headingless_code_cells():
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_code_cell("import pandas as pd\nfrom xgboost import XGBClassifier"),
+            nbformat.v4.new_code_cell("sample = pd.read_csv('sample.csv')"),
+            nbformat.v4.new_code_cell("train, oot = train_test_split(sample, test_size=0.2)"),
+            nbformat.v4.new_code_cell("model = XGBClassifier()\nmodel.fit(X_train, y_train)"),
+            nbformat.v4.new_code_cell("score = model.predict_proba(X_oot)[:, 1]\nauc = roc_auc_score(y_oot, score)"),
+            nbformat.v4.new_code_cell("importance = model.feature_importances_"),
+            nbformat.v4.new_code_cell("result.to_csv('metrics.csv', index=False)"),
+        ]
+    )
+
+    plan = notebook_step_plan(notebook)
+
+    assert [step.title for step in plan.steps] == [
+        "导入依赖",
+        "读取数据",
+        "样本切分",
+        "模型训练",
+        "模型打分与指标计算",
+        "特征分析",
+        "保存结果",
+    ]
+    assert [step.cell_indexes for step in plan.steps] == [[0], [1], [2], [3], [4], [5], [6]]
+    assert plan.cell_to_step == {
+        0: "cell-1",
+        1: "cell-2",
+        2: "cell-3",
+        3: "cell-4",
+        4: "cell-5",
+        5: "cell-6",
+        6: "cell-7",
+    }
+
+
+def test_notebook_step_plan_uses_function_name_when_headingless_code_is_unknown():
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_code_cell("build_custom_snapshot(user_df)"),
+        ]
+    )
+
+    plan = notebook_step_plan(notebook)
+
+    assert [step.title for step in plan.steps] == ["执行 build_custom_snapshot"]
+
+
+def test_notebook_step_plan_does_not_label_pmml_import_or_pipeline_as_export():
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_code_cell(
+                "import pandas as pd\n"
+                "from sklearn2pmml import PMMLPipeline, sklearn2pmml\n"
+                "df = pd.read_csv('sample.csv')\n"
+            ),
+            nbformat.v4.new_code_cell(
+                "vars1 = df.columns.tolist()\n"
+                "vars1.remove('target')\n"
+            ),
+            nbformat.v4.new_code_cell(
+                "trainx = df[(df.split_tag == 'train')][vars1]\n"
+                "testx = df[(df.split_tag == 'test')][vars1]\n"
+            ),
+            nbformat.v4.new_code_cell(
+                "pipeline = PMMLPipeline([('classifier', bst)])\n"
+                "pipeline.fit(trainx, trainy)\n"
+                "train_pred = pipeline.predict_proba(trainx)[:, 1]\n"
+            ),
+            nbformat.v4.new_code_cell("sklearn2pmml(pipeline, 'model.pmml')"),
+        ]
+    )
+
+    plan = notebook_step_plan(notebook)
+
+    assert [step.title for step in plan.steps] == [
+        "读取数据",
+        "特征筛选",
+        "样本切分",
+        "模型训练与打分",
+        "PMML 导出",
+    ]
+
+
 def test_notebook_step_plan_names_injected_validation_stages():
     notebook = nbformat.v4.new_notebook(
         cells=[
@@ -161,3 +245,29 @@ def test_notebook_step_preview_reads_titles_without_execution(tmp_path: Path):
             "system": False,
         },
     ]
+
+
+def test_notebook_step_preview_infers_titles_without_execution_for_headingless_notebook(
+    tmp_path: Path,
+):
+    notebook_path = tmp_path / "model.ipynb"
+    nbformat.write(
+        nbformat.v4.new_notebook(
+            cells=[
+                nbformat.v4.new_code_cell(
+                    "RMC_SAMPLE_DF = sample_df\n"
+                    "RMC_TARGET_COL = 'y'\n"
+                    "RMC_ALGORITHM = 'lgb'\n"
+                    "def RMC_SCORE_FN(df):\n"
+                    "    return model.predict_proba(df)[:, 1]\n"
+                ),
+                nbformat.v4.new_code_cell("sample = pd.read_parquet('sample.parquet')"),
+            ]
+        ),
+        notebook_path,
+    )
+
+    preview = notebook_step_preview(notebook_path)
+
+    assert [step["title"] for step in preview] == ["Notebook 契约配置", "读取数据"]
+    assert [step["id"] for step in preview] == ["cell-1", "cell-2"]

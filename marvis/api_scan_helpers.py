@@ -6,8 +6,17 @@ from pathlib import Path
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.db import TaskRepository
 from marvis.domain import FileArtifact, FileRole, TaskRecord, TaskStatus
-from marvis.files import scan_source_dir, write_json_atomic
-from marvis.notebook_contract import NotebookContractError, precheck_notebook_contract
+from marvis.files import (
+    EXCEL_SUFFIXES,
+    SAMPLE_SUFFIXES,
+    scan_source_dir,
+    write_json_atomic,
+)
+from marvis.notebook_contract import (
+    NotebookContractError,
+    inspect_notebook_contract,
+    precheck_notebook_contract,
+)
 from marvis.notebook_steps import notebook_step_preview
 from marvis.notebooks import close_live_notebook_session
 from marvis.pipeline import SCAN_STAGE_FAILURE_PREFIX
@@ -20,6 +29,12 @@ REQUIRED_SCAN_MATERIALS = (
     (FileRole.MODEL_PMML, "PMML 模型", "pmml_path"),
     (FileRole.DATA_DICTIONARY, "数据字典", "dictionary_path"),
 )
+MATERIAL_SELECTION_SUFFIXES = {
+    FileRole.NOTEBOOK: {".ipynb"},
+    FileRole.SAMPLE: SAMPLE_SUFFIXES | EXCEL_SUFFIXES,
+    FileRole.MODEL_PMML: {".pmml"},
+    FileRole.DATA_DICTIONARY: SAMPLE_SUFFIXES | EXCEL_SUFFIXES,
+}
 
 RMC_CONTRACT_NAME_LABELS = {
     "RMC_SAMPLE_DF": "RMC_SAMPLE_DF（样本 DataFrame）",
@@ -85,7 +100,8 @@ def scan_hook_payload(payload: dict) -> dict:
 
 def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
     # source_dir is normalized at task-create time, so pipeline and /scan agree.
-    artifacts = scan_source_dir(Path(task.source_dir))
+    source_dir = Path(task.source_dir).resolve()
+    artifacts = scan_source_dir(source_dir)
     checks = scan_preflight_checks(task, artifacts)
     task_dir = settings.tasks_dir / task.id
     uow = ArtifactUnitOfWork()
@@ -99,6 +115,7 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
         artifacts,
         execution_dir=staged_execution.path,
     )
+    notebook_contract = scan_notebook_contract(task, artifacts)
     scan_status = TaskStatus.FAILED if scan_error_checks(checks) else TaskStatus.SCANNED
     scan_message = scan_status_message(checks)
     payload = {
@@ -107,8 +124,10 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
         "status_message": scan_message,
         "artifacts": [artifact_payload(artifact) for artifact in artifacts],
         "ambiguities": artifact_ambiguities(artifacts),
+        "selected_materials": material_selection_payload(task, source_dir),
         "checks": checks,
         "notebook_steps": notebook_steps,
+        "notebook_contract": notebook_contract,
     }
     (staged_execution.path / "scan_result.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -162,6 +181,138 @@ def artifact_payload(artifact) -> dict:
     }
 
 
+def material_candidates_payload(task: TaskRecord) -> dict:
+    source_dir = Path(task.source_dir).resolve()
+    artifacts = scan_source_dir(source_dir)
+    candidates: dict[str, list[dict]] = {
+        role.value: [] for role, _, _ in REQUIRED_SCAN_MATERIALS
+    }
+    seen: dict[str, set[str]] = {role.value: set() for role, _, _ in REQUIRED_SCAN_MATERIALS}
+    for artifact in artifacts:
+        for role in material_candidate_roles(artifact):
+            role_key = role.value
+            candidate = material_candidate_payload(artifact, source_dir)
+            key = candidate["relative_path"]
+            if key in seen[role_key]:
+                continue
+            seen[role_key].add(key)
+            candidates[role_key].append(candidate)
+    for values in candidates.values():
+        values.sort(key=lambda item: item["relative_path"])
+    return {
+        "task_id": task.id,
+        "source_dir": str(source_dir),
+        "selection": material_selection_payload(task, source_dir),
+        "candidates": candidates,
+        "artifacts": [
+            material_candidate_payload(artifact, source_dir) for artifact in artifacts
+        ],
+        "required_roles": [
+            {"role": role.value, "label": label, "field": field}
+            for role, label, field in REQUIRED_SCAN_MATERIALS
+        ],
+    }
+
+
+def material_candidate_roles(artifact: FileArtifact) -> list[FileRole]:
+    roles: list[FileRole] = []
+    if artifact.role in {
+        FileRole.NOTEBOOK,
+        FileRole.MODEL_PMML,
+        FileRole.DATA_DICTIONARY,
+        FileRole.SAMPLE,
+    }:
+        roles.append(artifact.role)
+    suffix = artifact.path.suffix.lower()
+    if suffix in MATERIAL_SELECTION_SUFFIXES[FileRole.SAMPLE]:
+        roles.append(FileRole.SAMPLE)
+    if suffix in MATERIAL_SELECTION_SUFFIXES[FileRole.DATA_DICTIONARY]:
+        roles.append(FileRole.DATA_DICTIONARY)
+    result: list[FileRole] = []
+    for role in roles:
+        if role not in result:
+            result.append(role)
+    return result
+
+
+def material_candidate_payload(artifact: FileArtifact, source_dir: Path) -> dict:
+    try:
+        relative_path = artifact.path.resolve().relative_to(source_dir).as_posix()
+    except ValueError:
+        relative_path = artifact.path.name
+    return {
+        "role": artifact.role.value,
+        "path": str(artifact.path),
+        "relative_path": relative_path,
+        "name": artifact.path.name,
+        "size_bytes": artifact.size_bytes,
+        "sha256": artifact.sha256,
+        "risk_notes": artifact.risk_notes,
+    }
+
+
+def material_selection_payload(task: TaskRecord, source_dir: Path) -> dict[str, str]:
+    return {
+        field: material_selection_value(task, source_dir, field)
+        for _, _, field in REQUIRED_SCAN_MATERIALS
+    }
+
+
+def material_selection_value(task: TaskRecord, source_dir: Path, field: str) -> str:
+    value = getattr(task, field, None)
+    if not value:
+        return ""
+    raw_path = Path(value)
+    candidate = raw_path if raw_path.is_absolute() else source_dir / raw_path
+    try:
+        return candidate.resolve(strict=False).relative_to(source_dir).as_posix()
+    except ValueError:
+        return str(value)
+
+
+def validate_material_selection(task: TaskRecord, selection: dict[str, str]) -> dict[str, str]:
+    source_dir = Path(task.source_dir).resolve()
+    normalized: dict[str, str] = {}
+    for role, label, field in REQUIRED_SCAN_MATERIALS:
+        normalized[field] = normalize_selected_material_path(
+            source_dir=source_dir,
+            role=role,
+            label=label,
+            value=selection.get(field, ""),
+        )
+    return normalized
+
+
+def normalize_selected_material_path(
+    *,
+    source_dir: Path,
+    role: FileRole,
+    label: str,
+    value: str,
+) -> str:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        raise ValueError(f"请选择{label}。")
+    raw_path = Path(raw_value)
+    candidate = raw_path if raw_path.is_absolute() else source_dir / raw_path
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ValueError(f"{label}路径不存在：{raw_value}") from exc
+    try:
+        resolved = assert_within(source_dir, resolved)
+    except PermissionError as exc:
+        raise ValueError(f"{label}必须位于材料目录内：{raw_value}") from exc
+    suffix = resolved.suffix.lower()
+    allowed = MATERIAL_SELECTION_SUFFIXES[role]
+    if suffix not in allowed:
+        allowed_text = "、".join(sorted(allowed))
+        raise ValueError(
+            f"{label}文件格式不支持：{suffix or '无扩展名'}，支持 {allowed_text}"
+        )
+    return resolved.relative_to(source_dir).as_posix()
+
+
 def artifact_ambiguities(artifacts) -> list[str]:
     role_counts: dict[str, int] = {}
     for artifact in artifacts:
@@ -197,6 +348,35 @@ def scan_notebook_steps(
     execution_dir.mkdir(parents=True, exist_ok=True)
     write_json_atomic(execution_dir / "notebook_steps.json", {"steps": steps, "cells": []})
     return steps
+
+
+def scan_notebook_contract(
+    task: TaskRecord,
+    artifacts: list[FileArtifact],
+) -> dict:
+    notebook_path, error = resolve_scan_material(
+        task=task,
+        artifacts=artifacts,
+        role=FileRole.NOTEBOOK,
+        label="Notebook 文件",
+        task_field="notebook_path",
+    )
+    if error or notebook_path is None:
+        return {}
+    try:
+        return inspect_notebook_contract(notebook_path)
+    except NotebookContractError as exc:
+        return {
+            "read_only": True,
+            "source": "notebook_static_scan",
+            "error": format_notebook_contract_error(exc),
+        }
+    except Exception as exc:
+        return {
+            "read_only": True,
+            "source": "notebook_static_scan",
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
 
 
 def scan_preflight_checks(
@@ -260,6 +440,12 @@ def scan_preflight_checks(
         else:
             target_note = f"，目标列 {result.target_col}" if result.target_col else ""
             algorithm_note = f"，算法 {result.algorithm}" if result.algorithm else ""
+            if (
+                result.algorithm
+                and result.algorithm_raw
+                and result.algorithm_raw != result.algorithm
+            ):
+                algorithm_note += f"（原始 {result.algorithm_raw}）"
             checks.append(
                 {
                     "id": "notebook_contract",

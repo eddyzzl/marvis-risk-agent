@@ -235,6 +235,28 @@ class FakeTaskRepository:
             values["status_reason_code"] = reason_code
         self.tasks[task_id] = TaskRecord(**values)
 
+    def update_material_paths(
+        self,
+        task_id: str,
+        *,
+        notebook_path: str,
+        sample_path: str,
+        pmml_path: str,
+        dictionary_path: str,
+    ) -> TaskRecord:
+        task = self.get_task(task_id)
+        self.tasks[task_id] = TaskRecord(
+            **{
+                **asdict(task),
+                "notebook_path": notebook_path,
+                "sample_path": sample_path,
+                "pmml_path": pmml_path,
+                "dictionary_path": dictionary_path,
+                "updated_at": "2026-05-21T00:01:00+00:00",
+            }
+        )
+        return self.tasks[task_id]
+
     def get_report_values(self, task_id: str):
         self.get_task(task_id)
         return self.report_values[task_id]
@@ -471,6 +493,8 @@ def test_scan_route_is_served_from_dedicated_router():
     }
 
     assert routes[("/api/tasks/{task_id}/scan", ("POST",))] == "marvis.routers.scans"
+    assert routes[("/api/tasks/{task_id}/materials", ("GET",))] == "marvis.routers.scans"
+    assert routes[("/api/tasks/{task_id}/materials", ("PUT",))] == "marvis.routers.scans"
 
 
 def test_evidence_route_is_served_from_dedicated_router():
@@ -635,6 +659,56 @@ def test_scan_task_dispatches_task_scanned_hook(tmp_path: Path, monkeypatch):
     ]
 
 
+def test_task_material_selection_api_persists_user_chosen_roles(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    source = tmp_path / "materials"
+    source.mkdir()
+    nbformat.write(nbformat.v4.new_notebook(cells=[]), source / "model.ipynb")
+    (source / "sample.parquet").write_bytes(b"PAR1")
+    (source / "feature_importance_best.csv").write_text(
+        "feature,importance\nx1,1\n",
+        encoding="utf-8",
+    )
+    (source / "model.pmml").write_text("<PMML/>", encoding="utf-8")
+    (source / "dictionary.csv").write_text("特征名,类别\nx1,基础信息\n", encoding="utf-8")
+    task_id = client.post(
+        "/api/tasks",
+        json={"model_name": "A卡", "validator": "qa", "source_dir": str(source)},
+    ).json()["id"]
+
+    preview_response = client.get(f"/api/tasks/{task_id}/materials")
+
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert preview["task_id"] == task_id
+    assert {item["relative_path"] for item in preview["candidates"]["sample"]} == {
+        "dictionary.csv",
+        "feature_importance_best.csv",
+        "sample.parquet",
+    }
+    assert preview["selection"]["sample_path"] == ""
+
+    update_response = client.put(
+        f"/api/tasks/{task_id}/materials",
+        json={
+            "notebook_path": "model.ipynb",
+            "sample_path": "sample.parquet",
+            "pmml_path": "model.pmml",
+            "dictionary_path": "dictionary.csv",
+        },
+    )
+
+    assert update_response.status_code == 200
+    task = update_response.json()["task"]
+    assert task["notebook_path"] == "model.ipynb"
+    assert task["sample_path"] == "sample.parquet"
+    assert task["pmml_path"] == "model.pmml"
+    assert task["dictionary_path"] == "dictionary.csv"
+
+
 def test_task_payload_exposes_active_job_kind_for_reloaded_ui(
     tmp_path: Path,
     monkeypatch,
@@ -739,6 +813,46 @@ def test_task_payload_exposes_structured_failure_stage_for_reloaded_ui(
     assert listed.status_code == 200
     assert listed.json()[0]["failure_stage"] == "metrics"
     assert listed.json()[0]["stopped"] is False
+
+
+def test_task_payload_prefers_root_notebook_failure_in_composite_report_error(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "test",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    current = FakeTaskRepository.tasks[task_id]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{
+            **asdict(current),
+            "status": TaskStatus.FAILED,
+            "status_message": (
+                "报告输出失败。 · 模型可复现性验证失败：notebook failed at cell 4: "
+                "TypeError: fit() got an unexpected keyword argument 'early_stopping_rounds'"
+            ),
+        }
+    )
+    FakeTaskRepository.jobs["job-report"] = {
+        "id": "job-report",
+        "task_id": task_id,
+        "kind": "report",
+        "status": "failed",
+    }
+
+    got = client.get(f"/api/tasks/{task_id}")
+    listed = client.get("/api/tasks")
+
+    assert got.status_code == 200
+    assert got.json()["failure_stage"] == "notebook"
+    assert listed.status_code == 200
+    assert listed.json()[0]["failure_stage"] == "notebook"
 
 
 def test_pipeline_failure_with_unknown_message_keeps_failure_stage_unknown(
@@ -2531,7 +2645,7 @@ def test_scan_endpoint_returns_v2_artifacts_and_updates_status(
                 nbformat.v4.new_code_cell(
                     "RMC_SAMPLE_DF = sample_df\n"
                     "RMC_TARGET_COL = 'y'\n"
-                    "RMC_ALGORITHM = 'lgb'\n"
+                    "RMC_ALGORITHM = 'xgbm'\n"
                     "def RMC_SCORE_FN(df):\n"
                     "    return [0.1] * len(df)\n"
                 )
@@ -2563,23 +2677,29 @@ def test_scan_endpoint_returns_v2_artifacts_and_updates_status(
         "model_pmml",
         "data_dictionary",
     }
-    assert [step["title"] for step in payload["notebook_steps"]] == ["Notebook 初始化"]
+    assert [step["title"] for step in payload["notebook_steps"]] == ["Notebook 契约配置"]
+    assert payload["notebook_contract"]["read_only"] is True
+    assert payload["notebook_contract"]["algorithm_raw"] == "xgbm"
+    assert payload["notebook_contract"]["algorithm"] == "xgb"
+    assert payload["notebook_contract"]["algorithm_valid"] is True
     saved_scan = json.loads(
         (tmp_path / "tasks" / task_id / "execution" / "scan_result.json").read_text(
             encoding="utf-8"
         )
     )
     assert saved_scan["checks"][-1]["id"] == "notebook_contract"
-    assert saved_scan["notebook_steps"][0]["title"] == "Notebook 初始化"
+    assert "算法 xgb（原始 xgbm）" in saved_scan["checks"][-1]["message"]
+    assert saved_scan["notebook_contract"]["algorithm_raw"] == "xgbm"
+    assert saved_scan["notebook_steps"][0]["title"] == "Notebook 契约配置"
     saved_steps = json.loads(
         (tmp_path / "tasks" / task_id / "execution" / "notebook_steps.json").read_text(
             encoding="utf-8"
         )
     )
-    assert saved_steps["steps"][0]["title"] == "Notebook 初始化"
+    assert saved_steps["steps"][0]["title"] == "Notebook 契约配置"
     evidence = client.get(f"/api/tasks/{task_id}/evidence")
     assert evidence.status_code == 200
-    assert evidence.json()["notebook_steps"][0]["title"] == "Notebook 初始化"
+    assert evidence.json()["notebook_steps"][0]["title"] == "Notebook 契约配置"
     assert FakeTaskRepository.tasks[task_id].status == TaskStatus.SCANNED
 
 

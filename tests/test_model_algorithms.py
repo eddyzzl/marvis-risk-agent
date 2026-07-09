@@ -11,6 +11,7 @@ from marvis.model_algorithms import (
     ("raw", "expected"),
     [
         ("XGB", "xgb"),
+        ("xgbm", "xgb"),
         ("XGBClassifier", "xgb"),
         ("xgboost.XGBClassifier", "xgb"),
         ("XGBoost", "xgb"),

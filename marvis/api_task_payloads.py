@@ -96,10 +96,9 @@ def task_failure_stage(repo: TaskRepository, task: TaskRecord) -> str | None:
         return None
     if task_failed_during_scan(task):
         return "scan"
-    stage = failure_stage_from_job_kind(repo.get_latest_failed_job_kind(task.id))
-    if stage:
-        return stage
-    return legacy_failure_stage_from_message(task.status_message)
+    message_stage = legacy_failure_stage_from_message(task.status_message)
+    job_stage = failure_stage_from_job_kind(repo.get_latest_failed_job_kind(task.id))
+    return earliest_failure_stage(message_stage, job_stage)
 
 
 def task_failed_during_scan(task: TaskRecord) -> bool:
@@ -149,8 +148,31 @@ def failure_stage_from_job_kind(kind: str | None) -> str | None:
     }.get(str(kind or ""))
 
 
+def earliest_failure_stage(*stages: str | None) -> str | None:
+    stage_order = {
+        "scan": 0,
+        "notebook": 1,
+        "metrics": 2,
+        "report": 3,
+    }
+    ranked = [
+        stage
+        for stage in stages
+        if stage in stage_order
+    ]
+    if not ranked:
+        return None
+    return min(ranked, key=lambda stage: stage_order[stage])
+
+
 def legacy_failure_stage_from_message(message: str) -> str | None:
     text = str(message or "")
+    if re.search(
+        r"模型可复现性验证失败|notebook failed at cell|reproducibility",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return "notebook"
     if re.search(
         r"模型效果&稳定性验证失败|指标|metrics|notebook metrics failed|"
         r"sample column check failed|data dictionary missing columns|"
@@ -161,7 +183,7 @@ def legacy_failure_stage_from_message(message: str) -> str | None:
         return "metrics"
     if re.search(r"报告输出失败|报告|Word|report", text, flags=re.IGNORECASE):
         return "report"
-    if re.search(r"模型可复现性验证失败|notebook|reproducibility", text, flags=re.IGNORECASE):
+    if re.search(r"notebook", text, flags=re.IGNORECASE):
         return "notebook"
     return None
 

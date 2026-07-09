@@ -123,6 +123,39 @@ class TaskRepository:
                 raise KeyError(f"Task not found: {task_id}")
         return self.get_task(task_id)
 
+    def update_material_paths(
+        self,
+        task_id: str,
+        *,
+        notebook_path: str,
+        sample_path: str,
+        pmml_path: str,
+        dictionary_path: str,
+    ) -> TaskRecord:
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE tasks
+                   SET notebook_path = ?,
+                       sample_path = ?,
+                       pmml_path = ?,
+                       dictionary_path = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (
+                    notebook_path,
+                    sample_path,
+                    pmml_path,
+                    dictionary_path,
+                    _now(),
+                    task_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"Task not found: {task_id}")
+        return self.get_task(task_id)
+
     def delete_task(self, task_id: str) -> None:
         with connect(self.db_path) as conn:
             cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))

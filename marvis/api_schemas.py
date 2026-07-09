@@ -36,6 +36,13 @@ class ValidateRequest(BaseModel):
     feature_columns: list[str] | None = None
 
 
+class MaterialSelectionRequest(BaseModel):
+    notebook_path: str
+    sample_path: str
+    pmml_path: str
+    dictionary_path: str
+
+
 class ExecutionEnvironmentRequest(BaseModel):
     execution_mode: str = "jupyter_kernel"
     kernel_name: str = "python3"

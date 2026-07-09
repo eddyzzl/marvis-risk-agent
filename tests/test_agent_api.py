@@ -1246,6 +1246,168 @@ def test_agent_plain_chat_compacts_large_validation_evidence(
     assert evidence["reproducibility"]["summary"]["status"] == "fail"
 
 
+def test_agent_chat_prompt_keeps_read_only_notebook_contract_summary(tmp_path):
+    from marvis.agent.service import _chat_prompt
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
+
+    prompt = json.loads(
+        _chat_prompt(
+            task=task,
+            user_message="看一下现在 notebook 里的 RMC_ALGORITHM 是等于什么",
+            conversation=[],
+            evidence={
+                "scan": {
+                    "checks": [
+                        {
+                            "id": "notebook_contract",
+                            "label": "Notebook RMC 契约",
+                            "status": "success",
+                            "message": "已定义 RMC_SAMPLE_DF / RMC_SCORE_FN / RMC_TARGET_COL / RMC_ALGORITHM",
+                        }
+                    ],
+                    "notebook_contract": {
+                        "read_only": True,
+                        "source": "notebook_static_scan",
+                        "algorithm_source": "RMC_ALGORITHM",
+                        "algorithm_raw": "xgbm",
+                        "algorithm": "xgb",
+                        "algorithm_valid": True,
+                        "target_col": "y",
+                        "source_previews": [
+                            'RMC_ALGORITHM="xgbm"\n'
+                            + "RMC_SAMPLE_DF=model_data\n"
+                            + ("x" * 2000)
+                        ],
+                    },
+                }
+            },
+        )
+    )
+
+    contract = prompt["available_evidence"]["scan"]["notebook_contract"]
+    assert contract["read_only"] is True
+    assert contract["algorithm_raw"] == "xgbm"
+    assert contract["algorithm"] == "xgb"
+    assert contract["algorithm_source"] == "RMC_ALGORITHM"
+    assert contract["source_previews"][0].startswith('RMC_ALGORITHM="xgbm"')
+    assert len(contract["source_previews"][0]) <= 510
+    assert "只读静态扫描" in prompt["instructions"]
+    assert "不得要求用户手动打开Notebook" in prompt["instructions"]
+
+
+def test_agent_chat_prompt_keeps_failed_notebook_cell_file_references(tmp_path):
+    from marvis.agent.service import _chat_prompt
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
+
+    prompt = json.loads(
+        _chat_prompt(
+            task=task,
+            user_message="notebook 到底缺哪个文件？",
+            conversation=[],
+            evidence={
+                "notebook_steps": {
+                    "steps": [
+                        {
+                            "id": "step-2",
+                            "title": "读取数据",
+                            "status": "failed",
+                            "cell_indexes": [2],
+                        }
+                    ],
+                    "cells": [
+                        {
+                            "cell_index": 2,
+                            "step_id": "step-2",
+                            "status": "failed",
+                            "exception_name": "FileNotFoundError",
+                            "exception_value": "[WinError 2] 系统找不到指定的文件。",
+                            "source_preview": "model_feature = pd.read_csv('model_feature.py')\nfeature = pd.read_csv('feature_importance_best.csv')",
+                            "referenced_files": [
+                                "model_feature.py",
+                                "feature_importance_best.csv",
+                            ],
+                            "file_access_lines": [
+                                "model_feature = pd.read_csv('model_feature.py')",
+                                "feature = pd.read_csv('feature_importance_best.csv')",
+                            ],
+                        }
+                    ],
+                }
+            },
+        )
+    )
+
+    failure = prompt["available_evidence"]["notebook_failure"]["failed_cells"][0]
+    assert failure["cell_index"] == 2
+    assert failure["step_title"] == "读取数据"
+    assert failure["exception_name"] == "FileNotFoundError"
+    assert failure["referenced_files"] == [
+        "model_feature.py",
+        "feature_importance_best.csv",
+    ]
+    assert "pd.read_csv('model_feature.py')" in failure["source_preview"]
+    assert "失败 cell" in prompt["instructions"]
+
+
+def test_failure_summary_prompt_keeps_failed_notebook_cell_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.agent.service import failure_summary
+
+    calls = []
+
+    class FakeLLMClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def complete(self, **kwargs):
+            calls.append(kwargs)
+            return "第 2 个 cell 读取了 model_feature.py，但该文件没有在材料目录中找到。"
+
+    monkeypatch.setattr(
+        "marvis.agent.service.OpenAICompatibleLLMClient",
+        FakeLLMClient,
+    )
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
+
+    content, metadata = failure_summary(
+        task=task,
+        stage="模型可复现性",
+        error="FileNotFoundError: [WinError 2] 系统找不到指定的文件。",
+        evidence={
+            "notebook_steps": {
+                "cells": [
+                    {
+                        "cell_index": 2,
+                        "status": "failed",
+                        "exception_name": "FileNotFoundError",
+                        "source_preview": "pd.read_csv('model_feature.py')",
+                        "referenced_files": ["model_feature.py"],
+                        "file_access_lines": ["pd.read_csv('model_feature.py')"],
+                    }
+                ]
+            }
+        },
+        model_profile={"model_id": "m1"},
+    )
+
+    assert "model_feature.py" in content
+    assert metadata["fallback"] is False
+    prompt = json.loads(calls[0]["user_prompt"])
+    failure = prompt["evidence"]["notebook_failure"]["failed_cells"][0]
+    assert failure["cell_index"] == 2
+    assert failure["referenced_files"] == ["model_feature.py"]
+
+
 def test_agent_plain_chat_follow_up_uses_same_task_conversation_memory(
     tmp_path,
     monkeypatch,
@@ -3480,10 +3642,13 @@ def test_agent_rerun_scan_resets_steps_without_deleting_history(
         ("重新执行第一步", "scan"),
         ("重跑步骤1", "scan"),
         ("从头执行一遍", "scan"),
+        ("之前的有问题，再从一开始执行一下", "scan"),
+        ("再从一开始执行一下", "scan"),
         ("重新执行一遍全部", "scan"),
         ("全部重新执行", "scan"),
         ("完整流程重跑", "scan"),
         ("从第一步开始重新跑", "scan"),
+        ("重新读取我设定路径下的文件", "scan"),
         ("重新跑材料完备性验证", "scan"),
         ("再执行一下完备性检查", "scan"),
         ("重新执行第二步", "reproducibility"),
