@@ -330,9 +330,71 @@ def build_contract_tail_cell_source() -> str:
 # Injected by marvis v3 (tail). Validates the notebook contract.
 import json as _rmc_json
 from pathlib import Path as _RmcPath
+import re as _rmc_re
 import numpy as _rmc_np
 import pandas as _rmc_pd
-from marvis.model_algorithms import normalize_algorithm as _rmc_normalize_algorithm
+
+_RMC_SUPPORTED_ALGORITHM_TEXT = "xgb, lgb, lr, catboost, scorecard, dnn"
+_RMC_ALLOWED_ALGORITHMS = {"xgb", "lgb", "lr", "catboost", "scorecard", "dnn"}
+_RMC_ALGORITHM_ALIASES = {
+    "xgb": "xgb",
+    "xgboost": "xgb",
+    "xgbclassifier": "xgb",
+    "xgboostclassifier": "xgb",
+    "xgboostxgbclassifier": "xgb",
+    "xgboostsklearnxgbclassifier": "xgb",
+    "lgb": "lgb",
+    "lgbm": "lgb",
+    "lightgbm": "lgb",
+    "lighgbm": "lgb",
+    "lgbclassifier": "lgb",
+    "lgbmclassifier": "lgb",
+    "lightgbmclassifier": "lgb",
+    "lightgbmsklearnlgbmclassifier": "lgb",
+    "lr": "lr",
+    "logit": "lr",
+    "logistic": "lr",
+    "logisticregression": "lr",
+    "logisticregressioncv": "lr",
+    "sklearnlinearmodellogisticregression": "lr",
+    "逻辑回归": "lr",
+    "cat": "catboost",
+    "catboost": "catboost",
+    "catboostclassifier": "catboost",
+    "catboostcatboostclassifier": "catboost",
+    "scorecard": "scorecard",
+    "scorecards": "scorecard",
+    "评分卡": "scorecard",
+    "记分卡": "scorecard",
+    "dnn": "dnn",
+    "deeplearning": "dnn",
+    "deepneuralnetwork": "dnn",
+    "neuralnetwork": "dnn",
+    "mlp": "dnn",
+    "mlpclassifier": "dnn",
+    "神经网络": "dnn",
+    "深度神经网络": "dnn",
+}
+
+def _rmc_algorithm_key(value):
+    return _rmc_re.sub(r"[\W_]+", "", str(value).casefold(), flags=_rmc_re.UNICODE)
+
+def _rmc_normalize_algorithm(value):
+    key = str(value or "").strip()
+    if not key:
+        raise ValueError(
+            "model algorithm is required; supported algorithms: "
+            + _RMC_SUPPORTED_ALGORITHM_TEXT
+        )
+    if key in _RMC_ALLOWED_ALGORITHMS:
+        return key
+    normalized = _rmc_algorithm_key(key)
+    if normalized in _RMC_ALGORITHM_ALIASES:
+        return _RMC_ALGORITHM_ALIASES[normalized]
+    raise ValueError(
+        "unsupported model algorithm; supported algorithms: "
+        + _RMC_SUPPORTED_ALGORITHM_TEXT
+    )
 
 if "RMC_SAMPLE_DF" not in globals():
     raise NameError("RMC_SAMPLE_DF must be defined as a pandas DataFrame at notebook top level")

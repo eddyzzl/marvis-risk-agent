@@ -264,6 +264,15 @@ def test_contract_tail_cell_scores_and_writes_metadata(tmp_path: Path):
     }
 
 
+def test_contract_tail_cell_is_self_contained_for_legacy_kernels():
+    source = build_contract_tail_cell_source()
+
+    assert "from marvis" not in source
+    assert "import marvis" not in source
+    assert "def _rmc_normalize_algorithm" in source
+    assert "_rmc_algorithm = _rmc_normalize_algorithm(_rmc_algorithm_raw)" in source
+
+
 def test_contract_tail_cell_uses_positional_row_index_for_custom_sample_index(
     tmp_path: Path,
 ):
