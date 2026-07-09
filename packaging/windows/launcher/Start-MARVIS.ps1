@@ -40,9 +40,6 @@ function Initialize-ValidationKernelSpec {
 
     $ValidationRoot = Split-Path -Parent $ValidationPython
     $ValidationPath = "$ValidationRoot;$ValidationRoot\Scripts;$ValidationRoot\Library\bin;$env:PATH"
-    $KernelDir = Join-Path $InstallRoot "kernels\marvis-validation-pkg"
-    New-Item -ItemType Directory -Force -Path $KernelDir | Out-Null
-
     $KernelSpec = [ordered]@{
         argv = @(
             $ValidationPython,
@@ -66,9 +63,17 @@ function Initialize-ValidationKernelSpec {
             }
         }
     }
-    $KernelSpec |
-        ConvertTo-Json -Depth 8 |
-        Set-Content -Encoding utf8 -Path (Join-Path $KernelDir "kernel.json")
+    $KernelDirs = New-Object System.Collections.Generic.List[string]
+    $KernelDirs.Add((Join-Path $InstallRoot "kernels\marvis-validation-pkg"))
+    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+        $KernelDirs.Add((Join-Path $env:APPDATA "jupyter\kernels\marvis-validation-pkg"))
+    }
+    foreach ($KernelDir in $KernelDirs) {
+        New-Item -ItemType Directory -Force -Path $KernelDir | Out-Null
+        $KernelSpec |
+            ConvertTo-Json -Depth 8 |
+            Set-Content -Encoding utf8 -Path (Join-Path $KernelDir "kernel.json")
+    }
 }
 
 Initialize-ValidationKernelSpec -InstallRoot $InstallRoot

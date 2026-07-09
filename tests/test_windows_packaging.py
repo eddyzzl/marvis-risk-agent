@@ -44,6 +44,8 @@ def test_windows_launcher_registers_optional_validation_kernel():
     assert 'Join-Path $InstallRoot "validation-runtime\\python.exe"' in text
     assert "marvis-validation-pkg" in text
     assert "MARVIS Validation (pkg.txt)" in text
+    assert "System.Collections.Generic.List[string]" in text
+    assert 'Join-Path $env:APPDATA "jupyter\\kernels\\marvis-validation-pkg"' in text
     assert "JUPYTER_PATH" in text
     assert "CONDA_PREFIX" in text
     assert "$ValidationRoot\\Library\\bin" in text
