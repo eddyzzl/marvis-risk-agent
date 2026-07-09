@@ -47,6 +47,9 @@ def test_windows_cmd_launcher_uses_powershell_without_profile():
 
     assert "powershell.exe -NoProfile -ExecutionPolicy Bypass" in text
     assert "Start-MARVIS.ps1" in text
+    assert "MARVIS-Agent failed to start" in text
+    assert "%LOCALAPPDATA%\\MARVIS-Agent\\logs" in text
+    assert 'if /I not "%CI%"=="true" pause' in text
 
 
 def test_windows_inno_installer_is_per_user_and_creates_shortcuts():
@@ -79,6 +82,15 @@ def test_windows_build_script_produces_payload_before_compiling_installer():
     assert "validation core imports ok" in text
     assert "$ValidationRuntimeRoot\\Library\\bin" in text
     assert "-ConstraintPath $ValidationCoreRequirements" in text
+
+
+def test_windows_workflow_smoke_launches_bundled_payload():
+    text = Path(".github/workflows/windows-installer.yml").read_text(encoding="utf-8")
+
+    assert "Smoke launch bundled payload" in text
+    assert r".\dist\windows\build\payload\MARVIS-Agent.cmd" in text
+    assert "/api/health" in text
+    assert "Get-NetTCPConnection -LocalPort $port" in text
 
 
 def test_validation_pkg_source_and_conflict_notes_are_kept_with_packaging():

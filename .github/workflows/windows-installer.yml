@@ -32,6 +32,38 @@ jobs:
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build-installer.ps1 -Micromamba $env:MAMBA_EXE -InnoSetupCompiler $iscc -IncludeValidationEnvironment
 
+      - name: Smoke launch bundled payload
+        shell: powershell
+        run: |
+          $env:CI = "true"
+          $port = 8765
+          $cmd = Resolve-Path .\dist\windows\build\payload\MARVIS-Agent.cmd
+          & $cmd -NoBrowser -Port $port
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bundled payload launcher failed with exit code $LASTEXITCODE"
+          }
+          $healthUrl = "http://127.0.0.1:$port/api/health"
+          $deadline = (Get-Date).AddSeconds(20)
+          $ready = $false
+          while ((Get-Date) -lt $deadline) {
+            try {
+              $response = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2
+              if ($response.StatusCode -eq 200) {
+                $ready = $true
+                break
+              }
+            }
+            catch {
+              Start-Sleep -Seconds 1
+            }
+          }
+          if (-not $ready) {
+            throw "Bundled payload health check failed at $healthUrl"
+          }
+          Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -First 1 |
+            ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
