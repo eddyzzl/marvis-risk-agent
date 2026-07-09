@@ -34,12 +34,19 @@ The installer payload contains:
 
 - `runtime\python.exe`: private Python 3.12 runtime.
 - `runtime\Library\bin\java.exe`: private OpenJDK 17 runtime for PMML scoring.
+- `validation-runtime\python.exe`: optional separate task/Notebook execution
+  runtime when a compatible validation environment is bundled.
 - `MARVIS-Agent.cmd`: shortcut target.
 - `bin\Start-MARVIS.ps1`: starts `marvis serve` and opens the browser.
 
 The launcher sets `JAVA_HOME` and `PATH` only for the MARVIS child process. It
 does not register Python, does not modify system Java, and does not require
 administrator privileges.
+
+If `validation-runtime\python.exe` exists, the launcher registers it as a
+Jupyter kernel named `MARVIS Validation (pkg.txt)` and prepends the install
+directory to `JUPYTER_PATH`. That makes the environment visible in MARVIS's
+execution-environment picker without replacing the platform runtime.
 
 ## Build Prerequisites
 
@@ -72,6 +79,18 @@ The script:
 5. Copies launchers and metadata into `dist\windows\build\payload`.
 6. Compiles `MARVIS-Setup-<version>-win-x64.exe` with Inno Setup.
 7. Writes a sidecar SHA256 file next to the installer.
+
+To attempt bundling a separate validation execution environment:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build-installer.ps1 -IncludeValidationEnvironment
+```
+
+For the current `packaging\windows\validation\pkg.txt`, this intentionally fails
+with a conflict report: the supplied environment is a Linux Python 3.7.6
+Anaconda environment, while current MARVIS injected validation cells require
+Python 3.11+ in the selected kernel. The conflict is documented in
+`packaging/windows/validation/README.md`.
 
 ## Manual Launcher Test
 

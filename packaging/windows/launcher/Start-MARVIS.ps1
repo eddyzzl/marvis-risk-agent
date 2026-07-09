@@ -30,6 +30,48 @@ $env:MARVIS_HOME = $InstallRoot
 $env:JAVA_HOME = $JavaHome
 $env:PATH = "$RuntimeRoot;$RuntimeRoot\Scripts;$RuntimeRoot\Library\bin;$env:PATH"
 
+function Initialize-ValidationKernelSpec {
+    param([string] $InstallRoot)
+
+    $ValidationPython = Join-Path $InstallRoot "validation-runtime\python.exe"
+    if (-not (Test-Path $ValidationPython)) {
+        return
+    }
+
+    $KernelDir = Join-Path $InstallRoot "kernels\marvis-validation-pkg"
+    New-Item -ItemType Directory -Force -Path $KernelDir | Out-Null
+
+    $KernelSpec = [ordered]@{
+        argv = @(
+            $ValidationPython,
+            "-m",
+            "ipykernel_launcher",
+            "-f",
+            "{connection_file}"
+        )
+        display_name = "MARVIS Validation (pkg.txt)"
+        language = "python"
+        metadata = @{
+            marvis = @{
+                role = "validation"
+                source = "packaging/windows/validation/pkg.txt"
+                runtime = "validation-runtime"
+            }
+        }
+    }
+    $KernelSpec |
+        ConvertTo-Json -Depth 8 |
+        Set-Content -Encoding utf8 -Path (Join-Path $KernelDir "kernel.json")
+}
+
+Initialize-ValidationKernelSpec -InstallRoot $InstallRoot
+if ([string]::IsNullOrWhiteSpace($env:JUPYTER_PATH)) {
+    $env:JUPYTER_PATH = $InstallRoot
+}
+else {
+    $env:JUPYTER_PATH = "$InstallRoot;$env:JUPYTER_PATH"
+}
+
 $BaseUrl = "http://${HostName}:${Port}"
 $HealthUrl = "$BaseUrl/api/health"
 

@@ -26,6 +26,17 @@ def test_windows_launcher_uses_private_runtime_and_user_workspace():
     assert "$response.StatusCode -eq 200" in text
 
 
+def test_windows_launcher_registers_optional_validation_kernel():
+    text = (WINDOWS_PACKAGING / "launcher" / "Start-MARVIS.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'Join-Path $InstallRoot "validation-runtime\\python.exe"' in text
+    assert "marvis-validation-pkg" in text
+    assert "MARVIS Validation (pkg.txt)" in text
+    assert "JUPYTER_PATH" in text
+
+
 def test_windows_cmd_launcher_uses_powershell_without_profile():
     text = (WINDOWS_PACKAGING / "launcher" / "MARVIS-Agent.cmd").read_text(
         encoding="utf-8"
@@ -54,3 +65,23 @@ def test_windows_build_script_produces_payload_before_compiling_installer():
     assert "pypmml" in text
     assert "Get-FileHash -Algorithm SHA256" in text
     assert "SkipInstaller" in text
+    assert "IncludeValidationEnvironment" in text
+    assert '$ValidationRuntimeRoot = Join-Path $PayloadRoot "validation-runtime"' in text
+    assert "Assert-ValidationPackageListIsSupported" in text
+    assert "Write-ValidationPackageInstallSpecs" in text
+    assert "validation-requirements.txt" in text
+    assert "validation-conda-specs.txt" in text
+
+
+def test_validation_pkg_source_and_conflict_notes_are_kept_with_packaging():
+    pkg_text = (WINDOWS_PACKAGING / "validation" / "pkg.txt").read_text(
+        encoding="utf-8"
+    )
+    readme = (WINDOWS_PACKAGING / "validation" / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "python                    3.7.6" in pkg_text
+    assert "jpype1                    1.5.0" in pkg_text
+    assert "Current MARVIS requires Python `>=3.11`" in readme
+    assert "registered as a Jupyter" in readme
