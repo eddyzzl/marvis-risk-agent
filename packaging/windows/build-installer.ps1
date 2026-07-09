@@ -34,11 +34,20 @@ function Resolve-CommandPath {
         [string] $CommandName,
         [string] $InstallHint
     )
+    if (Test-Path $CommandName) {
+        return (Resolve-Path $CommandName).Path
+    }
     $command = Get-Command $CommandName -ErrorAction SilentlyContinue
     if (-not $command) {
         throw "$CommandName was not found on PATH. $InstallHint"
     }
-    return $command.Source
+    if ($command.Path) {
+        return $command.Path
+    }
+    if ($command.Source -and (Test-Path $command.Source)) {
+        return (Resolve-Path $command.Source).Path
+    }
+    throw "$CommandName resolved to '$($command.Source)', but that is not an executable path. $InstallHint"
 }
 
 function Read-CondaListFile {

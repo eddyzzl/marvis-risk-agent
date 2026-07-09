@@ -30,7 +30,7 @@ jobs:
         shell: powershell
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build-installer.ps1 -InnoSetupCompiler $iscc
+          powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build-installer.ps1 -Micromamba $env:MAMBA_EXE -InnoSetupCompiler $iscc
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
