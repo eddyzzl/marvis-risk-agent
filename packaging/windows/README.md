@@ -38,6 +38,12 @@ The installer payload contains:
   runtime when a compatible validation environment is bundled.
 - `MARVIS-Agent.cmd`: shortcut target.
 - `bin\Start-MARVIS.ps1`: starts `marvis serve` and opens the browser.
+- `assets\MARVIS-Agent.ico`: installer and shortcut icon generated from the
+  MARVIS web app icon.
+
+`constraints-runtime-win.txt` pins NumPy to a conservative Windows wheel for
+older personal-computer CPUs that do not support the `X86_V2` baseline used by
+newer NumPy wheels.
 
 The launcher sets `JAVA_HOME` and `PATH` only for the MARVIS child process. It
 does not register Python, does not modify system Java, and does not require

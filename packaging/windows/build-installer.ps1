@@ -161,9 +161,10 @@ $PayloadRoot = Join-Path $BuildRoot "payload"
 $RuntimeRoot = Join-Path $PayloadRoot "runtime"
 $ValidationRuntimeRoot = Join-Path $PayloadRoot "validation-runtime"
 $BinRoot = Join-Path $PayloadRoot "bin"
+$AssetsRoot = Join-Path $PayloadRoot "assets"
 
 Remove-Item -Recurse -Force $BuildRoot -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $Wheelhouse, $PayloadRoot, $BinRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $Wheelhouse, $PayloadRoot, $BinRoot, $AssetsRoot | Out-Null
 
 Write-Host "Building MARVIS wheel for version $Version"
 & $Python -m pip install --quiet --upgrade build
@@ -192,7 +193,8 @@ $RuntimePython = Join-Path $RuntimeRoot "python.exe"
 if ($LASTEXITCODE -ne 0) {
     throw "Upgrading pip in the runtime failed"
 }
-& $RuntimePython -m pip install --no-cache-dir $($wheel.FullName)
+$RuntimeConstraints = Join-Path $ScriptRoot "constraints-runtime-win.txt"
+& $RuntimePython -m pip install --no-cache-dir -c $RuntimeConstraints $($wheel.FullName)
 if ($LASTEXITCODE -ne 0) {
     throw "Installing MARVIS into the runtime failed"
 }
@@ -203,7 +205,7 @@ if (-not $SkipSmoke) {
     if ($LASTEXITCODE -ne 0) {
         throw "marvis version smoke check failed"
     }
-    & $RuntimePython -c "import fastapi, uvicorn, pandas, pypmml; print('runtime imports ok')"
+    & $RuntimePython -c "import fastapi, uvicorn, numpy, pandas, pypmml; print('runtime imports ok', numpy.__version__)"
     if ($LASTEXITCODE -ne 0) {
         throw "Runtime import smoke check failed"
     }
@@ -290,6 +292,7 @@ if ($IncludeValidationEnvironment) {
 
 Copy-Item -Force (Join-Path $ScriptRoot "launcher\MARVIS-Agent.cmd") (Join-Path $PayloadRoot "MARVIS-Agent.cmd")
 Copy-Item -Force (Join-Path $ScriptRoot "launcher\Start-MARVIS.ps1") (Join-Path $BinRoot "Start-MARVIS.ps1")
+Copy-Item -Force (Join-Path $ScriptRoot "assets\MARVIS-Agent.ico") (Join-Path $AssetsRoot "MARVIS-Agent.ico")
 Copy-Item -Force (Join-Path $RepoRoot "LICENSE") (Join-Path $PayloadRoot "LICENSE.txt")
 Copy-Item -Force (Join-Path $RepoRoot "README.md") (Join-Path $PayloadRoot "README.md")
 Set-Content -Encoding utf8 -Path (Join-Path $PayloadRoot "VERSION.txt") -Value $Version
@@ -300,10 +303,12 @@ if ($SkipInstaller) {
 }
 
 Write-Host "Compiling Inno Setup installer"
+$IconFile = Join-Path $ScriptRoot "assets\MARVIS-Agent.ico"
 & $InnoExe `
     "/DAppVersion=$Version" `
     "/DPayloadDir=$PayloadRoot" `
     "/DOutputDir=$OutputRoot" `
+    "/DIconFile=$IconFile" `
     (Join-Path $ScriptRoot "installer.iss")
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup failed"

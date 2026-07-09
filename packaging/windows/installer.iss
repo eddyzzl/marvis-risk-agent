@@ -10,6 +10,10 @@
 #define OutputDir "dist\windows"
 #endif
 
+#ifndef IconFile
+#define IconFile "packaging\windows\assets\MARVIS-Agent.ico"
+#endif
+
 [Setup]
 AppId={{5C90AA61-5E51-4C89-8C67-B7EBF02224D2}
 AppName=MARVIS-Agent
@@ -26,6 +30,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
 OutputBaseFilename=MARVIS-Setup-{#AppVersion}-win-x64
+SetupIconFile={#IconFile}
 Compression=zip
 SolidCompression=no
 WizardStyle=modern
@@ -42,8 +47,8 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\MARVIS-Agent"; Filename: "{app}\MARVIS-Agent.cmd"; WorkingDir: "{app}"
-Name: "{autodesktop}\MARVIS-Agent"; Filename: "{app}\MARVIS-Agent.cmd"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autoprograms}\MARVIS-Agent"; Filename: "{app}\MARVIS-Agent.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\assets\MARVIS-Agent.ico"
+Name: "{autodesktop}\MARVIS-Agent"; Filename: "{app}\MARVIS-Agent.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\assets\MARVIS-Agent.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\MARVIS-Agent.cmd"; Description: "Launch MARVIS-Agent"; Flags: nowait postinstall skipifsilent unchecked

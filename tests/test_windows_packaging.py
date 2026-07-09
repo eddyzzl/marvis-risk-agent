@@ -7,10 +7,15 @@ WINDOWS_PACKAGING = Path("packaging/windows")
 
 def test_windows_runtime_environment_bundles_python_pip_and_java():
     text = (WINDOWS_PACKAGING / "environment.yml").read_text(encoding="utf-8")
+    constraints = (WINDOWS_PACKAGING / "constraints-runtime-win.txt").read_text(
+        encoding="utf-8"
+    )
 
     assert "python=3.12" in text
     assert "- pip" in text
     assert "openjdk=17" in text
+    assert "numpy==1.26.4" in constraints
+    assert "X86_V2" in constraints
 
 
 def test_windows_launcher_uses_private_runtime_and_user_workspace():
@@ -60,8 +65,10 @@ def test_windows_inno_installer_is_per_user_and_creates_shortcuts():
     assert 'Source: "{#PayloadDir}\\*"' in text
     assert "Compression=zip" in text
     assert "SolidCompression=no" in text
+    assert "SetupIconFile={#IconFile}" in text
     assert "MARVIS-Agent.cmd" in text
     assert "{autodesktop}\\MARVIS-Agent" in text
+    assert 'IconFilename: "{app}\\assets\\MARVIS-Agent.ico"' in text
 
 
 def test_windows_build_script_produces_payload_before_compiling_installer():
@@ -71,6 +78,10 @@ def test_windows_build_script_produces_payload_before_compiling_installer():
     assert "$MicromambaExe create -y -p $RuntimeRoot" in text
     assert "$Python -m build" in text
     assert "pypmml" in text
+    assert "constraints-runtime-win.txt" in text
+    assert "-c $RuntimeConstraints" in text
+    assert "assets\\MARVIS-Agent.ico" in text
+    assert "/DIconFile=$IconFile" in text
     assert "Get-FileHash -Algorithm SHA256" in text
     assert "SkipInstaller" in text
     assert "IncludeValidationEnvironment" in text

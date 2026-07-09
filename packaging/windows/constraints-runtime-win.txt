@@ -1,0 +1,4 @@
+# Keep the bundled platform runtime compatible with older x86_64-v1 CPUs.
+# Newer NumPy 2.4+ Windows wheels can require X86_V2 and fail during import on
+# older personal computers before MARVIS can show a useful error.
+numpy==1.26.4
