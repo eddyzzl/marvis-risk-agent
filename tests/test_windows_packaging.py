@@ -121,6 +121,7 @@ def test_validation_windows_requirements_are_pinned_from_pkg_source():
         assert re.search(rf"^{re.escape(name)}\s+{re.escape(version)}\s", pkg_text, re.M)
     for requirement in [
         "cloudpickle=1.3.0",
+        "ipython_genutils=0.2.0",
         "openpyxl=3.0.3",
         "xlrd=1.2.0",
     ]:
