@@ -55,6 +55,8 @@ def test_windows_inno_installer_is_per_user_and_creates_shortcuts():
     assert "PrivilegesRequired=lowest" in text
     assert r"DefaultDirName={localappdata}\Programs\MARVIS-Agent" in text
     assert 'Source: "{#PayloadDir}\\*"' in text
+    assert "Compression=zip" in text
+    assert "SolidCompression=no" in text
     assert "MARVIS-Agent.cmd" in text
     assert "{autodesktop}\\MARVIS-Agent" in text
 
