@@ -1,0 +1,42 @@
+name: Windows Installer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          init-shell: powershell
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows installer
+        shell: powershell
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build-installer.ps1 -InnoSetupCompiler $iscc
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: marvis-windows-installer
+          path: |
+            dist/windows/MARVIS-Setup-*-win-x64.exe
+            dist/windows/MARVIS-Setup-*-win-x64.exe.sha256
+          if-no-files-found: error
