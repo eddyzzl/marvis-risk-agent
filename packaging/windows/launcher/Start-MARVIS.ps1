@@ -54,6 +54,8 @@ function Initialize-ValidationKernelSpec {
             CONDA_DEFAULT_ENV = $ValidationRoot
             CONDA_PREFIX = $ValidationRoot
             PATH = $ValidationPath
+            PYTHONNOUSERSITE = "1"
+            PYTHONPATH = ""
         }
         metadata = @{
             marvis = @{

@@ -1139,6 +1139,58 @@ def test_run_notebook_isolated_worker_error_is_reported(tmp_path: Path, monkeypa
     assert "worker boom" in log_path.read_text(encoding="utf-8")
 
 
+def test_run_notebook_isolated_kernel_start_failure_surfaces_worker_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    notebook_path = tmp_path / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    nbformat.write(nbformat.v4.new_notebook(cells=[]), notebook_path)
+    payload = {
+        "ok": True,
+        "result": {
+            "succeeded": False,
+            "failed_cell_index": None,
+            "error_name": "RuntimeError",
+            "error_value": "Kernel died before replying to kernel_info",
+            "resource_usage": {},
+        },
+    }
+
+    class FakeProcess:
+        pid = 12345
+        returncode = 0
+
+        def communicate(self, input=None, timeout=None):
+            stdout = NOTEBOOK_RESULT_SENTINEL + json.dumps(payload) + "\n"
+            stderr = "ImportError: DLL load failed while importing _zmq: module not found"
+            return stdout, stderr
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(
+        "marvis.notebooks.subprocess.Popen",
+        lambda *args, **kwargs: FakeProcess(),
+    )
+
+    result = run_notebook(
+        notebook_path,
+        executed_path,
+        log_path,
+        timeout=1,
+        isolated=True,
+    )
+
+    assert result.succeeded is False
+    assert result.failed_cell_index is None
+    assert "Kernel died before replying to kernel_info" in result.error_value
+    assert "DLL load failed while importing _zmq" in result.error_value
+    assert result.resource_usage["stderr_tail"].endswith("module not found")
+    assert "DLL load failed while importing _zmq" in log_path.read_text(encoding="utf-8")
+
+
 def test_run_notebook_returns_cancelled_when_token_is_cancelled(tmp_path: Path):
     notebook_path = tmp_path / "source.ipynb"
     executed_path = tmp_path / "executed.ipynb"

@@ -63,6 +63,8 @@ def test_windows_launcher_registers_optional_validation_kernel():
     assert "JUPYTER_PATH" in text
     assert "CONDA_PREFIX" in text
     assert "$ValidationRoot\\Library\\bin" in text
+    assert "PYTHONNOUSERSITE" in text
+    assert 'PYTHONPATH = ""' in text
 
 
 def test_windows_cmd_launcher_uses_powershell_without_profile():
@@ -111,6 +113,8 @@ def test_windows_build_script_produces_payload_before_compiling_installer():
     assert "requirements-optional-win-py37.txt" in text
     assert "MARVIS_VALIDATION_ENV_REPORT.txt" in text
     assert "validation core imports ok" in text
+    assert "$RuntimePython -m marvis.kernel_probe" in text
+    assert "Validation runtime Jupyter kernel handshake failed" in text
     assert "$ValidationRuntimeRoot\\Library\\bin" in text
     assert "-ConstraintPath $ValidationCoreRequirements" in text
 

@@ -1561,7 +1561,6 @@ function taskStatusTone(task) {
 function notebookReproducibilityComplete(task = selectedTask) {
   return (
     notebookReproducibilityCompleteStatuses.has(task?.status || "") ||
-    taskFailedDuringNotebook(task) ||
     taskFailedDuringMetrics(task) ||
     taskFailedDuringReport(task) ||
     (taskFailureWasRestartReclaim(task) && workflowStageCompleteFromEvidence("notebook"))
@@ -1591,11 +1590,7 @@ function metricOverviewComplete(task = selectedTask) {
 }
 
 function shouldShowMetricSection() {
-  return Boolean(selectedTaskId && (
-    metricOverviewComplete(selectedTask) ||
-    taskFailedDuringNotebook(selectedTask) ||
-    taskFailedDuringMetrics(selectedTask)
-  ));
+  return Boolean(selectedTaskId && metricOverviewComplete(selectedTask));
 }
 
 function renderMetricSectionVisibility() {

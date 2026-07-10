@@ -1176,12 +1176,26 @@ def _run_notebook_in_subprocess(
         "worker_pid": process.pid,
         "worker_started_at": started,
         "worker_returncode": process.returncode,
+        "stdout_tail": _tail_text(stdout),
+        "stderr_tail": _tail_text(stderr),
     })
+    succeeded = bool(result_payload.get("succeeded"))
+    failed_cell_index = result_payload.get("failed_cell_index")
+    error_name = result_payload.get("error_name")
+    error_value = result_payload.get("error_value")
+    if not succeeded and failed_cell_index is None and stderr:
+        error_value = _kernel_start_error_with_stderr(error_value, stderr)
+        _write_failure_log(
+            Path(log_path),
+            None,
+            str(error_name or "RuntimeError"),
+            error_value,
+        )
     return NotebookRunResult(
-        succeeded=bool(result_payload.get("succeeded")),
-        failed_cell_index=result_payload.get("failed_cell_index"),
-        error_name=result_payload.get("error_name"),
-        error_value=result_payload.get("error_value"),
+        succeeded=succeeded,
+        failed_cell_index=failed_cell_index,
+        error_name=error_name,
+        error_value=error_value,
         step_events=result_payload.get("step_events"),
         cancelled=bool(result_payload.get("cancelled")),
         resource_usage=resource_usage,
@@ -1260,6 +1274,18 @@ def _worker_protocol_error_message(returncode: int | None, stderr: str | None) -
     # it fits the single-line error surface without losing the actual cause.
     last_lines = [line for line in tail.splitlines() if line.strip()][-3:]
     return f"{base}; worker stderr: {' | '.join(last_lines)}"
+
+
+def _kernel_start_error_with_stderr(error_value: object, stderr: str) -> str:
+    base = str(error_value or "kernel failed before executing a notebook cell")
+    tail = _tail_text(stderr, limit=1600).strip()
+    if not tail:
+        return base
+    last_lines = [line for line in tail.splitlines() if line.strip()][-5:]
+    detail = " | ".join(last_lines)
+    if detail in base:
+        return base
+    return f"{base}; kernel stderr: {detail}"
 
 
 def _parse_notebook_worker_result(stdout: str) -> dict[str, Any] | None:

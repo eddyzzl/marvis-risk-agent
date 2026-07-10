@@ -1740,17 +1740,19 @@ def test_validation_material_binding_dialog_keeps_content_inside_viewport():
     assert "overscroll-behavior: contain" in rows_rule
 
 
-def test_validation_failure_stage_drives_rail_and_empty_evidence_copy():
+def test_validation_failure_stage_does_not_reveal_unfinished_evidence_sections():
     app_js = _read_static("app.js")
 
     assert "task.failure_stage || \"\"" in app_js
     assert "function earliestFailureStage" in app_js
     assert "function notebookStepStageFailure" in app_js
     assert "return earliestFailureStage(structuredStage, notebookStepStageFailure());" in app_js
-    assert "taskFailedDuringNotebook(task) ||" in app_js
-    assert "taskFailedDuringNotebook(selectedTask) ||" in app_js
-    assert "模型可复现性验证失败，修复 Notebook 后重新运行该阶段。" in app_js
-    assert "模型可复现性验证未通过，暂不展示效果&稳定性指标。" in app_js
+    notebook_complete = _slice_function(app_js, "function notebookReproducibilityComplete")
+    metric_visibility = _slice_function(app_js, "function shouldShowMetricSection")
+    assert "taskFailedDuringNotebook(task)" not in notebook_complete
+    assert "taskFailedDuringMetrics(task)" in notebook_complete
+    assert "taskFailedDuringNotebook(selectedTask)" not in metric_visibility
+    assert "taskFailedDuringMetrics(selectedTask)" not in metric_visibility
     assert "metricPreviewSignature(\n    previewTaskId,\n    lastMetricValues,\n    lastMetricTableSections,\n    emptyMessage," in app_js
 
 
@@ -9283,6 +9285,62 @@ def _run_node_capture_json(script: str) -> dict:
         ["node", "--input-type=module"], input=script, check=True, capture_output=True, text=True
     )
     return json.loads(result.stdout)
+
+
+def test_validation_evidence_sections_reveal_only_after_their_stage_completes():
+    app_js = _read_static("app.js")
+    visibility_start = app_js.index("function notebookReproducibilityComplete")
+    visibility_end = app_js.index("function workflowIndex", visibility_start)
+    visibility_functions = app_js[visibility_start:visibility_end]
+    script = "\n".join(
+        [
+            "let selectedTaskId = 'task';",
+            "let selectedTask = null;",
+            "const notebookReproducibilityCompleteStatuses = new Set([",
+            "  'executed', 'computing_metrics', 'writing_artifacts', 'succeeded', 'review_required',",
+            "]);",
+            "const metricOverviewCompleteStatuses = new Set([",
+            "  'writing_artifacts', 'succeeded', 'review_required',",
+            "]);",
+            "function taskFailedDuringNotebook(task) {",
+            "  return task?.status === 'failed' && task?.failure_stage === 'notebook';",
+            "}",
+            "function taskFailedDuringMetrics(task) {",
+            "  return task?.status === 'failed' && task?.failure_stage === 'metrics';",
+            "}",
+            "function taskFailedDuringReport(task) {",
+            "  return task?.status === 'failed' && task?.failure_stage === 'report';",
+            "}",
+            "function taskFailureWasRestartReclaim() { return false; }",
+            "function workflowStageCompleteFromEvidence() { return false; }",
+            visibility_functions,
+            "function visible(task) {",
+            "  selectedTask = task;",
+            "  selectedTaskId = task.id;",
+            "  return {",
+            "    reproducibility: shouldShowReproducibilitySection(),",
+            "    metrics: shouldShowMetricSection(),",
+            "  };",
+            "}",
+            "process.stdout.write(JSON.stringify({",
+            "  failedNotebook: visible({ id: 'n', status: 'failed', failure_stage: 'notebook' }),",
+            "  failedMetrics: visible({ id: 'm', status: 'failed', failure_stage: 'metrics' }),",
+            "  failedReport: visible({ id: 'r', status: 'failed', failure_stage: 'report' }),",
+            "  notebookComplete: visible({ id: 'e', status: 'executed' }),",
+            "  metricsComplete: visible({ id: 'w', status: 'writing_artifacts' }),",
+            "}));",
+        ]
+    )
+
+    data = _run_node_capture_json(script)
+
+    assert data == {
+        "failedNotebook": {"reproducibility": False, "metrics": False},
+        "failedMetrics": {"reproducibility": True, "metrics": False},
+        "failedReport": {"reproducibility": True, "metrics": True},
+        "notebookComplete": {"reproducibility": True, "metrics": False},
+        "metricsComplete": {"reproducibility": True, "metrics": True},
+    }
 
 
 _BROWSER_STUBS = """

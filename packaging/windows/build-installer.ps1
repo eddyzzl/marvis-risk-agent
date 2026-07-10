@@ -276,6 +276,13 @@ if ($IncludeValidationEnvironment) {
         if ($LASTEXITCODE -ne 0) {
             throw "Validation runtime core import smoke check failed"
         }
+        & $RuntimePython -m marvis.kernel_probe `
+            --python $ValidationPython `
+            --cwd $ValidationRuntimeRoot `
+            --timeout 30
+        if ($LASTEXITCODE -ne 0) {
+            throw "Validation runtime Jupyter kernel handshake failed"
+        }
     }
     finally {
         $env:PATH = $PreviousPath
