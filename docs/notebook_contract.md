@@ -84,6 +84,9 @@ RMC_FEATURE_IMPORTANCE = pd.DataFrame({
 - 类型为 pandas DataFrame。
 - 必须包含 `feature`、`importance` 两列。
 - 可选包含 `类别` 或 `category` 列；平台会统一写入 Web、Excel 和 Word 的“类别”列。
+- 压力测试将非空的 `类别` 或 `category` 视为该最终 `feature` 名称的权威分类。
+- 数据字典只会按完整特征名精确补充空类别，不会猜测前缀、后缀或派生特征名。
+- 如果仍有入模特征无法分类，压力测试整体状态为 `partial`；没有任何入模特征可分类时为 `failed`，不会显示为完整完成。
 - `importance` 必须是数值。
 - 平台按 `importance` 降序展示。
 - 平台不会自行决定是否取绝对值，LR 系数等场景由开发人员在 Notebook 中决定。
@@ -180,7 +183,9 @@ Notebook 内存模型 -> RMC_SCORE_FN(RMC_SAMPLE_DF.copy()) -> code_model_scores
 code_model_scores vs submitted_pmml_scores -> 一致性结论
 ```
 
-第 3 步“模型效果&稳定性验证”不会重新执行 Notebook，也不会由平台进程重新读取样本文件；它会在第 2 步保留的同一个 kernel 后面追加验证 cell，直接使用 `RMC_SAMPLE_DF`。
+默认完整流水线中，第 3 步“模型效果&稳定性验证”不会重新执行 Notebook，也不会由平台进程重新读取样本文件；它会在同一次隔离 Notebook 执行末尾追加验证 cell，直接使用 `RMC_SAMPLE_DF`、`RMC_SCORE_FN` 和 `RMC_FEATURE_IMPORTANCE`。
+
+如果用户单独重新执行第 3 步，平台会重新执行原 Notebook，以确定性重建上述契约对象，再在本次执行末尾追加指标 cell。平台不会复用已经退出或可能污染的旧 kernel，也不会绕过 Notebook 后重新解释原始特征分类。
 
 ## 常见失败
 

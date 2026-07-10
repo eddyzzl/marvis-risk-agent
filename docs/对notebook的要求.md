@@ -266,6 +266,9 @@ RMC_FEATURE_IMPORTANCE = pd.DataFrame({
 - 类型必须是 pandas DataFrame。
 - 必须包含两列：`feature`、`importance`。
 - 可选包含 `类别` 或 `category` 列；平台会统一写入 Web、Excel 和 Word 的“类别”列。
+- 压力测试优先使用这里的非空类别，并把它视为同一行最终 `feature` 名称的权威分类。
+- 上传的数据字典只按完整特征名精确补充空类别，不进行前缀、后缀或模糊匹配。
+- 仍有入模特征无法分类时，压力测试显示部分完成；全部无法分类时显示失败，而不是静默完成。
 - `feature` 为特征名，建议为字符串。
 - `importance` 为重要性数值。
 - 平台会按 `importance` 降序展示和写入报告。
@@ -416,6 +419,11 @@ Please add the MARVIS contract cell at the end of the notebook.
 ### 11.2 执行后运行时检查
 
 Notebook 原始 cell 全部执行完成后，平台会在同一个 kernel 中执行系统检查 cell。
+
+默认完整流水线还会在同一次隔离 Notebook 执行末尾追加第 3 步指标 cell，直接复用
+`RMC_SAMPLE_DF`、`RMC_SCORE_FN` 和 `RMC_FEATURE_IMPORTANCE`。如果验证人员单独
+重新执行第 3 步，平台会重新运行原 Notebook 以确定性重建这些契约对象，再追加指标
+cell；平台不会复用已经退出或可能污染的旧 kernel。
 
 平台会检查：
 

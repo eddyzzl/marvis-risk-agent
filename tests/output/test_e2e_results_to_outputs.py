@@ -10,20 +10,19 @@ from marvis.output.word import write_validation_word
 from marvis.validation.checks import finite_score_series, validate_binary_target
 from marvis.validation.config import ValidationConfig
 from marvis.validation.effectiveness import run_effectiveness
+from marvis.validation.feature_categories import resolve_feature_categories
 from marvis.validation.reproducibility import run_reproducibility
 from marvis.validation.results import ValidationResults
 from marvis.validation.sample_stats import run_basic_info
-from marvis.validation.stress_test import (
-    _filter_feature_categories,
-    _model_features,
-    load_feature_categories,
-    run_stress_test,
-)
+from marvis.validation.stress_test import run_stress_test
 
 
 class _IdentityScorer:
+    def __init__(self, feature: str = "x1") -> None:
+        self.feature = feature
+
     def score(self, df: pd.DataFrame) -> list[float]:
-        return df["x1"].astype(float).tolist()
+        return df[self.feature].astype(float).tolist()
 
 
 def _make_template(path: Path) -> Path:
@@ -70,19 +69,21 @@ def _compose_results(
     effectiveness = run_effectiveness(sample=scored, config=config)
 
     oot_sample = sample[sample[config.split_col] == config.split_values["oot"]]
-    feature_categories = _filter_feature_categories(
-        load_feature_categories(
-            dictionary,
-            feature_col=config.data_dict_feature_col,
-            category_col=config.data_dict_category_col,
-        ),
-        model_features=_model_features(config, basic_info.feature_importance),
+    category_resolution = resolve_feature_categories(
+        model_features=[
+            (row.feature, row.category) for row in basic_info.feature_importance
+        ],
+        dictionary=dictionary,
+        feature_col=config.data_dict_feature_col,
+        category_col=config.data_dict_category_col,
     )
     stress_test = run_stress_test(
         oot_sample=oot_sample,
         config=config,
-        feature_categories=feature_categories,
+        feature_categories=category_resolution.per_category,
         input_scorer=scorer,
+        unclassified_features=category_resolution.unclassified_features,
+        category_source_counts=category_resolution.source_counts,
     )
 
     return ValidationResults(
@@ -140,3 +141,64 @@ def test_engine_output_round_trip(tmp_path: Path):
     )
     assert word_result.unresolved_placeholders == []
     assert word_path.exists()
+
+
+def test_transformed_notebook_feature_keeps_stress_category_through_excel(
+    tmp_path: Path,
+):
+    feature = "BH_A044_C0580"
+    rows = []
+    for split in ("train", "test", "oot"):
+        for index in range(20):
+            value = (index + 1) / 21
+            rows.append(
+                {
+                    feature: value,
+                    "sample_score": value,
+                    "y": int(index >= 10),
+                    "split": split,
+                    "apply_month": "202503" if split == "train" else "202505",
+                }
+            )
+    sample = pd.DataFrame(rows)
+    dictionary = pd.DataFrame({"特征名": ["BH_A044"], "类别": ["睿智"]})
+    meta_path = tmp_path / "model_meta.json"
+    meta_path.write_text(
+        json.dumps(
+            {
+                "feature_importance": [
+                    {"feature": feature, "category": "睿智", "importance": 1.0}
+                ],
+                "hyperparameters": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    results = _compose_results(
+        sample=sample,
+        dictionary=dictionary,
+        model_meta_path=meta_path,
+        scorer=_IdentityScorer(feature),
+        config=ValidationConfig(
+            target_col="y",
+            score_col="sample_score",
+            split_col="split",
+            time_col="apply_month",
+            feature_columns=[feature],
+            bin_count=5,
+            random_sample_size=10,
+        ),
+    )
+
+    assert results.stress_test.status == "completed"
+    assert results.stress_test.unclassified_features == []
+    assert results.stress_test.per_category[0].category == "睿智"
+    assert results.stress_test.per_category[0].dropped_features == [feature]
+
+    excel_path = tmp_path / "transformed.xlsx"
+    write_validation_excel(results, excel_path)
+    workbook = load_workbook(excel_path, data_only=True)
+    assert "压力测试_分箱_睿智" in workbook.sheetnames
+    assert workbook["压力测试_汇总"]["A3"].value == "睿智"
