@@ -1084,11 +1084,55 @@ def _stress_scores_artifact_valid(path: Path) -> bool:
         return False
     if not isinstance(payload, dict) or not isinstance(payload.get("categories"), list):
         return False
-    schema_version = payload.get("schema_version")
-    if schema_version not in {None, "marvis.validation_stress_scores.v1"}:
+    if payload.get("schema_version") != "marvis.validation_stress_scores.v2":
         return False
+    feature_categories = payload.get("feature_categories")
+    unclassified = payload.get("unclassified_features")
+    source_counts = payload.get("source_counts")
+    conflicts = payload.get("conflicts")
+    if not isinstance(feature_categories, dict):
+        return False
+    if not _valid_stress_feature_categories(feature_categories):
+        return False
+    if not _valid_unique_strings(unclassified):
+        return False
+    if not isinstance(source_counts, dict) or set(source_counts) != {
+        "notebook",
+        "dictionary",
+        "unresolved",
+    }:
+        return False
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in source_counts.values()
+    ):
+        return False
+    if not isinstance(conflicts, list) or conflicts:
+        return False
+    classified_features = [
+        feature for features in feature_categories.values() for feature in features
+    ]
+    if len(classified_features) != len(set(classified_features)):
+        return False
+    if set(classified_features) & set(unclassified):
+        return False
+    if sum(source_counts.values()) != len(classified_features) + len(unclassified):
+        return False
+    if source_counts["unresolved"] != len(unclassified):
+        return False
+    rows_by_category: dict[str, dict] = {}
     for row in payload["categories"]:
-        if not isinstance(row, dict) or not str(row.get("category") or "").strip():
+        if not isinstance(row, dict):
+            return False
+        category = str(row.get("category") or "").strip()
+        if not category or category in rows_by_category:
+            return False
+        rows_by_category[category] = row
+    if set(rows_by_category) != set(feature_categories):
+        return False
+    for category, row in rows_by_category.items():
+        dropped_features = row.get("dropped_features")
+        if dropped_features != feature_categories[category]:
             return False
         status = row.get("status")
         if status not in {None, "completed", "skipped", "error"}:
@@ -1113,6 +1157,23 @@ def _stress_scores_artifact_valid(path: Path) -> bool:
         if status in {"completed", "skipped"} and error not in {None, ""}:
             return False
     return True
+
+
+def _valid_stress_feature_categories(value: dict) -> bool:
+    for category, features in value.items():
+        if not isinstance(category, str) or not category.strip():
+            return False
+        if not _valid_unique_strings(features) or not features:
+            return False
+    return True
+
+
+def _valid_unique_strings(value: object) -> bool:
+    if not isinstance(value, list):
+        return False
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        return False
+    return len(value) == len(set(value))
 
 
 def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:

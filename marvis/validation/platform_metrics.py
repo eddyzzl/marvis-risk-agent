@@ -23,18 +23,17 @@ from marvis.validation.effectiveness import (
     compute_roc_ks_curves,
     prepare_effectiveness_context,
 )
+from marvis.validation.feature_categories import (
+    FeatureCategoryConflict,
+    FeatureCategoryResolution,
+    resolve_feature_categories,
+)
 from marvis.validation.in_memory_scores import load_code_model_scores
 from marvis.validation.pmml_scoring import load_pmml_scorer
 from marvis.validation.reproducibility import run_reproducibility
-from marvis.validation.results import ValidationResults
+from marvis.validation.results import FeatureImportanceRow, ValidationResults
 from marvis.validation.sample_stats import run_basic_info
-from marvis.validation.stress_test import (
-    STRESS_MISSING_VALUE,
-    _filter_feature_categories,
-    _model_features,
-    load_feature_categories,
-    run_stress_test,
-)
+from marvis.validation.stress_test import STRESS_MISSING_VALUE, run_stress_test
 
 
 REPRODUCIBILITY_RESULT_JSON = "reproducibility_result.json"
@@ -156,15 +155,15 @@ def write_platform_validation_metrics(
         roc_ks_curves=roc_ks_curves,
     )
 
-    feature_categories = load_feature_categories(
-        dictionary,
+    category_resolution = stress_category_resolution_for_metrics(
+        feature_importance=basic_info.feature_importance,
+        fallback_model_features=[str(column) for column in sample.columns],
+        dictionary=dictionary,
         feature_col=config.data_dict_feature_col,
         category_col=config.data_dict_category_col,
+        stress_scores_path=stress_scores_path,
     )
-    feature_categories = _filter_feature_categories(
-        feature_categories,
-        model_features=_model_features(config, basic_info.feature_importance),
-    )
+    feature_categories = category_resolution.per_category
     oot_sample = sample[sample[config.split_col] == config.split_values["oot"]]
     stress_scorer = PrecomputedStressScenarioScorer(
         code_scores=code_scores,
@@ -195,6 +194,94 @@ def write_platform_validation_metrics(
     )
     write_validation_excel(results, excel_path)
     return results_json_path
+
+
+def stress_category_resolution_for_metrics(
+    *,
+    feature_importance: list[FeatureImportanceRow],
+    fallback_model_features: list[str] | None = None,
+    dictionary: pd.DataFrame,
+    feature_col: str,
+    category_col: str,
+    stress_scores_path: Path | None,
+) -> FeatureCategoryResolution:
+    model_features = [(row.feature, row.category) for row in feature_importance]
+    if not model_features:
+        dictionary_features = {
+            str(value).strip()
+            for value in dictionary[feature_col].tolist()
+            if pd.notna(value) and str(value).strip()
+        }
+        model_features = [
+            (feature, "")
+            for feature in (fallback_model_features or [])
+            if feature in dictionary_features
+        ]
+    expected = resolve_feature_categories(
+        model_features=model_features,
+        dictionary=dictionary,
+        feature_col=feature_col,
+        category_col=category_col,
+    )
+    _raise_category_conflict(expected)
+    if stress_scores_path is None or not Path(stress_scores_path).exists():
+        return expected
+
+    payload = json.loads(Path(stress_scores_path).read_text(encoding="utf-8"))
+    if payload.get("schema_version") != "marvis.validation_stress_scores.v2":
+        raise ValueError(
+            "stress scenario artifact category mapping does not match model metadata"
+        )
+    actual = _category_resolution_from_stress_payload(payload)
+    _raise_category_conflict(actual)
+    if (
+        actual.per_category != expected.per_category
+        or actual.unclassified_features != expected.unclassified_features
+        or actual.source_counts != expected.source_counts
+    ):
+        raise ValueError(
+            "stress scenario artifact category mapping does not match model metadata"
+        )
+    return actual
+
+
+def _category_resolution_from_stress_payload(
+    payload: dict[str, Any],
+) -> FeatureCategoryResolution:
+    raw_categories = payload.get("feature_categories") or {}
+    per_category = {
+        str(category): [str(feature) for feature in features]
+        for category, features in raw_categories.items()
+    }
+    conflicts = [
+        FeatureCategoryConflict(
+            feature=str(row.get("feature") or ""),
+            categories=tuple(str(value) for value in row.get("categories") or []),
+            source=str(row.get("source") or ""),
+        )
+        for row in payload.get("conflicts") or []
+    ]
+    return FeatureCategoryResolution(
+        per_category=per_category,
+        unclassified_features=[
+            str(feature) for feature in payload.get("unclassified_features") or []
+        ],
+        conflicts=conflicts,
+        source_counts={
+            str(source): int(count)
+            for source, count in (payload.get("source_counts") or {}).items()
+        },
+    )
+
+
+def _raise_category_conflict(resolution: FeatureCategoryResolution) -> None:
+    if not resolution.conflicts:
+        return
+    conflict = resolution.conflicts[0]
+    raise ValueError(
+        f"stress category conflict for {conflict.feature}: "
+        + ", ".join(conflict.categories)
+    )
 
 
 class PrecomputedStressScenarioScorer:

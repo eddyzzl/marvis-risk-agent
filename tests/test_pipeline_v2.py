@@ -46,6 +46,22 @@ from marvis.pipeline import (
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
+def _empty_stress_scores_payload() -> dict:
+    return {
+        "schema_version": "marvis.validation_stress_scores.v2",
+        "row_index": [],
+        "feature_categories": {},
+        "unclassified_features": [],
+        "source_counts": {
+            "notebook": 0,
+            "dictionary": 0,
+            "unresolved": 0,
+        },
+        "conflicts": [],
+        "categories": [],
+    }
+
+
 def _allow_legacy_live_notebook(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(LEGACY_LIVE_NOTEBOOK_ENV_VAR, "1")
 
@@ -186,6 +202,26 @@ def test_stress_score_reuse_rejects_truncated_or_invalid_artifact(tmp_path: Path
         json.dumps(
             {
                 "schema_version": "marvis.validation_stress_scores.v1",
+                "categories": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _stress_scores_artifact_valid(artifact) is False
+
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": "marvis.validation_stress_scores.v2",
+                "row_index": [],
+                "feature_categories": {},
+                "unclassified_features": [],
+                "source_counts": {
+                    "notebook": 0,
+                    "dictionary": 0,
+                    "unresolved": 0,
+                },
+                "conflicts": [],
                 "categories": [],
             }
         ),
@@ -448,7 +484,67 @@ def test_v1_validation_appended_policy_matches_generated_cell_kinds(tmp_path: Pa
     )
     assert "_rmc_consistency_status(" in reproducibility_sources["repro-compare"]
     assert "PASS if _rmc_mismatch_count == 0" not in reproducibility_sources["repro-compare"]
-    assert "from marvis" not in stress_sources["stress-scores"]
+    assert (
+        "from marvis.validation.feature_categories import resolve_feature_categories"
+        in stress_sources["stress-scores"]
+    )
+
+
+def test_stress_score_cell_prefers_notebook_categories_for_transformed_features(
+    tmp_path: Path,
+):
+    dictionary_path = tmp_path / "dictionary.csv"
+    dictionary_path.write_text("特征名,类别\nBH_A044,睿智\n", encoding="utf-8")
+    contract_path = tmp_path / "runtime_contract.json"
+    contract_path.write_text(json.dumps({"split_col": "split"}), encoding="utf-8")
+    output_path = tmp_path / "stress_scenario_scores.json"
+    task = SimpleNamespace(split_col="split")
+    settings = SimpleNamespace(
+        data_dict_feature_col="特征名",
+        data_dict_category_col="类别",
+    )
+    source = dict(
+        pipeline_module._build_stress_scenario_score_cell_sources(
+            task=task,
+            settings=settings,
+            dictionary_path=dictionary_path,
+            contract_meta_path=contract_path,
+            output_path=output_path,
+        )
+    )["stress-scores"]
+    namespace = {
+        "RMC_SAMPLE_DF": pd.DataFrame(
+            {
+                "BH_A044_C0580": [1.0, 2.0],
+                "y": [0, 1],
+                "split": ["oot", "oot"],
+            }
+        ),
+        "RMC_FEATURE_IMPORTANCE": pd.DataFrame(
+            {
+                "feature": ["BH_A044_C0580"],
+                "类别": ["睿智"],
+                "importance": [0.8],
+            }
+        ),
+        "RMC_SCORE_FN": lambda frame: pd.Series(
+            [0.1, 0.9], index=frame.index
+        ),
+    }
+
+    exec(compile(source, "<stress-scores>", "exec"), namespace)
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "marvis.validation_stress_scores.v2"
+    assert payload["feature_categories"] == {"睿智": ["BH_A044_C0580"]}
+    assert payload["unclassified_features"] == []
+    assert payload["source_counts"] == {
+        "notebook": 1,
+        "dictionary": 0,
+        "unresolved": 0,
+    }
+    assert payload["categories"][0]["category"] == "睿智"
+    assert payload["categories"][0]["dropped_features"] == ["BH_A044_C0580"]
 
 
 def test_generated_runtime_contract_resolution_preserves_zero_decimal_places(
@@ -1048,7 +1144,7 @@ def test_metrics_stage_refreshes_reproducibility_with_or_without_stress_scores(
     )
     if preexisting_stress_scores:
         (execution_dir / "stress_scenario_scores.json").write_text(
-            json.dumps({"categories": []}),
+            json.dumps(_empty_stress_scores_payload()),
             encoding="utf-8",
         )
     live_closed = {"value": False}
@@ -1068,7 +1164,7 @@ def test_metrics_stage_refreshes_reproducibility_with_or_without_stress_scores(
         assert kwargs["notebook_steps_path"] == execution_dir / "metrics_steps.json"
         assert [kind for kind, _source in extra_code_cells] == ["stress-scores"]
         (execution_dir / "stress_scenario_scores.json").write_text(
-            json.dumps({"categories": []}),
+            json.dumps(_empty_stress_scores_payload()),
             encoding="utf-8",
         )
 
@@ -2432,7 +2528,7 @@ def test_staged_pipeline_isolated_mode_merged_run_calls_notebook_step_once(
         )
         code_scores_path.write_text("row_index,code_model_score\n0,0.1\n")
         (execution_dir / "stress_scenario_scores.json").write_text(
-            json.dumps({"categories": []}),
+            json.dumps(_empty_stress_scores_payload()),
             encoding="utf-8",
         )
         (execution_dir / "model_meta.json").write_text(
