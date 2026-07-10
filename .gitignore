@@ -11,6 +11,7 @@ docs/superpowers/
 .omc/
 .marvis-launcher-env
 .superpowers/
+.worktrees/
 .aider*
 .roo/
 .windsurf/
