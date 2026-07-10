@@ -501,11 +501,42 @@ def test_parse_monitoring_disposition_three_keywords():
     assert parse("adjust threshold and rerun") == "adjust_threshold"
     assert parse("维持并观察") == "observe"
     assert parse("先保持观察") == "observe"
-    # most-specific wins: new_version over a co-occurring 观察.
-    assert parse("先观察，不行就起新版本") == "new_version"
+    # More than one choice is ambiguous, even when one keyword is more specific.
+    assert parse("先观察，不行就起新版本") is None
     # a plain confirm names no disposition.
     assert parse("确认") is None
     assert parse("") is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "raise the threshold to 3%",
+        "stakeholder feedback",
+        "this drift remains unobserved",
+        "new versioning notes",
+        "保持报告简洁，先解释下红灯",
+        "阈值保持不变",
+        "要观察吗？",
+        "不要观察",
+        "暂不调阈值",
+        "不起新版本",
+        "不建议调整阈值",
+        "没有必要起新版本",
+        "我不认为应该观察",
+        "不考虑调阈值",
+        "我不同意起新版本",
+        "我反对调整阈值",
+        "拒绝起新版本",
+        "不赞成观察",
+        "暂缓观察",
+        "观察还是调阈值？",
+    ],
+)
+def test_parse_monitoring_disposition_rejects_non_explicit_choices(text):
+    from marvis.agent.plan_driver import _parse_monitoring_disposition as parse
+
+    assert parse(text) is None
 
 
 def test_monitoring_next_action_new_version_points_at_development():

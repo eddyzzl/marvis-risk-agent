@@ -27,8 +27,9 @@ class PlanStepRecovery:
         for step in plan.steps:
             step_runs = running_runs.get(step.id, [])
             if step.status == StepStatus.RUNNING:
-                latest_output_ref = step.output_ref or (
-                    self._repo.latest_step_output_ref(step.id) if step_runs else None
+                latest_output_ref = step.output_ref or self._current_run_output_ref(
+                    step.id,
+                    step_runs,
                 )
                 if latest_output_ref:
                     step.output_ref = latest_output_ref
@@ -51,11 +52,14 @@ class PlanStepRecovery:
                 )
                 self._set_step_status(step, StepStatus.FAILED)
             elif step.status == StepStatus.CHECKING:
-                latest_output_ref = step.output_ref or (
-                    self._repo.latest_step_output_ref(step.id) if step_runs else None
-                ) or (
-                    self._repo.latest_succeeded_step_run_output_ref(step.id)
+                latest_output_ref = step.output_ref or self._current_run_output_ref(
+                    step.id,
+                    step_runs,
                 )
+                if latest_output_ref is None and not step_runs:
+                    latest_output_ref = self._repo.latest_succeeded_step_run_output_ref(
+                        step.id
+                    )
                 if latest_output_ref:
                     step.output_ref = latest_output_ref
                     self._recover_step_runs(
@@ -71,6 +75,12 @@ class PlanStepRecovery:
                         error_kind="ServerRestart",
                     )
                 self._recover_checking_step(plan, step)
+
+    def _current_run_output_ref(self, step_id: str, runs: list[dict]) -> str | None:
+        return self._repo.latest_step_output_ref_for_runs(
+            step_id,
+            run_ids=[str(run.get("id") or "") for run in runs],
+        )
 
     def _recover_step_runs(self, runs: list[dict], **kwargs) -> None:
         for run in runs:

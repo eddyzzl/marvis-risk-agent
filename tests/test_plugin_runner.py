@@ -12,16 +12,34 @@ import psutil
 import pytest
 
 from marvis.db import PluginRepository, init_db
-from marvis.plugins.contracts import PROTOCOL_VERSION
+from marvis.plugins.contracts import PROTOCOL_VERSION, WORKER_RESULT_SENTINEL
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import PluginManifest, ToolRef, ToolSpec
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
-from marvis.plugins.runner import _WORKER_ENV_ALLOWLIST, ToolContext, ToolRunner
+from marvis.plugins.runner import (
+    _WORKER_ENV_ALLOWLIST,
+    _parse_worker_result,
+    ToolContext,
+    ToolRunner,
+)
 
 
 def _runner(tmp_path):
     runner, _repo = _runtime(tmp_path)
     return runner
+
+
+def test_plugin_worker_result_sentinel_survives_native_stdout_after_protocol():
+    payload = {"ok": True, "worker_protocol_version": PROTOCOL_VERSION, "output": {}}
+    stdout = "\n".join(
+        [
+            "native library startup",
+            WORKER_RESULT_SENTINEL + json.dumps(payload),
+            "native library shutdown",
+        ]
+    )
+
+    assert _parse_worker_result(stdout) == payload
 
 
 def _runtime(tmp_path):
@@ -464,7 +482,8 @@ def test_worker_execution_failure_uses_nonzero_exit_code(tmp_path):
         check=False,
     )
 
-    payload = json.loads(completed.stdout)
+    payload = _parse_worker_result(completed.stdout)
+    assert payload is not None
     assert completed.returncode != 0
     assert payload["ok"] is False
     assert payload["error_kind"] == "execution"
@@ -1274,7 +1293,8 @@ def test_worker_rejects_job_with_mismatched_protocol_version(tmp_path):
         check=False,
     )
 
-    payload = json.loads(completed.stdout)
+    payload = _parse_worker_result(completed.stdout)
+    assert payload is not None
     assert completed.returncode != 0
     assert payload["ok"] is False
     assert payload["error_kind"] == "protocol_version_mismatch"

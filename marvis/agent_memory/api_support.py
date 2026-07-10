@@ -360,5 +360,10 @@ def audit_agent_memory_use_from_store(
                 message_id=message.get("id"),
                 use_reason=str(reference.get("use_reason") or "agent"),
             )
-        except KeyError:
+        except (KeyError, ValueError) as exc:
+            logger.info(
+                "skipped memory use audit for %s: %s",
+                memory_id,
+                exc,
+            )
             continue

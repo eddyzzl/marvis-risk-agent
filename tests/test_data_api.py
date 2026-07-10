@@ -16,7 +16,11 @@ from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
-from marvis.job_cancellation import register_job_cancellation, unregister_job_cancellation
+from marvis.job_cancellation import (
+    register_job_cancellation,
+    request_job_cancellation,
+    unregister_job_cancellation,
+)
 from marvis.routers.data import _run_join_execute_job, router as data_router
 from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.settings import build_settings
@@ -775,6 +779,242 @@ def test_join_api_propose_confirm_execute_flow(tmp_path):
     assert executed_audit["detail"]["result_dataset_id"] == execute.json()["result_dataset_id"]
 
 
+def test_join_confirm_recomputes_single_key_match_evidence_server_side(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    anchor = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "single_recount_anchor",
+        pd.DataFrame({"proposal_id": [1, 2], "client_key": ["A", "B"]}),
+        "sample",
+    )
+    feature = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "single_recount_feature",
+        pd.DataFrame({"proposal_id": [1, 2], "server_key": ["X", "Y"]}),
+        "feature",
+    )
+    plan = client.post(
+        f"/api/tasks/{task.id}/joins/propose",
+        json={
+            "anchor_dataset_id": anchor.id,
+            "feature_dataset_ids": [feature.id],
+        },
+    ).json()
+
+    response = client.post(
+        f"/api/joins/{plan['join_plan_id']}/confirm",
+        json={
+            "feature_id": feature.id,
+            "confirmed": False,
+            "dedup_strategy": None,
+            "key_pairs": [
+                {
+                    "anchor_col": "client_key",
+                    "feature_col": "server_key",
+                    "match_method": "exact",
+                    "transform_side": "both",
+                    "match_rate": 1.0,
+                    "resolved_by": "client-forged",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    join = response.json()["joins"][0]
+    assert join["key_pairs"][0]["match_rate"] == 0.0
+    assert join["key_pairs"][0]["resolved_by"] == "user"
+    assert join["diagnostics"]["matched_rows"] == 0
+    assert join["diagnostics"]["match_rate"] == 0.0
+
+
+def test_join_confirm_recount_uses_the_selected_hash_transform_side(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    phone_numbers = ["13800138000", "13900139000"]
+    anchor = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "transform_side_anchor",
+        pd.DataFrame({"proposal_id": [1, 2], "phone": phone_numbers}),
+        "sample",
+    )
+    feature = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "transform_side_feature",
+        pd.DataFrame({
+            "proposal_id": [1, 2],
+            "phone_md5": [hashlib.md5(value.encode()).hexdigest() for value in phone_numbers],
+        }),
+        "feature",
+    )
+    plan = client.post(
+        f"/api/tasks/{task.id}/joins/propose",
+        json={
+            "anchor_dataset_id": anchor.id,
+            "feature_dataset_ids": [feature.id],
+        },
+    ).json()
+
+    response = client.post(
+        f"/api/joins/{plan['join_plan_id']}/confirm",
+        json={
+            "feature_id": feature.id,
+            "confirmed": False,
+            "dedup_strategy": None,
+            "key_pairs": [
+                {
+                    "anchor_col": "phone",
+                    "feature_col": "phone_md5",
+                    "match_method": "hash:md5",
+                    # Hashing both sides double-hashes the already-hashed feature.
+                    "transform_side": "both",
+                    "match_rate": 1.0,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    join = response.json()["joins"][0]
+    assert join["key_pairs"][0]["match_rate"] == 0.0
+    assert join["diagnostics"]["matched_rows"] == 0
+    assert join["diagnostics"]["match_rate"] == 0.0
+
+
+def test_join_confirm_recomputes_each_key_and_combined_match_evidence(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    anchor = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "multi_recount_anchor",
+        pd.DataFrame({
+            "proposal_id": [1, 2, 3],
+            "left_a": ["A", "B", "C"],
+            "left_b": ["1", "2", "3"],
+        }),
+        "sample",
+    )
+    feature = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "multi_recount_feature",
+        pd.DataFrame({
+            "proposal_id": [1, 2, 3],
+            "right_a": ["A", "B", "X"],
+            "right_b": ["1", "9", "3"],
+        }),
+        "feature",
+    )
+    plan = client.post(
+        f"/api/tasks/{task.id}/joins/propose",
+        json={
+            "anchor_dataset_id": anchor.id,
+            "feature_dataset_ids": [feature.id],
+        },
+    ).json()
+
+    response = client.post(
+        f"/api/joins/{plan['join_plan_id']}/confirm",
+        json={
+            "feature_id": feature.id,
+            "confirmed": False,
+            "dedup_strategy": None,
+            "key_pairs": [
+                {
+                    "anchor_col": "left_a",
+                    "feature_col": "right_a",
+                    "match_method": "exact",
+                    "transform_side": "both",
+                    "match_rate": 1.0,
+                },
+                {
+                    "anchor_col": "left_b",
+                    "feature_col": "right_b",
+                    "match_method": "exact",
+                    "transform_side": "both",
+                    "match_rate": 1.0,
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    join = response.json()["joins"][0]
+    assert [pair["match_rate"] for pair in join["key_pairs"]] == pytest.approx(
+        [2 / 3, 2 / 3],
+        abs=0.0001,
+    )
+    assert {pair["resolved_by"] for pair in join["key_pairs"]} == {"user"}
+    assert join["diagnostics"]["matched_rows"] == 1
+    assert join["diagnostics"]["match_rate"] == pytest.approx(1 / 3, abs=0.0001)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("match_method", "client-python"),
+        ("transform_side", "somewhere-else"),
+    ],
+)
+def test_join_confirm_rejects_unknown_key_pair_enums(tmp_path, field, value):
+    client, settings = _client(tmp_path, raise_server_exceptions=False)
+    task = _create_task(settings)
+    anchor = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        f"invalid_{field}_anchor",
+        pd.DataFrame({"customer_id": [1, 2]}),
+        "sample",
+    )
+    feature = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        f"invalid_{field}_feature",
+        pd.DataFrame({"customer_id": [1, 2]}),
+        "feature",
+    )
+    plan = client.post(
+        f"/api/tasks/{task.id}/joins/propose",
+        json={
+            "anchor_dataset_id": anchor.id,
+            "feature_dataset_ids": [feature.id],
+        },
+    ).json()
+    key_pair = {
+        "anchor_col": "customer_id",
+        "feature_col": "customer_id",
+        "match_method": "exact",
+        "transform_side": "both",
+    }
+    key_pair[field] = value
+
+    response = client.post(
+        f"/api/joins/{plan['join_plan_id']}/confirm",
+        json={
+            "feature_id": feature.id,
+            "confirmed": False,
+            "dedup_strategy": None,
+            "key_pairs": [key_pair],
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_join_api_execute_supports_explicit_async_job(tmp_path):
     client, settings = _client(tmp_path)
     task = _create_task(settings)
@@ -980,7 +1220,6 @@ def test_join_cancel_endpoint_unlocks_task_after_running_job_is_cancelled(tmp_pa
     task, plan = _confirmed_join_plan(client, settings, tmp_path)
     task_repo = TaskRepository(settings.db_path)
     job_id = task_repo.start_job(task.id, "join")
-    task_repo.mark_job_running(job_id)
 
     # Cancel arrives before the runner has registered its own token (the
     # queued-job window) — this is exactly what the "pending" cancel request
@@ -1000,6 +1239,33 @@ def test_join_cancel_endpoint_unlocks_task_after_running_job_is_cancelled(tmp_pa
         DatasetRepository(settings.db_path).load_join_plan(plan["join_plan_id"]).status
         != "executed"
     )
+
+
+def test_join_callback_does_not_execute_after_queued_job_is_cancelled(tmp_path):
+    client, settings = _client(tmp_path)
+    task, plan = _confirmed_join_plan(client, settings, tmp_path)
+    task_repo = TaskRepository(settings.db_path)
+    job_id = task_repo.start_job(task.id, "join")
+    request_job_cancellation(job_id)
+    task_repo.finish_job(job_id, status="cancelled")
+
+    _run_join_execute_job(
+        job_id,
+        settings.db_path,
+        settings.datasets_dir,
+        plan["join_plan_id"],
+    )
+
+    assert task_repo.get_job(job_id)["status"] == "cancelled"
+    assert (
+        DatasetRepository(settings.db_path).load_join_plan(plan["join_plan_id"]).status
+        != "executed"
+    )
+    token = register_job_cancellation(job_id)
+    try:
+        assert token.is_cancelled() is False
+    finally:
+        unregister_job_cancellation(job_id, token)
 
 
 def test_join_api_marks_aggregate_dedup_as_synthetic(tmp_path):

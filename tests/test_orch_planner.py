@@ -255,6 +255,38 @@ def test_planner_generate_retries_after_invalid_json(tmp_path):
     assert "not json" in llm.calls[1]["user_prompt"]
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("autonomy_level", "auto"),
+        ("inputs", 7),
+    ],
+)
+def test_planner_generate_wraps_malformed_field_types_and_retries(
+    tmp_path,
+    field,
+    value,
+):
+    malformed = json.loads(_generated_plan())
+    if field == "inputs":
+        malformed["steps"][0][field] = value
+    else:
+        malformed[field] = value
+    llm = FakeLLM([json.dumps(malformed), _generated_plan()])
+
+    plan = _planner(tmp_path, llm).generate(
+        "echo once",
+        "task-1",
+        memory_context={},
+        task_context={},
+        max_retries=1,
+    )
+
+    assert plan.steps[0].title == "Echo"
+    assert len(llm.calls) == 2
+    assert "invalid plan fields" in llm.calls[1]["user_prompt"]
+
+
 def test_planner_generate_accepts_plan_wrapped_in_json_fence(tmp_path):
     """AGT-10: _parse_plan_json now goes through load_json_object, so a reply
     wrapped in ```json fences parses on the FIRST attempt (no retry needed) —
@@ -418,6 +450,33 @@ def test_planner_replan_retries_after_validator_failure(tmp_path):
     assert replanned.steps[1].tool_ref == ToolRef("_sample", "echo")
     assert len(llm.calls) == 2
     assert "missing" in llm.calls[1]["user_prompt"]
+
+
+def test_planner_replan_wraps_malformed_field_types_and_retries(tmp_path):
+    llm = FakeLLM([])
+    planner = _planner(tmp_path, llm)
+    plan = planner.from_template(
+        _template(),
+        {"message": "hello"},
+        task_id="task-1",
+    )
+    done_id = plan.steps[0].id
+    plan.steps[0].status = StepStatus.DONE
+    malformed = json.loads(_replanned_steps(ref_id=done_id))
+    malformed["steps"][0]["inputs"] = 7
+    llm.responses = [json.dumps(malformed), _replanned_steps(ref_id=done_id)]
+
+    replanned = planner.replan(
+        plan,
+        completed_summaries={done_id: {"echoed": "hello"}},
+        observation={"error_kind": "execution"},
+        reason="failure",
+        tier=resolve_tier("balanced"),
+    )
+
+    assert replanned.steps[1].tool_ref == ToolRef("_sample", "echo")
+    assert len(llm.calls) == 2
+    assert "invalid plan fields" in llm.calls[1]["user_prompt"]
 
 
 def test_planner_replan_rejects_exhausted_budget_without_llm_call(tmp_path):

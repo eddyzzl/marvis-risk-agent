@@ -430,6 +430,8 @@ function captureCheckedState(wrap, state) {
   for (const box of wrap.querySelectorAll(".screen-pick")) {
     state.checkedOverrides.set(box.value, box.checked);
   }
+  const reasonInput = wrap.querySelector?.(".screen-leakage-reason-input");
+  if (reasonInput) state.leakageReason = String(reasonInput.value || "");
 }
 
 export function handleScreenSearchInput(event, context = {}) {
@@ -667,16 +669,24 @@ export async function submitScreenSelection(button, rawContext = {}) {
     setActionStatus("这是历史筛选结果，请使用最新待确认步骤确认。", "error");
     return;
   }
-  const selection = [];
-  let hasLeakagePick = false;
-  for (const box of wrap.querySelectorAll(".screen-pick:checked")) {
-    if (box.disabled) continue;
-    selection.push(box.value);
-    const row = box.closest(".screen-row");
-    if (row && (row.classList.contains("screen-leakage") || row.classList.contains("screen-suspected"))) {
-      hasLeakagePick = true;
-    }
-  }
+  const messageId = wrap.dataset.screenForm || "";
+  const state = getState(messageId);
+  captureCheckedState(wrap, state);
+  const message = findMessage(messageId, rawContext);
+  const built = message ? tableBodyHtml(message, { interactive: true }) : null;
+  const selectedRows = built
+    ? built.allRows.filter((row) => row.checked && !row.disabled)
+    : Array.from(wrap.querySelectorAll(".screen-pick:checked"))
+      .filter((box) => !box.disabled)
+      .map((box) => {
+        const row = box.closest(".screen-row");
+        const category = row?.classList?.contains("screen-leakage")
+          ? "leakage"
+          : row?.classList?.contains("screen-suspected") ? "suspected" : "keep";
+        return { name: box.value, category };
+      });
+  const selection = selectedRows.map((row) => row.name);
+  const hasLeakagePick = selectedRows.some((row) => row.category === "leakage" || row.category === "suspected");
   if (!selection.length) {
     setActionStatus("请至少勾选一个特征。", "error");
     return;

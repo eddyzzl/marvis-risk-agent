@@ -19,6 +19,7 @@ from marvis.artifacts import ArtifactUnitOfWork
 from marvis.api_stage_helpers import start_task_job
 from marvis.api_task_helpers import dispatch_platform_hook
 from marvis.job_cancellation import (
+    clear_pending_job_cancellation,
     JobCancelled,
     register_job_cancellation,
     unregister_job_cancellation,
@@ -26,7 +27,7 @@ from marvis.job_cancellation import (
 from marvis.job_heartbeat import heartbeat_job
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
-from marvis.data.contracts import KeyPair
+from marvis.data.contracts import HASH_ALGO_CANDIDATES, KeyPair
 from marvis.data.errors import (
     DataBackendError,
     DataIngestError,
@@ -53,6 +54,13 @@ UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 # an explicit whitelist, not "whatever register_from_upload happens to parse".
 DATASET_PATH_SUFFIXES = {".csv", ".xlsx", ".parquet"}
 _EXCEL_UPLOAD_SUFFIXES = {".xlsx", ".xlsm"}
+_MATCH_METHODS = frozenset({
+    "exact",
+    "exact_lower",
+    "date",
+    *(f"hash:{algorithm}" for algorithm in HASH_ALGO_CANDIDATES),
+})
+_TRANSFORM_SIDES = frozenset({"anchor", "feature", "both"})
 
 
 def _upload_artifact_name(filename: str | None) -> str:
@@ -216,18 +224,27 @@ def _coerce_key_pairs(raw_pairs: list, *, anchor, feature) -> list[KeyPair]:
     feature_columns = {column.name for column in feature.columns}
     pairs = []
     for item in raw_pairs:
+        if not isinstance(item, dict):
+            raise unprocessable("key_pairs must contain objects")
         anchor_col = str(item.get("anchor_col") or "")
         feature_col = str(item.get("feature_col") or "")
         if anchor_col not in anchor_columns or feature_col not in feature_columns:
             raise unprocessable("key_pairs contain unknown columns")
+        match_method = str(item.get("match_method") or "exact").strip()
+        transform_side = str(item.get("transform_side") or "both").strip()
+        if match_method not in _MATCH_METHODS:
+            raise unprocessable("invalid key pair match_method")
+        if transform_side not in _TRANSFORM_SIDES:
+            raise unprocessable("invalid key pair transform_side")
         pairs.append(
             KeyPair(
                 anchor_col=anchor_col,
                 feature_col=feature_col,
-                match_method=str(item.get("match_method") or "exact"),
-                transform_side=str(item.get("transform_side") or "both"),
-                match_rate=float(item.get("match_rate") or 0.0),
-                resolved_by=str(item.get("resolved_by") or "user"),
+                match_method=match_method,
+                transform_side=transform_side,
+                # Client-supplied deterministic evidence is never authoritative.
+                match_rate=0.0,
+                resolved_by="user",
             )
         )
     return pairs
@@ -570,7 +587,14 @@ def confirm_join_plan(
     if payload.get("key_pairs"):
         anchor = registry.get(plan.anchor_dataset_id)
         feature = registry.get(feature_id)
-        spec.key_pairs = _coerce_key_pairs(payload["key_pairs"], anchor=anchor, feature=feature)
+        spec.key_pairs = join_engine.recompute_key_pairs(
+            anchor,
+            registry.resolve_path(anchor.id),
+            feature,
+            registry.resolve_path(feature.id),
+            _coerce_key_pairs(payload["key_pairs"], anchor=anchor, feature=feature),
+            seed=0,
+        )
         spec.diagnostics = join_engine.diagnose_join(
             anchor,
             registry.resolve_path(anchor.id),
@@ -578,6 +602,7 @@ def confirm_join_plan(
             registry.resolve_path(feature.id),
             spec.key_pairs,
             seed=0,
+            recompute_match=True,
         )
         repo_data.update_join_spec(plan.id, spec)
     try:
@@ -645,7 +670,9 @@ def execute_join_plan(
         }
     task_repo = TaskRepository(request.app.state.settings.db_path)
     job_id = start_task_job(task_repo, plan.task_id, "join")
-    task_repo.mark_job_running(job_id)
+    if task_repo.mark_job_running(job_id) is False:
+        clear_pending_job_cancellation(job_id)
+        raise conflict("join execution job is no longer active")
     cancel_token = register_job_cancellation(job_id)
     try:
         with heartbeat_job(task_repo, job_id):
@@ -702,7 +729,9 @@ def _run_join_execute_job(
     join_plan_id: str,
 ) -> None:
     task_repo = TaskRepository(db_path)
-    task_repo.mark_job_running(job_id)
+    if task_repo.mark_job_running(job_id) is False:
+        clear_pending_job_cancellation(job_id)
+        return
     repo_data = DatasetRepository(db_path)
     backend = DataBackend(datasets_dir)
     registry = DatasetRegistry(repo_data, backend, datasets_dir)

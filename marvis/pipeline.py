@@ -29,7 +29,9 @@ the codebase and test suite.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import logging
+import math
 import shutil
 import time
 from pathlib import Path
@@ -73,7 +75,6 @@ from marvis.notebooks import (
 from marvis.output.word import write_validation_word
 from marvis.pipeline_cellgen import (
     RMC_PMML_SCORE_COL as RMC_PMML_SCORE_COL,
-    STRESS_SCENARIO_SCORES_JSON,
     _build_deferred_contract_resolution_lines as _build_deferred_contract_resolution_lines,  # noqa: F401
     _build_metrics_cell_source as _build_metrics_cell_source,  # noqa: F401
     _build_metrics_cell_sources,
@@ -86,6 +87,7 @@ from marvis.pipeline_cellgen import (
 from marvis.pipeline_errors import PipelineCancelled, PipelineError
 from marvis.pipeline_io import (
     SCAN_STAGE_FAILURE_PREFIX as SCAN_STAGE_FAILURE_PREFIX,
+    STRESS_SCENARIO_SCORES_JSON,
     VALIDATION_RESULTS_PICKLE as VALIDATION_RESULTS_PICKLE,
     _algorithm as _algorithm,  # noqa: F401
     _clear_generated_artifacts,
@@ -204,6 +206,7 @@ def run_notebook_stage(
     settings: PipelineSettings,
     stage_claimed: bool = False,
     also_prepare_metrics: bool = False,
+    cancellation_job_id: str | None = None,
 ) -> None:
     """Run the notebook (reproducibility) stage.
 
@@ -246,7 +249,10 @@ def run_notebook_stage(
             task, artifacts, FileRole.MODEL_PMML, "input PMML", "pmml_path"
         )
         kernel_name = _execution_kernel_name(settings)
-        cancellation_token = register_notebook_cancellation(task_id)
+        cancellation_token = register_notebook_cancellation(
+            task_id,
+            job_id=cancellation_job_id,
+        )
         live_session: NotebookExecutionSession | None = None
         try:
             close_live_notebook_session(task_id)
@@ -449,6 +455,7 @@ def run_metrics_stage(
     task_id: str,
     settings: PipelineSettings,
     stage_claimed: bool = False,
+    cancellation_job_id: str | None = None,
 ) -> None:
     repo = TaskRepository(settings.db_path)
     task = repo.get_task(task_id)
@@ -483,7 +490,10 @@ def run_metrics_stage(
                 message="computing metrics",
                 expected=TaskStatus.EXECUTED,
             )
-        cancellation_token = register_notebook_cancellation(task_id)
+        cancellation_token = register_notebook_cancellation(
+            task_id,
+            job_id=cancellation_job_id,
+        )
         try:
             live_session = get_live_notebook_session(task_id)
             if settings.notebook_isolated_execution:
@@ -528,7 +538,8 @@ def run_metrics_stage(
                         task, artifacts, FileRole.SAMPLE, "sample", "sample_path"
                     )
                     stress_scores_path = execution_dir / STRESS_SCENARIO_SCORES_JSON
-                    if not stress_scores_path.exists():
+                    if not _stress_scores_artifact_valid(stress_scores_path):
+                        _unlink_if_exists(stress_scores_path)
                         notebook_path = _required_path(
                             task,
                             artifacts,
@@ -576,14 +587,29 @@ def run_metrics_stage(
                             contract,
                             execution_dir,
                         )
+                    # Metrics may be retried while the stress-score artifact from
+                    # the previous attempt is still valid. Rebuild reproducibility
+                    # evidence on every attempt so freshly computed metrics cannot
+                    # be paired with a stale Notebook-vs-PMML comparison.
+                    staged_reproducibility = metrics_uow.stage_file(
+                        outputs_dir,
+                        REPRODUCIBILITY_RESULT_JSON,
+                    )
+                    write_reproducibility_result(
+                        task=task,
+                        contract=contract,
+                        settings=settings,
+                        input_pmml_path=input_pmml_path,
+                        output_path=staged_reproducibility.path,
+                        fallback_sample_path=sample_path,
+                    )
                     write_platform_validation_metrics(
                         task=task,
                         contract=contract,
                         settings=settings,
                         dictionary_path=dictionary_path,
                         model_meta_path=model_meta_path,
-                        reproducibility_json_path=outputs_dir
-                        / REPRODUCIBILITY_RESULT_JSON,
+                        reproducibility_json_path=staged_reproducibility.path,
                         results_json_path=metrics_work_dir / "validation_results.json",
                         excel_path=metrics_work_dir / "validation.xlsx",
                         stress_scores_path=stress_scores_path,
@@ -599,6 +625,7 @@ def run_metrics_stage(
                     try:
                         _write_metrics_results_in_session(
                             session=live_session,
+                            task_dir=task_dir,
                             task=task,
                             settings=settings,
                             dictionary_path=dictionary_path,
@@ -676,7 +703,12 @@ def run_metrics_stage(
         _remove_dir_if_exists(metrics_work_dir)
 
 
-def run_report_stage(*, task_id: str, settings: PipelineSettings) -> None:
+def run_report_stage(
+    *,
+    task_id: str,
+    settings: PipelineSettings,
+    cancellation_job_id: str | None = None,
+) -> None:
     repo = TaskRepository(settings.db_path)
     task = repo.get_task(task_id)
     task_dir = settings.workspace / "tasks" / task_id
@@ -685,7 +717,10 @@ def run_report_stage(*, task_id: str, settings: PipelineSettings) -> None:
     report_path = outputs_dir / "validation_report.docx"
     temp_report_path = outputs_dir / ".validation_report.docx.tmp"
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    cancellation_token = register_notebook_cancellation(task_id)
+    cancellation_token = register_notebook_cancellation(
+        task_id,
+        job_id=cancellation_job_id,
+    )
     report_uow: ArtifactUnitOfWork | None = None
     logger.info("report stage starting task_id=%s", task_id)
     try:
@@ -883,6 +918,7 @@ def _write_reproducibility_result_in_session(
 def _write_metrics_results_in_session(
     *,
     session: NotebookExecutionSession,
+    task_dir: Path,
     task: TaskRecord,
     settings: PipelineSettings,
     dictionary_path: Path,
@@ -896,6 +932,7 @@ def _write_metrics_results_in_session(
         reproducibility_json_path = outputs_dir / REPRODUCIBILITY_RESULT_JSON
     cell_sources = _build_metrics_cell_sources(
         package_root=_package_root_for_notebook(),
+        task_dir=task_dir,
         task=task,
         settings=settings,
         dictionary_path=dictionary_path,
@@ -983,7 +1020,12 @@ def _execute_injected_cell(
         )
 
 
-def run_staged_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
+def run_staged_pipeline(
+    *,
+    task_id: str,
+    settings: PipelineSettings,
+    cancellation_job_id: str | None = None,
+) -> None:
     logger.info("staged pipeline starting task_id=%s", task_id)
     repo = TaskRepository(settings.db_path)
     task = repo.get_task(task_id)
@@ -1002,6 +1044,7 @@ def run_staged_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
         task_id=task_id,
         settings=settings,
         also_prepare_metrics=settings.notebook_isolated_execution,
+        cancellation_job_id=cancellation_job_id,
     )
     task = repo.get_task(task_id)
     if task.status is not TaskStatus.EXECUTED:
@@ -1011,7 +1054,11 @@ def run_staged_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
         )
         return
 
-    run_metrics_stage(task_id=task_id, settings=settings)
+    run_metrics_stage(
+        task_id=task_id,
+        settings=settings,
+        cancellation_job_id=cancellation_job_id,
+    )
     task = repo.get_task(task_id)
     if task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
         logger.info(
@@ -1020,8 +1067,52 @@ def run_staged_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
         )
         return
 
-    run_report_stage(task_id=task_id, settings=settings)
+    run_report_stage(
+        task_id=task_id,
+        settings=settings,
+        cancellation_job_id=cancellation_job_id,
+    )
     logger.info("staged pipeline finished task_id=%s", task_id)
+
+
+def _stress_scores_artifact_valid(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or not isinstance(payload.get("categories"), list):
+        return False
+    schema_version = payload.get("schema_version")
+    if schema_version not in {None, "marvis.validation_stress_scores.v1"}:
+        return False
+    for row in payload["categories"]:
+        if not isinstance(row, dict) or not str(row.get("category") or "").strip():
+            return False
+        status = row.get("status")
+        if status not in {None, "completed", "skipped", "error"}:
+            return False
+        row_indexes = row.get("row_index")
+        scores = row.get("scores")
+        if not isinstance(row_indexes, list) or not isinstance(scores, list):
+            return False
+        if len(row_indexes) != len(scores):
+            return False
+        try:
+            if any(
+                isinstance(score, bool) or not math.isfinite(float(score))
+                for score in scores
+            ):
+                return False
+        except (TypeError, ValueError):
+            return False
+        error = row.get("error")
+        if status == "error" and not str(error or "").strip():
+            return False
+        if status in {"completed", "skipped"} and error not in {None, ""}:
+            return False
+    return True
 
 
 def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
@@ -1122,6 +1213,7 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
         metrics_work_dir.mkdir(parents=True, exist_ok=True)
         _write_metrics_results_in_session(
             session=live_session,
+            task_dir=task_dir,
             task=task,
             settings=settings,
             dictionary_path=dictionary_path,

@@ -84,17 +84,24 @@ class DatasetRepository:
         content, regardless of which task registered it, so a new upload can
         reuse the existing parquet + profiling instead of duplicating both."""
         with connect(self.db_path) as conn:
-            row = conn.execute(
-                """
-                SELECT id, task_id, role, source_path, format, sheet, row_count,
-                       columns_json, has_target, target_col, created_at, content_hash
-                  FROM datasets
-                 WHERE content_hash = ?
-                 ORDER BY created_at, id
-                 LIMIT 1
-                """,
-                (content_hash,),
-            ).fetchone()
+            return self.find_dataset_by_content_hash_on_connection(conn, content_hash)
+
+    def find_dataset_by_content_hash_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        content_hash: str,
+    ) -> Dataset | None:
+        row = conn.execute(
+            """
+            SELECT id, task_id, role, source_path, format, sheet, row_count,
+                   columns_json, has_target, target_col, created_at, content_hash
+              FROM datasets
+             WHERE content_hash = ?
+             ORDER BY created_at, id
+             LIMIT 1
+            """,
+            (content_hash,),
+        ).fetchone()
         return None if row is None else _dataset_from_row(row)
 
     def set_dataset_role(self, dataset_id: str, role: str) -> None:

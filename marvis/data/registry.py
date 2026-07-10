@@ -61,30 +61,14 @@ class DatasetRegistry:
             find_by_hash = getattr(self._repo, "find_dataset_by_content_hash", None)
             existing = find_by_hash(content_hash) if callable(find_by_hash) else None
             if existing is not None:
-                # GAP-7: identical file content already registered (possibly by a
-                # different task) -- reuse its parquet + profiling instead of
-                # writing a duplicate file and re-profiling. The staged upload
-                # parquet is never promoted; only a new dataset row is created,
-                # pointing at the existing dataset's source_path.
-                uow.rollback()
-                dataset = Dataset(
-                    id=_new_dataset_id(),
-                    task_id=task_id,
-                    role=role,
-                    source_path=existing.source_path,
-                    format=existing.format,
-                    sheet=existing.sheet,
-                    row_count=existing.row_count,
-                    columns=existing.columns,
-                    has_target=existing.has_target,
-                    target_col=existing.target_col,
-                    created_at=_now_iso(),
-                    content_hash=content_hash,
-                )
-                return self._create_dedup_reference(dataset, existing)
-            profiles = profile_dataset(self._backend, artifact.path, seed=seed)
-            sample = self._backend.sample_rows(artifact.path, 1000, seed=seed)
-            target = detect_target_column(profiles, sample)
+                profiles = existing.columns
+                target = existing.target_col if existing.has_target else None
+                row_count = existing.row_count
+            else:
+                profiles = profile_dataset(self._backend, artifact.path, seed=seed)
+                sample = self._backend.sample_rows(artifact.path, 1000, seed=seed)
+                target = detect_target_column(profiles, sample)
+                row_count = self._backend.row_count(artifact.path)
             dataset = Dataset(
                 id=_new_dataset_id(),
                 task_id=task_id,
@@ -92,13 +76,16 @@ class DatasetRegistry:
                 source_path=self._relative_path(artifact.final_path),
                 format="parquet",
                 sheet=sheet,
-                row_count=self._backend.row_count(artifact.path),
+                row_count=row_count,
                 columns=tuple(profiles),
                 has_target=target is not None,
                 target_col=target,
                 created_at=_now_iso(),
                 content_hash=content_hash,
             )
+            atomic_result = self._register_upload_atomically(uow, dataset)
+            if atomic_result is not None:
+                return atomic_result
             create_on_connection = getattr(self._repo, "create_dataset_on_connection", None)
             transaction = getattr(self._repo, "transaction", None)
             if callable(create_on_connection) and callable(transaction):
@@ -111,25 +98,62 @@ class DatasetRegistry:
             uow.rollback()
             raise
 
-    def _create_dedup_reference(self, dataset: Dataset, existing: Dataset) -> Dataset:
-        audit = {
-            "kind": "dataset.dedup_reference",
-            "target_ref": dataset.id,
-            "outcome": "succeeded",
-            "detail": {
-                "task_id": dataset.task_id,
-                "content_hash": dataset.content_hash,
-                "reused_dataset_id": existing.id,
-                "reused_task_id": existing.task_id,
-                "source_path": dataset.source_path,
-            },
-        }
-        create_with_audit = getattr(self._repo, "create_dataset_with_audit", None)
-        if callable(create_with_audit):
-            create_with_audit(dataset, audit=audit)
-            return dataset
-        self._repo.create_dataset(dataset)
-        return dataset
+    def _register_upload_atomically(
+        self,
+        uow: ArtifactUnitOfWork,
+        dataset: Dataset,
+    ) -> Dataset | None:
+        transaction = getattr(self._repo, "transaction", None)
+        find_on_connection = getattr(
+            self._repo,
+            "find_dataset_by_content_hash_on_connection",
+            None,
+        )
+        create_on_connection = getattr(self._repo, "create_dataset_on_connection", None)
+        create_with_audit_on_connection = getattr(
+            self._repo,
+            "create_dataset_with_audit_on_connection",
+            None,
+        )
+        if not all(
+            callable(method)
+            for method in (
+                transaction,
+                find_on_connection,
+                create_on_connection,
+                create_with_audit_on_connection,
+            )
+        ):
+            return None
+
+        promoted = False
+        try:
+            with transaction() as conn:
+                # Serialize the content-hash lookup and reference insertion with
+                # task purge. A WAL read followed by a later write can otherwise
+                # retain a source_path that purge has already removed.
+                conn.execute("BEGIN IMMEDIATE")
+                existing = find_on_connection(conn, dataset.content_hash)
+                if existing is None:
+                    uow.promote_all()
+                    promoted = True
+                    create_on_connection(conn, dataset)
+                    result = dataset
+                else:
+                    result = _dedup_reference_dataset(dataset, existing)
+                    create_with_audit_on_connection(
+                        conn,
+                        result,
+                        audit=_dedup_reference_audit(result, existing),
+                    )
+        except Exception:
+            uow.rollback()
+            raise
+        if promoted:
+            uow.commit()
+        else:
+            uow.rollback()
+        return result
 
     def register_existing(
         self,
@@ -433,6 +457,38 @@ def _create_dataset(create_dataset, dataset: Dataset) -> Dataset:
 def _create_dataset_on_connection(create_dataset_on_connection, conn, dataset: Dataset) -> Dataset:
     create_dataset_on_connection(conn, dataset)
     return dataset
+
+
+def _dedup_reference_dataset(dataset: Dataset, existing: Dataset) -> Dataset:
+    return Dataset(
+        id=dataset.id,
+        task_id=dataset.task_id,
+        role=dataset.role,
+        source_path=existing.source_path,
+        format=existing.format,
+        sheet=existing.sheet,
+        row_count=existing.row_count,
+        columns=existing.columns,
+        has_target=existing.has_target,
+        target_col=existing.target_col,
+        created_at=dataset.created_at,
+        content_hash=dataset.content_hash,
+    )
+
+
+def _dedup_reference_audit(dataset: Dataset, existing: Dataset) -> dict:
+    return {
+        "kind": "dataset.dedup_reference",
+        "target_ref": dataset.id,
+        "outcome": "succeeded",
+        "detail": {
+            "task_id": dataset.task_id,
+            "content_hash": dataset.content_hash,
+            "reused_dataset_id": existing.id,
+            "reused_task_id": existing.task_id,
+            "source_path": dataset.source_path,
+        },
+    }
 
 
 def _now_iso() -> str:

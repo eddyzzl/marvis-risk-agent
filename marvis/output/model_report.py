@@ -131,15 +131,22 @@ def _write_score_band_sheet(workbook: Workbook, rows: list[dict]) -> None:
     direction = rows[0].get("cum_direction") or "higher_is_riskier"
     direction_label = "分数越高风险越高（PD）" if direction == "higher_is_riskier" else "分数越高风险越低（评分卡分数）"
     cum_reading = (
-        "累计列自高分向低分累计（先批核低分/低风险箱）"
+        "累计列自高分/高风险箱向低分累计，表示 score >= 当前箱下界的拒绝侧累计"
         if direction == "higher_is_riskier"
-        else "累计列自低分向高分累计（先批核低分箱，即先批核高风险，累计口径随分数上升而放宽）"
+        else "累计列自低分/高风险箱向高分累计，表示 score < 当前箱上界的拒绝侧累计"
     )
     example = _score_band_worked_example(rows)
     splits_present = "/".join(dict.fromkeys(row.get("split") for row in rows if row.get("split")))
+    has_unscored = any(int(row.get("unscored_count") or 0) > 0 for row in rows)
+    rate_note = (
+        "cum_count_pct 为已评分样本内累计占比；cum_reject_rate/cum_pass_rate "
+        "以全 split 样本为分母，未评分样本由 score_coverage/unscored_count 单列。"
+        if has_unscored
+        else "cum_count_pct/cum_reject_rate 为拒绝率，cum_pass_rate = 1 - 拒绝率。"
+    )
     sheet["A1"] = (
         f"分箱边界口径：等频分箱边界在 {edges_source} 集上确定，{splits_present} 共用同一组边界；"
-        f"{direction_label}；{cum_reading}。"
+        f"{direction_label}；{cum_reading}；{rate_note}"
     )
     sheet["A1"].font = Font(bold=True)
     if example:
@@ -150,22 +157,35 @@ def _write_score_band_sheet(workbook: Workbook, rows: list[dict]) -> None:
 
 def _score_band_worked_example(rows: list[dict]) -> str:
     """A single worked-reading row (DOM-5 how-to-fix #4): picks the OOT split's
-    boundary of the cutoff-side band closest to 50% cumulative pass rate as a
-    concrete "cutoff -> approval rate / bad rate" example for the report reader."""
-    oot_rows = [row for row in rows if row.get("split") == "oot" and row.get("cum_count_pct") is not None]
-    candidates = oot_rows or [row for row in rows if row.get("cum_count_pct") is not None]
+    boundary of the cutoff-side band closest to 50% cumulative reject rate as a
+    concrete "cutoff -> reject rate / bad rate" example for the report reader."""
+    def reject_rate(row: dict):
+        value = row.get("cum_reject_rate")
+        return row.get("cum_count_pct") if value is None else value
+
+    oot_rows = [
+        row
+        for row in rows
+        if row.get("split") == "oot" and reject_rate(row) is not None
+    ]
+    candidates = oot_rows or [row for row in rows if reject_rate(row) is not None]
     if not candidates:
         return ""
-    closest = min(candidates, key=lambda row: abs(row["cum_count_pct"] - 0.5))
-    cutoff = closest.get("score_upper") if closest.get("cum_direction") == "higher_is_riskier" else closest.get("score_lower")
-    cum_pct = closest.get("cum_count_pct")
+    closest = min(candidates, key=lambda row: abs(reject_rate(row) - 0.5))
+    direction = closest.get("cum_direction") or "higher_is_riskier"
+    cutoff = (
+        closest.get("score_lower")
+        if direction == "higher_is_riskier"
+        else closest.get("score_upper")
+    )
+    cum_pct = reject_rate(closest)
     cum_bad = closest.get("cum_bad_rate")
     if cutoff is None or cum_pct is None:
         return ""
     bad_text = f"{cum_bad:.2%}" if cum_bad is not None else "n/a"
     return (
-        f"示例读法（{closest.get('split')}）：cutoff≈{cutoff:.4g} → 通过率约 {cum_pct:.2%}，"
-        f"累计坏账率约 {bad_text}"
+        f"示例读法（{closest.get('split')}）：cutoff≈{cutoff:.4g} → 拒绝率约 {cum_pct:.2%}，"
+        f"拒绝人群累计坏账率约 {bad_text}"
     )
 
 

@@ -10,7 +10,7 @@ from marvis.db import TaskRepository
 from marvis.domain import TaskStatus
 from marvis.files import write_text_atomic
 from marvis.job_cancellation import request_job_cancellation
-from marvis.notebook_cancellation import request_notebook_cancellation
+from marvis.notebook_cancellation import request_active_notebook_cancellation
 from marvis.pipeline import _metrics_cancel_marker_path
 
 
@@ -27,7 +27,14 @@ def cancel_task_notebook(task_id: str, request: Request) -> dict:
     task = get_task_or_404(repo, task_id)
     if task.status != TaskStatus.RUNNING:
         raise conflict(f"cannot cancel notebook in status {task.status.value}")
-    request_notebook_cancellation(task_id)
+    job_id = _active_job_id(repo, task_id, "notebook", "pipeline")
+    if job_id is None:
+        raise conflict("task has no active notebook job")
+    if not request_active_notebook_cancellation(
+        task_id,
+        expected_job_id=job_id,
+    ):
+        raise conflict("active notebook job has no cancellable execution token")
     return {
         "task_id": task_id,
         "status": "accepted",
@@ -41,8 +48,15 @@ def cancel_task_metrics(task_id: str, request: Request) -> dict:
     task = get_task_or_404(repo, task_id)
     if task.status != TaskStatus.COMPUTING_METRICS:
         raise conflict(f"cannot cancel metrics in status {task.status.value}")
+    job_id = _active_job_id(repo, task_id, "metrics", "pipeline")
+    if job_id is None:
+        raise conflict("task has no active metrics job")
+    if not request_active_notebook_cancellation(
+        task_id,
+        expected_job_id=job_id,
+    ):
+        raise conflict("active metrics job has no cancellable execution token")
     _write_metrics_cancel_marker(request.app.state.settings.tasks_dir / task_id)
-    request_notebook_cancellation(task_id)
     return {
         "task_id": task_id,
         "status": "accepted",
@@ -56,9 +70,14 @@ def cancel_task_report(task_id: str, request: Request) -> dict:
     task = get_task_or_404(repo, task_id)
     if task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
         raise conflict(f"cannot cancel report in status {task.status.value}")
-    if repo.get_active_job_kind(task_id) != "report":
+    job_id = _active_job_id(repo, task_id, "report", "pipeline")
+    if job_id is None:
         raise conflict("task has no active report job")
-    request_notebook_cancellation(task_id)
+    if not request_active_notebook_cancellation(
+        task_id,
+        expected_job_id=job_id,
+    ):
+        raise conflict("active report job has no cancellable execution token")
     return {
         "task_id": task_id,
         "status": "accepted",
@@ -87,9 +106,17 @@ def cancel_task_join(task_id: str, request: Request) -> dict:
     }
 
 
-def _active_job_id(repo: TaskRepository, task_id: str, kind: str) -> str | None:
-    job = repo.get_latest_job(task_id, kind=kind)
-    if job is None or job.get("status") not in {"queued", "running"}:
+def _active_job_id(
+    repo: TaskRepository,
+    task_id: str,
+    *kinds: str,
+) -> str | None:
+    job = repo.get_latest_job(task_id)
+    if (
+        job is None
+        or job.get("status") not in {"queued", "running"}
+        or job.get("kind") not in kinds
+    ):
         return None
     return str(job["id"])
 

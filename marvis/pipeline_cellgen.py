@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
 RMC_PMML_SCORE_COL = "__rmc_submitted_pmml_score__"
 REPRODUCIBILITY_RESULT_JSON = "reproducibility_result.json"
-STRESS_SCENARIO_SCORES_JSON = "stress_scenario_scores.json"
 
 
 def _package_root_for_notebook() -> Path:
@@ -80,7 +79,7 @@ def _build_reproducibility_cell_sources(
         "    bin_count=int(_rmc_payload['bin_count']),",
         "    random_sample_size=int(_rmc_payload['random_sample_size']),",
         "    random_seed=int(_rmc_payload['random_seed']),",
-        "    score_decimal_places=int(_rmc_contract.get('score_decimal_places') or 6),",
+        "    score_decimal_places=int(6 if _rmc_contract.get('score_decimal_places') is None else _rmc_contract['score_decimal_places']),",
         ")",
         "_rmc_repro_sample = RMC_SAMPLE_DF.copy().reset_index(drop=True)",
         "_rmc_repro_take = min(_rmc_config.random_sample_size, len(_rmc_repro_sample))",
@@ -309,7 +308,9 @@ def _build_stress_scenario_score_cell_sources(
         "}",
         "_rmc_output_path = _RmcPath(_rmc_payload['output_path'])",
         "_rmc_output_path.parent.mkdir(parents=True, exist_ok=True)",
-        "_rmc_output_path.write_text(_rmc_json.dumps(_rmc_output, ensure_ascii=False, indent=2), encoding='utf-8')",
+        "_rmc_temp_path = _rmc_output_path.with_name(f'.{_rmc_output_path.name}.tmp')",
+        "_rmc_temp_path.write_text(_rmc_json.dumps(_rmc_output, ensure_ascii=False, indent=2), encoding='utf-8')",
+        "_rmc_temp_path.replace(_rmc_output_path)",
     ]
     return [("stress-scores", "\n".join(lines))]
 
@@ -317,6 +318,7 @@ def _build_stress_scenario_score_cell_sources(
 def _build_metrics_cell_source(
     *,
     package_root: Path,
+    task_dir: Path,
     task: TaskRecord,
     settings: PipelineSettings,
     dictionary_path: Path,
@@ -331,6 +333,7 @@ def _build_metrics_cell_source(
         source
         for _, source in _build_metrics_cell_sources(
             package_root=package_root,
+            task_dir=task_dir,
             task=task,
             settings=settings,
             dictionary_path=dictionary_path,
@@ -366,7 +369,7 @@ def _build_deferred_contract_resolution_lines() -> list[str]:
         "    _rmc_contract.get('time_col') or _rmc_payload['fallback_time_col']",
         ")",
         "_rmc_payload['pmml_output_field'] = str(_rmc_contract.get('pmml_output_field') or 'probability_1')",
-        "_rmc_payload['score_decimal_places'] = int(_rmc_contract.get('score_decimal_places') or 6)",
+        "_rmc_payload['score_decimal_places'] = int(6 if _rmc_contract.get('score_decimal_places') is None else _rmc_contract['score_decimal_places'])",
         "_rmc_payload['code_scores_path'] = str(_rmc_contract['code_model_scores_path'])",
         "_rmc_feature_importance_meta = []",
         "_rmc_importance_meta_path = _rmc_contract.get('feature_importance_path')",
@@ -400,6 +403,7 @@ def _build_deferred_contract_resolution_lines() -> list[str]:
 def _build_metrics_cell_sources(
     *,
     package_root: Path,
+    task_dir: Path,
     task: TaskRecord,
     settings: PipelineSettings,
     dictionary_path: Path,
@@ -440,7 +444,7 @@ def _build_metrics_cell_sources(
         "reproducibility_json_path": str(reproducibility_json_path),
         "results_json_path": str(results_json_path),
         "excel_path": str(excel_path),
-        "metrics_cancel_path": str(_metrics_cancel_marker_path(results_json_path.parent.parent)),
+        "metrics_cancel_path": str(_metrics_cancel_marker_path(task_dir)),
         "target_col": "" if deferred_contract else contract.target_col,
         "split_col": "" if deferred_contract else (contract.split_col or task.split_col or ""),
         "time_col": "" if deferred_contract else (contract.time_col or task.time_col or ""),

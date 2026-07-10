@@ -119,21 +119,79 @@ def test_stage_artifact_cleanup_invalidates_downstream_outputs(tmp_path: Path):
         directory.mkdir(parents=True)
     (execution_dir / "scan_result.json").write_text("{}", encoding="utf-8")
     (execution_dir / "runtime_contract.json").write_text("{}", encoding="utf-8")
+    (execution_dir / "stress_scenario_scores.json").write_text("{}", encoding="utf-8")
+    (execution_dir / "metrics_steps.json").write_text("{}", encoding="utf-8")
     (outputs_dir / "reproducibility_result.json").write_text("{}", encoding="utf-8")
     (outputs_dir / "validation_results.json").write_text("{}", encoding="utf-8")
     (outputs_dir / "validation.xlsx").write_bytes(b"xlsx")
     (outputs_dir / "validation_report.docx").write_bytes(b"docx")
+    metrics_work_dir = outputs_dir / ".metrics-stage-work"
+    metrics_work_dir.mkdir()
+    (metrics_work_dir / "validation_results.json").write_text("{}", encoding="utf-8")
     (images_dir / "chart.png").write_bytes(b"png")
 
     _clear_generated_artifacts(task_dir, stage="notebook")
 
     assert (execution_dir / "scan_result.json").exists()
     assert not (execution_dir / "runtime_contract.json").exists()
+    assert not (execution_dir / "stress_scenario_scores.json").exists()
+    assert not (execution_dir / "metrics_steps.json").exists()
     assert not (outputs_dir / "reproducibility_result.json").exists()
     assert not (outputs_dir / "validation_results.json").exists()
     assert not (outputs_dir / "validation.xlsx").exists()
     assert not (outputs_dir / "validation_report.docx").exists()
+    assert not metrics_work_dir.exists()
     assert not images_dir.exists()
+
+
+def test_stress_score_reuse_rejects_truncated_or_invalid_artifact(tmp_path: Path):
+    from marvis.pipeline import _stress_scores_artifact_valid
+
+    artifact = tmp_path / "stress_scenario_scores.json"
+    artifact.write_text('{"categories":', encoding="utf-8")
+    assert _stress_scores_artifact_valid(artifact) is False
+
+    artifact.write_text(json.dumps({"unexpected": []}), encoding="utf-8")
+    assert _stress_scores_artifact_valid(artifact) is False
+
+    for malformed in (
+        {"categories": [1]},
+        {
+            "categories": [
+                {
+                    "category": "income",
+                    "status": "completed",
+                    "error": None,
+                    "row_index": [0, 1],
+                    "scores": [0.1],
+                }
+            ]
+        },
+        {
+            "categories": [
+                {
+                    "category": "income",
+                    "status": "completed",
+                    "error": None,
+                    "row_index": [0],
+                    "scores": [float("inf")],
+                }
+            ]
+        },
+    ):
+        artifact.write_text(json.dumps(malformed), encoding="utf-8")
+        assert _stress_scores_artifact_valid(artifact) is False
+
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": "marvis.validation_stress_scores.v1",
+                "categories": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _stress_scores_artifact_valid(artifact) is True
 
 
 def _sigmoid(value: float) -> float:
@@ -268,8 +326,13 @@ def test_metrics_cell_reuses_notebook_scorer_and_saved_reproducibility(tmp_path:
             source_dir=str(tmp_path),
         )
     )
+    task_dir = tmp_path / "tasks" / task.id
+    results_json_path = (
+        task_dir / "outputs" / ".metrics-stage-work" / "validation_results.json"
+    )
     source = _build_metrics_cell_source(
         package_root=tmp_path,
+        task_dir=task_dir,
         task=task,
         settings=PipelineSettings(
             workspace=tmp_path,
@@ -291,7 +354,7 @@ def test_metrics_cell_reuses_notebook_scorer_and_saved_reproducibility(tmp_path:
         ),
         model_meta_path=tmp_path / "model_meta.json",
         reproducibility_json_path=tmp_path / "reproducibility_result.json",
-        results_json_path=tmp_path / "validation_results.json",
+        results_json_path=results_json_path,
         excel_path=tmp_path / "validation.xlsx",
     )
 
@@ -305,6 +368,9 @@ def test_metrics_cell_reuses_notebook_scorer_and_saved_reproducibility(tmp_path:
     assert "import pickle" not in source
     assert "results_pickle_path" not in source
     assert f"_rmc_package_root = {tmp_path.as_posix()!r}" in source
+    expected_cancel_path = pipeline_module._metrics_cancel_marker_path(task_dir)
+    assert f'"metrics_cancel_path": "{expected_cancel_path}"' in source
+    assert str(task_dir / "outputs" / "execution" / "metrics_cancel.requested") not in source
 
 
 def test_v1_validation_appended_policy_matches_generated_cell_kinds(tmp_path: Path):
@@ -350,6 +416,7 @@ def test_v1_validation_appended_policy_matches_generated_cell_kinds(tmp_path: Pa
         kind
         for kind, _source in pipeline_module._build_metrics_cell_sources(
             package_root=tmp_path,
+            task_dir=tmp_path / "tasks" / task.id,
             task=task,
             settings=settings,
             dictionary_path=tmp_path / "dictionary.csv",
@@ -384,6 +451,48 @@ def test_v1_validation_appended_policy_matches_generated_cell_kinds(tmp_path: Pa
     assert "from marvis" not in stress_sources["stress-scores"]
 
 
+def test_generated_runtime_contract_resolution_preserves_zero_decimal_places(
+    tmp_path: Path,
+):
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    init_db(repo.db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(tmp_path),
+        )
+    )
+    settings = PipelineSettings(
+        workspace=tmp_path,
+        db_path=repo.db_path,
+        report_template_path=tmp_path / "template.docx",
+    )
+    reproducibility_source = dict(
+        pipeline_module._build_reproducibility_cell_sources(
+            package_root=tmp_path,
+            task=task,
+            settings=settings,
+            input_pmml_path=tmp_path / "model.pmml",
+            contract_meta_path=tmp_path / "runtime_contract.json",
+            output_path=tmp_path / "reproducibility_result.json",
+        )
+    )["repro-pmml"]
+    deferred_source = "\n".join(
+        pipeline_module._build_deferred_contract_resolution_lines()
+    )
+    zero_safe_expression = (
+        "int(6 if _rmc_contract.get('score_decimal_places') is None "
+        "else _rmc_contract['score_decimal_places'])"
+    )
+
+    assert zero_safe_expression in reproducibility_source
+    assert zero_safe_expression in deferred_source
+    assert "score_decimal_places') or 6" not in reproducibility_source
+    assert "score_decimal_places') or 6" not in deferred_source
+
+
 def test_metrics_cell_handles_null_split_and_time_columns_in_history(tmp_path: Path):
     repo = TaskRepository(tmp_path / "marvis.sqlite")
     init_db(repo.db_path)
@@ -399,6 +508,7 @@ def test_metrics_cell_handles_null_split_and_time_columns_in_history(tmp_path: P
 
     source = _build_metrics_cell_source(
         package_root=tmp_path,
+        task_dir=tmp_path / "tasks" / task.id,
         task=task,
         settings=PipelineSettings(
             workspace=tmp_path,
@@ -444,6 +554,7 @@ def test_metrics_cell_uses_runtime_contract_algorithm_not_create_task_placeholde
 
     source = _build_metrics_cell_source(
         package_root=tmp_path,
+        task_dir=tmp_path / "tasks" / task.id,
         task=task,
         settings=PipelineSettings(
             workspace=tmp_path,
@@ -561,6 +672,7 @@ def test_metrics_stage_shows_named_internal_progress_steps(tmp_path: Path):
 
     _write_metrics_results_in_session(
         session=FakeSession(),
+        task_dir=tmp_path,
         task=task,
         settings=PipelineSettings(
             workspace=tmp_path,
@@ -864,9 +976,15 @@ def test_notebook_stage_can_write_reproducibility_in_isolated_worker(
     assert repo.get_task(task.id).status is TaskStatus.EXECUTED
 
 
-def test_metrics_stage_reruns_isolated_notebook_even_with_stale_live_session(
+@pytest.mark.parametrize(
+    ("preexisting_stress_scores", "metrics_fails"),
+    [(False, False), (True, False), (True, True)],
+)
+def test_metrics_stage_refreshes_reproducibility_with_or_without_stress_scores(
     tmp_path: Path,
     monkeypatch,
+    preexisting_stress_scores: bool,
+    metrics_fails: bool,
 ):
     project = tmp_path / "project"
     project.mkdir()
@@ -928,6 +1046,11 @@ def test_metrics_stage_reruns_isolated_notebook_even_with_stale_live_session(
         json.dumps({"summary": {"status": "pass"}, "rows": []}),
         encoding="utf-8",
     )
+    if preexisting_stress_scores:
+        (execution_dir / "stress_scenario_scores.json").write_text(
+            json.dumps({"categories": []}),
+            encoding="utf-8",
+        )
     live_closed = {"value": False}
     register_live_notebook_session(
         task.id,
@@ -938,6 +1061,7 @@ def test_metrics_stage_reruns_isolated_notebook_even_with_stale_live_session(
     )
 
     def fake_notebook_step_v3(*, extra_code_cells, **kwargs):
+        assert not preexisting_stress_scores
         assert kwargs["keep_alive"] is False
         assert kwargs["isolated"] is True
         assert kwargs["stage_claimed"] is True
@@ -948,7 +1072,20 @@ def test_metrics_stage_reruns_isolated_notebook_even_with_stale_live_session(
             encoding="utf-8",
         )
 
-    def fake_write_platform_validation_metrics(*, results_json_path, excel_path, **_kwargs):
+    reproducibility_calls = {"count": 0}
+
+    def fake_write_reproducibility_result(*, output_path, **_kwargs):
+        reproducibility_calls["count"] += 1
+        output_path.write_text(json.dumps({"run": "fresh"}), encoding="utf-8")
+
+    def fake_write_platform_validation_metrics(
+        *, reproducibility_json_path, results_json_path, excel_path, **_kwargs
+    ):
+        assert json.loads(reproducibility_json_path.read_text(encoding="utf-8")) == {
+            "run": "fresh"
+        }
+        if metrics_fails:
+            raise RuntimeError("metrics write failed")
         metrics_work_dir = outputs_dir / ".metrics-stage-work"
         metrics_work_dir.mkdir(parents=True, exist_ok=True)
         (metrics_work_dir / "validation_results.json").write_text("{}", encoding="utf-8")
@@ -959,19 +1096,39 @@ def test_metrics_stage_reruns_isolated_notebook_even_with_stale_live_session(
         "marvis.pipeline.write_platform_validation_metrics",
         fake_write_platform_validation_metrics,
     )
-
-    run_metrics_stage(
-        task_id=task.id,
-        settings=PipelineSettings(
-            workspace=workspace,
-            db_path=db_path,
-            report_template_path=tmp_path / "template.docx",
-        ),
-        stage_claimed=True,
+    monkeypatch.setattr(
+        "marvis.pipeline.write_reproducibility_result",
+        fake_write_reproducibility_result,
     )
 
+    def run():
+        run_metrics_stage(
+            task_id=task.id,
+            settings=PipelineSettings(
+                workspace=workspace,
+                db_path=db_path,
+                report_template_path=tmp_path / "template.docx",
+            ),
+            stage_claimed=True,
+        )
+    if metrics_fails:
+        with pytest.raises(RuntimeError, match="metrics write failed"):
+            run()
+    else:
+        run()
+
     assert live_closed["value"] is True
-    assert repo.get_task(task.id).status is TaskStatus.WRITING_ARTIFACTS
+    assert reproducibility_calls["count"] == 1
+    if metrics_fails:
+        assert json.loads(
+            (outputs_dir / REPRODUCIBILITY_RESULT_JSON).read_text(encoding="utf-8")
+        ) == {"summary": {"status": "pass"}, "rows": []}
+        assert repo.get_task(task.id).status is TaskStatus.FAILED
+    else:
+        assert json.loads(
+            (outputs_dir / REPRODUCIBILITY_RESULT_JSON).read_text(encoding="utf-8")
+        ) == {"run": "fresh"}
+        assert repo.get_task(task.id).status is TaskStatus.WRITING_ARTIFACTS
 
 
 def test_metrics_stage_marks_sample_column_failure_as_metrics_failure(

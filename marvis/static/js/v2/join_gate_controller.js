@@ -51,6 +51,7 @@ export function renderJoinC1Form(message, options = {}) {
   const c1 = message?.metadata?.join_c1;
   if (!c1 || !Array.isArray(c1.files) || !c1.files.length) return "";
   const messageId = message?.id ? String(message.id) : "";
+  const gateStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
   // UX-2: earlier C1 forms (superseded by a later gate) render read-only so a
   // stale tab cannot re-submit role assignments against an already-advanced
   // step — mirrors the screen/modeling-setup readonly convention.
@@ -95,7 +96,7 @@ export function renderJoinC1Form(message, options = {}) {
       ),
     )
     .join("");
-  return `<div class="c1-form" data-c1-form="${escapeHtml(messageId)}"${interactive ? "" : ' data-c1-readonly="true"'}>
+  return `<div class="c1-form" data-c1-form="${escapeHtml(messageId)}" data-c1-gate-step-id="${escapeHtml(gateStepId)}"${interactive ? "" : ' data-c1-readonly="true"'}>
     <table class="c1-form-table">
       <thead><tr><th>文件</th><th>行数</th><th>列数</th><th>含目标</th><th>角色</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -131,6 +132,11 @@ export async function submitC1Assignment(button, rawContext = {}) {
     return;
   }
   const targetCol = form.querySelector(".c1-target")?.value || "";
+  const expectedStepId = form.dataset.c1GateStepId || "";
+  if (!expectedStepId) {
+    setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
+    return;
+  }
   button.disabled = true;
   const context = joinGateContext(rawContext);
   try {
@@ -139,6 +145,7 @@ export async function submitC1Assignment(button, rawContext = {}) {
         method: "POST",
         body: JSON.stringify({
           content: "[C1]" + JSON.stringify({ anchor_id: anchorIds[0], anchor_ids: anchorIds, feature_ids: featureIds, target_col: targetCol }),
+          expected_step_id: expectedStepId,
           acceptance_mode: acceptanceMode,
         }),
       });

@@ -675,6 +675,76 @@ def test_plan_rail_retry_step_posts_edited_inputs():
     assert "openRetryCard(" in click_body
 
 
+def test_plan_retry_uses_manually_edited_json_when_structured_fields_are_present():
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = f"""
+import assert from "node:assert/strict";
+import {{ createPlanRailController }} from {json.dumps(module_url)};
+
+globalThis.window = {{ setTimeout: () => {{}} }};
+globalThis.fetch = async () => ({{
+  ok: true,
+  json: async () => ({{ plans: [{{ id: "plan-1", steps: [] }}] }}),
+}});
+const calls = [];
+const controller = createPlanRailController({{
+  getSelectedTaskId: () => "task-1",
+  getSelectedTask: () => ({{ id: "task-1" }}),
+  getAgentMessages: () => [],
+  isAgentMode: () => false,
+  renderWorkflowStepper: () => {{}},
+  setActionStatus: () => {{}},
+  refreshTasks: async () => {{}},
+  loadAgentMessages: async () => {{}},
+  renderAll: () => {{}},
+  apiClient: async (url, options) => {{
+    calls.push({{ url, body: JSON.parse(options.body) }});
+    return {{ ok: true }};
+  }},
+}});
+controller.maybeFetchPlan("task-1");
+await new Promise((resolve) => setTimeout(resolve, 0));
+await new Promise((resolve) => setTimeout(resolve, 0));
+
+const structuredField = {{
+  dataset: {{ planRetryInputKey: "foo", planRetryInputType: "string" }},
+  value: "old",
+}};
+const jsonField = {{
+  value: '{{"foo":"edited","extra":1}}',
+  defaultValue: '{{"foo":"old"}}',
+}};
+const form = {{
+  querySelectorAll: (selector) => selector === "[data-plan-retry-input-key]" ? [structuredField] : [],
+  querySelector: (selector) => selector === ".plan-retry-inputs" ? jsonField : null,
+}};
+const button = {{
+  dataset: {{ planRetryStep: "step-1" }},
+  disabled: false,
+  closest: () => form,
+}};
+controller.handleClick({{
+  target: {{ closest: (selector) => selector === "[data-plan-retry-step]" ? button : null }},
+  preventDefault: () => {{}},
+  stopPropagation: () => {{}},
+}});
+await new Promise((resolve) => setTimeout(resolve, 0));
+
+assert.equal(calls.length, 1);
+assert.deepEqual(calls[0].body.inputs, {{ foo: "edited", extra: 1 }});
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
+
+
 def test_plan_retry_replace_semantics_warning_is_always_present():
     """LT-4: a smoke pass on the retry flow found /api/plans/{id}/steps/{id}/retry
     fully REPLACES the step's inputs_json (marvis/repositories/plans.py

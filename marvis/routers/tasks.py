@@ -1,8 +1,9 @@
 import logging
+from pathlib import Path
 import shutil
 
 from fastapi import APIRouter, Request, Response
-from marvis.errors import not_found, unprocessable
+from marvis.errors import conflict, not_found, unprocessable
 
 from marvis.api_schemas import CreateTaskRequest
 from marvis.api_task_helpers import (
@@ -20,7 +21,7 @@ from marvis.db import TaskRepository
 from marvis.domain import TaskCreate
 from marvis.model_algorithms import normalize_algorithm
 from marvis.notebooks import close_live_notebook_session
-from marvis.safe_paths import assert_within
+from marvis.state_machine import ConflictError
 
 
 router = APIRouter(prefix="/api", tags=["tasks"])
@@ -162,18 +163,32 @@ def delete_task(task_id: str, request: Request) -> None:
     reject_if_task_has_active_job(repo, task_id)
 
     settings = request.app.state.settings
-    task_dir = assert_within(settings.tasks_dir, settings.tasks_dir / task_id)
-    close_live_notebook_session(task_id)
+    task_dir = _lexical_child_path(settings.tasks_dir, task_id)
+    datasets_root = getattr(settings, "datasets_dir", None)
+
+    def validate_dataset_source_path(relative_path: str) -> None:
+        if datasets_root is not None:
+            _lexical_child_path(datasets_root, relative_path)
+
     try:
-        summary = repo.purge_task(task_id)
+        summary = repo.purge_task(
+            task_id,
+            validate_dataset_source_path=validate_dataset_source_path,
+        )
     except KeyError as exc:
         raise not_found(f"Task not found: {task_id}") from exc
+    except PermissionError as exc:
+        raise unprocessable("dataset source path escapes the datasets directory") from exc
+    except ConflictError as exc:
+        raise conflict(str(exc)) from exc
+    close_live_notebook_session(task_id)
     try:
-        if task_dir.exists():
+        if task_dir.is_symlink():
+            task_dir.unlink()
+        elif task_dir.exists():
             shutil.rmtree(task_dir)
     except OSError as exc:
         logger.warning("task dir cleanup failed for %s: %s", task_id, exc)
-    datasets_root = getattr(settings, "datasets_dir", None)
     if datasets_root is not None:
         # Only the dataset files this task exclusively owned are safe to remove --
         # purge_task already excluded source_paths still referenced by another
@@ -183,11 +198,11 @@ def delete_task(task_id: str, request: Request) -> None:
         # point at a file physically stored under a *different* task's directory.
         for relative_path in summary.get("dataset_source_paths", []):
             try:
-                dataset_path = assert_within(datasets_root, datasets_root / relative_path)
-            except ValueError:
+                dataset_path = _lexical_child_path(datasets_root, relative_path)
+            except PermissionError:
                 continue
             try:
-                if dataset_path.exists():
+                if dataset_path.is_symlink() or dataset_path.is_file():
                     dataset_path.unlink()
             except OSError as exc:
                 logger.warning(
@@ -198,7 +213,30 @@ def delete_task(task_id: str, request: Request) -> None:
                 )
         task_datasets_dir = datasets_root / task_id
         try:
-            if task_datasets_dir.exists() and not any(task_datasets_dir.rglob("*")):
+            if task_datasets_dir.is_symlink():
+                task_datasets_dir.unlink()
+            elif task_datasets_dir.exists() and not any(task_datasets_dir.rglob("*")):
                 shutil.rmtree(task_datasets_dir)
         except OSError as exc:
             logger.warning("datasets dir cleanup failed for %s: %s", task_id, exc)
+
+
+def _lexical_child_path(root: Path, relative_path: str) -> Path:
+    """Return a child path without resolving its final symlink.
+
+    Resolving the final component before deletion turns a symlink into its
+    target and can delete another task's data. Intermediate symlinks are
+    rejected because unlinking a descendant would still follow them.
+    """
+    root_path = Path(root).resolve()
+    relative = Path(relative_path)
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        raise PermissionError(f"path escapes root: {relative_path}")
+    current = root_path
+    for part in relative.parts[:-1]:
+        if part in {"", "."}:
+            continue
+        current = current / part
+        if current.is_symlink():
+            raise PermissionError(f"path traverses symlink: {relative_path}")
+    return root_path.joinpath(*relative.parts)

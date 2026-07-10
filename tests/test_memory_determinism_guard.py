@@ -115,7 +115,13 @@ def test_metrics_endpoint_does_not_pass_agent_memory_context_to_validation_stage
 
     assert response.status_code == 202, response.text
     assert len(calls) == 1
-    assert set(calls[0]) == {"task_id", "settings", "stage_claimed"}
+    assert set(calls[0]) == {
+        "task_id",
+        "settings",
+        "stage_claimed",
+        "cancellation_job_id",
+    }
     assert calls[0]["task_id"] == task.id
     assert calls[0]["stage_claimed"] is True
+    assert calls[0]["cancellation_job_id"]
     assert "memory_context" not in calls[0]

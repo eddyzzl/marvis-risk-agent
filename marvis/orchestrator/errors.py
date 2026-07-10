@@ -21,3 +21,12 @@ class IllegalStepTransition(OrchestratorError):
 
 class PlanNotFoundError(OrchestratorError):
     pass
+
+
+class RefResolutionError(OrchestratorError):
+    """A plan input reference could not be resolved to an upstream value."""
+
+    def __init__(self, ref: str, reason: str) -> None:
+        super().__init__(f"could not resolve ref {ref}: {reason}")
+        self.ref = ref
+        self.reason = reason

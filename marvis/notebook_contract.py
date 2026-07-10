@@ -1,12 +1,15 @@
 from dataclasses import dataclass
 import ast
+from hashlib import sha256
 import json
 from pathlib import Path
+from tokenize import TokenError
 from typing import Any
 
-import nbformat
+from IPython.core.inputtransformer2 import TransformerManager
 
 from marvis.model_algorithms import normalize_algorithm
+from marvis.notebook_io import read_notebook_bytes
 
 REQUIRED_CONTRACT_NAMES = (
     "RMC_SAMPLE_DF",
@@ -21,7 +24,20 @@ CONTRACT_SCAN_NAMES = REQUIRED_CONTRACT_NAMES + (
 
 
 class NotebookContractError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        cell_index: int | None = None,
+        line_number: int | None = None,
+        source_excerpt: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.cell_index = cell_index
+        self.line_number = line_number
+        self.source_excerpt = source_excerpt
+        self.notebook_path: str | None = None
+        self.notebook_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,19 +87,23 @@ class RuntimeContract:
 
 
 def precheck_notebook_contract(notebook_or_path: Any) -> ContractPrecheckResult:
-    notebook = _read_notebook(notebook_or_path)
-    bindings = _contract_bindings(notebook)
-    missing = _missing_contract_names(bindings)
-    if missing:
-        raise NotebookContractError(
-            "Notebook contract check failed before execution: missing "
-            + ", ".join(missing)
-        )
-    if bindings.invalid_names:
-        raise NotebookContractError(
-            "Notebook contract check failed before execution: invalid "
-            + ", ".join(bindings.invalid_names)
-        )
+    notebook, revision = _read_notebook_snapshot(notebook_or_path)
+    try:
+        bindings = _contract_bindings(notebook)
+        missing = _missing_contract_names(bindings)
+        if missing:
+            raise NotebookContractError(
+                "Notebook contract check failed before execution: missing "
+                + ", ".join(missing)
+            )
+        if bindings.invalid_names:
+            raise NotebookContractError(
+                "Notebook contract check failed before execution: invalid "
+                + ", ".join(bindings.invalid_names)
+            )
+    except NotebookContractError as exc:
+        _attach_notebook_revision(exc, revision)
+        raise
     return ContractPrecheckResult(
         missing_names=[],
         target_col=bindings.target_col,
@@ -95,8 +115,12 @@ def precheck_notebook_contract(notebook_or_path: Any) -> ContractPrecheckResult:
 
 def inspect_notebook_contract(notebook_or_path: Any) -> dict[str, Any]:
     """Return a bounded, read-only static summary of the notebook RMC contract."""
-    notebook = _read_notebook(notebook_or_path)
-    bindings = _contract_bindings(notebook)
+    notebook, revision = _read_notebook_snapshot(notebook_or_path)
+    try:
+        bindings = _contract_bindings(notebook)
+    except NotebookContractError as exc:
+        _attach_notebook_revision(exc, revision)
+        raise
     missing = _missing_contract_names(bindings)
     algorithm_valid: bool | None
     if not bindings.algorithm_defined:
@@ -301,7 +325,7 @@ def _contract_bindings(notebook: Any) -> _ContractBindings:
 
 def _parse_contract_scan_cell(source: str, cell_index: int) -> ast.Module | None:
     candidates = [source]
-    notebook_python_source = _strip_ipython_syntax_for_static_scan(source)
+    notebook_python_source = _transform_ipython_syntax_for_static_scan(source)
     if notebook_python_source != source:
         candidates.append(notebook_python_source)
 
@@ -316,21 +340,51 @@ def _parse_contract_scan_cell(source: str, cell_index: int) -> ast.Module | None
         assert last_error is not None
         raise NotebookContractError(
             "Notebook contract check failed before execution: "
-            f"syntax error in RMC contract code cell {cell_index}: {last_error.msg}"
+            f"syntax error in RMC contract code cell {cell_index}, "
+            f"line {last_error.lineno}: {last_error.msg}",
+            cell_index=cell_index,
+            line_number=last_error.lineno,
+            source_excerpt=_source_excerpt(source, last_error.lineno),
         ) from last_error
     return None
 
 
-def _strip_ipython_syntax_for_static_scan(source: str) -> str:
-    cleaned: list[str] = []
-    for line_index, line in enumerate(source.splitlines()):
-        stripped = line.lstrip()
-        if line_index == 0 and stripped.startswith("%%"):
-            continue
-        if stripped.startswith(("%", "!")):
-            continue
-        cleaned.append(line)
-    return "\n".join(cleaned)
+def _transform_ipython_syntax_for_static_scan(source: str) -> str:
+    lines = source.splitlines()
+    if lines and lines[0].lstrip().startswith("%%"):
+        # Scan the Python body of a cell magic while preserving source line numbers.
+        lines[0] = ""
+    candidate = "\n".join(lines)
+    if source.endswith("\n"):
+        candidate += "\n"
+    try:
+        return TransformerManager().transform_cell(candidate)
+    except (SyntaxError, TokenError):
+        return candidate
+
+
+def _source_excerpt(source: str, line_number: int | None, *, radius: int = 1) -> str:
+    if not line_number:
+        return ""
+    lines = source.splitlines()
+    start = max(1, line_number - radius)
+    end = min(len(lines), line_number + radius)
+    excerpt = []
+    for number in range(start, end + 1):
+        text = lines[number - 1].expandtabs(4)
+        if len(text) > 180:
+            text = text[:177] + "..."
+        excerpt.append(f"L{number}: {text}")
+    return "\n".join(excerpt)
+
+
+def _attach_notebook_revision(
+    exc: NotebookContractError,
+    revision: tuple[str, str] | None,
+) -> None:
+    if revision is None:
+        return
+    exc.notebook_path, exc.notebook_sha256 = revision
 
 
 def _mentions_required_contract_name(source: str) -> bool:
@@ -638,7 +692,11 @@ def load_runtime_contract(path: Path) -> RuntimeContract:
         split_col=_optional_str(payload.get("split_col")),
         time_col=_optional_str(payload.get("time_col")),
         pmml_output_field=str(payload.get("pmml_output_field") or "probability_1"),
-        score_decimal_places=int(payload.get("score_decimal_places") or 6),
+        score_decimal_places=int(
+            6
+            if payload.get("score_decimal_places") is None
+            else payload["score_decimal_places"]
+        ),
         code_model_scores_path=Path(payload["code_model_scores_path"]),
         sample_snapshot_path=_optional_path(payload.get("sample_snapshot_path")),
         feature_importance_path=_optional_path(payload.get("feature_importance_path")),
@@ -647,10 +705,13 @@ def load_runtime_contract(path: Path) -> RuntimeContract:
     )
 
 
-def _read_notebook(notebook_or_path: Any):
+def _read_notebook_snapshot(notebook_or_path: Any):
     if isinstance(notebook_or_path, (str, Path)):
-        return nbformat.read(notebook_or_path, as_version=4)
-    return notebook_or_path
+        path = Path(notebook_or_path).resolve()
+        raw = path.read_bytes()
+        notebook = read_notebook_bytes(raw, source=str(path), as_version=4)
+        return notebook, (str(path), sha256(raw).hexdigest())
+    return notebook_or_path, None
 
 
 def _optional_path(value: Any) -> Path | None:

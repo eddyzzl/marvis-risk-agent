@@ -153,7 +153,14 @@ def handle_agent_stop_message_with_callbacks(
             "message": message["content"],
             "messages": repo.list_agent_messages(task.id),
         }
-    request_agent_cancellation_fn(task.id)
+    active_job = repo.get_latest_job(task.id, kind="agent")
+    active_job_id = (
+        str(active_job["id"])
+        if active_job is not None
+        and active_job.get("status") in {"queued", "running"}
+        else None
+    )
+    request_agent_cancellation_fn(task.id, job_id=active_job_id)
     request_notebook_cancellation_fn(task.id)
     mark_agent_cancelled(repo, task.id)
     if agent_has_stop_ack_message(repo, task.id):
@@ -174,17 +181,21 @@ def handle_agent_stop_message_with_callbacks(
     }
 
 
-def clear_agent_and_notebook_cancellation(task_id: str) -> None:
-    clear_agent_cancellation(task_id)
+def clear_agent_and_notebook_cancellation(
+    task_id: str,
+    *,
+    job_id: str | None = None,
+) -> None:
+    clear_agent_cancellation(task_id, job_id=job_id)
     clear_pending_notebook_cancellation(task_id)
 
 
-def agent_cancellation_requested(task_id: str) -> bool:
-    return _agent_cancellation_requested(task_id)
+def agent_cancellation_requested(task_id: str, *, job_id: str | None = None) -> bool:
+    return _agent_cancellation_requested(task_id, job_id=job_id)
 
 
-def raise_if_agent_cancelled(task_id: str) -> None:
-    _raise_if_agent_cancelled(task_id)
+def raise_if_agent_cancelled(task_id: str, *, job_id: str | None = None) -> None:
+    _raise_if_agent_cancelled(task_id, job_id=job_id)
 
 
 def mark_agent_cancelled(repo: TaskRepository, task_id: str) -> None:

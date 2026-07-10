@@ -11,7 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from marvis.errors import conflict, not_found, unprocessable
 from pydantic import BaseModel, Field
 
-from marvis.db import TaskRepository
+from marvis.db import PlanRepository, TaskRepository
 from marvis.orchestrator.capability import TIERS, resolve_tier, tier_from_settings
 from marvis.agent.gates import build_failure_envelope
 from marvis.orchestrator.contracts import PlanStatus, StepStatus, plan_to_dict
@@ -151,7 +151,7 @@ def confirm_plan(request: Request, plan_id: str) -> dict:
         request.app.state.plan_repo.confirm_plan(plan_id)
     except PlanNotFoundError as exc:
         raise not_found(str(exc)) from exc
-    except IllegalPlanTransition as exc:
+    except (IllegalPlanTransition, ConflictError) as exc:
         raise conflict(str(exc)) from exc
     plan = _load_plan(request, plan_id)
     _dispatch_platform_hook(
@@ -249,30 +249,19 @@ def retry_step(
 @router.post("/plans/{plan_id}/cancel")
 def cancel_plan(request: Request, plan_id: str) -> dict:
     repo = request.app.state.plan_repo
-    plan = _load_plan(request, plan_id)
+    _load_plan(request, plan_id)
     try:
         repo.set_plan_status(plan_id, PlanStatus.CANCELLED)
     except PlanNotFoundError as exc:
         raise not_found(str(exc)) from exc
-    except IllegalPlanTransition as exc:
+    except (IllegalPlanTransition, ConflictError) as exc:
         raise conflict(str(exc)) from exc
-    # Cooperative cancel (REL-5): the plan-status flip above is what the
-    # executor's run() loop checkpoints on (marvis/orchestrator/executor.py),
-    # but a job row already RUNNING for this task would otherwise keep
-    # idx_jobs_active_task locked until that in-flight run() call happens to
-    # notice — release it here too so the task unlocks immediately.
-    task_repo = TaskRepository(_db_path(request))
-    active_job_id = _active_plan_job_id(task_repo, plan.task_id)
-    if active_job_id is not None:
-        task_repo.finish_job(active_job_id, status="cancelled")
+    # Cancellation is cooperative: the executor checkpoints the plan status
+    # and finishes the exact job row that owns its execution lease. Jobs do not
+    # currently carry a plan id, so ending the latest task-level plan job here
+    # could cancel another plan and would release the task lock while the old
+    # callback was still running.
     return _load_plan_payload(request, plan_id)
-
-
-def _active_plan_job_id(task_repo: TaskRepository, task_id: str) -> str | None:
-    job = task_repo.get_latest_job(task_id, kind=PLAN_JOB_KIND)
-    if job is None or job.get("status") not in {"queued", "running"}:
-        return None
-    return str(job["id"])
 
 
 def _load_plan_payload(request: Request, plan_id: str) -> dict:
@@ -407,10 +396,30 @@ def _start_plan_job(request: Request, task_id: str) -> str:
 
 def _run_plan_job(job_id: str, db_path: Path, executor, plan_id: str) -> None:
     repo = TaskRepository(db_path)
-    repo.mark_job_running(job_id)
+    if not repo.mark_job_running(job_id):
+        return
     try:
         with heartbeat_job(repo, job_id):
             result = executor.run(plan_id)
+    except (ConflictError, IllegalPlanTransition) as exc:
+        try:
+            cancelled = (
+                PlanRepository(db_path).load_plan(plan_id).status
+                == PlanStatus.CANCELLED
+            )
+        except Exception:
+            cancelled = False
+        if cancelled:
+            repo.finish_job(job_id, status="cancelled")
+            return
+        repo.finish_job(
+            job_id,
+            status="failed",
+            error_name=exc.__class__.__name__,
+            error_value=str(exc),
+            traceback=traceback.format_exc(),
+        )
+        raise
     except Exception as exc:
         repo.finish_job(
             job_id,

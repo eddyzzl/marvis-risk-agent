@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-import nbformat
+from marvis.notebook_io import read_notebook
 
 
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,3})\s+(.+?)\s*$")
@@ -88,7 +88,7 @@ def notebook_step_plan(notebook: Any) -> NotebookStepPlan:
 
 
 def notebook_step_preview(notebook_path: Path) -> list[dict]:
-    notebook = nbformat.read(notebook_path, as_version=4)
+    notebook = read_notebook(notebook_path, as_version=4)
     plan = notebook_step_plan(notebook)
     return [
         {

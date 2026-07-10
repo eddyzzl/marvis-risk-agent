@@ -25,7 +25,7 @@ class ValidationJobCallbacks:
     mark_agent_cancelled: Callable[[TaskRepository, str], None]
     agent_has_stop_ack_message: Callable[[TaskRepository, str], bool]
     add_exception_summary: Callable[..., None]
-    clear_agent_cancellation: Callable[[str], None]
+    clear_agent_cancellation: Callable[..., None]
     stop_ack_content: str
 
 
@@ -43,7 +43,9 @@ def run_agent_validation_job(
     callbacks: ValidationJobCallbacks,
 ) -> None:
     repo = TaskRepository(settings.db_path)
-    repo.mark_job_running(job_id)
+    if repo.mark_job_running(job_id) is False:
+        callbacks.clear_agent_cancellation(task_id, job_id=job_id)
+        return
     auto_accept = callbacks.agent_auto_accept(acceptance_mode)
     try:
         current_stage = stage
@@ -152,7 +154,7 @@ def run_agent_validation_job(
             )
         raise
     finally:
-        callbacks.clear_agent_cancellation(task_id)
+        callbacks.clear_agent_cancellation(task_id, job_id=job_id)
 
 
 __all__ = ["ValidationJobCallbacks", "run_agent_validation_job"]

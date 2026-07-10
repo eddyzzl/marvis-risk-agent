@@ -82,7 +82,12 @@ def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
             compare_values=compare_values,
         )
         metrics.append(_jsonable(item))
-    result = {"dataset_id": dataset.id, "metrics": metrics, "nan_labels_dropped": nan_labels_dropped}
+    result = {
+        "dataset_id": dataset.id,
+        "metrics": metrics,
+        "collinear": None,
+        "nan_labels_dropped": nan_labels_dropped,
+    }
     # Optional metrics are computed only when selected (spec §2: 选了才算). VIF /
     # collinear is the first wired one; missing selection → not computed.
     selected = {str(metric).strip().lower() for metric in (inputs.get("metrics") or [])}

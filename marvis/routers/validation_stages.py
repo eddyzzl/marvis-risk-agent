@@ -86,6 +86,7 @@ def run_task_notebook(
                 payload.feature_columns,
             ),
             "stage_claimed": True,
+            "cancellation_job_id": job_id,
         },
         hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
         after_hook_event="notebook.completed",
@@ -163,6 +164,7 @@ def run_task_metrics(
             "task_id": task_id,
             "settings": pipeline_settings,
             "stage_claimed": True,
+            "cancellation_job_id": job_id,
         },
         hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
         after_hook_event="validation.completed",
@@ -195,6 +197,7 @@ def run_task_report(
         {
             "task_id": task_id,
             "settings": pipeline_settings_from_request(request, task, None),
+            "cancellation_job_id": job_id,
         },
         hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
         before_hook_event="report.before_generate",
@@ -240,6 +243,7 @@ def validate_task(
                 task,
                 payload.feature_columns,
             ),
+            "cancellation_job_id": job_id,
         },
     )
     return {

@@ -63,6 +63,10 @@ class JobCancellationRegistry:
         token.cancel()
         return True
 
+    def clear_pending(self, job_id: str) -> None:
+        with self._lock:
+            self._pending.discard(job_id)
+
 
 _REGISTRY = JobCancellationRegistry()
 
@@ -77,3 +81,7 @@ def unregister_job_cancellation(job_id: str, token: JobCancellationToken) -> Non
 
 def request_job_cancellation(job_id: str) -> bool:
     return _REGISTRY.request_cancel(job_id)
+
+
+def clear_pending_job_cancellation(job_id: str) -> None:
+    _REGISTRY.clear_pending(job_id)

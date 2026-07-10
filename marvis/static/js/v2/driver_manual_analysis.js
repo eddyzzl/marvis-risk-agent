@@ -108,7 +108,7 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
     }
     const intro = renderMarkdown(stripChatInstructions(message.content || ""));
     if (meta.join_c1) {
-      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers)}</section>`);
+      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive: isPendingGate })}</section>`);
       continue;
     }
     if (meta.screen) {

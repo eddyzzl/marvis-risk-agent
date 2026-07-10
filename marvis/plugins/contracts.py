@@ -13,7 +13,10 @@ from marvis.safe_paths import assert_within
 # so both sides of the boundary import the same leaf module with zero
 # internal marvis dependencies beyond safe_paths (PERF-5: worker entrypoint
 # import must stay dependency-free).
-PROTOCOL_VERSION = 1
+# v2 frames the authoritative result as a sentinel-prefixed JSON line so
+# native-library stdout cannot corrupt the protocol payload.
+PROTOCOL_VERSION = 2
+WORKER_RESULT_SENTINEL = "@@MARVIS_PLUGIN_RESULT@@"
 
 
 @dataclass(frozen=True)

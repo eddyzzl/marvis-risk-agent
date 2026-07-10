@@ -343,27 +343,30 @@ class Planner:
         if not isinstance(raw_steps, list) or not raw_steps:
             raise PlanningError("plan JSON must include non-empty steps")
 
-        plan_id = uuid.uuid4().hex
-        steps = [
-            _step_from_json(item, index=index, plan_id=plan_id)
-            for index, item in enumerate(raw_steps[:max_steps])
-        ]
-        return Plan(
-            id=plan_id,
-            task_id=task_id,
-            goal=goal,
-            source="generated",
-            template_id=None,
-            steps=steps,
-            autonomy_level=int(data.get("autonomy_level", tier.default_autonomy_level)),
-            novel_mode=novel_mode,
-            tier=tier.name,
-            success_criteria=[
-                dict(item)
-                for item in data.get("success_criteria") or []
-                if isinstance(item, dict)
-            ],
-        )
+        try:
+            plan_id = uuid.uuid4().hex
+            steps = [
+                _step_from_json(item, index=index, plan_id=plan_id)
+                for index, item in enumerate(raw_steps[:max_steps])
+            ]
+            return Plan(
+                id=plan_id,
+                task_id=task_id,
+                goal=goal,
+                source="generated",
+                template_id=None,
+                steps=steps,
+                autonomy_level=int(data.get("autonomy_level", tier.default_autonomy_level)),
+                novel_mode=novel_mode,
+                tier=tier.name,
+                success_criteria=[
+                    dict(item)
+                    for item in data.get("success_criteria") or []
+                    if isinstance(item, dict)
+                ],
+            )
+        except (TypeError, ValueError) as exc:
+            raise PlanningError(f"invalid plan fields: {exc}") from exc
 
 
 def build_plan_prompt(
@@ -574,10 +577,13 @@ def _parse_steps_json(
     raw_steps = data.get("steps") if isinstance(data, dict) else data
     if not isinstance(raw_steps, list) or not raw_steps:
         raise PlanningError("replan JSON must include non-empty steps")
-    return [
-        _step_from_json(item, index=start_index + offset, plan_id=plan_id)
-        for offset, item in enumerate(raw_steps[:max_steps])
-    ]
+    try:
+        return [
+            _step_from_json(item, index=start_index + offset, plan_id=plan_id)
+            for offset, item in enumerate(raw_steps[:max_steps])
+        ]
+    except (TypeError, ValueError) as exc:
+        raise PlanningError(f"invalid plan fields: {exc}") from exc
 
 
 def _parse_json_object(raw: str, *, label: str) -> dict:

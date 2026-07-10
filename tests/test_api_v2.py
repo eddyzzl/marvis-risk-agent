@@ -48,6 +48,8 @@ class FakeTaskRepository:
         "strategies": 0,
         "backtests": 0,
         "sub_agents": 0,
+        "draft_tools": 0,
+        "draft_runs": 0,
     }
 
     def __init__(self, _db_path: Path):
@@ -98,8 +100,11 @@ class FakeTaskRepository:
         }
         return job_id
 
-    def mark_job_running(self, job_id: str) -> None:
+    def mark_job_running(self, job_id: str) -> bool:
+        if self.jobs[job_id]["status"] != "queued":
+            return False
         self.jobs[job_id]["status"] = "running"
+        return True
 
     def finish_job(
         self,
@@ -180,11 +185,21 @@ class FakeTaskRepository:
         self.get_task(task_id)
         return dict(self.purge_summary)
 
-    def purge_task(self, task_id: str, *, actor: str = "system") -> dict:
+    def purge_task(
+        self,
+        task_id: str,
+        *,
+        actor: str = "system",
+        validate_dataset_source_path=None,
+    ) -> dict:
         self.get_task(task_id)
+        dataset_source_paths = []
+        if validate_dataset_source_path is not None:
+            for source_path in dataset_source_paths:
+                validate_dataset_source_path(source_path)
         self.deleted.append(task_id)
         del self.tasks[task_id]
-        summary = {**self.purge_summary, "dataset_source_paths": []}
+        summary = {**self.purge_summary, "dataset_source_paths": dataset_source_paths}
         self.audits.append(
             {
                 "kind": "task.delete",
@@ -324,6 +339,8 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
         "strategies": 0,
         "backtests": 0,
         "sub_agents": 0,
+        "draft_tools": 0,
+        "draft_runs": 0,
     }
     monkeypatch.setattr("marvis.agent.validation_app_service.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.api_stage_helpers.TaskRepository", FakeTaskRepository)
@@ -2054,10 +2071,13 @@ def test_cancel_notebook_endpoint_requests_running_notebook_stop(
     monkeypatch,
 ):
     client = _client(tmp_path, monkeypatch)
-    requested: list[str] = []
+    requested: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
-        "marvis.routers.stage_controls.request_notebook_cancellation",
-        lambda task_id: requested.append(task_id) or True,
+        "marvis.routers.stage_controls.request_active_notebook_cancellation",
+        lambda task_id, *, expected_job_id=None: requested.append(
+            (task_id, expected_job_id)
+        )
+        or True,
         raising=False,
     )
     task_id = client.post(
@@ -2067,12 +2087,13 @@ def test_cancel_notebook_endpoint_requests_running_notebook_stop(
     FakeTaskRepository.tasks[task_id] = TaskRecord(
         **{**asdict(FakeTaskRepository.tasks[task_id]), "status": TaskStatus.RUNNING}
     )
+    job_id = FakeTaskRepository(Path("unused")).start_job(task_id, "notebook")
 
     response = client.post(f"/api/tasks/{task_id}/notebook/cancel")
 
     assert response.status_code == 202
     assert response.json()["status"] == "accepted"
-    assert requested == [task_id]
+    assert requested == [(task_id, job_id)]
 
 
 def test_cancel_notebook_endpoint_rejects_non_running_task(
@@ -2082,8 +2103,8 @@ def test_cancel_notebook_endpoint_rejects_non_running_task(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.routers.stage_controls.request_notebook_cancellation",
-        lambda task_id: requested.append(task_id) or True,
+        "marvis.routers.stage_controls.request_active_notebook_cancellation",
+        lambda task_id, *, expected_job_id=None: requested.append(task_id) or True,
         raising=False,
     )
     task_id = client.post(
@@ -2105,10 +2126,13 @@ def test_cancel_metrics_endpoint_requests_running_metrics_stop(
     monkeypatch,
 ):
     client = _client(tmp_path, monkeypatch)
-    requested: list[str] = []
+    requested: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
-        "marvis.routers.stage_controls.request_notebook_cancellation",
-        lambda task_id: requested.append(task_id) or True,
+        "marvis.routers.stage_controls.request_active_notebook_cancellation",
+        lambda task_id, *, expected_job_id=None: requested.append(
+            (task_id, expected_job_id)
+        )
+        or True,
         raising=False,
     )
     task_id = client.post(
@@ -2121,12 +2145,13 @@ def test_cancel_metrics_endpoint_requests_running_metrics_stop(
             "status": TaskStatus.COMPUTING_METRICS,
         }
     )
+    job_id = FakeTaskRepository(Path("unused")).start_job(task_id, "metrics")
 
     response = client.post(f"/api/tasks/{task_id}/metrics/cancel")
 
     assert response.status_code == 202
     assert response.json()["status"] == "accepted"
-    assert requested == [task_id]
+    assert requested == [(task_id, job_id)]
     marker_path = tmp_path / "tasks" / task_id / "execution" / "metrics_cancel.requested"
     assert marker_path.read_text(encoding="utf-8") == "cancelled\n"
 
@@ -2138,8 +2163,8 @@ def test_cancel_metrics_endpoint_rejects_non_running_metrics_task(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.routers.stage_controls.request_notebook_cancellation",
-        lambda task_id: requested.append(task_id) or True,
+        "marvis.routers.stage_controls.request_active_notebook_cancellation",
+        lambda task_id, *, expected_job_id=None: requested.append(task_id) or True,
         raising=False,
     )
     task_id = client.post(
@@ -2161,10 +2186,13 @@ def test_cancel_report_endpoint_requests_report_stop(
     monkeypatch,
 ):
     client = _client(tmp_path, monkeypatch)
-    requested: list[str] = []
+    requested: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
-        "marvis.routers.stage_controls.request_notebook_cancellation",
-        lambda task_id: requested.append(task_id) or True,
+        "marvis.routers.stage_controls.request_active_notebook_cancellation",
+        lambda task_id, *, expected_job_id=None: requested.append(
+            (task_id, expected_job_id)
+        )
+        or True,
         raising=False,
     )
     task_id = client.post(
@@ -2188,7 +2216,7 @@ def test_cancel_report_endpoint_requests_report_stop(
 
     assert response.status_code == 202
     assert response.json()["status"] == "accepted"
-    assert requested == [task_id]
+    assert requested == [(task_id, "job-report")]
 
 
 def test_cancel_report_endpoint_rejects_without_active_report_job(
@@ -2198,8 +2226,8 @@ def test_cancel_report_endpoint_rejects_without_active_report_job(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.routers.stage_controls.request_notebook_cancellation",
-        lambda task_id: requested.append(task_id) or True,
+        "marvis.routers.stage_controls.request_active_notebook_cancellation",
+        lambda task_id, *, expected_job_id=None: requested.append(task_id) or True,
         raising=False,
     )
     task_id = client.post(
@@ -2292,6 +2320,33 @@ def test_stage_job_dispatches_before_and_after_hooks(tmp_path: Path, monkeypatch
             task_id,
         ),
     ]
+
+
+def test_stage_job_does_not_execute_after_queued_job_is_cancelled(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from marvis.api import _run_stage_job
+
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
+    ).json()["id"]
+    repo = FakeTaskRepository(tmp_path / "marvis.sqlite")
+    job_id = repo.start_job(task_id, "report")
+    repo.finish_job(job_id, status="cancelled")
+    calls: list[str] = []
+
+    _run_stage_job(
+        job_id,
+        tmp_path / "marvis.sqlite",
+        lambda **_kwargs: calls.append("executed"),
+        {"task_id": task_id},
+    )
+
+    assert calls == []
+    assert FakeTaskRepository.jobs[job_id]["status"] == "cancelled"
 
 
 def test_metrics_endpoint_claims_computing_before_dispatching_stage(
@@ -2552,8 +2607,8 @@ def test_legacy_validate_endpoint_runs_staged_pipeline_for_cli_compatibility(
     client = _client(tmp_path, monkeypatch)
     calls = []
 
-    def fake_run_staged_pipeline(*, task_id, settings):
-        calls.append((task_id, settings))
+    def fake_run_staged_pipeline(*, task_id, settings, cancellation_job_id=None):
+        calls.append((task_id, settings, cancellation_job_id))
 
     monkeypatch.setattr("marvis.routers.validation_stages.run_staged_pipeline", fake_run_staged_pipeline)
     create = client.post(
@@ -2572,6 +2627,7 @@ def test_legacy_validate_endpoint_runs_staged_pipeline_for_cli_compatibility(
 
     assert response.status_code == 202
     assert calls[0][0] == task_id
+    assert calls[0][2] == "job-1"
 
 
 def test_validate_rejects_terminal_task_without_dispatching_pipeline(
@@ -2743,14 +2799,17 @@ def test_scan_endpoint_reports_notebook_contract_errors_before_execution(
     assert payload["status"] == "failed"
     checks = {check["id"]: check for check in payload["checks"]}
     assert checks["notebook_contract"]["status"] == "error"
-    assert (
-        checks["notebook_contract"]["message"]
-        == "Notebook RMC 契约检查失败：缺少 RMC_SCORE_FN（模型打分函数）。请在 Notebook 顶层定义后重新扫描。"
+    assert checks["notebook_contract"]["message"].startswith(
+        "Notebook RMC 契约检查失败：缺少 RMC_SCORE_FN（模型打分函数）。请在 Notebook 顶层定义后重新扫描。"
     )
+    assert str((source / "model.ipynb").resolve()) in checks["notebook_contract"]["message"]
+    assert "SHA-256：" in checks["notebook_contract"]["message"]
     assert "missing RMC_SCORE_FN" not in checks["notebook_contract"]["message"]
-    assert payload["status_message"] == (
+    assert payload["status_message"].startswith(
         "材料扫描失败：Notebook RMC 契约检查失败：缺少 RMC_SCORE_FN（模型打分函数）。请在 Notebook 顶层定义后重新扫描。"
     )
+    assert str((source / "model.ipynb").resolve()) in payload["status_message"]
+    assert "SHA-256：" in payload["status_message"]
     assert FakeTaskRepository.tasks[task_id].status == TaskStatus.FAILED
     assert FakeTaskRepository.tasks[task_id].status_message == payload["status_message"]
 
@@ -2794,16 +2853,20 @@ def test_scan_endpoint_translates_multiple_missing_rmc_contract_fields(
     payload = response.json()
     assert payload["status"] == "failed"
     checks = {check["id"]: check for check in payload["checks"]}
-    assert checks["notebook_contract"]["message"] == (
+    assert checks["notebook_contract"]["message"].startswith(
         "Notebook RMC 契约检查失败：缺少 "
         "RMC_SAMPLE_DF（样本 DataFrame）、RMC_SCORE_FN（模型打分函数）、"
         "RMC_TARGET_COL（目标列）、RMC_ALGORITHM（模型算法）。请在 Notebook 顶层定义后重新扫描。"
     )
-    assert payload["status_message"] == (
+    assert str((source / "model.ipynb").resolve()) in checks["notebook_contract"]["message"]
+    assert "SHA-256：" in checks["notebook_contract"]["message"]
+    assert payload["status_message"].startswith(
         "材料扫描失败：Notebook RMC 契约检查失败：缺少 "
         "RMC_SAMPLE_DF（样本 DataFrame）、RMC_SCORE_FN（模型打分函数）、"
         "RMC_TARGET_COL（目标列）、RMC_ALGORITHM（模型算法）。请在 Notebook 顶层定义后重新扫描。"
     )
+    assert str((source / "model.ipynb").resolve()) in payload["status_message"]
+    assert "SHA-256：" in payload["status_message"]
 
 
 def test_scan_endpoint_returns_422_when_source_dir_exceeds_limits(

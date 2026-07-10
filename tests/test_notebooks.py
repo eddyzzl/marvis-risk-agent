@@ -1038,6 +1038,81 @@ def test_prepare_execution_notebook_appends_generated_system_cells(tmp_path: Pat
     assert prepared.cells[-1].source == "write_metrics()"
 
 
+def test_prepare_execution_notebook_clears_saved_user_outputs(tmp_path: Path):
+    source_notebook = tmp_path / "source.ipynb"
+    output_notebook = tmp_path / "prepared.ipynb"
+    user_cell = nbformat.v4.new_code_cell(
+        "\n".join(
+            [
+                "import pandas as pd",
+                "RMC_SAMPLE_DF = pd.DataFrame({'x': [1.0], 'y': [0]})",
+                "RMC_TARGET_COL = 'y'",
+                "RMC_ALGORITHM = 'lgb'",
+                "def RMC_SCORE_FN(df):",
+                "    return [0.1 for _ in range(len(df))]",
+            ]
+        ),
+        execution_count=9,
+        outputs=[
+            nbformat.v4.new_output(
+                output_type="error",
+                ename="RuntimeError",
+                evalue="saved stale failure",
+                traceback=["RuntimeError: saved stale failure"],
+            )
+        ],
+    )
+    nbformat.write(nbformat.v4.new_notebook(cells=[user_cell]), source_notebook)
+
+    prepare_execution_notebook_v3(
+        source_notebook=source_notebook,
+        output_notebook=output_notebook,
+        sample_path=tmp_path / "sample.csv",
+        contract_meta_path=tmp_path / "runtime_contract.json",
+        code_scores_path=tmp_path / "code_model_scores.csv",
+        feature_importance_path=tmp_path / "feature_importance.csv",
+        model_params_path=tmp_path / "model_params.json",
+    )
+
+    prepared = nbformat.read(output_notebook, as_version=4)
+    prepared_user_cell = prepared.cells[1]
+    assert prepared_user_cell.outputs == []
+    assert prepared_user_cell.execution_count is None
+
+
+def test_prepare_execution_notebook_accepts_non_utf8_source_notebook(tmp_path: Path):
+    source_notebook = tmp_path / "source.ipynb"
+    output_notebook = tmp_path / "prepared.ipynb"
+    source_notebook.write_bytes(
+        (
+            '{"cells":[{"cell_type":"markdown","id":"markdown-1","metadata":{},'
+            '"source":["score · label"]},{"cell_type":"code","id":"code-1",'
+            '"metadata":{},"execution_count":null,"outputs":[],'
+            '"source":["RMC_SAMPLE_DF = sample_df\\n",'
+            '"RMC_TARGET_COL = \'y\'\\n","RMC_ALGORITHM = \'xgb\'\\n",'
+            '"def RMC_SCORE_FN(df):\\n","    return [0.1] * len(df)\\n"]}],'
+            '"metadata":{"kernelspec":{"name":"python3","display_name":"Python 3"}},'
+            '"nbformat":4,"nbformat_minor":5}'
+        ).encode("cp1252")
+    )
+
+    prepare_execution_notebook_v3(
+        source_notebook=source_notebook,
+        output_notebook=output_notebook,
+        sample_path=tmp_path / "sample.csv",
+        contract_meta_path=tmp_path / "runtime_contract.json",
+        code_scores_path=tmp_path / "code_model_scores.csv",
+        feature_importance_path=tmp_path / "feature_importance.csv",
+        model_params_path=tmp_path / "model_params.json",
+    )
+
+    prepared = nbformat.read(output_notebook, as_version=4)
+
+    assert prepared.cells[0].metadata.get("marvis") == "head"
+    assert prepared.cells[2].source.startswith("RMC_SAMPLE_DF")
+    assert prepared.cells[-1].metadata.get("marvis") == "tail"
+
+
 def test_run_notebook_isolated_worker_error_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     notebook_path = tmp_path / "source.ipynb"
     executed_path = tmp_path / "executed.ipynb"

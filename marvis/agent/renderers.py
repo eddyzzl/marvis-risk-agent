@@ -662,6 +662,7 @@ def _score_band_table(rows) -> dict | None:
     split = next((s for s in preferred_order if s in available_splits), rows[0].get("split"))
     split_rows = [row for row in rows if row.get("split") == split]
     split_rows.sort(key=lambda row: row.get("bin") if row.get("bin") is not None else 0)
+    has_unscored = any(int(row.get("unscored_count") or 0) > 0 for row in split_rows)
     chart = {
         "kind": "score_band_bars",
         "split": split,
@@ -676,21 +677,32 @@ def _score_band_table(rows) -> dict | None:
             for row in split_rows
         ],
     }
+    columns = ["分箱", "分数区间", "样本量", "坏率", "累计拒绝率", "拒绝人群坏率", "lift"]
+    if has_unscored:
+        columns.extend(["评分覆盖率", "未评分数"])
+    table_rows = []
+    for row in split_rows:
+        values = [
+            _num(row.get("bin")),
+            f"{_num(row.get('score_lower'))} - {_num(row.get('score_upper'))}",
+            _num(row.get("sample_count")),
+            _num(row.get("bad_rate")),
+            _num(row.get("cum_reject_rate", row.get("cum_count_pct"))),
+            _num(row.get("cum_bad_rate")),
+            _num(row.get("lift")),
+        ]
+        if has_unscored:
+            values.extend(
+                [
+                    _num(row.get("score_coverage")),
+                    _num(row.get("unscored_count")),
+                ]
+            )
+        table_rows.append(values)
     return {
         "title": f"评分分段（{split}）",
-        "columns": ["分箱", "分数区间", "样本量", "坏率", "累计通过率", "累计坏率", "lift"],
-        "rows": [
-            [
-                _num(row.get("bin")),
-                f"{_num(row.get('score_lower'))} - {_num(row.get('score_upper'))}",
-                _num(row.get("sample_count")),
-                _num(row.get("bad_rate")),
-                _num(row.get("cum_count_pct")),
-                _num(row.get("cum_bad_rate")),
-                _num(row.get("lift")),
-            ]
-            for row in split_rows
-        ],
+        "columns": columns,
+        "rows": table_rows,
         "chart": chart,
     }
 

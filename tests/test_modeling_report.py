@@ -360,6 +360,79 @@ def test_resolve_sections_and_render_model_report_degrades_missing_business_data
     assert any(status.section == "product_list" and not status.available for status in statuses)
 
 
+def test_model_report_labels_higher_risk_score_band_as_reject_side(tmp_path):
+    output = tmp_path / "model_report.xlsx"
+    render_model_report(
+        ModelReportPayload(
+            project_meta={},
+            dataset_split=[],
+            stability=[],
+            sample_analysis=[],
+            vintage=None,
+            feature_importance=[],
+            score_bands=[
+                {
+                    "split": "oot",
+                    "bin": 1,
+                    "score_lower": 0.7,
+                    "score_upper": 0.8,
+                    "sample_count": 40,
+                    "cum_count_pct": 0.4,
+                    "cum_bad_rate": 0.3,
+                    "bin_edges_source": "train",
+                    "cum_direction": "higher_is_riskier",
+                }
+            ],
+        ),
+        output,
+    )
+
+    sheet = load_workbook(output)["评分分段"]
+    assert "拒绝侧累计" in sheet["A1"].value
+    assert "cum_pass_rate = 1 - 拒绝率" in sheet["A1"].value
+    assert "先批核" not in sheet["A1"].value
+    assert "cutoff≈0.7" in sheet["A2"].value
+    assert "拒绝率约 40.00%" in sheet["A2"].value
+    assert "拒绝人群累计坏账率约 30.00%" in sheet["A2"].value
+    assert "通过率" not in sheet["A2"].value
+
+
+def test_model_report_worked_example_uses_full_population_reject_rate(tmp_path):
+    output = tmp_path / "model_report.xlsx"
+    render_model_report(
+        ModelReportPayload(
+            project_meta={},
+            dataset_split=[],
+            stability=[],
+            sample_analysis=[],
+            vintage=None,
+            feature_importance=[],
+            score_bands=[
+                {
+                    "split": "oot",
+                    "bin": 1,
+                    "score_lower": 0.7,
+                    "score_upper": 0.8,
+                    "sample_count": 40,
+                    "cum_count_pct": 0.5,
+                    "cum_reject_rate": 0.4,
+                    "cum_pass_rate": 0.4,
+                    "score_coverage": 0.8,
+                    "unscored_count": 20,
+                    "cum_bad_rate": 0.3,
+                    "bin_edges_source": "train",
+                    "cum_direction": "higher_is_riskier",
+                }
+            ],
+        ),
+        output,
+    )
+
+    sheet = load_workbook(output)["评分分段"]
+    assert "未评分样本" in sheet["A1"].value
+    assert "拒绝率约 40.00%" in sheet["A2"].value
+
+
 def test_non_binary_model_report_keeps_fixed_sheets_and_adds_metrics(tmp_path):
     from marvis.packs.modeling.contracts import Experiment, ModelMetrics, TrainConfig
 
@@ -917,6 +990,35 @@ def test_generate_scorecard_report_keeps_pd_and_points_separate(tmp_path):
     assert base_row["points"] > 100
 
 
+def test_scorecard_report_adds_points_when_input_already_has_score(tmp_path):
+    runner, settings, task, dataset = _report_runner(tmp_path)
+    experiment_id = _train_report_experiment(
+        runner,
+        task,
+        dataset,
+        "scorecard",
+        {"scorecard_max_bins": 3, "max_iter": 200},
+    )
+    dataset_path = settings.datasets_dir / dataset.source_path
+    frame = pd.read_parquet(dataset_path)
+    frame["score"] = 0.5
+    frame[modeling_tools.SCORECARD_POINTS_COL] = -999.0
+    frame.to_parquet(dataset_path, index=False)
+
+    report = runner.invoke(
+        ToolRef("modeling", "generate_model_report"),
+        {"experiment_id": experiment_id, "dataset_id": dataset.id},
+        task_id=task.id,
+    )
+
+    assert report.ok is True, report.error
+    scored_path = settings.tasks_dir / task.id / "outputs" / "model_report_scored.parquet"
+    scored_frame = pd.read_parquet(scored_path)
+    assert "score" in scored_frame.columns
+    assert modeling_tools.SCORECARD_POINTS_COL in scored_frame.columns
+    assert not (scored_frame[modeling_tools.SCORECARD_POINTS_COL] == -999.0).any()
+
+
 def test_generate_model_report_audit_failure_rolls_back_report_file(tmp_path, monkeypatch: pytest.MonkeyPatch):
     """LT-5: report_tools now stages report_path via ArtifactUnitOfWork instead of
     writing directly to the final path -- a failure in the audit write that follows
@@ -1131,17 +1233,50 @@ def test_score_band_rows_cumulative_columns_are_hand_computable_and_monotonic(tm
     # higher_is_riskier -> cumulation starts at the highest bin (bin 2) first.
     assert by_bin[2]["cum_direction"] == "higher_is_riskier"
     assert by_bin[2]["cum_count_pct"] == pytest.approx(4 / 8)
+    assert by_bin[2]["cum_reject_rate"] == pytest.approx(4 / 8)
+    assert by_bin[2]["cum_pass_rate"] == pytest.approx(4 / 8)
     assert by_bin[2]["cum_bad_rate"] == pytest.approx(3 / 4)
     assert by_bin[2]["cum_bad_capture"] == pytest.approx(3 / 4)
+    assert by_bin[2]["ks_contribution"] == pytest.approx(0.5)
     assert by_bin[1]["cum_count_pct"] == pytest.approx(8 / 8)
+    assert by_bin[1]["cum_reject_rate"] == pytest.approx(8 / 8)
+    assert by_bin[1]["cum_pass_rate"] == pytest.approx(0 / 8)
     assert by_bin[1]["cum_bad_rate"] == pytest.approx(4 / 8)
     assert by_bin[1]["cum_bad_capture"] == pytest.approx(4 / 4)
+    assert by_bin[1]["ks_contribution"] == pytest.approx(0.0)
     # Monotonic non-decreasing along the cumulation order (bin2 then bin1).
     ordered = [by_bin[2], by_bin[1]]
     cum_counts = [row["cum_count_pct"] for row in ordered]
     cum_captures = [row["cum_bad_capture"] for row in ordered]
     assert cum_counts == sorted(cum_counts)
     assert cum_captures == sorted(cum_captures)
+
+
+def test_score_band_rates_account_for_unscored_population(tmp_path):
+    frame = pd.DataFrame({
+        "score": [0.1, 0.2, 0.8, 0.9, float("nan")],
+        "y": [0, 1, 1, 0, 1],
+        "split": ["train"] * 5,
+    })
+    runtime, path = _score_band_runtime(tmp_path, frame)
+
+    rows = modeling_tools._score_band_rows(
+        runtime,
+        path,
+        score_col="score",
+        target_col="y",
+        config=_score_band_config(split_values={"train": "train"}),
+        bin_count=2,
+    )
+
+    by_bin = {row["bin"]: row for row in rows}
+    assert by_bin[2]["cum_count_pct"] == pytest.approx(2 / 4)
+    assert by_bin[2]["cum_reject_rate"] == pytest.approx(2 / 5)
+    assert by_bin[2]["cum_pass_rate"] == pytest.approx(2 / 5)
+    assert by_bin[2]["unscored_count"] == 1
+    assert by_bin[2]["score_coverage"] == pytest.approx(4 / 5)
+    assert by_bin[1]["cum_reject_rate"] == pytest.approx(4 / 5)
+    assert by_bin[1]["cum_pass_rate"] == pytest.approx(0 / 5)
 
 
 def test_score_band_rows_higher_is_better_direction_cumulates_from_low_bin_up(tmp_path):
@@ -1168,7 +1303,13 @@ def test_score_band_rows_higher_is_better_direction_cumulates_from_low_bin_up(tm
     assert by_bin[1]["cum_direction"] == "higher_is_better"
     # Cumulation starts at bin 1 (lowest points = highest risk) for higher_is_better.
     assert by_bin[1]["cum_count_pct"] == pytest.approx(4 / 8)
+    assert by_bin[1]["cum_reject_rate"] == pytest.approx(4 / 8)
+    assert by_bin[1]["cum_pass_rate"] == pytest.approx(4 / 8)
+    assert by_bin[1]["ks_contribution"] == pytest.approx(0.5)
     assert by_bin[2]["cum_count_pct"] == pytest.approx(8 / 8)
+    assert by_bin[2]["cum_reject_rate"] == pytest.approx(8 / 8)
+    assert by_bin[2]["cum_pass_rate"] == pytest.approx(0 / 8)
+    assert by_bin[2]["ks_contribution"] == pytest.approx(0.0)
 
 
 def test_score_band_rows_handles_no_oot_split(tmp_path):

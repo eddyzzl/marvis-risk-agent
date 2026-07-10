@@ -18,7 +18,13 @@ export function renderModelingSetupPanel(message, options = {}) {
     : "-";
   const primaryRecipe = String(setup.recipe || (Array.isArray(setup.recipes) ? setup.recipes[0] : "") || "-");
   const featureCount = Number.isFinite(Number(setup.feature_count)) ? String(Number(setup.feature_count)) : "-";
-  const nTrials = Number.isFinite(Number(setup.n_trials)) ? String(Number(setup.n_trials)) : "-";
+  const rawNTrials = setup.n_trials;
+  const nTrials = rawNTrials !== null
+    && rawNTrials !== undefined
+    && String(rawNTrials).trim() !== ""
+    && Number.isFinite(Number(rawNTrials))
+    ? String(Number(rawNTrials))
+    : "-";
   const metricPolicy = String(setup.metric_policy || "-");
   const supportedPmml = new Set(Array.isArray(setup.pmml_supported_algorithms)
     ? setup.pmml_supported_algorithms.map((item) => String(item))
@@ -268,9 +274,13 @@ function collectModelingSetupAdjustParams(form) {
   }
   const nTrials = form.querySelector(".modeling-n-trials-input");
   if (nTrials) {
-    const value = Number(nTrials.value);
-    const current = Number(nTrials.getAttribute("data-current-n-trials") || NaN);
-    if (Number.isFinite(value) && value !== current) params.n_trials = value;
+    const rawValue = String(nTrials.value ?? "").trim();
+    const rawCurrent = String(nTrials.getAttribute("data-current-n-trials") ?? "").trim();
+    if (rawValue) {
+      const value = Number(rawValue);
+      const current = rawCurrent ? Number(rawCurrent) : null;
+      if (Number.isFinite(value) && value !== current) params.n_trials = value;
+    }
   }
   const recipeControl = form.querySelector(".modeling-recipe-control");
   if (recipeControl) {
@@ -281,7 +291,9 @@ function collectModelingSetupAdjustParams(form) {
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean);
-    if (selected.join(",") !== current.join(",")) params.recipes = selected;
+    const selectedSet = [...new Set(selected)].sort();
+    const currentSet = [...new Set(current)].sort();
+    if (selectedSet.join(",") !== currentSet.join(",")) params.recipes = selected;
   }
   const picked = form.querySelector(".modeling-weight-pick:checked");
   const sampleWeightCol = picked ? String(picked.value || "").trim() : "";

@@ -22,6 +22,7 @@ from marvis.errors import conflict, not_implemented, unprocessable
 from marvis.agent.orchestrator import (
     agent_next_stage,
     is_metrics_failure,
+    register_agent_cancellation,
     request_agent_cancellation,
 )
 from marvis.agent.service import (
@@ -278,7 +279,8 @@ def dispatch_driver_turn(
         job_id = repo_.start_job(task.id, _DRIVER_JOB_KIND)
     except ConflictError as exc:
         raise conflict(_DRIVER_JOB_BUSY_DETAIL) from exc
-    repo_.mark_job_running(job_id)
+    if repo_.mark_job_running(job_id) is False:
+        raise conflict(_DRIVER_JOB_BUSY_DETAIL)
     runtime = DriverTurnRuntime(
         settings=request.app.state.settings,
         plan_repo=request.app.state.plan_repo,
@@ -317,57 +319,63 @@ def dispatch_agent_validation_job(
     forced_stage: str | None = None,
     stage_instruction: str | None = None,
 ) -> dict:
-    clear_agent_cancellation(task.id)
     normalized_acceptance_mode = normalize_agent_acceptance_mode(acceptance_mode)
     auto_accept = agent_auto_accept(normalized_acceptance_mode)
     stage = forced_stage or agent_next_stage(repo_, task, scan_failure_prefix=SCAN_FAILURE_PREFIX)
     job_id = start_task_job(repo_, task.id, "agent")
-    should_create_opening_message = not (auto_accept and stage and stage != "scan")
-    opening_message = (
-        add_streaming_agent_message(
-            repo_,
+    register_agent_cancellation(task.id, job_id)
+    try:
+        should_create_opening_message = not (auto_accept and stage and stage != "scan")
+        opening_message = (
+            add_streaming_agent_message(
+                repo_,
+                task.id,
+                stage="chat",
+                model_profile=model_profile,
+            )
+            if should_create_opening_message
+            else None
+        )
+        if opening_message and stage and stage != "scan":
+            finalize_agent_opening_message(
+                repo_,
+                task_id=task.id,
+                message_id=opening_message["id"],
+                model_profile=model_profile,
+                content=agent_stage_opening_text(stage),
+            )
+        stage_message = None
+        if stage == "word_conclusion_draft":
+            stage_message = add_streaming_agent_message(
+                repo_,
+                task.id,
+                stage="word_conclusion_draft",
+                model_profile=model_profile,
+            )
+        messages = repo_.list_agent_messages(task.id)
+        background_tasks.add_task(
+            run_agent_validation_job,
+            job_id,
+            settings,
             task.id,
-            stage="chat",
-            model_profile=model_profile,
+            model_profile,
+            opening_message["id"] if opening_message else None,
+            stage,
+            stage_message["id"] if stage_message else None,
+            normalized_acceptance_mode,
+            stage_instruction,
         )
-        if should_create_opening_message
-        else None
-    )
-    if opening_message and stage and stage != "scan":
-        finalize_agent_opening_message(
-            repo_,
-            task_id=task.id,
-            message_id=opening_message["id"],
-            model_profile=model_profile,
-            content=agent_stage_opening_text(stage),
-        )
-    stage_message = None
-    if stage == "word_conclusion_draft":
-        stage_message = add_streaming_agent_message(
-            repo_,
-            task.id,
-            stage="word_conclusion_draft",
-            model_profile=model_profile,
-        )
-    background_tasks.add_task(
-        run_agent_validation_job,
-        job_id,
-        settings,
-        task.id,
-        model_profile,
-        opening_message["id"] if opening_message else None,
-        stage,
-        stage_message["id"] if stage_message else None,
-        normalized_acceptance_mode,
-        stage_instruction,
-    )
+    except Exception as exc:
+        fail_queued_job(repo_, job_id, exc)
+        clear_agent_cancellation(task.id, job_id=job_id)
+        raise
     return {
         "task_id": task.id,
         "status": "accepted",
         "stage": stage,
         "acceptance_mode": normalized_acceptance_mode,
         "message": "agent validation dispatched; poll task and agent messages",
-        "messages": repo_.list_agent_messages(task.id),
+        "messages": messages,
     }
 
 
@@ -432,6 +440,7 @@ def confirm_agent_report_conclusions(
         {
             "task_id": task_id,
             "settings": agent_pipeline_settings(settings, latest_task),
+            "cancellation_job_id": job_id,
         },
         success_agent_notice="word_report_ready",
         hook_dispatcher=hook_dispatcher,

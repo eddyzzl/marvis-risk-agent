@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 VALIDATION_RESULTS_PICKLE = "validation_results.pkl"
 REPRODUCIBILITY_RESULT_JSON = "reproducibility_result.json"
 METRICS_CANCEL_MARKER = "metrics_cancel.requested"
+STRESS_SCENARIO_SCORES_JSON = "stress_scenario_scores.json"
 SCAN_STAGE_FAILURE_PREFIX = "材料扫描失败："
 
 def _required_path(
@@ -272,6 +273,8 @@ def _clear_generated_artifacts(task_dir: Path, *, stage: str) -> None:
             "model_params.json",
             "model_meta.json",
             "notebook_steps.json",
+            "metrics_steps.json",
+            STRESS_SCENARIO_SCORES_JSON,
             METRICS_CANCEL_MARKER,
         ):
             _unlink_if_exists(execution_dir / name)
@@ -285,6 +288,7 @@ def _clear_generated_artifacts(task_dir: Path, *, stage: str) -> None:
             "metrics_notebook.log",
         ):
             _unlink_if_exists(outputs_dir / name)
+        _remove_dir_if_exists(outputs_dir / ".metrics-stage-work")
         _remove_dir_if_exists(images_dir)
         return
 

@@ -276,9 +276,31 @@ class _RuleSelectionAdapter:
 # ---------------------------------------------------------------------------
 # strategy-monitoring disposition adapter (render_monitoring_report gate)
 # ---------------------------------------------------------------------------
-_MONITORING_NEW_VERSION = re.compile(r"(起新版本|新版本|新起一版|起一版|重起|new\s*version|new\s*strategy)", re.IGNORECASE)
-_MONITORING_ADJUST = re.compile(r"(调阈值|改阈值|调整阈值|调门槛|调参|adjust\s*threshold|retune|re-?run)", re.IGNORECASE)
-_MONITORING_OBSERVE = re.compile(r"(维持|观察|保持|继续观察|再看看|keep\s*watch|observe|hold)", re.IGNORECASE)
+_MONITORING_NEW_VERSION = re.compile(
+    r"(?:起新版本|新版本|新起一版|起一版|重起)|\bnew\s+(?:version|strategy)\b",
+    re.IGNORECASE,
+)
+_MONITORING_ADJUST = re.compile(
+    r"(?:调阈值|改阈值|调整阈值|调门槛)|\badjust\s+threshold\b",
+    re.IGNORECASE,
+)
+_MONITORING_OBSERVE = re.compile(
+    r"观察|\b(?:keep\s+watch(?:ing)?|observe)\b",
+    re.IGNORECASE,
+)
+_MONITORING_QUESTION = re.compile(
+    r"[?？]|(?:吗|呢)\s*[。.!！]?$|是否|是不是|要不要|该不该|能不能|可不可以|还是",
+    re.IGNORECASE,
+)
+_MONITORING_NEGATION = re.compile(
+    r"(?:不|没|无|勿|别|反对|拒绝|取消|暂停|停止|暂缓)|"
+    r"(?:(?:不建议|没有必要|没必要|不认为|不主张|不应|不该)"
+    r"[^，。；;！？!?\n]{0,12}(?:观察|阈值|版本))|"
+    r"(?:不要|不用|无需|不需要|勿|别|取消|暂停|停止|暂不|先不|"
+    r"不(?:观察|调|调整|改|起|开|做|维持|保持|继续|采用|选择))|"
+    r"\b(?:do\s+not|don't|dont|not|never|without)\b",
+    re.IGNORECASE,
+)
 
 _MONITORING_DISPOSITIONS = ("observe", "adjust_threshold", "new_version")
 
@@ -286,23 +308,27 @@ _MONITORING_DISPOSITIONS = ("observe", "adjust_threshold", "new_version")
 def parse_monitoring_disposition(text: str) -> str | None:
     """Parse a strategy-monitoring alarm-gate reply into a disposition keyword.
 
-    Recognises the three red-light checklist choices (spec S5), most-specific
-    first so 「起新版本」 wins over a co-occurring 「观察」:
+    Recognises exactly one explicit red-light checklist choice (spec S5):
       * 「起新版本」/「新版本」/「new version」        -> "new_version"
       * 「调阈值」/「调整阈值」/「adjust threshold」    -> "adjust_threshold"
-      * 「维持」/「观察」/「保持」/「observe」          -> "observe"
+      * 「观察」/「observe」/「keep watch」             -> "observe"
 
-    Returns None when the reply names no disposition (a plain 「确认」 or an
-    unrelated instruction), so it falls through to the normal confirm/route path.
+    Questions, negations, generic wording such as 「保持」, and replies naming
+    multiple choices return None so they fall through to the normal router.
     """
     raw = text or ""
-    if _MONITORING_NEW_VERSION.search(raw):
-        return "new_version"
-    if _MONITORING_ADJUST.search(raw):
-        return "adjust_threshold"
-    if _MONITORING_OBSERVE.search(raw):
-        return "observe"
-    return None
+    if _MONITORING_QUESTION.search(raw) or _MONITORING_NEGATION.search(raw):
+        return None
+    matches = [
+        disposition
+        for disposition, pattern in (
+            ("new_version", _MONITORING_NEW_VERSION),
+            ("adjust_threshold", _MONITORING_ADJUST),
+            ("observe", _MONITORING_OBSERVE),
+        )
+        if pattern.search(raw)
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 class _MonitoringDispositionAdapter:

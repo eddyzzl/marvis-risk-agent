@@ -463,10 +463,11 @@ def _score_band_rows(
 
     Cumulation direction (cum_count_pct / cum_bad_rate / cum_bad_capture) follows
     ``_score_band_direction``: for a higher-is-riskier PD score, cumulation runs from
-    the highest bin down (an "approve everyone at or below this score" cutoff reading);
-    for higher-is-better scorecard points, it runs from the lowest bin up. Either way
-    ``cum_count_pct`` reads as "share of population that would be approved if the
-    cutoff were placed at this band's boundary".
+    the highest bin down; for higher-is-better scorecard points, it runs from the
+    lowest bin up. Both walks therefore start at the riskiest band, so
+    ``cum_count_pct`` is the rejected share within scored rows. Operational
+    ``cum_reject_rate``/``cum_pass_rate`` use the full split population as their
+    denominator; unscored rows are reported separately through coverage fields.
     """
     from marvis.validation.binning import assign_bins, equal_frequency_bin_edges
 
@@ -509,16 +510,19 @@ def _score_band_rows(
         assigned = assign_bins(scores, edges)
         labels = pd.to_numeric(split_frame[target_col], errors="coerce").to_numpy(dtype=float)
         labeled_mask = np.isfinite(labels)
+        split_sample_count = int(len(split_frame))
         total_count = int(np.sum(assigned > 0))
+        unscored_count = split_sample_count - total_count
+        score_coverage = (
+            total_count / split_sample_count if split_sample_count else None
+        )
         total_labeled = int(np.sum(labeled_mask & (assigned > 0)))
         total_bad = int(np.sum(labels[labeled_mask & (assigned > 0)] == 1)) if total_labeled else 0
         overall_bad_rate = (total_bad / total_labeled) if total_labeled else None
         overall_bad_rate_by_split[split_name] = overall_bad_rate
 
-        # Cumulation walks bin indices in "approval order": worst-score-first for a
-        # higher-is-riskier score (approving low scores first) or best-score-first for
-        # higher-is-better points -- either way starting from bin index len(edges)-1
-        # down to 1 for higher_is_riskier, or 1 up to len(edges)-1 for higher_is_better.
+        # Cumulation walks bin indices in rejection order: highest PD first for a
+        # higher-is-riskier score, or lowest points first for higher-is-better.
         bin_indices = list(range(1, len(edges)))
         cum_order = list(reversed(bin_indices)) if direction == "higher_is_riskier" else bin_indices
         band_rows: dict[int, dict] = {}
@@ -536,6 +540,14 @@ def _score_band_rows(
             cum_labeled += labeled_count
             cum_bad += bad_count
             cum_count_pct = (cum_count / total_count) if total_count else None
+            cum_reject_rate = (
+                cum_count / split_sample_count if split_sample_count else None
+            )
+            cum_pass_rate = (
+                (total_count - cum_count) / split_sample_count
+                if split_sample_count
+                else None
+            )
             cum_bad_rate = (cum_bad / cum_labeled) if cum_labeled else None
             cum_bad_capture = (cum_bad / total_bad) if total_bad else None
             lift = (bad_rate / overall_bad_rate) if bad_rate is not None and overall_bad_rate else None
@@ -545,6 +557,10 @@ def _score_band_rows(
                 "score_lower": float(edges[bin_index - 1]) if np.isfinite(edges[bin_index - 1]) else None,
                 "score_upper": float(edges[bin_index]) if np.isfinite(edges[bin_index]) else None,
                 "sample_count": count,
+                "split_sample_count": split_sample_count,
+                "scored_count": total_count,
+                "unscored_count": unscored_count,
+                "score_coverage": score_coverage,
                 "labeled_count": labeled_count if count else None,
                 "bad_count": bad_count if count and labeled_count else None,
                 "bad_rate": bad_rate if count else None,
@@ -552,7 +568,8 @@ def _score_band_rows(
                 "cum_count_pct": cum_count_pct if count else None,
                 "cum_bad_rate": cum_bad_rate if count else None,
                 "cum_bad_capture": cum_bad_capture if count else None,
-                "cum_pass_rate": cum_count_pct if count else None,
+                "cum_reject_rate": cum_reject_rate if count else None,
+                "cum_pass_rate": cum_pass_rate if count else None,
                 "lift": lift if count else None,
                 "bin_edges_source": edges_source,
                 "cum_direction": direction,
@@ -572,13 +589,20 @@ def _score_band_rows(
 
 def _annotate_score_band_ks(rows: list[dict], overall_bad_rate_by_split: dict[str, float | None]) -> None:
     """Adds a per-row ``ks_contribution`` = |cum_bad_pct - cum_good_pct| within each
-    split, walking rows in the same cumulation order they were produced in (already
-    grouped by split, in cum_order). Purely derived from fields already on each row --
-    no extra data pass, deterministic (INV-1)."""
+    split, walking the same risk-first order used by the cumulative reject fields.
+    Rows are returned in ascending bin order for display, so the calculation must
+    explicitly reverse higher-is-riskier bins. Purely derived from fields already
+    on each row -- no extra data pass, deterministic (INV-1)."""
     by_split: dict[str, list[dict]] = {}
     for row in rows:
         by_split.setdefault(row["split"], []).append(row)
     for split_name, split_rows in by_split.items():
+        direction = split_rows[0].get("cum_direction") or "higher_is_riskier"
+        calculation_rows = sorted(
+            split_rows,
+            key=lambda row: int(row.get("bin") or 0),
+            reverse=direction == "higher_is_riskier",
+        )
         overall_bad_rate = overall_bad_rate_by_split.get(split_name)
         total_labeled = sum(row["labeled_count"] or 0 for row in split_rows)
         total_bad = sum(row["bad_count"] or 0 for row in split_rows)
@@ -589,7 +613,7 @@ def _annotate_score_band_ks(rows: list[dict], overall_bad_rate_by_split: dict[st
             continue
         cum_bad = 0
         cum_good = 0
-        for row in split_rows:
+        for row in calculation_rows:
             bad_count = row["bad_count"] or 0
             labeled_count = row["labeled_count"] or 0
             good_count = labeled_count - bad_count
@@ -710,7 +734,12 @@ def _report_scored_dataset(
     dataset_id: str,
 ) -> tuple[Path, str, pd.DataFrame | None]:
     columns = runtime.backend.column_names(dataset_path)
-    if "score" in columns:
+    has_input_score = "score" in columns
+    needs_scorecard_points = (
+        artifact is not None
+        and artifact.algorithm == "scorecard"
+    )
+    if has_input_score and not needs_scorecard_points:
         return dataset_path, "score", None
     if artifact is None:
         # No trained artifact and no explicit `score` column: there is no real model
@@ -721,19 +750,22 @@ def _report_scored_dataset(
 
     frame = runtime.backend.read_frame(dataset_path)
     scorer = _ModelArtifactScorer(artifact, base_dir=_artifact_model_base_dir(runtime, artifact))
-    frame[MODEL_REPORT_SCORE_COL] = scorer.score(frame)
-    scorecard_points = scorer.scorecard_points(frame)
-    if scorecard_points is not None:
-        frame[SCORECARD_POINTS_COL] = scorecard_points
+    score_col = "score" if has_input_score else MODEL_REPORT_SCORE_COL
+    if not has_input_score:
+        frame[MODEL_REPORT_SCORE_COL] = scorer.score(frame)
+    if needs_scorecard_points or not has_input_score:
+        scorecard_points = scorer.scorecard_points(frame)
+        if scorecard_points is not None:
+            frame[SCORECARD_POINTS_COL] = scorecard_points
     out_path = Path(runtime.settings.tasks_dir) / task_id / "outputs" / "model_report_scored.parquet"
-    artifact = TransactionalArtifactStore(out_path.parent).stage(out_path.name)
+    staged_artifact = TransactionalArtifactStore(out_path.parent).stage(out_path.name)
     try:
-        frame.to_parquet(artifact.path, index=False)
-        final_path = artifact.promote()
-        artifact.commit()
-        return final_path, MODEL_REPORT_SCORE_COL, frame
+        frame.to_parquet(staged_artifact.path, index=False)
+        final_path = staged_artifact.promote()
+        staged_artifact.commit()
+        return final_path, score_col, frame
     except Exception:
-        artifact.rollback()
+        staged_artifact.rollback()
         raise
 
 

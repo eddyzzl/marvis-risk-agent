@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -171,9 +172,20 @@ class TaskRepository:
         summary.pop("_dataset_source_paths", None)
         return summary
 
-    def purge_task(self, task_id: str, *, actor: str = "system") -> dict:
+    def purge_task(
+        self,
+        task_id: str,
+        *,
+        actor: str = "system",
+        validate_dataset_source_path: Callable[[str], None] | None = None,
+    ) -> dict:
         with connect(self.db_path) as conn:
-            return self.purge_task_on_connection(conn, task_id, actor=actor)
+            return self.purge_task_on_connection(
+                conn,
+                task_id,
+                actor=actor,
+                validate_dataset_source_path=validate_dataset_source_path,
+            )
 
     def purge_task_on_connection(
         self,
@@ -181,12 +193,30 @@ class TaskRepository:
         task_id: str,
         *,
         actor: str = "system",
+        validate_dataset_source_path: Callable[[str], None] | None = None,
     ) -> dict:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
             raise KeyError(f"Task not found: {task_id}")
+        active_job = conn.execute(
+            """
+            SELECT id
+              FROM jobs
+             WHERE task_id = ?
+               AND status IN ('queued', 'running')
+             LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if active_job is not None:
+            raise ConflictError(f"task {task_id} has an active job")
         summary = _task_purge_summary(conn, task_id)
         source_paths = summary.pop("_dataset_source_paths")
+        if validate_dataset_source_path is not None:
+            for source_path in source_paths:
+                validate_dataset_source_path(source_path)
         # datasets/joins/plans/experiments/strategies/sub_agents have no ON DELETE
         # CASCADE from tasks (see marvis/db_schema.py); their own children
         # (model_artifacts, backtests, plan_steps/outputs/runs) do cascade once the
@@ -197,6 +227,8 @@ class TaskRepository:
         conn.execute("DELETE FROM experiments WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM strategies WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM sub_agents WHERE parent_task_id = ?", (task_id,))
+        conn.execute("DELETE FROM draft_runs WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM draft_tools WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         _write_audit_row(
             conn,
@@ -466,19 +498,26 @@ class TaskRepository:
             ) from exc
         return job_id
 
-    def mark_job_running(self, job_id: str) -> None:
+    def mark_job_running(self, job_id: str) -> bool:
+        """Atomically claim a queued job for execution.
+
+        Returns False when cancellation, watchdog recovery, or another callback
+        already moved the job out of queued, so a late callback cannot resurrect it.
+        """
         now = _now()
         with connect(self.db_path) as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE jobs
                    SET status = 'running',
                        started_at = COALESCE(started_at, ?),
                        heartbeat_at = ?
                  WHERE id = ?
+                   AND status = 'queued'
                 """,
                 (now, now, job_id),
             )
+        return cursor.rowcount > 0
 
     def touch_job_heartbeat(self, job_id: str) -> bool:
         """Bump ``heartbeat_at`` for a still-running job (REL-5). Long job
@@ -500,10 +539,11 @@ class TaskRepository:
         return cursor.rowcount > 0
 
     def count_heartbeat_stale_running_jobs(self, *, older_than_seconds: int) -> int:
-        """Read-only count of RUNNING jobs whose heartbeat is already stale
-        (would be released by the next watchdog sweep). Exposed on /api/health
-        so "stuck" is at least observable (REL-5) without waiting for the
-        watchdog to actually fire."""
+        """Count active jobs that the next watchdog sweep would release.
+
+        This includes both RUNNING jobs with a stale heartbeat and QUEUED jobs
+        whose callback never claimed them, matching the sweep's release set.
+        """
         cutoff = (
             datetime.now(UTC) - timedelta(seconds=older_than_seconds)
         ).isoformat()
@@ -512,21 +552,28 @@ class TaskRepository:
                 """
                 SELECT COUNT(*) AS stale_count
                   FROM jobs
-                 WHERE status = 'running'
-                   AND COALESCE(heartbeat_at, started_at, created_at) <= ?
+                 WHERE (status = 'running'
+                        AND COALESCE(heartbeat_at, started_at, created_at) <= ?)
+                    OR (status = 'queued' AND created_at <= ?)
                 """,
-                (cutoff,),
+                (cutoff, cutoff),
             ).fetchone()
         return int(row["stale_count"]) if row is not None else 0
 
-    def fail_heartbeat_lost_jobs(self, *, older_than_seconds: int) -> list[dict]:
-        """Watchdog sweep (REL-5): fail every RUNNING job whose heartbeat
-        (falling back to started_at/created_at for jobs predating this column,
-        or one that never ticked) is older than the threshold, releasing
+    def fail_heartbeat_lost_jobs(
+        self,
+        *,
+        older_than_seconds: int,
+        include_running: bool = True,
+    ) -> list[dict]:
+        """Watchdog sweep (REL-5): fail every queued job that never started and
+        every running job whose heartbeat (falling back to started_at/created_at
+        for jobs predating this column) is older than the threshold, releasing
         idx_jobs_active_task so the task isn't wedged behind a 409 forever
-        because a background thread hung. Select-then-update inside one
-        connection/transaction so a job that finishes normally in the same
-        instant it goes stale can't be double-failed; each release is audited.
+        because background registration was lost or an executor thread hung.
+        Select-then-CAS-update inside one connection/transaction so a job that
+        starts or finishes normally in the same instant it goes stale can't be
+        double-failed; each release is audited.
         Returns the released job rows (id/task_id/kind)."""
         cutoff = (
             datetime.now(UTC) - timedelta(seconds=older_than_seconds)
@@ -534,47 +581,113 @@ class TaskRepository:
         now = _now()
         released: list[dict] = []
         with connect(self.db_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT id, task_id, kind
-                  FROM jobs
-                 WHERE status = 'running'
-                   AND COALESCE(heartbeat_at, started_at, created_at) <= ?
-                """,
-                (cutoff,),
-            ).fetchall()
+            if include_running:
+                rows = conn.execute(
+                    """
+                    SELECT id, task_id, kind, status
+                      FROM jobs
+                     WHERE (status = 'running'
+                            AND COALESCE(heartbeat_at, started_at, created_at) <= ?)
+                        OR (status = 'queued' AND created_at <= ?)
+                    """,
+                    (cutoff, cutoff),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, task_id, kind, status
+                      FROM jobs
+                     WHERE status = 'queued' AND created_at <= ?
+                    """,
+                    (cutoff,),
+                ).fetchall()
             for row in rows:
                 job_id = str(row["id"])
+                previous_status = str(row["status"])
+                error_name = (
+                    "JobStartLost" if previous_status == "queued" else "HeartbeatLost"
+                )
+                error_value = (
+                    f"job remained queued for more than {older_than_seconds}s without starting"
+                    if previous_status == "queued"
+                    else f"job heartbeat exceeded {older_than_seconds}s without an update"
+                )
                 cursor = conn.execute(
                     """
                     UPDATE jobs
                        SET status = 'failed',
-                           error_name = 'HeartbeatLost',
+                           error_name = ?,
                            error_value = ?,
                            finished_at = ?
                      WHERE id = ?
-                       AND status = 'running'
+                       AND status = ?
                     """,
                     (
-                        f"job heartbeat exceeded {older_than_seconds}s without an update",
+                        error_name,
+                        error_value,
                         now,
                         job_id,
+                        previous_status,
                     ),
                 )
                 if cursor.rowcount == 0:
                     continue
                 released.append(
-                    {"id": job_id, "task_id": str(row["task_id"]), "kind": str(row["kind"])}
+                    {
+                        "id": job_id,
+                        "task_id": str(row["task_id"]),
+                        "kind": str(row["kind"]),
+                        "previous_status": previous_status,
+                    }
                 )
+                task_state_closed = False
+                if previous_status == "queued":
+                    task_failure = {
+                        "notebook": (
+                            TaskStatus.RUNNING,
+                            "模型可复现性验证失败：后台任务排队超时，未开始执行",
+                        ),
+                        "metrics": (
+                            TaskStatus.COMPUTING_METRICS,
+                            "模型效果&稳定性验证失败：后台任务排队超时，未开始执行",
+                        ),
+                    }.get(str(row["kind"]))
+                    if task_failure is not None:
+                        expected_status, status_message = task_failure
+                        task_cursor = conn.execute(
+                            """
+                            UPDATE tasks
+                               SET status = ?,
+                                   status_message = ?,
+                                   status_reason_code = '',
+                                   updated_at = ?
+                             WHERE id = ?
+                               AND status = ?
+                            """,
+                            (
+                                TaskStatus.FAILED.value,
+                                status_message,
+                                now,
+                                str(row["task_id"]),
+                                expected_status.value,
+                            ),
+                        )
+                        task_state_closed = task_cursor.rowcount > 0
                 _write_audit_row(
                     conn,
-                    kind="job.heartbeat_lost",
+                    kind=(
+                        "job.start_lost"
+                        if previous_status == "queued"
+                        else "job.heartbeat_lost"
+                    ),
                     target_ref=job_id,
                     outcome="failed",
                     detail={
                         "task_id": str(row["task_id"]),
                         "job_kind": str(row["kind"]),
+                        "previous_status": previous_status,
                         "stale_after_seconds": older_than_seconds,
+                        "task_state_closed": task_state_closed,
                     },
                 )
         return released
@@ -1244,6 +1357,8 @@ def _task_purge_summary(conn: sqlite3.Connection, task_id: str) -> dict:
         "strategies": len(strategy_ids),
         "backtests": int(backtest_count),
         "sub_agents": _count("sub_agents", "parent_task_id"),
+        "draft_tools": _count("draft_tools"),
+        "draft_runs": _count("draft_runs"),
         "_dataset_source_paths": removable_paths,
     }
 

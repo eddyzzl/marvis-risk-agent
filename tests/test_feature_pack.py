@@ -508,8 +508,9 @@ def test_feature_metrics_tool_drops_unlabeled_target_rows_when_confirmed(tmp_pat
 def test_feature_metrics_computes_collinear_only_when_vif_selected(tmp_path):
     """Optional metrics are computed only when selected (spec §2: 选了才算).
 
-    No selection → base per-feature metrics only, no collinear section. Selecting
-    VIF adds the collinear / VIF block alongside the base metrics.
+    No selection → base per-feature metrics and an explicit null optional output,
+    so strict workflow references remain resolvable without computing a collinear
+    section. Selecting VIF fills that output with the collinear / VIF block.
     """
     runner, registry, _repo, _backend = _runtime(tmp_path)
     dataset = _register_sample(registry, tmp_path)
@@ -520,7 +521,7 @@ def test_feature_metrics_computes_collinear_only_when_vif_selected(tmp_path):
         task_id="task-feature",
     )
     assert base.ok is True, base.error
-    assert "collinear" not in base.output
+    assert base.output["collinear"] is None
 
     with_vif = runner.invoke(
         ToolRef("feature", "compute_feature_metrics"),

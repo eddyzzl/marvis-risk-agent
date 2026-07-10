@@ -2,7 +2,7 @@ from pathlib import Path
 
 from marvis.db import PluginRepository, init_db
 from marvis.orchestrator.contracts import Plan, PlanStep, PostCheck
-from marvis.orchestrator.validator import PlanValidator
+from marvis.orchestrator.validator import PlanValidator, _schema_has_path
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef, parse_manifest
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -180,6 +180,35 @@ def test_plan_validator_accepts_basic_echo_plan(tmp_path):
     assert _validator(tmp_path).validate(_plan(step)) == []
 
 
+def test_schema_path_supports_json_schema_combinators():
+    schema = {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "result": {
+                        "anyOf": [
+                            {"type": "null"},
+                            {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {"score": {"type": "number"}},
+                                },
+                            },
+                        ]
+                    }
+                },
+            },
+            {"type": "object", "properties": {"error": {"type": "string"}}},
+        ]
+    }
+
+    assert _schema_has_path(schema, "result.0.score") is True
+    assert _schema_has_path(schema, "error") is True
+    assert _schema_has_path(schema, "result.0.missing") is False
+
+
 def test_plan_validator_reports_unknown_tools(tmp_path):
     step = _step("step-1", ToolRef("missing", "echo"), {"message": "hi"})
 
@@ -252,6 +281,46 @@ def test_plan_validator_checks_ref_compatibility(tmp_path):
         "dependency" in problem
         for problem in _validator(tmp_path).validate(_plan(upstream, missing_edge))
     )
+
+
+def test_plan_validator_checks_refs_nested_inside_lists_and_dicts(tmp_path):
+    upstream = _step("step-1", ToolRef("_sample", "echo"), {"message": "hi"})
+    missing_edge = _step(
+        "step-2",
+        ToolRef("_sample", "echo"),
+        {"message": {"items": ["$ref:step-1.output.echoed"]}},
+    )
+    unknown_upstream = _step(
+        "step-2",
+        ToolRef("_sample", "echo"),
+        {"message": [{"value": "$ref:missing.output.echoed"}]},
+    )
+
+    missing_edge_problems = _validator(tmp_path).validate(_plan(upstream, missing_edge))
+    unknown_problems = _validator(tmp_path).validate(_plan(unknown_upstream))
+
+    assert any("lacks dependency edge" in problem for problem in missing_edge_problems)
+    assert any("ref to unknown step missing" in problem for problem in unknown_problems)
+
+
+def test_plan_validator_accepts_nested_output_paths_with_array_indices(tmp_path):
+    upstream = _step(
+        "step-1",
+        ToolRef("metrics_pack", "nested_metrics"),
+        {"dataset": "sample"},
+        post_checks=[
+            PostCheck("range", {"field": "metrics.ks", "min": 0.0, "max": 1.0}),
+            PostCheck("range", {"field": "bins.0.total_iv", "min": 0.0}),
+        ],
+    )
+    downstream = _step(
+        "step-2",
+        ToolRef("_sample", "echo"),
+        {"message": "$ref:step-1.output.bins.0.total_iv"},
+        depends_on=["step-1"],
+    )
+
+    assert _validator(tmp_path).validate(_plan(upstream, downstream)) == []
 
 
 def test_plan_validator_requires_join_confirmation(tmp_path):

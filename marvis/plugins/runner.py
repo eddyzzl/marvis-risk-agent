@@ -12,7 +12,7 @@ import time
 from typing import Any
 
 from marvis.db import PluginRepository
-from marvis.plugins.contracts import PROTOCOL_VERSION
+from marvis.plugins.contracts import PROTOCOL_VERSION, WORKER_RESULT_SENTINEL
 from marvis.plugins.contracts import ToolContext as ToolContext  # noqa: F401 (re-exported for compatibility)
 from marvis.plugins.manifest import PluginManifest, ToolRef
 from marvis.plugins.registry import ToolRegistry
@@ -825,7 +825,21 @@ def _duration_ms(started: float) -> int:
 
 
 def _parse_worker_result(stdout: str) -> dict[str, Any] | None:
+    if not stdout:
+        return None
+    for line in reversed(stdout.splitlines()):
+        index = line.rfind(WORKER_RESULT_SENTINEL)
+        if index != -1:
+            result = _load_worker_result(
+                line[index + len(WORKER_RESULT_SENTINEL):]
+            )
+            if result is not None:
+                return result
     line = stdout.strip().splitlines()[-1] if stdout.strip() else ""
+    return _load_worker_result(line)
+
+
+def _load_worker_result(line: str) -> dict[str, Any] | None:
     if not line:
         return None
     try:

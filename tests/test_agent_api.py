@@ -49,6 +49,56 @@ def test_validation_agent_job_loop_lives_outside_api_module():
     assert api._run_agent_validation_job_impl is validation_runner.run_agent_validation_job
 
 
+def test_validation_agent_job_does_not_execute_after_queue_claim_is_lost(tmp_path):
+    from marvis.agent.validation_runner import (
+        ValidationJobCallbacks,
+        run_agent_validation_job,
+    )
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    job_id = repo.start_job(task_id, "agent")
+    repo.finish_job(job_id, status="cancelled")
+    calls: list[str] = []
+    clear_calls: list[tuple[str, str | None]] = []
+
+    def unexpected(*_args, **_kwargs):
+        calls.append("executed")
+        raise AssertionError("cancelled job callback must not execute")
+
+    callbacks = ValidationJobCallbacks(
+        agent_auto_accept=unexpected,
+        agent_next_stage=unexpected,
+        raise_if_agent_cancelled=unexpected,
+        open_agent_stage=unexpected,
+        run_scan_stage=unexpected,
+        run_reproducibility_stage=unexpected,
+        run_metrics_stage=unexpected,
+        run_word_conclusion_stage=unexpected,
+        finalize_agent_opening_message=unexpected,
+        mark_agent_cancelled=unexpected,
+        agent_has_stop_ack_message=unexpected,
+        add_exception_summary=unexpected,
+        clear_agent_cancellation=lambda cleared_task_id, *, job_id=None: clear_calls.append(
+            (cleared_task_id, job_id)
+        ),
+        stop_ack_content="cancelled",
+    )
+
+    run_agent_validation_job(
+        job_id,
+        SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+        task_id,
+        {"model_id": "m1"},
+        callbacks=callbacks,
+    )
+
+    assert calls == []
+    assert clear_calls == [(task_id, job_id)]
+    assert repo.get_job(job_id)["status"] == "cancelled"
+
+
 def test_validation_agent_evidence_helper_lives_outside_api_module():
     from marvis import api
     from marvis.agent import validation_evidence
@@ -587,6 +637,191 @@ def test_agent_auto_accept_dispatch_does_not_precreate_received_intro_for_next_s
         for message in payload["messages"]
         if message["role"] == "assistant" and message["content"].startswith("收到")
     ]
+
+
+@pytest.mark.parametrize(
+    ("failure_point", "acceptance_mode", "forced_stage"),
+    [
+        ("opening_message", "normal", "scan"),
+        ("opening_finalize", "normal", "reproducibility"),
+        ("stage_message", "auto_accept", "word_conclusion_draft"),
+    ],
+)
+def test_agent_dispatch_releases_queued_job_when_message_setup_fails(
+    tmp_path,
+    monkeypatch,
+    failure_point,
+    acceptance_mode,
+    forced_stage,
+):
+    from marvis.agent.validation_app_service import dispatch_agent_validation_job
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    task = repo.get_task(task_id)
+
+    def fail_message(*_args, **_kwargs):
+        raise RuntimeError(f"{failure_point} failed")
+
+    if failure_point == "opening_finalize":
+        monkeypatch.setattr(
+            "marvis.agent.validation_app_service.finalize_agent_opening_message",
+            fail_message,
+        )
+    else:
+        monkeypatch.setattr(
+            "marvis.agent.validation_app_service.add_streaming_agent_message",
+            fail_message,
+        )
+
+    with pytest.raises(RuntimeError, match=failure_point):
+        dispatch_agent_validation_job(
+            repo_=repo,
+            task=task,
+            settings=SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+            model_profile={"model_id": "m1"},
+            acceptance_mode=acceptance_mode,
+            background_tasks=BackgroundTasks(),
+            forced_stage=forced_stage,
+        )
+
+    job = repo.get_latest_job(task_id, kind="agent")
+    assert job["status"] == "failed"
+    assert job["error_name"] == "RuntimeError"
+    assert repo.task_has_active_job(task_id) is False
+
+
+def test_agent_dispatch_releases_queued_job_when_background_registration_fails(
+    tmp_path,
+):
+    from marvis.agent.validation_app_service import dispatch_agent_validation_job
+
+    class FailingBackgroundTasks:
+        def add_task(self, *_args, **_kwargs):
+            raise RuntimeError("background registration failed")
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+
+    with pytest.raises(RuntimeError, match="background registration failed"):
+        dispatch_agent_validation_job(
+            repo_=repo,
+            task=repo.get_task(task_id),
+            settings=SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+            model_profile={"model_id": "m1"},
+            background_tasks=FailingBackgroundTasks(),
+            forced_stage="scan",
+        )
+
+    job = repo.get_latest_job(task_id, kind="agent")
+    assert job["status"] == "failed"
+    assert job["error_name"] == "RuntimeError"
+    assert repo.task_has_active_job(task_id) is False
+
+
+def test_agent_dispatch_conflict_does_not_clear_active_worker_cancellation(tmp_path):
+    from marvis.agent.orchestrator import (  # noqa: PLC0415
+        agent_cancellation_requested,
+        clear_agent_cancellation,
+        request_agent_cancellation,
+    )
+    from marvis.agent.validation_app_service import (  # noqa: PLC0415
+        dispatch_agent_validation_job,
+    )
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    active_job_id = repo.start_job(task_id, "agent")
+    repo.mark_job_running(active_job_id)
+    request_agent_cancellation(task_id)
+
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            dispatch_agent_validation_job(
+                repo_=repo,
+                task=repo.get_task(task_id),
+                settings=SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+                model_profile={"model_id": "m1"},
+                background_tasks=BackgroundTasks(),
+                forced_stage="scan",
+            )
+
+        assert exc_info.value.status_code == 409
+        assert agent_cancellation_requested(task_id) is True
+    finally:
+        clear_agent_cancellation(task_id)
+        repo.finish_job(active_job_id, status="cancelled")
+
+
+def test_agent_stop_between_job_insert_and_dispatch_registration_is_preserved(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.agent.orchestrator import (  # noqa: PLC0415
+        agent_cancellation_requested,
+        clear_agent_cancellation,
+        request_agent_cancellation,
+    )
+    from marvis.agent.validation_app_service import (  # noqa: PLC0415
+        dispatch_agent_validation_job,
+    )
+    from marvis.api_stage_helpers import start_task_job as real_start_task_job
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    inserted_job: dict[str, str] = {}
+
+    def start_then_stop(repo_, started_task_id, kind):
+        job_id = real_start_task_job(repo_, started_task_id, kind)
+        inserted_job["id"] = job_id
+        request_agent_cancellation(started_task_id, job_id=job_id)
+        return job_id
+
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.start_task_job",
+        start_then_stop,
+    )
+    try:
+        dispatch_agent_validation_job(
+            repo_=repo,
+            task=repo.get_task(task_id),
+            settings=SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+            model_profile={"model_id": "m1"},
+            background_tasks=BackgroundTasks(),
+            forced_stage="scan",
+        )
+
+        assert agent_cancellation_requested(
+            task_id,
+            job_id=inserted_job["id"],
+        ) is True
+    finally:
+        clear_agent_cancellation(task_id, job_id=inserted_job.get("id"))
+        if inserted_job:
+            repo.finish_job(inserted_job["id"], status="cancelled")
+
+
+def test_clear_agent_cancellation_is_scoped_to_one_task():
+    from marvis.agent.orchestrator import (  # noqa: PLC0415
+        agent_cancellation_requested,
+        clear_agent_cancellation,
+        request_agent_cancellation,
+    )
+
+    request_agent_cancellation("task-a")
+    request_agent_cancellation("task-b")
+    try:
+        clear_agent_cancellation("task-a")
+
+        assert agent_cancellation_requested("task-a") is False
+        assert agent_cancellation_requested("task-b") is True
+    finally:
+        clear_agent_cancellation("task-a")
+        clear_agent_cancellation("task-b")
 
 
 def test_agent_word_conclusions_auto_accept_confirms_and_generates_report(
@@ -2712,7 +2947,7 @@ def test_agent_stop_endpoint_requests_active_agent_cancellation_without_user_mes
     requested_notebook: list[str] = []
     monkeypatch.setattr(
         "marvis.agent.validation_app_service.request_agent_cancellation",
-        lambda task_id: requested_agent.append(task_id),
+        lambda task_id, *, job_id=None: requested_agent.append((task_id, job_id)),
     )
     monkeypatch.setattr(
         "marvis.agent.validation_app_service.request_notebook_cancellation",
@@ -2721,14 +2956,14 @@ def test_agent_stop_endpoint_requests_active_agent_cancellation_without_user_mes
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
     repo = TaskRepository(tmp_path / "marvis.sqlite")
-    repo.start_job(task_id, "agent")
+    job_id = repo.start_job(task_id, "agent")
 
     response = client.post(f"/api/tasks/{task_id}/agent/stop")
 
     assert response.status_code == 202, response.text
     payload = response.json()
     assert payload["status"] == "cancel_requested"
-    assert requested_agent == [task_id]
+    assert requested_agent == [(task_id, job_id)]
     assert requested_notebook == [task_id]
     assert repo.get_active_job_kind(task_id) == "agent"
     messages = payload["messages"]
@@ -3093,7 +3328,8 @@ def test_agent_chat_confirm_report_draft_dispatches_report_without_llm_chat(
             llm_calls.append(kwargs)
             return "不应调用普通聊天"
 
-    def fake_report_stage(*, task_id, settings):
+    def fake_report_stage(*, task_id, settings, cancellation_job_id=None):
+        assert cancellation_job_id
         report_calls.append(task_id)
         repo = TaskRepository(settings.db_path)
         repo.update_status(
@@ -3168,7 +3404,8 @@ def test_agent_chat_confirm_report_draft_dispatches_report_without_llm_chat(
 def test_agent_chat_confirm_report_draft_does_not_need_enabled_llm(tmp_path, monkeypatch):
     report_calls: list[str] = []
 
-    def fake_report_stage(*, task_id, settings):
+    def fake_report_stage(*, task_id, settings, cancellation_job_id=None):
+        assert cancellation_job_id
         report_calls.append(task_id)
         repo = TaskRepository(settings.db_path)
         repo.update_status(

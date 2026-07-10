@@ -102,9 +102,7 @@ class PlanValidator:
         problems = []
         by_id = {step.id: step for step in plan.steps}
         for step in plan.steps:
-            for value in step.inputs.values():
-                if not _is_ref(value):
-                    continue
+            for value in _iter_refs(step.inputs):
                 try:
                     upstream_id, field = _parse_ref(value)
                 except ValueError as exc:
@@ -122,7 +120,7 @@ class PlanValidator:
                 upstream_tool = self._resolve_step_tool(upstream)
                 if upstream_tool is None:
                     continue
-                if field and field not in _schema_fields(upstream_tool.output_schema):
+                if field and not _schema_has_path(upstream_tool.output_schema, field):
                     problems.append(
                         f"step {step.title}: ref field {field} not in upstream output"
                     )
@@ -223,17 +221,29 @@ def _is_ref(value) -> bool:
     return isinstance(value, str) and value.startswith("$ref:")
 
 
+def _walk_values(value):
+    yield value
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _walk_values(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _walk_values(item)
+
+
+def _iter_refs(value):
+    return (item for item in _walk_values(value) if _is_ref(item))
+
+
 def _is_deferred_input(value) -> bool:
-    if _is_ref(value) or _is_slot_placeholder(value):
-        return True
     # A container (e.g. FS-5's features union list `[{slot:feature_cols}, $ref:...]`) is
     # deferred if any element is — its final shape is only known after ref/slot resolution,
-    # so it cannot be schema-validated at plan time.
-    if isinstance(value, (list, tuple)):
-        return any(_is_deferred_input(item) for item in value)
-    if isinstance(value, dict):
-        return any(_is_deferred_input(item) for item in value.values())
-    return False
+    # so it cannot be schema-validated at plan time. Use the same recursive walk as ref
+    # compatibility checks so container shapes cannot diverge between the two passes.
+    return any(
+        _is_ref(item) or _is_slot_placeholder(item)
+        for item in _walk_values(value)
+    )
 
 
 def _relax_required(input_schema: dict, step_inputs: dict) -> dict:
@@ -263,11 +273,31 @@ def _parse_ref(value: str) -> tuple[str, str]:
     return step_id, tail[1:]
 
 
-def _schema_fields(schema: dict) -> set[str]:
+def _schema_has_path(schema: dict, path: str) -> bool:
+    return _schema_has_parts(schema, path.split("."))
+
+
+def _schema_has_parts(schema: dict, parts: list[str]) -> bool:
+    if not isinstance(schema, dict) or any(not part for part in parts):
+        return False
+    if not parts:
+        return True
+    for combinator in ("oneOf", "anyOf", "allOf"):
+        variants = schema.get(combinator)
+        if isinstance(variants, list) and any(
+            _schema_has_parts(variant, parts)
+            for variant in variants
+            if isinstance(variant, dict)
+        ):
+            return True
+    part, *tail = parts
     properties = schema.get("properties")
-    if not isinstance(properties, dict):
-        return set()
-    return set(properties)
+    if isinstance(properties, dict) and part in properties:
+        return _schema_has_parts(properties[part], tail)
+    items = schema.get("items")
+    if part.isdigit() and isinstance(items, dict):
+        return _schema_has_parts(items, tail)
+    return False
 
 
 def _metric_fields_in(schema: dict) -> set[str]:

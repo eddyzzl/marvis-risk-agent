@@ -114,6 +114,7 @@ class JoinEngine:
         key_pairs: list[KeyPair],
         *,
         seed: int,
+        recompute_match: bool = False,
     ) -> JoinDiagnostics:
         anchor_rows = anchor.row_count
         feature_rows = feature.row_count
@@ -134,7 +135,7 @@ class JoinEngine:
         anchor_keys = [pair.anchor_col for pair in key_pairs]
         feature_keys = [pair.feature_col for pair in key_pairs]
         key_unique = self._backend.is_key_unique(feature_path, feature_keys, key_pairs=key_pairs)
-        if len(key_pairs) == 1:
+        if len(key_pairs) == 1 and not recompute_match:
             match_rate = key_pairs[0].match_rate
             sampled = min(SMALL_SAMPLE_N, anchor_rows)
             matched = int(round(match_rate * sampled))
@@ -230,6 +231,43 @@ class JoinEngine:
             precision_loss_columns=precision_loss_columns,
             key_dtype_divergences=key_dtype_divergences,
         )
+
+    def recompute_key_pairs(
+        self,
+        anchor: Dataset,
+        anchor_path: Path,
+        feature: Dataset,
+        feature_path: Path,
+        key_pairs: list[KeyPair],
+        *,
+        seed: int,
+    ) -> list[KeyPair]:
+        """Replace client-provided evidence with server-computed single-key rates."""
+        anchor_profiles = _profiles_by_name(anchor.columns)
+        feature_profiles = _profiles_by_name(feature.columns)
+        recomputed = []
+        for pair in key_pairs:
+            matched, sampled = self._backend.match_rate_for_method(
+                anchor_path,
+                [pair.anchor_col],
+                feature_path,
+                [pair.feature_col],
+                method=pair.match_method,
+                key_fingerprints=_key_fps(anchor, feature, [pair]),
+                sample_n=SMALL_SAMPLE_N,
+                seed=seed,
+            )
+            anchor_profile = anchor_profiles[pair.anchor_col]
+            feature_profile = feature_profiles[pair.feature_col]
+            recomputed.append(replace(
+                pair,
+                match_rate=round(matched / sampled, 4) if sampled else 0.0,
+                resolved_by="user",
+                anchor_dtype=str(anchor_profile.dtype),
+                feature_dtype=str(feature_profile.dtype),
+                dtype_divergent=_dtype_family(anchor_profile) != _dtype_family(feature_profile),
+            ))
+        return recomputed
 
     def _precision_loss_columns(
         self,
@@ -592,13 +630,24 @@ def _key_fps(
 ) -> list[tuple]:
     anchor_profiles = _profiles_by_name(anchor.columns)
     feature_profiles = _profiles_by_name(feature.columns)
-    return [
-        (
-            anchor_profiles[pair.anchor_col].fingerprint,
-            feature_profiles[pair.feature_col].fingerprint,
-        )
-        for pair in key_pairs
-    ]
+    fingerprints = []
+    for pair in key_pairs:
+        anchor_fp = anchor_profiles[pair.anchor_col].fingerprint
+        feature_fp = feature_profiles[pair.feature_col].fingerprint
+        if pair.match_method.startswith("hash:"):
+            # match_rate_for_method uses is_hashed to decide whether each side is
+            # transformed. For an explicit key pair, the validated transform_side
+            # is authoritative because it is also what left_join executes.
+            anchor_fp = replace(
+                anchor_fp,
+                is_hashed=pair.transform_side not in {"anchor", "both"},
+            )
+            feature_fp = replace(
+                feature_fp,
+                is_hashed=pair.transform_side not in {"feature", "both"},
+            )
+        fingerprints.append((anchor_fp, feature_fp))
+    return fingerprints
 
 
 def _profiles_by_name(columns: tuple[ColumnProfile, ...]) -> dict[str, ColumnProfile]:

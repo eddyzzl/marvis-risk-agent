@@ -49,7 +49,8 @@ def run_stage_job(
     after_hook_event: str | None = None,
 ) -> None:
     repo = TaskRepository(db_path)
-    repo.mark_job_running(job_id)
+    if repo.mark_job_running(job_id) is False:
+        return
     task_id = kwargs.get("task_id")
     task_id_text = str(task_id) if task_id else None
     dispatch_platform_hook(

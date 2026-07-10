@@ -359,6 +359,45 @@ def test_memory_distillation_references_are_use_audited(tmp_path):
     assert events[-1]["details"] == {"use_reason": "chat"}
 
 
+def test_memory_use_audit_skips_entry_disabled_after_reference_was_attached(
+    tmp_path,
+    caplog,
+):
+    db_path = tmp_path / "marvis.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    entry = store.create(
+        MemoryCandidate(
+            memory_type="task_experience",
+            summary="Notebook 环境缺少 xgboost 时先检查依赖清单。",
+            payload={"failure_type": "dependency", "package": "xgboost"},
+            source_task_id="task-history",
+        )
+    )
+    message = {
+        "id": "msg-completed-stage",
+        "metadata": {
+            "memory_references": [
+                {
+                    "kind": "raw",
+                    "id": entry.id,
+                    "use_reason": "metrics",
+                }
+            ]
+        },
+    }
+    store.set_status(entry.id, "disabled", task_id="task-admin")
+    caplog.set_level("INFO", logger="marvis.agent_memory.api_support")
+
+    _audit_agent_memory_use_from_store(store, message, task_id="task-current")
+
+    assert [event["event_type"] for event in store.list_events(entry.id)] == [
+        "create",
+        "disable",
+    ]
+    assert "skipped memory use audit" in caplog.text
+
+
 def test_agent_message_memory_reference_route_uses_direct_lookup(tmp_path, monkeypatch):
     client = _client(tmp_path)
     db_path = tmp_path / "marvis.sqlite"

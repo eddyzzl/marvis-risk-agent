@@ -16,7 +16,8 @@ class AgentValidationCancelled(Exception):
 
 
 _AGENT_CANCELLATION_LOCK = threading.Lock()
-_AGENT_CANCELLATION_REQUESTS: set[str] = set()
+_AGENT_CANCELLATION_REQUESTS: set[tuple[str, str | None]] = set()
+_ACTIVE_AGENT_JOBS: dict[str, str] = {}
 
 
 def agent_next_stage(
@@ -54,23 +55,49 @@ def is_metrics_failure(task: TaskRecord) -> bool:
     )
 
 
-def request_agent_cancellation(task_id: str) -> None:
+def register_agent_cancellation(task_id: str, job_id: str) -> None:
     with _AGENT_CANCELLATION_LOCK:
-        _AGENT_CANCELLATION_REQUESTS.add(task_id)
+        _ACTIVE_AGENT_JOBS[task_id] = job_id
+        # A task-only request belongs to streaming work that had no job lease;
+        # it must not poison a later job. A job-bound request created in the DB
+        # insert -> registry window is intentionally preserved for this job.
+        _AGENT_CANCELLATION_REQUESTS.discard((task_id, None))
 
 
-def clear_agent_cancellation(task_id: str) -> None:
+def request_agent_cancellation(task_id: str, *, job_id: str | None = None) -> None:
     with _AGENT_CANCELLATION_LOCK:
-        _AGENT_CANCELLATION_REQUESTS.discard(task_id)
+        target_job_id = job_id or _ACTIVE_AGENT_JOBS.get(task_id)
+        _AGENT_CANCELLATION_REQUESTS.add((task_id, target_job_id))
 
 
-def agent_cancellation_requested(task_id: str) -> bool:
+def clear_agent_cancellation(task_id: str, *, job_id: str | None = None) -> None:
     with _AGENT_CANCELLATION_LOCK:
-        return task_id in _AGENT_CANCELLATION_REQUESTS
+        if job_id is None:
+            stale_requests = {
+                request
+                for request in _AGENT_CANCELLATION_REQUESTS
+                if request[0] == task_id
+            }
+            _AGENT_CANCELLATION_REQUESTS.difference_update(stale_requests)
+            _ACTIVE_AGENT_JOBS.pop(task_id, None)
+            return
+        _AGENT_CANCELLATION_REQUESTS.discard((task_id, job_id))
+        if _ACTIVE_AGENT_JOBS.get(task_id) == job_id:
+            _ACTIVE_AGENT_JOBS.pop(task_id, None)
 
 
-def raise_if_agent_cancelled(task_id: str) -> None:
-    if agent_cancellation_requested(task_id):
+def agent_cancellation_requested(
+    task_id: str,
+    *,
+    job_id: str | None = None,
+) -> bool:
+    with _AGENT_CANCELLATION_LOCK:
+        target_job_id = job_id or _ACTIVE_AGENT_JOBS.get(task_id)
+        return (task_id, target_job_id) in _AGENT_CANCELLATION_REQUESTS
+
+
+def raise_if_agent_cancelled(task_id: str, *, job_id: str | None = None) -> None:
+    if agent_cancellation_requested(task_id, job_id=job_id):
         raise AgentValidationCancelled("agent validation cancelled")
 
 

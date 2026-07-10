@@ -376,10 +376,7 @@ function collectPlanRetryStructuredInputs(form) {
   return inputs;
 }
 
-function parsePlanRetryInputs(form) {
-  const structured = collectPlanRetryStructuredInputs(form);
-  if (structured) return structured;
-  const field = form?.querySelector?.(".plan-retry-inputs");
+function parsePlanRetryJson(field) {
   let value;
   try {
     value = JSON.parse(String(field?.value || "{}"));
@@ -390,6 +387,20 @@ function parsePlanRetryInputs(form) {
     throw new Error("重试参数必须是 JSON 对象。");
   }
   return value;
+}
+
+function parsePlanRetryInputs(form) {
+  const field = form?.querySelector?.(".plan-retry-inputs");
+  if (
+    field
+    && typeof field.defaultValue === "string"
+    && String(field.value ?? "") !== field.defaultValue
+  ) {
+    return parsePlanRetryJson(field);
+  }
+  const structured = collectPlanRetryStructuredInputs(form);
+  if (structured) return structured;
+  return parsePlanRetryJson(field);
 }
 
 export function createPlanRailController({

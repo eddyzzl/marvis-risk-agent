@@ -13,6 +13,8 @@ from marvis.orchestrator.contracts import (
     PlanStep,
     StepStatus,
 )
+from marvis.orchestrator.errors import RefResolutionError
+from marvis.llm_client import LLMClientError
 from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.planner import PlanningError, ReplanError
 from marvis.orchestrator.plan_recovery import PlanStepRecovery
@@ -185,7 +187,12 @@ class PlanExecutor:
             step.output_ref = self._repo.store_step_output(
                 step.id,
                 output,
-                evidence=self._step_evidence(step, resolved_inputs, output),
+                evidence=self._step_evidence(
+                    step,
+                    resolved_inputs,
+                    output,
+                    run_id=run_id,
+                ),
             )
             self._finish_step_run(
                 run_id,
@@ -243,10 +250,18 @@ class PlanExecutor:
     def _finish_step_run(self, run_id: str, **kwargs) -> None:
         self._repo.finish_step_run(run_id, **kwargs)
 
-    def _step_evidence(self, step: PlanStep, resolved_inputs: dict, output: dict) -> dict:
+    def _step_evidence(
+        self,
+        step: PlanStep,
+        resolved_inputs: dict,
+        output: dict,
+        *,
+        run_id: str,
+    ) -> dict:
         seed = resolved_inputs.get("seed")
         tool_version, manifest_hash = _tool_manifest_details(getattr(self._runner, "_tools", None), step.tool_ref)
         return {
+            "step_run_id": run_id,
             "tool_name": step.tool_ref.label(),
             "tool_version": tool_version,
             "manifest_hash": manifest_hash,
@@ -315,9 +330,15 @@ class PlanExecutor:
 
     def _resolve_value(self, value):
         if isinstance(value, str) and value.startswith("$ref:"):
-            step_id, field = _parse_ref(value)
-            output = self._repo.load_step_output(step_id)
-            return _dig(output, field) if field else output
+            try:
+                step_id, field = _parse_ref(value)
+            except ValueError as exc:
+                raise RefResolutionError(value, str(exc)) from exc
+            try:
+                output = self._repo.load_step_output(step_id)
+            except KeyError as exc:
+                raise RefResolutionError(value, f"upstream output {step_id} is missing") from exc
+            return _dig(output, field, ref=value) if field else output
         if isinstance(value, list):
             return [self._resolve_value(item) for item in value]
         if isinstance(value, dict):
@@ -452,11 +473,11 @@ class PlanExecutor:
                 task_id=plan.task_id,
             )
             return True
-        except (KeyError, PlanningError, LLMSettingsError):
+        except (KeyError, PlanningError, LLMClientError, LLMSettingsError):
             # Replan is a best-effort enhancement. In manual mode (no LLM configured) the
             # planner cannot replan — that is NOT a flow error; swallow it and let the plan
             # continue to its confirmation gate. PlanningError covers ReplanError + invalid
-            # replans; LLMSettingsError covers "no enabled model".
+            # replans; LLMClientError/LLMSettingsError cover unavailable models.
             return False
 
     def _try_final_review_replan(
@@ -500,7 +521,7 @@ class PlanExecutor:
                 task_id=plan.task_id,
             )
             return True
-        except (KeyError, PlanningError, LLMSettingsError):
+        except (KeyError, PlanningError, LLMClientError, LLMSettingsError):
             return False
 
     def replan_from_instruction(self, plan_id: str, instruction: str) -> bool:
@@ -538,11 +559,11 @@ class PlanExecutor:
                 task_id=plan.task_id,
             )
             return True
-        except (KeyError, PlanningError, LLMSettingsError):
+        except (KeyError, PlanningError, LLMClientError, LLMSettingsError):
             # Replan is a best-effort enhancement. In manual mode (no LLM configured) the
             # planner cannot replan — that is NOT a flow error; swallow it and let the plan
             # continue to its confirmation gate. PlanningError covers ReplanError + invalid
-            # replans; LLMSettingsError covers "no enabled model".
+            # replans; LLMClientError/LLMSettingsError cover unavailable models.
             return False
 
     def _try_append_explore_segment(self, plan: Plan, tier: CapabilityTier) -> bool:
@@ -554,7 +575,7 @@ class PlanExecutor:
                 completed_summaries=self._summaries(plan),
                 tier=tier,
             )
-        except ReplanError:
+        except (ReplanError, LLMClientError, LLMSettingsError):
             return False
         if done or not segment:
             return False
@@ -645,14 +666,18 @@ def _parse_ref(value: str) -> tuple[str, str]:
     return step_id, tail[1:]
 
 
-def _dig(value: dict, path: str):
+def _dig(value: Any, path: str, *, ref: str):
     current: Any = value
     for part in path.split("."):
-        if not part:
-            return None
-        if not isinstance(current, dict) or part not in current:
-            return None
-        current = current[part]
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+            continue
+        if isinstance(current, (list, tuple)) and part.isdigit():
+            index = int(part)
+            if index < len(current):
+                current = current[index]
+                continue
+        raise RefResolutionError(ref, f"path segment {part!r} is missing")
     return current
 
 

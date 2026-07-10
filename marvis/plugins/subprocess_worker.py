@@ -18,7 +18,7 @@ import subprocess
 import sys
 import traceback
 
-from marvis.plugins.contracts import PROTOCOL_VERSION, ToolContext
+from marvis.plugins.contracts import PROTOCOL_VERSION, WORKER_RESULT_SENTINEL, ToolContext
 
 
 def worker_main() -> None:
@@ -659,7 +659,7 @@ def _structured_error_detail(exc: BaseException) -> dict | None:
 
 
 def _emit(obj: dict) -> None:
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.write(WORKER_RESULT_SENTINEL + json.dumps(obj, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
 

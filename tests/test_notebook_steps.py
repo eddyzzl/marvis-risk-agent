@@ -247,6 +247,22 @@ def test_notebook_step_preview_reads_titles_without_execution(tmp_path: Path):
     ]
 
 
+def test_notebook_step_preview_accepts_non_utf8_notebook_bytes(tmp_path: Path):
+    notebook_path = tmp_path / "model.ipynb"
+    notebook_path.write_bytes(
+        (
+            '{"cells":[{"cell_type":"markdown","id":"markdown-1","metadata":{},'
+            '"source":["score · label"]},{"cell_type":"code","id":"code-1","metadata":{},'
+            '"source":["sample = pd.read_csv(\\"sample.csv\\")"]}],'
+            '"metadata":{},"nbformat":4,"nbformat_minor":5}'
+        ).encode("cp1252")
+    )
+
+    preview = notebook_step_preview(notebook_path)
+
+    assert [step["title"] for step in preview] == ["读取数据"]
+
+
 def test_notebook_step_preview_infers_titles_without_execution_for_headingless_notebook(
     tmp_path: Path,
 ):

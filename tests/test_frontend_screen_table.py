@@ -254,6 +254,34 @@ def test_modeling_setup_weight_picker_renders_candidates():
     assert output == "ok"
 
 
+def test_modeling_setup_missing_trials_does_not_render_zero():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderModelingSetupPanel } from "./marvis/static/js/v2/modeling_setup_panel.js";
+
+        const html = renderModelingSetupPanel({
+          id: "missing-trials",
+          metadata: {
+            step_id: "gate-missing-trials",
+            modeling_setup: {
+              target_type: "binary",
+              recipes: ["lgb"],
+              eligible_algorithms: ["lgb"],
+              n_trials: null,
+            },
+          },
+        });
+        const input = html.match(/<input type="number" class="modeling-n-trials-input"[^>]+>/)?.[0] || "";
+        assert.equal(input.includes('value=""'), true);
+        assert.equal(input.includes('data-current-n-trials=""'), true);
+        assert.equal(input.includes('value="0"'), false);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_model_delivery_panel_renderer_and_branch_are_wired():
     app_js = _read("app.js")
     module_js = _read("js/v2/model_delivery_panel.js")
@@ -672,6 +700,19 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
         // success path leaves the button disabled (no re-enable on success)
         assert.equal(firstButton.disabled, true);
 
+        const callsBeforeWeightOnlyAdjust = calls.length;
+        await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{
+          currentWeight: "weight",
+          pickedWeight: "weight_v2",
+          currentTrials: "",
+          trials: "",
+          currentRecipes: "xgb,lgb",
+          selectedRecipes: ["lgb", "xgb"],
+          reason: "",
+        }}) }}, context);
+        assert.equal(calls.length, callsBeforeWeightOnlyAdjust + 1);
+        assert.deepEqual(calls.at(-1)[1].adjust_params, {{ sample_weight_col: "weight_v2" }});
+
         await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{ currentWeight: "weight", pickedWeight: "weight" }}) }}, context);
         assert.deepEqual(statuses.at(-1), ["建模设置未变化。", "info"]);
         await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{
@@ -837,6 +878,48 @@ def test_screen_table_only_latest_gate_is_interactive():
     assert output == "ok"
 
 
+def test_join_c1_only_latest_gate_is_interactive():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { driverManualAnalysisHtml } from "./marvis/static/js/v2/driver_manual_analysis.js";
+        import { renderJoinC1Form } from "./marvis/static/js/v2/join_gate_controller.js";
+
+        const c1 = {
+          files: [{
+            dataset_id: "main",
+            name: "main.csv",
+            row_count: 2,
+            n_cols: 2,
+            has_target: true,
+            proposed_role: "anchor",
+            columns: ["id", "bad"],
+          }],
+          target_col: "bad",
+        };
+        const renderers = {
+          renderAgentMarkdown: (value) => String(value || ""),
+          renderC1Form: renderJoinC1Form,
+          renderDedupPicker: () => "",
+          renderModelingSetup: () => "",
+          renderScreenTable: () => "",
+          renderTables: () => "",
+          renderModelDelivery: () => "",
+        };
+        const messages = [
+          { id: "old-c1", role: "assistant", content: "old", metadata: { kind: "gate", step_id: "gate-old", join_c1: c1 } },
+          { id: "new-c1", role: "assistant", content: "new", metadata: { kind: "gate", step_id: "gate-new", join_c1: c1 } },
+        ];
+        const html = driverManualAnalysisHtml(messages, renderers);
+        assert.equal((html.match(/data-c1-readonly/g) || []).length, 1);
+        assert.equal((html.match(/data-c1-confirm/g) || []).length, 1);
+        assert.equal(html.includes('data-c1-gate-step-id="gate-new"'), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_screen_threshold_adjust_rejects_empty_and_posts_valid_payload():
     output = _run_node(
         f"""
@@ -969,6 +1052,54 @@ def test_screen_table_search_filters_by_feature_name():
         assert.equal((lastHtml.match(/class="screen-row/g) || []).length, 5);
         assert.equal(lastHtml.includes("beta_other"), false);
         assert.equal(lastHtml.includes("alpha_feature_0"), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_screen_table_rerender_preserves_leakage_override_reason():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { handleScreenSearchInput } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const message = {
+          id: "reason-msg",
+          metadata: {
+            step_id: "gate-reason",
+            screen: {
+              selected: [],
+              leakage: [["leak_col", 0.8, "future info"]],
+              suspected: [],
+              unusable: [],
+              scores: { leak_col: { ks: 0.8, iv: 0.7 } },
+              n_screened: 1,
+              thresholds: { leakage_ks: 0.4, max_missing_rate: 0.95 },
+            },
+          },
+        };
+        const searchInput = { value: "leak" };
+        const reasonInput = { value: "已核实不是未来信息" };
+        const box = { value: "leak_col", checked: true };
+        const wrap = {
+          dataset: { screenForm: message.id, screenReadonly: "false" },
+          querySelectorAll: (selector) => selector === ".screen-pick" ? [box] : [],
+          querySelector: (selector) => {
+            if (selector === ".screen-search-input") return searchInput;
+            if (selector === ".screen-leakage-reason-input") return reasonInput;
+            return null;
+          },
+        };
+        searchInput.closest = (selector) => selector === "[data-screen-search]" ? searchInput : wrap;
+        let lastHtml = "";
+        const handled = handleScreenSearchInput({ target: searchInput }, {
+          getAgentMessages: () => [message],
+          applyRerender: (_wrap, html) => { lastHtml = html; },
+        });
+
+        assert.equal(handled, true);
+        assert.equal(lastHtml.includes("已核实不是未来信息"), true);
         process.stdout.write("ok");
         """
     )
@@ -1192,6 +1323,71 @@ def test_screen_table_paginates_at_fifty_rows_per_page():
         assert.equal(lastHtml.includes("第 2 / 3 页"), true);
         assert.equal(lastHtml.includes("f000"), false);
         assert.equal(lastHtml.includes("f050"), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_screen_confirm_submits_selection_across_all_pages():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { submitScreenSelection } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const selected = [];
+        const scores = {};
+        for (let i = 0; i < 60; i++) {
+          const name = "f" + String(i).padStart(3, "0");
+          selected.push(name);
+          scores[name] = { ks: i / 100, iv: i / 200 };
+        }
+        const message = {
+          id: "page-confirm-msg",
+          metadata: {
+            step_id: "gate-page-confirm",
+            screen: {
+              selected,
+              leakage: [],
+              suspected: [],
+              unusable: [],
+              scores,
+              n_screened: selected.length,
+              thresholds: { leakage_ks: 0.9, max_missing_rate: 0.95 },
+            },
+          },
+        };
+        const visibleBoxes = selected.slice(50).map((value) => ({
+          value,
+          checked: true,
+          disabled: false,
+          closest: () => ({ classList: { contains: () => false } }),
+        }));
+        const wrap = {
+          dataset: {
+            screenForm: message.id,
+            screenReadonly: "false",
+            screenStepId: "gate-page-confirm",
+          },
+          querySelectorAll: (selector) => selector === ".screen-pick:checked" ? visibleBoxes : [],
+          querySelector: () => null,
+        };
+        const calls = [];
+        await submitScreenSelection({ disabled: false, closest: () => wrap }, {
+          getSelectedTaskId: () => "task-1",
+          getAgentMessages: () => [message],
+          agentAcceptanceModeValue: () => "manual",
+          setActionStatus: () => {},
+          setAgentMessages: () => {},
+          renderAgentConversation: () => {},
+          api: async (url, options) => {
+            calls.push([url, JSON.parse(options.body)]);
+            return { messages: [] };
+          },
+        });
+
+        assert.equal(calls.length, 1);
+        assert.deepEqual(calls[0][1].selection, selected);
         process.stdout.write("ok");
         """
     )
@@ -1443,6 +1639,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         const c1Html = renderJoinC1Form({{
           id: "c1-msg",
           metadata: {{
+            step_id: "gate-c1",
             join_c1: {{
               target_col: "bad",
               files: [
@@ -1453,10 +1650,11 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
           }},
         }});
         assert.equal(c1Html.includes('data-c1-form="c1-msg"'), true);
+        assert.equal(c1Html.includes('data-c1-gate-step-id="gate-c1"'), true);
         assert.equal(c1Html.includes('data-c1-dataset="main"'), true);
         assert.equal(c1Html.includes('value="bad" selected'), true);
         const c1Form = {{
-          dataset: {{}},
+          dataset: {{ c1GateStepId: "gate-c1" }},
           querySelectorAll: (selector) => selector === ".c1-role" ? [
             {{ getAttribute: (name) => name === "data-c1-dataset" ? "main" : null, value: "anchor" }},
             {{ getAttribute: (name) => name === "data-c1-dataset" ? "feat" : null, value: "feature" }},
@@ -1468,6 +1666,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         assert.equal(c1Button.disabled, true);
         assert.equal(calls[0][0], "/api/tasks/task-1/agent/messages");
         assert.equal(calls[0][1].acceptance_mode, "manual");
+        assert.equal(calls[0][1].expected_step_id, "gate-c1");
         assert.equal(calls[0][1].content.startsWith("[C1]"), true);
         assert.deepEqual(JSON.parse(calls[0][1].content.slice(4)), {{
           anchor_id: "main",

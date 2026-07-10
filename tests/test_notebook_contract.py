@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 from pathlib import Path
 
 import nbformat
@@ -27,6 +28,35 @@ def test_precheck_requires_score_function_and_target_col():
         precheck_notebook_contract(notebook)
 
     assert "missing RMC_SCORE_FN" in str(excinfo.value)
+
+
+def test_precheck_path_uses_one_byte_snapshot_for_parse_and_revision(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "model.ipynb"
+    nbformat.write(
+        nbformat.v4.new_notebook(
+            cells=[nbformat.v4.new_code_cell("RMC_TARGET_COL = 'y'")]
+        ),
+        path,
+    )
+    expected_bytes = path.read_bytes()
+    original_read_bytes = Path.read_bytes
+    reads = {"count": 0}
+
+    def counted_read_bytes(candidate):
+        if candidate.resolve() == path.resolve():
+            reads["count"] += 1
+        return original_read_bytes(candidate)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+
+    with pytest.raises(NotebookContractError) as excinfo:
+        precheck_notebook_contract(path)
+
+    assert reads["count"] == 1
+    assert excinfo.value.notebook_sha256 == sha256(expected_bytes).hexdigest()
 
 
 def test_precheck_requires_top_level_score_function_binding_not_string_reference():
@@ -241,6 +271,24 @@ def test_precheck_can_scan_contract_cell_with_leading_cell_magic():
     assert result.missing_names == []
 
 
+def test_precheck_accepts_ipython_shell_escape_inside_contract_function():
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_code_cell(
+                "RMC_SAMPLE_DF = sample_df\n"
+                "RMC_TARGET_COL = 'y'\n"
+                "RMC_ALGORITHM = 'xgb'\n"
+                "def RMC_SCORE_FN(df):\n"
+                "    !echo scoring\n"
+            ),
+        ]
+    )
+
+    result = precheck_notebook_contract(notebook)
+
+    assert result.missing_names == []
+
+
 def test_contract_head_cell_defines_paths(tmp_path: Path):
     source = build_contract_head_cell_source(
         sample_path=tmp_path / "sample.csv",
@@ -311,6 +359,44 @@ def test_contract_tail_cell_scores_and_writes_metadata(tmp_path: Path):
         "algorithm": "lr",
         "C": 0.5,
     }
+
+
+def test_contract_tail_and_loader_preserve_zero_score_decimal_places(tmp_path: Path):
+    sample_path = tmp_path / "sample.csv"
+    meta_path = tmp_path / "contract.json"
+    scores_path = tmp_path / "scores.csv"
+    pd.DataFrame({"x": [1.0], "y": [0]}).to_csv(sample_path, index=False)
+    namespace: dict = {}
+    exec(
+        build_contract_head_cell_source(
+            sample_path=sample_path,
+            contract_meta_path=meta_path,
+            code_scores_path=scores_path,
+            feature_importance_path=tmp_path / "importance.csv",
+            model_params_path=tmp_path / "params.json",
+        ),
+        namespace,
+    )
+    exec(
+        "\n".join(
+            [
+                "import pandas as pd",
+                "RMC_SAMPLE_DF = pd.DataFrame({'x': [1.0], 'y': [0]})",
+                "RMC_TARGET_COL = 'y'",
+                "RMC_ALGORITHM = 'lr'",
+                "RMC_SCORE_DECIMAL_PLACES = 0",
+                "def RMC_SCORE_FN(df):",
+                "    return df['x'] / 10",
+            ]
+        ),
+        namespace,
+    )
+
+    exec(build_contract_tail_cell_source(), namespace)
+
+    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert payload["score_decimal_places"] == 0
+    assert load_runtime_contract(meta_path).score_decimal_places == 0
 
 
 def test_contract_tail_cell_is_self_contained_for_legacy_kernels():

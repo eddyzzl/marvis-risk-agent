@@ -32,6 +32,7 @@ from marvis.notebook_contract import (
     build_contract_tail_cell_source,
     precheck_notebook_contract,
 )
+from marvis.notebook_io import read_notebook
 from marvis.notebook_steps import NotebookStepPlan, notebook_step_plan
 from marvis.files import write_json_atomic, write_text_atomic
 
@@ -162,7 +163,7 @@ class NotebookExecutionSession:
         self.cancellation_token = cancellation_token
         self.memory_limit_mb = _normalize_memory_limit_mb(memory_limit_mb)
         self.resource_poll_interval_seconds = max(0.05, float(resource_poll_interval_seconds))
-        self.notebook = nbformat.read(notebook_path, as_version=4)
+        self.notebook = read_notebook(notebook_path, as_version=4)
         self.original_cell_count = len(self.notebook.cells)
         self.allow_appended_execution = bool(
             allow_appended_execution or appended_execution_policy is not None
@@ -741,8 +742,12 @@ def prepare_execution_notebook_v3(
     feature_importance_path.parent.mkdir(parents=True, exist_ok=True)
     model_params_path.parent.mkdir(parents=True, exist_ok=True)
 
-    notebook = nbformat.read(source_notebook, as_version=4)
+    notebook = read_notebook(source_notebook, as_version=4)
     precheck_notebook_contract(notebook)
+    for cell in notebook.cells:
+        if cell.cell_type == "code":
+            cell.outputs = []
+            cell.execution_count = None
 
     head = nbformat.v4.new_code_cell(
         build_contract_head_cell_source(
@@ -1284,7 +1289,7 @@ def _write_subprocess_timeout_artifacts(
     executed_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     if not executed_path.exists():
-        notebook = nbformat.read(notebook_path, as_version=4)
+        notebook = read_notebook(notebook_path, as_version=4)
         nbformat.write(notebook, executed_path)
     _write_failure_log(
         log_path,
@@ -1303,7 +1308,7 @@ def _write_subprocess_cancel_artifacts(
     executed_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     if not executed_path.exists():
-        notebook = nbformat.read(notebook_path, as_version=4)
+        notebook = read_notebook(notebook_path, as_version=4)
         nbformat.write(notebook, executed_path)
     _write_cancel_log(log_path)
 

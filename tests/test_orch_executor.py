@@ -1,7 +1,11 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from marvis.db import PlanRepository, init_db
+from marvis.llm_client import LLMClientError
+from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.contracts import (
     AgentStatus,
     LoopEvent,
@@ -13,6 +17,7 @@ from marvis.orchestrator.contracts import (
     SubAgent,
 )
 from marvis.orchestrator.executor import PlanExecutor
+from marvis.orchestrator.errors import OrchestratorError
 from marvis.orchestrator.harness_state import HarnessState
 from marvis.orchestrator.reviewer import Reviewer
 from marvis.plugins.manifest import PluginManifest, ToolRef, ToolSpec
@@ -127,6 +132,19 @@ class FakeAdaptivePlanner:
     def next_explore_segment(self, plan, *, completed_summaries, tier):
         self.explore_calls.append((plan.id, completed_summaries, tier.name))
         return self.explore_results.pop(0)
+
+
+class LLMFailingAdaptivePlanner:
+    def replan(self, *args, **kwargs):
+        raise LLMClientError("local model timed out")
+
+    def next_explore_segment(self, *args, **kwargs):
+        raise LLMClientError("local model timed out")
+
+
+class LLMSettingsFailingAdaptivePlanner(LLMFailingAdaptivePlanner):
+    def next_explore_segment(self, *args, **kwargs):
+        raise LLMSettingsError("model disabled")
 
 
 def _ok(output):
@@ -296,6 +314,43 @@ def test_plan_executor_runs_linear_plan_resolves_refs_and_finalizes(tmp_path):
     assert evidence["input_hash"].startswith("sha256:")
     assert evidence["input_summary"] == {"message": "hi"}
     assert evidence["parent_output_refs"] == ["metrics:step-1:v1"]
+
+
+def test_plan_executor_resolves_numeric_array_indices_in_ref_paths(tmp_path):
+    plan = _plan(
+        _step("step-1", inputs={"message": "hi"}),
+        _step(
+            "step-2",
+            index=1,
+            inputs={"message": "$ref:step-1.output.items.0.message"},
+            depends_on=["step-1"],
+        ),
+    )
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([
+        _ok({"items": [{"message": "from-list"}]}),
+        _ok({"echoed": "from-list"}),
+    ])
+
+    result = _executor(repo, runner).run("plan-1")
+
+    assert result.status == PlanStatus.DONE
+    assert runner.calls[1][1] == {"message": "from-list"}
+
+
+def test_plan_executor_raises_typed_error_for_missing_ref_path(tmp_path):
+    repo = _repo(tmp_path, _plan(_step("step-1")))
+    repo.store_step_output("step-1", {"items": []})
+    executor = _executor(repo, FakeRunner([]))
+
+    with pytest.raises(
+        OrchestratorError,
+        match=r"\$ref:step-1\.output\.items\.0\.message",
+    ) as exc_info:
+        executor._resolve_refs(
+            {"message": "$ref:step-1.output.items.0.message"}
+        )
+    assert exc_info.type.__name__ == "RefResolutionError"
 
 
 def test_plan_executor_run_stops_cleanly_when_plan_cancelled_between_steps(tmp_path):
@@ -790,7 +845,11 @@ def test_plan_executor_recovers_checking_step_with_run_ledger_output_without_ste
     plan = _plan(_step("step-1", status=StepStatus.CHECKING), status=PlanStatus.RUNNING)
     repo = _repo(tmp_path, plan)
     run_id = _seed_run_for_checking_step(repo, "step-1", inputs={"message": "hi"})
-    output_ref = repo.store_step_output("step-1", {"echoed": "hi"})
+    output_ref = repo.store_step_output(
+        "step-1",
+        {"echoed": "hi"},
+        evidence={"step_run_id": run_id},
+    )
     runner = FakeRunner([])
 
     result = _executor(repo, runner).run("plan-1")
@@ -842,7 +901,11 @@ def test_plan_executor_recovers_running_step_with_persisted_output_without_rerun
         tool_ref="_sample.echo",
         inputs={"message": "second"},
     )
-    output_ref = repo.store_step_output("step-1", {"echoed": "hi"})
+    output_ref = repo.store_step_output(
+        "step-1",
+        {"echoed": "hi"},
+        evidence={"step_run_id": second_run_id},
+    )
     runner = FakeRunner([])
 
     result = _executor(repo, runner).run("plan-1")
@@ -856,6 +919,56 @@ def test_plan_executor_recovers_running_step_with_persisted_output_without_rerun
     assert [run["id"] for run in runs] == [first_run_id, second_run_id]
     assert [run["status"] for run in runs] == ["succeeded", "succeeded"]
     assert [run["output_ref"] for run in runs] == [output_ref, output_ref]
+
+
+def test_plan_executor_does_not_recover_output_predating_running_attempt(tmp_path):
+    plan = _plan(_step("step-1", status=StepStatus.RUNNING), status=PlanStatus.RUNNING)
+    repo = _repo(tmp_path, plan)
+    stale_output_ref = repo.store_step_output("step-1", {"echoed": "old attempt"})
+    run_id = repo.start_step_run(
+        plan_id="plan-1",
+        step_id="step-1",
+        tool_ref="_sample.echo",
+        inputs={"message": "retry"},
+    )
+
+    result = _executor(repo, FakeRunner([])).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.FAILED
+    assert loaded.steps[0].status == StepStatus.FAILED
+    assert loaded.steps[0].output_ref is None
+    assert stale_output_ref != loaded.steps[0].output_ref
+    runs = repo.list_step_runs("step-1")
+    assert [run["id"] for run in runs] == [run_id]
+    assert runs[0]["status"] == "interrupted"
+    assert runs[0]["output_ref"] is None
+
+
+def test_plan_executor_does_not_recover_late_output_from_previous_attempt(tmp_path):
+    plan = _plan(_step("step-1", status=StepStatus.RUNNING), status=PlanStatus.RUNNING)
+    repo = _repo(tmp_path, plan)
+    current_run_id = repo.start_step_run(
+        plan_id="plan-1",
+        step_id="step-1",
+        tool_ref="_sample.echo",
+        inputs={"message": "current retry"},
+    )
+    repo.store_step_output(
+        "step-1",
+        {"echoed": "late previous attempt"},
+        evidence={"step_run_id": "previous-run"},
+    )
+
+    result = _executor(repo, FakeRunner([])).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.FAILED
+    assert loaded.steps[0].status == StepStatus.FAILED
+    assert loaded.steps[0].output_ref is None
+    runs = repo.list_step_runs("step-1")
+    assert [run["id"] for run in runs] == [current_run_id]
+    assert runs[0]["status"] == "interrupted"
 
 
 def test_plan_executor_does_not_recover_from_stale_output_version_after_reset(tmp_path):
@@ -1045,6 +1158,19 @@ def test_plan_executor_replans_execution_failure_and_continues(tmp_path):
     assert len(runner.calls) == 2
 
 
+def test_plan_executor_llm_replan_failure_does_not_leave_plan_running(tmp_path):
+    repo = _repo(tmp_path, _plan(_step("step-1", tool="fail_tool")))
+
+    result = _adaptive_executor(
+        repo,
+        FakeRunner([_fail("temporary execution failure")]),
+        LLMFailingAdaptivePlanner(),
+    ).run("plan-1")
+
+    assert result.status == PlanStatus.FAILED
+    assert repo.load_plan("plan-1").status == PlanStatus.FAILED
+
+
 def test_plan_executor_records_no_progress_when_repeated_failures_block_replan(tmp_path):
     plan = _plan(
         _step("step-1", tool="fail_tool", status=StepStatus.FAILED),
@@ -1122,3 +1248,33 @@ def test_plan_executor_appends_explore_segment_until_done(tmp_path):
     assert loaded.loop_events[0].at
     assert len(planner.explore_calls) == 2
     assert len(runner.calls) == 2
+
+
+def test_plan_executor_llm_explore_failure_finalizes_instead_of_staying_running(tmp_path):
+    plan = _plan(_step("step-1"))
+    plan.novel_mode = "explore"
+    repo = _repo(tmp_path, plan)
+
+    result = _adaptive_executor(
+        repo,
+        FakeRunner([_ok({"echoed": "first"})]),
+        LLMFailingAdaptivePlanner(),
+    ).run("plan-1")
+
+    assert result.status == PlanStatus.DONE
+    assert repo.load_plan("plan-1").status == PlanStatus.DONE
+
+
+def test_plan_executor_disabled_explore_model_finalizes_instead_of_staying_running(tmp_path):
+    plan = _plan(_step("step-1"))
+    plan.novel_mode = "explore"
+    repo = _repo(tmp_path, plan)
+
+    result = _adaptive_executor(
+        repo,
+        FakeRunner([_ok({"echoed": "first"})]),
+        LLMSettingsFailingAdaptivePlanner(),
+    ).run("plan-1")
+
+    assert result.status == PlanStatus.DONE
+    assert repo.load_plan("plan-1").status == PlanStatus.DONE

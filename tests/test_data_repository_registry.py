@@ -856,6 +856,23 @@ def test_sniff_long_id_flags_zero_padded_short_codes(tmp_path):
     assert "org_code" in sniff_long_id_columns(csv_path, encoding="utf-8")
 
 
+def test_csv_ingest_detects_whitespace_and_plus_prefixed_identifier_values(tmp_path):
+    from marvis.data.csv_ingest import read_csv_with_fallback_encoding
+
+    csv_path = tmp_path / "spaced-ids.csv"
+    csv_path.write_text(
+        "account_id,org_code\n 123456789012345678, +000123\n, 000456\n",
+        encoding="utf-8",
+    )
+
+    frame, report = read_csv_with_fallback_encoding(csv_path)
+
+    assert set(report.long_id_columns) == {"account_id", "org_code"}
+    assert frame.loc[0, "account_id"] == " 123456789012345678"
+    assert frame.loc[0, "org_code"] == " +000123"
+    assert frame.loc[1, "org_code"] == " 000456"
+
+
 def test_sniff_long_id_does_not_flag_plain_short_numerics(tmp_path):
     # T1-B8 guard: plain short numerics without a leading zero must NOT be flagged (the
     # relaxation must not over-trigger and force every small-int column to string).
@@ -864,6 +881,22 @@ def test_sniff_long_id_does_not_flag_plain_short_numerics(tmp_path):
     csv_path = tmp_path / "nums.csv"
     csv_path.write_text("qty\n1\n22\n333\n", encoding="utf-8")
     assert "qty" not in sniff_long_id_columns(csv_path, encoding="utf-8")
+
+
+def test_csv_ingest_protects_id_values_that_first_appear_after_sample_window(tmp_path):
+    from marvis.data.csv_ingest import read_csv_with_fallback_encoding
+
+    csv_path = tmp_path / "late_ids.csv"
+    rows = ["account_id,org_code,bad_flag"]
+    rows.extend(f"1,1,{index % 2}" for index in range(2001))
+    rows.extend((",,0", "123456789012345678,000123,1"))
+    csv_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    frame, report = read_csv_with_fallback_encoding(csv_path)
+
+    assert set(report.long_id_columns) == {"account_id", "org_code"}
+    assert frame.iloc[-1]["account_id"] == "123456789012345678"
+    assert frame.iloc[-1]["org_code"] == "000123"
 
 
 def test_zero_padded_short_code_kept_as_string_end_to_end(tmp_path):

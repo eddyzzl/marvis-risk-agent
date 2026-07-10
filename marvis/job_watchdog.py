@@ -43,21 +43,32 @@ def watchdog_interval_seconds() -> int:
     return value if value > 0 else DEFAULT_WATCHDOG_INTERVAL_SECONDS
 
 
-def sweep_heartbeat_lost_jobs(task_repo, *, older_than_seconds: int | None = None) -> list[dict]:
-    """Fail every RUNNING job whose heartbeat has gone stale and return the
-    released job rows. Never raises — a watchdog that itself crashes the app
-    would be worse than a missed sweep."""
+def sweep_heartbeat_lost_jobs(
+    task_repo,
+    *,
+    older_than_seconds: int | None = None,
+    include_running: bool = True,
+) -> list[dict]:
+    """Release stale queued jobs and heartbeat-lost running jobs.
+
+    Never raises — a watchdog that itself crashes the app would be worse than a
+    missed sweep.
+    """
     threshold = (
         heartbeat_timeout_seconds() if older_than_seconds is None else older_than_seconds
     )
     try:
-        released = task_repo.fail_heartbeat_lost_jobs(older_than_seconds=threshold)
+        released = task_repo.fail_heartbeat_lost_jobs(
+            older_than_seconds=threshold,
+            include_running=include_running,
+        )
     except Exception:
         logger.exception("job heartbeat watchdog sweep failed")
         return []
     for job in released:
         logger.warning(
-            "released hung job %s (task=%s kind=%s) after heartbeat exceeded %ss",
+            "released stale %s job %s (task=%s kind=%s) after %ss",
+            job.get("previous_status", "running"),
             job.get("id"),
             job.get("task_id"),
             job.get("kind"),
@@ -105,5 +116,12 @@ class JobHeartbeatWatchdog:
     def _run(self) -> None:
         while not self._stop.wait(self._interval_seconds):
             sweep_heartbeat_lost_jobs(
-                self._task_repo, older_than_seconds=self._heartbeat_timeout
+                self._task_repo,
+                older_than_seconds=self._heartbeat_timeout,
+                # Without a generation fence, releasing a live-process running
+                # job lets a recovered worker race a new job and double-write.
+                # Startup recovery may release running rows because no worker
+                # from the previous process can resume in this local runtime;
+                # periodic sweeps only reclaim callbacks that never started.
+                include_running=False,
             )

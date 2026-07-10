@@ -631,6 +631,37 @@ class PlanRepository:
             return None
         return f"metrics:{step_id}:v{int(row['version'])}"
 
+    def latest_step_output_ref_for_runs(
+        self,
+        step_id: str,
+        *,
+        run_ids: list[str],
+    ) -> str | None:
+        """Return the newest output explicitly bound to one of ``run_ids``."""
+        normalized_run_ids = {str(run_id) for run_id in run_ids if str(run_id)}
+        if not normalized_run_ids:
+            return None
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT version, evidence_json
+                  FROM plan_step_output_versions
+                 WHERE step_id = ?
+                 ORDER BY version DESC
+                """,
+                (step_id,),
+            ).fetchall()
+        for row in rows:
+            try:
+                evidence = json.loads(row["evidence_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(evidence, dict):
+                continue
+            if str(evidence.get("step_run_id") or "") in normalized_run_ids:
+                return f"metrics:{step_id}:v{int(row['version'])}"
+        return None
+
     def replace_remaining_steps(
         self,
         plan_id: str,

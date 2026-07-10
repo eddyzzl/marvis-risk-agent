@@ -34,48 +34,46 @@ class CsvIngestReport:
 
 
 def sniff_long_id_columns(path: Path, *, encoding: str, sample_rows: int = 2000) -> tuple[str, ...]:
-    """Detect columns whose sampled values look like long (>=15 digit) integer ids.
+    """Detect columns containing long integer ids or zero-padded codes.
 
-    Reads a small text sample with dtype=str (so no precision is lost while
-    sampling) and flags any column where a majority of non-null sampled values
-    are purely-digit strings at or above LONG_ID_DIGIT_THRESHOLD length. These
-    columns must be read back as strings by the real parse to avoid float64
-    truncating their trailing digits (the "18-digit national ID becomes a
-    float and loses precision" failure mode).
+    Streams the complete CSV in text chunks (so no precision is lost and no
+    duplicate full table is retained) and flags a column as soon as any value
+    needs string preservation. These columns must be read back as strings by
+    the real parse to avoid float64 truncating trailing digits or numeric
+    inference stripping leading zeroes.
     """
     try:
-        sample = pd.read_csv(
+        chunks = pd.read_csv(
             path,
             encoding=encoding,
             dtype=str,
-            nrows=sample_rows,
+            chunksize=sample_rows,
             keep_default_na=True,
         )
+        flagged: set[str] = set()
+        column_order: list[str] = []
+        for chunk in chunks:
+            if not column_order:
+                column_order = [str(column) for column in chunk.columns]
+            for column in chunk.columns:
+                column_name = str(column)
+                if column_name in flagged:
+                    continue
+                values = chunk[column].dropna()
+                if values.empty:
+                    continue
+                normalized = values.str.strip()
+                unsigned = normalized.str.removeprefix("+")
+                digit_like = normalized.str.fullmatch(r"\+?\d+")
+                long_digit_like = digit_like & (
+                    unsigned.str.len() >= LONG_ID_DIGIT_THRESHOLD
+                )
+                zero_padded = digit_like & unsigned.str.match(r"^0\d+$")
+                if bool(long_digit_like.any() or zero_padded.any()):
+                    flagged.add(column_name)
     except (UnicodeDecodeError, pd.errors.ParserError, csv.Error):
         return ()
-    flagged: list[str] = []
-    for column in sample.columns:
-        values = sample[column].dropna()
-        if values.empty:
-            continue
-        digit_like = values.str.fullmatch(r"\d+")
-        long_digit_like = digit_like & (values.str.len() >= LONG_ID_DIGIT_THRESHOLD)
-        if digit_like.sum() == 0:
-            continue
-        digit_total = max(int(digit_like.sum()), 1)
-        # Require the column to be predominantly long-digit-shaped (not just a
-        # handful of values that happen to look numeric) before flagging it.
-        if long_digit_like.sum() / digit_total >= 0.9 and long_digit_like.sum() > 0:
-            flagged.append(str(column))
-            continue
-        # T1-B8: also protect zero-padded SHORT codes (leading zero, below the long-id
-        # length rule) -- e.g. a 6-digit org code "000123". Under int/float promotion the
-        # leading zero is stripped, so the SAME code diverges dtype across files and silently
-        # mis-matches. Force them to string (2+ digits so a bare '0' row can't trip it).
-        zero_padded = digit_like & values.str.match(r"^0\d+$")
-        if zero_padded.sum() / digit_total >= 0.9 and zero_padded.sum() > 0:
-            flagged.append(str(column))
-    return tuple(flagged)
+    return tuple(column for column in column_order if column in flagged)
 
 
 def read_csv_with_fallback_encoding(

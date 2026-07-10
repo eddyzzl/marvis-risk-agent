@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from hashlib import sha256
 import json
 from pathlib import Path
+import shutil
+import uuid
 
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.db import TaskRepository
@@ -10,6 +14,7 @@ from marvis.files import (
     EXCEL_SUFFIXES,
     SAMPLE_SUFFIXES,
     scan_source_dir,
+    sha256_file,
     write_json_atomic,
 )
 from marvis.notebook_contract import (
@@ -57,8 +62,22 @@ def format_notebook_contract_error(exc: NotebookContractError) -> str:
         missing_text = "、".join(
             RMC_CONTRACT_NAME_LABELS.get(name, name) for name in missing_names
         )
-        return f"Notebook RMC 契约检查失败：缺少 {missing_text}。请在 Notebook 顶层定义后重新扫描。"
-    return f"Notebook RMC 契约检查失败：{message}"
+        result = f"Notebook RMC 契约检查失败：缺少 {missing_text}。请在 Notebook 顶层定义后重新扫描。"
+    else:
+        result = f"Notebook RMC 契约检查失败：{message}"
+    details = []
+    if exc.cell_index is not None and exc.line_number is not None:
+        details.append(f"位置：代码单元 {exc.cell_index}，第 {exc.line_number} 行")
+    if exc.notebook_path:
+        details.append(f"文件：{exc.notebook_path}")
+    if exc.notebook_sha256:
+        details.append(f"SHA-256：{exc.notebook_sha256}")
+    if exc.source_excerpt:
+        details.append("代码：" + exc.source_excerpt.replace("\n", " | "))
+    if details:
+        separator = " " if result.endswith(("。", "！", "？")) else "；"
+        result += separator + "；".join(details)
+    return result
 
 
 def scan_error_checks(checks: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -107,6 +126,7 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
     uow = ArtifactUnitOfWork()
     staged_execution = uow.stage_directory(task_dir, "execution")
     staged_execution.path.mkdir(parents=True, exist_ok=True)
+    previous_scan = _archive_previous_scan(task_dir / "execution", staged_execution.path)
     uow.remove_path(task_dir / "outputs")
     uow.remove_path(task_dir / "images")
     notebook_steps = scan_notebook_steps(
@@ -119,9 +139,13 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
     scan_status = TaskStatus.FAILED if scan_error_checks(checks) else TaskStatus.SCANNED
     scan_message = scan_status_message(checks)
     payload = {
+        "scan_id": uuid.uuid4().hex,
+        "scanned_at": datetime.now(timezone.utc).isoformat(),
         "task_id": task.id,
         "status": scan_status.value,
         "status_message": scan_message,
+        "notebook_revision": notebook_revision_payload(task, artifacts),
+        "previous_scan": previous_scan,
         "artifacts": [artifact_payload(artifact) for artifact in artifacts],
         "ambiguities": artifact_ambiguities(artifacts),
         "selected_materials": material_selection_payload(task, source_dir),
@@ -178,6 +202,72 @@ def artifact_payload(artifact) -> dict:
         "size_bytes": artifact.size_bytes,
         "sha256": artifact.sha256,
         "risk_notes": artifact.risk_notes,
+    }
+
+
+def notebook_revision_payload(
+    task: TaskRecord,
+    artifacts: list[FileArtifact],
+) -> dict:
+    notebook_path, error = resolve_scan_material(
+        task=task,
+        artifacts=artifacts,
+        role=FileRole.NOTEBOOK,
+        label="Notebook 文件",
+        task_field="notebook_path",
+    )
+    if error or notebook_path is None:
+        return {}
+    stat = notebook_path.stat()
+    artifact = next(
+        (item for item in artifacts if item.path.resolve() == notebook_path.resolve()),
+        None,
+    )
+    digest = artifact.sha256 if artifact is not None else None
+    return {
+        "path": str(notebook_path.resolve()),
+        "size_bytes": stat.st_size,
+        "sha256": digest or sha256_file(notebook_path),
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _archive_previous_scan(previous_execution: Path, staged_execution: Path) -> dict | None:
+    previous_history = previous_execution / "scan_history"
+    staged_history = staged_execution / "scan_history"
+    if previous_history.is_dir():
+        shutil.copytree(previous_history, staged_history, dirs_exist_ok=True)
+
+    previous_result = previous_execution / "scan_result.json"
+    if not previous_result.is_file():
+        return None
+    raw = previous_result.read_bytes()
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    staged_history.mkdir(parents=True, exist_ok=True)
+    archive_path = staged_history / f"{sha256(raw).hexdigest()}.json"
+    if not archive_path.exists():
+        shutil.copy2(previous_result, archive_path)
+    return _scan_history_summary(payload)
+
+
+def _scan_history_summary(payload: dict) -> dict:
+    scan_id = str(payload.get("scan_id") or "")
+    if not scan_id:
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        scan_id = f"legacy-{sha256(encoded).hexdigest()[:16]}"
+    return {
+        "scan_id": scan_id,
+        "scanned_at": payload.get("scanned_at"),
+        "status": payload.get("status"),
+        "status_message": payload.get("status_message"),
+        "notebook_revision": payload.get("notebook_revision") or {},
     }
 
 
