@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "marvis"
-version = "2.1.10"
+version = "2.1.11"
 description = "MARVIS-Agent: all-purpose credit-risk agent for model development, validation, data processing, feature analysis, and strategy workflows"
 readme = "README.md"
 license = "MIT"
