@@ -234,3 +234,47 @@ def test_stress_test_marks_all_missing_categories_as_skipped():
 
     assert result.status == "skipped"
     assert result.per_category[0].status == "skipped"
+
+
+def test_stress_test_marks_completed_categories_partial_when_features_unclassified():
+    oot = pd.DataFrame({
+        "x1": [0.1, 0.2, 0.8, 0.9],
+        "sample_score": [0.1, 0.2, 0.8, 0.9],
+        "y": [0, 0, 1, 1],
+        "split": ["oot"] * 4,
+        "apply_month": ["202507"] * 4,
+    })
+
+    result = run_stress_test(
+        oot_sample=oot,
+        config=_config(),
+        feature_categories={"内部特征": ["x1"]},
+        input_scorer=_ProportionalScorer(),
+        unclassified_features=["BH_A044_C0580"],
+        category_source_counts={"notebook": 1, "dictionary": 0, "unresolved": 1},
+    )
+
+    assert result.status == "partial"
+    assert result.unclassified_features == ["BH_A044_C0580"]
+    assert result.category_source_counts["unresolved"] == 1
+
+
+def test_stress_test_fails_when_no_model_feature_can_be_classified():
+    oot = pd.DataFrame({
+        "x1": [0.1, 0.2, 0.8, 0.9],
+        "sample_score": [0.1, 0.2, 0.8, 0.9],
+        "y": [0, 0, 1, 1],
+        "split": ["oot"] * 4,
+        "apply_month": ["202507"] * 4,
+    })
+
+    result = run_stress_test(
+        oot_sample=oot,
+        config=_config(),
+        feature_categories={},
+        input_scorer=_ProportionalScorer(),
+        unclassified_features=["BH_A044_C0580"],
+    )
+
+    assert result.status == "failed"
+    assert result.per_category == []

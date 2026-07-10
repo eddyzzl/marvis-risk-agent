@@ -44,6 +44,22 @@ def test_stress_summary_mentions_negative_9999_sentinel():
     assert "置 null" not in values["TEXT:stress_test_summary"]
 
 
+def test_stress_summary_names_unclassified_features():
+    base = _make_results()
+    results = replace(
+        base,
+        stress_test=replace(
+            base.stress_test,
+            status="partial",
+            unclassified_features=["BH_A044_C0580"],
+        ),
+    )
+
+    values = report_text_values_from_results(results)
+
+    assert "未分类特征 1 个：BH_A044_C0580" in values["TEXT:stress_test_summary"]
+
+
 def test_pressure_test_summary_placeholder_gets_platform_fallback():
     values = report_text_values_from_results(
         _make_results(),

@@ -297,6 +297,11 @@ def _stress_text(results: ValidationResults) -> str:
         "failed": "压力测试未完成，需先修复异常：",
         "skipped": "压力测试未执行有效类别：",
     }.get(results.stress_test.status, "")
+    if results.stress_test.unclassified_features:
+        features = results.stress_test.unclassified_features
+        items.append(
+            f"未分类特征 {len(features)} 个：{_feature_name_preview(features)}"
+        )
     for item in results.stress_test.per_category:
         if item.status == "skipped":
             items.append(f"{item.category}：未找到可用于压力测试的入模特征")
@@ -312,6 +317,14 @@ def _stress_text(results: ValidationResults) -> str:
         )
     text = "；".join(items) or "无压力测试结果"
     return f"{status_prefix}{text}" if status_prefix else text
+
+
+def _feature_name_preview(features: list[str], *, limit: int = 20) -> str:
+    visible = features[:limit]
+    text = "、".join(visible)
+    if len(features) > limit:
+        return f"{text} 等 {len(features)} 个"
+    return text
 
 
 def _optional_float(value) -> float | None:

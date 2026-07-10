@@ -711,6 +711,8 @@ def _build_metrics_cell_sources(
         "    feature_categories=_rmc_feature_categories,",
         "    input_scorer=_RmcNotebookScorer(),",
         "    cancellation_check=_rmc_raise_if_metrics_cancelled,",
+        "    unclassified_features=_rmc_category_resolution.unclassified_features,",
+        "    category_source_counts=_rmc_category_resolution.source_counts,",
         ")",
     ]
     output_lines = [

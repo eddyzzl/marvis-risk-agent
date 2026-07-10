@@ -228,6 +228,8 @@ class StressTestResult:
     baseline: StressBaseline
     per_category: list[StressCategoryResult]
     status: str = "completed"
+    unclassified_features: list[str] = field(default_factory=list)
+    category_source_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -420,6 +422,13 @@ def _stress_test_from_dict(payload: dict[str, Any]) -> StressTestResult:
         ),
         per_category=per_category,
         status=str(payload.get("status") or _stress_test_status_from_categories(per_category)),
+        unclassified_features=[
+            str(feature) for feature in payload.get("unclassified_features") or []
+        ],
+        category_source_counts={
+            str(source): int(count)
+            for source, count in (payload.get("category_source_counts") or {}).items()
+        },
     )
 
 

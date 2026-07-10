@@ -307,6 +307,20 @@ def _write_stress_summary(workbook: Workbook, results: ValidationResults) -> Non
         "错误",
     )]
     baseline_ks = results.stress_test.baseline.ks
+    unclassified = results.stress_test.unclassified_features
+    coverage_text = f"未分类特征 {len(unclassified)} 个"
+    if unclassified:
+        coverage_text += "：" + _feature_name_preview(unclassified)
+    rows.append((
+        "分类覆盖",
+        _stress_status_label(results.stress_test.status),
+        0,
+        baseline_ks,
+        "",
+        "",
+        "",
+        coverage_text,
+    ))
     rows.extend(
         (item.category, _stress_status_label(item.status), len(item.dropped_features), baseline_ks,
          item.ks_after if item.ks_after is not None else "",
@@ -317,7 +331,7 @@ def _write_stress_summary(workbook: Workbook, results: ValidationResults) -> Non
     )
     _write_rows(sheet, rows, header_rows=1, decimal_columns={3, 4, 5, 6})
     # color KS_delta cells based on threshold
-    for row_index, item in enumerate(results.stress_test.per_category, start=2):
+    for row_index, item in enumerate(results.stress_test.per_category, start=3):
         if item.ks_delta is None:
             continue
         color = ks_delta_cell_color(item.ks_delta)
@@ -325,6 +339,14 @@ def _write_stress_summary(workbook: Workbook, results: ValidationResults) -> Non
             sheet.cell(row=row_index, column=6).fill = PatternFill(
                 start_color=color, end_color=color, fill_type="solid",
             )
+
+
+def _feature_name_preview(features: list[str], *, limit: int = 20) -> str:
+    visible = features[:limit]
+    text = "、".join(visible)
+    if len(features) > limit:
+        return f"{text} 等 {len(features)} 个"
+    return text
 
 
 def _stress_status_label(status: str) -> str:

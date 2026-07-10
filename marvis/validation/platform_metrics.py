@@ -175,6 +175,8 @@ def write_platform_validation_metrics(
         config=config,
         feature_categories=feature_categories,
         input_scorer=stress_scorer,
+        unclassified_features=category_resolution.unclassified_features,
+        category_source_counts=category_resolution.source_counts,
     )
 
     results = ValidationResults(

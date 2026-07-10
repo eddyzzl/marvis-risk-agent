@@ -120,8 +120,29 @@ def test_each_table_has_expected_layout(payload):
         "IMAGE:ranking_table_oot": "table",
         "IMAGE:top20_feature_ranking": "table",
         "IMAGE:pressure_ks_table": "table",
+        "TEXT:stress_category_coverage": "table",
         "ROC_KS_CURVES": "roc_ks_curve",
     }
+
+
+def test_stress_section_includes_category_coverage(payload):
+    payload["stress_test"].update(
+        {
+            "status": "partial",
+            "unclassified_features": ["BH_A044_C0580"],
+        }
+    )
+
+    sections = metric_table_sections_from_payload(payload)
+    stress_section = next(section for section in sections if section["title"] == "压力测试")
+    coverage = next(
+        table
+        for table in stress_section["tables"]
+        if table["key"] == "TEXT:stress_category_coverage"
+    )
+
+    assert coverage["headers"] == ["整体状态", "未分类特征数", "未分类特征"]
+    assert coverage["rows"] == [["部分完成", "1", "BH_A044_C0580"]]
 
 
 def test_roc_ks_section_is_appended_with_curves(payload):

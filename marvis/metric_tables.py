@@ -94,6 +94,9 @@ def metric_table_sections_from_payload(payload: dict[str, Any]) -> list[dict[str
     bin_tables = _as_dict(effectiveness.get("bin_tables"))
     feature_importance = _as_list(basic_info.get("feature_importance"))
     per_category = _as_list(stress_test.get("per_category"))
+    unclassified_features = [
+        str(feature) for feature in _as_list(stress_test.get("unclassified_features"))
+    ]
 
     sections = [
         {
@@ -216,6 +219,16 @@ def metric_table_sections_from_payload(payload: dict[str, Any]) -> list[dict[str
                     "压力测试",
                     ["类别", "状态", "KS_baseline", "KS_after", "KS_delta", "PSI vs baseline"],
                     _pressure_test_rows(_as_dict(stress_test.get("baseline")), per_category),
+                ),
+                _table(
+                    "TEXT:stress_category_coverage",
+                    "压力测试分类覆盖",
+                    ["整体状态", "未分类特征数", "未分类特征"],
+                    [[
+                        _stress_status_label(stress_test.get("status")),
+                        _integer(len(unclassified_features)),
+                        _feature_name_preview(unclassified_features),
+                    ]],
                 ),
             ],
         },
@@ -417,6 +430,14 @@ def _pressure_test_rows(baseline: dict[str, Any], rows: list[Any]) -> list[list[
         for row in rows
         if isinstance(row, dict)
     ]
+
+
+def _feature_name_preview(features: list[str], *, limit: int = 20) -> str:
+    visible = features[:limit]
+    text = "、".join(visible) if visible else "-"
+    if len(features) > limit:
+        return f"{text} 等 {len(features)} 个"
+    return text
 
 
 def _stress_status_label(status: Any, error: Any = None) -> str:

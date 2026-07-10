@@ -129,6 +129,34 @@ def test_validation_results_from_dict_ignores_pipeline_task_identity():
     assert not hasattr(results, "task_id")
     assert results.model_name == "A卡"
     assert results.reproducibility.summary.status is ConsistencyStatus.PASS
+    assert results.stress_test.unclassified_features == []
+    assert results.stress_test.category_source_counts == {}
+
+
+def test_validation_results_from_dict_preserves_stress_category_coverage():
+    payload = {
+        "stress_test": {
+            "status": "partial",
+            "baseline": {"ks": 0.3, "sample_count": 10, "bin_table": []},
+            "per_category": [],
+            "unclassified_features": ["BH_A044_C0580"],
+            "category_source_counts": {
+                "notebook": 2,
+                "dictionary": 1,
+                "unresolved": 1,
+            },
+        }
+    }
+
+    results = validation_results_from_dict(payload)
+
+    assert results.stress_test.status == "partial"
+    assert results.stress_test.unclassified_features == ["BH_A044_C0580"]
+    assert results.stress_test.category_source_counts == {
+        "notebook": 2,
+        "dictionary": 1,
+        "unresolved": 1,
+    }
 
 
 def test_validation_results_from_dict_preserves_feature_importance_category():

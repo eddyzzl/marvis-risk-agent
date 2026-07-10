@@ -145,6 +145,27 @@ def test_stress_summary_labels_negative_9999_sentinel(tmp_path: Path):
     assert "置 null 特征数" not in header_values
 
 
+def test_stress_summary_includes_category_coverage_row(tmp_path: Path):
+    base = _make_results()
+    results = replace(
+        base,
+        stress_test=replace(
+            base.stress_test,
+            status="partial",
+            unclassified_features=["BH_A044_C0580"],
+        ),
+    )
+    output = tmp_path / "out.xlsx"
+
+    write_validation_excel(results, output)
+
+    sheet = load_workbook(output, data_only=True)["压力测试_汇总"]
+    values = [[cell.value for cell in row] for row in sheet.iter_rows()]
+    assert values[1][0] == "分类覆盖"
+    assert values[1][1] == "部分完成"
+    assert "未分类特征 1 个：BH_A044_C0580" in values[1][-1]
+
+
 def test_header_style_applied(tmp_path: Path):
     output = tmp_path / "out.xlsx"
     write_validation_excel(_make_results(), output)

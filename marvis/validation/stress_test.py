@@ -67,6 +67,8 @@ def run_stress_test(
     feature_categories: dict[str, list[str]],
     input_scorer: Scorer,
     cancellation_check: Callable[[], None] | None = None,
+    unclassified_features: list[str] | None = None,
+    category_source_counts: dict[str, int] | None = None,
 ) -> StressTestResult:
     if oot_sample.empty:
         raise ValueError("OOT sample is required for stress test")
@@ -156,10 +158,18 @@ def run_stress_test(
                 status="error",
             ))
 
+    unresolved = list(unclassified_features or [])
+    status = _stress_test_status(per_category)
+    if unresolved and not per_category:
+        status = "failed"
+    elif unresolved and status == "completed":
+        status = "partial"
     return StressTestResult(
         baseline=baseline,
         per_category=per_category,
-        status=_stress_test_status(per_category),
+        status=status,
+        unclassified_features=unresolved,
+        category_source_counts=dict(category_source_counts or {}),
     )
 
 
