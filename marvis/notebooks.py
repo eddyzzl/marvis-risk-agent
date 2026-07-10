@@ -1278,14 +1278,37 @@ def _worker_protocol_error_message(returncode: int | None, stderr: str | None) -
 
 def _kernel_start_error_with_stderr(error_value: object, stderr: str) -> str:
     base = str(error_value or "kernel failed before executing a notebook cell")
-    tail = _tail_text(stderr, limit=1600).strip()
+    tail = _tail_text(stderr, limit=4000).strip()
     if not tail:
         return base
-    last_lines = [line for line in tail.splitlines() if line.strip()][-5:]
-    detail = " | ".join(last_lines)
+    detail = _kernel_start_stderr_summary(tail)
     if detail in base:
         return base
     return f"{base}; kernel stderr: {detail}"
+
+
+def _kernel_start_stderr_summary(stderr: str) -> str:
+    cleanup_markers = (
+        "NotebookClient._async_cleanup_kernel",
+        "_async_cleanup_kernel",
+    )
+    diagnostic = stderr
+    for marker in cleanup_markers:
+        marker_index = diagnostic.find(marker)
+        if marker_index > 0:
+            diagnostic = diagnostic[:marker_index]
+            break
+    lines = [line for line in diagnostic.splitlines() if line.strip()]
+    if not lines:
+        lines = [line for line in stderr.splitlines() if line.strip()]
+    informative = [
+        line
+        for line in lines
+        if any(token in line for token in ("Error:", "Exception:", "ImportError:", "ModuleNotFoundError:", "DLL load failed"))
+        or "No module named" in line
+    ]
+    selected = informative[-3:] if informative else lines[-5:]
+    return " | ".join(selected)
 
 
 def _parse_notebook_worker_result(stdout: str) -> dict[str, Any] | None:

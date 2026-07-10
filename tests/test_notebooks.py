@@ -1191,6 +1191,66 @@ def test_run_notebook_isolated_kernel_start_failure_surfaces_worker_stderr(
     assert "DLL load failed while importing _zmq" in log_path.read_text(encoding="utf-8")
 
 
+def test_run_notebook_isolated_kernel_start_failure_ignores_cleanup_traceback_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    notebook_path = tmp_path / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    nbformat.write(nbformat.v4.new_notebook(cells=[]), notebook_path)
+    payload = {
+        "ok": True,
+        "result": {
+            "succeeded": False,
+            "failed_cell_index": None,
+            "error_name": "RuntimeError",
+            "error_value": "Kernel died before replying to kernel_info",
+            "resource_usage": {},
+        },
+    }
+    stderr = "\n".join([
+        "Traceback (most recent call last):",
+        "  File \"C:\\anaconda\\envs\\marvis\\Lib\\runpy.py\", line 196, in _run_module_as_main",
+        "ImportError: DLL load failed while importing _multiarray_umath: 找不到指定的模块。",
+        "Exception ignored in: <coroutine object NotebookClient._async_cleanup_kernel>",
+        "Traceback (most recent call last):",
+        "  File \"C:\\anaconda\\envs\\marvis\\Lib\\site-packages\\nbclient\\client.py\", line 504, in _async_cleanup_kernel",
+        "    assert self.km is not None",
+        "           ^^^^^^^^^^^^^^^^^^^",
+        "AssertionError:",
+    ])
+
+    class FakeProcess:
+        pid = 12345
+        returncode = 0
+
+        def communicate(self, input=None, timeout=None):
+            stdout = NOTEBOOK_RESULT_SENTINEL + json.dumps(payload) + "\n"
+            return stdout, stderr
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(
+        "marvis.notebooks.subprocess.Popen",
+        lambda *args, **kwargs: FakeProcess(),
+    )
+
+    result = run_notebook(
+        notebook_path,
+        executed_path,
+        log_path,
+        timeout=1,
+        isolated=True,
+    )
+
+    assert result.succeeded is False
+    assert "DLL load failed while importing _multiarray_umath" in result.error_value
+    assert "NotebookClient._async_cleanup_kernel" not in result.error_value
+    assert "AssertionError" not in result.error_value
+
+
 def test_run_notebook_returns_cancelled_when_token_is_cancelled(tmp_path: Path):
     notebook_path = tmp_path / "source.ipynb"
     executed_path = tmp_path / "executed.ipynb"
