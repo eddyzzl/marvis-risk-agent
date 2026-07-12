@@ -121,6 +121,9 @@ class FieldRecognitionResult:
     # Reserved for non-confirmable structural/security failures. Competing
     # equal-priority assignments remain separate candidates for user confirmation.
     conflicts: tuple[str, ...]
+    # Ordinary parse/recognition failures are bounded evidence for confirmation,
+    # not hard blockers. They are intentionally separate from conflicts.
+    diagnostics: tuple[str, ...] = ()
 
     @classmethod
     def from_candidates(
@@ -130,6 +133,7 @@ class FieldRecognitionResult:
         candidates,
         transformations,
         conflicts,
+        diagnostics=(),
     ) -> FieldRecognitionResult:
         return cls(
             schema_version=FIELD_RECOGNITION_SCHEMA,
@@ -137,6 +141,7 @@ class FieldRecognitionResult:
             candidates={key: tuple(value) for key, value in candidates.items()},
             transformations=tuple(transformations),
             conflicts=tuple(conflicts),
+            diagnostics=tuple(diagnostics),
         )
 
 
