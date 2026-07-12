@@ -1,0 +1,177 @@
+{
+  "schema_version": "marvis.validation_non_regression.v1",
+  "report_text_keys": [
+    "TEXT:algorithm",
+    "TEXT:data_source_summary",
+    "TEXT:dataset_split_summary",
+    "TEXT:model_name",
+    "TEXT:model_training_description",
+    "TEXT:model_version",
+    "TEXT:oot_bad_rate",
+    "TEXT:oot_count",
+    "TEXT:oot_ks",
+    "TEXT:oot_period",
+    "TEXT:oot_psi",
+    "TEXT:pressure_test_summary",
+    "TEXT:report_title",
+    "TEXT:reproducibility_summary",
+    "TEXT:sample_end_month",
+    "TEXT:sample_period",
+    "TEXT:sample_start_month",
+    "TEXT:stress_test_summary",
+    "TEXT:test_bad_rate",
+    "TEXT:test_count",
+    "TEXT:train_bad_rate",
+    "TEXT:train_count",
+    "TEXT:train_test_period",
+    "TEXT:train_test_ratio"
+  ],
+  "template_text_keys": [
+    "TEXT:report_title",
+    "TEXT:model_name",
+    "TEXT:model_overview",
+    "TEXT:model_scope",
+    "TEXT:sample_start_month",
+    "TEXT:sample_end_month",
+    "TEXT:bad_sample_definition",
+    "TEXT:good_sample_definition",
+    "TEXT:train_test_period",
+    "TEXT:train_test_ratio",
+    "TEXT:oot_period",
+    "TEXT:model_training_description",
+    "TEXT:oot_psi",
+    "TEXT:oot_ks",
+    "TEXT:pressure_test_summary",
+    "TEXT:pressure_impact_recommendation",
+    "TEXT:final_validation_conclusion",
+    "TEXT:drafter",
+    "TEXT:draft_date",
+    "TEXT:revision_version",
+    "TEXT:revision_date",
+    "TEXT:revision_author",
+    "TEXT:revision_description"
+  ],
+  "template_image_keys": [
+    "IMAGE:sample_overall_distribution",
+    "IMAGE:sample_month_distribution",
+    "IMAGE:model_parameters",
+    "IMAGE:top20_feature_ranking",
+    "IMAGE:psi_stability_table",
+    "IMAGE:roc_ks_graph_train",
+    "IMAGE:roc_ks_graph_test",
+    "IMAGE:roc_ks_graph_oot",
+    "IMAGE:ranking_table_train",
+    "IMAGE:ranking_table_test",
+    "IMAGE:ranking_table_oot",
+    "IMAGE:overall_model_effect",
+    "IMAGE:loan_month_effect",
+    "IMAGE:pressure_ks_table",
+    "IMAGE:pressure_psi_table",
+    "IMAGE:pressure_score_shift"
+  ],
+  "rendered_image_keys": [
+    "IMAGE:sample_overall_distribution",
+    "IMAGE:sample_month_distribution",
+    "IMAGE:top20_feature_ranking",
+    "IMAGE:ranking_table",
+    "IMAGE:roc_ks_graph_train",
+    "IMAGE:ranking_table_train",
+    "IMAGE:roc_ks_graph_test",
+    "IMAGE:ranking_table_test",
+    "IMAGE:roc_ks_graph_oot",
+    "IMAGE:ranking_table_oot",
+    "IMAGE:model_parameters",
+    "IMAGE:overall_model_effect",
+    "IMAGE:dataset_model_effect",
+    "IMAGE:loan_month_effect",
+    "IMAGE:psi_stability_table",
+    "IMAGE:ks_discrimination_table",
+    "IMAGE:pressure_ks_table",
+    "IMAGE:pressure_psi_table",
+    "IMAGE:pressure_score_shift_1",
+    "IMAGE:pressure_score_shift",
+    "IMAGE:pressure_score_shift_2",
+    "IMAGE:pressure_score_shift_3",
+    "IMAGE:pressure_score_shift_4",
+    "IMAGE:pressure_score_shift_5",
+    "IMAGE:pressure_score_shift_6",
+    "IMAGE:pressure_score_shift_7"
+  ],
+  "excel_sheets": [
+    "验证总览",
+    "样本基本信息",
+    "样本逐月分布",
+    "模型超参",
+    "特征重要性",
+    "模型效果",
+    "PSI稳定性",
+    "ROC_KS曲线",
+    "分箱_train",
+    "分箱_test",
+    "分箱_oot",
+    "逐月效果",
+    "压力测试_汇总",
+    "压力测试_分箱_征信"
+  ],
+  "agent_sections": [
+    {
+      "title": "样本情况",
+      "table_keys": [
+        "IMAGE:sample_overall_distribution",
+        "IMAGE:sample_month_distribution"
+      ],
+      "chart_keys": []
+    },
+    {
+      "title": "整体效果&稳定性",
+      "table_keys": [
+        "IMAGE:overall_model_effect"
+      ],
+      "chart_keys": []
+    },
+    {
+      "title": "分月效果&稳定性",
+      "table_keys": [
+        "IMAGE:loan_month_effect"
+      ],
+      "chart_keys": []
+    },
+    {
+      "title": "分箱排序性",
+      "table_keys": [
+        "IMAGE:ranking_table_train",
+        "IMAGE:ranking_table_test",
+        "IMAGE:ranking_table_oot"
+      ],
+      "chart_keys": []
+    },
+    {
+      "title": "特征重要性",
+      "table_keys": [
+        "IMAGE:top20_feature_ranking"
+      ],
+      "chart_keys": []
+    },
+    {
+      "title": "压力测试",
+      "table_keys": [
+        "IMAGE:pressure_ks_table",
+        "TEXT:stress_category_coverage"
+      ],
+      "chart_keys": []
+    },
+    {
+      "title": "ROC&KS 曲线",
+      "table_keys": [
+        "ROC_KS_CURVES"
+      ],
+      "chart_keys": []
+    }
+  ],
+  "allowed_replacements": {
+    "TEXT:reproducibility_summary": "TEXT:pmml_scoring_summary",
+    "reproducibility": "pmml_scoring",
+    "模型可复现性验证": "PMML打分测试",
+    "分数一致性": "PMML打分测试"
+  }
+}
