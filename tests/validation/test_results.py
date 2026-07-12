@@ -1,3 +1,7 @@
+from dataclasses import replace
+
+import pytest
+
 from marvis.validation.results import (
     ValidationResults,
     ReproducibilityResult,
@@ -16,8 +20,241 @@ from marvis.validation.results import (
     MonthlyPsiRow,
     StressCategoryResult,
     ConsistencyStatus,
+    MAX_PMML_SCORING_ERROR_CHARS,
+    MAX_PMML_SCORING_ERRORS,
+    PmmlScoringResult,
+    pmml_scoring_result_from_dict,
+    pmml_scoring_result_to_dict,
+    validate_pmml_scoring_result_fields,
     validation_results_from_dict,
 )
+
+
+def _valid_pmml_scoring_result(**overrides):
+    values = {
+        "schema_version": "marvis.pmml_scoring.v1",
+        "cache_key": "c" * 64,
+        "pmml_sha256": "a" * 64,
+        "sample_sha256": "b" * 64,
+        "engine": "pypmml-pmml4s-batch",
+        "engine_version": "1.5.5",
+        "output_field": "probability_1",
+        "input_row_count": 3,
+        "success_count": 3,
+        "failure_count": 0,
+        "null_count": 0,
+        "non_finite_count": 0,
+        "elapsed_seconds": 0.1,
+        "rows_per_second": 30.0,
+        "chunk_size": 2,
+        "required_input_count": 2,
+        "missing_inputs": [],
+        "score_artifact_path": "pmml_scores.parquet",
+        "score_artifact_sha256": "d" * 64,
+        "status": "pass",
+        "bounded_errors": [],
+    }
+    values.update(overrides)
+    return PmmlScoringResult(**values)
+
+
+def test_pmml_scoring_result_round_trip_is_exact_and_detached():
+    result = _valid_pmml_scoring_result()
+
+    payload = pmml_scoring_result_to_dict(result)
+    restored = pmml_scoring_result_from_dict(payload)
+
+    assert restored == result
+    assert payload["missing_inputs"] is not result.missing_inputs
+    assert payload["bounded_errors"] is not result.bounded_errors
+
+
+@pytest.mark.parametrize("key", ["status", "bounded_errors"])
+def test_pmml_scoring_result_from_dict_rejects_missing_fields(key):
+    payload = pmml_scoring_result_to_dict(_valid_pmml_scoring_result())
+    payload.pop(key)
+
+    with pytest.raises(ValueError, match="missing"):
+        pmml_scoring_result_from_dict(payload)
+
+
+def test_pmml_scoring_result_from_dict_rejects_unknown_fields():
+    payload = pmml_scoring_result_to_dict(_valid_pmml_scoring_result())
+    payload["task_id"] = "orchestration-only"
+
+    with pytest.raises(ValueError, match="unknown"):
+        pmml_scoring_result_from_dict(payload)
+
+
+def test_pmml_scoring_result_from_dict_rejects_non_mapping_payload():
+    with pytest.raises(ValueError, match="must be an object"):
+        pmml_scoring_result_from_dict([])  # type: ignore[arg-type]
+
+
+def test_pmml_scoring_result_rejects_unknown_schema_version():
+    result = _valid_pmml_scoring_result(schema_version="marvis.pmml_scoring.v2")
+
+    with pytest.raises(ValueError, match="unsupported PMML scoring schema"):
+        validate_pmml_scoring_result_fields(result)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "input_row_count",
+        "success_count",
+        "failure_count",
+        "null_count",
+        "non_finite_count",
+        "chunk_size",
+        "required_input_count",
+    ],
+)
+def test_pmml_scoring_result_rejects_bool_disguised_as_integer(field_name):
+    result = replace(_valid_pmml_scoring_result(), **{field_name: True})
+
+    with pytest.raises(ValueError, match="integer"):
+        validate_pmml_scoring_result_fields(result)
+
+
+@pytest.mark.parametrize("field_name", ["elapsed_seconds", "rows_per_second"])
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf"), -0.1])
+def test_pmml_scoring_result_rejects_invalid_numeric_evidence(field_name, value):
+    result = replace(_valid_pmml_scoring_result(), **{field_name: value})
+
+    with pytest.raises(ValueError, match="PMML scoring number"):
+        validate_pmml_scoring_result_fields(result)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"input_row_count": 0, "success_count": 0}, "must be positive"),
+        ({"chunk_size": 0}, "must be positive"),
+        ({"success_count": 2}, "do not add to input"),
+        (
+            {"success_count": 2, "failure_count": 1},
+            "detail counts are inconsistent",
+        ),
+    ],
+)
+def test_pmml_scoring_result_rejects_invalid_count_invariants(overrides, message):
+    result = replace(_valid_pmml_scoring_result(), **overrides)
+
+    with pytest.raises(ValueError, match=message):
+        validate_pmml_scoring_result_fields(result)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"success_count": 2, "failure_count": 1, "null_count": 1},
+        {"missing_inputs": ["x1"]},
+        {"bounded_errors": ["PMML output failed"]},
+    ],
+)
+def test_pmml_scoring_result_rejects_passing_evidence_with_errors(overrides):
+    result = replace(_valid_pmml_scoring_result(), **overrides)
+
+    with pytest.raises(ValueError, match="passing PMML scoring evidence"):
+        validate_pmml_scoring_result_fields(result)
+
+
+def test_pmml_scoring_result_rejects_failed_status_without_failure_evidence():
+    result = _valid_pmml_scoring_result(status="failed")
+
+    with pytest.raises(ValueError, match="failed PMML scoring evidence is empty"):
+        validate_pmml_scoring_result_fields(result)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"success_count": 2, "failure_count": 1, "null_count": 1},
+        {"missing_inputs": ["x1"]},
+        {"bounded_errors": ["PMML engine failed"]},
+    ],
+)
+def test_pmml_scoring_result_accepts_failed_status_with_failure_evidence(overrides):
+    result = replace(_valid_pmml_scoring_result(), status="failed", **overrides)
+
+    assert validate_pmml_scoring_result_fields(result) is result
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "cache_key",
+        "pmml_sha256",
+        "sample_sha256",
+        "score_artifact_sha256",
+    ],
+)
+@pytest.mark.parametrize("value", ["a" * 63, "A" * 64, "g" * 64, 1])
+def test_pmml_scoring_result_rejects_invalid_hashes(field_name, value):
+    result = replace(_valid_pmml_scoring_result(), **{field_name: value})
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        validate_pmml_scoring_result_fields(result)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["engine", "engine_version", "output_field", "score_artifact_path"],
+)
+@pytest.mark.parametrize("value", ["", "   ", None])
+def test_pmml_scoring_result_rejects_empty_identity_fields(field_name, value):
+    result = replace(_valid_pmml_scoring_result(), **{field_name: value})
+
+    with pytest.raises(ValueError, match="identity field"):
+        validate_pmml_scoring_result_fields(result)
+
+
+def test_pmml_scoring_result_rejects_too_many_bounded_errors():
+    result = _valid_pmml_scoring_result(
+        status="failed",
+        bounded_errors=["error"] * (MAX_PMML_SCORING_ERRORS + 1),
+    )
+
+    with pytest.raises(ValueError, match="too many"):
+        validate_pmml_scoring_result_fields(result)
+
+
+def test_pmml_scoring_result_rejects_oversized_bounded_error():
+    result = _valid_pmml_scoring_result(
+        status="failed",
+        bounded_errors=["x" * (MAX_PMML_SCORING_ERROR_CHARS + 1)],
+    )
+
+    with pytest.raises(ValueError, match="too long"):
+        validate_pmml_scoring_result_fields(result)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("missing_inputs", ("x1",)),
+        ("missing_inputs", [""]),
+        ("bounded_errors", ("error",)),
+        ("bounded_errors", [""]),
+    ],
+)
+def test_pmml_scoring_result_rejects_invalid_string_lists(field_name, value):
+    result = replace(
+        _valid_pmml_scoring_result(),
+        status="failed",
+        **{field_name: value},
+    )
+
+    with pytest.raises(ValueError, match=field_name):
+        validate_pmml_scoring_result_fields(result)
+
+
+def test_pmml_scoring_result_to_dict_revalidates_direct_instances():
+    result = _valid_pmml_scoring_result(rows_per_second=float("nan"))
+
+    with pytest.raises(ValueError, match="PMML scoring number"):
+        pmml_scoring_result_to_dict(result)
 
 
 def test_consistency_status_values():

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import dataclasses
+from dataclasses import asdict, dataclass, field
+import math
+import re
 from typing import Any, Literal
 
 from marvis.compat import StrEnum
 
 _UNSET = object()
+PMML_SCORING_RESULT_SCHEMA = "marvis.pmml_scoring.v1"
+MAX_PMML_SCORING_ERRORS = 64
+MAX_PMML_SCORING_ERROR_CHARS = 500
 
 
 class ConsistencyStatus(StrEnum):
@@ -87,6 +93,148 @@ class ReproducibilityResult:
     seed: int
     rows: list[ScoreCompareRow]
     summary: ConsistencySummary
+
+
+@dataclass(frozen=True)
+class PmmlScoringResult:
+    schema_version: str
+    cache_key: str
+    pmml_sha256: str
+    sample_sha256: str
+    engine: str
+    engine_version: str
+    output_field: str
+    input_row_count: int
+    success_count: int
+    failure_count: int
+    null_count: int
+    non_finite_count: int
+    elapsed_seconds: float
+    rows_per_second: float
+    chunk_size: int
+    required_input_count: int
+    missing_inputs: list[str]
+    score_artifact_path: str
+    score_artifact_sha256: str
+    status: str
+    bounded_errors: list[str]
+
+
+def validate_pmml_scoring_result_fields(
+    result: PmmlScoringResult,
+) -> PmmlScoringResult:
+    """Validate persisted PMML scoring evidence without coercing its values."""
+    if not isinstance(result, PmmlScoringResult):
+        raise ValueError("PMML scoring result has an invalid type")
+    if result.schema_version != PMML_SCORING_RESULT_SCHEMA:
+        raise ValueError(
+            f"unsupported PMML scoring schema: {result.schema_version!r}"
+        )
+
+    integer_fields = (
+        "input_row_count",
+        "success_count",
+        "failure_count",
+        "null_count",
+        "non_finite_count",
+        "chunk_size",
+        "required_input_count",
+    )
+    for name in integer_fields:
+        value = getattr(result, name)
+        if type(value) is not int or value < 0:
+            raise ValueError(f"invalid non-negative PMML scoring integer: {name}")
+
+    for name in ("elapsed_seconds", "rows_per_second"):
+        value = getattr(result, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"invalid PMML scoring number: {name}")
+        if not math.isfinite(float(value)) or float(value) < 0:
+            raise ValueError(f"invalid PMML scoring number: {name}")
+
+    if result.input_row_count <= 0 or result.chunk_size <= 0:
+        raise ValueError("PMML scoring row count and chunk size must be positive")
+    if result.success_count + result.failure_count != result.input_row_count:
+        raise ValueError("PMML scoring success/failure counts do not add to input")
+    if result.failure_count != result.null_count + result.non_finite_count:
+        raise ValueError("PMML scoring failure detail counts are inconsistent")
+
+    if result.status not in {"pass", "failed"}:
+        raise ValueError("invalid PMML scoring status")
+    _require_non_empty_string_list(result.missing_inputs, "missing_inputs")
+    _validate_bounded_scoring_errors(result.bounded_errors)
+    if result.status == "pass" and (
+        result.failure_count
+        or result.null_count
+        or result.non_finite_count
+        or result.missing_inputs
+        or result.bounded_errors
+    ):
+        raise ValueError("passing PMML scoring evidence contains failures")
+    if result.status == "failed" and not (
+        result.failure_count or result.missing_inputs or result.bounded_errors
+    ):
+        raise ValueError("failed PMML scoring evidence is empty")
+
+    for name in (
+        "cache_key",
+        "pmml_sha256",
+        "sample_sha256",
+        "score_artifact_sha256",
+    ):
+        value = getattr(result, name)
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(f"invalid PMML scoring SHA-256 field: {name}")
+    for name in ("engine", "engine_version", "output_field", "score_artifact_path"):
+        value = getattr(result, name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"missing PMML scoring identity field: {name}")
+    return result
+
+
+def pmml_scoring_result_to_dict(result: PmmlScoringResult) -> dict[str, Any]:
+    validate_pmml_scoring_result_fields(result)
+    return asdict(result)
+
+
+def pmml_scoring_result_from_dict(payload: dict[str, Any]) -> PmmlScoringResult:
+    if not isinstance(payload, dict):
+        raise ValueError("PMML scoring result must be an object")
+    expected = {item.name for item in dataclasses.fields(PmmlScoringResult)}
+    actual = set(payload)
+    unknown = actual - expected
+    missing = expected - actual
+    if unknown or missing:
+        raise ValueError(
+            "invalid PMML scoring result; "
+            f"missing={_bounded_field_names(missing)}, "
+            f"unknown={_bounded_field_names(unknown)}"
+        )
+    try:
+        result = PmmlScoringResult(**payload)
+    except TypeError as exc:
+        raise ValueError("invalid PMML scoring result fields") from exc
+    return validate_pmml_scoring_result_fields(result)
+
+
+def _require_non_empty_string_list(value: object, name: str) -> list[str]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and bool(item.strip()) for item in value
+    ):
+        raise ValueError(f"invalid PMML scoring {name}")
+    return value
+
+
+def _validate_bounded_scoring_errors(value: object) -> None:
+    errors = _require_non_empty_string_list(value, "bounded_errors")
+    if len(errors) > MAX_PMML_SCORING_ERRORS:
+        raise ValueError("too many PMML scoring bounded_errors")
+    if any(len(item) > MAX_PMML_SCORING_ERROR_CHARS for item in errors):
+        raise ValueError("PMML scoring bounded_error is too long")
+
+
+def _bounded_field_names(values: set[object]) -> list[str]:
+    return sorted(str(value)[:80] for value in values)[:32]
 
 
 @dataclass(frozen=True)
