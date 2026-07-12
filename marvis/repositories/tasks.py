@@ -134,28 +134,51 @@ class TaskRepository:
         dictionary_path: str,
     ) -> TaskRecord:
         with connect(self.db_path) as conn:
-            cursor = conn.execute(
-                """
-                UPDATE tasks
-                   SET notebook_path = ?,
-                       sample_path = ?,
-                       pmml_path = ?,
-                       dictionary_path = ?,
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                (
-                    notebook_path,
-                    sample_path,
-                    pmml_path,
-                    dictionary_path,
-                    _now(),
-                    task_id,
-                ),
+            self.update_material_paths_on_connection(
+                conn,
+                task_id,
+                notebook_path=notebook_path,
+                sample_path=sample_path,
+                pmml_path=pmml_path,
+                dictionary_path=dictionary_path,
+                begin_immediate=True,
             )
-            if cursor.rowcount == 0:
-                raise KeyError(f"Task not found: {task_id}")
         return self.get_task(task_id)
+
+    def update_material_paths_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        *,
+        notebook_path: str,
+        sample_path: str,
+        pmml_path: str,
+        dictionary_path: str,
+        begin_immediate: bool = False,
+    ) -> None:
+        if begin_immediate or not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            """
+            UPDATE tasks
+               SET notebook_path = ?,
+                   sample_path = ?,
+                   pmml_path = ?,
+                   dictionary_path = ?,
+                   updated_at = ?
+             WHERE id = ?
+            """,
+            (
+                notebook_path,
+                sample_path,
+                pmml_path,
+                dictionary_path,
+                _now(),
+                task_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Task not found: {task_id}")
 
     def delete_task(self, task_id: str) -> None:
         with connect(self.db_path) as conn:

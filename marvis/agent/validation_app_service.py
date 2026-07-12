@@ -46,6 +46,7 @@ from marvis.agent.validation_stages import (
     add_agent_auto_stage_start_message as add_agent_auto_stage_start_message_impl,
     add_agent_continue_prompt as add_agent_continue_prompt_impl,
     add_agent_failure_summary as add_agent_failure_summary_impl,
+    add_agent_input_confirmation_prompt as add_agent_input_confirmation_prompt_impl,
     auto_confirm_agent_report_conclusions as auto_confirm_agent_report_conclusions_impl,
     finalize_agent_opening_message as finalize_agent_opening_message_impl,
     open_agent_stage as open_agent_stage_impl,
@@ -108,6 +109,11 @@ from marvis.pipeline import (
     run_metrics_stage,
     run_notebook_stage,
     run_report_stage,
+)
+from marvis.repositories.validation_contracts import (
+    ValidationContractActiveJobConflict,
+    ValidationContractRepository,
+    require_confirmed_validation_input_contract,
 )
 from marvis.state_machine import ConflictError
 
@@ -321,8 +327,90 @@ def dispatch_agent_validation_job(
 ) -> dict:
     normalized_acceptance_mode = normalize_agent_acceptance_mode(acceptance_mode)
     auto_accept = agent_auto_accept(normalized_acceptance_mode)
-    stage = forced_stage or agent_next_stage(repo_, task, scan_failure_prefix=SCAN_FAILURE_PREFIX)
-    job_id = start_task_job(repo_, task.id, "agent")
+    stage, awaiting_contract = _agent_validation_stage_decision(
+        repo_,
+        task,
+        requested_stage=forced_stage,
+    )
+    if awaiting_contract is not None:
+        add_agent_input_confirmation_prompt_impl(
+            repo_,
+            task_id=task.id,
+            model_profile=model_profile,
+            contract_payload=awaiting_contract,
+        )
+        return {
+            "task_id": task.id,
+            "status": "awaiting_confirmation",
+            "stage": "input_confirmation",
+            "acceptance_mode": normalized_acceptance_mode,
+            "validation_input_contract": awaiting_contract,
+            "message": "validation input contract requires confirmation",
+            "messages": repo_.list_agent_messages(task.id),
+        }
+    if (
+        task.task_type == TASK_TYPE_VALIDATION
+        and task.validation_workflow_version == 2
+        and stage is not None
+        and stage != "scan"
+    ):
+        try:
+            job_id = ValidationContractRepository(repo_.db_path).start_ready_job(
+                task.id,
+                "agent",
+            )
+        except (ValidationContractActiveJobConflict, ConflictError) as exc:
+            raise conflict("task already has an active stage") from exc
+        except ValueError:
+            latest_task = repo_.get_task(task.id)
+            _stage, awaiting_contract = _agent_validation_stage_decision(
+                repo_,
+                latest_task,
+                requested_stage=stage,
+            )
+            if awaiting_contract is None:
+                raise
+            add_agent_input_confirmation_prompt_impl(
+                repo_,
+                task_id=task.id,
+                model_profile=model_profile,
+                contract_payload=awaiting_contract,
+            )
+            return {
+                "task_id": task.id,
+                "status": "awaiting_confirmation",
+                "stage": "input_confirmation",
+                "acceptance_mode": normalized_acceptance_mode,
+                "validation_input_contract": awaiting_contract,
+                "message": "validation input contract requires confirmation",
+                "messages": repo_.list_agent_messages(task.id),
+            }
+    else:
+        job_id = start_task_job(repo_, task.id, "agent")
+    latest_task = repo_.get_task(task.id)
+    stage, awaiting_contract = _agent_validation_stage_decision(
+        repo_,
+        latest_task,
+        requested_stage=stage,
+    )
+    if awaiting_contract is not None:
+        exc = ValueError("validation input contract requires confirmation")
+        fail_queued_job(repo_, job_id, exc)
+        add_agent_input_confirmation_prompt_impl(
+            repo_,
+            task_id=task.id,
+            model_profile=model_profile,
+            contract_payload=awaiting_contract,
+        )
+        return {
+            "task_id": task.id,
+            "status": "awaiting_confirmation",
+            "stage": "input_confirmation",
+            "acceptance_mode": normalized_acceptance_mode,
+            "validation_input_contract": awaiting_contract,
+            "message": str(exc),
+            "messages": repo_.list_agent_messages(task.id),
+        }
     register_agent_cancellation(task.id, job_id)
     try:
         should_create_opening_message = not (auto_accept and stage and stage != "scan")
@@ -392,12 +480,34 @@ def confirm_agent_report_conclusions(
     model_metadata: Callable[[dict], dict] | None = None,
     hook_dispatcher=None,
 ) -> dict:
-    latest_task = get_task_or_404(repo_, task_id)
-    if latest_task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
-        raise conflict(f"cannot generate report in status {latest_task.status.value}")
+    initial_task = get_task_or_404(repo_, task_id)
     if expected_revision is None:
         _, expected_revision = repo_.get_report_values(task_id)
-    job_id = start_task_job(repo_, task_id, "report")
+    if (
+        initial_task.task_type == TASK_TYPE_VALIDATION
+        and initial_task.validation_workflow_version == 2
+    ):
+        try:
+            job_id = ValidationContractRepository(repo_.db_path).start_ready_job(
+                task_id,
+                "report",
+            )
+        except (ValidationContractActiveJobConflict, ConflictError) as exc:
+            raise conflict("task already has an active stage") from exc
+        except ValueError as exc:
+            raise unprocessable(str(exc)) from exc
+    else:
+        job_id = start_task_job(repo_, task_id, "report")
+    latest_task = repo_.get_task(task_id)
+    if latest_task.status not in {
+        TaskStatus.WRITING_ARTIFACTS,
+        TaskStatus.REVIEW_REQUIRED,
+    }:
+        exc = ValueError(
+            f"cannot generate report in status {latest_task.status.value}"
+        )
+        fail_queued_job(repo_, job_id, exc)
+        raise conflict(str(exc))
     try:
         revision = repo_.update_agent_report_conclusions_with_audit(
             task_id,
@@ -688,7 +798,44 @@ def run_agent_validation_job(
 
 
 def agent_next_stage_for_job(repo_: TaskRepository, task: TaskRecord) -> str | None:
-    return agent_next_stage(repo_, task, scan_failure_prefix=SCAN_FAILURE_PREFIX)
+    stage, _awaiting_contract = _agent_validation_stage_decision(repo_, task)
+    return stage
+
+
+def _agent_validation_stage_decision(
+    repo_: TaskRepository,
+    task: TaskRecord,
+    *,
+    requested_stage: str | None = None,
+) -> tuple[str | None, dict | None]:
+    stage = requested_stage or agent_next_stage(
+        repo_,
+        task,
+        scan_failure_prefix=SCAN_FAILURE_PREFIX,
+    )
+    if (
+        task.task_type != TASK_TYPE_VALIDATION
+        or task.validation_workflow_version != 2
+        or stage is None
+        or stage == "scan"
+    ):
+        return stage, None
+    contract_repo = ValidationContractRepository(repo_.db_path)
+    try:
+        require_confirmed_validation_input_contract(contract_repo, task.id)
+    except ValueError:
+        record = contract_repo.get(task.id)
+        if record is None:
+            return None, {
+                "task_id": task.id,
+                "revision": None,
+                "status": "missing",
+                "needs_confirmation": True,
+                "read_only": True,
+                "contract": None,
+            }
+        return None, record.to_api_payload()
+    return stage, None
 
 
 def open_agent_stage(

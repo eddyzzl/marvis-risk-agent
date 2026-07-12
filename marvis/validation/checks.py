@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from marvis.validation.input_contracts import JsonScalar
+
 
 def validate_binary_target(sample: pd.DataFrame, target_col: str) -> None:
     if target_col not in sample.columns:
@@ -28,7 +30,7 @@ def validate_required_splits(
     sample: pd.DataFrame,
     *,
     split_col: str,
-    split_values: dict[str, str],
+    split_values: dict[str, JsonScalar],
     required: tuple[str, ...] = ("train", "test", "oot"),
 ) -> None:
     if split_col not in sample.columns:
@@ -39,12 +41,30 @@ def validate_required_splits(
     missing_splits = [
         key
         for key in required
-        if sample[sample[split_col] == split_values[key]].empty
+        if not _typed_scalar_mask(sample[split_col], split_values[key]).any()
     ]
     if missing_splits:
         raise ValueError(
             "required sample split has no rows: " + ", ".join(missing_splits)
         )
+
+
+def _typed_scalar_mask(values: pd.Series, expected: JsonScalar) -> pd.Series:
+    expected_value = expected.item() if isinstance(expected, np.generic) else expected
+
+    def matches(raw: object) -> bool:
+        value = raw.item() if isinstance(raw, np.generic) else raw
+        if type(value) is not type(expected_value):
+            return False
+        if value is None:
+            return expected_value is None
+        try:
+            equal = value == expected_value
+        except (TypeError, ValueError):
+            return False
+        return isinstance(equal, (bool, np.bool_)) and bool(equal)
+
+    return values.map(matches).astype(bool)
 
 
 def finite_score_series(

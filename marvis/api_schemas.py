@@ -1,6 +1,19 @@
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+)
 
 from marvis.domain import TASK_TYPE_VALIDATION
+
+
+StrictJsonScalar = StrictStr | StrictInt | StrictFloat | StrictBool | None
 
 
 class CreateTaskRequest(BaseModel):
@@ -41,6 +54,26 @@ class MaterialSelectionRequest(BaseModel):
     sample_path: str
     pmml_path: str
     dictionary_path: str
+
+
+class ValidationInputConfirmationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    revision: StrictInt = Field(gt=0)
+    target_col: str
+    positive_label: StrictJsonScalar
+    negative_label: StrictJsonScalar = None
+    split_col: str
+    split_value_mapping: dict[str, StrictJsonScalar]
+    time_col: str
+    time_granularity: str
+    pmml_output_field: str
+    model_params: dict[str, Any]
+    metadata_sheet: str | None = None
+    feature_col: str
+    category_col: str
+    importance_col: str
+    transformations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ExecutionEnvironmentRequest(BaseModel):

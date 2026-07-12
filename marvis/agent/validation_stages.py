@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import json
 
 from marvis.agent.service import REQUIRED_AGENT_REPORT_KEYS, agent_conclusions_confirmed
 from marvis.agent.validation_messages import (
@@ -19,7 +20,30 @@ from marvis.agent_memory.api_support import (
 )
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.db import TaskRepository
-from marvis.domain import TaskRecord, TaskStatus
+from marvis.domain import TASK_TYPE_VALIDATION, TaskRecord, TaskStatus
+from marvis.repositories.validation_contracts import (
+    ValidationContractRepository,
+    require_confirmed_validation_input_contract,
+)
+
+
+MAX_INPUT_CONFIRMATION_CANDIDATE_LINES = 24
+MAX_INPUT_CONFIRMATION_CANDIDATES_PER_FIELD = 3
+MAX_INPUT_CONFIRMATION_VALUE_CHARS = 160
+
+
+def _require_ready_contract_for_v2(
+    settings,
+    task: TaskRecord,
+) -> None:
+    if (
+        task.task_type == TASK_TYPE_VALIDATION
+        and task.validation_workflow_version == 2
+    ):
+        require_confirmed_validation_input_contract(
+            ValidationContractRepository(settings.db_path),
+            task.id,
+        )
 
 
 @dataclass(frozen=True)
@@ -195,11 +219,132 @@ def run_agent_scan_stage(
         raise_if_cancelled=raise_if_agent_cancelled,
     )
     raise_if_agent_cancelled(task_id)
+    contract_payload = _pending_validation_contract_payload(scan_payload)
+    if contract_payload is not None:
+        add_agent_input_confirmation_prompt(
+            repo,
+            task_id=task_id,
+            model_profile=model_profile,
+            contract_payload=contract_payload,
+        )
+        return True
     if not auto_accept:
         add_agent_continue_prompt(
             repo, task_id, model_profile, next_stage="reproducibility"
         )
     return True
+
+
+def _pending_validation_contract_payload(scan_payload: object) -> dict | None:
+    if not isinstance(scan_payload, dict):
+        return None
+    payload = scan_payload.get("validation_input_contract")
+    if not isinstance(payload, dict) or payload.get("status") != "pending_confirmation":
+        return None
+    return payload
+
+
+def add_agent_input_confirmation_prompt(
+    repo: TaskRepository,
+    *,
+    task_id: str,
+    model_profile: dict,
+    contract_payload: dict,
+) -> None:
+    status = str(contract_payload.get("status") or "missing")
+    revision = contract_payload.get("revision")
+    contract = contract_payload.get("contract")
+    candidates = contract.get("candidates") if isinstance(contract, dict) else None
+    candidate_lines: list[str] = []
+    omitted_candidates = 0
+    if isinstance(candidates, dict):
+        candidate_fields = sorted(candidates.items())
+        for field_index, (field_name, values) in enumerate(candidate_fields):
+            if not isinstance(values, list):
+                continue
+            visible = values[:MAX_INPUT_CONFIRMATION_CANDIDATES_PER_FIELD]
+            omitted_candidates += len(values) - len(visible)
+            for candidate_index, candidate in enumerate(visible):
+                if len(candidate_lines) >= MAX_INPUT_CONFIRMATION_CANDIDATE_LINES:
+                    omitted_candidates += len(visible) - candidate_index
+                    break
+                if not isinstance(candidate, dict) or "value" not in candidate:
+                    continue
+                rendered = json.dumps(
+                    _candidate_preview_value(candidate["value"]),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if len(rendered) > MAX_INPUT_CONFIRMATION_VALUE_CHARS:
+                    rendered = (
+                        rendered[: MAX_INPUT_CONFIRMATION_VALUE_CHARS - 1] + "…"
+                    )
+                candidate_lines.append(f"- {field_name} = {rendered}")
+            if len(candidate_lines) >= MAX_INPUT_CONFIRMATION_CANDIDATE_LINES:
+                omitted_candidates += sum(
+                    len(value)
+                    for _name, value in candidate_fields[field_index + 1 :]
+                    if isinstance(value, list)
+                )
+                break
+    if omitted_candidates:
+        candidate_lines.append(f"- … 其余候选已省略（{omitted_candidates} 项）")
+    candidate_text = (
+        "\n原子候选：\n" + "\n".join(candidate_lines)
+        if candidate_lines
+        else "\n当前没有可自动确认的原子候选。"
+    )
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="input_confirmation",
+        content=(
+            f"验证输入契约状态为 {status}"
+            f"（revision {revision}）。"
+            f"{candidate_text}\n"
+            "请先在验证字段确认界面逐项确认验证字段并提交；契约状态变为 ready 后，"
+            "再回复“继续”。在确认完成前，平台不会执行模型可复现性阶段。"
+        ),
+        metadata={
+            **model_metadata(model_profile),
+            "awaiting_validation_input_confirmation": True,
+            "validation_input_contract_ref": {
+                "task_id": task_id,
+                "revision": revision,
+                "status": status,
+                "needs_confirmation": bool(
+                    contract_payload.get("needs_confirmation", True)
+                ),
+            },
+        },
+    )
+
+
+def _candidate_preview_value(value: object, *, depth: int = 0) -> object:
+    if isinstance(value, str):
+        if len(value) <= MAX_INPUT_CONFIRMATION_VALUE_CHARS:
+            return value
+        return value[: MAX_INPUT_CONFIRMATION_VALUE_CHARS - 1] + "…"
+    if depth >= 3:
+        return "…"
+    if isinstance(value, list):
+        preview = [
+            _candidate_preview_value(item, depth=depth + 1) for item in value[:5]
+        ]
+        if len(value) > 5:
+            preview.append(f"… {len(value) - 5} more")
+        return preview
+    if isinstance(value, dict):
+        items = sorted(value.items(), key=lambda item: str(item[0]))
+        preview = {
+            str(key): _candidate_preview_value(item, depth=depth + 1)
+            for key, item in items[:5]
+        }
+        if len(items) > 5:
+            preview["…"] = f"{len(items) - 5} more"
+        return preview
+    return value
 
 
 def run_agent_reproducibility_stage(
@@ -212,6 +357,7 @@ def run_agent_reproducibility_stage(
     deps: ValidationStageDependencies,
 ) -> bool:
     task = repo.get_task(task_id)
+    _require_ready_contract_for_v2(settings, task)
     repo.update_status(
         task_id,
         TaskStatus.RUNNING,
@@ -280,6 +426,7 @@ def run_agent_metrics_stage(
     deps: ValidationStageDependencies,
 ) -> bool:
     task = repo.get_task(task_id)
+    _require_ready_contract_for_v2(settings, task)
     if task.status == TaskStatus.FAILED and deps.is_metrics_failure(task):
         expected_statuses = {
             TaskStatus.FAILED,
@@ -367,6 +514,7 @@ def run_agent_word_conclusion_stage(
     deps: ValidationStageDependencies,
 ) -> bool:
     task = repo.get_task(task_id)
+    _require_ready_contract_for_v2(settings, task)
     evidence = deps.agent_evidence_from_settings(settings, task_id)
     evidence = _word_conclusion_evidence_with_stage_summaries(repo, task_id, evidence)
     memory_store = AgentMemoryStore(settings.db_path)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, BackgroundTasks, Request
-from marvis.errors import conflict
+from marvis.errors import conflict, unprocessable
 
 from marvis.agent.orchestrator import is_metrics_failure
 from marvis.api_report_helpers import require_confirmed_agent_conclusions
@@ -16,7 +16,7 @@ from marvis.api_stage_helpers import (
 )
 from marvis.api_task_helpers import get_task_or_404
 from marvis.db import TaskRepository
-from marvis.domain import TaskStatus
+from marvis.domain import TASK_TYPE_VALIDATION, TaskStatus
 from marvis.notebooks import close_live_notebook_session, get_live_notebook_session
 from marvis.pipeline import (
     LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE,
@@ -26,7 +26,11 @@ from marvis.pipeline import (
     run_report_stage,
     run_staged_pipeline,
 )
-from marvis.state_machine import IllegalTransition
+from marvis.repositories.validation_contracts import (
+    ValidationContractActiveJobConflict,
+    ValidationContractRepository,
+)
+from marvis.state_machine import ConflictError, IllegalTransition
 
 
 router = APIRouter(prefix="/api", tags=["validation-stages"])
@@ -34,6 +38,31 @@ router = APIRouter(prefix="/api", tags=["validation-stages"])
 
 def _repo(request: Request) -> TaskRepository:
     return TaskRepository(request.app.state.settings.db_path)
+
+
+def _start_v2_guarded_job(
+    request: Request,
+    repo: TaskRepository,
+    task_id: str,
+    kind: str,
+):
+    task = get_task_or_404(repo, task_id)
+    if (
+        task.task_type == TASK_TYPE_VALIDATION
+        and task.validation_workflow_version == 2
+    ):
+        try:
+            job_id = ValidationContractRepository(
+                request.app.state.settings.db_path
+            ).start_ready_job(task_id, kind)
+        except (ValidationContractActiveJobConflict, ConflictError) as exc:
+            raise conflict("task already has an active stage") from exc
+        except ValueError as exc:
+            raise unprocessable(str(exc)) from exc
+    else:
+        job_id = start_task_job(repo, task_id, kind)
+    task = repo.get_task(task_id)
+    return task, job_id
 
 
 @router.post("/tasks/{task_id}/notebook", status_code=202)
@@ -44,8 +73,9 @@ def run_task_notebook(
     background_tasks: BackgroundTasks,
 ) -> dict:
     repo = _repo(request)
-    task = get_task_or_404(repo, task_id)
-    job_id = start_task_job(repo, task_id, "notebook")
+    task, job_id = _start_v2_guarded_job(
+        request, repo, task_id, "notebook"
+    )
     if task.status in {
         TaskStatus.RUNNING,
         TaskStatus.COMPUTING_METRICS,
@@ -105,8 +135,7 @@ def run_task_metrics(
     background_tasks: BackgroundTasks,
 ) -> dict:
     repo = _repo(request)
-    task = get_task_or_404(repo, task_id)
-    job_id = start_task_job(repo, task_id, "metrics")
+    task, job_id = _start_v2_guarded_job(request, repo, task_id, "metrics")
     metrics_retry = is_metrics_failure(task)
     pipeline_settings = pipeline_settings_from_request(request, task, None)
     if (
@@ -183,9 +212,12 @@ def run_task_report(
     background_tasks: BackgroundTasks,
 ) -> dict:
     repo = _repo(request)
-    task = get_task_or_404(repo, task_id)
-    require_confirmed_agent_conclusions(repo, task)
-    job_id = start_task_job(repo, task_id, "report")
+    task, job_id = _start_v2_guarded_job(request, repo, task_id, "report")
+    try:
+        require_confirmed_agent_conclusions(repo, task)
+    except Exception as exc:
+        fail_queued_job(repo, job_id, exc)
+        raise
     if task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
         repo.finish_job(job_id, status="failed")
         raise conflict(f"cannot generate report in status {task.status.value}")
@@ -218,8 +250,7 @@ def validate_task(
     background_tasks: BackgroundTasks,
 ) -> dict:
     repo = _repo(request)
-    task = get_task_or_404(repo, task_id)
-    job_id = start_task_job(repo, task_id, "pipeline")
+    task, job_id = _start_v2_guarded_job(request, repo, task_id, "pipeline")
     if task.status in {
         TaskStatus.RUNNING,
         TaskStatus.EXECUTED,

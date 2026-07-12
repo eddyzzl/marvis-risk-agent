@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 
+from marvis.validation.input_contracts import JsonScalar
+
 
 @dataclass(frozen=True)
 class ValidationConfig:
@@ -12,7 +14,7 @@ class ValidationConfig:
     random_sample_size: int = 1000
     random_seed: int = 42
     score_decimal_places: int = 6
-    split_values: dict[str, str] = field(
+    split_values: dict[str, JsonScalar] = field(
         default_factory=lambda: {"train": "train", "test": "test", "oot": "oot"}
     )
     data_dict_feature_col: str = "特征名"

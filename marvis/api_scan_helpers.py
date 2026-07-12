@@ -9,7 +9,13 @@ import uuid
 
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.db import TaskRepository
-from marvis.domain import FileArtifact, FileRole, TaskRecord, TaskStatus
+from marvis.domain import (
+    TASK_TYPE_VALIDATION,
+    FileArtifact,
+    FileRole,
+    TaskRecord,
+    TaskStatus,
+)
 from marvis.files import (
     EXCEL_SUFFIXES,
     SAMPLE_SUFFIXES,
@@ -25,7 +31,28 @@ from marvis.notebook_contract import (
 from marvis.notebook_steps import notebook_step_preview
 from marvis.notebooks import close_live_notebook_session
 from marvis.pipeline import SCAN_STAGE_FAILURE_PREFIX
+from marvis.repositories.validation_contracts import ValidationContractRepository
 from marvis.safe_paths import assert_within
+from marvis.validation.feature_metadata import (
+    FeatureMetadataSelection,
+    inspect_feature_metadata,
+    normalize_feature_metadata,
+)
+from marvis.validation.field_recognition import recognize_notebook_fields
+from marvis.validation.input_contracts import (
+    INPUT_CONTRACT_SCHEMA,
+    FIELD_RECOGNITION_SCHEMA,
+    FieldCandidate,
+    FieldEvidence,
+    FieldRecognitionResult,
+    ValidationInputContract,
+)
+from marvis.validation.pmml_manifest import parse_pmml_input_manifest
+from marvis.validation.sample_schema import inspect_sample_schema
+from marvis.validation_materials import (
+    ResolvedValidationMaterials,
+    resolve_selected_validation_materials,
+)
 
 
 REQUIRED_SCAN_MATERIALS = (
@@ -48,6 +75,10 @@ RMC_CONTRACT_NAME_LABELS = {
     "RMC_ALGORITHM": "RMC_ALGORITHM（模型算法）",
 }
 SCAN_FAILURE_PREFIX = SCAN_STAGE_FAILURE_PREFIX
+
+
+class SourceDirectoryScanError(ValueError):
+    """A source-tree guardrail failure, distinct from v2 material validation."""
 
 
 def format_notebook_contract_error(exc: NotebookContractError) -> str:
@@ -120,8 +151,29 @@ def scan_hook_payload(payload: dict) -> dict:
 def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
     # source_dir is normalized at task-create time, so pipeline and /scan agree.
     source_dir = Path(task.source_dir).resolve()
-    artifacts = scan_source_dir(source_dir)
-    checks = scan_preflight_checks(task, artifacts)
+    try:
+        artifacts = scan_source_dir(source_dir)
+    except ValueError as exc:
+        raise SourceDirectoryScanError(str(exc)) from exc
+    is_v2_validation = _uses_v2_validation_contract(task)
+    validation_contract: ValidationInputContract | None = None
+    resolved_materials: ResolvedValidationMaterials | None = None
+    if is_v2_validation:
+        resolved_materials = resolve_selected_validation_materials(task)
+        validation_contract = build_validation_input_contract(
+            notebook_path=resolved_materials.notebook,
+            sample_path=resolved_materials.sample,
+            pmml_path=resolved_materials.pmml,
+            dictionary_path=resolved_materials.dictionary,
+            known_hashes={
+                artifact.path.resolve(): artifact.sha256
+                for artifact in artifacts
+                if artifact.sha256
+            },
+        )
+        checks = _v2_scan_checks(resolved_materials, validation_contract)
+    else:
+        checks = scan_preflight_checks(task, artifacts)
     task_dir = settings.tasks_dir / task.id
     uow = ArtifactUnitOfWork()
     staged_execution = uow.stage_directory(task_dir, "execution")
@@ -135,7 +187,14 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
         artifacts,
         execution_dir=staged_execution.path,
     )
-    notebook_contract = scan_notebook_contract(task, artifacts)
+    notebook_contract = (
+        {
+            "read_only": True,
+            "source": "notebook_static_recognition",
+        }
+        if is_v2_validation
+        else scan_notebook_contract(task, artifacts)
+    )
     scan_status = TaskStatus.FAILED if scan_error_checks(checks) else TaskStatus.SCANNED
     scan_message = scan_status_message(checks)
     payload = {
@@ -153,10 +212,11 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
         "notebook_steps": notebook_steps,
         "notebook_contract": notebook_contract,
     }
-    (staged_execution.path / "scan_result.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    if not is_v2_validation:
+        (staged_execution.path / "scan_result.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     close_live_notebook_session(task.id)
     expected_statuses = {
         TaskStatus.CREATED,
@@ -177,6 +237,19 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
             expected=expected_statuses,
             begin_immediate=True,
         )
+        if validation_contract is not None:
+            record = ValidationContractRepository(
+                settings.db_path
+            ).replace_candidates_on_connection(
+                conn,
+                task.id,
+                validation_contract,
+            )
+            payload["validation_input_contract"] = record.to_api_payload()
+            (staged_execution.final_path / "scan_result.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         return payload
 
     def commit_scan_legacy():
@@ -193,6 +266,303 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
     else:
         uow.finalize(commit_scan_legacy)
     return payload
+
+
+def _uses_v2_validation_contract(task: TaskRecord) -> bool:
+    return (
+        task.task_type == TASK_TYPE_VALIDATION
+        and task.validation_workflow_version == 2
+    )
+
+
+def build_validation_input_contract(
+    *,
+    notebook_path: Path,
+    sample_path: Path,
+    pmml_path: Path,
+    dictionary_path: Path,
+    known_hashes: dict[Path, str] | None = None,
+) -> ValidationInputContract:
+    """Build bounded, read-only v2 candidates from four selected materials."""
+
+    known = {Path(path).resolve(): digest for path, digest in (known_hashes or {}).items()}
+    conflicts: list[str] = []
+
+    try:
+        sample_schema = inspect_sample_schema(sample_path)
+        sample_digest = sample_schema.sha256
+    except ValueError as exc:
+        sample_schema = None
+        sample_digest = _known_or_hash(sample_path, known)
+        conflicts.append(f"sample: {exc}")
+
+    try:
+        fields = recognize_notebook_fields(notebook_path)
+        notebook_digest = fields.notebook_sha256
+    except ValueError as exc:
+        notebook_digest = _known_or_hash(notebook_path, known)
+        fields = FieldRecognitionResult(
+            schema_version=FIELD_RECOGNITION_SCHEMA,
+            notebook_sha256=notebook_digest,
+            candidates={},
+            transformations=(),
+            conflicts=(f"Notebook: {exc}",),
+            diagnostics=(),
+        )
+
+    try:
+        manifest = parse_pmml_input_manifest(pmml_path)
+    except ValueError as exc:
+        manifest = None
+        conflicts.append(f"PMML: {exc}")
+    pmml_digest = _known_or_hash(pmml_path, known)
+
+    metadata = None
+    metadata_selections: tuple[FeatureMetadataSelection, ...] = ()
+    if manifest is not None:
+        try:
+            inspection = inspect_feature_metadata(dictionary_path, manifest)
+            metadata_selections = inspection.selections
+            conflicts.extend(
+                f"feature metadata: {message}"
+                for message in inspection.blocking_errors
+            )
+            if len(metadata_selections) == 1:
+                metadata = normalize_feature_metadata(
+                    dictionary_path,
+                    selection=metadata_selections[0],
+                    manifest=manifest,
+                )
+        except ValueError as exc:
+            conflicts.append(f"feature metadata: {exc}")
+    else:
+        conflicts.append("feature metadata: PMML manifest is unavailable")
+    dictionary_digest = _known_or_hash(dictionary_path, known)
+
+    return assemble_validation_input_contract(
+        material_hashes={
+            "notebook": notebook_digest,
+            "sample": sample_digest,
+            "pmml": pmml_digest,
+            "dictionary": dictionary_digest,
+        },
+        sample_schema=sample_schema,
+        fields=fields,
+        manifest=manifest,
+        metadata=metadata,
+        metadata_selections=metadata_selections,
+        conflicts=tuple(conflicts),
+    )
+
+
+def assemble_validation_input_contract(
+    *,
+    material_hashes: dict[str, str],
+    sample_schema,
+    fields: FieldRecognitionResult,
+    manifest,
+    metadata,
+    metadata_selections: tuple[FeatureMetadataSelection, ...],
+    conflicts: tuple[str, ...],
+) -> ValidationInputContract:
+    candidates = {key: tuple(value) for key, value in fields.candidates.items()}
+    hard_conflicts = [*fields.conflicts, *conflicts]
+
+    if manifest is not None:
+        algorithm = str(manifest.algorithm).strip()
+        if algorithm:
+            candidates["algorithm"] = _append_candidate(
+                candidates.get("algorithm", ()),
+                _material_candidate(algorithm, "pmml_manifest", "PMML algorithm"),
+            )
+        else:
+            hard_conflicts.append("PMML algorithm is unavailable")
+
+        output_candidates = tuple(
+            value for value in manifest.output_candidates if str(value).strip()
+        )
+        if output_candidates:
+            candidates["pmml_output_field"] = tuple(
+                [*candidates.get("pmml_output_field", ())]
+                + [
+                    _material_candidate(value, "pmml_output", "PMML output field")
+                    for value in output_candidates
+                ]
+            )
+        else:
+            hard_conflicts.append("PMML output field is unavailable")
+        if manifest.unsupported_derivations:
+            hard_conflicts.append(
+                "unsupported PMML stress dependencies: "
+                + ", ".join(manifest.unsupported_derivations)
+            )
+        if sample_schema is not None:
+            producible_fields = _candidate_producible_fields(
+                sample_columns=frozenset(sample_schema.columns),
+                transformations=fields.transformations,
+            )
+            missing_inputs = [
+                name
+                for name in manifest.raw_required_fields
+                if name not in producible_fields
+            ]
+            if missing_inputs:
+                hard_conflicts.append(
+                    "sample missing required PMML inputs: " + ", ".join(missing_inputs)
+                )
+
+    if metadata_selections:
+        candidates["feature_metadata_selection"] = tuple(
+            _material_candidate(
+                {
+                    "metadata_sheet": selection.sheet_name,
+                    "feature_col": selection.feature_col,
+                    "category_col": selection.category_col,
+                    "importance_col": selection.importance_col,
+                },
+                "feature_metadata",
+                "feature metadata column selection",
+            )
+            for selection in metadata_selections
+        )
+    else:
+        hard_conflicts.append("feature metadata selection is unavailable")
+
+    return ValidationInputContract(
+        schema_version=INPUT_CONTRACT_SCHEMA,
+        material_hashes=material_hashes,
+        status="blocked" if hard_conflicts else "pending_confirmation",
+        candidates=candidates,
+        sample_schema=sample_schema,
+        pmml_manifest=manifest,
+        feature_metadata=metadata,
+        confirmed={},
+        transformations=fields.transformations,
+        conflicts=tuple(_bounded_conflicts(hard_conflicts)),
+    )
+
+
+def _known_or_hash(path: Path, known_hashes: dict[Path, str]) -> str:
+    selected = Path(path).resolve()
+    return known_hashes.get(selected) or sha256_file(selected)
+
+
+def _material_candidate(value, source_kind: str, excerpt: str) -> FieldCandidate:
+    return FieldCandidate(
+        value=value,
+        evidence=(
+            FieldEvidence(
+                source_kind=source_kind,
+                notebook_cell=None,
+                source_excerpt=excerpt,
+                confidence=1.0,
+            ),
+        ),
+    )
+
+
+def _append_candidate(
+    values: tuple[FieldCandidate, ...], candidate: FieldCandidate
+) -> tuple[FieldCandidate, ...]:
+    return (*values, candidate)
+
+
+def _candidate_producible_fields(
+    *, sample_columns: frozenset[str], transformations
+) -> frozenset[str]:
+    """Resolve transformation dependencies without recursion.
+
+    A field is producible when it is present in the sample or at least one of its
+    transformation alternatives has all inputs available.  The dependency queue
+    handles long chains and leaves cyclic-only components unresolved.
+    """
+    producible = set(sample_columns)
+    pending_inputs: list[set[str]] = []
+    outputs: list[str] = []
+    waiting_by_input: dict[str, list[int]] = {}
+    ready: list[str] = []
+
+    for index, spec in enumerate(transformations):
+        dependencies = set(spec.input_fields) - producible
+        pending_inputs.append(dependencies)
+        outputs.append(spec.output_field)
+        if not dependencies:
+            ready.append(spec.output_field)
+        for dependency in dependencies:
+            waiting_by_input.setdefault(dependency, []).append(index)
+
+    while ready:
+        field = ready.pop()
+        if field in producible:
+            continue
+        producible.add(field)
+        for index in waiting_by_input.get(field, ()):
+            dependencies = pending_inputs[index]
+            dependencies.discard(field)
+            if not dependencies:
+                ready.append(outputs[index])
+
+    return frozenset(producible)
+
+
+def _bounded_conflicts(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values[:64]:
+        text = str(value)
+        bounded = text if len(text) <= 500 else text[:497] + "..."
+        if bounded not in result:
+            result.append(bounded)
+    return result
+
+
+def _v2_scan_checks(
+    materials: ResolvedValidationMaterials,
+    contract: ValidationInputContract,
+) -> list[dict[str, str]]:
+    checks = [
+        {
+            "id": f"material_{role.value}",
+            "label": label,
+            "status": "success",
+            "message": f"已识别：{path.name}",
+        }
+        for (role, label, _field), path in zip(
+            REQUIRED_SCAN_MATERIALS,
+            (
+                materials.notebook,
+                materials.sample,
+                materials.pmml,
+                materials.dictionary,
+            ),
+            strict=True,
+        )
+    ]
+    if contract.conflicts:
+        checks.append(
+            {
+                "id": "validation_input_contract",
+                "label": "验证输入契约",
+                "status": "error",
+                "message": _bounded_scan_error_message(contract.conflicts),
+            }
+        )
+    else:
+        checks.append(
+            {
+                "id": "validation_input_contract",
+                "label": "验证输入契约",
+                "status": "success",
+                "message": "字段与元数据候选已生成，等待用户确认。",
+            }
+        )
+    return checks
+
+
+def _bounded_scan_error_message(conflicts: tuple[str, ...], limit: int = 2_000) -> str:
+    message = "；".join(conflicts)
+    if len(message) <= limit:
+        return message
+    return message[: limit - 3] + "..."
 
 
 def artifact_payload(artifact) -> dict:

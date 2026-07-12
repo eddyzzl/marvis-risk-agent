@@ -11,6 +11,7 @@ from marvis.app import create_app
 from marvis.agent_memory.models import MemoryCandidate
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.db import PluginRepository, TaskRepository
+from marvis.db_schema import connect
 from marvis.domain import TaskStatus
 from marvis.pipeline import NOTEBOOK_STAGE_FAILURE_PREFIX
 
@@ -122,7 +123,13 @@ def test_validation_agent_stage_impl_lives_outside_api_module():
     assert api._run_agent_metrics_stage_impl is validation_stages.run_agent_metrics_stage
 
 
-def _create_task(client: TestClient, tmp_path: Path, *, run_mode: str = "agent") -> str:
+def _create_task(
+    client: TestClient,
+    tmp_path: Path,
+    *,
+    run_mode: str = "agent",
+    validation_workflow_version: int = 1,
+) -> str:
     response = client.post(
         "/api/tasks",
         json={
@@ -133,7 +140,14 @@ def _create_task(client: TestClient, tmp_path: Path, *, run_mode: str = "agent")
         },
     )
     assert response.status_code == 200, response.text
-    return response.json()["id"]
+    task_id = response.json()["id"]
+    if validation_workflow_version != 2:
+        with connect(tmp_path / "marvis.sqlite") as conn:
+            conn.execute(
+                "UPDATE tasks SET validation_workflow_version = ? WHERE id = ?",
+                (validation_workflow_version, task_id),
+            )
+    return task_id
 
 
 def _advance_to_writing_artifacts(repo: TaskRepository, task_id: str) -> None:
@@ -516,6 +530,108 @@ def test_agent_auto_accept_runs_all_remaining_stages_without_continue_prompts(
     ]
 
 
+@pytest.mark.parametrize("auto_accept", [False, True])
+def test_agent_scan_pending_contract_pauses_with_atomic_candidates(
+    tmp_path,
+    monkeypatch,
+    auto_accept,
+):
+    from marvis.agent.validation_app_service import run_agent_scan_stage
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path, validation_workflow_version=2)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    contract_payload = {
+        "status": "pending_confirmation",
+        "revision": 3,
+        "contract": {
+            "candidates": {
+                "target_col": [
+                    {
+                        "value": "y",
+                        "evidence": [
+                            {
+                                "source_kind": "rmc_literal",
+                                "notebook_cell": 0,
+                                "source_excerpt": "RMC_TARGET_COL='y'",
+                                "confidence": 1.0,
+                            }
+                        ],
+                    }
+                ],
+                "split_col": [
+                    {
+                        "value": "split",
+                        "evidence": [],
+                    }
+                ],
+                "model_params": [
+                    {
+                        "value": {"index": index, "blob": "x" * 1_000},
+                        "evidence": [],
+                    }
+                    for index in range(80)
+                ],
+            }
+        },
+    }
+
+    def fake_scan(repo_, task, _settings):
+        repo_.update_status(
+            task.id,
+            TaskStatus.SCANNED,
+            "scanned",
+            expected=TaskStatus.CREATED,
+        )
+        return {"validation_input_contract": contract_payload}
+
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.perform_scan_task",
+        fake_scan,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.summarize_stage",
+        lambda **_kwargs: ("材料扫描完成。", {"fallback": True}),
+    )
+
+    assert run_agent_scan_stage(
+        repo,
+        SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+        task_id,
+        {"model_id": "m1"},
+        auto_accept=auto_accept,
+    ) is True
+
+    task = repo.get_task(task_id)
+    assert task.status == TaskStatus.SCANNED
+    messages = repo.list_agent_messages(task_id)
+    confirmation = messages[-1]
+    assert confirmation["stage"] == "input_confirmation"
+    assert "pending_confirmation" in confirmation["content"]
+    assert "revision 3" in confirmation["content"]
+    assert 'target_col = "y"' in confirmation["content"]
+    assert 'split_col = "split"' in confirmation["content"]
+    assert "确认验证字段" in confirmation["content"]
+    assert len(confirmation["content"]) <= 6_000
+    assert "x" * 200 not in confirmation["content"]
+    assert "其余候选已省略" in confirmation["content"]
+    assert confirmation["metadata"]["awaiting_validation_input_confirmation"] is True
+    assert confirmation["metadata"]["validation_input_contract_ref"] == {
+        "task_id": task_id,
+        "revision": 3,
+        "status": "pending_confirmation",
+        "needs_confirmation": True,
+    }
+    assert "validation_input_contract" not in confirmation["metadata"]
+    assert len(json.dumps(confirmation["metadata"], ensure_ascii=False)) < 1_000
+    assert not [
+        message
+        for message in messages
+        if message.get("metadata", {}).get("awaiting_next_stage")
+        == "reproducibility"
+    ]
+
+
 def test_agent_auto_accept_does_not_add_received_intro_when_auto_advancing(
     tmp_path,
     monkeypatch,
@@ -637,6 +753,137 @@ def test_agent_auto_accept_dispatch_does_not_precreate_received_intro_for_next_s
         for message in payload["messages"]
         if message["role"] == "assistant" and message["content"].startswith("收到")
     ]
+
+
+def test_agent_dispatch_auto_accept_cannot_bypass_pending_input_confirmation(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.agent.validation_app_service import (
+        agent_next_stage_for_job,
+        dispatch_agent_validation_job,
+    )
+    from marvis.repositories.validation_contracts import ValidationContractRepository
+    from tests.validation_builders import make_candidate_contract
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path, validation_workflow_version=2)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    repo.update_status(
+        task_id,
+        TaskStatus.SCANNED,
+        "scanned",
+        expected=TaskStatus.CREATED,
+    )
+    pending = ValidationContractRepository(tmp_path / "marvis.sqlite").replace_candidates(
+        task_id,
+        make_candidate_contract(),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_agent_validation_job",
+        lambda *_args, **_kwargs: calls.append("job"),
+    )
+
+    assert agent_next_stage_for_job(repo, repo.get_task(task_id)) is None
+
+    payload = dispatch_agent_validation_job(
+        repo_=repo,
+        task=repo.get_task(task_id),
+        settings=SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+        model_profile={"model_id": "m1"},
+        acceptance_mode="auto_accept",
+        background_tasks=BackgroundTasks(),
+    )
+
+    assert payload["status"] == "awaiting_confirmation"
+    assert payload["stage"] == "input_confirmation"
+    assert payload["validation_input_contract"]["status"] == "pending_confirmation"
+    assert payload["validation_input_contract"]["revision"] == pending.revision
+    assert repo.get_task(task_id).status == TaskStatus.SCANNED
+    assert repo.task_has_active_job(task_id) is False
+    assert repo.get_latest_job(task_id, kind="agent") is None
+    assert calls == []
+
+    forced = dispatch_agent_validation_job(
+        repo_=repo,
+        task=repo.get_task(task_id),
+        settings=SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+        model_profile={"model_id": "m1"},
+        acceptance_mode="normal",
+        background_tasks=BackgroundTasks(),
+        forced_stage="metrics",
+    )
+
+    assert forced["status"] == "awaiting_confirmation"
+    assert forced["stage"] == "input_confirmation"
+    assert repo.task_has_active_job(task_id) is False
+    assert calls == []
+
+
+def test_direct_agent_reproducibility_stage_requires_ready_v2_contract_before_status_change(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.agent.validation_app_service import run_agent_reproducibility_stage
+    from marvis.repositories.validation_contracts import ValidationContractRepository
+    from tests.validation_builders import make_candidate_contract
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path, validation_workflow_version=2)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    repo.update_status(
+        task_id,
+        TaskStatus.SCANNED,
+        "scanned",
+        expected=TaskStatus.CREATED,
+    )
+    ValidationContractRepository(tmp_path / "marvis.sqlite").replace_candidates(
+        task_id,
+        make_candidate_contract(),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_notebook_stage",
+        lambda **_kwargs: calls.append("notebook"),
+    )
+
+    with pytest.raises(ValueError, match="requires confirmation"):
+        run_agent_reproducibility_stage(
+            repo,
+            SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+            task_id,
+            {"model_id": "m1"},
+        )
+
+    assert repo.get_task(task_id).status == TaskStatus.SCANNED
+    assert calls == []
+
+
+def test_agent_next_stage_allows_confirmed_v2_contract(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.agent.validation_app_service import agent_next_stage_for_job
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path, validation_workflow_version=2)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    repo.update_status(
+        task_id,
+        TaskStatus.SCANNED,
+        "scanned",
+        expected=TaskStatus.CREATED,
+    )
+    guarded: list[str] = []
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.require_confirmed_validation_input_contract",
+        lambda _contract_repo, guarded_task_id: guarded.append(guarded_task_id)
+        or SimpleNamespace(status="ready"),
+    )
+
+    assert agent_next_stage_for_job(repo, repo.get_task(task_id)) == "reproducibility"
+    assert guarded == [task_id]
 
 
 @pytest.mark.parametrize(

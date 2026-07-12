@@ -27,6 +27,7 @@ from marvis.routers.scans import router as scans_router
 from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.routers.tasks import router as tasks_router
 from marvis.routers.validation_agent import router as validation_agent_router
+from marvis.routers.validation_contracts import router as validation_contracts_router
 from marvis.routers.validation_stages import router as validation_stages_router
 from marvis.pipeline import LEGACY_LIVE_NOTEBOOK_ENV_VAR, PipelineSettings
 
@@ -52,8 +53,8 @@ class FakeTaskRepository:
         "draft_runs": 0,
     }
 
-    def __init__(self, _db_path: Path):
-        pass
+    def __init__(self, db_path: Path):
+        self.db_path = Path(db_path)
 
     def create_task(self, payload):
         task_id = f"task-{len(self.tasks) + 1}"
@@ -323,6 +324,23 @@ class FakeHookDispatcher:
         self.calls.append((event, payload, task_id))
 
 
+class FakeValidationContractRepository:
+    def __init__(self, db_path: Path):
+        self.task_repo = FakeTaskRepository(db_path)
+
+    def start_ready_job(self, task_id: str, kind: str) -> str:
+        return self.task_repo.start_job(task_id, kind)
+
+
+def _set_historical_validation_workflow(task_id: str) -> None:
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{
+            **asdict(FakeTaskRepository.tasks[task_id]),
+            "validation_workflow_version": 1,
+        }
+    )
+
+
 def _client(tmp_path: Path, monkeypatch) -> TestClient:
     FakeTaskRepository.tasks = {}
     FakeTaskRepository.deleted = []
@@ -344,6 +362,14 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
         "draft_runs": 0,
     }
     monkeypatch.setattr("marvis.agent.validation_app_service.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.ValidationContractRepository",
+        FakeValidationContractRepository,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.require_confirmed_validation_input_contract",
+        lambda *_args, **_kwargs: SimpleNamespace(status="ready"),
+    )
     monkeypatch.setattr("marvis.api_stage_helpers.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.evidence.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.report_fields.TaskRepository", FakeTaskRepository)
@@ -354,6 +380,10 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setattr(
         "marvis.routers.validation_stages.TaskRepository",
         FakeTaskRepository,
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.ValidationContractRepository",
+        FakeValidationContractRepository,
     )
 
     app = FastAPI()
@@ -373,6 +403,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     app.include_router(stage_controls_router)
     app.include_router(tasks_router)
     app.include_router(validation_agent_router)
+    app.include_router(validation_contracts_router)
     app.include_router(validation_stages_router)
     return TestClient(app)
 
@@ -575,6 +606,17 @@ def test_validation_stage_routes_are_served_from_dedicated_router():
     assert routes[("/api/tasks/{task_id}/validate", ("POST",))] == (
         "marvis.routers.validation_stages"
     )
+
+
+def test_validation_input_contract_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in validation_contracts_router.routes
+    }
+
+    endpoint = "/api/tasks/{task_id}/validation-input-contract"
+    assert routes[(endpoint, ("GET",))] == "marvis.routers.validation_contracts"
+    assert routes[(endpoint, ("PUT",))] == "marvis.routers.validation_contracts"
 
 
 def test_validation_agent_routes_are_served_from_dedicated_router():
@@ -1938,6 +1980,47 @@ def test_notebook_metrics_and_report_endpoints_dispatch_stages(tmp_path: Path, m
     assert calls[0][2].workspace == tmp_path
 
 
+def test_v2_notebook_endpoint_requires_ready_contract_before_creating_job(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.run_notebook_stage",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.ValidationContractRepository.start_ready_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("validation input contract requires confirmation")
+        ),
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+            "run_mode": "manual",
+        },
+    ).json()["id"]
+    task = FakeTaskRepository.tasks[task_id]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{**asdict(task), "status": TaskStatus.SCANNED}
+    )
+
+    response = client.post(f"/api/tasks/{task_id}/notebook", json={})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "validation input contract requires confirmation"
+    )
+    assert FakeTaskRepository.tasks[task_id].status == TaskStatus.SCANNED
+    assert FakeTaskRepository.jobs == {}
+    assert calls == []
+
+
 def test_stage_endpoint_blocks_active_same_task_but_allows_other_tasks(
     tmp_path: Path,
     monkeypatch,
@@ -2020,6 +2103,7 @@ def test_completed_task_can_rerun_prior_workflow_stages(tmp_path: Path, monkeypa
         "/api/tasks",
         json={"model_name": "A卡", "validator": "qa", "source_dir": str(source)},
     ).json()["id"]
+    _set_historical_validation_workflow(task_id)
 
     FakeTaskRepository.tasks[task_id] = TaskRecord(
         **{**asdict(FakeTaskRepository.tasks[task_id]), "status": TaskStatus.SUCCEEDED}
@@ -2624,12 +2708,59 @@ def test_legacy_validate_endpoint_runs_staged_pipeline_for_cli_compatibility(
         },
     )
     task_id = create.json()["id"]
+    task = FakeTaskRepository.tasks[task_id]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{**asdict(task), "validation_workflow_version": 1}
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.ValidationContractRepository.start_ready_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("v1 must not read the v2 validation contract")
+        ),
+    )
 
     response = client.post(f"/api/tasks/{task_id}/validate", json={})
 
     assert response.status_code == 202
     assert calls[0][0] == task_id
     assert calls[0][2] == "job-1"
+
+
+def test_v2_validate_endpoint_requires_ready_contract_before_creating_job(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.run_staged_pipeline",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.ValidationContractRepository.start_ready_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("validation input contract requires confirmation")
+        ),
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+            "run_mode": "manual",
+        },
+    ).json()["id"]
+
+    response = client.post(f"/api/tasks/{task_id}/validate", json={})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "validation input contract requires confirmation"
+    )
+    assert FakeTaskRepository.tasks[task_id].status == TaskStatus.CREATED
+    assert FakeTaskRepository.jobs == {}
+    assert calls == []
 
 
 def test_validate_rejects_terminal_task_without_dispatching_pipeline(
@@ -2723,6 +2854,7 @@ def test_scan_endpoint_returns_v2_artifacts_and_updates_status(
             "source_dir": str(source),
         },
     ).json()["id"]
+    _set_historical_validation_workflow(task_id)
 
     response = client.post(f"/api/tasks/{task_id}/scan")
 
@@ -2793,6 +2925,7 @@ def test_scan_endpoint_reports_notebook_contract_errors_before_execution(
             "source_dir": str(source),
         },
     ).json()["id"]
+    _set_historical_validation_workflow(task_id)
 
     response = client.post(f"/api/tasks/{task_id}/scan")
 
@@ -2848,6 +2981,7 @@ def test_scan_endpoint_translates_multiple_missing_rmc_contract_fields(
             "source_dir": str(source),
         },
     ).json()["id"]
+    _set_historical_validation_workflow(task_id)
 
     response = client.post(f"/api/tasks/{task_id}/scan")
 

@@ -6,8 +6,10 @@ import json
 from pathlib import Path
 import sqlite3
 from typing import Any
+import uuid
 
 from marvis.db_schema import connect
+from marvis.domain import TASK_TYPE_VALIDATION
 from marvis.files import sha256_file
 from marvis.repositories.audit import _write_audit_row
 from marvis.repositories.tasks import _now
@@ -20,13 +22,8 @@ from marvis.validation.input_contracts import (
     input_contract_to_dict,
     validation_confirmation_to_dict,
 )
+from marvis.validation_materials import resolve_validation_material_paths
 
-_MATERIAL_TASK_FIELDS = (
-    ("notebook", "notebook_path"),
-    ("sample", "sample_path"),
-    ("pmml", "pmml_path"),
-    ("dictionary", "dictionary_path"),
-)
 _CANDIDATE_KEYS = frozenset({"candidates", "transformations", "conflicts"})
 
 
@@ -62,6 +59,10 @@ class ValidationContractMaterialMismatch(ValueError):
     pass
 
 
+class ValidationContractActiveJobConflict(RuntimeError):
+    pass
+
+
 class ValidationContractRepository:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
@@ -73,6 +74,21 @@ class ValidationContractRepository:
         self, task_id: str, contract: ValidationInputContract
     ) -> ValidationInputContractRecord:
         return _replace_contract_candidates(self.db_path, task_id, contract)
+
+    def replace_candidates_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        contract: ValidationInputContract,
+        *,
+        begin_immediate: bool = False,
+    ) -> ValidationInputContractRecord:
+        return _replace_contract_candidates_on_connection(
+            conn,
+            task_id,
+            contract,
+            begin_immediate=begin_immediate,
+        )
 
     def confirm(
         self,
@@ -91,6 +107,153 @@ class ValidationContractRepository:
             resolved_sample_schema=resolved_sample_schema,
             resolved_feature_metadata=resolved_feature_metadata,
         )
+
+    def invalidate_for_material_change_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+    ) -> ValidationInputContractRecord | None:
+        return _invalidate_for_material_change_on_connection(conn, task_id)
+
+    def start_ready_job(self, task_id: str, kind: str) -> str:
+        return _start_ready_job(self.db_path, task_id, kind)
+
+
+def require_confirmed_validation_input_contract(
+    repo: ValidationContractRepository,
+    task_id: str,
+) -> ValidationInputContractRecord:
+    record = repo.get(task_id)
+    if record is None or record.status != "ready":
+        raise ValueError("validation input contract requires confirmation")
+    return record
+
+
+def _start_ready_job(db_path: Path, task_id: str, kind: str) -> str:
+    job_id = uuid.uuid4().hex
+    now = _now()
+    with connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        task_row = conn.execute(
+            """
+            SELECT id, task_type, validation_workflow_version
+              FROM tasks
+             WHERE id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        if task_row is None:
+            raise KeyError(f"Task not found: {task_id}")
+        _require_v2_validation_task_row(task_row)
+        contract_row = conn.execute(
+            "SELECT * FROM validation_input_contracts WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if contract_row is None or _row_to_contract_record(contract_row).status != "ready":
+            raise ValueError("validation input contract requires confirmation")
+        try:
+            conn.execute(
+                """
+                INSERT INTO jobs(id, task_id, kind, status, created_at)
+                VALUES (?, ?, ?, 'queued', ?)
+                """,
+                (job_id, task_id, kind, now),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValidationContractActiveJobConflict(
+                f"task {task_id} already has an active job"
+            ) from exc
+    return job_id
+
+
+def _invalidate_for_material_change_on_connection(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> ValidationInputContractRecord | None:
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    task_row = conn.execute(
+        """
+        SELECT id, task_type, validation_workflow_version
+          FROM tasks
+         WHERE id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    if task_row is None:
+        raise KeyError(f"Task not found: {task_id}")
+    if (
+        str(task_row["task_type"] or "") != TASK_TYPE_VALIDATION
+        or int(task_row["validation_workflow_version"] or 0) != 2
+    ):
+        return None
+    row = conn.execute(
+        "SELECT * FROM validation_input_contracts WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    current = _row_to_contract_record(row)
+    invalidated = _validate_contract(
+        replace(
+            current.contract,
+            status="blocked",
+            confirmed={},
+            conflicts=("selected validation materials changed; rescan required",),
+        )
+    )
+    encoded = _encode_contract_columns(invalidated)
+    now = _now()
+    new_revision = current.revision + 1
+    cursor = conn.execute(
+        """
+        UPDATE validation_input_contracts
+           SET schema_version = ?, revision = ?, status = ?,
+               candidate_json = ?, confirmed_json = ?,
+               material_hashes_json = ?, sample_schema_json = ?,
+               pmml_manifest_json = ?, metadata_resolution_json = ?,
+               updated_at = ?
+         WHERE task_id = ? AND revision = ?
+        """,
+        (
+            invalidated.schema_version,
+            new_revision,
+            invalidated.status,
+            encoded["candidate_json"],
+            encoded["confirmed_json"],
+            encoded["material_hashes_json"],
+            encoded["sample_schema_json"],
+            encoded["pmml_manifest_json"],
+            encoded["metadata_resolution_json"],
+            now,
+            task_id,
+            current.revision,
+        ),
+    )
+    if cursor.rowcount == 0:
+        raise ValidationContractRevisionConflict(
+            "validation input contract revision changed during material update"
+        )
+    _write_audit_row(
+        conn,
+        kind="validation.input_contract.invalidate",
+        target_ref=task_id,
+        outcome="succeeded",
+        inputs_hash=sha256(task_id.encode("utf-8")).hexdigest(),
+        detail={
+            "task_id": task_id,
+            "revision": new_revision,
+            "reason": "selected_materials_changed",
+        },
+    )
+    return ValidationInputContractRecord(
+        task_id=task_id,
+        revision=new_revision,
+        status=invalidated.status,
+        contract=invalidated,
+        created_at=current.created_at,
+        updated_at=now,
+    )
 
 
 def _read_contract_record(
@@ -112,6 +275,22 @@ def _replace_contract_candidates(
     task_id: str,
     contract: ValidationInputContract,
 ) -> ValidationInputContractRecord:
+    with connect(db_path) as conn:
+        return _replace_contract_candidates_on_connection(
+            conn,
+            task_id,
+            contract,
+            begin_immediate=True,
+        )
+
+
+def _replace_contract_candidates_on_connection(
+    conn: sqlite3.Connection,
+    task_id: str,
+    contract: ValidationInputContract,
+    *,
+    begin_immediate: bool,
+) -> ValidationInputContractRecord:
     validated = _validate_contract(contract)
     candidate_status = (
         "blocked" if validated.status == "blocked" else "pending_confirmation"
@@ -119,78 +298,84 @@ def _replace_contract_candidates(
     candidate = replace(validated, status=candidate_status, confirmed={})
     encoded = _encode_contract_columns(candidate)
     now = _now()
-    with connect(db_path) as conn:
+    if begin_immediate and not conn.in_transaction:
         conn.execute("BEGIN IMMEDIATE")
-        task_row = conn.execute(
-            "SELECT id FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone()
-        if task_row is None:
-            raise KeyError(f"Task not found: {task_id}")
-        previous = conn.execute(
-            "SELECT revision, created_at FROM validation_input_contracts WHERE task_id = ?",
-            (task_id,),
-        ).fetchone()
-        if previous is None:
-            revision = 1
-            created_at = now
-            conn.execute(
-                """
-                INSERT INTO validation_input_contracts(
-                    task_id, schema_version, revision, status, candidate_json,
-                    confirmed_json, material_hashes_json, sample_schema_json,
-                    pmml_manifest_json, metadata_resolution_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_id,
-                    candidate.schema_version,
-                    revision,
-                    candidate.status,
-                    encoded["candidate_json"],
-                    encoded["confirmed_json"],
-                    encoded["material_hashes_json"],
-                    encoded["sample_schema_json"],
-                    encoded["pmml_manifest_json"],
-                    encoded["metadata_resolution_json"],
-                    created_at,
-                    now,
-                ),
-            )
-        else:
-            revision = int(previous["revision"]) + 1
-            created_at = str(previous["created_at"])
-            conn.execute(
-                """
-                UPDATE validation_input_contracts
-                   SET schema_version = ?, revision = ?, status = ?,
-                       candidate_json = ?, confirmed_json = ?,
-                       material_hashes_json = ?, sample_schema_json = ?,
-                       pmml_manifest_json = ?, metadata_resolution_json = ?,
-                       updated_at = ?
-                 WHERE task_id = ?
-                """,
-                (
-                    candidate.schema_version,
-                    revision,
-                    candidate.status,
-                    encoded["candidate_json"],
-                    encoded["confirmed_json"],
-                    encoded["material_hashes_json"],
-                    encoded["sample_schema_json"],
-                    encoded["pmml_manifest_json"],
-                    encoded["metadata_resolution_json"],
-                    now,
-                    task_id,
-                ),
-            )
-        return ValidationInputContractRecord(
-            task_id=task_id,
-            revision=revision,
-            status=candidate.status,
-            contract=candidate,
-            created_at=created_at,
-            updated_at=now,
+    task_row = conn.execute(
+        """
+        SELECT id, task_type, validation_workflow_version
+          FROM tasks
+         WHERE id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    if task_row is None:
+        raise KeyError(f"Task not found: {task_id}")
+    _require_v2_validation_task_row(task_row)
+    previous = conn.execute(
+        "SELECT revision, created_at FROM validation_input_contracts WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    if previous is None:
+        revision = 1
+        created_at = now
+        conn.execute(
+            """
+            INSERT INTO validation_input_contracts(
+                task_id, schema_version, revision, status, candidate_json,
+                confirmed_json, material_hashes_json, sample_schema_json,
+                pmml_manifest_json, metadata_resolution_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                candidate.schema_version,
+                revision,
+                candidate.status,
+                encoded["candidate_json"],
+                encoded["confirmed_json"],
+                encoded["material_hashes_json"],
+                encoded["sample_schema_json"],
+                encoded["pmml_manifest_json"],
+                encoded["metadata_resolution_json"],
+                created_at,
+                now,
+            ),
         )
+    else:
+        revision = int(previous["revision"]) + 1
+        created_at = str(previous["created_at"])
+        conn.execute(
+            """
+            UPDATE validation_input_contracts
+               SET schema_version = ?, revision = ?, status = ?,
+                   candidate_json = ?, confirmed_json = ?,
+                   material_hashes_json = ?, sample_schema_json = ?,
+                   pmml_manifest_json = ?, metadata_resolution_json = ?,
+                   updated_at = ?
+             WHERE task_id = ?
+            """,
+            (
+                candidate.schema_version,
+                revision,
+                candidate.status,
+                encoded["candidate_json"],
+                encoded["confirmed_json"],
+                encoded["material_hashes_json"],
+                encoded["sample_schema_json"],
+                encoded["pmml_manifest_json"],
+                encoded["metadata_resolution_json"],
+                now,
+                task_id,
+            ),
+        )
+    return ValidationInputContractRecord(
+        task_id=task_id,
+        revision=revision,
+        status=candidate.status,
+        contract=candidate,
+        created_at=created_at,
+        updated_at=now,
+    )
 
 
 def _confirm_contract(
@@ -212,8 +397,8 @@ def _confirm_contract(
         conn.execute("BEGIN IMMEDIATE")
         task_row = conn.execute(
             """
-            SELECT id, source_dir, notebook_path, sample_path, pmml_path,
-                   dictionary_path
+            SELECT id, task_type, validation_workflow_version, source_dir,
+                   notebook_path, sample_path, pmml_path, dictionary_path
               FROM tasks
              WHERE id = ?
             """,
@@ -221,6 +406,7 @@ def _confirm_contract(
         ).fetchone()
         if task_row is None:
             raise KeyError(f"Task not found: {task_id}")
+        _require_v2_validation_task_row(task_row)
         row = conn.execute(
             "SELECT * FROM validation_input_contracts WHERE task_id = ?",
             (task_id,),
@@ -349,35 +535,27 @@ def _confirm_contract(
 
 
 def resolve_selected_material_paths(task_row: sqlite3.Row) -> dict[str, Path]:
-    raw_source_dir = Path(str(task_row["source_dir"])).expanduser()
-    try:
-        source_dir = raw_source_dir.resolve(strict=True)
-    except FileNotFoundError as exc:
-        raise ValueError(f"task source_dir does not exist: {raw_source_dir}") from exc
-    if not source_dir.is_dir():
-        raise ValueError(f"task source_dir is not a directory: {source_dir}")
+    resolved = resolve_validation_material_paths(
+        source_dir=str(task_row["source_dir"]),
+        notebook_path=task_row["notebook_path"],
+        sample_path=task_row["sample_path"],
+        pmml_path=task_row["pmml_path"],
+        dictionary_path=task_row["dictionary_path"],
+    )
+    return {
+        "notebook": resolved.notebook,
+        "sample": resolved.sample,
+        "pmml": resolved.pmml,
+        "dictionary": resolved.dictionary,
+    }
 
-    resolved: dict[str, Path] = {}
-    for role, field in _MATERIAL_TASK_FIELDS:
-        selected = task_row[field]
-        if selected is None or not str(selected).strip():
-            raise ValueError(f"selected {role} path is required")
-        raw_path = Path(str(selected)).expanduser()
-        candidate = raw_path if raw_path.is_absolute() else source_dir / raw_path
-        try:
-            path = candidate.resolve(strict=True)
-        except FileNotFoundError as exc:
-            raise ValueError(f"selected {role} does not exist: {selected}") from exc
-        try:
-            path.relative_to(source_dir)
-        except ValueError as exc:
-            raise ValueError(
-                f"selected {role} must be inside source_dir: {selected}"
-            ) from exc
-        if not path.is_file():
-            raise ValueError(f"selected {role} is not a file: {selected}")
-        resolved[role] = path
-    return resolved
+
+def _require_v2_validation_task_row(task_row: sqlite3.Row) -> None:
+    if (
+        str(task_row["task_type"] or "") != TASK_TYPE_VALIDATION
+        or int(task_row["validation_workflow_version"] or 0) != 2
+    ):
+        raise ValueError("validation input contract requires a version 2 validation task")
 
 
 def _validate_contract(contract: ValidationInputContract) -> ValidationInputContract:

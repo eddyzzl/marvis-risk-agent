@@ -183,6 +183,22 @@ def test_transformation_decoder_is_strict_and_validates_operations():
         transformation_spec_from_dict({**payload, "output_field": " "})
 
 
+def test_transformation_decoder_rejects_deep_params_without_recursion_error():
+    nested: object = "leaf"
+    for _ in range(70):
+        nested = {"nested": nested}
+
+    with pytest.raises(ValueError, match="maximum depth"):
+        transformation_spec_from_dict(
+            {
+                "operation": "copy",
+                "output_field": "derived",
+                "input_fields": ["x1"],
+                "params": {"nested": nested},
+            }
+        )
+
+
 def test_constant_mapping_params_preserve_numeric_keys_as_typed_pairs():
     payload = {
         "operation": "constant_mapping",

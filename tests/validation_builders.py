@@ -54,7 +54,27 @@ def make_candidate_contract(
             for key in ("notebook", "sample", "pmml", "dictionary")
         },
         status="pending_confirmation",
-        candidates={"target_col": (FieldCandidate("y", (evidence,)),)},
+        candidates={
+            "target_col": (FieldCandidate("y", (evidence,)),),
+            "feature_metadata_selection": (
+                FieldCandidate(
+                    {
+                        "metadata_sheet": None,
+                        "feature_col": "feature",
+                        "category_col": "category",
+                        "importance_col": "importance",
+                    },
+                    (
+                        FieldEvidence(
+                            "feature_metadata",
+                            None,
+                            "metadata.csv",
+                            1.0,
+                        ),
+                    ),
+                ),
+            ),
+        },
         sample_schema=SampleSchema(
             path="sample.parquet",
             columns=("x1", "x2", "y", "split", "apply_month"),

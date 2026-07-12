@@ -10,10 +10,12 @@ from marvis.db import TaskRepository, connect, init_db
 from marvis.domain import TaskCreate
 from marvis.files import sha256_file
 from marvis.repositories.validation_contracts import (
+    ValidationContractActiveJobConflict,
     ValidationContractDataError,
     ValidationContractMaterialMismatch,
     ValidationContractRepository,
     ValidationContractRevisionConflict,
+    require_confirmed_validation_input_contract,
 )
 from tests.validation_builders import (
     make_candidate_contract,
@@ -167,6 +169,107 @@ def test_replace_candidates_round_trips_canonical_json_and_invalidates_confirmat
         )
 
 
+def test_replace_candidates_on_connection_participates_in_outer_transaction(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task, _paths, hashes = _create_material_task(tmp_path)
+    repo = ValidationContractRepository(db_path)
+
+    with pytest.raises(RuntimeError, match="rollback outer transaction"):
+        with connect(db_path) as conn:
+            repo.replace_candidates_on_connection(
+                conn,
+                task.id,
+                make_candidate_contract(material_hashes=hashes),
+                begin_immediate=True,
+            )
+            raise RuntimeError("rollback outer transaction")
+
+    assert repo.get(task.id) is None
+
+
+def test_ready_contract_guard_rejects_missing_and_pending_records(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task, _paths, hashes = _create_material_task(tmp_path)
+    repo = ValidationContractRepository(db_path)
+
+    with pytest.raises(ValueError, match="requires confirmation"):
+        require_confirmed_validation_input_contract(repo, task.id)
+
+    pending = repo.replace_candidates(
+        task.id, make_candidate_contract(material_hashes=hashes)
+    )
+    with pytest.raises(ValueError, match="requires confirmation"):
+        require_confirmed_validation_input_contract(repo, task.id)
+
+    ready = repo.confirm(
+        task.id,
+        make_validation_confirmation(),
+        expected_revision=pending.revision,
+    )
+    assert require_confirmed_validation_input_contract(repo, task.id) == ready
+
+
+def test_start_ready_job_atomically_checks_contract_and_active_lease(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task, _paths, hashes = _create_material_task(tmp_path)
+    repo = ValidationContractRepository(db_path)
+    task_repo = TaskRepository(db_path)
+    pending = repo.replace_candidates(
+        task.id, make_candidate_contract(material_hashes=hashes)
+    )
+
+    with pytest.raises(ValueError, match="requires confirmation"):
+        repo.start_ready_job(task.id, "pipeline")
+    assert task_repo.get_latest_job(task.id) is None
+
+    repo.confirm(
+        task.id,
+        make_validation_confirmation(),
+        expected_revision=pending.revision,
+    )
+    job_id = repo.start_ready_job(task.id, "pipeline")
+
+    assert task_repo.get_latest_job(task.id)["id"] == job_id
+    assert task_repo.task_has_active_job(task.id) is True
+    with pytest.raises(ValidationContractActiveJobConflict, match="active job"):
+        repo.start_ready_job(task.id, "report")
+
+
+@pytest.mark.parametrize(
+    ("task_type", "workflow_version"),
+    [("validation", 1), ("modeling", 0)],
+)
+def test_contract_repository_is_scoped_to_v2_validation_tasks(
+    tmp_path, task_type: str, workflow_version: int
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task, _paths, hashes = _create_material_task(tmp_path)
+    repo = ValidationContractRepository(db_path)
+    pending = repo.replace_candidates(
+        task.id, make_candidate_contract(material_hashes=hashes)
+    )
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE tasks SET task_type = ?, validation_workflow_version = ? WHERE id = ?",
+            (task_type, workflow_version, task.id),
+        )
+
+    with pytest.raises(ValueError, match="version 2 validation task"):
+        repo.replace_candidates(
+            task.id, make_candidate_contract(material_hashes=hashes)
+        )
+    with pytest.raises(ValueError, match="version 2 validation task"):
+        repo.confirm(
+            task.id,
+            make_validation_confirmation(),
+            expected_revision=pending.revision,
+        )
+
+
 def test_replace_candidates_never_trusts_incoming_ready_status(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -296,7 +399,7 @@ def test_confirmation_rejects_material_path_escape(tmp_path):
         task.id, make_candidate_contract(material_hashes=hashes)
     )
 
-    with pytest.raises(ValueError, match="inside source_dir"):
+    with pytest.raises(ValueError, match="escapes source directory"):
         repo.confirm(
             task.id, make_validation_confirmation(), expected_revision=first.revision
         )

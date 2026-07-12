@@ -23,6 +23,7 @@ TRANSFORMATION_OPERATIONS = frozenset(
     }
 )
 CONTRACT_STATUSES = frozenset({"ready", "pending_confirmation", "blocked"})
+MAX_JSON_DEPTH = 64
 
 
 @dataclass(frozen=True)
@@ -658,7 +659,9 @@ def _decode_json_object(value: object, label: str) -> dict[str, Any]:
     return cast(dict[str, Any], _tuples_to_lists(result))
 
 
-def _require_json_value(value: object) -> None:
+def _require_json_value(value: object, *, depth: int = 0) -> None:
+    if depth > MAX_JSON_DEPTH:
+        raise ValueError("JSON value exceeds maximum depth")
     if value is None or isinstance(value, (str, bool, int)):
         return
     if isinstance(value, float):
@@ -667,13 +670,13 @@ def _require_json_value(value: object) -> None:
         return
     if isinstance(value, (list, tuple)):
         for item in value:
-            _require_json_value(item)
+            _require_json_value(item, depth=depth + 1)
         return
     if isinstance(value, dict):
         if not all(isinstance(key, str) for key in value):
             raise ValueError("JSON object keys must be strings")
         for item in value.values():
-            _require_json_value(item)
+            _require_json_value(item, depth=depth + 1)
         return
     raise ValueError(f"value is not JSON-compatible: {type(value).__name__}")
 
