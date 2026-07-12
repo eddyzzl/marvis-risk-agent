@@ -16,6 +16,41 @@ from __future__ import annotations
 
 import pytest
 
+from marvis.validation.input_contracts import PmmlInputManifest, StressUnit
+from tests.validation_builders import make_ready_contract
+
+
+@pytest.fixture
+def ready_contract():
+    return make_ready_contract()
+
+
+@pytest.fixture
+def pmml_contract(ready_contract):
+    return ready_contract
+
+
+@pytest.fixture
+def direct_manifest(ready_contract):
+    return ready_contract.require_pmml_manifest()
+
+
+@pytest.fixture
+def derived_manifest():
+    return PmmlInputManifest(
+        schema_version="marvis.pmml_input_manifest.v1",
+        raw_required_fields=("age", "income"),
+        derived_fields=("age_bucket",),
+        model_features=("age_bucket", "income"),
+        stress_units=(
+            StressUnit("age_bucket", ("age",), ("age_bucket <- age",)),
+            StressUnit("income", ("income",), ()),
+        ),
+        unsupported_derivations=(),
+        output_candidates=("probability_1",),
+        algorithm="xgb",
+    )
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _prewarm_pmml_gateway():

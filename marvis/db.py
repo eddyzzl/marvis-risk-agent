@@ -27,6 +27,9 @@ from marvis.repositories.tasks import (
     TaskRepository as TaskRepository,  # noqa: F401
     _normalize_task_type as _normalize_task_type,  # noqa: F401
 )
+from marvis.repositories.validation_contracts import (
+    ValidationContractRepository as ValidationContractRepository,  # noqa: F401
+)
 
 
 def _now() -> str:

@@ -117,6 +117,7 @@ class TaskRecord:
     oot_ks_min: float | None = None
     metrics: list[str] = field(default_factory=list)
     capability_tier: str = ""
+    validation_workflow_version: int = 0
 
 
 @dataclass(frozen=True)

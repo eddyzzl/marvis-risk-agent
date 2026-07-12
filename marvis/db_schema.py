@@ -20,6 +20,7 @@ _MIGRATION_TABLES = frozenset({
     "model_artifacts",
     "llm_calls",
     "datasets",
+    "validation_input_contracts",
 })
 
 # ARCH-10: schema_version mechanism.
@@ -61,7 +62,11 @@ _MIGRATION_TABLES = frozenset({
 # strategies table from migration 1), but is written idempotently anyway (a
 # table_info probe before each ADD COLUMN, CREATE TABLE/INDEX IF NOT EXISTS)
 # so it is safe against any partially-migrated database.
-SCHEMA_VERSION = 2
+#
+# _migration_003_validation_input_contracts adds the immutable validation
+# workflow-version discriminator and the normalized, revisioned input contract.
+# It backfills only historical validation rows that still carry version 0.
+SCHEMA_VERSION = 3
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -773,6 +778,52 @@ def _migration_002_strategy_versioning(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_003_validation_input_contracts(conn: sqlite3.Connection) -> None:
+    """Add immutable workflow versions and normalized validation contracts.
+
+    A version-2 test/repair database may contain only a subset of baseline tables.
+    Guard the tasks backfill so such a database can still advance atomically; a
+    normal database always has tasks before this migration runs.
+    """
+    tasks_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks'"
+    ).fetchone()
+    if tasks_exists is not None:
+        _ensure_column(
+            conn,
+            table="tasks",
+            column="validation_workflow_version",
+            definition="INTEGER NOT NULL DEFAULT 0",
+        )
+        task_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "task_type" in task_columns:
+            conn.execute(
+                "UPDATE tasks SET validation_workflow_version = 1 "
+                "WHERE task_type = 'validation' AND validation_workflow_version = 0"
+            )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS validation_input_contracts (
+            task_id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            candidate_json TEXT NOT NULL,
+            confirmed_json TEXT NOT NULL DEFAULT '{}',
+            material_hashes_json TEXT NOT NULL,
+            sample_schema_json TEXT NOT NULL,
+            pmml_manifest_json TEXT NOT NULL,
+            metadata_resolution_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -783,6 +834,7 @@ def _migration_002_strategy_versioning(conn: sqlite3.Connection) -> None:
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_001_baseline),
     (2, _migration_002_strategy_versioning),
+    (3, _migration_003_validation_input_contracts),
 ]
 
 

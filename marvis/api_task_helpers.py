@@ -48,6 +48,7 @@ def task_hook_payload(task: TaskRecord) -> dict:
     payload = {
         "task_id": task.id,
         "task_type": task.task_type,
+        "validation_workflow_version": task.validation_workflow_version,
         "status": task.status.value,
         "run_mode": task.run_mode,
         "algorithm": task.algorithm,

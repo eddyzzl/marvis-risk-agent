@@ -1157,9 +1157,10 @@ def _row_to_agent_message(row: sqlite3.Row) -> dict:
 
 def _task_record_from_create(payload: TaskCreate) -> TaskRecord:
     now = _now()
+    task_type = _normalize_task_type(payload.task_type)
     return TaskRecord(
         id=uuid.uuid4().hex,
-        task_type=_normalize_task_type(payload.task_type),
+        task_type=task_type,
         model_name=payload.model_name,
         model_version=payload.model_version,
         validator=payload.validator,
@@ -1187,6 +1188,7 @@ def _task_record_from_create(payload: TaskCreate) -> TaskRecord:
         status_reason_code="",
         created_at=now,
         updated_at=now,
+        validation_workflow_version=2 if task_type == TASK_TYPE_VALIDATION else 0,
     )
 
 
@@ -1200,18 +1202,19 @@ def _insert_task_record_row(
         """
         INSERT INTO tasks
         (
-            id, task_type, model_name, model_version, validator, source_dir,
+            id, task_type, validation_workflow_version, model_name, model_version, validator, source_dir,
             algorithm, run_mode, target_col, score_col, split_col,
             time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, oot_ks_min, metrics_json, capability_tier, notebook_path, sample_path,
             pmml_path, dictionary_path, report_values_json,
             report_values_revision, status, status_message,
             status_reason_code, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             record.id,
             record.task_type,
+            record.validation_workflow_version,
             record.model_name,
             record.model_version,
             record.validator,
@@ -1248,6 +1251,11 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
     return TaskRecord(
         id=row["id"],
         task_type=row["task_type"] or TASK_TYPE_VALIDATION,
+        validation_workflow_version=(
+            int(row["validation_workflow_version"])
+            if "validation_workflow_version" in row.keys()
+            else 0
+        ),
         model_name=row["model_name"],
         model_version=row["model_version"],
         validator=row["validator"],

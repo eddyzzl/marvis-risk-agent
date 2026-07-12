@@ -80,6 +80,7 @@ class FakeTaskRepository:
             status_message="created",
             created_at="2026-05-21T00:00:00+00:00",
             updated_at="2026-05-21T00:00:00+00:00",
+            validation_workflow_version=2 if payload.task_type == "validation" else 0,
         )
         self.tasks[task_id] = task
         self.report_values[task_id] = (dict(payload.report_values), 0)
@@ -629,6 +630,7 @@ def test_create_task_dispatches_task_created_hook(tmp_path: Path, monkeypatch):
             {
                 "task_id": task["id"],
                 "task_type": "validation",
+                "validation_workflow_version": 2,
                 "status": "created",
                 "run_mode": "agent",
                 "algorithm": "lgb",
