@@ -6,6 +6,8 @@ from typing import Any
 
 import pandas as pd
 
+from marvis.validation.input_contracts import FeatureMetadataResolution
+
 
 @dataclass(frozen=True)
 class FeatureCategoryConflict:
@@ -20,6 +22,39 @@ class FeatureCategoryResolution:
     unclassified_features: list[str]
     conflicts: list[FeatureCategoryConflict]
     source_counts: dict[str, int]
+
+
+def feature_category_resolution_from_metadata(
+    resolution: FeatureMetadataResolution,
+) -> FeatureCategoryResolution:
+    """Adapt confirmed v2 metadata without changing the legacy resolver."""
+
+    if not isinstance(resolution, FeatureMetadataResolution):
+        raise TypeError("resolution must be a FeatureMetadataResolution")
+    if resolution.conflicts:
+        raise ValueError("confirmed feature metadata contains conflicts")
+    coverage = resolution.coverage
+    if (
+        coverage.feature != 1.0
+        or coverage.category != 1.0
+        or coverage.importance != 1.0
+        or coverage.stress_unit != 1.0
+    ):
+        raise ValueError("feature metadata coverage must be complete")
+    per_category = {
+        category: list(raw_fields)
+        for category, raw_fields in resolution.per_category_raw_fields.items()
+    }
+    return FeatureCategoryResolution(
+        per_category=per_category,
+        unclassified_features=[],
+        conflicts=[],
+        source_counts={
+            "notebook": 0,
+            "dictionary": sum(row.in_pmml for row in resolution.rows),
+            "unresolved": 0,
+        },
+    )
 
 
 def resolve_feature_categories(
