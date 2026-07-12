@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PMML xmlns="http://www.dmg.org/PMML-4_4" version="4.4">
+  <Header/>
+  <DataDictionary numberOfFields="3">
+    <DataField name="age" optype="continuous" dataType="double"/>
+    <DataField name="income" optype="continuous" dataType="double"/>
+    <DataField name="target" optype="categorical" dataType="integer">
+      <Value value="0"/>
+      <Value value="1"/>
+    </DataField>
+  </DataDictionary>
+  <TransformationDictionary>
+    <DerivedField name="age_bucket" optype="categorical" dataType="integer">
+      <Discretize field="age">
+        <DiscretizeBin binValue="1">
+          <Interval closure="closedOpen" leftMargin="0" rightMargin="30"/>
+        </DiscretizeBin>
+        <DiscretizeBin binValue="2">
+          <Interval closure="closedClosed" leftMargin="30" rightMargin="120"/>
+        </DiscretizeBin>
+      </Discretize>
+    </DerivedField>
+  </TransformationDictionary>
+  <MiningModel functionName="classification" algorithmName="XGBoost (GBTree)">
+    <MiningSchema>
+      <MiningField name="age_bucket" usageType="active"/>
+      <MiningField name="income" usageType="active"/>
+      <MiningField name="target" usageType="target"/>
+    </MiningSchema>
+    <Output>
+      <OutputField name="probability_1" feature="probability" value="1"/>
+    </Output>
+    <Segmentation multipleModelMethod="sum"/>
+  </MiningModel>
+</PMML>
