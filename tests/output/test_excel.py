@@ -17,6 +17,7 @@ from marvis.validation.results import (
     MonthlyPsiRow,
     MonthlyRow,
     OverallRow,
+    PmmlScoringResult,
     PsiStabilityRow,
     ReproducibilityResult,
     RocKsCurve,
@@ -95,8 +96,42 @@ def _make_results() -> ValidationResults:
     return ValidationResults(
         model_name="A卡", model_version="v1",
         algorithm="lgb", target_type="binary",
+        schema_version="marvis.validation_results.v1",
         reproducibility=repro, basic_info=basic,
         effectiveness=eff, stress_test=stress,
+    )
+
+
+def _make_pmml_results() -> ValidationResults:
+    legacy = _make_results()
+    scoring = PmmlScoringResult(
+        schema_version="marvis.pmml_scoring.v1",
+        cache_key="c" * 64,
+        pmml_sha256="d" * 64,
+        sample_sha256="e" * 64,
+        engine="pypmml-pmml4s-batch",
+        engine_version="1.5.8",
+        output_field="probability_1",
+        input_row_count=3,
+        success_count=3,
+        failure_count=0,
+        null_count=0,
+        non_finite_count=0,
+        elapsed_seconds=0.1,
+        rows_per_second=30.0,
+        chunk_size=2,
+        required_input_count=2,
+        missing_inputs=[],
+        score_artifact_path="pmml_scores.parquet",
+        score_artifact_sha256="a" * 64,
+        status="pass",
+        bounded_errors=[],
+    )
+    return replace(
+        legacy,
+        schema_version="marvis.validation_results.v2",
+        pmml_scoring=scoring,
+        reproducibility=None,
     )
 
 

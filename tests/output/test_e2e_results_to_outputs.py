@@ -91,6 +91,7 @@ def _compose_results(
         model_version="v1",
         algorithm="lgb",
         target_type="binary",
+        schema_version="marvis.validation_results.v1",
         reproducibility=reproducibility,
         basic_info=basic_info,
         effectiveness=effectiveness,

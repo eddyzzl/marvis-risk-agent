@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 import math
 import re
-from typing import Any, Literal
+import types
+from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from marvis.compat import StrEnum
 
@@ -12,6 +14,8 @@ _UNSET = object()
 PMML_SCORING_RESULT_SCHEMA = "marvis.pmml_scoring.v1"
 MAX_PMML_SCORING_ERRORS = 64
 MAX_PMML_SCORING_ERROR_CHARS = 500
+VALIDATION_RESULTS_SCHEMA_V1 = "marvis.validation_results.v1"
+VALIDATION_RESULTS_SCHEMA_V2 = "marvis.validation_results.v2"
 
 
 class ConsistencyStatus(StrEnum):
@@ -386,198 +390,307 @@ class ValidationResults:
     model_version: str
     algorithm: str
     target_type: Literal["binary"]
-    reproducibility: ReproducibilityResult
     basic_info: BasicInfoResult
     effectiveness: EffectivenessResult
     stress_test: StressTestResult
+    # Compatibility-safe default: historical constructors remain legacy until
+    # a PMML-only assembly point explicitly opts into v2.
+    schema_version: str = VALIDATION_RESULTS_SCHEMA_V1
+    pmml_scoring: PmmlScoringResult | None = None
+    reproducibility: ReproducibilityResult | None = None
+
+
+_VALIDATION_RESULTS_BASE_FIELDS = {
+    "model_name",
+    "model_version",
+    "algorithm",
+    "target_type",
+    "basic_info",
+    "effectiveness",
+    "stress_test",
+}
+_VALIDATION_RESULTS_ENVELOPE_FIELDS = _VALIDATION_RESULTS_BASE_FIELDS | {
+    "schema_version",
+    "pmml_scoring",
+    "reproducibility",
+    # Historical pipeline payloads occasionally wrapped the deterministic
+    # result with this known orchestration identity. It is intentionally not
+    # part of ValidationResults, but remains a recognized compatibility field.
+    "task_id",
+}
+_DATACLASS_FIELD_ALIASES: dict[type[Any], dict[str, str]] = {
+    # Older validation JSON used the dictionary header as the result key.
+    FeatureImportanceRow: {"类别": "category"},
+}
+
+
+def validation_results_to_dict(results: ValidationResults) -> dict[str, Any]:
+    """Serialize one canonical version of deterministic validation results."""
+    if not isinstance(results, ValidationResults):
+        raise ValueError("invalid validation results: expected ValidationResults")
+
+    try:
+        payload: dict[str, Any] = {
+            "model_name": results.model_name,
+            "model_version": results.model_version,
+            "algorithm": results.algorithm,
+            "target_type": results.target_type,
+            "basic_info": asdict(results.basic_info),
+            "effectiveness": asdict(results.effectiveness),
+            "stress_test": asdict(results.stress_test),
+            "schema_version": results.schema_version,
+        }
+    except (TypeError, AttributeError) as exc:
+        raise ValueError("invalid validation results fields") from exc
+
+    if results.schema_version == VALIDATION_RESULTS_SCHEMA_V2:
+        if results.pmml_scoring is None or results.reproducibility is not None:
+            raise ValueError("v2 validation results require only pmml_scoring")
+        payload["pmml_scoring"] = pmml_scoring_result_to_dict(results.pmml_scoring)
+    elif results.schema_version == VALIDATION_RESULTS_SCHEMA_V1:
+        if results.reproducibility is None or results.pmml_scoring is not None:
+            raise ValueError("v1 validation results require only reproducibility")
+        try:
+            payload["reproducibility"] = asdict(results.reproducibility)
+        except (TypeError, AttributeError) as exc:
+            raise ValueError("invalid validation results reproducibility") from exc
+    else:
+        raise ValueError(
+            f"unsupported validation results schema: {results.schema_version!r}"
+        )
+
+    # Reuse the strict persistence decoder so direct dataclass construction
+    # cannot serialize malformed nested evidence.
+    validation_results_from_dict(payload)
+    return payload
 
 
 def validation_results_from_dict(payload: dict[str, Any]) -> ValidationResults:
-    return ValidationResults(
-        model_name=str(payload.get("model_name") or ""),
-        model_version=str(payload.get("model_version") or ""),
-        algorithm=str(payload.get("algorithm") or ""),
-        target_type="binary",
-        reproducibility=_reproducibility_from_dict(payload.get("reproducibility") or {}),
-        basic_info=_basic_info_from_dict(payload.get("basic_info") or {}),
-        effectiveness=_effectiveness_from_dict(payload.get("effectiveness") or {}),
-        stress_test=_stress_test_from_dict(payload.get("stress_test") or {}),
-    )
-
-
-def _reproducibility_from_dict(payload: dict[str, Any]) -> ReproducibilityResult:
-    summary = payload.get("summary") or {}
-    return ReproducibilityResult(
-        sample_size=int(payload.get("sample_size") or 0),
-        seed=int(payload.get("seed") or 0),
-        rows=[
-            ScoreCompareRow(
-                row_index=row.get("row_index", 0),
-                score_code_model=row.get("score_code_model"),
-                score_submitted_pmml=row.get("score_submitted_pmml"),
-                abs_diff=row.get("abs_diff"),
-                matched=bool(row.get("matched")),
-            )
-            for row in payload.get("rows") or []
-        ],
-        summary=ConsistencySummary(
-            match_count=int(summary.get("match_count") or 0),
-            mismatch_count=int(summary.get("mismatch_count") or 0),
-            max_abs_diff=float(summary.get("max_abs_diff") or 0.0),
-            status=ConsistencyStatus(summary.get("status") or ConsistencyStatus.REVIEW),
-        ),
-    )
-
-
-def _normalise_row_index(row_index: object) -> int | str:
-    if hasattr(row_index, "item"):
-        row_index = row_index.item()
-    if isinstance(row_index, float) and row_index.is_integer():
-        row_index = int(row_index)
-    return row_index if isinstance(row_index, (int, str)) else str(row_index)
-
-
-def _basic_info_from_dict(payload: dict[str, Any]) -> BasicInfoResult:
-    sample_period = list(payload.get("sample_period") or ["", ""])
-    while len(sample_period) < 2:
-        sample_period.append("")
-    return BasicInfoResult(
-        sample_period=(str(sample_period[0]), str(sample_period[1])),
-        split_summary=[
-            SplitRow(
-                split=str(row.get("split") or ""),
-                sample_count=int(row.get("sample_count") or 0),
-                bad_count=int(row.get("bad_count") or 0),
-                bad_rate=float(row.get("bad_rate") or 0.0),
-                period_start=str(row.get("period_start") or ""),
-                period_end=str(row.get("period_end") or ""),
-            )
-            for row in payload.get("split_summary") or []
-        ],
-        monthly_distribution=[
-            MonthlyRow(
-                month=str(row.get("month") or ""),
-                sample_count=int(row.get("sample_count") or 0),
-                bad_count=int(row.get("bad_count") or 0),
-                bad_rate=float(row.get("bad_rate") or 0.0),
-            )
-            for row in payload.get("monthly_distribution") or []
-        ],
-        hyperparameters=dict(payload.get("hyperparameters") or {}),
-        feature_importance=[
-            FeatureImportanceRow(
-                rank=int(row.get("rank") or 0),
-                feature=str(row.get("feature") or ""),
-                importance=float(row.get("importance") or 0.0),
-                category=str(row.get("category") or row.get("类别") or ""),
-            )
-            for row in payload.get("feature_importance") or []
-        ],
-    )
-
-
-def _effectiveness_from_dict(payload: dict[str, Any]) -> EffectivenessResult:
-    return EffectivenessResult(
-        overall=[
-            OverallRow(
-                split=str(row.get("split") or ""),
-                ks=float(row.get("ks") or 0.0),
-                psi_vs_train=float(row.get("psi_vs_train") or 0.0),
-                sample_count=int(row.get("sample_count") or 0),
-                bad_rate=float(row.get("bad_rate") or 0.0),
-                bad_count=int(row.get("bad_count") or 0),
-                auc=float(row.get("auc") or 0.0),
-                head_lift_5pct=_optional_float(row.get("head_lift_5pct")),
-                tail_lift_5pct=_optional_float(row.get("tail_lift_5pct")),
-            )
-            for row in payload.get("overall") or []
-        ],
-        bin_tables={
-            str(split): [_bin_row_from_dict(row) for row in rows]
-            for split, rows in (payload.get("bin_tables") or {}).items()
-        },
-        monthly_ks=[
-            MonthlyKsRow(
-                month=str(row.get("month") or ""),
-                ks=float(row.get("ks") or 0.0),
-                sample_count=int(row.get("sample_count") or 0),
-                bad_count=int(row.get("bad_count") or 0),
-                bad_rate=float(row.get("bad_rate") or 0.0),
-                auc=float(row.get("auc") or 0.0),
-                head_lift_5pct=_optional_float(row.get("head_lift_5pct")),
-                tail_lift_5pct=_optional_float(row.get("tail_lift_5pct")),
-            )
-            for row in payload.get("monthly_ks") or []
-        ],
-        monthly_psi=[
-            MonthlyPsiRow(
-                month=str(row.get("month") or ""),
-                psi_vs_train=float(row.get("psi_vs_train") or 0.0),
-                psi_first_month=_optional_float(row.get("psi_first_month")),
-                psi_last_month=_optional_float(row.get("psi_last_month")),
-                psi_mom=_optional_float(row.get("psi_mom")),
-                psi_mom_reference_month=str(row.get("psi_mom_reference_month") or ""),
-                psi_mom_has_calendar_gap=bool(row.get("psi_mom_has_calendar_gap")),
-            )
-            for row in payload.get("monthly_psi") or []
-        ],
-        psi_stability_table=[
-            PsiStabilityRow(
-                bin_label=str(row.get("bin_label") or ""),
-                expected_count=int(row.get("expected_count") or 0),
-                expected_pct=float(row.get("expected_pct") or 0.0),
-                actual_count=int(row.get("actual_count") or 0),
-                actual_pct=float(row.get("actual_pct") or 0.0),
-                psi=float(row.get("psi") or 0.0),
-            )
-            for row in payload.get("psi_stability_table") or []
-        ],
-        roc_ks_curves={
-            str(split): RocKsCurve(
-                split=str(row.get("split") or split),
-                fpr=[float(value) for value in row.get("fpr") or []],
-                tpr=[float(value) for value in row.get("tpr") or []],
-                ks_curve=[float(value) for value in row.get("ks_curve") or []],
-                ks=float(row.get("ks") or 0.0),
-                population_at_ks=float(row.get("population_at_ks") or 0.0),
-            )
-            for split, row in (payload.get("roc_ks_curves") or {}).items()
-            if isinstance(row, dict)
-        },
-    )
-
-
-def _stress_test_from_dict(payload: dict[str, Any]) -> StressTestResult:
-    baseline = payload.get("baseline") or {}
-    per_category = [
-        StressCategoryResult(
-            category=str(row.get("category") or ""),
-            dropped_features=[str(feature) for feature in row.get("dropped_features") or []],
-            ks_after=_optional_float(row.get("ks_after")),
-            ks_delta=_optional_float(row.get("ks_delta")),
-            psi_vs_baseline=_optional_float(row.get("psi_vs_baseline")),
-            bin_table=[_bin_row_from_dict(item) for item in row.get("bin_table") or []],
-            error=row.get("error"),
-            status=str(row.get("status") or ("error" if row.get("error") else "completed")),
+    """Decode persisted validation results without defaulting damaged fields."""
+    _require_dict(payload, "root")
+    actual = set(payload)
+    unknown = actual - _VALIDATION_RESULTS_ENVELOPE_FIELDS
+    missing = _VALIDATION_RESULTS_BASE_FIELDS - actual
+    if unknown or missing:
+        raise _invalid_validation_results(
+            "root",
+            f"missing={_bounded_field_names(missing)}, "
+            f"unknown={_bounded_field_names(unknown)}",
         )
-        for row in payload.get("per_category") or []
-    ]
-    return StressTestResult(
-        baseline=StressBaseline(
-            ks=float(baseline.get("ks") or 0.0),
-            sample_count=int(baseline.get("sample_count") or 0),
-            bin_table=[_bin_row_from_dict(row) for row in baseline.get("bin_table") or []],
+    if "task_id" in payload:
+        _strict_value(payload["task_id"], str, "task_id")
+
+    has_reproducibility = "reproducibility" in payload
+    has_pmml_scoring = "pmml_scoring" in payload
+    if "schema_version" not in payload:
+        # Only historical reproducibility payloads predate the version field.
+        # PMML-only results were introduced together with v2 and therefore
+        # must never be inferred from a damaged envelope.
+        if not has_reproducibility or has_pmml_scoring:
+            raise _invalid_validation_results(
+                "root", "legacy payload must contain only reproducibility"
+            )
+        schema = VALIDATION_RESULTS_SCHEMA_V1
+    else:
+        schema = _strict_value(payload["schema_version"], str, "schema_version")
+
+    if schema == VALIDATION_RESULTS_SCHEMA_V2:
+        if has_reproducibility or not has_pmml_scoring:
+            raise ValueError("v2 validation results require only pmml_scoring")
+        try:
+            scoring = pmml_scoring_result_from_dict(
+                _require_dict(payload["pmml_scoring"], "pmml_scoring")
+            )
+        except ValueError as exc:
+            raise _invalid_validation_results("pmml_scoring", str(exc)) from exc
+        reproducibility = None
+    elif schema == VALIDATION_RESULTS_SCHEMA_V1:
+        if has_pmml_scoring:
+            raise ValueError("v1 validation results cannot contain pmml_scoring")
+        if not has_reproducibility:
+            raise ValueError("v1 validation results require only reproducibility")
+        scoring = None
+        reproducibility = reproducibility_result_from_dict(
+            _require_dict(payload["reproducibility"], "reproducibility")
+        )
+    else:
+        raise ValueError(f"unsupported validation results schema: {schema!r}")
+
+    return ValidationResults(
+        model_name=_strict_value(payload["model_name"], str, "model_name"),
+        model_version=_strict_value(
+            payload["model_version"], str, "model_version"
         ),
-        per_category=per_category,
-        status=str(payload.get("status") or _stress_test_status_from_categories(per_category)),
-        unclassified_features=[
-            str(feature) for feature in payload.get("unclassified_features") or []
-        ],
-        category_source_counts={
-            str(source): int(count)
-            for source, count in (payload.get("category_source_counts") or {}).items()
-        },
+        algorithm=_strict_value(payload["algorithm"], str, "algorithm"),
+        target_type=_strict_value(
+            payload["target_type"], Literal["binary"], "target_type"
+        ),
+        basic_info=_decode_dataclass(payload["basic_info"], BasicInfoResult, "basic_info"),
+        effectiveness=_decode_dataclass(
+            payload["effectiveness"], EffectivenessResult, "effectiveness"
+        ),
+        stress_test=_decode_dataclass(
+            payload["stress_test"], StressTestResult, "stress_test"
+        ),
+        schema_version=schema,
+        pmml_scoring=scoring,
+        reproducibility=reproducibility,
     )
+
+
+def reproducibility_result_from_dict(
+    payload: dict[str, Any],
+) -> ReproducibilityResult:
+    return _decode_dataclass(payload, ReproducibilityResult, "reproducibility")
+
+
+def _decode_dataclass(payload: object, cls: type[Any], path: str):
+    value = dict(_require_dict(payload, path))
+    for alias, canonical in _DATACLASS_FIELD_ALIASES.get(cls, {}).items():
+        if alias not in value:
+            continue
+        if canonical in value:
+            raise _invalid_validation_results(
+                path, f"both {alias!r} and {canonical!r} are present"
+            )
+        value[canonical] = value.pop(alias)
+    fields = {item.name: item for item in dataclasses.fields(cls)}
+    unknown = set(value) - set(fields)
+    missing = {
+        name
+        for name, item in fields.items()
+        if name not in value
+        and item.default is dataclasses.MISSING
+        and item.default_factory is dataclasses.MISSING
+    }
+    if unknown or missing:
+        raise _invalid_validation_results(
+            path,
+            f"missing={_bounded_field_names(missing)}, "
+            f"unknown={_bounded_field_names(unknown)}",
+        )
+    hints = get_type_hints(cls)
+    decoded = {
+        name: _strict_value(value[name], hints[name], f"{path}.{name}")
+        for name in fields
+        if name in value
+    }
+    # Preserve the two status inferences used by pre-versioned result files.
+    # Dataclass defaults alone would silently reinterpret an omitted failed or
+    # empty stress result as "completed".
+    if cls is StressCategoryResult and "status" not in value:
+        decoded["status"] = "error" if decoded.get("error") else "completed"
+    if cls is StressTestResult and "status" not in value:
+        decoded["status"] = _stress_test_status_from_categories(
+            decoded.get("per_category", [])
+        )
+    try:
+        return cls(**decoded)
+    except (TypeError, ValueError) as exc:
+        raise _invalid_validation_results(path, "invalid field values") from exc
+
+
+def _strict_value(value: object, annotation: object, path: str):
+    if annotation is Any:
+        return _strict_json_value(value, path)
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal:
+        if value not in args or type(value) not in {type(item) for item in args}:
+            raise _invalid_validation_results(path, f"expected {annotation!r}")
+        return value
+    if origin in {Union, types.UnionType}:
+        for option in args:
+            try:
+                return _strict_value(value, option, path)
+            except ValueError:
+                continue
+        raise _invalid_validation_results(path, f"expected {annotation!r}")
+    if origin is list:
+        if type(value) is not list:
+            raise _invalid_validation_results(path, "expected list")
+        return [
+            _strict_value(item, args[0], f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if origin is dict:
+        if type(value) is not dict:
+            raise _invalid_validation_results(path, "expected object")
+        return {
+            _strict_value(key, args[0], f"{path}.<key>"): _strict_value(
+                item, args[1], f"{path}.{key}"
+            )
+            for key, item in value.items()
+        }
+    if origin is tuple:
+        if not isinstance(value, (list, tuple)) or len(value) != len(args):
+            raise _invalid_validation_results(path, "expected fixed-length array")
+        return tuple(
+            _strict_value(item, item_type, f"{path}[{index}]")
+            for index, (item, item_type) in enumerate(zip(value, args, strict=True))
+        )
+    if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
+        return _decode_dataclass(value, annotation, path)
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        if isinstance(value, annotation):
+            return value
+        if type(value) is not str:
+            raise _invalid_validation_results(path, f"expected {annotation.__name__}")
+        try:
+            return annotation(value)
+        except ValueError as exc:
+            raise _invalid_validation_results(
+                path, f"invalid {annotation.__name__}"
+            ) from exc
+    if annotation is float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _invalid_validation_results(path, "expected number")
+        numeric = float(value)
+        if math.isnan(numeric) or (
+            math.isinf(numeric)
+            and not path.endswith((".score_lower", ".score_upper"))
+        ):
+            raise _invalid_validation_results(path, "expected finite number")
+        return numeric
+    if annotation is int:
+        if type(value) is not int:
+            raise _invalid_validation_results(path, "expected integer")
+        return value
+    if annotation is str:
+        if type(value) is not str:
+            raise _invalid_validation_results(path, "expected string")
+        return value
+    if annotation is bool:
+        if type(value) is not bool:
+            raise _invalid_validation_results(path, "expected boolean")
+        return value
+    if annotation is type(None):
+        if value is not None:
+            raise _invalid_validation_results(path, "expected null")
+        return None
+    raise _invalid_validation_results(path, f"unsupported field type {annotation!r}")
+
+
+def _strict_json_value(value: object, path: str):
+    if value is None or type(value) in {str, bool, int}:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise _invalid_validation_results(path, "expected finite JSON number")
+        return value
+    if type(value) is list:
+        return [
+            _strict_json_value(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if type(value) is dict:
+        if not all(type(key) is str for key in value):
+            raise _invalid_validation_results(path, "expected string JSON keys")
+        return {
+            key: _strict_json_value(item, f"{path}.{key}")
+            for key, item in value.items()
+        }
+    raise _invalid_validation_results(path, "expected JSON value")
 
 
 def _stress_test_status_from_categories(
@@ -595,20 +708,19 @@ def _stress_test_status_from_categories(
     return "partial"
 
 
-def _bin_row_from_dict(row: dict[str, Any]) -> BinRow:
-    return BinRow(
-        bin_index=int(row.get("bin_index") or 0),
-        score_lower=float(row.get("score_lower") or 0.0),
-        score_upper=float(row.get("score_upper") or 0.0),
-        sample_count=int(row.get("sample_count") or 0),
-        bad_count=int(row.get("bad_count") or 0),
-        bad_rate=float(row.get("bad_rate") or 0.0),
-        cum_sample_pct=float(row.get("cum_sample_pct") or 0.0),
-        cum_bad_pct=float(row.get("cum_bad_pct") or 0.0),
-        lift=float(row.get("lift") or 0.0),
-        ks=float(row.get("ks") or 0.0),
-    )
+def _require_dict(value: object, path: str) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise _invalid_validation_results(path, "expected object")
+    return value
 
 
-def _optional_float(value: Any) -> float | None:
-    return None if value is None else float(value)
+def _invalid_validation_results(path: str, detail: str) -> ValueError:
+    return ValueError(f"invalid validation results at {path}: {detail}")
+
+
+def _normalise_row_index(row_index: object) -> int | str:
+    if hasattr(row_index, "item"):
+        row_index = row_index.item()
+    if isinstance(row_index, float) and row_index.is_integer():
+        row_index = int(row_index)
+    return row_index if isinstance(row_index, (int, str)) else str(row_index)

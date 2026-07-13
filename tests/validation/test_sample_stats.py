@@ -5,7 +5,8 @@ import pandas as pd
 import pytest
 
 from marvis.validation.config import ValidationConfig
-from marvis.validation.sample_stats import run_basic_info
+from marvis.validation.input_contracts import FeatureMetadataRow
+from marvis.validation.sample_stats import run_basic_info, run_basic_info_from_metadata
 
 
 def _config() -> ValidationConfig:
@@ -134,3 +135,24 @@ def test_basic_info_rejects_missing_required_split(tmp_path: Path):
 
     with pytest.raises(ValueError, match="test"):
         run_basic_info(sample=sample, config=_config(), model_meta_path=meta_path)
+
+
+def test_metadata_basic_info_checks_cancellation_for_each_split_and_month():
+    sample = pd.DataFrame({
+        "sample_score": [0.1, 0.9] * 3,
+        "y": [0, 1] * 3,
+        "split": ["train", "train", "test", "test", "oot", "oot"],
+        "apply_month": ["202501", "202501", "202502", "202502", "202503", "202503"],
+    })
+    checkpoints: list[int] = []
+
+    run_basic_info_from_metadata(
+        sample=sample,
+        config=_config(),
+        model_params={},
+        feature_metadata=(FeatureMetadataRow("x1", "征信", 1.0, None, True),),
+        cancellation_check=lambda: checkpoints.append(len(checkpoints)),
+    )
+
+    # One entry checkpoint, three splits, three months, and one before metadata.
+    assert len(checkpoints) == 8

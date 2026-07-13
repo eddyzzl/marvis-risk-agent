@@ -1,4 +1,6 @@
 from dataclasses import replace
+import json
+from pathlib import Path
 
 import pytest
 
@@ -27,7 +29,12 @@ from marvis.validation.results import (
     pmml_scoring_result_to_dict,
     validate_pmml_scoring_result_fields,
     validation_results_from_dict,
+    validation_results_to_dict,
 )
+from tests.output.test_excel import _make_pmml_results, _make_results
+
+
+LEGACY_FIXTURE = Path("tests/fixtures/legacy_validation_results.json")
 
 
 def _valid_pmml_scoring_result(**overrides):
@@ -56,6 +63,107 @@ def _valid_pmml_scoring_result(**overrides):
     }
     values.update(overrides)
     return PmmlScoringResult(**values)
+
+
+def test_new_results_round_trip_uses_pmml_scoring_not_reproducibility():
+    results = _make_pmml_results()
+
+    payload = validation_results_to_dict(results)
+
+    assert payload["schema_version"] == "marvis.validation_results.v2"
+    assert payload["pmml_scoring"]["status"] == "pass"
+    assert "reproducibility" not in payload
+    assert validation_results_from_dict(payload) == results
+
+
+def test_pmml_results_require_explicit_v2_schema_version():
+    payload = validation_results_to_dict(_make_pmml_results())
+    payload.pop("schema_version")
+
+    with pytest.raises(ValueError, match="legacy payload must contain only"):
+        validation_results_from_dict(payload)
+
+
+def test_explicit_null_schema_version_is_rejected_not_treated_as_legacy():
+    payload = validation_results_to_dict(_make_results())
+    payload["schema_version"] = None
+
+    with pytest.raises(ValueError, match="schema_version.*expected string"):
+        validation_results_from_dict(payload)
+
+
+def test_legacy_results_fixture_remains_readable_without_schema_version():
+    payload = json.loads(LEGACY_FIXTURE.read_text(encoding="utf-8"))
+
+    results = validation_results_from_dict(payload)
+
+    assert results.schema_version == "marvis.validation_results.v1"
+    assert results.reproducibility is not None
+    assert results.pmml_scoring is None
+    assert validation_results_to_dict(results)["schema_version"] == (
+        "marvis.validation_results.v1"
+    )
+
+
+def test_legacy_missing_stress_status_preserves_empty_and_error_inference():
+    empty_payload = validation_results_to_dict(_make_results())
+    empty_payload.pop("schema_version")
+    empty_payload["stress_test"].pop("status")
+    empty_payload["stress_test"]["per_category"] = []
+
+    empty = validation_results_from_dict(empty_payload)
+    assert empty.stress_test.status == "skipped"
+
+    failed_payload = validation_results_to_dict(_make_results())
+    failed_payload.pop("schema_version")
+    failed_payload["stress_test"].pop("status")
+    category = failed_payload["stress_test"]["per_category"][0]
+    category.pop("status")
+    category["error"] = "legacy scoring failed"
+
+    failed = validation_results_from_dict(failed_payload)
+    assert failed.stress_test.status == "failed"
+    assert failed.stress_test.per_category[0].status == "error"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.update({"unexpected": "field"}),
+        lambda payload: payload.update({"model_name": 123}),
+        lambda payload: payload["basic_info"].pop("sample_period"),
+        lambda payload: payload["basic_info"]["split_summary"][0].update(
+            {"sample_count": "100"}
+        ),
+        lambda payload: payload["basic_info"]["split_summary"][0].update(
+            {"bad_rate": float("nan")}
+        ),
+    ],
+)
+def test_validation_results_rejects_unknown_missing_and_wrongly_typed_fields(mutate):
+    payload = validation_results_to_dict(_make_results())
+    mutate(payload)
+
+    with pytest.raises(ValueError, match="invalid validation results"):
+        validation_results_from_dict(payload)
+
+
+def test_validation_results_rejects_both_canonical_score_sections():
+    payload = validation_results_to_dict(_make_results())
+    payload["pmml_scoring"] = pmml_scoring_result_to_dict(
+        _valid_pmml_scoring_result()
+    )
+
+    with pytest.raises(ValueError, match="v1 validation results cannot contain pmml_scoring"):
+        validation_results_from_dict(payload)
+
+
+def test_serializer_rejects_non_json_hyperparameter_values():
+    results = _make_results()
+    results.basic_info.hyperparameters["bad"] = object()
+
+    with pytest.raises(ValueError, match="expected JSON value"):
+        validation_results_to_dict(results)
 
 
 def test_pmml_scoring_result_round_trip_is_exact_and_detached():
@@ -307,6 +415,7 @@ def test_validation_results_assembles():
         model_version="v1",
         algorithm="lgb",
         target_type="binary",
+        schema_version="marvis.validation_results.v1",
         reproducibility=repro,
         basic_info=basic,
         effectiveness=eff,
@@ -371,18 +480,17 @@ def test_validation_results_from_dict_ignores_pipeline_task_identity():
 
 
 def test_validation_results_from_dict_preserves_stress_category_coverage():
-    payload = {
-        "stress_test": {
-            "status": "partial",
-            "baseline": {"ks": 0.3, "sample_count": 10, "bin_table": []},
-            "per_category": [],
-            "unclassified_features": ["BH_A044_C0580"],
-            "category_source_counts": {
-                "notebook": 2,
-                "dictionary": 1,
-                "unresolved": 1,
-            },
-        }
+    payload = validation_results_to_dict(_make_results())
+    payload["stress_test"] = {
+        "status": "partial",
+        "baseline": {"ks": 0.3, "sample_count": 10, "bin_table": []},
+        "per_category": [],
+        "unclassified_features": ["BH_A044_C0580"],
+        "category_source_counts": {
+            "notebook": 2,
+            "dictionary": 1,
+            "unresolved": 1,
+        },
     }
 
     results = validation_results_from_dict(payload)

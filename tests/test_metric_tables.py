@@ -4,6 +4,8 @@ from __future__ import annotations
 import pytest
 
 from marvis.metric_tables import metric_table_sections_from_payload
+from marvis.validation.results import validation_results_to_dict
+from tests.output.test_excel import _make_pmml_results
 
 
 @pytest.fixture
@@ -90,6 +92,22 @@ def test_sections_basic_titles_preserved(payload):
         "分箱排序性",
         "特征重要性",
         "压力测试",
+    ]
+
+
+def test_pmml_results_preserve_all_downstream_metric_sections():
+    payload = validation_results_to_dict(_make_pmml_results())
+
+    sections = metric_table_sections_from_payload(payload)
+
+    assert [section["title"] for section in sections] == [
+        "样本情况",
+        "整体效果&稳定性",
+        "分月效果&稳定性",
+        "分箱排序性",
+        "特征重要性",
+        "压力测试",
+        "ROC&KS 曲线",
     ]
 
 

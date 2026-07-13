@@ -315,6 +315,27 @@ def test_monthly_metrics_present_for_each_month():
     assert psi_months == monthly_months
 
 
+def test_split_and_month_metric_loops_have_cancellation_checkpoints():
+    sample = _build_sample()
+    config = _config(bin_count=5)
+    split_checkpoints: list[int] = []
+    month_checkpoints: list[int] = []
+
+    compute_overall_ks(
+        sample=sample,
+        config=config,
+        cancellation_check=lambda: split_checkpoints.append(len(split_checkpoints)),
+    )
+    compute_monthly_ks(
+        sample=sample,
+        config=config,
+        cancellation_check=lambda: month_checkpoints.append(len(month_checkpoints)),
+    )
+
+    assert len(split_checkpoints) == 3
+    assert len(month_checkpoints) == 3
+
+
 def test_monthly_metrics_include_model_analysis_psi_variants():
     sample = _build_ranked_sample()
     result = run_effectiveness(sample=sample, config=_config(bin_count=5))

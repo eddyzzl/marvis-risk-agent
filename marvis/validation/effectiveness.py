@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -41,27 +42,64 @@ class EffectivenessContext:
     train_distribution: Any
 
 
-def run_effectiveness(*, sample: pd.DataFrame, config: ValidationConfig) -> EffectivenessResult:
+def run_effectiveness(
+    *,
+    sample: pd.DataFrame,
+    config: ValidationConfig,
+    cancellation_check: Callable[[], None] | None = None,
+) -> EffectivenessResult:
+    _check_cancelled(cancellation_check)
     validate_required_splits(
         sample,
         split_col=config.split_col,
         split_values=config.split_values,
     )
-    context = prepare_effectiveness_context(sample=sample, config=config)
-    overall = compute_overall_ks(sample=sample, config=config)
+    context = prepare_effectiveness_context(
+        sample=sample,
+        config=config,
+        cancellation_check=cancellation_check,
+    )
+    overall = compute_overall_ks(
+        sample=sample,
+        config=config,
+        cancellation_check=cancellation_check,
+    )
     overall = compute_overall_psi(
         sample=sample,
         config=config,
         context=context,
         overall=overall,
+        cancellation_check=cancellation_check,
     )
     return build_effectiveness_result(
         overall=overall,
-        bin_tables=compute_bin_tables(sample=sample, config=config, context=context),
-        monthly_ks=compute_monthly_ks(sample=sample, config=config),
-        monthly_psi=compute_monthly_psi(sample=sample, config=config, context=context),
-        psi_stability_table=compute_psi_stability_table(sample=sample, config=config),
-        roc_ks_curves=compute_roc_ks_curves(sample=sample, config=config),
+        bin_tables=compute_bin_tables(
+            sample=sample,
+            config=config,
+            context=context,
+            cancellation_check=cancellation_check,
+        ),
+        monthly_ks=compute_monthly_ks(
+            sample=sample,
+            config=config,
+            cancellation_check=cancellation_check,
+        ),
+        monthly_psi=compute_monthly_psi(
+            sample=sample,
+            config=config,
+            context=context,
+            cancellation_check=cancellation_check,
+        ),
+        psi_stability_table=compute_psi_stability_table(
+            sample=sample,
+            config=config,
+            cancellation_check=cancellation_check,
+        ),
+        roc_ks_curves=compute_roc_ks_curves(
+            sample=sample,
+            config=config,
+            cancellation_check=cancellation_check,
+        ),
     )
 
 
@@ -69,7 +107,9 @@ def prepare_effectiveness_context(
     *,
     sample: pd.DataFrame,
     config: ValidationConfig,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> EffectivenessContext:
+    _check_cancelled(cancellation_check)
     score_col = config.score_col
     split_col = config.split_col
     splits = config.split_values
@@ -84,6 +124,7 @@ def compute_overall_ks(
     *,
     sample: pd.DataFrame,
     config: ValidationConfig,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> list[OverallRow]:
     score_col = config.score_col
     target_col = config.target_col
@@ -92,6 +133,7 @@ def compute_overall_ks(
 
     overall: list[OverallRow] = []
     for split_key in ("train", "test", "oot"):
+        _check_cancelled(cancellation_check)
         rows_split = sample[sample[split_col] == splits[split_key]]
         scores = rows_split[score_col].to_numpy(dtype=float)
         labels = rows_split[target_col].to_numpy(dtype=int)
@@ -121,12 +163,14 @@ def compute_overall_psi(
     config: ValidationConfig,
     context: EffectivenessContext,
     overall: list[OverallRow],
+    cancellation_check: Callable[[], None] | None = None,
 ) -> list[OverallRow]:
     score_col = config.score_col
     split_col = config.split_col
     splits = config.split_values
     psi_by_split: dict[str, float] = {}
     for split_key in ("train", "test", "oot"):
+        _check_cancelled(cancellation_check)
         rows_split = sample[sample[split_col] == splits[split_key]]
         scores = rows_split[score_col].to_numpy(dtype=float)
         distribution = bin_distribution(scores, context.edges)
@@ -146,6 +190,7 @@ def compute_bin_tables(
     sample: pd.DataFrame,
     config: ValidationConfig,
     context: EffectivenessContext,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> dict[str, list]:
     score_col = config.score_col
     target_col = config.target_col
@@ -153,6 +198,7 @@ def compute_bin_tables(
     splits = config.split_values
     bin_tables: dict[str, list] = {}
     for split_key in ("train", "test", "oot"):
+        _check_cancelled(cancellation_check)
         rows_split = sample[sample[split_col] == splits[split_key]]
         if rows_split.empty:
             bin_tables[split_key] = []
@@ -170,7 +216,9 @@ def compute_psi_stability_table(
     *,
     sample: pd.DataFrame,
     config: ValidationConfig,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> list[PsiStabilityRow]:
+    _check_cancelled(cancellation_check)
     score_col = config.score_col
     split_col = config.split_col
     splits = config.split_values
@@ -191,6 +239,7 @@ def compute_psi_stability_table(
     psi_by_bin = _psi_contributions(expected_dist, actual_dist)
     rows: list[PsiStabilityRow] = []
     for index, (expected_count, actual_count) in enumerate(zip(expected_bins, actual_bins), start=1):
+        _check_cancelled(cancellation_check)
         expected_pct = _ratio(expected_count, expected_total)
         actual_pct = _ratio(actual_count, actual_total)
         rows.append(
@@ -233,6 +282,7 @@ def compute_roc_ks_curves(
     *,
     sample: pd.DataFrame,
     config: ValidationConfig,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> dict[str, RocKsCurve]:
     score_col = config.score_col
     target_col = config.target_col
@@ -240,6 +290,7 @@ def compute_roc_ks_curves(
     splits = config.split_values
     curves: dict[str, RocKsCurve] = {}
     for split_key in ("train", "test", "oot"):
+        _check_cancelled(cancellation_check)
         rows_split = sample[sample[split_col] == splits[split_key]]
         curves[split_key] = _roc_ks_curve(
             split=split_key,
@@ -253,12 +304,14 @@ def compute_monthly_ks(
     *,
     sample: pd.DataFrame,
     config: ValidationConfig,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> list[MonthlyKsRow]:
     score_col = config.score_col
     target_col = config.target_col
     monthly_ks: list[MonthlyKsRow] = []
     months = month_key_series(sample[config.time_col], column_name=config.time_col)
     for month, group in sample.groupby(months, sort=True):
+        _check_cancelled(cancellation_check)
         scores = group[score_col].to_numpy(dtype=float)
         labels = group[target_col].to_numpy(dtype=int)
         sample_count = int(len(group))
@@ -325,11 +378,15 @@ def compute_monthly_psi(
     sample: pd.DataFrame,
     config: ValidationConfig,
     context: EffectivenessContext,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> list[MonthlyPsiRow]:
     score_col = config.score_col
     monthly_psi: list[MonthlyPsiRow] = []
     months = month_key_series(sample[config.time_col], column_name=config.time_col)
-    grouped = [(str(month), group) for month, group in sample.groupby(months, sort=True)]
+    grouped: list[tuple[str, pd.DataFrame]] = []
+    for month, group in sample.groupby(months, sort=True):
+        _check_cancelled(cancellation_check)
+        grouped.append((str(month), group))
     if not grouped:
         return monthly_psi
 
@@ -341,6 +398,7 @@ def compute_monthly_psi(
     previous_month = ""
 
     for month, group in grouped:
+        _check_cancelled(cancellation_check)
         scores = group[score_col].to_numpy(dtype=float)
         distribution = bin_distribution(scores, context.edges)
         psi_mom = None if previous_distribution is None else float(compute_psi(previous_distribution, distribution))
@@ -358,6 +416,11 @@ def compute_monthly_psi(
         previous_distribution = distribution
         previous_month = month
     return monthly_psi
+
+
+def _check_cancelled(callback: Callable[[], None] | None) -> None:
+    if callback is not None:
+        callback()
 
 
 def _has_calendar_month_gap(previous_month: str, current_month: str) -> bool:
