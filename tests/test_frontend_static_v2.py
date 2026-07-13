@@ -1095,7 +1095,7 @@ def test_selected_running_task_auto_polls_progress_after_refresh_or_reselect():
     poll_start = app_js.index("async function pollValidationProgress")
     poll_end = app_js.index("async function validateCurrentTask", poll_start)
     poll_body = app_js[poll_start:poll_end]
-    assert "{ stopping = false, background = false } = {}" in poll_body
+    assert "settleWhenServerIdle = false" in poll_body
     assert "const claim = claimProgressPoll(progressPolls, taskId, { background });" in poll_body
     assert "if (!claim.claimed) return claim.existing.promise;" in poll_body
     assert "releaseProgressPoll(progressPolls, taskId, pollState)" in poll_body
@@ -6810,15 +6810,72 @@ def test_agent_stop_response_polls_until_active_agent_job_finishes():
     wait_body = app_js[wait_start:wait_end]
     assert '"scanned"' in wait_body
     assert '"executed"' in wait_body
-    assert "{ stopping }" in wait_body
+    assert "{ stopping, settleWhenServerIdle: true }" in wait_body
     assert "agentValidationStopped(finalTask" in wait_body
 
     poll_start = app_js.index("async function pollValidationProgress")
     poll_end = app_js.index("async function validateCurrentTask", poll_start)
     poll_body = app_js[poll_start:poll_end]
-    assert "{ stopping = false, background = false } = {}" in poll_body
+    assert "settleWhenServerIdle = false" in poll_body
     assert "const serverBusyAction = taskServerBusyAction(polledTask);" in poll_body
     assert "doneStatuses.has(status) && !serverBusyAction" in poll_body
+
+
+def test_agent_wait_settles_when_failed_job_leaves_task_in_created_state():
+    app_js = _read_static("app.js")
+    wait_body = _slice_function(app_js, "async function waitForAgentValidation")
+    poll_body = _slice_function(app_js, "async function pollValidationProgress")
+
+    assert "settleWhenServerIdle: true" in wait_body
+
+    script = "\n".join(
+        [
+            "const progressPolls = new Map();",
+            "let selectedTaskId = 'task-1';",
+            "let selectedTask = { id: 'task-1', status: 'created', active_job_kind: null };",
+            "const taskCache = [selectedTask];",
+            "const statuses = [];",
+            "let refreshCount = 0;",
+            "let nowCall = 0;",
+            "Date.now = () => nowCall++ === 0 ? 0 : 3600001;",
+            "function claimProgressPoll(registry, taskId) {",
+            "  const pollState = { cancelled: false, promise: null };",
+            "  registry.set(taskId, pollState);",
+            "  return { claimed: true, pollState };",
+            "}",
+            "function releaseProgressPoll(registry, taskId, pollState) {",
+            "  if (registry.get(taskId) === pollState) registry.delete(taskId);",
+            "}",
+            "async function sleep() {}",
+            "async function refreshTasks() { refreshCount += 1; }",
+            "function findTaskInCache(taskId) { return taskCache.find((task) => task.id === taskId) || null; }",
+            "async function loadTaskEvidence() {}",
+            "function metricOverviewComplete() { return false; }",
+            "function currentMetricPreviewHasValues() { return false; }",
+            "async function loadReportFields() {}",
+            "function selectedTaskIsAgentMode() { return true; }",
+            "async function loadAgentMessages() {}",
+            "function renderChangedValidationViews() {}",
+            "function renderTaskList() {}",
+            "function taskServerBusyAction(task) { return task.active_job_kind || null; }",
+            "function setActionStatus(message, kind) { statuses.push({ message, kind }); }",
+            "function setTaskFailureActionStatus() {}",
+            poll_body,
+            "const result = await pollValidationProgress(new Set(['scanned', 'failed']), 'task-1', { settleWhenServerIdle: true });",
+            "process.stdout.write(JSON.stringify({ result, refreshCount, statuses }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["result"]["status"] == "created"
+    assert payload["refreshCount"] == 1
+    assert payload["statuses"] == []
 
 
 def test_agent_mode_hides_empty_scan_section_until_evidence_or_messages():
@@ -8542,7 +8599,7 @@ def test_agent_stop_polling_finishes_when_server_job_is_cancelled_even_if_status
     poll_end = app_js.index("async function validateCurrentTask", poll_start)
     poll_body = app_js[poll_start:poll_end]
 
-    assert "{ stopping = false, background = false } = {}" in poll_body
+    assert "settleWhenServerIdle = false" in poll_body
     assert "if (stopping && !serverBusyAction)" in poll_body
     assert "return polledTask;" in poll_body
 

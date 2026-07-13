@@ -6016,7 +6016,7 @@ async function waitForAgentValidation(taskId, { stopping = false } = {}) {
   const progressPromise = pollValidationProgress(
     new Set(["scanned", "executed", "writing_artifacts", "failed", "succeeded", "review_required"]),
     taskId,
-    { stopping },
+    { stopping, settleWhenServerIdle: true },
   );
   const streamPollPromise = pollAgentMessagesUntilSettled(taskId, progressPromise);
   const finalTask = await progressPromise;
@@ -6208,7 +6208,7 @@ async function dispatchDriverStart(taskId = selectedTaskId) {
 async function pollValidationProgress(
   doneStatuses = terminalTaskStatuses,
   taskId = selectedTaskId,
-  { stopping = false, background = false } = {},
+  { stopping = false, background = false, settleWhenServerIdle = false } = {},
 ) {
   if (!taskId) return null;
   const claim = claimProgressPoll(progressPolls, taskId, { background });
@@ -6241,6 +6241,14 @@ async function pollValidationProgress(
         if (selectedTaskId === taskId && !background) {
           setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "success");
         }
+        return polledTask;
+      }
+      // Agent-stage exceptions may occur before a deterministic stage updates
+      // the task status (for example while constructing the scan contract).
+      // The job lease is the authoritative liveness signal in that gap: once
+      // it is gone, return control to the composer instead of polling the stale
+      // pre-stage status for an hour.
+      if (settleWhenServerIdle && !serverBusyAction) {
         return polledTask;
       }
       if (doneStatuses.has(status) && !serverBusyAction) {

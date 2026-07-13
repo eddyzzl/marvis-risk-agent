@@ -218,6 +218,40 @@ def test_parquet_uses_metadata_and_iterates_multiple_row_groups(tmp_path):
     assert pd.concat(chunks, ignore_index=True)["x"].tolist() == list(range(7))
 
 
+def test_parquet_normalizes_blank_field_name_in_dtype_contract(tmp_path):
+    path = tmp_path / "blank-field.parquet"
+    table = pa.table(
+        {
+            "": pa.array([1, 2], type=pa.int64()),
+            "x": pa.array([10, 20], type=pa.int64()),
+            "y": pa.array([0, 1], type=pa.int64()),
+        }
+    )
+    pq.write_table(table, path)
+
+    schema = inspect_sample_schema(path)
+    chunks = list(
+        iter_sample_projection(
+            path,
+            columns=("x", "y"),
+            chunk_size=1,
+            schema=schema,
+        )
+    )
+
+    assert schema.columns == ("__marvis_unnamed_column_0__", "x", "y")
+    assert schema.dtypes == {
+        "__marvis_unnamed_column_0__": "int64",
+        "x": "int64",
+        "y": "int64",
+    }
+    assert "" not in schema.dtypes
+    assert pd.concat(chunks, ignore_index=True).to_dict("list") == {
+        "x": [10, 20],
+        "y": [0, 1],
+    }
+
+
 def test_feather_uses_ipc_schema_and_iterates_record_batches(tmp_path):
     path = tmp_path / "sample.feather"
     schema = pa.schema([("x", pa.int64()), ("y", pa.int64()), ("z", pa.int64())])
@@ -240,6 +274,39 @@ def test_feather_uses_ipc_schema_and_iterates_record_batches(tmp_path):
     assert inspected.row_count == 5
     assert [len(frame) for frame in chunks] == [2, 1, 2]
     assert all(tuple(frame.columns) == ("y", "x") for frame in chunks)
+
+
+def test_feather_normalizes_blank_field_name_in_dtype_contract(tmp_path):
+    path = tmp_path / "blank-field.feather"
+    schema = pa.schema(
+        [("", pa.int64()), ("x", pa.int64()), ("y", pa.int64())]
+    )
+    with pa.OSFile(str(path), "wb") as sink, ipc.new_file(sink, schema) as writer:
+        writer.write_batch(
+            pa.record_batch([[1, 2], [10, 20], [0, 1]], schema=schema)
+        )
+
+    inspected = inspect_sample_schema(path)
+    chunks = list(
+        iter_sample_projection(
+            path,
+            columns=("x", "y"),
+            chunk_size=1,
+            schema=inspected,
+        )
+    )
+
+    assert inspected.columns == ("__marvis_unnamed_column_0__", "x", "y")
+    assert inspected.dtypes == {
+        "__marvis_unnamed_column_0__": "int64",
+        "x": "int64",
+        "y": "int64",
+    }
+    assert "" not in inspected.dtypes
+    assert pd.concat(chunks, ignore_index=True).to_dict("list") == {
+        "x": [10, 20],
+        "y": [0, 1],
+    }
 
 
 def test_excel_accepts_only_nonempty_second_sheet_and_projection_uses_it(tmp_path):

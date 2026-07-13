@@ -215,7 +215,10 @@ def _inspect_parquet(path: Path) -> SampleSchema:
     return SampleSchema(
         path=str(path),
         columns=columns,
-        dtypes={field.name: str(field.type) for field in arrow_schema},
+        dtypes={
+            column: str(field.type)
+            for column, field in zip(columns, arrow_schema, strict=True)
+        },
         row_count=row_count,
         preview_row_count=0,
         encoding=None,
@@ -240,7 +243,10 @@ def _inspect_feather(path: Path) -> SampleSchema:
     return SampleSchema(
         path=str(path),
         columns=columns,
-        dtypes={field.name: str(field.type) for field in arrow_schema},
+        dtypes={
+            column: str(field.type)
+            for column, field in zip(columns, arrow_schema, strict=True)
+        },
         row_count=row_count,
         preview_row_count=0,
         encoding=None,
