@@ -22,6 +22,14 @@ from marvis.agent_memory.prompting import (
 
 
 REQUIRED_AGENT_REPORT_KEYS = tuple(sorted(AGENT_REPORT_CONCLUSION_KEYS))
+_V2_FINAL_CONCLUSION_FORBIDDEN_PATTERNS = (
+    re.compile(r"材料(?:扫描|识别|完备)"),
+    re.compile(r"验证输入契约"),
+    re.compile(r"PMML\s*(?:全量)?(?:打分|评分)(?:测试|完成|通过|成功|覆盖|样本|耗时)?", re.IGNORECASE),
+    re.compile(r"报告(?:已|进入|生成|产出|定稿)"),
+    re.compile(r"最终定稿|建议(?:在投产前)?审阅(?:报告|结论)|确认\s*Word", re.IGNORECASE),
+    re.compile(r"可直接(?:部署|投产)"),
+)
 GLOBAL_AGENT_EVIDENCE_KEYS = frozenset(
     {
         "scan",
@@ -790,6 +798,8 @@ def generate_word_conclusions(
             stream=False,
         )
         values = _parse_conclusion_json(content)
+        if task.validation_workflow_version == 2:
+            _validate_v2_word_conclusions(values)
     except (LLMClientError, ValueError) as exc:
         return {}, {"llm_error": str(exc), "fallback": True, "confirmable": False}
     return values, attach_memory_metadata(
@@ -812,9 +822,8 @@ def fallback_word_conclusions(*, task: TaskRecord) -> dict[str, str]:
                 "如出现显著稳定性或区分能力下降，应先复核信源质量和样本分布后再继续使用。"
             ),
             "TEXT:final_validation_conclusion": (
-                f"{name}的最终判断应以 OOT 区分效果、PSI 稳定性、过拟合检查和关键数据源压力表现为依据。"
-                "当前未能生成更细的模型评价文字，建议结合结构化指标判断模型可用性及上线限制；"
-                "PMML 部署文件已具备评分能力。"
+                f"当前缺少足以直接评价{name}区分效果、样本外稳定性、过拟合和压力风险的结构化证据，"
+                "因此不能形成模型可用性结论。PMML部署可用。"
             ),
         }
     return {
@@ -1806,8 +1815,8 @@ def _stage_instructions(
                 "不得写可直接部署或可直接投产。"
                 "不得复述材料扫描、材料完备性、验证输入契约、PMML 打分样本量或耗时、"
                 "平台执行步骤、报告产出状态、最终定稿阶段或建议审阅报告等流程信息；"
-                "如果 evidence.visible_stage_summaries 中已有 PMML 打分测试或效果稳定性解读，"
-                "必须吸收其要点，不能退化成一句泛泛结论。"
+                "如果 evidence.visible_stage_summaries 中已有模型效果稳定性解读，必须吸收其模型评价要点；"
+                "PMML 相关证据最多用于判断是否可简短表述为 PMML 部署可用。"
             )
         return (
             reference_instruction
@@ -1849,3 +1858,12 @@ def _parse_conclusion_json(content: str) -> dict[str, str]:
     if missing:
         raise ValueError("word conclusion response missing keys: " + ", ".join(missing))
     return values
+
+
+def _validate_v2_word_conclusions(values: dict[str, str]) -> None:
+    conclusion = values.get("TEXT:final_validation_conclusion", "")
+    for pattern in _V2_FINAL_CONCLUSION_FORBIDDEN_PATTERNS:
+        if pattern.search(conclusion):
+            raise ValueError(
+                "V2 final validation conclusion contains forbidden process narration"
+            )

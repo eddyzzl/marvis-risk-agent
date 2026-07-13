@@ -123,7 +123,7 @@ def test_v2_word_conclusion_system_prompt_excludes_legacy_consistency_flow(monke
                 {
                     "TEXT:pressure_test_summary": "压力测试摘要。",
                     "TEXT:pressure_impact_recommendation": "压力测试建议。",
-                    "TEXT:final_validation_conclusion": "PMML 打分测试完成。",
+                    "TEXT:final_validation_conclusion": "模型效果良好、稳定性可接受，PMML部署可用。",
                 },
                 ensure_ascii=False,
             )
@@ -146,6 +146,34 @@ def test_v2_word_conclusion_system_prompt_excludes_legacy_consistency_flow(monke
     assert "不得复述材料扫描" in captured["system_prompt"]
     assert "不得写“可直接部署”或“可直接投产”" in captured["system_prompt"]
     assert "报告已进入" not in captured["system_prompt"]
+
+
+def test_v2_word_conclusion_rejects_process_narration(monkeypatch):
+    class ProcessNarratingClient:
+        def complete(self, **_kwargs):
+            return json.dumps(
+                {
+                    "TEXT:pressure_test_summary": "压力测试摘要。",
+                    "TEXT:pressure_impact_recommendation": "压力测试建议。",
+                    "TEXT:final_validation_conclusion": "材料扫描完成，报告已进入最终定稿阶段。",
+                },
+                ensure_ascii=False,
+            )
+
+    monkeypatch.setattr(
+        "marvis.agent.service._client",
+        lambda _profile: ProcessNarratingClient(),
+    )
+
+    values, metadata = generate_word_conclusions(
+        task=replace(_task(), validation_workflow_version=2),
+        evidence={},
+        model_profile={"api_base_url": "http://llm", "model_name": "m", "api_key": "k"},
+    )
+
+    assert values == {}
+    assert metadata["confirmable"] is False
+    assert "forbidden process narration" in metadata["llm_error"]
 
 
 def test_word_conclusion_invalid_json_reports_format_error(monkeypatch):

@@ -142,7 +142,8 @@ def test_v2_word_prompt_and_fallback_use_pmml_scoring_not_reproducibility():
 
     fallback = fallback_word_conclusions(task=task)
     combined = " ".join(fallback.values())
-    assert "PMML 打分测试" in combined
+    assert "PMML部署可用" in combined
+    assert "PMML 打分测试" not in fallback["TEXT:final_validation_conclusion"]
     assert "模型压力测试" in combined
     assert "Notebook 可复现性" not in combined
     assert "分数一致性" not in combined
