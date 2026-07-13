@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 from marvis.agent.service import (
     answer_chat_message,
@@ -110,6 +111,37 @@ def test_word_conclusion_uses_non_streaming_json_request(monkeypatch):
     assert captured["response_format"] == {"type": "json_object"}
     assert values["TEXT:final_validation_conclusion"] == "模型可进入人工复核。"
     assert metadata["fallback"] is False
+
+
+def test_v2_word_conclusion_system_prompt_excludes_legacy_consistency_flow(monkeypatch):
+    captured = {}
+
+    class CapturingClient:
+        def complete(self, **kwargs):
+            captured.update(kwargs)
+            return json.dumps(
+                {
+                    "TEXT:pressure_test_summary": "压力测试摘要。",
+                    "TEXT:pressure_impact_recommendation": "压力测试建议。",
+                    "TEXT:final_validation_conclusion": "PMML 打分测试完成。",
+                },
+                ensure_ascii=False,
+            )
+
+    monkeypatch.setattr(
+        "marvis.agent.service._client",
+        lambda _profile: CapturingClient(),
+    )
+    task = replace(_task(), validation_workflow_version=2)
+
+    generate_word_conclusions(
+        task=task,
+        evidence={},
+        model_profile={"api_base_url": "http://llm", "model_name": "m", "api_key": "k"},
+    )
+
+    assert "V2 PMML 打分工作流" in captured["system_prompt"]
+    assert "不得使用“可复现”“一致性验证”" in captured["system_prompt"]
 
 
 def test_word_conclusion_invalid_json_reports_format_error(monkeypatch):

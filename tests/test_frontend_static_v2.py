@@ -1279,7 +1279,6 @@ def test_initialization_failure_shows_service_connection_error():
 
 
 def test_create_task_payload_omits_notebook_contract_fields():
-    app_js = _read_static("app.js")
     create_dialog_js = _read_static("js/create-task-dialog.js")
 
     for field in ["report_values"]:
@@ -1297,7 +1296,6 @@ def test_create_task_payload_omits_notebook_contract_fields():
         "time_col:",
         "feature_columns:",
     ]:
-        assert removed_field not in app_js
         assert removed_field not in create_dialog_js
 
 
@@ -11902,3 +11900,15 @@ def test_v2_validation_ui_uses_pmml_scoring_copy_and_evidence():
     assert 'renderPmmlScoringEvidence(evidence.pmml_scoring || {})' in app_js
     assert 'id="scoringSectionTitle">PMML打分测试</h3>' in index_html
     assert "PMML打分、效果稳定性验证，模型压力测试" in index_html
+
+
+def test_v2_pending_input_contract_has_an_interactive_confirmation_panel():
+    app_js = _read_static("app.js")
+    index_html = _read_static("index.html")
+
+    assert 'id="validationContractPanel"' in index_html
+    assert "function renderValidationInputContract" in app_js
+    assert "function loadValidationInputContract" in app_js
+    assert "function submitValidationInputContract" in app_js
+    assert "/validation-input-contract`" in app_js
+    assert 'data-validation-contract-submit' in app_js

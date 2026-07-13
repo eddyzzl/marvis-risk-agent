@@ -8,6 +8,7 @@ from marvis.agent.prompts import (
     AGENT_SYSTEM_PROMPT,
     RISK_METRIC_INTERPRETATION_GUIDANCE,
     WORD_CONCLUSION_SYSTEM_PROMPT,
+    WORD_CONCLUSION_V2_SYSTEM_PROMPT,
 )
 from marvis.db import AGENT_REPORT_CONCLUSION_KEYS
 from marvis.domain import TaskRecord
@@ -778,7 +779,11 @@ def generate_word_conclusions(
     )
     try:
         content = _client(model_profile).complete(
-            system_prompt=WORD_CONCLUSION_SYSTEM_PROMPT,
+            system_prompt=(
+                WORD_CONCLUSION_V2_SYSTEM_PROMPT
+                if task.validation_workflow_version == 2
+                else WORD_CONCLUSION_SYSTEM_PROMPT
+            ),
             user_prompt=prompt,
             temperature=0.2,
             response_format={"type": "json_object"},

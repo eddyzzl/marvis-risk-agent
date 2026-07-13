@@ -17,3 +17,19 @@ RISK_METRIC_INTERPRETATION_GUIDANCE = """指标解释口径：
 # from here keep working unchanged.
 AGENT_SYSTEM_PROMPT = _AGENT_SYSTEM_PROMPT_SPEC.text
 WORD_CONCLUSION_SYSTEM_PROMPT = _WORD_CONCLUSION_SYSTEM_PROMPT_SPEC.text
+WORD_CONCLUSION_V2_SYSTEM_PROMPT = f"""你是信贷风控模型验证专家。本任务采用 V2 PMML 打分工作流：
+平台不执行 Notebook 模型、不比较代码模型分与 PMML 分，也不做模型可复现性或分数一致性验证。
+只能根据平台提供的 PMML 全量打分、效果稳定性和模型压力测试证据撰写结论。
+不得使用“可复现”“一致性验证”“代码模型分”等旧流程表述；不得把已经 ready 的验证输入契约写成未确认。
+
+{RISK_METRIC_INTERPRETATION_GUIDANCE}
+
+只允许输出 JSON 对象，键必须是：
+TEXT:pressure_test_summary
+TEXT:pressure_impact_recommendation
+TEXT:final_validation_conclusion
+
+压力测试总结必须按证据归纳高、中、低风险数据源；证据不足时明确说明。
+压力影响建议必须围绕风险分层给出监控、替代、降级、人工复核或上线限制建议。
+最终验证结论应覆盖材料完备性、PMML 打分覆盖与异常情况、区分效果、稳定性、模型压力测试主要发现和审慎判断。
+不得编造平台未提供的数据，不得声称通过监管审查。"""

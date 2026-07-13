@@ -204,6 +204,7 @@ let suppressAgentAutoScrollTaskId = null;
 let pendingTaskContentLoadTaskId = null;
 let taskContentSettleTimer = null;
 let latestNotebookSteps = [];
+let latestValidationInputContract = null;
 let sidebarCollapsed = false;
 let sidebarSlideTimer = null;
 let scanAbortController = null;
@@ -3977,8 +3978,171 @@ function renderScanResult(result, notebookCells = []) {
     `<div class="chip-row">${materialChecks}</div>`,
     preflightChecks,
   ].join("");
+  renderValidationInputContract(result.validation_input_contract || null);
   updateAgentScanSectionVisibility();
   renderNotebookSteps(result.notebook_steps || [], result.notebook_cells || notebookCells);
+}
+
+function validationContractCandidates(contract, key) {
+  const values = [];
+  const seen = new Set();
+  for (const candidate of contract?.candidates?.[key] || []) {
+    const value = candidate?.value;
+    const identity = JSON.stringify(value);
+    if (identity === undefined || seen.has(identity)) continue;
+    seen.add(identity);
+    values.push(value);
+  }
+  return values;
+}
+
+function validationContractSelectHtml(contract, key, label) {
+  const values = validationContractCandidates(contract, key);
+  return [
+    `<label>${escapeHtml(label)}<select name="${escapeHtml(key)}">`,
+    ...values.map((value, index) => {
+      const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+      return `<option value="${index}">${escapeHtml(text)}</option>`;
+    }),
+    "</select></label>",
+  ].join("");
+}
+
+function validationContractCandidateValue(form, contract, key) {
+  const index = Number(form.elements.namedItem(key)?.value || 0);
+  return validationContractCandidates(contract, key)[index];
+}
+
+function validationContractScalar(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    return text;
+  }
+}
+
+function renderValidationInputContract(record) {
+  const panel = $("validationContractPanel");
+  if (!panel) return;
+  latestValidationInputContract = record;
+  if (!usesPmmlScoringWorkflow() || !record) {
+    panel.classList.add("hidden");
+    panel.innerHTML = "";
+    return;
+  }
+  panel.classList.remove("hidden");
+  if (record.status === "ready") {
+    panel.innerHTML = '<h4>验证字段已确认</h4><p>契约已就绪，可以执行 PMML 打分测试。</p>';
+    return;
+  }
+  if (record.status !== "pending_confirmation") {
+    panel.innerHTML = `<h4>验证字段暂不可确认</h4><p>${escapeHtml(record.status || "未知状态")}</p>`;
+    return;
+  }
+  const contract = record.contract || {};
+  const timeField = validationContractCandidates(contract, "time_col")[0] || "";
+  const timeGranularity = /date|day|dt/i.test(String(timeField)) ? "date" : "month";
+  const algorithm = validationContractCandidates(contract, "algorithm")[0]
+    || contract.pmml_manifest?.algorithm
+    || "-";
+  panel.innerHTML = [
+    '<form id="validationContractForm">',
+    '<h4>确认验证字段</h4>',
+    `<p>已从 Notebook、PMML、样本和数据字典识别候选。算法：${escapeHtml(algorithm)}。请确认后继续。</p>`,
+    '<div class="validation-contract-grid">',
+    validationContractSelectHtml(contract, "target_col", "目标字段"),
+    '<label>坏样本值<input name="positive_label" value="1" /></label>',
+    '<label>好样本值<input name="negative_label" value="0" /></label>',
+    validationContractSelectHtml(contract, "split_col", "样本划分字段"),
+    '<label>训练集取值<input name="split_train" value="train" /></label>',
+    '<label>测试集取值<input name="split_test" value="test" /></label>',
+    '<label>时间外样本取值<input name="split_oot" value="oot" /></label>',
+    validationContractSelectHtml(contract, "time_col", "时间字段"),
+    `<label>时间粒度<select name="time_granularity"><option value="date"${timeGranularity === "date" ? " selected" : ""}>日</option><option value="month"${timeGranularity === "month" ? " selected" : ""}>月</option></select></label>`,
+    validationContractSelectHtml(contract, "pmml_output_field", "PMML 分数字段"),
+    validationContractSelectHtml(contract, "model_params", "模型参数来源"),
+    validationContractSelectHtml(contract, "feature_metadata_selection", "特征元数据列"),
+    "</div>",
+    '<div class="validation-contract-actions">',
+    '<button class="button primary" type="submit" data-validation-contract-submit>确认字段并继续</button>',
+    '<span class="status" data-validation-contract-status></span>',
+    "</div>",
+    "</form>",
+  ].join("");
+}
+
+async function loadValidationInputContract(taskId = selectedTaskId) {
+  if (!taskId || !usesPmmlScoringWorkflow()) return;
+  try {
+    const record = await api(`/api/tasks/${encodeURIComponent(taskId)}/validation-input-contract`);
+    if (selectedTaskId === taskId) renderValidationInputContract(record);
+  } catch (_) {
+    // The scan result remains the fallback until a contract record exists.
+  }
+}
+
+async function submitValidationInputContract(form) {
+  const record = latestValidationInputContract;
+  const taskId = selectedTaskId;
+  if (!record || !taskId || record.status !== "pending_confirmation") return;
+  const contract = record.contract || {};
+  const metadata = validationContractCandidateValue(form, contract, "feature_metadata_selection") || {};
+  const status = form.querySelector("[data-validation-contract-status]");
+  const button = form.querySelector("[data-validation-contract-submit]");
+  button.disabled = true;
+  if (status) status.textContent = "正在校验字段…";
+  try {
+    const confirmed = await api(`/api/tasks/${encodeURIComponent(taskId)}/validation-input-contract`, {
+      method: "PUT",
+      body: JSON.stringify({
+        revision: record.revision,
+        target_col: validationContractCandidateValue(form, contract, "target_col"),
+        positive_label: validationContractScalar(form.elements.positive_label.value),
+        negative_label: validationContractScalar(form.elements.negative_label.value),
+        split_col: validationContractCandidateValue(form, contract, "split_col"),
+        split_value_mapping: {
+          train: validationContractScalar(form.elements.split_train.value),
+          test: validationContractScalar(form.elements.split_test.value),
+          oot: validationContractScalar(form.elements.split_oot.value),
+        },
+        time_col: validationContractCandidateValue(form, contract, "time_col"),
+        time_granularity: form.elements.time_granularity.value,
+        pmml_output_field: validationContractCandidateValue(form, contract, "pmml_output_field"),
+        model_params: validationContractCandidateValue(form, contract, "model_params") || {},
+        metadata_sheet: metadata.metadata_sheet ?? null,
+        feature_col: metadata.feature_col,
+        category_col: metadata.category_col,
+        importance_col: metadata.importance_col,
+        transformations: contract.transformations || [],
+      }),
+    });
+    if (selectedTaskId !== taskId) return;
+    renderValidationInputContract(confirmed);
+    setActionStatus("验证字段已确认，正在继续 PMML 打分测试。", "success");
+    if (selectedTaskIsAgentMode()) {
+      const input = $("agentComposerInput");
+      input.value = "继续";
+      await startAgentValidation();
+    }
+  } catch (error) {
+    button.disabled = false;
+    if (status) status.textContent = error?.message || "字段确认失败";
+    throw error;
+  }
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("submit", (event) => {
+    const form = event.target?.closest?.("#validationContractForm");
+    if (!form) return;
+    event.preventDefault();
+    runAction(() => submitValidationInputContract(form), {
+      actionId: "validationContract",
+      busyText: "正在确认验证字段…",
+    });
+  });
 }
 
 function renderValidationResult(result) {
@@ -4329,6 +4493,7 @@ async function loadTaskEvidence(taskId = selectedTaskId) {
     const evidence = await api(`/api/tasks/${taskId}/evidence`);
     if (selectedTaskId !== taskId) return;
     renderEvidence(evidence || {});
+    await loadValidationInputContract(taskId);
   } catch (_) {
     if (selectedTaskId === taskId && !notebookReproducibilityComplete(selectedTask)) {
       resetEvidenceSummaries();
@@ -4385,6 +4550,7 @@ function renderStoredStateSummaries() {
   const scanEmptyText = selectedTaskId ? "点击\"扫描材料\"开始" : "选择任务后点击\"扫描材料\"开始";
   $("scanSummary").className = "result-summary empty";
   $("scanSummary").textContent = selectedTaskIsAgentMode() ? "" : scanEmptyText;
+  renderValidationInputContract(null);
   updateAgentScanSectionVisibility();
   resetEvidenceSummaries();
   updateAgentReportSectionVisibility();

@@ -1080,6 +1080,53 @@ textarea {
   margin-top: 10px;
 }
 
+.validation-contract-panel {
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent-soft));
+}
+
+.validation-contract-panel h4,
+.validation-contract-panel p {
+  margin: 0;
+}
+
+.validation-contract-panel p {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.validation-contract-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  margin-top: 14px;
+}
+
+.validation-contract-grid label {
+  margin: 0;
+}
+
+.validation-contract-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.validation-contract-actions .status {
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .validation-contract-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .status.error {
   color: var(--danger);
   font-weight: 700;
