@@ -3,6 +3,7 @@ import pandas as pd
 
 from marvis.feature.binning import assign_bins as _feature_assign_bins
 from marvis.feature.binning import equal_frequency_edges
+from marvis.feature.correlation import safe_correlation
 from marvis.feature.metrics import compute_psi as _feature_compute_psi
 from marvis.feature.metrics import feature_ks
 from marvis.validation.results import BinRow
@@ -101,6 +102,7 @@ def bin_table(
     *,
     score_col: str,
     target_col: str,
+    reverse: bool = False,
 ) -> list[BinRow]:
     scores = dataframe[score_col].to_numpy(dtype=float)
     labels = pd.to_numeric(dataframe[target_col], errors="coerce").to_numpy(dtype=float)
@@ -118,4 +120,16 @@ def bin_table(
             int(mask.sum()),
             int(labels[mask].sum()),
         ))
-    return accumulate_bin_metrics(marginals, reverse=False)
+    return accumulate_bin_metrics(marginals, reverse=reverse)
+
+
+def reverse_score_bins_for_good_to_bad(scores, labels) -> bool:
+    """Whether ascending score bands must be reversed to read good-to-bad.
+
+    The decision is made once from the baseline score and bad-label relationship.
+    Callers that compare stressed scenarios should reuse this same value for every
+    scenario so the population direction cannot flip between tables.
+    """
+    score_values = np.asarray(scores, dtype=float)
+    label_values = np.asarray(labels, dtype=float)
+    return bool(safe_correlation(score_values, label_values) < 0)

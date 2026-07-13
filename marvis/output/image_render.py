@@ -159,12 +159,13 @@ def render_all_images(results: ValidationResults, output_dir: Path) -> dict[str,
         image_path = _render_table(
             output_dir / f"pressure_score_shift_{index}.png",
             header=[
-                item.category, "样本总数", "累计占比", "逾期数量", "逾期率",
-                "累计逾期率", "单组lift", "累计lift", "ks",
+                item.category, "样本总数", "各箱占比", "累计占比", "逾期数量",
+                "逾期率", "累计逾期率", "单组lift", "累计lift", "ks",
             ],
-            rows=_reference_bin_rows(item.bin_table) or [("(无数据)", "", "", "", "", "", "", "", "")],
-            color_scale_columns={4},
-            data_bar_columns={7: "63BE7B"},
+            rows=_reference_bin_rows(item.bin_table, include_bin_share=True)
+            or [("(无数据)", "", "", "", "", "", "", "", "", "")],
+            color_scale_columns={5},
+            data_bar_columns={8: "63BE7B"},
         )
         images[key] = image_path
         pressure_shift_paths.append(image_path)
@@ -346,7 +347,7 @@ def _monthly_effect_rows(results: ValidationResults) -> list[tuple]:
     return rows
 
 
-def _reference_bin_rows(bins) -> list[tuple]:
+def _reference_bin_rows(bins, *, include_bin_share: bool = False) -> list[tuple]:
     total = sum(row.sample_count for row in bins)
     total_bad = sum(row.bad_count for row in bins)
     overall_bad_rate = _ratio(total_bad, total)
@@ -357,7 +358,7 @@ def _reference_bin_rows(bins) -> list[tuple]:
         cumulative_count += row.sample_count
         cumulative_bad += row.bad_count
         cumulative_bad_rate = _ratio(cumulative_bad, cumulative_count)
-        rows.append((
+        values = (
             _score_interval(row.score_lower, row.score_upper),
             row.sample_count,
             f"{_ratio(cumulative_count, total):.2%}",
@@ -367,7 +368,10 @@ def _reference_bin_rows(bins) -> list[tuple]:
             f"{row.lift:.2f}",
             f"{_ratio(cumulative_bad_rate, overall_bad_rate):.2f}",
             f"{row.ks:.4f}",
-        ))
+        )
+        if include_bin_share:
+            values = values[:2] + (f"{_ratio(row.sample_count, total):.2%}",) + values[2:]
+        rows.append(values)
     return rows
 
 

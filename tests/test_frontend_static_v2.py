@@ -1704,6 +1704,8 @@ def test_validation_material_binding_dialog_is_wired_before_scan():
     assert 'id="materialBindingConfirmButton"' in index_html
     assert 'createMaterialBindingDialogController' in app_js
     assert 'materialBindingDialog.ensureMaterialSelection(task)' in app_js
+    assert 'ensureMaterialSelection(task, { force = false } = {})' in binding_js
+    assert 'if (!force && completeSelection(payload.selection)) return task;' in binding_js
     assert 'materialBindingDialog.bind();' in app_js
     assert 'label: "Notebook"' in binding_js
     assert 'label: "Sample"' in binding_js
@@ -1717,6 +1719,22 @@ def test_validation_material_binding_dialog_is_wired_before_scan():
     assert 'feature_importance_best.csv' not in binding_js
     assert "selected_materials" in app_js
     assert "已指定" in app_js
+
+
+def test_validation_input_candidates_use_native_tables_with_legacy_row_styling():
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    message_body = _slice_function(app_js, "function agentMessageHtml")
+    assert 'data-agent-stage="${escapeHtml(String(message.stage))}"' in message_body
+    assert '.agent-message[data-agent-stage="input_confirmation"] .agent-message-content ul' in styles_css
+    assert '.agent-message[data-agent-stage="input_confirmation"] .agent-message-content li' in styles_css
+    legacy_list_rule = _css_rule(
+        styles_css,
+        '.agent-message[data-agent-stage="input_confirmation"] .agent-message-content ul',
+    )
+    assert "list-style: none" in legacy_list_rule
+    assert "border: 1px solid var(--border)" in legacy_list_rule
 
 
 def test_validation_material_binding_dialog_keeps_content_inside_viewport():
@@ -3292,8 +3310,8 @@ def test_step_rail_splits_notebook_and_metrics_progress_with_elapsed_time():
     assert "function stepAfterInLatestNotebookSteps" in app_js
     assert "metricStepsForRail" in app_js
     assert "notebookStepsForRail" in app_js
-    assert 'step.id === "notebook" ? renderNotebookStepRail(notebookStepsForRail(), "分段进度", index + 1, stepStatus, "notebook") : ""' in app_js
-    assert 'step.id === "metrics" ? renderNotebookStepRail(metricStepsForRail(), "计算进度", index + 1, stepStatus, "metrics") : ""' in app_js
+    assert "v2WorkflowSubsteps" in app_js
+    assert 'renderNotebookStepRail(childSteps, "阶段任务", index + 1, stepStatus, step.id)' in app_js
     assert "formatStepElapsed(step, notebookSteps[index + 1] || stepAfterInLatestNotebookSteps(step))" in app_js
     assert "elapsed_seconds" in app_js
     elapsed_start = app_js.index("function stepElapsedSeconds")
@@ -3309,6 +3327,47 @@ def test_step_rail_splits_notebook_and_metrics_progress_with_elapsed_time():
     elapsed_formatter = app_js[elapsed_start:elapsed_end]
     assert 'return "0s";' in elapsed_formatter
     assert "totalSeconds === 0" in elapsed_formatter
+
+
+def test_v2_validation_rail_uses_stable_logical_subtasks_and_hides_notebook_preview():
+    app_js = _read_static("app.js")
+
+    for title in [
+        "材料文件识别",
+        "数据字典与特征元数据",
+        "验证输入契约",
+        "PMML 解析",
+        "PMML 全量评分",
+        "评分结果校验",
+        "指标数据准备",
+        "模型效果计算",
+        "稳定性分析",
+        "模型压力测试",
+        "总体判断",
+        "最终结论",
+        "Word 报告",
+        "Excel 分析",
+    ]:
+        assert title in app_js
+
+    notebook_body = _slice_function(app_js, "function notebookStepsForRail")
+    assert "usesPmmlScoringWorkflow" in notebook_body
+    assert 'id.startsWith("system-repro-")' in notebook_body
+    assert "stepWorkflowStage(step) === \"notebook\"" in notebook_body
+
+    logical_body = _slice_function(app_js, "function v2WorkflowSubsteps")
+    assert "v2WorkflowSubstepPlans[stageId]" in logical_body
+    assert "latestNotebookSteps.find" in logical_body
+    assert 'parentStatus === "succeeded"' in logical_body
+    assert 'status: "succeeded"' in logical_body
+
+    renderer = _slice_function(app_js, "function renderWorkflowStepper")
+    assert "usesPmmlScoringWorkflow(selectedTask)" in renderer
+    assert "v2WorkflowSubsteps(step.id, stepStatus)" in renderer
+    assert 'renderNotebookStepRail(childSteps, "阶段任务", index + 1, stepStatus, step.id)' in renderer
+    # V1 keeps its existing Notebook/metrics evidence rails.
+    assert 'renderNotebookStepRail(notebookStepsForRail(), "分段进度", index + 1, stepStatus, "notebook")' in renderer
+    assert 'renderNotebookStepRail(metricStepsForRail(), "计算进度", index + 1, stepStatus, "metrics")' in renderer
 
 
 def test_validate_action_primes_reproducibility_system_steps_immediately():
@@ -6078,7 +6137,7 @@ def test_current_status_error_detail_is_always_visible_and_turns_red_for_failure
     assert 'id="actionErrorDetail"' in index_html
     assert 'class="action-error-detail"' in index_html
     assert "暂无报错" in index_html
-    assert 'id="actionErrorDetail"\n                      class="action-error-detail"' in index_html
+    assert 'id="actionErrorDetail"\n                  class="action-error-detail"' in index_html
     assert 'role="alert"' not in index_html[index_html.index('id="actionErrorDetail"'):index_html.index('id="taskSnapshot"')]
     assert 'aria-live="assertive"' not in index_html[index_html.index('id="actionErrorDetail"'):index_html.index('id="taskSnapshot"')]
 
@@ -6092,6 +6151,9 @@ def test_current_status_error_detail_is_always_visible_and_turns_red_for_failure
     assert 'detail.className = `action-error-detail ${kind === "error" ? "error" : ""}`.trim();' in status_renderer
     assert "setActionErrorDetail(describeActionStatus(message, kind, detail), kind)" in status_renderer
     assert "actionErrorDetail" in status_renderer
+    describe_body = _slice_function(app_js, "function describeActionStatus")
+    assert 'if (detail && detail !== message) return `${message} · ${detail}`;' in describe_body
+    assert 'kind === "error"' not in describe_body
 
     # failures are signalled by a red status pill, not a red box
     assert "function actionStatusPill" in app_js
@@ -8548,6 +8610,25 @@ def test_agent_send_always_requires_llm():
     assert "taskUsesPlanRail(selectedTask)" not in body
 
 
+def test_agent_material_selection_response_forces_dialog_then_requires_rescan():
+    app_js = _read_static("app.js")
+    send_body = _slice_function(app_js, "async function startAgentValidation")
+
+    assert 'result.status === "awaiting_material_selection"' in send_body
+    assert 'result.ui_action?.type === "select_validation_materials"' in send_body
+    assert "handleAgentMaterialSelectionRequest(taskId)" in send_body
+    assert send_body.index("handleAgentMaterialSelectionRequest(taskId)") < send_body.index(
+        'result.status !== "accepted"'
+    )
+
+    handler_body = _slice_function(app_js, "async function handleAgentMaterialSelectionRequest")
+    assert "materialBindingDialog.ensureMaterialSelection(task, { force: true })" in handler_body
+    assert "await refreshTasks();" in handler_body
+    assert "请重新扫描材料" in handler_body
+    assert "dispatchAgentValidation" not in handler_body
+    assert "waitForAgentValidation" not in handler_body
+
+
 def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
@@ -9258,6 +9339,15 @@ def test_action_status_writer_is_idempotent():
     assert guard_index < pill_write_index
 
 
+def test_action_status_signature_is_scoped_to_selected_task():
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "function setActionStatus")
+    assert "selectedTaskId" in body, (
+        "switching between tasks with the same status copy must still repaint "
+        "the persistent status detail for the newly selected task"
+    )
+
+
 def test_metric_preview_skips_unchanged_payload():
     app_js = _read_static("app.js")
     body = _slice_function(app_js, "function renderMetricPreview")
@@ -9744,6 +9834,33 @@ def test_computing_metrics_has_one_status_phrase():
     assert "指标概览进行中" in snapshot_body
 
 
+def test_validation_status_snapshot_keeps_persistent_stage_detail():
+    app_js = _read_static("app.js")
+    snapshot_body = _slice_function(app_js, "function taskActionStatusSnapshot")
+    for phrase in [
+        "等待材料识别",
+        "已完成：材料识别",
+        "PMML解析与全量评分",
+        "模型效果、稳定性与压力测试",
+        "Word报告与Excel分析",
+        "已完成：材料识别、PMML打分、模型验证与报告输出",
+    ]:
+        assert phrase in snapshot_body
+    assert snapshot_body.count("detail:") >= 10
+
+    render_body = _slice_function(app_js, "function renderCurrentTask")
+    assert "setActionStatus: setWorkspaceActionStatus" in render_body
+    workspace_status_body = _slice_function(app_js, "function setWorkspaceActionStatus")
+    assert "taskActionStatusSnapshot(selectedTask)" in workspace_status_body
+    assert "snapshot.detail" in workspace_status_body
+
+    failure_status_body = _slice_function(app_js, "function setTaskFailureActionStatus")
+    assert 'setActionErrorDetail("")' not in failure_status_body, (
+        "switching between two successful tasks can reuse the same status signature; "
+        "the failure helper must not clear the persistent detail before that render"
+    )
+
+
 def test_writing_artifacts_idle_shows_metrics_complete():
     """writing_artifacts is a dual-meaning state.
 
@@ -9785,14 +9902,12 @@ def test_writing_artifacts_idle_shows_metrics_complete():
     )
     assert "完成" in snapshots["idle"]["message"]
     assert "进行中" not in snapshots["idle"]["message"]
-    assert snapshots["reportBusy"] == {
-        "message": "报告输出进行中。",
-        "kind": "busy",
-    }
-    assert snapshots["metricsRunning"] == {
-        "message": "指标概览进行中。",
-        "kind": "busy",
-    }
+    assert snapshots["reportBusy"]["message"] == "报告输出进行中。"
+    assert snapshots["reportBusy"]["kind"] == "busy"
+    assert "Word" in snapshots["reportBusy"]["detail"]
+    assert snapshots["metricsRunning"]["message"] == "指标概览进行中。"
+    assert snapshots["metricsRunning"]["kind"] == "busy"
+    assert "压力测试" in snapshots["metricsRunning"]["detail"]
 
 
 def test_task_stopped_uses_structured_stopped_field_only():
@@ -11819,8 +11934,8 @@ def test_task_hero_click_collapses_to_title_and_status_only():
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
 
-    # DOM: a details wrapper holds only the subtitle/error/snapshot, so the title
-    # row (name + status pill + chevron) stays visible when collapsed.
+    # DOM: the current status detail is outside the collapsible wrapper, so the
+    # operator can still see progress or errors while subtitle/meta are folded.
     hero_start = index_html.index('id="taskHero"')
     hero_markup = index_html[hero_start:index_html.index("</header>", hero_start)]
     assert 'class="task-hero-top-right"' in hero_markup
@@ -11832,12 +11947,13 @@ def test_task_hero_click_collapses_to_title_and_status_only():
     assert 'class="task-hero-details-inner"' in hero_markup
     # The always-visible title row precedes the collapsible details.
     assert hero_markup.index('class="task-hero-top"') < hero_markup.index('id="taskHeroDetails"')
-    # Everything that folds away lives inside the details wrapper; the status
-    # pill stays out of it so it is always visible.
+    # Only subtitle/meta fold away. Both the status pill and its detail stay
+    # outside the wrapper and remain visible.
     details_at = hero_markup.index('id="taskHeroDetails"')
-    for hidden_id in ("currentTaskSubtitle", "actionErrorDetail", "taskSnapshot"):
+    for hidden_id in ("currentTaskSubtitle", "taskSnapshot"):
         assert f'id="{hidden_id}"' in hero_markup[details_at:]
     assert 'id="actionStatus"' in hero_markup[:details_at]
+    assert 'id="actionErrorDetail"' in hero_markup[:details_at]
 
     # CSS: grid-rows 1fr<->0fr animates the height; the inner wrapper clips.
     details_rule = _css_rule(styles_css, ".task-hero-details")

@@ -22,6 +22,7 @@ from marvis.validation.binning import (
     compute_ks,
     compute_psi,
     equal_frequency_bin_edges,
+    reverse_score_bins_for_good_to_bad,
 )
 from marvis.validation.config import ValidationConfig
 from marvis.validation.field_transformations import (
@@ -958,6 +959,10 @@ def run_pmml_stress(
     baseline_frame = pd.DataFrame(
         {"__target__": context.labels, "__score__": context.baseline_scores}
     )
+    reverse_bins = reverse_score_bins_for_good_to_bad(
+        context.baseline_scores,
+        context.labels,
+    )
     baseline_ks = float(compute_ks(context.baseline_scores, context.labels))
     baseline = StressBaseline(
         ks=baseline_ks,
@@ -967,6 +972,7 @@ def run_pmml_stress(
             edges,
             score_col="__score__",
             target_col="__target__",
+            reverse=reverse_bins,
         ),
     )
     scenario_dir = Path(scenario_dir)
@@ -1078,6 +1084,7 @@ def run_pmml_stress(
                     edges,
                     score_col="__score__",
                     target_col="__target__",
+                    reverse=reverse_bins,
                 ),
                 error=None,
                 status="completed",

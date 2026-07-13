@@ -110,6 +110,16 @@ class _RecordingScorer:
         return pd.Series(1.0 / (1.0 + np.exp(-linear)), dtype="float64")
 
 
+class _HigherIsBetterScorer(_RecordingScorer):
+    def score_chunk(self, frame: pd.DataFrame) -> pd.Series:
+        self.calls.append(frame.copy())
+        x2 = frame["x2"].to_numpy(dtype=float)
+        x2 = np.where(x2 == -9999, 0.0, x2)
+        linear = np.clip(frame["x1"].to_numpy(dtype=float) - x2, -20, 20)
+        bad_probability = 1.0 / (1.0 + np.exp(-linear))
+        return pd.Series(1.0 - bad_probability, dtype="float64")
+
+
 def _ready_for_sample(ready_contract, sample_path: Path, **changes):
     schema = inspect_sample_schema(sample_path)
     contract = replace(
@@ -134,7 +144,7 @@ def _config() -> ValidationConfig:
     )
 
 
-def _baseline(tmp_path: Path, contract, sample_path: Path):
+def _baseline(tmp_path: Path, contract, sample_path: Path, *, scorer=None):
     path = tmp_path / "baseline.parquet"
     result = run_pmml_scoring(
         contract=contract,
@@ -142,7 +152,7 @@ def _baseline(tmp_path: Path, contract, sample_path: Path):
         pmml_path=PMML_FIXTURE,
         score_path=path,
         chunk_size=3,
-        scorer=_RecordingScorer(),
+        scorer=scorer or _RecordingScorer(),
     )
     return path, result
 
@@ -170,6 +180,8 @@ def test_stress_reuses_baseline_and_scores_every_category_on_complete_oot(
     )
 
     assert result.baseline.sample_count == 4
+    assert result.baseline.bin_table[0].lift < 1.0
+    assert result.baseline.bin_table[-1].lift > 1.0
     assert [row.category for row in result.per_category] == ["征信", "内部"]
     assert result.status == "completed"
     assert len(scorer.calls) == 4
@@ -179,6 +191,38 @@ def test_stress_reuses_baseline_and_scores_every_category_on_complete_oot(
     assert all((frame["x2"] == -9999).all() for frame in scorer.calls[2:])
     assert (tmp_path / "stress" / "category_001.parquet").is_file()
     assert (tmp_path / "stress" / "category_002.parquet").is_file()
+
+
+def test_stress_uses_baseline_direction_for_higher_is_better_scores(
+    tmp_path: Path, ready_contract
+):
+    sample_path = tmp_path / "sample.parquet"
+    _sample_frame().to_parquet(sample_path, index=False, row_group_size=3)
+    contract = _ready_for_sample(ready_contract, sample_path)
+    baseline_scorer = _HigherIsBetterScorer()
+    baseline_path, scoring = _baseline(
+        tmp_path,
+        contract,
+        sample_path,
+        scorer=baseline_scorer,
+    )
+
+    result = run_pmml_stress(
+        contract=contract,
+        config=_config(),
+        sample_path=sample_path,
+        baseline_score_path=baseline_path,
+        scoring_result=scoring,
+        scenario_dir=tmp_path / "stress",
+        feature_categories={"内部": ("x2",)},
+        scorer=_HigherIsBetterScorer(),
+        chunk_size=2,
+    )
+
+    for rows in [result.baseline.bin_table, result.per_category[0].bin_table]:
+        assert rows[0].lift < 1.0
+        assert rows[-1].lift > 1.0
+        assert rows[-1].cum_sample_pct == pytest.approx(1.0)
 
 
 def test_stress_reads_and_transforms_the_source_sample_once(

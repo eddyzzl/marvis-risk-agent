@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import dataclasses
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -16,6 +17,8 @@ MAX_PMML_SCORING_ERRORS = 64
 MAX_PMML_SCORING_ERROR_CHARS = 500
 VALIDATION_RESULTS_SCHEMA_V1 = "marvis.validation_results.v1"
 VALIDATION_RESULTS_SCHEMA_V2 = "marvis.validation_results.v2"
+VALIDATION_LIFT_ORDER_GOOD_TO_BAD = "good_to_bad"
+_VALIDATION_LIFT_ORDER_LEGACY_BAD_TO_GOOD = "bad_to_good"
 
 
 class ConsistencyStatus(StrEnum):
@@ -411,6 +414,7 @@ _VALIDATION_RESULTS_BASE_FIELDS = {
 }
 _VALIDATION_RESULTS_ENVELOPE_FIELDS = _VALIDATION_RESULTS_BASE_FIELDS | {
     "schema_version",
+    "lift_order",
     "pmml_scoring",
     "reproducibility",
     # Historical pipeline payloads occasionally wrapped the deterministic
@@ -439,6 +443,7 @@ def validation_results_to_dict(results: ValidationResults) -> dict[str, Any]:
             "effectiveness": asdict(results.effectiveness),
             "stress_test": asdict(results.stress_test),
             "schema_version": results.schema_version,
+            "lift_order": VALIDATION_LIFT_ORDER_GOOD_TO_BAD,
         }
     except (TypeError, AttributeError) as exc:
         raise ValueError("invalid validation results fields") from exc
@@ -468,6 +473,7 @@ def validation_results_to_dict(results: ValidationResults) -> dict[str, Any]:
 def validation_results_from_dict(payload: dict[str, Any]) -> ValidationResults:
     """Decode persisted validation results without defaulting damaged fields."""
     _require_dict(payload, "root")
+    payload = normalize_validation_results_lift_order(payload)
     actual = set(payload)
     unknown = actual - _VALIDATION_RESULTS_ENVELOPE_FIELDS
     missing = _VALIDATION_RESULTS_BASE_FIELDS - actual
@@ -493,6 +499,14 @@ def validation_results_from_dict(payload: dict[str, Any]) -> ValidationResults:
         schema = VALIDATION_RESULTS_SCHEMA_V1
     else:
         schema = _strict_value(payload["schema_version"], str, "schema_version")
+
+    lift_order = _strict_value(
+        payload.get("lift_order"),
+        Literal["good_to_bad"],
+        "lift_order",
+    )
+    if lift_order != VALIDATION_LIFT_ORDER_GOOD_TO_BAD:
+        raise ValueError(f"unsupported validation lift order: {lift_order!r}")
 
     if schema == VALIDATION_RESULTS_SCHEMA_V2:
         if has_reproducibility or not has_pmml_scoring:
@@ -536,6 +550,188 @@ def validation_results_from_dict(payload: dict[str, Any]) -> ValidationResults:
         pmml_scoring=scoring,
         reproducibility=reproducibility,
     )
+
+
+def normalize_validation_results_lift_order(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a detached payload using the current good-head/bad-tail convention.
+
+    Early PMML-only V2 artifacts predate an explicit lift-order marker and stored
+    overall/monthly fields as high-risk ``head`` and low-risk ``tail``. Unmarked V1
+    artifacts exist in both conventions, so their observed head/tail direction is
+    used only as a compatibility heuristic; explicitly marked artifacts are never
+    inferred from their values.
+    """
+    normalized = deepcopy(_require_dict(payload, "root"))
+    schema = normalized.get("schema_version")
+    if schema not in {None, VALIDATION_RESULTS_SCHEMA_V1, VALIDATION_RESULTS_SCHEMA_V2}:
+        return normalized
+
+    lift_order = normalized.get("lift_order")
+    if lift_order == VALIDATION_LIFT_ORDER_GOOD_TO_BAD:
+        return normalized
+    if lift_order not in {None, _VALIDATION_LIFT_ORDER_LEGACY_BAD_TO_GOOD}:
+        return normalized
+
+    should_swap = lift_order == _VALIDATION_LIFT_ORDER_LEGACY_BAD_TO_GOOD
+    if lift_order is None:
+        should_swap = schema == VALIDATION_RESULTS_SCHEMA_V2
+        if schema in {None, VALIDATION_RESULTS_SCHEMA_V1}:
+            should_swap = _unmarked_v1_uses_legacy_bad_head(normalized)
+
+    if should_swap:
+        _swap_validation_head_tail_lift(normalized)
+    _normalize_persisted_validation_bin_tables(normalized)
+    normalized["lift_order"] = VALIDATION_LIFT_ORDER_GOOD_TO_BAD
+    return normalized
+
+
+def _swap_validation_head_tail_lift(payload: dict[str, Any]) -> None:
+    effectiveness = payload.get("effectiveness")
+    if not isinstance(effectiveness, dict):
+        return
+    for section in ("overall", "monthly_ks"):
+        rows = effectiveness.get(section)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if "head_lift_5pct" not in row and "tail_lift_5pct" not in row:
+                continue
+            head = row.get("head_lift_5pct")
+            tail = row.get("tail_lift_5pct")
+            row["head_lift_5pct"] = tail
+            row["tail_lift_5pct"] = head
+
+
+def _unmarked_v1_uses_legacy_bad_head(payload: dict[str, Any]) -> bool:
+    effectiveness = payload.get("effectiveness")
+    if isinstance(effectiveness, dict):
+        for section in ("overall", "monthly_ks"):
+            rows = effectiveness.get(section)
+            if not isinstance(rows, list):
+                continue
+            direction_votes: list[int] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                head = row.get("head_lift_5pct")
+                tail = row.get("tail_lift_5pct")
+                if not isinstance(head, (int, float)) or not isinstance(tail, (int, float)):
+                    continue
+                if not math.isfinite(float(head)) or not math.isfinite(float(tail)):
+                    continue
+                direction_votes.append((head > tail) - (head < tail))
+            vote_total = sum(direction_votes)
+            if vote_total:
+                return vote_total > 0
+    return False
+
+
+def _normalize_persisted_validation_bin_tables(payload: dict[str, Any]) -> None:
+    effectiveness = payload.get("effectiveness")
+    if isinstance(effectiveness, dict):
+        bin_tables = effectiveness.get("bin_tables")
+        if isinstance(bin_tables, dict):
+            for split, rows in list(bin_tables.items()):
+                if isinstance(rows, list):
+                    bin_tables[split] = _ordered_persisted_bin_rows(
+                        rows,
+                        reverse=_persisted_bin_rows_are_bad_to_good(rows),
+                    )
+
+    stress = payload.get("stress_test")
+    if not isinstance(stress, dict):
+        return
+    baseline = stress.get("baseline")
+    baseline_rows = baseline.get("bin_table") if isinstance(baseline, dict) else None
+    if not isinstance(baseline_rows, list):
+        return
+    reverse_stress = _persisted_bin_rows_are_bad_to_good(baseline_rows)
+    baseline["bin_table"] = _ordered_persisted_bin_rows(
+        baseline_rows,
+        reverse=reverse_stress,
+    )
+    categories = stress.get("per_category")
+    if not isinstance(categories, list):
+        return
+    for category in categories:
+        if not isinstance(category, dict):
+            continue
+        rows = category.get("bin_table")
+        if isinstance(rows, list):
+            category["bin_table"] = _ordered_persisted_bin_rows(
+                rows,
+                reverse=reverse_stress,
+            )
+
+
+def _persisted_bin_rows_are_bad_to_good(rows: list[object]) -> bool:
+    observations: list[tuple[float, float, float]] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        count = row.get("sample_count")
+        bad_count = row.get("bad_count")
+        bad_rate = row.get("bad_rate")
+        if not isinstance(count, (int, float)) or float(count) <= 0:
+            continue
+        if not isinstance(bad_rate, (int, float)):
+            if not isinstance(bad_count, (int, float)):
+                continue
+            bad_rate = float(bad_count) / float(count)
+        if not math.isfinite(float(bad_rate)):
+            continue
+        observations.append((float(index), float(bad_rate), float(count)))
+    if len(observations) < 2:
+        return False
+    weight = sum(item[2] for item in observations)
+    mean_index = sum(index * count for index, _, count in observations) / weight
+    mean_rate = sum(rate * count for _, rate, count in observations) / weight
+    covariance = sum(
+        count * (index - mean_index) * (rate - mean_rate)
+        for index, rate, count in observations
+    )
+    return covariance < 0
+
+
+def _ordered_persisted_bin_rows(
+    rows: list[object],
+    *,
+    reverse: bool,
+) -> list[object]:
+    if not rows or not all(isinstance(row, dict) for row in rows):
+        return rows
+    ordered = [dict(row) for row in (reversed(rows) if reverse else rows)]
+    try:
+        total = sum(int(row["sample_count"]) for row in ordered)
+        total_bad = sum(int(row["bad_count"]) for row in ordered)
+    except (KeyError, TypeError, ValueError):
+        return rows
+    total_good = total - total_bad
+    overall_bad_rate = float(total_bad / total) if total else 0.0
+    cumulative_count = 0
+    cumulative_bad = 0
+    for bin_index, row in enumerate(ordered, start=1):
+        count = int(row["sample_count"])
+        bad = int(row["bad_count"])
+        cumulative_count += count
+        cumulative_bad += bad
+        cumulative_good = cumulative_count - cumulative_bad
+        bad_rate = float(bad / count) if count else 0.0
+        cumulative_bad_pct = float(cumulative_bad / total_bad) if total_bad else 0.0
+        cumulative_good_pct = float(cumulative_good / total_good) if total_good else 0.0
+        row.update(
+            {
+                "bin_index": bin_index,
+                "bad_rate": bad_rate,
+                "cum_sample_pct": float(cumulative_count / total) if total else 0.0,
+                "cum_bad_pct": cumulative_bad_pct,
+                "lift": float(bad_rate / overall_bad_rate) if overall_bad_rate else 0.0,
+                "ks": float(abs(cumulative_bad_pct - cumulative_good_pct)),
+            }
+        )
+    return ordered
 
 
 def reproducibility_result_from_dict(

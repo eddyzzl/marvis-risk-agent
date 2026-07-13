@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+import pytest
 
 from marvis.agent.service import _stage_prompt, fallback_word_conclusions
 from marvis.agent.validation_evidence import agent_evidence_from_settings
@@ -82,6 +83,49 @@ def test_agent_evidence_strictly_loads_pmml_scoring_result(tmp_path: Path):
     invalid = _scoring_payload(untrusted_extra="must not reach agent")
     result_path.write_text(json.dumps(invalid), encoding="utf-8")
     assert agent_evidence_from_settings(settings, task_id)["pmml_scoring"] == {}
+
+
+def test_agent_evidence_migrates_legacy_v2_lift_order(tmp_path: Path):
+    task_id = "task-pmml"
+    output_dir = tmp_path / "tasks" / task_id / "outputs"
+    output_dir.mkdir(parents=True)
+    (output_dir / "validation_results.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "marvis.validation_results.v2",
+                "effectiveness": {
+                    "overall": [
+                        {
+                            "split": "oot",
+                            "head_lift_5pct": 2.4,
+                            "tail_lift_5pct": 0.3,
+                        }
+                    ],
+                    "monthly_ks": [
+                        {
+                            "month": "202607",
+                            "head_lift_5pct": 2.2,
+                            "tail_lift_5pct": 0.4,
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = SimpleNamespace(tasks_dir=tmp_path / "tasks")
+
+    validation_results = agent_evidence_from_settings(settings, task_id)[
+        "validation_results"
+    ]
+
+    assert validation_results["lift_order"] == "good_to_bad"
+    assert validation_results["effectiveness"]["overall"][0][
+        "head_lift_5pct"
+    ] == pytest.approx(0.3)
+    assert validation_results["effectiveness"]["overall"][0][
+        "tail_lift_5pct"
+    ] == pytest.approx(2.4)
 
 
 def test_v2_pmml_scoring_prompt_uses_only_scoring_coverage_and_performance():

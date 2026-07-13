@@ -6574,6 +6574,33 @@ body[data-theme="dark"] .progress-rail {
   line-height: 1.78;
 }
 
+/* Historical input-confirmation messages stored candidates as a Markdown
+   list. Keep those tasks readable after the structured table rollout by
+   presenting the existing rows as one grouped table-like list. New messages
+   use metadata.tables and render as a real two-column table. */
+.agent-message[data-agent-stage="input_confirmation"] .agent-message-content ul {
+  margin: 8px 0 12px;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-message[data-agent-stage="input_confirmation"] .agent-message-content li {
+  margin: 0;
+  padding: 7px 12px;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-message[data-agent-stage="input_confirmation"] .agent-message-content li:last-child {
+  border-bottom: 0;
+}
+
 /* VD-2: needs_confirmation gate messages get a distinct "gate card" shell so
    they read as a blocking decision point, not an ordinary chat bubble with an
    extra button. Reuses the task-hero glass/backdrop-filter material and the

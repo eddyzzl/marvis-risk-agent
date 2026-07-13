@@ -11,6 +11,7 @@ from marvis.validation.binning import (
     compute_ks,
     compute_psi,
     equal_frequency_bin_edges,
+    reverse_score_bins_for_good_to_bad,
 )
 from marvis.validation.checks import finite_score_series
 from marvis.validation.config import ValidationConfig
@@ -88,11 +89,19 @@ def run_stress_test(
     _raise_if_cancelled(cancellation_check)
     baseline_labels = oot_sample[config.target_col].to_numpy(dtype=int)
     edges = equal_frequency_bin_edges(baseline_scores, config.bin_count)
+    reverse_bins = reverse_score_bins_for_good_to_bad(
+        baseline_scores,
+        baseline_labels,
+    )
 
     baseline_df = oot_sample.copy()
     baseline_df["__baseline_score__"] = baseline_scores
     baseline_bin_rows = bin_table(
-        baseline_df, edges, score_col="__baseline_score__", target_col=config.target_col
+        baseline_df,
+        edges,
+        score_col="__baseline_score__",
+        target_col=config.target_col,
+        reverse=reverse_bins,
     )
     baseline = StressBaseline(
         ks=float(compute_ks(baseline_scores, baseline_labels)),
@@ -136,7 +145,11 @@ def run_stress_test(
             after_df = oot_sample.copy()
             after_df["__after_score__"] = scores_after
             after_bin_rows = bin_table(
-                after_df, edges, score_col="__after_score__", target_col=config.target_col
+                after_df,
+                edges,
+                score_col="__after_score__",
+                target_col=config.target_col,
+                reverse=reverse_bins,
             )
             per_category.append(StressCategoryResult(
                 category=category,

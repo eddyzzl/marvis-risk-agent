@@ -769,6 +769,23 @@ def test_task_material_selection_api_persists_user_chosen_roles(
     assert task["pmml_path"] == "model.pmml"
     assert task["dictionary_path"] == "dictionary.csv"
 
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{
+            **asdict(FakeTaskRepository.tasks[task_id]),
+            "status": TaskStatus.WRITING_ARTIFACTS,
+        }
+    )
+    reselection_response = client.put(
+        f"/api/tasks/{task_id}/materials",
+        json={
+            "notebook_path": "model.ipynb",
+            "sample_path": "sample.parquet",
+            "pmml_path": "model.pmml",
+            "dictionary_path": "dictionary.csv",
+        },
+    )
+    assert reselection_response.status_code == 200
+
 
 def test_task_payload_exposes_active_job_kind_for_reloaded_ui(
     tmp_path: Path,
@@ -1336,6 +1353,8 @@ def test_report_fields_get_and_put_round_trip_revision(tmp_path: Path, monkeypat
 @pytest.fixture
 def complete_validation_results_payload() -> dict:
     return {
+        "schema_version": "marvis.validation_results.v2",
+        "lift_order": "good_to_bad",
         "basic_info": {
             "sample_period": ["20250101", "20250331"],
             "split_summary": [
@@ -1358,20 +1377,20 @@ def complete_validation_results_payload() -> dict:
         "effectiveness": {
             "overall": [
                 {"split": "train", "sample_count": 80, "bad_count": 8, "bad_rate": 0.10,
-                 "ks": 0.3215, "auc": 0.7345, "head_lift_5pct": 2.1, "tail_lift_5pct": 0.4,
+                 "ks": 0.3215, "auc": 0.7345, "head_lift_5pct": 0.4, "tail_lift_5pct": 2.1,
                  "psi_vs_train": 0.0},
                 {"split": "test", "sample_count": 20, "bad_count": 2, "bad_rate": 0.10,
-                 "ks": 0.3308, "auc": 0.7401, "head_lift_5pct": 2.0, "tail_lift_5pct": 0.5,
+                 "ks": 0.3308, "auc": 0.7401, "head_lift_5pct": 0.5, "tail_lift_5pct": 2.0,
                  "psi_vs_train": 0.0008},
                 {"split": "oot", "sample_count": 30, "bad_count": 3, "bad_rate": 0.10,
-                 "ks": 0.321456, "auc": 0.7210, "head_lift_5pct": 1.9, "tail_lift_5pct": 0.4,
+                 "ks": 0.321456, "auc": 0.7210, "head_lift_5pct": 0.4, "tail_lift_5pct": 1.9,
                  "psi_vs_train": 0.012345},
             ],
             "monthly_ks": [
                 {"month": "202501", "sample_count": 80, "bad_count": 8, "bad_rate": 0.10,
-                 "ks": 0.3215, "auc": 0.7345, "head_lift_5pct": 2.1, "tail_lift_5pct": 0.4},
+                 "ks": 0.3215, "auc": 0.7345, "head_lift_5pct": 0.4, "tail_lift_5pct": 2.1},
                 {"month": "202503", "sample_count": 30, "bad_count": 3, "bad_rate": 0.10,
-                 "ks": 0.3050, "auc": 0.7210, "head_lift_5pct": 1.9, "tail_lift_5pct": 0.4},
+                 "ks": 0.3050, "auc": 0.7210, "head_lift_5pct": 0.4, "tail_lift_5pct": 1.9},
             ],
             "monthly_psi": [
                 {"month": "202501", "psi_first_month": 0.0, "psi_last_month": 0.012, "psi_mom": None},
@@ -1486,9 +1505,30 @@ def test_report_fields_include_ordered_metric_table_sections_from_completed_outp
         "ROC&KS 曲线",
     ]
     assert all(section.get("section_theme") for section in sections)
+    assert sections[1]["tables"][0]["rows"][0][7:9] == ["0.40", "2.10"]
+    assert sections[2]["tables"][0]["rows"][0][6:8] == ["0.40", "2.10"]
     assert sections[1]["tables"][0]["layout"] == "kpi_cards"
     assert sections[2]["tables"][0]["layout"] == "trend_table"
     assert sections[5]["tables"][0]["layout"] == "table"
+
+    legacy_payload = json.loads(json.dumps(complete_validation_results_payload))
+    legacy_payload.pop("lift_order")
+    for section in ("overall", "monthly_ks"):
+        for row in legacy_payload["effectiveness"][section]:
+            row["head_lift_5pct"], row["tail_lift_5pct"] = (
+                row["tail_lift_5pct"],
+                row["head_lift_5pct"],
+            )
+    (output_dir / "validation_results.json").write_text(
+        json.dumps(legacy_payload),
+        encoding="utf-8",
+    )
+
+    migrated = client.get(f"/api/tasks/{task_id}/report-fields").json()[
+        "metric_table_sections"
+    ]
+    assert migrated[1]["tables"][0]["rows"][0][7:9] == ["0.40", "2.10"]
+    assert migrated[2]["tables"][0]["rows"][0][6:8] == ["0.40", "2.10"]
     assert sections[6]["tables"][0]["layout"] == "roc_ks_curve"
     assert len(sections[1]["tables"][0]["column_specs"]) == len(sections[1]["tables"][0]["headers"])
 

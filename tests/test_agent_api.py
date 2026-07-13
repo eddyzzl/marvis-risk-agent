@@ -609,12 +609,10 @@ def test_agent_scan_pending_contract_pauses_with_atomic_candidates(
     assert confirmation["stage"] == "input_confirmation"
     assert "pending_confirmation" in confirmation["content"]
     assert "revision 3" in confirmation["content"]
-    assert 'target_col = "y"' in confirmation["content"]
-    assert 'split_col = "split"' in confirmation["content"]
+    assert "原子候选" not in confirmation["content"]
     assert "确认验证字段" in confirmation["content"]
-    assert len(confirmation["content"]) <= 6_000
+    assert len(confirmation["content"]) <= 1_000
     assert "x" * 200 not in confirmation["content"]
-    assert "其余候选已省略" in confirmation["content"]
     assert confirmation["metadata"]["awaiting_validation_input_confirmation"] is True
     assert confirmation["metadata"]["validation_input_contract_ref"] == {
         "task_id": task_id,
@@ -623,7 +621,26 @@ def test_agent_scan_pending_contract_pauses_with_atomic_candidates(
         "needs_confirmation": True,
     }
     assert "validation_input_contract" not in confirmation["metadata"]
-    assert len(json.dumps(confirmation["metadata"], ensure_ascii=False)) < 1_000
+    tables = confirmation["metadata"]["tables"]
+    assert len(tables) == 1
+    assert tables[0]["title"] == "验证字段候选"
+    assert tables[0]["columns"] == ["验证字段", "候选值"]
+    rows = tables[0]["rows"]
+    assert [row[0] for row in rows] == [
+        "model_params",
+        "model_params",
+        "model_params",
+        "split_col",
+        "target_col",
+        "…",
+    ]
+    assert all(len(row[1]) <= 160 for row in rows[:-1])
+    assert rows[-3:] == [
+        ["split_col", '"split"'],
+        ["target_col", '"y"'],
+        ["…", "其余候选已省略（77 项）"],
+    ]
+    assert len(json.dumps(confirmation["metadata"], ensure_ascii=False)) <= 6_000
     assert not [
         message
         for message in messages
@@ -1239,16 +1256,39 @@ def test_metrics_stage_evidence_drops_oversized_roc_curve_arrays():
         "scan": {"checks": []},
         "validation_results": {
             "model_name": "demo",
+            "basic_info": {
+                "feature_importance": [
+                    {"feature": f"f{index}", "importance": index}
+                    for index in range(1_000)
+                ],
+            },
             "effectiveness": {
                 "overall": [{"split": "train", "ks": 0.34, "auc": 0.79}],
                 "monthly_ks": [{"month": "202503", "ks": 0.33}],
                 "psi_stability_table": [{"split": "oot", "psi": 0.05}],
+                "bin_tables": {
+                    "train": [
+                        {"bin": index, "bad_rate": index / 100}
+                        for index in range(100)
+                    ]
+                },
                 "roc_ks_curves": {
                     "train": {"roc": payload_curve, "ks": payload_curve},
                     "oot": {"roc": payload_curve, "ks": payload_curve},
                 },
             },
-            "stress_test": {"scenarios": []},
+            "stress_test": {
+                "baseline": {"ks": 0.34, "bin_table": payload_curve},
+                "per_category": [
+                    {
+                        "category": "人行",
+                        "ks_after": 0.28,
+                        "dropped_features": [f"f{index}" for index in range(1_000)],
+                        "bin_table": payload_curve,
+                    }
+                ],
+                "status": "pass",
+            },
         },
     }
 
@@ -1259,6 +1299,12 @@ def test_metrics_stage_evidence_drops_oversized_roc_curve_arrays():
     assert effectiveness["overall"] == [{"split": "train", "ks": 0.34, "auc": 0.79}]
     assert effectiveness["monthly_ks"] == [{"month": "202503", "ks": 0.33}]
     assert effectiveness["psi_stability_table"] == [{"split": "oot", "psi": 0.05}]
+    assert len(effectiveness["bin_tables"]["train"]) == 10
+    assert len(scoped["validation_results"]["basic_info"]["feature_importance"]) == 20
+    stress = scoped["validation_results"]["stress_test"]
+    assert "bin_table" not in stress["baseline"]
+    assert "bin_table" not in stress["per_category"][0]
+    assert len(stress["per_category"][0]["dropped_features"]) == 20
 
 
 def test_word_conclusion_draft_evidence_drops_oversized_roc_curves():
@@ -2222,6 +2268,8 @@ def test_agent_chat_question_receives_current_validation_context(
     ]
     assert "PSI 小于 0.10" in calls[0]["system_prompt"]
     assert "KS 0.30" in calls[0]["system_prompt"]
+    assert "头部是低风险/好客户" in calls[0]["system_prompt"]
+    assert "累计 lift 覆盖全部样本时末行必然等于 1" in calls[0]["system_prompt"]
     assert "过拟合" in calls[0]["system_prompt"]
     assert "train-test" in calls[0]["system_prompt"]
     assert "相对 10%" in calls[0]["system_prompt"]
@@ -2317,6 +2365,8 @@ def test_agent_metrics_summary_prompt_uses_contextual_metric_guidance(
     prompt = json.loads(calls[0]["user_prompt"])
     assert "PSI 小于 0.10" in calls[0]["system_prompt"]
     assert "KS 0.30" in calls[0]["system_prompt"]
+    assert "头部是低风险/好客户" in calls[0]["system_prompt"]
+    assert "累计 lift 覆盖全部样本时末行必然等于 1" in calls[0]["system_prompt"]
     assert "过拟合" in calls[0]["system_prompt"]
     assert "train-test" in calls[0]["system_prompt"]
     assert "相对 10%" in calls[0]["system_prompt"]
@@ -2326,6 +2376,7 @@ def test_agent_metrics_summary_prompt_uses_contextual_metric_guidance(
     assert "低风险数据源" in calls[0]["system_prompt"]
     assert "PSI 小于 0.10" in prompt["instructions"]
     assert "KS 0.30" in prompt["instructions"]
+    assert "头部是低风险/好客户" in prompt["instructions"]
     assert "过拟合" in prompt["instructions"]
     assert "train-test" in prompt["instructions"]
     assert "高风险数据源" in prompt["instructions"]
@@ -2381,7 +2432,11 @@ def test_agent_stage_summary_strips_instruction_acknowledgement_preamble(
 
     assert response.status_code == 200, response.text
     content = response.json()["message"]["content"]
-    assert content == "结论\n当前阶段应重点关注 PMML 分数一致性。"
+    assert content.startswith("总体判断\n结论\n当前阶段应重点关注 PMML 分数一致性。")
+    assert "好的，遵照您的指示" not in content
+    assert "效果表现" in content
+    assert "稳定性表现" in content
+    assert "压力测试风险" in content
     assert "好的" not in content
     assert "遵照" not in content
     assert "以下是" not in content
@@ -4308,6 +4363,8 @@ def test_agent_rerun_scan_resets_steps_without_deleting_history(
         ("重新执行第四步", "word_conclusion_draft"),
         ("重跑步骤4", "word_conclusion_draft"),
         ("重新写三段结论草稿", "word_conclusion_draft"),
+        ("请修正三段结论：最终验证结论只评价模型效果和稳定性", "word_conclusion_draft"),
+        ("最终验证结论不要提材料扫描，请改成只评价模型", "word_conclusion_draft"),
         ("重新生成报告", "word_conclusion_draft"),
         ("再生成 Word 报告", "word_conclusion_draft"),
     ],
@@ -4316,6 +4373,58 @@ def test_agent_rerun_stage_recognizes_step_numbers_and_business_aliases(content,
     from marvis.agent.service import agent_rerun_stage
 
     assert agent_rerun_stage(content) == stage
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "重新选择材料",
+        "更换验证材料",
+        "重新绑定 Notebook 和样本文件",
+        "把 PMML 换一下",
+    ],
+)
+def test_agent_material_reselection_intent_recognizes_selection_commands(content):
+    from marvis.agent.service import is_agent_material_reselection_intent
+
+    assert is_agent_material_reselection_intent(content) is True
+
+
+def test_agent_material_reselection_opens_ui_without_rerunning_scan(
+    tmp_path,
+    monkeypatch,
+):
+    def unexpected_dispatch(*_args, **_kwargs):
+        pytest.fail("material reselection must not rerun the stale scan selection")
+
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_agent_validation_job",
+        unexpected_dispatch,
+    )
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path, validation_workflow_version=2)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    before = repo.get_task(task_id)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "重新选择材料"},
+    )
+
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["status"] == "awaiting_material_selection"
+    assert payload["ui_action"] == {"type": "select_validation_materials"}
+    after = repo.get_task(task_id)
+    assert after.status == before.status
+    assert after.notebook_path == before.notebook_path
+    messages = repo.list_agent_messages(task_id)
+    assert messages[-2]["content"] == "重新选择材料"
+    assert messages[-2]["metadata"]["intent"] == "select_materials"
+    assert messages[-1]["metadata"]["ui_action"] == {
+        "type": "select_validation_materials"
+    }
+    assert "重新绑定" in messages[-1]["content"]
 
 
 def test_agent_rerun_material_completeness_after_stop_dispatches_scan(
@@ -4385,15 +4494,17 @@ def test_agent_rerun_material_completeness_after_stop_dispatches_scan(
         metadata={"intent": "stop", "cancel_requested": True},
     )
 
+    instruction = "重新扫描材料并继续验证"
     response = client.post(
         f"/api/tasks/{task_id}/agent/messages",
-        json={"content": "重新执行一下完备性验证", "model_id": "m1"},
+        json={"content": instruction, "model_id": "m1"},
     )
 
     assert response.status_code == 202, response.text
     assert response.json()["stage"] == "scan"
     assert calls[0]["stage"] == "scan"
-    assert calls[0]["stage_instruction"] == "重新执行一下完备性验证"
+    assert calls[0]["stage_instruction"] == instruction
+    assert calls[0]["acceptance_mode"] == "auto_accept"
     assert chat_calls == []
     task = repo.get_task(task_id)
     assert task.status == TaskStatus.CREATED
@@ -4401,10 +4512,11 @@ def test_agent_rerun_material_completeness_after_stop_dispatches_scan(
     rerun_user = next(
         message
         for message in repo.list_agent_messages(task_id)
-        if message["content"] == "重新执行一下完备性验证"
+        if message["content"] == instruction
     )
     assert rerun_user["metadata"]["intent"] == "rerun_stage"
     assert rerun_user["metadata"]["target_stage"] == "scan"
+    assert rerun_user["metadata"]["continue_after_rerun"] is True
 
 
 def test_agent_rerun_report_draft_resets_report_step_and_keeps_rewrite_instruction(
@@ -4476,8 +4588,19 @@ def test_agent_rerun_report_draft_resets_report_step_and_keeps_rewrite_instructi
         content="旧草稿也要保留。",
         metadata={"draft_values": REQUIRED_AGENT_CONCLUSIONS, "report_revision": 1},
     )
+    earlier_instruction = "最终验证结论不要提材料扫描，请修改为只评价模型"
+    repo.add_agent_message(
+        task_id,
+        role="user",
+        stage="chat",
+        content=earlier_instruction,
+        metadata={},
+    )
 
-    instruction = "重新给我写一个草稿，要修改压力测试部分的措辞"
+    instruction = (
+        "请修正三段结论：压力测试总结要更正风险分层，"
+        "最终验证结论只评价模型效果和稳定性"
+    )
     response = client.post(
         f"/api/tasks/{task_id}/agent/messages",
         json={"content": instruction, "model_id": "m1"},
@@ -4487,7 +4610,11 @@ def test_agent_rerun_report_draft_resets_report_step_and_keeps_rewrite_instructi
     assert response.json()["stage"] == "word_conclusion_draft"
     assert calls[0]["stage"] == "word_conclusion_draft"
     assert calls[0]["stage_message_id"]
-    assert calls[0]["stage_instruction"] == instruction
+    assert earlier_instruction in calls[0]["stage_instruction"]
+    assert instruction in calls[0]["stage_instruction"]
+    assert calls[0]["stage_instruction"].index(earlier_instruction) < calls[0][
+        "stage_instruction"
+    ].index(instruction)
     task = repo.get_task(task_id)
     assert task.status == TaskStatus.WRITING_ARTIFACTS
     assert task.status_message == "agent rerun requested: word_conclusion_draft"
@@ -4499,6 +4626,7 @@ def test_agent_rerun_report_draft_resets_report_step_and_keeps_rewrite_instructi
     rerun_user = next(message for message in messages if message["content"] == instruction)
     assert rerun_user["metadata"]["intent"] == "rerun_stage"
     assert rerun_user["metadata"]["target_stage"] == "word_conclusion_draft"
+    assert rerun_user["metadata"]["active_report_directive_count"] == 2
 
 
 def test_agent_rerun_rejects_stage_that_has_not_been_reached(tmp_path, monkeypatch):

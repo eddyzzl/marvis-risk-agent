@@ -185,7 +185,8 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert "L6.5 12" not in model_card_markup
     assert "L17.5 12" not in model_card_markup
     assert "模型验证" in welcome_markup
-    assert "可复现性、稳定性、效果验证，压力测试" in welcome_markup
+    assert "PMML打分、效果稳定性验证，模型压力测试" in welcome_markup
+    assert "可复现性、稳定性、效果验证，压力测试" not in welcome_markup
     assert "压力测试和编写报告" not in welcome_markup
     assert "一致性、稳定性、效果验证，压力测试和编写报告" not in welcome_markup
     assert "材料扫描、Notebook 复现与验证报告生成" not in welcome_markup

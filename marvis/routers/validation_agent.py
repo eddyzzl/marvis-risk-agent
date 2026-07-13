@@ -5,6 +5,9 @@ from marvis.agent.service import (
     agent_rerun_stage,
     answer_chat_message,
     is_agent_advance_intent,
+    is_agent_material_reselection_intent,
+    is_agent_report_revision_intent,
+    is_continue_validation_intent,
     is_stop_validation_intent,
     summarize_stage,
 )
@@ -46,6 +49,43 @@ from marvis.api_task_helpers import get_task_or_404, reject_if_task_has_active_j
 
 
 router = APIRouter(prefix="/api", tags=["validation-agent"])
+REPORT_DIRECTIVE_LIMIT = 6
+REPORT_DIRECTIVE_CHARS = 1_600
+
+
+def _report_revision_instruction_context(
+    conversation: list[dict],
+    current_instruction: str,
+) -> tuple[str, int]:
+    prior: list[str] = []
+    for message in conversation:
+        if message.get("role") != "user":
+            continue
+        content = str(message.get("content") or "").strip()
+        metadata = message.get("metadata") or {}
+        is_word_rerun = (
+            metadata.get("target_stage") == "word_conclusion_draft"
+            and metadata.get("intent")
+            in {"rerun_stage", "regenerate_report_draft"}
+        )
+        if not content or not (
+            is_word_rerun or is_agent_report_revision_intent(content)
+        ):
+            continue
+        prior.append(content[:REPORT_DIRECTIVE_CHARS])
+    prior = prior[-(REPORT_DIRECTIVE_LIMIT - 1) :]
+    if not prior:
+        return current_instruction, 1
+    directives = [*prior, current_instruction[:REPORT_DIRECTIVE_CHARS]]
+    lines = "\n".join(
+        f"{index}. {directive}" for index, directive in enumerate(directives, 1)
+    )
+    return (
+        "以下是本任务按时间顺序记录的报告修改指令；后出现的指令覆盖与其冲突的旧指令，"
+        "其余要求继续有效：\n"
+        f"{lines}",
+        len(directives),
+    )
 
 
 @router.get("/tasks/{task_id}/agent/messages")
@@ -143,6 +183,33 @@ def post_agent_message(
             adjust_params=payload.adjust_params,
             expected_step_id=payload.expected_step_id,
         )
+    if is_agent_material_reselection_intent(content):
+        reject_if_task_has_active_job(repo, task_id)
+        ui_action = {"type": "select_validation_materials"}
+        user_message = repo.add_agent_message(
+            task_id,
+            role="user",
+            stage="chat",
+            content=content,
+            metadata={"intent": "select_materials"},
+        )
+        capture_user_preference_memory(request, task_id, user_message)
+        repo.add_agent_message(
+            task_id,
+            role="assistant",
+            stage="chat",
+            content=(
+                "请在随后弹出的“重新选择验证材料”窗口中重新绑定 Notebook、样本数据、"
+                "PMML 和数据字典；保存后再重新扫描材料。"
+            ),
+            metadata={"intent": "select_materials", "ui_action": ui_action},
+        )
+        return {
+            "task_id": task_id,
+            "status": "awaiting_material_selection",
+            "ui_action": ui_action,
+            "messages": repo.list_agent_messages(task_id),
+        }
     conversation = repo.list_agent_messages(task_id)
     pending_report_draft = latest_pending_agent_report_draft(conversation)
     if is_agent_report_confirm_intent(content) and pending_report_draft:
@@ -169,12 +236,23 @@ def post_agent_message(
     if rerun_stage:
         reject_if_task_has_active_job(repo, task_id)
         require_agent_rerun_stage_reached(task, rerun_stage)
+        continue_after_rerun = (
+            rerun_stage in {"scan", "reproducibility", "metrics"}
+            and is_continue_validation_intent(content)
+        )
         rerun_intent = (
             "regenerate_report_draft"
             if rerun_stage == "word_conclusion_draft"
             and is_agent_report_regenerate_intent(content)
             else "rerun_stage"
         )
+        stage_instruction = content
+        directive_count = 0
+        if rerun_stage == "word_conclusion_draft":
+            stage_instruction, directive_count = _report_revision_instruction_context(
+                conversation,
+                content,
+            )
         user_message = repo.add_agent_message(
             task_id,
             role="user",
@@ -184,6 +262,12 @@ def post_agent_message(
                 **model_metadata(model_profile),
                 "intent": rerun_intent,
                 "target_stage": rerun_stage,
+                "continue_after_rerun": continue_after_rerun,
+                **(
+                    {"active_report_directive_count": directive_count}
+                    if directive_count
+                    else {}
+                ),
             },
         )
         capture_user_preference_memory(request, task_id, user_message)
@@ -193,10 +277,12 @@ def post_agent_message(
             task=task,
             settings=request.app.state.settings,
             model_profile=model_profile,
-            acceptance_mode=payload.acceptance_mode,
+            acceptance_mode=(
+                "auto_accept" if continue_after_rerun else payload.acceptance_mode
+            ),
             background_tasks=background_tasks,
             forced_stage=rerun_stage,
-            stage_instruction=content,
+            stage_instruction=stage_instruction,
         )
     if is_agent_report_regenerate_intent(content) and pending_report_draft:
         reject_if_task_has_active_job(repo, task_id)

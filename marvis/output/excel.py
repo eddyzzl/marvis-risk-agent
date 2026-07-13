@@ -75,6 +75,7 @@ def write_validation_excel(
                 sheet_name,
                 category_result.bin_table,
                 first_header=category_result.category,
+                include_bin_share=True,
             )
 
         workbook.save(workbook_artifact.path)
@@ -426,21 +427,36 @@ def _write_bins(
     bins: list[BinRow],
     *,
     first_header: str = "分箱",
+    include_bin_share: bool = False,
 ) -> None:
     sheet = workbook.create_sheet(_safe_sheet_title(workbook, sheet_name))
-    rows: list[tuple] = [(
-        first_header, "样本总数", "累计占比", "逾期数量", "逾期率",
-        "累计逾期率", "单组lift", "累计lift", "ks",
-    )]
-    rows.extend(_reference_bin_rows(bins))
+    if include_bin_share:
+        rows: list[tuple] = [(
+            first_header, "样本总数", "各箱占比", "累计占比", "逾期数量",
+            "逾期率", "累计逾期率", "单组lift", "累计lift", "ks",
+        )]
+        percent_columns = {2, 3, 5, 6}
+        number_formats = {7: "0.00", 8: "0.00", 9: "0.0000"}
+        color_scale_columns = {5}
+        data_bar_columns = {8: "63BE7B"}
+    else:
+        rows = [(
+            first_header, "样本总数", "累计占比", "逾期数量", "逾期率",
+            "累计逾期率", "单组lift", "累计lift", "ks",
+        )]
+        percent_columns = {2, 4, 5}
+        number_formats = {6: "0.00", 7: "0.00", 8: "0.0000"}
+        color_scale_columns = {4}
+        data_bar_columns = {7: "63BE7B"}
+    rows.extend(_reference_bin_rows(bins, include_bin_share=include_bin_share))
     _write_rows(
         sheet,
         rows,
         header_rows=1,
-        percent_columns={2, 4, 5},
-        number_formats={6: "0.00", 7: "0.00", 8: "0.0000"},
-        color_scale_columns={4},
-        data_bar_columns={7: "63BE7B"},
+        percent_columns=percent_columns,
+        number_formats=number_formats,
+        color_scale_columns=color_scale_columns,
+        data_bar_columns=data_bar_columns,
     )
 
 
@@ -541,7 +557,11 @@ def _apply_reference_conditional_formatting(
         )
 
 
-def _reference_bin_rows(bins: list[BinRow]) -> list[tuple]:
+def _reference_bin_rows(
+    bins: list[BinRow],
+    *,
+    include_bin_share: bool = False,
+) -> list[tuple]:
     total = sum(row.sample_count for row in bins)
     total_bad = sum(row.bad_count for row in bins)
     overall_bad_rate = _ratio(total_bad, total)
@@ -552,7 +572,7 @@ def _reference_bin_rows(bins: list[BinRow]) -> list[tuple]:
         cumulative_count += row.sample_count
         cumulative_bad += row.bad_count
         cumulative_bad_rate = _ratio(cumulative_bad, cumulative_count)
-        rows.append((
+        values = (
             _score_interval(row.score_lower, row.score_upper),
             row.sample_count,
             _ratio(cumulative_count, total),
@@ -562,7 +582,10 @@ def _reference_bin_rows(bins: list[BinRow]) -> list[tuple]:
             row.lift,
             _ratio(cumulative_bad_rate, overall_bad_rate),
             row.ks,
-        ))
+        )
+        if include_bin_share:
+            values = values[:2] + (_ratio(row.sample_count, total),) + values[2:]
+        rows.append(values)
     return rows
 
 

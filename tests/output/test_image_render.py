@@ -8,7 +8,7 @@ from marvis.output import image_render
 from marvis.output.image_render import get_matplotlib_font, render_all_images
 from marvis.output.styles import CJK_FONT_CANDIDATES
 from marvis.validation.results import FeatureImportanceRow, RocKsCurve
-from tests.output.test_excel import _make_results
+from tests.output.test_excel import _make_results, _make_results_with_uneven_stress_bins
 
 
 def test_renders_required_image_keys(tmp_path: Path):
@@ -125,11 +125,13 @@ def test_word_image_tables_use_reference_model_analysis_headers(monkeypatch, tmp
         "数据集", "时间范围", "样本量", "逾期率", "坏样本量",
         "KS(%)", "AUC(%)", "5%头部lift", "5%尾部lift", "PSI",
     ]
+    assert captured["overall_model_effect.png"]["rows"][0][7:9] == ("0.20", "2.00")
     assert captured["loan_month_effect.png"]["header"] == [
         "月份", "样本量", "逾期率", "坏样本量", "KS(%)", "AUC(%)",
         "5%头部lift", "5%尾部lift", "PSI(首月基准)", "PSI(尾月基准)",
         "PSI(较上一有样本月)", "PSI参考月",
     ]
+    assert captured["loan_month_effect.png"]["rows"][0][6:8] == ("0.20", "2.00")
     assert captured["ks_discrimination_table.png"]["header"] == [
         "分箱", "样本总数", "累计占比", "逾期数量", "逾期率",
         "累计逾期率", "单组lift", "累计lift", "ks",
@@ -174,8 +176,36 @@ def test_word_image_tables_use_excel_conditional_formatting_rules(monkeypatch, t
     assert captured["psi_stability_table.png"]["color_scale_columns"] == {5}
     assert captured["ranking_table_train.png"]["color_scale_columns"] == {4}
     assert captured["ranking_table_train.png"]["data_bar_columns"] == {7: "63BE7B"}
-    assert captured["pressure_score_shift_1.png"]["color_scale_columns"] == {4}
-    assert captured["pressure_score_shift_1.png"]["data_bar_columns"] == {7: "63BE7B"}
+    assert captured["pressure_score_shift_1.png"]["color_scale_columns"] == {5}
+    assert captured["pressure_score_shift_1.png"]["data_bar_columns"] == {8: "63BE7B"}
+
+
+def test_pressure_score_shift_includes_per_bin_and_cumulative_share(
+    monkeypatch,
+    tmp_path: Path,
+):
+    captured = {}
+
+    def fake_render_table(output_path: Path, *, header: list[str], rows: list[tuple], **kwargs) -> Path:
+        captured[output_path.name] = {"header": header, "rows": rows, **kwargs}
+        return output_path
+
+    monkeypatch.setattr(image_render, "_render_table", fake_render_table)
+
+    image_render.render_all_images(_make_results_with_uneven_stress_bins(), tmp_path)
+
+    pressure = captured["pressure_score_shift_1.png"]
+    assert pressure["header"] == [
+        "征信", "样本总数", "各箱占比", "累计占比", "逾期数量", "逾期率",
+        "累计逾期率", "单组lift", "累计lift", "ks",
+    ]
+    assert pressure["rows"][0][2:4] == ("30.00%", "30.00%")
+    assert pressure["rows"][1][2:4] == ("70.00%", "100.00%")
+    assert pressure["rows"][0][7] == "0.00"
+    assert pressure["rows"][1][7] == "1.43"
+    assert pressure["rows"][1][8] == "1.00"
+    assert pressure["color_scale_columns"] == {5}
+    assert pressure["data_bar_columns"] == {8: "63BE7B"}
 
 
 def test_render_table_draws_data_bars_and_color_scales(tmp_path: Path):

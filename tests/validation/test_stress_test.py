@@ -74,6 +74,34 @@ def test_stress_test_per_category_leave_one_out():
     assert by_category["支付"].error is None
 
 
+def test_stress_tables_use_baseline_direction_for_higher_is_better_scores():
+    class HigherIsBetterScorer:
+        def score(self, df: pd.DataFrame) -> list[float]:
+            return (1.0 - df["x1"].astype(float)).tolist()
+
+    oot = pd.DataFrame({
+        "x1": [index / 9 for index in range(10)],
+        "x2": [0.0] * 10,
+        "x3": [0.0] * 10,
+        "sample_score": [index / 9 for index in range(10)],
+        "y": [0] * 5 + [1] * 5,
+        "split": ["oot"] * 10,
+        "apply_month": ["202507"] * 10,
+    })
+
+    result = run_stress_test(
+        oot_sample=oot,
+        config=_config(),
+        feature_categories={"支付": ["x2"]},
+        input_scorer=HigherIsBetterScorer(),
+    )
+
+    for rows in [result.baseline.bin_table, result.per_category[0].bin_table]:
+        assert rows[0].lift < 1.0
+        assert rows[-1].lift > 1.0
+        assert rows[-1].cum_sample_pct == pytest.approx(1.0)
+
+
 def test_stress_test_sets_category_features_to_negative_9999():
     class RecordingScorer:
         def __init__(self):

@@ -80,6 +80,7 @@ WORD_CONCLUSION_STRESS_CATEGORY_LIMIT = 20
 WORD_CONCLUSION_PSI_BIN_LIMIT = 12
 WORD_CONCLUSION_VISIBLE_SUMMARY_LIMIT = 8
 WORD_CONCLUSION_VISIBLE_SUMMARY_CHARS = 1200
+METRICS_BIN_TABLE_LIMIT = 10
 REPRODUCIBILITY_NOTEBOOK_STEP_LIMIT = 16
 REPRODUCIBILITY_CONTRACT_FEATURE_LIMIT = 20
 NOTEBOOK_CONTRACT_SOURCE_PREVIEW_LIMIT = 3
@@ -112,6 +113,13 @@ GREETING_CHAT_FALLBACK = (
 STAGE_SUMMARY_MAX_TOKENS = {
     "metrics": 4096,
 }
+METRICS_SUMMARY_REQUIRED_SECTIONS = (
+    "总体判断",
+    "效果表现",
+    "稳定性表现",
+    "压力测试风险",
+    "建议",
+)
 AGENT_RESPONSE_PREAMBLE_PATTERNS = (
     r"^(?:好的|好|收到|明白|可以)[，,。！!\s]*",
     r"^(?:我会|我将)?(?:遵照|根据|按照)(?:您|你)?的?(?:指示|要求)[，,。！!\s]*",
@@ -369,10 +377,82 @@ def is_agent_advance_intent(content: str) -> bool:
     return is_start_validation_intent(content) or is_continue_validation_intent(content)
 
 
+def _compact_agent_command(content: str) -> str:
+    return "".join(str(content or "").strip().lower().split()).strip("。.!！?？")
+
+
+def is_agent_material_reselection_intent(content: str) -> bool:
+    compact = _compact_agent_command(content)
+    if not compact:
+        return False
+    selection_markers = (
+        "重新选择",
+        "重新选",
+        "重选",
+        "更换",
+        "换一下",
+        "换一个",
+        "重新绑定",
+        "修改材料选择",
+        "修改文件选择",
+    )
+    material_markers = (
+        "材料",
+        "验证文件",
+        "notebook",
+        "样本",
+        "pmml",
+        "数据字典",
+    )
+    return any(marker in compact for marker in selection_markers) and any(
+        marker in compact for marker in material_markers
+    )
+
+
+def is_agent_report_revision_intent(content: str) -> bool:
+    compact = _compact_agent_command(content)
+    if not compact:
+        return False
+    revision_markers = (
+        "修正",
+        "更正",
+        "纠正",
+        "修改",
+        "调整",
+        "改写",
+        "改成",
+        "重写",
+        "替换",
+        "删除",
+        "删掉",
+        "不要提",
+        "不再提",
+        "只评价",
+        "只保留",
+        "补充",
+    )
+    report_markers = (
+        "报告",
+        "草稿",
+        "三段",
+        "结论",
+        "压力测试总结",
+        "压力影响建议",
+        "最终验证结论",
+    )
+    return any(marker in compact for marker in revision_markers) and any(
+        marker in compact for marker in report_markers
+    )
+
+
 def agent_rerun_stage(content: str) -> str | None:
-    compact = "".join(str(content or "").strip().lower().split()).strip("。.!！?？")
+    compact = _compact_agent_command(content)
     if not compact:
         return None
+    if is_agent_material_reselection_intent(content):
+        return None
+    if is_agent_report_revision_intent(content):
+        return "word_conclusion_draft"
     rerun_markers = (
         "重新",
         "重跑",
@@ -621,8 +701,9 @@ def summarize_stage(
     # LLM-5: memory injection is one of the three named highest-volume prompt
     # touch points; surface the truncation flag on this call's audit record.
     truncated = memory_context_was_truncated(normalize_memory_context(memory_context))
+    client = _client(model_profile)
     try:
-        content = _client(model_profile).complete(
+        content = client.complete(
             system_prompt=AGENT_SYSTEM_PROMPT,
             user_prompt=prompt,
             temperature=0.2,
@@ -631,8 +712,41 @@ def summarize_stage(
             truncated=truncated,
         )
     except LLMClientError as exc:
-        return fallback, {"llm_error": str(exc), "fallback": True}
+        guarded_fallback = (
+            _sectioned_metrics_summary(fallback, fallback)
+            if stage == "metrics"
+            else fallback
+        )
+        return guarded_fallback, {"llm_error": str(exc), "fallback": True}
     cleaned = _strip_agent_response_preamble(content or fallback)
+    metadata = {"fallback": False}
+    if stage == "metrics":
+        missing_sections = _missing_metrics_summary_sections(cleaned)
+        if missing_sections:
+            repair_prompt = _metrics_summary_repair_prompt(
+                prompt,
+                previous_response=cleaned,
+                missing_sections=missing_sections,
+            )
+            try:
+                repaired_content = client.complete(
+                    system_prompt=AGENT_SYSTEM_PROMPT,
+                    user_prompt=repair_prompt,
+                    temperature=0.1,
+                    max_tokens=STAGE_SUMMARY_MAX_TOKENS.get(stage),
+                    truncated=truncated,
+                )
+            except LLMClientError as exc:
+                repaired_content = ""
+                metadata["llm_repair_error"] = str(exc)
+            repaired = _strip_agent_response_preamble(repaired_content or "")
+            if repaired and not _missing_metrics_summary_sections(repaired):
+                cleaned = repaired
+                metadata["summary_repaired"] = True
+            else:
+                cleaned = _sectioned_metrics_summary(cleaned, fallback)
+                metadata["fallback"] = True
+                metadata["summary_repair_failed"] = True
     guarded = _guard_stage_summary(
         task=task,
         stage=stage,
@@ -640,11 +754,59 @@ def summarize_stage(
         content=cleaned,
         fallback=fallback,
     )
-    metadata = {"fallback": False}
     if guarded != cleaned:
-        metadata["guarded_scan_summary"] = True
         metadata["guarded_stage_summary"] = True
+        if stage == "scan":
+            metadata["guarded_scan_summary"] = True
     return guarded, attach_memory_metadata(metadata, memory_context, use_reason=stage)
+
+
+def _missing_metrics_summary_sections(content: str) -> list[str]:
+    text = str(content or "")
+    missing: list[str] = []
+    for section in METRICS_SUMMARY_REQUIRED_SECTIONS:
+        heading = re.compile(
+            rf"(?m)^\s{{0,3}}(?:#{{1,6}}\s*|[-+*]\s+|\d+[.、)]\s*)?"
+            rf"(?:\*\*|__)?{re.escape(section)}"
+            r"(?:\*\*|__)?\s*(?::|：|$)",
+        )
+        if not heading.search(text):
+            missing.append(section)
+    return missing
+
+
+def _metrics_summary_repair_prompt(
+    original_prompt: str,
+    *,
+    previous_response: str,
+    missing_sections: list[str],
+) -> str:
+    try:
+        payload = json.loads(original_prompt)
+    except (TypeError, json.JSONDecodeError):
+        payload = {"original_request": str(original_prompt or "")}
+    payload["previous_response"] = str(previous_response or "")[:12_000]
+    payload["repair_request"] = {
+        "reason": "stage summary is missing required sections",
+        "missing_sections": list(missing_sections),
+        "required_sections": list(METRICS_SUMMARY_REQUIRED_SECTIONS),
+        "instruction": (
+            "请完整重写当前阶段分析，逐一使用上述五个标题；每节都要基于原 evidence 给出完整判断，"
+            "不得编造指标，也不得只补标题。只输出重写后的分析正文。"
+        ),
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _sectioned_metrics_summary(content: str, fallback: str) -> str:
+    overall = str(content or fallback or "平台指标已生成，请结合页面证据复核。").strip()
+    return (
+        f"总体判断\n{overall}\n\n"
+        "效果表现\n请以平台已计算的 KS、AUC 和样本分层结果为准。\n\n"
+        "稳定性表现\n请以平台已计算的 PSI、逐期表现和样本外结果为准。\n\n"
+        "压力测试风险\n请以平台生成的高、中、低风险分层和对应数据源影响为准。\n\n"
+        "建议\n结合上述确定性指标与压力测试明细进行持续监测和人工复核。"
+    )
 
 
 def compose_agent_start_message(
@@ -938,7 +1100,7 @@ def _metrics_stage_evidence(evidence: dict) -> dict:
     if not isinstance(validation_results, dict):
         return {"validation_results": validation_results}
     return {
-        "validation_results": _slim_validation_results_for_llm(
+        "validation_results": _compact_metrics_validation_results(
             {
                 key: validation_results.get(key)
                 for key in METRICS_VALIDATION_RESULT_KEYS
@@ -1441,6 +1603,64 @@ def _slim_validation_results_for_llm(validation_results: dict) -> dict:
             if key not in OVERSIZED_EFFECTIVENESS_KEYS
         }
     return slim
+
+
+def _compact_metrics_validation_results(validation_results: dict) -> dict:
+    if not isinstance(validation_results, dict):
+        return validation_results
+    compact: dict[str, object] = {
+        key: validation_results.get(key)
+        for key in ("model_name", "model_version", "algorithm", "target_type")
+        if validation_results.get(key) is not None
+    }
+    raw_basic_info = validation_results.get("basic_info")
+    basic_info = _compact_basic_info_for_word(raw_basic_info)
+    if basic_info:
+        hyperparameters = (
+            raw_basic_info.get("hyperparameters")
+            if isinstance(raw_basic_info, dict)
+            else None
+        )
+        if isinstance(hyperparameters, dict):
+            basic_info["hyperparameters"] = dict(list(hyperparameters.items())[:50])
+        compact["basic_info"] = basic_info
+
+    effectiveness = _compact_effectiveness_for_word(
+        validation_results.get("effectiveness")
+    )
+    raw_effectiveness = validation_results.get("effectiveness")
+    if isinstance(raw_effectiveness, dict):
+        bin_tables = raw_effectiveness.get("bin_tables")
+        if isinstance(bin_tables, dict):
+            effectiveness["bin_tables"] = {
+                str(split): rows[:METRICS_BIN_TABLE_LIMIT]
+                for split, rows in bin_tables.items()
+                if isinstance(rows, list)
+            }
+    if effectiveness:
+        compact["effectiveness"] = effectiveness
+
+    overfitting = validation_results.get("overfitting_check")
+    if isinstance(overfitting, dict):
+        compact["overfitting_check"] = dict(overfitting)
+
+    stress_test = _compact_stress_test_for_word(
+        validation_results.get("stress_test")
+    )
+    raw_stress_test = validation_results.get("stress_test")
+    if stress_test and isinstance(raw_stress_test, dict):
+        source_counts = raw_stress_test.get("category_source_counts")
+        if isinstance(source_counts, dict):
+            stress_test["category_source_counts"] = dict(source_counts)
+        unclassified = raw_stress_test.get("unclassified_features")
+        if isinstance(unclassified, list):
+            stress_test["unclassified_feature_count"] = len(unclassified)
+            stress_test["unclassified_features_sample"] = unclassified[
+                :WORD_CONCLUSION_FEATURE_LIMIT
+            ]
+    if stress_test:
+        compact["stress_test"] = stress_test
+    return compact
 
 
 def _scan_stage_evidence(evidence: dict) -> dict:

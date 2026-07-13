@@ -71,9 +71,92 @@ def test_new_results_round_trip_uses_pmml_scoring_not_reproducibility():
     payload = validation_results_to_dict(results)
 
     assert payload["schema_version"] == "marvis.validation_results.v2"
+    assert payload["lift_order"] == "good_to_bad"
     assert payload["pmml_scoring"]["status"] == "pass"
     assert "reproducibility" not in payload
     assert validation_results_from_dict(payload) == results
+
+
+def test_legacy_v2_lift_fields_are_migrated_to_good_head_bad_tail():
+    payload = validation_results_to_dict(_make_pmml_results())
+    payload.pop("lift_order")
+    for section in ("overall", "monthly_ks"):
+        for row in payload["effectiveness"][section]:
+            row["head_lift_5pct"], row["tail_lift_5pct"] = (
+                row["tail_lift_5pct"],
+                row["head_lift_5pct"],
+            )
+    bad_to_good_bins = [
+        {
+            "bin_index": 1,
+            "score_lower": 0.0,
+            "score_upper": 0.5,
+            "sample_count": 5,
+            "bad_count": 5,
+            "bad_rate": 1.0,
+            "cum_sample_pct": 0.5,
+            "cum_bad_pct": 1.0,
+            "lift": 2.0,
+            "ks": 1.0,
+        },
+        {
+            "bin_index": 2,
+            "score_lower": 0.5,
+            "score_upper": 1.0,
+            "sample_count": 5,
+            "bad_count": 0,
+            "bad_rate": 0.0,
+            "cum_sample_pct": 1.0,
+            "cum_bad_pct": 1.0,
+            "lift": 0.0,
+            "ks": 0.0,
+        },
+    ]
+    payload["effectiveness"]["bin_tables"]["oot"] = bad_to_good_bins
+    payload["stress_test"]["baseline"]["bin_table"] = bad_to_good_bins
+    payload["stress_test"]["per_category"][0]["bin_table"] = bad_to_good_bins
+    legacy_head = payload["effectiveness"]["overall"][0]["head_lift_5pct"]
+
+    restored = validation_results_from_dict(payload)
+    current = validation_results_to_dict(restored)
+
+    assert legacy_head == pytest.approx(2.0)
+    assert payload["effectiveness"]["overall"][0]["head_lift_5pct"] == legacy_head
+    assert restored.effectiveness.overall[0].head_lift_5pct == pytest.approx(0.2)
+    assert restored.effectiveness.overall[0].tail_lift_5pct == pytest.approx(2.0)
+    assert restored.effectiveness.monthly_ks[0].head_lift_5pct == pytest.approx(0.2)
+    assert restored.effectiveness.monthly_ks[0].tail_lift_5pct == pytest.approx(2.0)
+    for rows in [
+        restored.effectiveness.bin_tables["oot"],
+        restored.stress_test.baseline.bin_table,
+        restored.stress_test.per_category[0].bin_table,
+    ]:
+        assert rows[0].lift == pytest.approx(0.0)
+        assert rows[-1].lift == pytest.approx(2.0)
+        assert rows[-1].cum_sample_pct == pytest.approx(1.0)
+        assert rows[-1].cum_bad_pct == pytest.approx(1.0)
+    assert current["lift_order"] == "good_to_bad"
+
+
+def test_unmarked_v1_bad_head_is_migrated_but_good_head_is_preserved():
+    bad_head_payload = validation_results_to_dict(_make_results())
+    assert bad_head_payload["lift_order"] == "good_to_bad"
+    bad_head_payload.pop("lift_order")
+    for section in ("overall", "monthly_ks"):
+        for row in bad_head_payload["effectiveness"][section]:
+            row["head_lift_5pct"], row["tail_lift_5pct"] = (
+                row["tail_lift_5pct"],
+                row["head_lift_5pct"],
+            )
+
+    migrated = validation_results_from_dict(bad_head_payload)
+    good_head_payload = json.loads(LEGACY_FIXTURE.read_text(encoding="utf-8"))
+    preserved = validation_results_from_dict(good_head_payload)
+
+    assert migrated.effectiveness.overall[0].head_lift_5pct == pytest.approx(0.2)
+    assert migrated.effectiveness.overall[0].tail_lift_5pct == pytest.approx(2.0)
+    assert preserved.effectiveness.overall[0].head_lift_5pct == pytest.approx(0.2)
+    assert preserved.effectiveness.overall[0].tail_lift_5pct == pytest.approx(2.0)
 
 
 def test_pmml_results_require_explicit_v2_schema_version():
@@ -100,9 +183,9 @@ def test_legacy_results_fixture_remains_readable_without_schema_version():
     assert results.schema_version == "marvis.validation_results.v1"
     assert results.reproducibility is not None
     assert results.pmml_scoring is None
-    assert validation_results_to_dict(results)["schema_version"] == (
-        "marvis.validation_results.v1"
-    )
+    current = validation_results_to_dict(results)
+    assert current["schema_version"] == "marvis.validation_results.v1"
+    assert current["lift_order"] == "good_to_bad"
 
 
 def test_legacy_missing_stress_status_preserves_empty_and_error_inference():

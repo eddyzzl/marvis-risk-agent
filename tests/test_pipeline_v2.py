@@ -150,6 +150,7 @@ def test_v2_pmml_scoring_and_metrics_never_execute_notebook(
         (outputs / "validation_results.json").read_text(encoding="utf-8")
     )
     assert results["schema_version"] == "marvis.validation_results.v2"
+    assert results["lift_order"] == "good_to_bad"
     assert results["stress_test"]["status"] == "completed"
     assert results["pmml_scoring"]["score_artifact_path"] == "pmml_scores.parquet"
     assert not (outputs / ".pmml-metrics-stage-work").exists()

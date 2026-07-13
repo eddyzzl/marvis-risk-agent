@@ -135,6 +135,22 @@ def _make_pmml_results() -> ValidationResults:
     )
 
 
+def _make_results_with_uneven_stress_bins() -> ValidationResults:
+    results = _make_results()
+    category = results.stress_test.per_category[0]
+    uneven_bins = [
+        BinRow(1, 0.0, 0.2, 3, 0, 0.0, 0.3, 0.0, 0.0, 0.1),
+        BinRow(2, 0.2, 1.0, 7, 2, 2 / 7, 1.0, 1.0, 10 / 7, 0.0),
+    ]
+    return replace(
+        results,
+        stress_test=replace(
+            results.stress_test,
+            per_category=[replace(category, bin_table=uneven_bins)],
+        ),
+    )
+
+
 def test_write_excel_includes_all_required_sheets(tmp_path: Path):
     output = tmp_path / "out.xlsx"
     write_validation_excel(_make_results(), output)
@@ -262,6 +278,8 @@ def test_reference_sample_and_effect_headers_and_number_formats(tmp_path: Path):
     assert effect_sheet.cell(row=2, column=6).number_format == "0.0"
     assert effect_sheet.cell(row=2, column=7).number_format == "0.0"
     assert effect_sheet.cell(row=2, column=8).number_format == "0.00"
+    assert effect_sheet.cell(row=2, column=8).value == pytest.approx(0.2)
+    assert effect_sheet.cell(row=2, column=9).value == pytest.approx(2.0)
     assert effect_sheet.cell(row=2, column=10).value == "BASE"
 
     monthly_sheet = wb["逐月效果"]
@@ -270,6 +288,8 @@ def test_reference_sample_and_effect_headers_and_number_formats(tmp_path: Path):
         "5%头部lift", "5%尾部lift", "PSI(首月基准)", "PSI(尾月基准)",
         "PSI(较上一有样本月)", "PSI参考月",
     ]
+    assert monthly_sheet.cell(row=2, column=7).value == pytest.approx(0.2)
+    assert monthly_sheet.cell(row=2, column=8).value == pytest.approx(2.0)
 
 
 def test_effectiveness_sheet_preserves_zero_bad_count(tmp_path: Path):
@@ -306,6 +326,32 @@ def test_reference_bin_table_columns_and_formats(tmp_path: Path):
     assert sheet.cell(row=2, column=7).number_format == "0.00"
     assert sheet.cell(row=2, column=8).number_format == "0.00"
     assert sheet.cell(row=2, column=9).number_format == "0.0000"
+
+
+def test_stress_bin_table_includes_per_bin_and_cumulative_share(tmp_path: Path):
+    output = tmp_path / "out.xlsx"
+    write_validation_excel(_make_results_with_uneven_stress_bins(), output)
+    wb = load_workbook(output)
+    sheet = wb["压力测试_分箱_征信"]
+
+    assert [cell.value for cell in sheet[1][:10]] == [
+        "征信", "样本总数", "各箱占比", "累计占比", "逾期数量", "逾期率",
+        "累计逾期率", "单组lift", "累计lift", "ks",
+    ]
+    assert sheet["C2"].value == pytest.approx(0.3)
+    assert sheet["C3"].value == pytest.approx(0.7)
+    assert sheet["D2"].value == pytest.approx(0.3)
+    assert sheet["D3"].value == pytest.approx(1.0)
+    assert sheet["H2"].value < 1.0
+    assert sheet["H3"].value > 1.0
+    assert sheet["I3"].value == pytest.approx(1.0)
+    assert sheet["C2"].number_format == "0.00%"
+    assert sheet["D2"].number_format == "0.00%"
+    assert sheet["F2"].number_format == "0.00%"
+    assert sheet["G2"].number_format == "0.00%"
+    assert sheet["H2"].number_format == "0.00"
+    assert sheet["I2"].number_format == "0.00"
+    assert sheet["J2"].number_format == "0.0000"
 
 
 def test_new_report_image_materials_are_in_excel(tmp_path: Path):

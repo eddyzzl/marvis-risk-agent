@@ -268,7 +268,7 @@ def add_agent_input_confirmation_prompt(
     revision = contract_payload.get("revision")
     contract = contract_payload.get("contract")
     candidates = contract.get("candidates") if isinstance(contract, dict) else None
-    candidate_lines: list[str] = []
+    candidate_rows: list[list[str]] = []
     omitted_candidates = 0
     if isinstance(candidates, dict):
         candidate_fields = sorted(candidates.items())
@@ -278,7 +278,7 @@ def add_agent_input_confirmation_prompt(
             visible = values[:MAX_INPUT_CONFIRMATION_CANDIDATES_PER_FIELD]
             omitted_candidates += len(values) - len(visible)
             for candidate_index, candidate in enumerate(visible):
-                if len(candidate_lines) >= MAX_INPUT_CONFIRMATION_CANDIDATE_LINES:
+                if len(candidate_rows) >= MAX_INPUT_CONFIRMATION_CANDIDATE_LINES:
                     omitted_candidates += len(visible) - candidate_index
                     break
                 if not isinstance(candidate, dict) or "value" not in candidate:
@@ -293,8 +293,8 @@ def add_agent_input_confirmation_prompt(
                     rendered = (
                         rendered[: MAX_INPUT_CONFIRMATION_VALUE_CHARS - 1] + "…"
                     )
-                candidate_lines.append(f"- {field_name} = {rendered}")
-            if len(candidate_lines) >= MAX_INPUT_CONFIRMATION_CANDIDATE_LINES:
+                candidate_rows.append([str(field_name), rendered])
+            if len(candidate_rows) >= MAX_INPUT_CONFIRMATION_CANDIDATE_LINES:
                 omitted_candidates += sum(
                     len(value)
                     for _name, value in candidate_fields[field_index + 1 :]
@@ -302,11 +302,22 @@ def add_agent_input_confirmation_prompt(
                 )
                 break
     if omitted_candidates:
-        candidate_lines.append(f"- … 其余候选已省略（{omitted_candidates} 项）")
-    candidate_text = (
-        "\n原子候选：\n" + "\n".join(candidate_lines)
-        if candidate_lines
-        else "\n当前没有可自动确认的原子候选。"
+        candidate_rows.append(["…", f"其余候选已省略（{omitted_candidates} 项）"])
+    candidate_tables = (
+        [
+            {
+                "title": "验证字段候选",
+                "columns": ["验证字段", "候选值"],
+                "rows": candidate_rows,
+            }
+        ]
+        if candidate_rows
+        else []
+    )
+    candidate_intro = (
+        "候选字段已整理为下表。"
+        if candidate_rows
+        else "当前没有可自动确认的候选字段。"
     )
     repo.add_agent_message(
         task_id,
@@ -315,12 +326,13 @@ def add_agent_input_confirmation_prompt(
         content=(
             f"验证输入契约状态为 {status}"
             f"（revision {revision}）。"
-            f"{candidate_text}\n"
+            f"{candidate_intro}"
             "请先在验证字段确认界面逐项确认验证字段并提交；契约状态变为 ready 后，"
             "再回复“继续”。在确认完成前，平台不会执行 PMML 打分测试。"
         ),
         metadata={
             **model_metadata(model_profile),
+            "tables": candidate_tables,
             "awaiting_validation_input_confirmation": True,
             "validation_input_contract_ref": {
                 "task_id": task_id,

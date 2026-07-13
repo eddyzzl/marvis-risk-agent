@@ -196,10 +196,10 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
     }
   }
 
-  async function ensureMaterialSelection(task) {
+  async function ensureMaterialSelection(task, { force = false } = {}) {
     if (!task || (task.task_type || "validation") !== "validation") return task;
     const payload = await api(`/api/tasks/${task.id}/materials`);
-    if (completeSelection(payload.selection)) return task;
+    if (!force && completeSelection(payload.selection)) return task;
     previewRequestSequence += 1;
     activeTask = task;
     render(payload);

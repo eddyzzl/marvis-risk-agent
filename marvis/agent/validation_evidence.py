@@ -5,6 +5,7 @@ from pathlib import Path
 
 from marvis.validation.overfitting import overfitting_check_from_validation_results
 from marvis.validation.results import (
+    normalize_validation_results_lift_order,
     pmml_scoring_result_from_dict,
     pmml_scoring_result_to_dict,
 )
@@ -12,7 +13,9 @@ from marvis.validation.results import (
 
 def agent_evidence_from_settings(settings, task_id: str) -> dict:
     task_dir = settings.tasks_dir / task_id
-    validation_results = _read_json(task_dir / "outputs" / "validation_results.json")
+    validation_results = normalize_validation_results_lift_order(
+        _read_json(task_dir / "outputs" / "validation_results.json")
+    )
     pmml_scoring = _read_pmml_scoring_result(
         task_dir / "outputs" / "pmml_scoring_result.json"
     )

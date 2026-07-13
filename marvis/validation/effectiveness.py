@@ -7,7 +7,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from marvis.feature.correlation import safe_correlation
 from marvis.formatting import ratio as _ratio
 from marvis.formatting import score_interval as _score_interval
 from marvis.feature.metrics import feature_auc as _feature_auc
@@ -21,6 +20,7 @@ from marvis.validation.binning import (
     compute_ks,
     compute_psi,
     equal_frequency_bin_edges,
+    reverse_score_bins_for_good_to_bad,
 )
 from marvis.validation.config import ValidationConfig
 from marvis.validation.checks import validate_required_splits
@@ -355,8 +355,7 @@ def _should_reverse_eval_bins(
         return False
     scores = valid[score_col].to_numpy(dtype=float)
     labels = valid[target_col].to_numpy(dtype=float)
-    correlation = safe_correlation(scores, labels)
-    return bool(correlation < 0)
+    return reverse_score_bins_for_good_to_bad(scores, labels)
 
 
 def _recompute_cumulative_bin_metrics(rows: list[BinRow]) -> list[BinRow]:
@@ -456,14 +455,14 @@ def compute_auc(scores, labels) -> float:
 
 
 def compute_head_tail_lift(scores, labels, fraction: float = 0.05) -> tuple[float | None, float | None]:
-    """NEW-2 (S1a): delegates to feature/metrics.py::head_tail_lift, the reference
-    direction-aware implementation (risk_sign = sign(corr(scores, target)), so head is
-    always the high-risk end regardless of whether the score is higher-is-riskier or
-    higher-is-better). This module previously hard-coded a descending sort (head =
-    highest score), which silently mislabeled head/tail for any higher-is-better score
-    (e.g. scorecard points) -- see test_head_tail_lift_flips_for_higher_is_better_score.
-    Only the return-shape is adapted here (dict -> 2-tuple); the algorithm itself is
-    not reimplemented, to avoid the two call sites ever drifting apart again.
+    """Return validation-report lift ordered from good head to bad tail.
+
+    The shared feature metric is direction-aware but names the high-risk end ``head``
+    and the low-risk end ``tail``. Model-validation reports use the opposite population
+    convention: the table starts with good/low-risk customers (head) and ends with
+    bad/high-risk customers (tail). Keep the shared calculation unchanged for feature
+    analysis and response-model selection, and adapt only its names at this validation
+    boundary.
     """
     result = _feature_head_tail_lift(
         np.asarray(scores, dtype=float),
@@ -472,7 +471,9 @@ def compute_head_tail_lift(scores, labels, fraction: float = 0.05) -> tuple[floa
         min_rows=1,
     )
     pct = int(round(fraction * 100))
-    return result.get(f"lift_head_{pct}"), result.get(f"lift_tail_{pct}")
+    risk_head_lift = result.get(f"lift_head_{pct}")
+    risk_tail_lift = result.get(f"lift_tail_{pct}")
+    return risk_tail_lift, risk_head_lift
 
 
 def build_effectiveness_result(

@@ -32,17 +32,17 @@ def payload() -> dict:
         "effectiveness": {
             "overall": [
                 {"split": "train", "sample_count": 80, "bad_count": 8, "bad_rate": 0.10,
-                 "ks": 0.3215, "auc": 0.7345, "head_lift_5pct": 2.1, "tail_lift_5pct": 0.4, "psi_vs_train": 0.0},
+                 "ks": 0.3215, "auc": 0.7345, "head_lift_5pct": 0.4, "tail_lift_5pct": 2.1, "psi_vs_train": 0.0},
                 {"split": "test",  "sample_count": 20, "bad_count": 2, "bad_rate": 0.10,
-                 "ks": 0.3308, "auc": 0.7401, "head_lift_5pct": 2.0, "tail_lift_5pct": 0.5, "psi_vs_train": 0.0008},
+                 "ks": 0.3308, "auc": 0.7401, "head_lift_5pct": 0.5, "tail_lift_5pct": 2.0, "psi_vs_train": 0.0008},
                 {"split": "oot",   "sample_count": 30, "bad_count": 3, "bad_rate": 0.10,
-                 "ks": 0.3050, "auc": 0.7210, "head_lift_5pct": 1.9, "tail_lift_5pct": 0.4, "psi_vs_train": 0.0490},
+                 "ks": 0.3050, "auc": 0.7210, "head_lift_5pct": 0.4, "tail_lift_5pct": 1.9, "psi_vs_train": 0.0490},
             ],
             "monthly_ks": [
                 {"month": "202501", "sample_count": 80, "bad_count": 8, "bad_rate": 0.10,
-                 "ks": 0.3215, "auc": 0.7345, "head_lift_5pct": 2.1, "tail_lift_5pct": 0.4},
+                 "ks": 0.3215, "auc": 0.7345, "head_lift_5pct": 0.4, "tail_lift_5pct": 2.1},
                 {"month": "202503", "sample_count": 30, "bad_count": 3, "bad_rate": 0.10,
-                 "ks": 0.3050, "auc": 0.7210, "head_lift_5pct": 1.9, "tail_lift_5pct": 0.4},
+                 "ks": 0.3050, "auc": 0.7210, "head_lift_5pct": 0.4, "tail_lift_5pct": 1.9},
             ],
             "monthly_psi": [
                 {"month": "202501", "psi_first_month": 0.0,   "psi_last_month": 0.012, "psi_mom": None},
@@ -206,6 +206,7 @@ def test_column_specs_match_headers_length_and_kind(payload):
     by_key = {t["key"]: t for s in sections for t in s["tables"]}
 
     overall = by_key["IMAGE:overall_model_effect"]
+    assert overall["rows"][0][7:9] == ["0.40", "2.10"]
     assert len(overall["column_specs"]) == len(overall["headers"])
     kinds_overall = [spec["kind"] for spec in overall["column_specs"]]
     assert kinds_overall == [
@@ -229,6 +230,7 @@ def test_column_specs_match_headers_length_and_kind(payload):
     assert psi_spec["thresholds"] == [0.02, 0.10]
 
     monthly = by_key["IMAGE:loan_month_effect"]
+    assert monthly["rows"][0][6:8] == ["0.40", "2.10"]
     assert monthly["headers"] == [
         "月份", "样本量", "逾期率", "坏样本量", "KS(%)", "AUC(%)",
         "5%头部lift", "5%尾部lift", "PSI(首月基准)", "PSI(尾月基准)",

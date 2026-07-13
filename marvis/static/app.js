@@ -1336,7 +1336,7 @@ function actionStatusPill(message, kind) {
 
 function describeActionStatus(message, kind, detail) {
   if (!message) return "";
-  if (kind === "error" && detail && detail !== message) return `${message} · ${detail}`;
+  if (detail && detail !== message) return `${message} · ${detail}`;
   return message;
 }
 
@@ -1350,7 +1350,12 @@ function setActionErrorDetail(message = "", kind = "info") {
 }
 
 function setActionStatus(message, kind = "info", detail = "") {
-  const nextSignature = signatureFromParts([message || "", kind || "info", detail || ""]);
+  const nextSignature = signatureFromParts([
+    selectedTaskId || "",
+    message || "",
+    kind || "info",
+    detail || "",
+  ]);
   if (renderSignatures.actionStatus === nextSignature) return;
   renderSignatures.actionStatus = nextSignature;
 
@@ -1480,10 +1485,7 @@ function setTaskFailureActionStatus(task = selectedTask) {
     return true;
   }
   const message = taskFailureActionStatusMessage(task);
-  if (!message) {
-    setActionErrorDetail("");
-    return false;
-  }
+  if (!message) return false;
   const kind = task.status === "review_required" ? "success" : "error";
   setActionStatus(taskFailureActionStatusTitle(task), kind, message);
   return true;
@@ -1529,47 +1531,87 @@ function actionCancelledStatusTitle(actionId) {
 }
 
 function taskActionStatusSnapshot(task = selectedTask) {
-  if (!task) return { message: "", kind: "info" };
-  if (taskStopped(task)) return { message: "已停止当前动作。", kind: "stopped" };
-  if (task.active_job_kind === "join") return { message: "数据拼接进行中。", kind: "busy" };
-  if (task.active_job_kind === "plan") return { message: "计划执行进行中。", kind: "busy" };
+  if (!task) return { message: "", kind: "info", detail: "" };
+  if (taskStopped(task)) {
+    return { message: "已停止当前动作。", kind: "stopped", detail: "当前步骤已停止，可按需重新发起。" };
+  }
+  if (task.active_job_kind === "join") {
+    return { message: "数据拼接进行中。", kind: "busy", detail: "当前步骤：执行数据拼接。" };
+  }
+  if (task.active_job_kind === "plan") {
+    return { message: "计划执行进行中。", kind: "busy", detail: "当前步骤：执行已确认计划。" };
+  }
   // REL-1/UX-1: V2 driver-turn task (data_join/feature_analysis/modeling/
   // strategy/vintage) job — these task types don't carry the V1.1 validation
   // task.status values the switch below keys on, so without this the busy pill
   // would go blank for the whole turn instead of showing "正在执行下一步…".
-  if (task.active_job_kind === "driver") return { message: "正在执行下一步…", kind: "busy" };
+  if (task.active_job_kind === "driver") {
+    return { message: "正在执行下一步…", kind: "busy", detail: "当前步骤：执行工作流任务。" };
+  }
   switch (task.status) {
     case "created":
-      return { message: "任务已创建。", kind: "info" };
+      return { message: "任务已创建。", kind: "info", detail: "当前步骤：等待材料识别。" };
     case "scanned":
     case "configured":
-      return { message: "材料识别完成。", kind: "success" };
+      return {
+        message: "材料识别完成。",
+        kind: "success",
+        detail: usesPmmlScoringWorkflow(task)
+          ? "已完成：材料识别；下一步：PMML打分测试。"
+          : "已完成：材料识别；下一步：模型可复现性验证。",
+      };
     case "running":
       return {
         message: usesPmmlScoringWorkflow(task) ? "PMML打分测试进行中。" : "模型可复现性验证进行中。",
         kind: "busy",
+        detail: usesPmmlScoringWorkflow(task) ? "当前步骤：PMML解析与全量评分。" : "当前步骤：执行 Notebook 与分数一致性验证。",
       };
     case "executed":
       return {
         message: usesPmmlScoringWorkflow(task) ? "PMML打分测试完成。" : "模型可复现性验证完成。",
         kind: "success",
+        detail: usesPmmlScoringWorkflow(task)
+          ? "已完成：PMML打分测试；下一步：模型效果、稳定性与压力测试。"
+          : "已完成：模型可复现性验证；下一步：模型效果与稳定性验证。",
       };
     case "computing_metrics":
-      return { message: "指标概览进行中。", kind: "busy" };
+      return {
+        message: "指标概览进行中。",
+        kind: "busy",
+        detail: "当前步骤：模型效果、稳定性与压力测试。",
+      };
     case "writing_artifacts":
       // writing_artifacts is dual-meaning: backend flips here the moment
       // metrics finishes (idle, awaiting "生成 Word") and stays here while
       // the report job actually runs. Only the second case is in-progress.
       if (task.active_job_kind === "report") {
-        return { message: "报告输出进行中。", kind: "busy" };
+        return {
+          message: "报告输出进行中。",
+          kind: "busy",
+          detail: "当前步骤：生成最终结论、Word报告与Excel分析。",
+        };
       }
-      return { message: "模型效果&稳定性验证完成。", kind: "success" };
+      return {
+        message: "模型效果&稳定性验证完成。",
+        kind: "success",
+        detail: "已完成：模型效果、稳定性与压力测试；下一步：报告输出。",
+      };
     case "succeeded":
-      return { message: "验证完成。", kind: "success" };
+      return {
+        message: "验证完成。",
+        kind: "success",
+        detail: usesPmmlScoringWorkflow(task)
+          ? "已完成：材料识别、PMML打分、模型验证与报告输出。"
+          : "已完成：材料识别、可复现性验证、模型验证与报告输出。",
+      };
     case "review_required":
-      return { message: "验证完成，需人工复核。", kind: "success" };
+      return {
+        message: "验证完成，需人工复核。",
+        kind: "success",
+        detail: "已完成：全部验证与报告输出；当前：等待人工复核。",
+      };
     default:
-      return { message: "", kind: "info" };
+      return { message: "", kind: "info", detail: task.status_message || "" };
   }
 }
 
@@ -2880,6 +2922,14 @@ function syncAgentComposerClearance() {
   workspace.style.setProperty("--agent-composer-clearance", `${Math.ceil(composerHeight + composerGap)}px`);
 }
 
+function setWorkspaceActionStatus(message, kind = "info", detail = undefined) {
+  const snapshot = taskActionStatusSnapshot(selectedTask);
+  const persistentDetail = detail === undefined && snapshot.message === message
+    ? snapshot.detail || ""
+    : detail || "";
+  setActionStatus(message, kind, persistentDetail);
+}
+
 function renderCurrentTask({ force = false } = {}) {
   const nextSignature = currentTaskSignature(selectedTask);
   if (!force && renderSignatures.currentTask === nextSignature) return;
@@ -2891,7 +2941,7 @@ function renderCurrentTask({ force = false } = {}) {
     getElementById: $,
     taskDisplayName,
     renderTaskSnapshot,
-    setActionStatus,
+    setActionStatus: setWorkspaceActionStatus,
     updateGreeting: updateWorkspaceGreetingView,
     statusOverride: actionStatusOverride?.taskId === selectedTaskId ? actionStatusOverride : null,
     setTaskFailureActionStatus,
@@ -3035,11 +3085,75 @@ function stepWorkflowStage(step) {
 }
 
 function notebookStepsForRail() {
+  const pmmlWorkflow = typeof usesPmmlScoringWorkflow === "function"
+    ? usesPmmlScoringWorkflow()
+    : Number(selectedTask?.validation_workflow_version) === 2;
+  if (pmmlWorkflow) {
+    return latestNotebookSteps.filter((step) => {
+      const id = String(step?.id || "");
+      return id.startsWith("system-repro-");
+    });
+  }
   return latestNotebookSteps.filter((step) => stepWorkflowStage(step) === "notebook");
 }
 
 function metricStepsForRail() {
   return latestNotebookSteps.filter((step) => stepWorkflowStage(step) === "metrics");
+}
+
+const v2WorkflowSubstepPlans = {
+  scan: [
+    { id: "v2-scan-materials", title: "材料文件识别" },
+    { id: "v2-scan-metadata", title: "数据字典与特征元数据" },
+    { id: "v2-scan-contract", title: "验证输入契约" },
+  ],
+  notebook: [
+    { id: "system-repro-parse", title: "PMML 解析" },
+    { id: "system-repro-pmml", title: "PMML 全量评分" },
+    { id: "system-repro-validate", title: "评分结果校验" },
+  ],
+  metrics: [
+    { id: "system-metrics-prepare", title: "指标数据准备" },
+    { id: "system-metrics-effectiveness", title: "模型效果计算" },
+    { id: "system-metrics-stability", title: "稳定性分析" },
+    { id: "system-metrics-stress", title: "模型压力测试" },
+    { id: "system-metrics-summary", title: "总体判断" },
+  ],
+  report: [
+    { id: "v2-report-conclusion", title: "最终结论" },
+    { id: "v2-report-word", title: "Word 报告" },
+    { id: "v2-report-excel", title: "Excel 分析" },
+  ],
+};
+
+function v2WorkflowSubsteps(stageId, parentStatus = "pending") {
+  const plannedSteps = v2WorkflowSubstepPlans[stageId] || [];
+  return plannedSteps.map((plannedStep, index) => {
+    const existingStep = latestNotebookSteps.find((step) => step?.id === plannedStep.id) || null;
+    const step = {
+      ...(existingStep || {}),
+      ...plannedStep,
+      system: true,
+    };
+    if (parentStatus === "succeeded" || parentStatus === "review") {
+      return { ...step, status: "succeeded" };
+    }
+    if (parentStatus === "pending") {
+      return { ...step, status: "pending" };
+    }
+    if (parentStatus === "stopped") {
+      const evidenceTone = notebookStepTone(existingStep?.status);
+      return { ...step, status: evidenceTone === "succeeded" ? "succeeded" : "stopped" };
+    }
+    if (parentStatus === "failed") {
+      const evidenceTone = notebookStepTone(existingStep?.status);
+      if (evidenceTone === "succeeded" || evidenceTone === "failed") {
+        return { ...step, status: evidenceTone };
+      }
+      return { ...step, status: index === 0 ? "failed" : "pending" };
+    }
+    return { ...step, status: existingStep?.status || "pending" };
+  });
 }
 
 function workflowStageCompleteFromEvidence(stepId) {
@@ -3394,6 +3508,9 @@ function renderWorkflowStepper({ force = false } = {}) {
     item.dataset.stepTarget = displayStep.target;
     item.tabIndex = 0;
     item.setAttribute("role", "group");
+    const childSteps = usesPmmlScoringWorkflow(selectedTask)
+      ? v2WorkflowSubsteps(step.id, stepStatus)
+      : [];
     item.innerHTML = [
       '<div class="step-head">',
       stepCheckerHtml(stepStatus),
@@ -3405,8 +3522,14 @@ function renderWorkflowStepper({ force = false } = {}) {
       stepActionButtonHtml(displayStep),
       "</div>",
       stepDownloadActionsHtml(displayStep),
-      step.id === "notebook" ? renderNotebookStepRail(notebookStepsForRail(), "分段进度", index + 1, stepStatus, "notebook") : "",
-      step.id === "metrics" ? renderNotebookStepRail(metricStepsForRail(), "计算进度", index + 1, stepStatus, "metrics") : "",
+      usesPmmlScoringWorkflow(selectedTask)
+        ? renderNotebookStepRail(childSteps, "阶段任务", index + 1, stepStatus, step.id)
+        : step.id === "notebook"
+          ? renderNotebookStepRail(notebookStepsForRail(), "分段进度", index + 1, stepStatus, "notebook")
+          : "",
+      !usesPmmlScoringWorkflow(selectedTask) && step.id === "metrics"
+        ? renderNotebookStepRail(metricStepsForRail(), "计算进度", index + 1, stepStatus, "metrics")
+        : "",
     ].join("");
     stepper.appendChild(item);
   });
@@ -5786,6 +5909,9 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     : "";
   const messageId = message?.id ? String(message.id) : "";
   const idAttr = messageId ? ` data-agent-message-id="${escapeHtml(messageId)}"` : "";
+  const stageAttr = message?.stage
+    ? ` data-agent-stage="${escapeHtml(String(message.stage))}"`
+    : "";
   // VD-2/UX-2: only the latest gate (stale-protection identical to manual
   // mode's latestInteractiveScreenMessageId / lastAssistantMessageId) renders
   // its widgets as interactive; earlier gate cards render the same widgets as
@@ -5799,7 +5925,7 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     role === "assistant" ? agentMessageGateButtonHtml(message) : "",
   ].join("");
   return [
-    `<article class="${className}"${idAttr}>`,
+    `<article class="${className}"${idAttr}${stageAttr}>`,
     role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentMessageMetaLabel(message, labelStage))}</div>` : "",
     isGate ? driverGateCardHtml(message, bodyHtml) : bodyHtml,
     memoryReferencesHtml,
@@ -5906,6 +6032,27 @@ async function pollAgentMessagesUntilSettled(taskId, pendingPromise, { preserveO
   }
 }
 
+async function handleAgentMaterialSelectionRequest(taskId) {
+  const task = findTaskInCache(taskId) || (selectedTaskId === taskId ? selectedTask : null);
+  if (!task) {
+    setActionStatus("无法打开材料选择。", "error", "请刷新任务后重试。");
+    return false;
+  }
+  const selectedMaterialsTask = await materialBindingDialog.ensureMaterialSelection(task, { force: true });
+  if (!selectedMaterialsTask) {
+    setActionStatus("等待选择验证材料。", "info", "完成材料选择后请重新扫描材料。");
+    return false;
+  }
+  selectedTaskId = selectedMaterialsTask.id;
+  selectedTask = selectedMaterialsTask;
+  rememberSelectedTaskId(selectedMaterialsTask.id);
+  await refreshTasks();
+  if (selectedTaskId === taskId) {
+    setActionStatus("材料选择已保存。", "success", "下一步：请重新扫描材料。");
+  }
+  return true;
+}
+
 async function startAgentValidation() {
   const taskId = selectedTaskId;
   if (!taskId) return;
@@ -5969,6 +6116,13 @@ async function startAgentValidation() {
   renderAgentConversation();
   if (result.status === "cancel_requested") {
     await waitForAgentValidation(taskId, { stopping: true });
+    return;
+  }
+  if (
+    result.status === "awaiting_material_selection"
+    || result.ui_action?.type === "select_validation_materials"
+  ) {
+    await handleAgentMaterialSelectionRequest(taskId);
     return;
   }
   if (result.status !== "accepted") return;

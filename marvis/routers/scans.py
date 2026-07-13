@@ -61,7 +61,6 @@ def update_task_materials(
             if task.status in {
                 TaskStatus.RUNNING,
                 TaskStatus.COMPUTING_METRICS,
-                TaskStatus.WRITING_ARTIFACTS,
             }:
                 raise conflict(
                     f"cannot update materials for task in status {task.status.value}"

@@ -11,6 +11,7 @@ from marvis.metric_tables import (
 from marvis.pipeline import REPORT_STAGE_FAILURE_PREFIX
 from marvis.report_fields import report_field_payload
 from marvis.report_texts import computed_report_text_values_from_payload
+from marvis.validation.results import normalize_validation_results_lift_order
 
 
 def build_report_field_payload(
@@ -64,6 +65,9 @@ def validation_results_payload_for_task(request: Request, task: TaskRecord) -> d
     if not result_path.exists():
         return None
     try:
-        return json.loads(result_path.read_text(encoding="utf-8"))
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(payload, dict):
+        return None
+    return normalize_validation_results_lift_order(payload)

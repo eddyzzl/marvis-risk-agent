@@ -217,7 +217,13 @@ def test_summarize_stage_includes_bounded_memory_context_and_metadata(monkeypatc
     class CapturingClient:
         def complete(self, **kwargs):
             captured.update(kwargs)
-            return "当前模型 KS 相比历史版本提升，需要继续关注 PSI。"
+            return (
+                "总体判断\n模型效果与稳定性整体可接受。\n\n"
+                "效果表现\n当前模型 KS 相比历史版本提升。\n\n"
+                "稳定性表现\n需要继续关注 PSI。\n\n"
+                "压力测试风险\n当前证据未显示额外高风险项。\n\n"
+                "建议\n持续监测 OOT 表现。"
+            )
 
     monkeypatch.setattr(
         "marvis.agent.service._client",
@@ -258,7 +264,8 @@ def test_summarize_stage_includes_bounded_memory_context_and_metadata(monkeypatc
 
     prompt = json.loads(captured["user_prompt"])
     assert captured["max_tokens"] == 4096
-    assert content == "当前模型 KS 相比历史版本提升，需要继续关注 PSI。"
+    assert content.startswith("总体判断\n")
+    assert "效果表现\n当前模型 KS 相比历史版本提升。" in content
     assert "压力测试风险必须完整覆盖" in prompt["instructions"]
     assert "不得停在半句话" in prompt["instructions"]
     assert prompt["cross_task_memory"]["memories"][0]["id"] == "mem-1"
@@ -274,6 +281,130 @@ def test_summarize_stage_includes_bounded_memory_context_and_metadata(monkeypatc
         }
     ]
     assert evidence == {"validation_results": {"effectiveness": {"overall": {"ks": 0.30}}}}
+
+
+def test_metrics_summary_retries_when_required_overall_judgment_is_missing(monkeypatch):
+    responses = iter(
+        [
+            "模型 KS 较好，但需要关注稳定性。",
+            (
+                "总体判断\n模型整体表现可接受。\n\n"
+                "效果表现\nKS 体现出有效区分能力。\n\n"
+                "稳定性表现\nPSI 需要持续监测。\n\n"
+                "压力测试风险\n高、中、低风险分层均应按平台证据解释。\n\n"
+                "建议\n持续进行样本外监测。"
+            ),
+        ]
+    )
+    calls: list[dict] = []
+
+    class RepairingClient:
+        def complete(self, **kwargs):
+            calls.append(kwargs)
+            return next(responses)
+
+    monkeypatch.setattr(
+        "marvis.agent.service._client",
+        lambda _profile: RepairingClient(),
+    )
+
+    content, metadata = summarize_stage(
+        task=_task(),
+        stage="metrics",
+        evidence={"validation_results": {}},
+        model_profile={"model_id": "m1"},
+        fallback="平台指标已生成。",
+    )
+
+    assert len(calls) == 2
+    repair_prompt = json.loads(calls[1]["user_prompt"])
+    assert repair_prompt["repair_request"]["missing_sections"] == [
+        "总体判断",
+        "效果表现",
+        "稳定性表现",
+        "压力测试风险",
+        "建议",
+    ]
+    assert content.startswith("总体判断\n")
+    assert metadata["summary_repaired"] is True
+    assert metadata["fallback"] is False
+
+
+def test_metrics_summary_uses_complete_sectioned_fallback_after_failed_repair(monkeypatch):
+    class IncompleteClient:
+        def complete(self, **_kwargs):
+            return "只有一句不完整的模型说明。"
+
+    monkeypatch.setattr(
+        "marvis.agent.service._client",
+        lambda _profile: IncompleteClient(),
+    )
+
+    content, metadata = summarize_stage(
+        task=_task(),
+        stage="metrics",
+        evidence={},
+        model_profile={"model_id": "m1"},
+        fallback="平台指标已生成，请结合页面证据复核。",
+    )
+
+    for section in ("总体判断", "效果表现", "稳定性表现", "压力测试风险", "建议"):
+        assert section in content
+    assert "只有一句不完整的模型说明" in content
+    assert metadata["fallback"] is True
+    assert metadata["summary_repair_failed"] is True
+
+
+def test_metrics_stage_prompt_stays_within_common_32k_context_window():
+    from marvis.agent.service import AGENT_SYSTEM_PROMPT, _stage_prompt
+    from marvis.llm_client import estimate_tokens
+
+    huge_curve = [{"x": index, "y": index / 1000} for index in range(2_000)]
+    evidence = {
+        "scan": {"checks": []},
+        "validation_results": {
+            "model_name": "A卡",
+            "basic_info": {
+                "feature_importance": [
+                    {"feature": f"feature_{index}", "importance": index}
+                    for index in range(1_000)
+                ],
+            },
+            "effectiveness": {
+                "overall": [{"split": "oot", "ks": 0.34, "auc": 0.72}],
+                "monthly_ks": [
+                    {"month": f"2025{month:02d}", "ks": 0.3}
+                    for month in range(1, 13)
+                ],
+                "bin_tables": {"oot": huge_curve},
+                "roc_ks_curves": {"oot": {"roc": huge_curve, "ks": huge_curve}},
+            },
+            "stress_test": {
+                "baseline": {"ks": 0.34, "bin_table": huge_curve},
+                "per_category": [
+                    {
+                        "category": "人行",
+                        "ks_after": 0.28,
+                        "dropped_features": [
+                            f"feature_{index}" for index in range(1_000)
+                        ],
+                        "bin_table": huge_curve,
+                    }
+                ],
+            },
+        },
+    }
+
+    prompt = _stage_prompt(
+        task=_task(),
+        stage="metrics",
+        evidence=evidence,
+    )
+
+    estimated = estimate_tokens(AGENT_SYSTEM_PROMPT) + estimate_tokens(prompt)
+    assert estimated + 4_096 < 32_768
+    assert "roc_ks_curves" not in prompt
+    assert "feature_999" not in prompt
 
 
 def test_summarize_stage_fallback_does_not_claim_memory_use(monkeypatch):
