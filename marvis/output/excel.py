@@ -27,6 +27,7 @@ from marvis.output.styles import (
 )
 from marvis.validation.results import (
     BinRow,
+    ConsistencyStatus,
     ValidationResults,
 )
 
@@ -34,7 +35,12 @@ _INVALID_SHEET_TITLE_CHARS = re.compile(r"[\[\]:*?/\\]")
 _MAX_SHEET_TITLE_LENGTH = 31
 
 
-def write_validation_excel(results: ValidationResults, output_path: Path) -> Path:
+def write_validation_excel(
+    results: ValidationResults,
+    output_path: Path,
+    *,
+    report_values: dict[str, object] | None = None,
+) -> Path:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     uow = ArtifactUnitOfWork()
@@ -45,6 +51,7 @@ def write_validation_excel(results: ValidationResults, output_path: Path) -> Pat
 
     try:
         _write_overview(workbook, results)
+        _write_report_texts(workbook, report_values)
         _write_basic_info(workbook, results)
         _write_monthly_distribution(workbook, results)
         _write_hyperparameters(workbook, results)
@@ -81,23 +88,77 @@ def write_validation_excel(results: ValidationResults, output_path: Path) -> Pat
 
 def _write_overview(workbook: Workbook, results: ValidationResults) -> None:
     sheet = workbook.create_sheet("验证总览")
-    summary = results.reproducibility.summary
-    rows = [
+    rows: list[tuple[object, object]] = [
         ("项目", "取值"),
         ("模型", f"{results.model_name} {results.model_version}"),
         ("算法", results.algorithm),
-        ("抽样行数", results.reproducibility.sample_size),
-        ("对齐行数", summary.match_count),
-        ("差异行数", summary.mismatch_count),
-        ("最大绝对差", summary.max_abs_diff),
-        ("可复现性状态", summary.status.value),
     ]
+    if results.pmml_scoring is not None:
+        scoring = results.pmml_scoring
+        rows.extend(
+            [
+                ("PMML打分测试状态", scoring.status),
+                ("全量样本", scoring.input_row_count),
+                ("成功评分", scoring.success_count),
+                ("失败评分", scoring.failure_count),
+                ("空值输出", scoring.null_count),
+                ("非有限值输出", scoring.non_finite_count),
+                ("PMML输出字段", scoring.output_field),
+                ("批量引擎", scoring.engine),
+                ("打分耗时(秒)", scoring.elapsed_seconds),
+                ("吞吐(行/秒)", scoring.rows_per_second),
+            ]
+        )
+        status_value = (
+            ConsistencyStatus.PASS
+            if scoring.status == "pass"
+            else ConsistencyStatus.FAIL
+            if scoring.status == "fail"
+            else ConsistencyStatus.REVIEW
+        )
+    elif results.reproducibility is not None:
+        summary = results.reproducibility.summary
+        rows.extend(
+            [
+                ("抽样行数", results.reproducibility.sample_size),
+                ("对齐行数", summary.match_count),
+                ("差异行数", summary.mismatch_count),
+                ("最大绝对差", summary.max_abs_diff),
+                ("可复现性状态", summary.status.value),
+            ]
+        )
+        status_value = summary.status
+    else:
+        rows.append(("验证状态", "缺少评分或复现证据"))
+        status_value = ConsistencyStatus.REVIEW
     _write_rows(sheet, rows, header_rows=1)
     sheet.cell(row=len(rows), column=2).fill = PatternFill(
-        start_color=status_cell_color(summary.status),
-        end_color=status_cell_color(summary.status),
+        start_color=status_cell_color(status_value),
+        end_color=status_cell_color(status_value),
         fill_type="solid",
     )
+
+
+def _write_report_texts(
+    workbook: Workbook,
+    report_values: dict[str, object] | None,
+) -> None:
+    if not report_values:
+        return
+    rows: list[tuple[object, object]] = [("报告字段", "内容")]
+    rows.extend(
+        (str(key), value)
+        for key, value in sorted(report_values.items())
+        if value not in (None, "")
+    )
+    if len(rows) == 1:
+        return
+    sheet = workbook.create_sheet("报告文本")
+    _write_rows(sheet, rows, header_rows=1)
+    sheet.column_dimensions["A"].width = 42
+    sheet.column_dimensions["B"].width = 100
+    for row in sheet.iter_rows(min_row=2, min_col=2, max_col=2):
+        row[0].alignment = Alignment(vertical="top", wrap_text=True)
 
 
 def _write_basic_info(workbook: Workbook, results: ValidationResults) -> None:

@@ -79,6 +79,7 @@ from marvis.notebooks import (
     register_live_notebook_session,
     run_notebook,
 )
+from marvis.output.excel import write_validation_excel
 from marvis.output.word import write_validation_word
 from marvis.pipeline_cellgen import (
     RMC_PMML_SCORE_COL as RMC_PMML_SCORE_COL,
@@ -1250,6 +1251,7 @@ def run_report_stage(
     outputs_dir = task_dir / "outputs"
     images_dir = task_dir / "images"
     report_path = outputs_dir / "validation_report.docx"
+    excel_path = outputs_dir / "validation.xlsx"
     temp_report_path = outputs_dir / ".validation_report.docx.tmp"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     cancellation_token = register_notebook_cancellation(
@@ -1267,6 +1269,7 @@ def run_report_stage(
         _unlink_if_exists(temp_report_path)
         report_uow = ArtifactUnitOfWork()
         staged_report = report_uow.stage_file(outputs_dir, report_path.name)
+        staged_excel = report_uow.stage_file(outputs_dir, excel_path.name)
         staged_images = report_uow.stage_directory(task_dir, images_dir.name)
         results = _load_validation_results(outputs_dir)
         report_values, _ = repo.get_report_values(task_id)
@@ -1275,6 +1278,12 @@ def run_report_stage(
             template_path=settings.report_template_path,
             output_path=staged_report.path,
             image_output_dir=staged_images.path,
+            report_values=report_values,
+        )
+        cancellation_token.raise_if_cancelled()
+        write_validation_excel(
+            results,
+            staged_excel.path,
             report_values=report_values,
         )
         cancellation_token.raise_if_cancelled()

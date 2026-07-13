@@ -4574,7 +4574,7 @@ def test_agent_report_confirm_writes_three_conclusions_and_dispatches_report(
     )
 
 
-def test_v2_agent_report_ready_message_only_advertises_word(tmp_path):
+def test_v2_agent_report_ready_message_advertises_word_and_excel(tmp_path):
     from marvis.api_stage_helpers import add_agent_report_ready_message
 
     client = _client(tmp_path)
@@ -4592,7 +4592,7 @@ def test_v2_agent_report_ready_message_only_advertises_word(tmp_path):
     ready = repo.list_agent_messages(task_id)[-1]
     assert ready["stage"] == "word_report_ready"
     assert "下载Word" in ready["content"]
-    assert "下载Excel" not in ready["content"]
+    assert "下载Excel" in ready["content"]
 
 
 def test_agent_report_confirm_rejects_extra_report_keys(tmp_path):

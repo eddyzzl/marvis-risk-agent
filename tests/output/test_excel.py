@@ -157,6 +157,37 @@ def test_overview_sheet_contains_status_text(tmp_path: Path):
     assert any(isinstance(v, str) and "pass" in v.lower() for v in values)
 
 
+def test_pmml_excel_includes_scoring_overview_and_report_texts(tmp_path: Path):
+    output = tmp_path / "out.xlsx"
+    report_values = {
+        "TEXT:pressure_test_summary": "压力测试总结正文。",
+        "TEXT:pressure_impact_recommendation": "压力影响建议正文。",
+        "TEXT:final_validation_conclusion": "模型效果与稳定性良好，PMML部署可用。",
+    }
+
+    write_validation_excel(
+        _make_pmml_results(),
+        output,
+        report_values=report_values,
+    )
+
+    wb = load_workbook(output, data_only=True)
+    overview_values = [
+        cell.value
+        for row in wb["验证总览"].iter_rows()
+        for cell in row
+    ]
+    assert "PMML打分测试状态" in overview_values
+    assert "pass" in overview_values
+    assert "可复现性状态" not in overview_values
+    report_values_in_sheet = [
+        cell.value
+        for row in wb["报告文本"].iter_rows()
+        for cell in row
+    ]
+    assert set(report_values.values()).issubset(set(report_values_in_sheet))
+
+
 def test_feature_importance_sheet_includes_category(tmp_path: Path):
     output = tmp_path / "out.xlsx"
     write_validation_excel(_make_results(), output)

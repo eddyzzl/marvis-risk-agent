@@ -163,6 +163,7 @@ def test_v2_pmml_scoring_and_metrics_never_execute_notebook(
         TaskStatus.REVIEW_REQUIRED,
     }
     assert (outputs / "validation_report.docx").is_file()
+    assert (outputs / "validation.xlsx").is_file()
 
 
 def _empty_stress_scores_payload() -> dict:
@@ -1942,6 +1943,12 @@ def test_report_stage_status_failure_rolls_back_promoted_docx_and_images(
         return SimpleNamespace(unresolved_placeholders=[])
 
     monkeypatch.setattr("marvis.pipeline.write_validation_word", fake_word_writer)
+    monkeypatch.setattr(
+        "marvis.pipeline.write_validation_excel",
+        lambda _results, output_path, **_kwargs: Path(output_path).write_bytes(
+            b"new-xlsx"
+        ),
+    )
     original_update = TaskRepository.update_status_on_connection
 
     def failing_status_update(self, conn, *args, **kwargs):
