@@ -1161,6 +1161,49 @@ def test_create_task_accepts_missing_model_version(tmp_path: Path, monkeypatch):
     assert task["model_version"] == ""
 
 
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "自营复借T卡多头裂变模型(C0003_ZYT_MOB3_6_BASIC_2606)",
+        "自营复借T卡多头裂变模型（基础版）",
+    ],
+)
+def test_create_task_accepts_parentheses_in_model_name(
+    tmp_path: Path,
+    monkeypatch,
+    model_name: str,
+):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/tasks",
+        json={
+            "model_name": model_name,
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["model_name"] == model_name
+
+
+def test_create_task_rejects_path_separator_in_model_name(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "模型/越界",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "model_name contains illegal characters"
+
+
 def test_create_task_rejects_unknown_algorithm(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
 

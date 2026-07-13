@@ -13,7 +13,7 @@ from marvis.safe_paths import assert_within
 
 
 logger = logging.getLogger(__name__)
-MODEL_ID_RE = re.compile(r"^[\w一-鿿\- ]{1,64}$", re.UNICODE)
+MODEL_ID_RE = re.compile(r"^[\w一-鿿\- ()（）]{1,64}$", re.UNICODE)
 ACTIVE_JOB_DETAIL = "task already has an active stage"
 
 
