@@ -13,6 +13,8 @@ RUN_NODE=1
 RUN_DIFF=1
 RUN_AUDIT=0
 FAST=0
+AFFECTED=0
+FAST_MARKERS="not slow and not e2e and not llm"
 
 usage() {
   cat <<'USAGE'
@@ -25,7 +27,11 @@ Options:
   --skip-ruff     Skip ruff.
   --skip-node     Skip JavaScript syntax checks.
   --skip-diff     Skip git diff whitespace checks.
-  --fast          Run only the fast test tier (-m "not slow and not e2e").
+  --fast          Run only the fast test tier
+                  (-m "not slow and not e2e and not llm").
+  --affected      Run tests affected by the current git diff. Uses
+                  CHECK_DIFF_RANGE when set; otherwise checks local changes.
+                  Falls back to the fast tier when mapping is uncertain.
   --audit         Run pip-audit against the locked dependencies (skipped
                    with a warning if pip-audit is not installed).
   -h, --help      Show this help.
@@ -34,10 +40,17 @@ Environment:
   PYTHON          Python executable to use. Defaults to "python".
   NODE            Node.js executable to use. Defaults to "node".
   RUFF            Ruff executable to use. Defaults to "$PYTHON -m ruff".
+  CHECK_DIFF_RANGE
+                  Optional git diff range used by --affected and diff checks,
+                  for example origin/main...HEAD.
+
+Pytest arguments may follow "--". Custom -m expressions cannot be combined
+with --fast or --affected because those modes own the marker filter.
 USAGE
 }
 
 PYTEST_ARGS=("-q")
+PYTEST_ARGS_ARE_DEFAULT=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-pytest)
@@ -60,6 +73,10 @@ while [[ $# -gt 0 ]]; do
       FAST=1
       shift
       ;;
+    --affected)
+      AFFECTED=1
+      shift
+      ;;
     --audit)
       RUN_AUDIT=1
       shift
@@ -71,17 +88,75 @@ while [[ $# -gt 0 ]]; do
     --)
       shift
       PYTEST_ARGS=("$@")
+      PYTEST_ARGS_ARE_DEFAULT=0
       break
       ;;
     *)
       PYTEST_ARGS=("$@")
+      PYTEST_ARGS_ARE_DEFAULT=0
       break
       ;;
   esac
 done
 
-if [[ "$FAST" -eq 1 && "${#PYTEST_ARGS[@]}" -eq 1 && "${PYTEST_ARGS[0]}" == "-q" ]]; then
-  PYTEST_ARGS=("-q" "-m" "not slow and not e2e")
+if [[ "$FAST" -eq 1 && "$AFFECTED" -eq 1 ]]; then
+  echo "error: --fast and --affected cannot be used together" >&2
+  exit 2
+fi
+
+if [[ "$RUN_PYTEST" -eq 1 ]] && [[ "$FAST" -eq 1 || "$AFFECTED" -eq 1 ]]; then
+  for pytest_arg in "${PYTEST_ARGS[@]}"; do
+    if [[ "$pytest_arg" == "-m" || "$pytest_arg" == -m?* ]]; then
+      echo "error: custom pytest -m cannot be combined with --fast or --affected" >&2
+      exit 2
+    fi
+  done
+fi
+
+if [[ "$FAST" -eq 1 ]]; then
+  if [[ "$PYTEST_ARGS_ARE_DEFAULT" -eq 1 ]]; then
+    PYTEST_ARGS=("-q" "-m" "$FAST_MARKERS")
+  else
+    PYTEST_ARGS=("-m" "$FAST_MARKERS" "${PYTEST_ARGS[@]}")
+  fi
+fi
+
+if [[ "$AFFECTED" -eq 1 && "$RUN_PYTEST" -eq 1 ]]; then
+  AFFECTED_COMMAND=("$PYTHON_BIN" "scripts/select_affected_tests.py" "--root" "$ROOT_DIR")
+  if [[ -n "${CHECK_DIFF_RANGE:-}" ]]; then
+    AFFECTED_COMMAND+=("--diff-range" "$CHECK_DIFF_RANGE")
+  fi
+  AFFECTED_COMMAND+=("--null")
+  AFFECTED_OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/marvis-affected.XXXXXX")"
+  cleanup_affected_output() {
+    rm -f "$AFFECTED_OUTPUT_FILE"
+  }
+  trap cleanup_affected_output EXIT
+
+  set +e
+  "${AFFECTED_COMMAND[@]}" > "$AFFECTED_OUTPUT_FILE"
+  AFFECTED_STATUS=$?
+  set -e
+  if [[ "$AFFECTED_STATUS" -eq 2 ]]; then
+    if [[ "$PYTEST_ARGS_ARE_DEFAULT" -eq 1 ]]; then
+      PYTEST_ARGS=("-q" "-m" "$FAST_MARKERS")
+    else
+      PYTEST_ARGS=("-m" "$FAST_MARKERS" "${PYTEST_ARGS[@]}")
+    fi
+  elif [[ "$AFFECTED_STATUS" -ne 0 ]]; then
+    echo "error: affected-test selector failed with status $AFFECTED_STATUS" >&2
+    exit "$AFFECTED_STATUS"
+  elif [[ ! -s "$AFFECTED_OUTPUT_FILE" ]]; then
+    RUN_PYTEST=0
+  else
+    AFFECTED_TESTS=()
+    while IFS= read -r -d '' test_path; do
+      [[ -n "$test_path" ]] && AFFECTED_TESTS+=("$test_path")
+    done < "$AFFECTED_OUTPUT_FILE"
+    PYTEST_ARGS=("${AFFECTED_TESTS[@]}" "${PYTEST_ARGS[@]}")
+  fi
+  cleanup_affected_output
+  trap - EXIT
 fi
 
 if [[ "$RUN_DIFF" -eq 1 ]]; then

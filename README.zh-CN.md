@@ -225,6 +225,8 @@ ruff check marvis tests --extend-exclude '*.ipynb'
 node --check marvis/static/app.js
 ```
 
+日常小改动可运行 `scripts/check --affected`，按 git diff 选择相关测试；无法安全映射时会自动退回 fast 层。需要覆盖全部非重型用例时运行 `scripts/check --fast`，它会排除 `slow`、`e2e` 和 `llm` 用例。发布前仍运行不带这两个参数的完整 `scripts/check`。
+
 ## 发布推送
 
 发布新的公开版本时，使用 release helper，不要直接裸跑 `git push`。执行时机是：功能、修复或文档改动已经验证并 commit 之后。脚本要求工作区干净，并会单独创建一个版本 bump commit 和 annotated tag。

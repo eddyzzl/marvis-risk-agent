@@ -233,15 +233,19 @@ node --check marvis/static/app.js
 
 Tests are tiered with pytest markers (`slow`, `e2e`, `llm`). For fast local
 iteration, run only the fast tier (excludes real-training/real-subprocess
-tests and browser e2e smoke tests):
+tests, browser e2e smoke tests, and LLM evals):
 
 ```bash
-python -m pytest -m "not slow and not e2e" -q
+python -m pytest -m "not slow and not e2e and not llm" -q
 # or
 scripts/check --fast
 ```
 
-CI always runs the full, untiered suite; `--fast` is a local-only speedup.
+For a small local change, `scripts/check --affected` follows local Python
+imports and runs only the mapped test files. It uses `CHECK_DIFF_RANGE` when
+provided and conservatively falls back to the fast tier when any changed file
+cannot be mapped safely. Pull-request and push CI use the fast tier; manual CI
+dispatch and the release gate run the full, untiered suite.
 
 ## Release Push
 

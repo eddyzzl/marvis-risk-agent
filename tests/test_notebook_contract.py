@@ -306,6 +306,36 @@ def test_contract_head_cell_defines_paths(tmp_path: Path):
     assert namespace["RMC_CODE_SCORES_PATH"].endswith("scores.csv")
 
 
+def test_contract_head_cell_read_csv_falls_back_only_when_encoding_unspecified(
+    tmp_path: Path,
+):
+    csv_path = tmp_path / "feature_importance.csv"
+    csv_path.write_bytes(
+        "feature,importance,分类\nx1,1.0,征信\n".encode("gb18030")
+    )
+    source = build_contract_head_cell_source(
+        sample_path=tmp_path / "sample.csv",
+        contract_meta_path=tmp_path / "contract.json",
+        code_scores_path=tmp_path / "scores.csv",
+        feature_importance_path=tmp_path / "importance.csv",
+        model_params_path=tmp_path / "params.json",
+    )
+    original_read_csv = pd.read_csv
+    namespace: dict = {}
+    try:
+        exec(source, namespace)
+
+        with pytest.raises(UnicodeDecodeError):
+            pd.read_csv(csv_path, encoding="utf-8")
+        frame = pd.read_csv(csv_path)
+    finally:
+        pd.read_csv = original_read_csv
+
+    assert frame.to_dict(orient="records") == [
+        {"feature": "x1", "importance": 1.0, "分类": "征信"}
+    ]
+
+
 def test_contract_tail_cell_scores_and_writes_metadata(tmp_path: Path):
     sample_path = tmp_path / "sample.csv"
     meta_path = tmp_path / "contract.json"
