@@ -142,6 +142,10 @@ def test_v2_word_conclusion_system_prompt_excludes_legacy_consistency_flow(monke
 
     assert "V2 PMML 打分工作流" in captured["system_prompt"]
     assert "不得使用“可复现”“一致性验证”" in captured["system_prompt"]
+    assert "最终验证结论应直接评价模型的区分效果" in captured["system_prompt"]
+    assert "不得复述材料扫描" in captured["system_prompt"]
+    assert "不得写“可直接部署”或“可直接投产”" in captured["system_prompt"]
+    assert "报告已进入" not in captured["system_prompt"]
 
 
 def test_word_conclusion_invalid_json_reports_format_error(monkeypatch):
