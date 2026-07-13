@@ -280,7 +280,6 @@ def _inspect_feature_metadata(
         merged_cell_limit=MAX_MERGED_EXPANDED_CELLS,
     )
     manifest_context = _build_manifest_context(manifest, ledger=ledger)
-    coverage_cache: dict[tuple[str, ...], str | None] = {}
     resolution_cache: dict[
         tuple[tuple[str, ...], tuple[str, ...], tuple[float, ...]], str | None
     ] = {}
@@ -311,7 +310,6 @@ def _inspect_feature_metadata(
                 outcome.table,
                 manifest_context,
                 ledger=ledger,
-                coverage_cache=coverage_cache,
                 resolution_cache=resolution_cache,
                 max_rejections=max_diagnostics,
                 diagnostic_char_limit=max_diagnostic_chars,
@@ -336,7 +334,6 @@ def _inspect_feature_metadata(
             table,
             manifest_context,
             ledger=ledger,
-            coverage_cache=coverage_cache,
             resolution_cache=resolution_cache,
             max_rejections=max_diagnostics,
             diagnostic_char_limit=max_diagnostic_chars,
@@ -1314,13 +1311,15 @@ def _column_selections(
     manifest_context: _ManifestContext,
     *,
     ledger: _InspectionLedger,
-    coverage_cache: dict[tuple[str, ...], str | None],
     resolution_cache: dict[
         tuple[tuple[str, ...], tuple[str, ...], tuple[float, ...]], str | None
     ],
     max_rejections: int,
     diagnostic_char_limit: int,
 ) -> tuple[list[FeatureMetadataSelection], list[str]]:
+    # Coverage is resolved after the three physical columns have been paired.
+    # A partial importance table may still be usable when omitted PMML features
+    # can inherit one unambiguous category from their feature namespace.
     feature_matches, category_matches, importance_matches = _alias_matches(table.columns)
     missing = []
     if not feature_matches:
@@ -1360,22 +1359,6 @@ def _column_selections(
         column: _normalize_importance_column(table, column=column)
         for column in importance_matches
     }
-    for feature_values, feature_error in feature_cache.values():
-        if feature_error or feature_values in coverage_cache:
-            continue
-        available = frozenset(feature_values)
-        missing = [
-            feature
-            for feature in manifest_context.model_features
-            if feature not in available
-        ]
-        coverage_cache[feature_values] = (
-            "missing PMML feature metadata: "
-            + _bounded_join(missing, char_limit=300)
-            if missing
-            else None
-        )
-
     valid: list[FeatureMetadataSelection] = []
     rejected: list[str] = []
     for feature_col, category_col, importance_col in product(
@@ -1392,12 +1375,7 @@ def _column_selections(
         feature_values, feature_error = feature_cache[feature_col]
         category_values, category_error = category_cache[category_col]
         importance_values, importance_error = importance_cache[importance_col]
-        coverage_error = (
-            None if feature_error else coverage_cache.get(feature_values)
-        )
-        cache_error = (
-            feature_error or category_error or importance_error or coverage_error
-        )
+        cache_error = feature_error or category_error or importance_error
         if cache_error:
             if len(rejected) < max_rejections:
                 _append_rejection(
@@ -1632,10 +1610,18 @@ def _resolve_against_manifest(
     model_features = context.model_features
     by_feature = {row.feature: row for row in rows}
     missing = [feature for feature in model_features if feature not in by_feature]
-    if missing:
+    unresolved: list[str] = []
+    for feature in missing:
+        inferred = _inferred_metadata_row(feature, rows)
+        if inferred is None:
+            unresolved.append(feature)
+            continue
+        rows.append(inferred)
+        by_feature[feature] = inferred
+    if unresolved:
         raise ValueError(
             "missing PMML feature metadata: "
-            + _bounded_join(missing, char_limit=300)
+            + _bounded_join(unresolved, char_limit=300)
         )
     ordered: list[FeatureMetadataRow] = []
     model_set = context.model_feature_set
@@ -1676,6 +1662,40 @@ def _resolve_against_manifest(
         extra_features=extras,
         conflicts=(),
     )
+
+
+def _inferred_metadata_row(
+    feature: str, rows: Sequence[FeatureMetadataRow]
+) -> FeatureMetadataRow | None:
+    for namespace in _metadata_namespace_keys(feature):
+        siblings = [
+            row
+            for row in rows
+            if namespace in _metadata_namespace_keys(row.feature)
+        ]
+        categories = {row.category for row in siblings}
+        if len(categories) != 1:
+            continue
+        sheets = {row.source_sheet for row in siblings}
+        return FeatureMetadataRow(
+            feature=feature,
+            category=next(iter(categories)),
+            importance=0.0,
+            source_sheet=next(iter(sheets)) if len(sheets) == 1 else None,
+            in_pmml=True,
+        )
+    return None
+
+
+def _metadata_namespace_keys(feature: str) -> tuple[str, ...]:
+    namespace, separator, _remainder = feature.partition("_")
+    if not separator or not namespace:
+        return ()
+    keys = [namespace]
+    family = "".join(character for character in namespace if character.isalpha())[:2]
+    if len(family) == 2 and family != namespace:
+        keys.append(family)
+    return tuple(keys)
 
 
 def _resolve_stress_fields(

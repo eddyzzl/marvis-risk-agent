@@ -108,6 +108,52 @@ def test_missing_importance_is_blocking_not_selection_ambiguity(
         inspection.only_valid_selection()
 
 
+def test_missing_low_importance_pmml_feature_is_supplemented_from_namespace(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "dictionary.csv"
+    path.write_text(
+        "feature,category,importance\n"
+        "ppdi_known,朴道v4,12.5\n"
+        "bh_known,百行V2,8.0\n"
+        "qrorg_known,人行,3.0\n",
+        encoding="utf-8",
+    )
+    manifest = _manifest(
+        "ppdi_known", "ppdi_missing", "bh_known", "qrid_missing"
+    )
+
+    selection = inspect_feature_metadata(path, manifest).only_valid_selection()
+    resolution = normalize_feature_metadata(
+        path, selection=selection, manifest=manifest
+    )
+
+    by_feature = {row.feature: row for row in resolution.rows}
+    assert by_feature["ppdi_missing"].category == "朴道v4"
+    assert by_feature["ppdi_missing"].importance == 0.0
+    assert by_feature["ppdi_missing"].in_pmml is True
+    assert by_feature["qrid_missing"].category == "人行"
+    assert resolution.coverage.feature == 1.0
+
+
+def test_missing_pmml_feature_with_ambiguous_namespace_stays_blocking(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "dictionary.csv"
+    path.write_text(
+        "feature,category,importance\n"
+        "qrorg_known,人行,3.0\n"
+        "qrfoo_known,其他,2.0\n",
+        encoding="utf-8",
+    )
+    manifest = _manifest("qrorg_known", "qrfoo_known", "qrid_missing")
+
+    inspection = inspect_feature_metadata(path, manifest)
+
+    assert inspection.selections == ()
+    assert "qrid_missing" in " ".join(inspection.blocking_errors)
+
+
 @pytest.mark.parametrize(
     "category_alias",
     ["source", "特征分类", "产品名称", "product", "特征产品", "特征信源"],
