@@ -95,6 +95,14 @@ def normalize_binary_target(
             normalized.append(1)
         elif key == negative_key:
             normalized.append(0)
+        elif _numeric_scalar_equal(value, positive) and not _numeric_scalar_equal(
+            value, negative
+        ):
+            normalized.append(1)
+        elif _numeric_scalar_equal(value, negative) and not _numeric_scalar_equal(
+            value, positive
+        ):
+            normalized.append(0)
         else:
             raise ValueError("target contains a value outside confirmed labels")
     return pd.Series(normalized, index=values.index, dtype="int8")
@@ -104,11 +112,11 @@ def validate_binary_labels(
     observed: Sequence[object], *, positive: object, negative: object | None
 ) -> JsonScalar:
     observed_by_key = _unique_scalar_mapping(observed, field="target")
-    _, positive_key = _json_scalar_with_identity(
-        positive, field="positive label"
+    positive_value, positive_key = _resolve_observed_label(
+        observed_by_key,
+        positive,
+        field="positive label",
     )
-    if positive_key not in observed_by_key:
-        raise ValueError("positive label is not observed in target")
     if len(observed_by_key) != 2:
         raise ValueError("binary target must contain exactly two typed values")
     if negative is None:
@@ -117,16 +125,49 @@ def validate_binary_labels(
             for key, value in observed_by_key.items()
             if key != positive_key
         )
-    _, negative_key = _json_scalar_with_identity(
-        negative, field="negative label"
+    negative_value, negative_key = _resolve_observed_label(
+        observed_by_key,
+        negative,
+        field="negative label",
     )
     if negative_key == positive_key:
         raise ValueError("positive and negative labels must differ")
-    if negative_key not in observed_by_key:
-        raise ValueError("negative label is not observed in target")
     if set(observed_by_key) != {positive_key, negative_key}:
         raise ValueError("target contains a value outside confirmed labels")
-    return observed_by_key[negative_key]
+    return negative_value
+
+
+def _resolve_observed_label(
+    observed_by_key: Mapping[tuple[str, str], JsonScalar],
+    requested: object,
+    *,
+    field: str,
+) -> tuple[JsonScalar, tuple[str, str]]:
+    _, requested_key = _json_scalar_with_identity(requested, field=field)
+    if requested_key in observed_by_key:
+        return observed_by_key[requested_key], requested_key
+    matches = [
+        (value, key)
+        for key, value in observed_by_key.items()
+        if _numeric_scalar_equal(value, requested)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(f"{field} matches multiple typed target values")
+    raise ValueError(f"{field} is not observed in target")
+
+
+def _numeric_scalar_equal(left: object, right: object) -> bool:
+    left = _python_scalar(left)
+    right = _python_scalar(right)
+    if type(left) not in {int, float} or type(right) not in {int, float}:
+        return False
+    if isinstance(left, float) and not math.isfinite(left):
+        return False
+    if isinstance(right, float) and not math.isfinite(right):
+        return False
+    return left == right
 
 
 def validate_split_mapping(

@@ -262,8 +262,33 @@ def test_json_scalar_and_binary_labels_use_type_stable_identity() -> None:
 
     assert len(identities) == 4
     assert validate_binary_labels((1, 1.0), positive=1, negative=1.0) == 1.0
+    assert input_confirmation.normalize_binary_target(
+        pd.Series([1, 1.0], dtype="object"),
+        positive=1,
+        negative=1.0,
+    ).tolist() == [1, 0]
     with pytest.raises(ValueError, match="positive label"):
         validate_binary_labels((1, 1.0), positive=True, negative=1.0)
+
+
+def test_binary_labels_accept_unambiguous_integer_float_json_round_trip() -> None:
+    observed = (0.0, 1.0)
+
+    assert validate_binary_labels(observed, positive=1, negative=0) == 0.0
+    normalized = input_confirmation.normalize_binary_target(
+        pd.Series([0.0, 1.0, 1.0, 0.0]),
+        positive=1,
+        negative=0,
+    )
+
+    assert normalized.tolist() == [0, 1, 1, 0]
+
+
+def test_binary_labels_do_not_coerce_strings_or_booleans_to_numbers() -> None:
+    with pytest.raises(ValueError, match="positive label"):
+        validate_binary_labels((0.0, 1.0), positive="1", negative=0)
+    with pytest.raises(ValueError, match="positive label"):
+        validate_binary_labels((0.0, 1.0), positive=True, negative=0)
 
 
 def test_split_mapping_requires_exact_keys_typed_unique_values_and_full_coverage() -> None:
