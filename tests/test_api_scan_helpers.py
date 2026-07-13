@@ -332,6 +332,8 @@ def test_material_candidates_payload_lists_extra_csv_without_selecting_it(tmp_pa
         "feature_importance_best.csv",
         "sample.parquet",
     }
+    by_path = {item["relative_path"]: item for item in sample_candidates}
+    assert by_path["feature_importance_best.csv"]["role"] == "data_dictionary"
     assert payload["selection"]["sample_path"] == "sample.parquet"
 
 

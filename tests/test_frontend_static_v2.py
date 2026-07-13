@@ -1708,7 +1708,7 @@ def test_validation_material_binding_dialog_is_wired_before_scan():
     assert 'label: "Notebook"' in binding_js
     assert 'label: "Sample"' in binding_js
     assert 'label: "PMML"' in binding_js
-    assert 'label: "Dictionary"' in binding_js
+    assert 'label: "Metadata", caption: "数据字典 / 特征元数据"' in binding_js
     assert "material-binding-role-icon" in binding_js
     assert "material-binding-role-text" in binding_js
     assert '`/api/tasks/${activeTask.id}/materials`' in binding_js

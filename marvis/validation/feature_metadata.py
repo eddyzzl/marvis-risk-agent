@@ -108,6 +108,7 @@ class FeatureMetadataInspection:
     path: str
     selections: tuple[FeatureMetadataSelection, ...]
     blocking_errors: tuple[str, ...]
+    inspection_complete: bool = True
 
     def only_valid_selection(self) -> FeatureMetadataSelection:
         if self.blocking_errors:
@@ -117,6 +118,10 @@ class FeatureMetadataInspection:
         if len(self.selections) != 1:
             raise ValueError("feature metadata selection requires user confirmation")
         return self.selections[0]
+
+
+class FeatureMetadataInspectionIncomplete(ValueError):
+    """Candidate inspection could not finish within the supported safety bounds."""
 
 
 @dataclass(frozen=True)
@@ -172,11 +177,11 @@ class _ManifestContext:
     work_size: int
 
 
-class _MetadataLimitError(ValueError):
+class _MetadataLimitError(FeatureMetadataInspectionIncomplete):
     pass
 
 
-class _InspectionBudgetError(ValueError):
+class _InspectionBudgetError(FeatureMetadataInspectionIncomplete):
     pass
 
 
@@ -252,7 +257,10 @@ def inspect_feature_metadata(
             and max_diagnostic_chars > 0
             else MAX_DIAGNOSTIC_CHARS
         )
-        raise _bounded_value_error(exc, limit=limit) from None
+        bounded = _bounded_text(str(exc), limit)
+        if isinstance(exc, FeatureMetadataInspectionIncomplete):
+            raise FeatureMetadataInspectionIncomplete(bounded) from None
+        raise ValueError(bounded) from None
 
 
 def _inspect_feature_metadata(
@@ -287,6 +295,8 @@ def _inspect_feature_metadata(
     selections: list[FeatureMetadataSelection] = []
     diagnostics: list[str] = []
     structural_errors: list[str] = []
+    incomplete_diagnostics: list[str] = []
+    inspection_complete = True
     suffix = selected_path.suffix.lower()
     if suffix in {".xlsx", ".xls"}:
         outcomes = _iter_excel_candidate_outcomes(
@@ -306,7 +316,7 @@ def _inspect_feature_metadata(
                 structural_errors.append(outcome.structural_error)
             if outcome.table is None:
                 continue
-            valid, rejected = _column_selections(
+            valid, rejected, selection_complete = _column_selections(
                 outcome.table,
                 manifest_context,
                 ledger=ledger,
@@ -314,8 +324,13 @@ def _inspect_feature_metadata(
                 max_rejections=max_diagnostics,
                 diagnostic_char_limit=max_diagnostic_chars,
             )
+            inspection_complete = inspection_complete and selection_complete
+            if not selection_complete:
+                incomplete_diagnostics.extend(rejected)
             if len(selections) + len(valid) > MAX_SELECTIONS:
-                raise ValueError("feature metadata selection limit exceeded")
+                raise FeatureMetadataInspectionIncomplete(
+                    "feature metadata selection limit exceeded"
+                )
             selections.extend(valid)
             _extend_diagnostics(
                 diagnostics,
@@ -330,7 +345,7 @@ def _inspect_feature_metadata(
             max_rows=max_rows,
             max_columns=max_columns,
         )
-        valid, rejected = _column_selections(
+        valid, rejected, selection_complete = _column_selections(
             table,
             manifest_context,
             ledger=ledger,
@@ -338,8 +353,13 @@ def _inspect_feature_metadata(
             max_rejections=max_diagnostics,
             diagnostic_char_limit=max_diagnostic_chars,
         )
+        inspection_complete = inspection_complete and selection_complete
+        if not selection_complete:
+            incomplete_diagnostics.extend(rejected)
         if len(valid) > MAX_SELECTIONS:
-            raise ValueError("feature metadata selection limit exceeded")
+            raise FeatureMetadataInspectionIncomplete(
+                "feature metadata selection limit exceeded"
+            )
         selections.extend(valid)
         _extend_diagnostics(
             diagnostics,
@@ -349,7 +369,12 @@ def _inspect_feature_metadata(
         )
 
     if selections:
-        return FeatureMetadataInspection(str(selected_path), tuple(selections), ())
+        return FeatureMetadataInspection(
+            str(selected_path),
+            tuple(selections),
+            tuple(incomplete_diagnostics[:max_diagnostics]),
+            inspection_complete,
+        )
     if structural_errors:
         raise ValueError(_bounded_text(structural_errors[0], max_diagnostic_chars))
     if not diagnostics:
@@ -358,6 +383,7 @@ def _inspect_feature_metadata(
         str(selected_path),
         (),
         tuple(diagnostics[:max_diagnostics]),
+        inspection_complete,
     )
 
 
@@ -473,9 +499,11 @@ def _enforce_byte_limit(
     try:
         size = path.stat().st_size
     except OSError as exc:
-        raise ValueError("cannot read feature metadata file") from exc
+        raise FeatureMetadataInspectionIncomplete(
+            "cannot read feature metadata file"
+        ) from exc
     if size > limit:
-        raise ValueError(message)
+        raise FeatureMetadataInspectionIncomplete(message)
 
 
 def _validate_xlsx_archive(path: Path) -> None:
@@ -483,13 +511,17 @@ def _validate_xlsx_archive(path: Path) -> None:
         with ZipFile(path, "r") as archive:
             members = archive.infolist()
             if len(members) > MAX_XLSX_ARCHIVE_ENTRIES:
-                raise ValueError("feature metadata XLSX exceeds archive entry limit")
+                raise FeatureMetadataInspectionIncomplete(
+                    "feature metadata XLSX exceeds archive entry limit"
+                )
             total_uncompressed = 0
             for member in members:
                 if member.flag_bits & 0x1:
-                    raise ValueError("encrypted feature metadata XLSX is not supported")
+                    raise FeatureMetadataInspectionIncomplete(
+                        "encrypted feature metadata XLSX is not supported"
+                    )
                 if member.file_size > MAX_XLSX_MEMBER_UNCOMPRESSED_BYTES:
-                    raise ValueError(
+                    raise FeatureMetadataInspectionIncomplete(
                         "feature metadata XLSX member exceeds uncompressed byte limit"
                     )
                 is_xml = member.filename.endswith((".xml", ".rels"))
@@ -499,18 +531,18 @@ def _validate_xlsx_archive(path: Path) -> None:
                     and not is_worksheet
                     and member.file_size > MAX_XLSX_EAGER_XML_UNCOMPRESSED_BYTES
                 ):
-                    raise ValueError(
+                    raise FeatureMetadataInspectionIncomplete(
                         "feature metadata XLSX eager XML member exceeds byte limit"
                     )
                 total_uncompressed += member.file_size
                 if total_uncompressed > MAX_XLSX_TOTAL_UNCOMPRESSED_BYTES:
-                    raise ValueError(
+                    raise FeatureMetadataInspectionIncomplete(
                         "feature metadata XLSX exceeds total uncompressed byte limit"
                     )
                 if member.file_size:
                     ratio = member.file_size / max(member.compress_size, 1)
                     if ratio > MAX_XLSX_COMPRESSION_RATIO:
-                        raise ValueError(
+                        raise FeatureMetadataInspectionIncomplete(
                             "feature metadata XLSX member exceeds compression ratio limit"
                         )
             for member in members:
@@ -540,7 +572,9 @@ def _reject_unsafe_xml_declarations(source: Any) -> None:
             )
         if _xml_root_started(payload):
             return
-    raise ValueError("feature metadata XML prolog exceeds safety limit")
+    raise FeatureMetadataInspectionIncomplete(
+        "feature metadata XML prolog exceeds safety limit"
+    )
 
 
 def _xml_root_started(payload: bytes) -> bool:
@@ -691,6 +725,8 @@ def _read_csv_stream(
                     projected_columns = tuple(
                         columns[index] for index in selected_indices
                     )
+                    if not _has_required_metadata_aliases(projected_columns):
+                        return _Table(None, projected_columns, ())
                     rows: list[tuple[Any, ...]] = []
                     for index, row in enumerate(reader, start=1):
                         if index > max_rows:
@@ -709,14 +745,18 @@ def _read_csv_stream(
     except _MetadataLimitError:
         raise
     except OSError as exc:
-        raise ValueError("cannot read feature metadata CSV") from exc
+        raise FeatureMetadataInspectionIncomplete(
+            "cannot read feature metadata CSV"
+        ) from exc
 
 
 def _validate_csv_headers(
     raw_headers: Sequence[Any], *, max_columns: int
 ) -> tuple[str, ...]:
     if len(raw_headers) > max_columns:
-        raise ValueError("feature metadata exceeds column limit")
+        raise FeatureMetadataInspectionIncomplete(
+            "feature metadata exceeds column limit"
+        )
     headers = tuple(_header_text(value) for value in raw_headers)
     if not headers:
         raise ValueError("feature metadata contains no columns")
@@ -758,13 +798,17 @@ def _iter_xlsx_candidate_outcomes(
     try:
         workbook = load_workbook(path, read_only=True, data_only=True)
     except Exception as exc:
-        raise ValueError("cannot read feature metadata workbook") from exc
+        raise FeatureMetadataInspectionIncomplete(
+            "cannot read feature metadata workbook"
+        ) from exc
     try:
         for sheet_name in workbook.sheetnames:
             worksheet = workbook[sheet_name]
             worksheet.reset_dimensions()
             try:
                 raw_header = _xlsx_header(worksheet, max_columns=max_columns)
+            except FeatureMetadataInspectionIncomplete:
+                raise
             except ValueError as exc:
                 message = f"sheet {sheet_name}: {exc}"
                 yield _ExcelSheetOutcome(None, (), message)
@@ -782,7 +826,7 @@ def _iter_xlsx_candidate_outcomes(
                     max_columns=max_columns,
                     ledger=ledger,
                 )
-            except _InspectionBudgetError:
+            except FeatureMetadataInspectionIncomplete:
                 raise
             except ValueError as exc:
                 message = f"sheet {sheet_name}: {exc}"
@@ -806,7 +850,9 @@ def _xlsx_header(worksheet: Any, *, max_columns: int) -> tuple[Any, ...]:
             )
             parsed = next(parser.parse(), None)
     except Exception as exc:
-        raise ValueError("cannot read feature metadata sheet header") from exc
+        raise FeatureMetadataInspectionIncomplete(
+            "cannot read feature metadata sheet header"
+        ) from exc
     if parsed is None:
         return ()
     row_index, cells = parsed
@@ -820,7 +866,9 @@ def _xlsx_header(worksheet: Any, *, max_columns: int) -> tuple[Any, ...]:
         value = cell["value"]
         if column > max_columns:
             if _header_text(value) in _ALL_ALIAS_SET:
-                raise ValueError("feature metadata exceeds column limit")
+                raise FeatureMetadataInspectionIncomplete(
+                    "feature metadata exceeds column limit"
+                )
             continue
         raw[column - 1] = value
     return _trim_trailing_blank_cells(tuple(raw))
@@ -877,7 +925,9 @@ def _xlsx_candidate_table(
     )
     for index, row in enumerate(iterator):
         if index >= max_rows:
-            raise ValueError("feature metadata exceeds row limit")
+            raise FeatureMetadataInspectionIncomplete(
+                "feature metadata exceeds row limit"
+            )
         raw_rows.append(list(row))
     selected_columns = frozenset(index + 1 for index in selected_indices)
     merged_ranges = _xlsx_merged_ranges(
@@ -920,17 +970,25 @@ def _xlsx_merged_ranges(
                     element.clear()
                     continue
                 if max_col > max_columns:
-                    raise ValueError("feature metadata exceeds column limit")
+                    raise FeatureMetadataInspectionIncomplete(
+                        "feature metadata exceeds column limit"
+                    )
                 if max_row - 1 > max_rows:
-                    raise ValueError("feature metadata exceeds row limit")
+                    raise FeatureMetadataInspectionIncomplete(
+                        "feature metadata exceeds row limit"
+                    )
                 ranges.append(_MergedRange(min_col, min_row, max_col, max_row))
                 if len(ranges) > MAX_MERGED_RANGES:
-                    raise ValueError("feature metadata merged-cell range limit exceeded")
+                    raise FeatureMetadataInspectionIncomplete(
+                        "feature metadata merged-cell range limit exceeded"
+                    )
                 element.clear()
     except ValueError:
         raise
     except Exception as exc:
-        raise ValueError("cannot inspect feature metadata merged cells") from exc
+        raise FeatureMetadataInspectionIncomplete(
+            "cannot inspect feature metadata merged cells"
+        ) from exc
     return tuple(ranges)
 
 
@@ -945,7 +1003,9 @@ def _read_selected_xlsx_sheet(
     try:
         workbook = load_workbook(path, read_only=True, data_only=True)
     except Exception as exc:
-        raise ValueError("cannot read feature metadata workbook") from exc
+        raise FeatureMetadataInspectionIncomplete(
+            "cannot read feature metadata workbook"
+        ) from exc
     try:
         if selection.sheet_name not in workbook.sheetnames:
             raise ValueError("selected feature metadata sheet does not exist")
@@ -975,7 +1035,9 @@ def _iter_xls_candidate_outcomes(
     try:
         workbook = xlrd.open_workbook(path, on_demand=True, formatting_info=True)
     except Exception as exc:
-        raise ValueError("cannot read feature metadata workbook") from exc
+        raise FeatureMetadataInspectionIncomplete(
+            "cannot read feature metadata workbook"
+        ) from exc
     try:
         for sheet_name in workbook.sheet_names():
             sheet = workbook.sheet_by_name(sheet_name)
@@ -997,7 +1059,7 @@ def _iter_xls_candidate_outcomes(
                     max_columns=max_columns,
                     ledger=ledger,
                 )
-            except _InspectionBudgetError:
+            except FeatureMetadataInspectionIncomplete:
                 raise
             except ValueError as exc:
                 message = f"sheet {sheet_name}: {exc}"
@@ -1022,7 +1084,9 @@ def _xls_candidate_table(
     )
     data_row_count = max(int(sheet.nrows) - 1, 0)
     if data_row_count > max_rows:
-        raise ValueError("feature metadata exceeds row limit")
+        raise FeatureMetadataInspectionIncomplete(
+            "feature metadata exceeds row limit"
+        )
     max_selected_col = max(selected_indices) + 1
     raw_rows = [
         list(sheet.row_values(row_index, 0, max_selected_col))
@@ -1062,12 +1126,18 @@ def _xls_merged_ranges(
         ):
             continue
         if merged.max_col > max_columns:
-            raise ValueError("feature metadata exceeds column limit")
+            raise FeatureMetadataInspectionIncomplete(
+                "feature metadata exceeds column limit"
+            )
         if merged.max_row - 1 > max_rows:
-            raise ValueError("feature metadata exceeds row limit")
+            raise FeatureMetadataInspectionIncomplete(
+                "feature metadata exceeds row limit"
+            )
         ranges.append(merged)
         if len(ranges) > MAX_MERGED_RANGES:
-            raise ValueError("feature metadata merged-cell range limit exceeded")
+            raise FeatureMetadataInspectionIncomplete(
+                "feature metadata merged-cell range limit exceeded"
+            )
     return tuple(ranges)
 
 
@@ -1082,7 +1152,9 @@ def _read_selected_xls_sheet(
     try:
         workbook = xlrd.open_workbook(path, on_demand=True, formatting_info=True)
     except Exception as exc:
-        raise ValueError("cannot read feature metadata workbook") from exc
+        raise FeatureMetadataInspectionIncomplete(
+            "cannot read feature metadata workbook"
+        ) from exc
     try:
         if selection.sheet_name not in workbook.sheet_names():
             raise ValueError("selected feature metadata sheet does not exist")
@@ -1116,7 +1188,9 @@ def _project_alias_headers(
     if not selected_indices:
         raise ValueError("feature metadata has no alias columns")
     if max(selected_indices) >= max_columns:
-        raise ValueError("feature metadata exceeds column limit")
+        raise FeatureMetadataInspectionIncomplete(
+            "feature metadata exceeds column limit"
+        )
     headers = tuple(_header_text(raw_header[index]) for index in selected_indices)
     duplicates = _duplicates(headers)
     if duplicates:
@@ -1140,7 +1214,9 @@ def _project_nonblank_rows(
         _validate_cell_values(projected)
         decoded_chars += _decoded_character_count(projected)
         if decoded_chars > MAX_METADATA_DECODED_CHARS:
-            raise ValueError("feature metadata exceeds decoded character limit")
+            raise FeatureMetadataInspectionIncomplete(
+                "feature metadata exceeds decoded character limit"
+            )
         if _row_is_blank(projected):
             continue
         rows.append(projected)
@@ -1191,12 +1267,14 @@ def _read_parquet_table(path: Path, *, max_rows: int, max_columns: int) -> _Tabl
         parquet = pq.ParquetFile(path)
         raw_headers = tuple(parquet.schema_arrow.names)
         headers = _validate_arrow_headers(raw_headers, max_columns=max_columns)
+        projected = tuple(value for value in headers if value in _ALL_ALIAS_SET)
+        if not _has_required_metadata_aliases(projected):
+            return _Table(None, projected, ())
         row_count = int(parquet.metadata.num_rows)
         if row_count > max_rows:
-            raise ValueError("feature metadata exceeds row limit")
-        projected = tuple(value for value in headers if value in _ALL_ALIAS_SET)
-        if not projected:
-            return _Table(None, (), ())
+            raise FeatureMetadataInspectionIncomplete(
+                "feature metadata exceeds row limit"
+            )
         _validate_parquet_role_types(parquet.schema_arrow, projected)
         _validate_parquet_projection_size(parquet, projected)
         rows: list[tuple[Any, ...]] = []
@@ -1209,13 +1287,24 @@ def _read_parquet_table(path: Path, *, max_rows: int, max_columns: int) -> _Tabl
                 _decoded_character_count(row) for row in projected_rows
             )
             if decoded_chars > MAX_METADATA_DECODED_CHARS:
-                raise ValueError("feature metadata exceeds decoded character limit")
+                raise FeatureMetadataInspectionIncomplete(
+                    "feature metadata exceeds decoded character limit"
+                )
             rows.extend(projected_rows)
         return _Table(None, projected, tuple(rows))
     except ValueError:
         raise
     except (OSError, pa.ArrowException) as exc:
         raise ValueError("invalid feature metadata Parquet file") from exc
+
+
+def _has_required_metadata_aliases(columns: Sequence[str]) -> bool:
+    column_set = frozenset(columns)
+    return bool(
+        column_set & _FEATURE_ALIAS_SET
+        and column_set & _CATEGORY_ALIAS_SET
+        and column_set & _IMPORTANCE_ALIAS_SET
+    )
 
 
 def _validate_parquet_role_types(
@@ -1266,12 +1355,12 @@ def _validate_parquet_projection_size(
         for column_index in indices:
             size = int(row_group.column(column_index).total_uncompressed_size)
             if size > MAX_PARQUET_MEMBER_DECODED_BYTES:
-                raise ValueError(
+                raise FeatureMetadataInspectionIncomplete(
                     "feature metadata Parquet column chunk exceeds decoded byte limit"
                 )
             total += size
             if total > MAX_PARQUET_TOTAL_DECODED_BYTES:
-                raise ValueError(
+                raise FeatureMetadataInspectionIncomplete(
                     "feature metadata Parquet projection exceeds decoded byte limit"
                 )
 
@@ -1280,7 +1369,9 @@ def _validate_arrow_headers(
     raw_headers: Sequence[Any], *, max_columns: int
 ) -> tuple[str, ...]:
     if len(raw_headers) > max_columns:
-        raise ValueError("feature metadata exceeds column limit")
+        raise FeatureMetadataInspectionIncomplete(
+            "feature metadata exceeds column limit"
+        )
     headers = tuple(_header_text(value) for value in raw_headers)
     if any(not value for value in headers):
         raise ValueError("feature metadata contains a blank column name")
@@ -1316,7 +1407,7 @@ def _column_selections(
     ],
     max_rejections: int,
     diagnostic_char_limit: int,
-) -> tuple[list[FeatureMetadataSelection], list[str]]:
+) -> tuple[list[FeatureMetadataSelection], list[str], bool]:
     # Coverage is resolved after the three physical columns have been paired.
     # A partial importance table may still be usable when omitted PMML features
     # can inherit one unambiguous category from their feature namespace.
@@ -1330,14 +1421,14 @@ def _column_selections(
         missing.append("importance column alias")
     label = _sheet_label(table.sheet_name)
     if missing:
-        return [], [f"{label}: missing " + ", ".join(missing)]
+        return [], [f"{label}: missing " + ", ".join(missing)], True
     combination_count = (
         len(feature_matches) * len(category_matches) * len(importance_matches)
     )
     if combination_count > MAX_ALIAS_COMBINATIONS:
-        return [], [f"{label}: alias combination limit exceeded"]
+        return [], [f"{label}: alias combination limit exceeded"], False
     if combination_count * len(table.rows) > MAX_ALIAS_ROW_EVALUATIONS:
-        return [], [f"{label}: alias row evaluation limit exceeded"]
+        return [], [f"{label}: alias row evaluation limit exceeded"], False
     ledger.charge_work(
         combination_count
         * (
@@ -1397,6 +1488,8 @@ def _column_selections(
                 )
                 merged = _merge_identical_and_reject_conflicts(rows)
                 _resolve_against_manifest(merged, manifest_context)
+            except FeatureMetadataInspectionIncomplete:
+                raise
             except ValueError as exc:
                 resolution_cache[resolution_key] = _bounded_text(
                     str(exc), MAX_DIAGNOSTIC_CHARS
@@ -1415,9 +1508,9 @@ def _column_selections(
                 )
             continue
         if len(valid) >= MAX_SELECTIONS:
-            return [], [f"{label}: alias selection limit exceeded"]
+            return [], [f"{label}: alias selection limit exceeded"], False
         valid.append(selection)
-    return valid, rejected
+    return valid, rejected, True
 
 
 def _alias_matches(
@@ -1437,6 +1530,8 @@ def _normalize_text_column(
     for row_index, row in enumerate(table.rows, start=2):
         try:
             value = _exact_text(row[index])
+        except FeatureMetadataInspectionIncomplete:
+            raise
         except ValueError as exc:
             return (), str(exc)
         if not value:
@@ -1457,6 +1552,8 @@ def _normalize_importance_column(
     for row_index, value in enumerate(values, start=2):
         try:
             _validate_cell_value(value)
+        except FeatureMetadataInspectionIncomplete:
+            raise
         except ValueError as exc:
             return (), str(exc)
         if _is_blank(value) or isinstance(value, bool):
@@ -1762,7 +1859,9 @@ def _validate_selection(selection: FeatureMetadataSelection) -> None:
     if any(not isinstance(value, str) or not value.strip() for value in columns):
         raise ValueError("selected metadata columns must be non-empty strings")
     if any(len(value) > MAX_METADATA_CELL_CHARS for value in columns):
-        raise ValueError("selected metadata column exceeds cell length limit")
+        raise FeatureMetadataInspectionIncomplete(
+            "selected metadata column exceeds cell length limit"
+        )
     if len(set(columns)) != 3:
         raise ValueError("one physical metadata column cannot serve multiple roles")
 
@@ -1807,7 +1906,9 @@ def _validate_cell_values(values: Sequence[Any]) -> None:
 
 def _validate_cell_value(value: Any) -> None:
     if isinstance(value, str) and len(value) > MAX_METADATA_CELL_CHARS:
-        raise ValueError("feature metadata cell length exceeds limit")
+        raise FeatureMetadataInspectionIncomplete(
+            "feature metadata cell length exceeds limit"
+        )
 
 
 def _decoded_character_count(values: Sequence[Any]) -> int:

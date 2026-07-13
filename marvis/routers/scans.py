@@ -32,11 +32,13 @@ def _repo(request: Request) -> TaskRepository:
 
 
 @router.get("/tasks/{task_id}/materials")
-def task_material_candidates(task_id: str, request: Request) -> dict:
+def task_material_candidates(
+    task_id: str, request: Request, pmml_path: str | None = None
+) -> dict:
     repo = _repo(request)
     task = get_task_or_404(repo, task_id)
     try:
-        return material_candidates_payload(task)
+        return material_candidates_payload(task, pmml_path_override=pmml_path)
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         raise unprocessable(f"source dir invalid: {exc}") from exc
 

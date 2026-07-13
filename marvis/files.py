@@ -9,6 +9,14 @@ from marvis.domain import FileArtifact, FileRole
 EXCEL_SUFFIXES = {".xlsx", ".xls"}
 SAMPLE_SUFFIXES = {".feather", ".csv", ".parquet"}
 DICTIONARY_KEYWORDS = ("字典", "dictionary")
+FEATURE_METADATA_KEYWORDS = (
+    "元数据",
+    "metadata",
+    "特征重要性",
+    "feature importance",
+    "feature_importance",
+)
+FEATURE_METADATA_SUFFIXES = EXCEL_SUFFIXES | {".csv", ".parquet"}
 EXCEL_SAMPLE_KEYWORDS = (
     "样本",
     "数据",
@@ -29,8 +37,9 @@ def classify_file(path: Path) -> FileRole:
 
     if suffix == ".ipynb":
         return FileRole.NOTEBOOK
-    if suffix in EXCEL_SUFFIXES | {".csv"} and any(
-        keyword in name or keyword in lower_name for keyword in DICTIONARY_KEYWORDS
+    if suffix in FEATURE_METADATA_SUFFIXES and any(
+        keyword in name or keyword in lower_name
+        for keyword in (*DICTIONARY_KEYWORDS, *FEATURE_METADATA_KEYWORDS)
     ):
         return FileRole.DATA_DICTIONARY
     if suffix in SAMPLE_SUFFIXES:
@@ -51,12 +60,16 @@ def scan_source_dir(
     max_files: int = 2000,
     max_depth: int = 6,
     max_total_hash_bytes: int = 500 * 1024 * 1024,
+    include_unknown_suffixes: set[str] | frozenset[str] | None = None,
 ) -> list[FileArtifact]:
     if not source_dir.exists():
         raise FileNotFoundError(source_dir)
     if not source_dir.is_dir():
         raise NotADirectoryError(source_dir)
 
+    included_unknown = {
+        str(suffix).lower() for suffix in (include_unknown_suffixes or ())
+    }
     artifacts: list[FileArtifact] = []
     scanned_files = 0
     total_hashed_bytes = 0
@@ -78,7 +91,10 @@ def scan_source_dir(
 
         role = classify_file(path)
         if role == FileRole.UNKNOWN:
-            continue
+            if path.name.startswith((".~", "~$")) or path.name == ".DS_Store":
+                continue
+            if path.suffix.lower() not in included_unknown:
+                continue
 
         size_bytes = path.stat().st_size
         should_hash = (

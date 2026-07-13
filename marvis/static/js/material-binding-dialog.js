@@ -2,7 +2,7 @@ const MATERIAL_BINDING_ROLES = [
   { role: "notebook", field: "notebook_path", label: "Notebook", caption: "Notebook 文件" },
   { role: "sample", field: "sample_path", label: "Sample", caption: "样本数据" },
   { role: "model_pmml", field: "pmml_path", label: "PMML", caption: "PMML 模型" },
-  { role: "data_dictionary", field: "dictionary_path", label: "Dictionary", caption: "数据字典" },
+  { role: "data_dictionary", field: "dictionary_path", label: "Metadata", caption: "数据字典 / 特征元数据" },
 ];
 
 const MATERIAL_BINDING_ROLE_ICONS = {
@@ -31,12 +31,26 @@ function formatBytes(value) {
 
 function candidateText(candidate) {
   const size = formatBytes(candidate?.size_bytes);
-  return `${candidate?.relative_path || candidate?.name || "未命名文件"}${size ? ` · ${size}` : ""}`;
+  const metadataStatus = candidate?.metadata_compatibility?.status;
+  const compatibility = candidate?.recommended
+    ? " · 推荐：与 PMML 完整匹配"
+    : metadataStatus === "compatible"
+      ? " · 与 PMML 匹配"
+      : metadataStatus === "incompatible"
+        ? " · 元数据不完整"
+        : metadataStatus === "not_evaluated"
+          ? " · 需人工确认"
+          : "";
+  return `${candidate?.relative_path || candidate?.name || "未命名文件"}${size ? ` · ${size}` : ""}${compatibility}`;
 }
 
 function defaultSelectionForRole(role, candidates, selection) {
   const selected = String(selection?.[role.field] || "");
   if (selected) return selected;
+  const recommendedCandidates = candidates.filter((candidate) => candidate.recommended);
+  if (recommendedCandidates.length === 1) return recommendedCandidates[0].relative_path || "";
+  const hasMetadataAssessment = candidates.some((candidate) => candidate.metadata_compatibility);
+  if (role.role === "data_dictionary" && (hasMetadataAssessment || candidates.length > 1)) return "";
   const exactRoleCandidates = candidates.filter((candidate) => candidate.role === role.role);
   if (exactRoleCandidates.length === 1) return exactRoleCandidates[0].relative_path || "";
   if (candidates.length === 1) return candidates[0].relative_path || "";
@@ -77,6 +91,7 @@ function renderRoleRow(role, candidates, value) {
 export function createMaterialBindingDialogController({ $, api } = {}) {
   let pendingResolve = null;
   let activeTask = null;
+  let previewRequestSequence = 0;
 
   function setStatus(message, kind = "info") {
     const status = $("materialBindingStatus");
@@ -106,6 +121,46 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
     return selection;
   }
 
+  async function refreshMetadataRecommendation(pmmlPath) {
+    if (!activeTask?.id) return;
+    const requestSequence = ++previewRequestSequence;
+    const dictionarySelect = document.querySelector(
+      '[data-material-binding-field="dictionary_path"]',
+    );
+    if (dictionarySelect) dictionarySelect.value = "";
+    const confirmButton = $("materialBindingConfirmButton");
+    if (confirmButton) confirmButton.disabled = true;
+    setStatus("正在检查所选 PMML 与特征元数据...", "busy");
+    try {
+      const payload = await api(
+        `/api/tasks/${activeTask.id}/materials?pmml_path=${encodeURIComponent(pmmlPath)}`,
+      );
+      if (requestSequence !== previewRequestSequence) return;
+      const currentSelection = collectSelection();
+      render({
+        ...payload,
+        selection: {
+          ...(payload.selection || {}),
+          ...currentSelection,
+          pmml_path: pmmlPath,
+        },
+      });
+      setStatus(
+        payload.recommendation
+          ? "已推荐与所选 PMML 完整匹配的特征元数据，请确认。"
+          : "已按所选 PMML 更新元数据检查结果，请确认。",
+        "info",
+      );
+    } catch (error) {
+      if (requestSequence !== previewRequestSequence) return;
+      setStatus(error?.message || "特征元数据检查失败。", "error");
+    } finally {
+      if (requestSequence === previewRequestSequence && confirmButton) {
+        confirmButton.disabled = false;
+      }
+    }
+  }
+
   function resolvePending(value) {
     if (!pendingResolve) return;
     const resolve = pendingResolve;
@@ -114,6 +169,8 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
   }
 
   function closeWith(value) {
+    previewRequestSequence += 1;
+    activeTask = null;
     resolvePending(value);
     const dialog = $("materialBindingDialog");
     if (dialog?.open) dialog.close(value ? "confirm" : "cancel");
@@ -143,8 +200,11 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
     if (!task || (task.task_type || "validation") !== "validation") return task;
     const payload = await api(`/api/tasks/${task.id}/materials`);
     if (completeSelection(payload.selection)) return task;
+    previewRequestSequence += 1;
     activeTask = task;
     render(payload);
+    const confirmButton = $("materialBindingConfirmButton");
+    if (confirmButton) confirmButton.disabled = false;
     setStatus("");
     const dialog = $("materialBindingDialog");
     if (!dialog) return task;
@@ -155,6 +215,12 @@ export function createMaterialBindingDialogController({ $, api } = {}) {
   }
 
   function bind() {
+    $("materialBindingRows")?.addEventListener("change", (event) => {
+      const field = event.target?.dataset?.materialBindingField;
+      if (field === "pmml_path") {
+        refreshMetadataRecommendation(event.target.value || "");
+      }
+    });
     $("materialBindingConfirmButton")?.addEventListener("click", confirmSelection);
     $("materialBindingCancelButton")?.addEventListener("click", () => closeWith(null));
     $("closeMaterialBindingDialogButton")?.addEventListener("click", () => closeWith(null));

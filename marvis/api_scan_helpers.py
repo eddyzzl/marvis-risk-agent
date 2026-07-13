@@ -34,6 +34,7 @@ from marvis.pipeline import SCAN_STAGE_FAILURE_PREFIX
 from marvis.repositories.validation_contracts import ValidationContractRepository
 from marvis.safe_paths import assert_within
 from marvis.validation.feature_metadata import (
+    FeatureMetadataInspectionIncomplete,
     FeatureMetadataSelection,
     inspect_feature_metadata,
     normalize_feature_metadata,
@@ -59,7 +60,7 @@ REQUIRED_SCAN_MATERIALS = (
     (FileRole.NOTEBOOK, "Notebook 文件", "notebook_path"),
     (FileRole.SAMPLE, "样本数据", "sample_path"),
     (FileRole.MODEL_PMML, "PMML 模型", "pmml_path"),
-    (FileRole.DATA_DICTIONARY, "数据字典", "dictionary_path"),
+    (FileRole.DATA_DICTIONARY, "数据字典/特征元数据", "dictionary_path"),
 )
 MATERIAL_SELECTION_SUFFIXES = {
     FileRole.NOTEBOOK: {".ipynb"},
@@ -67,6 +68,11 @@ MATERIAL_SELECTION_SUFFIXES = {
     FileRole.MODEL_PMML: {".pmml"},
     FileRole.DATA_DICTIONARY: SAMPLE_SUFFIXES | EXCEL_SUFFIXES,
 }
+MAX_FEATURE_METADATA_CANDIDATES = 32
+MAX_FEATURE_METADATA_CANDIDATE_FILE_BYTES = 64 * 1024 * 1024
+MAX_FEATURE_METADATA_CANDIDATE_BYTES = 512 * 1024 * 1024
+FEATURE_METADATA_INSPECTION_SUFFIXES = EXCEL_SUFFIXES | {".csv", ".parquet"}
+EXPLICIT_SAMPLE_FILENAME_KEYWORDS = ("sample", "样本")
 
 RMC_CONTRACT_NAME_LABELS = {
     "RMC_SAMPLE_DF": "RMC_SAMPLE_DF（样本 DataFrame）",
@@ -641,14 +647,42 @@ def _scan_history_summary(payload: dict) -> dict:
     }
 
 
-def material_candidates_payload(task: TaskRecord) -> dict:
+def material_candidates_payload(
+    task: TaskRecord, *, pmml_path_override: str | None = None
+) -> dict:
     source_dir = Path(task.source_dir).resolve()
-    artifacts = scan_source_dir(source_dir)
+    artifacts = scan_source_dir(
+        source_dir,
+        hash_limit_bytes=MAX_FEATURE_METADATA_CANDIDATE_FILE_BYTES,
+        include_unknown_suffixes=EXCEL_SUFFIXES,
+    )
+    compatibility, compatible_paths, pmml_relative_path, evaluation_complete = (
+        _feature_metadata_candidate_compatibility(
+            task=task,
+            artifacts=artifacts,
+            source_dir=source_dir,
+            pmml_path_override=pmml_path_override,
+        )
+    )
+    explicit_dictionary = pmml_path_override is None and bool(
+        str(task.dictionary_path or "").strip()
+    )
+    recommended_path = (
+        compatible_paths[0]
+        if (
+            evaluation_complete
+            and not explicit_dictionary
+            and len(compatible_paths) == 1
+        )
+        else None
+    )
     candidates: dict[str, list[dict]] = {
         role.value: [] for role, _, _ in REQUIRED_SCAN_MATERIALS
     }
     seen: dict[str, set[str]] = {role.value: set() for role, _, _ in REQUIRED_SCAN_MATERIALS}
     for artifact in artifacts:
+        artifact_key = _relative_material_path(artifact.path, source_dir)
+        assessment = compatibility.get(artifact_key)
         for role in material_candidate_roles(artifact):
             role_key = role.value
             candidate = material_candidate_payload(artifact, source_dir)
@@ -656,6 +690,10 @@ def material_candidates_payload(task: TaskRecord) -> dict:
             if key in seen[role_key]:
                 continue
             seen[role_key].add(key)
+            if role is FileRole.DATA_DICTIONARY:
+                if assessment is not None:
+                    candidate["metadata_compatibility"] = assessment
+                candidate["recommended"] = key == recommended_path
             candidates[role_key].append(candidate)
     for values in candidates.values():
         values.sort(key=lambda item: item["relative_path"])
@@ -664,6 +702,15 @@ def material_candidates_payload(task: TaskRecord) -> dict:
         "source_dir": str(source_dir),
         "selection": material_selection_payload(task, source_dir),
         "candidates": candidates,
+        "recommendation": (
+            {
+                "dictionary_path": recommended_path,
+                "pmml_path": pmml_relative_path,
+                "reason": "unique_pmml_compatible_feature_metadata",
+            }
+            if recommended_path is not None and pmml_relative_path is not None
+            else None
+        ),
         "artifacts": [
             material_candidate_payload(artifact, source_dir) for artifact in artifacts
         ],
@@ -672,6 +719,155 @@ def material_candidates_payload(task: TaskRecord) -> dict:
             for role, label, field in REQUIRED_SCAN_MATERIALS
         ],
     }
+
+
+def _feature_metadata_candidate_compatibility(
+    *,
+    task: TaskRecord,
+    artifacts: list[FileArtifact],
+    source_dir: Path,
+    pmml_path_override: str | None = None,
+) -> tuple[dict[str, dict], list[str], str | None, bool]:
+    if pmml_path_override is not None:
+        if not str(pmml_path_override).strip():
+            return {}, [], None, False
+        normalized_pmml_path = normalize_selected_material_path(
+            source_dir=source_dir,
+            role=FileRole.MODEL_PMML,
+            label="PMML 模型",
+            value=pmml_path_override,
+        )
+        pmml_path = source_dir / normalized_pmml_path
+        error = None
+    else:
+        pmml_path, error = resolve_scan_material(
+            task=task,
+            artifacts=artifacts,
+            role=FileRole.MODEL_PMML,
+            label="PMML 模型",
+            task_field="pmml_path",
+        )
+    if error or pmml_path is None:
+        return {}, [], None, False
+    try:
+        manifest = parse_pmml_input_manifest(pmml_path)
+    except ValueError:
+        return {}, [], _relative_material_path(pmml_path, source_dir), False
+
+    selected_sample = _selected_material_path(
+        task=task,
+        source_dir=source_dir,
+        field="sample_path",
+    )
+    eligible = [
+        artifact
+        for artifact in artifacts
+        if artifact.path.resolve() != selected_sample
+        and not _is_explicitly_named_sample(artifact)
+        and artifact.path.suffix.lower() in FEATURE_METADATA_INSPECTION_SUFFIXES
+    ]
+    eligible.sort(
+        key=lambda artifact: (
+            artifact.role is not FileRole.DATA_DICTIONARY,
+            _relative_material_path(artifact.path, source_dir),
+        )
+    )
+
+    compatibility: dict[str, dict] = {}
+    compatible_paths: list[str] = []
+    inspected_bytes = 0
+    evaluation_complete = True
+    for index, artifact in enumerate(eligible):
+        relative_path = _relative_material_path(artifact.path, source_dir)
+        if artifact.size_bytes > MAX_FEATURE_METADATA_CANDIDATE_FILE_BYTES:
+            evaluation_complete = False
+            compatibility[relative_path] = {
+                "status": "not_evaluated",
+                "selection_count": 0,
+                "blocking_errors": [
+                    "feature metadata candidate exceeds automatic file size limit"
+                ],
+            }
+            continue
+        if (
+            index >= MAX_FEATURE_METADATA_CANDIDATES
+            or artifact.size_bytes
+            > MAX_FEATURE_METADATA_CANDIDATE_BYTES - inspected_bytes
+        ):
+            evaluation_complete = False
+            compatibility[relative_path] = {
+                "status": "not_evaluated",
+                "selection_count": 0,
+                "blocking_errors": ["feature metadata candidate evaluation limit exceeded"],
+            }
+            continue
+        inspected_bytes += artifact.size_bytes
+        try:
+            inspection = inspect_feature_metadata(artifact.path, manifest)
+        except FeatureMetadataInspectionIncomplete as exc:
+            evaluation_complete = False
+            assessment = {
+                "status": "not_evaluated",
+                "selection_count": 0,
+                "blocking_errors": [str(exc)],
+            }
+        except ValueError as exc:
+            assessment = {
+                "status": "incompatible",
+                "selection_count": 0,
+                "blocking_errors": [str(exc)],
+            }
+        else:
+            selection_count = len(inspection.selections)
+            blocking_errors = list(inspection.blocking_errors)
+            if not inspection.inspection_complete:
+                evaluation_complete = False
+            assessment = {
+                "status": (
+                    "not_evaluated"
+                    if not inspection.inspection_complete
+                    else "compatible" if selection_count else "incompatible"
+                ),
+                "selection_count": selection_count,
+                "blocking_errors": blocking_errors,
+            }
+        compatibility[relative_path] = assessment
+        if assessment["status"] == "compatible":
+            compatible_paths.append(relative_path)
+    return (
+        compatibility,
+        compatible_paths,
+        _relative_material_path(pmml_path, source_dir),
+        evaluation_complete,
+    )
+
+
+def _is_explicitly_named_sample(artifact: FileArtifact) -> bool:
+    if artifact.role is not FileRole.SAMPLE:
+        return False
+    name = artifact.path.stem.casefold()
+    return any(keyword in name for keyword in EXPLICIT_SAMPLE_FILENAME_KEYWORDS)
+
+
+def _selected_material_path(
+    *, task: TaskRecord, source_dir: Path, field: str
+) -> Path | None:
+    raw_value = str(getattr(task, field, None) or "").strip()
+    if not raw_value:
+        return None
+    raw_path = Path(raw_value)
+    candidate = raw_path if raw_path.is_absolute() else source_dir / raw_path
+    try:
+        return candidate.resolve(strict=True)
+    except FileNotFoundError:
+        return None
+
+
+def _relative_material_path(path: Path, source_dir: Path) -> str:
+    try:
+        return path.resolve().relative_to(source_dir).as_posix()
+    except ValueError:
+        return path.name
 
 
 def material_candidate_roles(artifact: FileArtifact) -> list[FileRole]:
