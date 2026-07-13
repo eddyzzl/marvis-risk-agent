@@ -20,6 +20,7 @@ from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling import tools as modeling_tools
 from marvis.packs.modeling import train_tools as modeling_train_tools
+from marvis.packs.modeling.recipes.common import pop_boost_rounds
 from marvis.packs.modeling.tools import _ModelArtifactScorer, _effective_seed
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
@@ -858,12 +859,10 @@ def _register_segment_sample(registry, tmp_path, task_id: str):
     return registry.register_existing(path, task_id=task_id, role="modeling_sample")
 
 
-@pytest.mark.slow
-def test_segment_value_evaluation_reports_pooled_and_per_segment_breakdown(tmp_path):
-    """SEL-8 (scoped-down diagnostic): segment_value_evaluation scores ONE
-    already-trained model (no new training) and reports pooled KS/AUC plus a
-    per-segment breakdown -- channel B's much weaker signal must show up as a
-    materially lower per-segment AUC than channel A, with a nonzero KS spread."""
+@pytest.fixture(scope="module")
+def segment_model_scenario(tmp_path_factory):
+    """Train the shared SEL-8 model once; each test still invokes the real tool."""
+    tmp_path = tmp_path_factory.mktemp("segment-model")
     runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
     dataset = _register_segment_sample(registry, tmp_path, task.id)
     prepared = runner.invoke(
@@ -879,7 +878,6 @@ def test_segment_value_evaluation_reports_pooled_and_per_segment_breakdown(tmp_p
         task_id=task.id,
     )
     assert prepared.ok is True, prepared.error
-
     trained = runner.invoke(
         ToolRef("modeling", "train_model"),
         {
@@ -895,16 +893,29 @@ def test_segment_value_evaluation_reports_pooled_and_per_segment_breakdown(tmp_p
         task_id=task.id,
     )
     assert trained.ok is True, trained.error
+    return SimpleNamespace(
+        runner=runner,
+        task_id=task.id,
+        dataset_id=prepared.output["result_dataset_id"],
+        artifact_id=trained.output["artifact_id"],
+    )
 
-    evaluated = runner.invoke(
+
+@pytest.mark.slow
+def test_segment_value_evaluation_reports_pooled_and_per_segment_breakdown(segment_model_scenario):
+    """SEL-8 (scoped-down diagnostic): segment_value_evaluation scores ONE
+    already-trained model (no new training) and reports pooled KS/AUC plus a
+    per-segment breakdown -- channel B's much weaker signal must show up as a
+    materially lower per-segment AUC than channel A, with a nonzero KS spread."""
+    evaluated = segment_model_scenario.runner.invoke(
         ToolRef("modeling", "segment_value_evaluation"),
         {
-            "artifact_id": trained.output["artifact_id"],
-            "dataset_id": prepared.output["result_dataset_id"],
+            "artifact_id": segment_model_scenario.artifact_id,
+            "dataset_id": segment_model_scenario.dataset_id,
             "segment_col": "channel",
             "min_group_rows": 50,
         },
-        task_id=task.id,
+        task_id=segment_model_scenario.task_id,
     )
 
     assert evaluated.ok is True, evaluated.error
@@ -921,63 +932,34 @@ def test_segment_value_evaluation_reports_pooled_and_per_segment_breakdown(tmp_p
 
     # deterministic: same inputs -> byte-identical numbers (no randomness in
     # scoring/grouping/KS-AUC computation).
-    evaluated_again = runner.invoke(
+    evaluated_again = segment_model_scenario.runner.invoke(
         ToolRef("modeling", "segment_value_evaluation"),
         {
-            "artifact_id": trained.output["artifact_id"],
-            "dataset_id": prepared.output["result_dataset_id"],
+            "artifact_id": segment_model_scenario.artifact_id,
+            "dataset_id": segment_model_scenario.dataset_id,
             "segment_col": "channel",
             "min_group_rows": 50,
         },
-        task_id=task.id,
+        task_id=segment_model_scenario.task_id,
     )
     assert evaluated_again.output["segments"] == out["segments"]
     assert evaluated_again.output["pooled"] == out["pooled"]
 
 
 @pytest.mark.slow
-def test_segment_value_evaluation_merges_small_segments_into_default_group(tmp_path):
+def test_segment_value_evaluation_merges_small_segments_into_default_group(segment_model_scenario):
     """SEL-8: any segment below min_group_rows is folded into __default__
     rather than getting an unreliable few-row KS/AUC row of its own -- with the
     tool's own default floor (500), channel B (a few hundred rows) merges away
     and only __default__ remains."""
-    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
-    dataset = _register_segment_sample(registry, tmp_path, task.id)
-    prepared = runner.invoke(
-        ToolRef("modeling", "prepare_modeling_frame"),
-        {
-            "dataset_id": dataset.id,
-            "target_col": "y",
-            "feature_cols": ["x1", "x2"],
-            "split_col": "split",
-            "passthrough_cols": ["channel"],
-            "seed": 11,
-        },
-        task_id=task.id,
-    )
-    trained = runner.invoke(
-        ToolRef("modeling", "train_model"),
-        {
-            "dataset_id": prepared.output["result_dataset_id"],
-            "recipe": "lgb",
-            "features": ["x1", "x2"],
-            "target_col": "y",
-            "split_col": "split",
-            "split_values": {"train": "train", "test": "test", "oot": "oot"},
-            "params": {"num_boost_round": 20, "learning_rate": 0.1, "num_leaves": 8},
-            "seed": 23,
-        },
-        task_id=task.id,
-    )
-
-    evaluated = runner.invoke(
+    evaluated = segment_model_scenario.runner.invoke(
         ToolRef("modeling", "segment_value_evaluation"),
         {
-            "artifact_id": trained.output["artifact_id"],
-            "dataset_id": prepared.output["result_dataset_id"],
+            "artifact_id": segment_model_scenario.artifact_id,
+            "dataset_id": segment_model_scenario.dataset_id,
             "segment_col": "channel",
         },
-        task_id=task.id,
+        task_id=segment_model_scenario.task_id,
     )
 
     assert evaluated.ok is True, evaluated.error
@@ -987,46 +969,17 @@ def test_segment_value_evaluation_merges_small_segments_into_default_group(tmp_p
 
 
 @pytest.mark.slow
-def test_segment_value_evaluation_requires_binary_target_and_known_segment_column(tmp_path):
+def test_segment_value_evaluation_requires_binary_target_and_known_segment_column(segment_model_scenario):
     """SEL-8: clear config errors instead of silent misbehaviour -- an unknown
     segment_col and (separately) a non-binary target both raise."""
-    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
-    dataset = _register_segment_sample(registry, tmp_path, task.id)
-    prepared = runner.invoke(
-        ToolRef("modeling", "prepare_modeling_frame"),
-        {
-            "dataset_id": dataset.id,
-            "target_col": "y",
-            "feature_cols": ["x1", "x2"],
-            "split_col": "split",
-            "passthrough_cols": ["channel"],
-            "seed": 11,
-        },
-        task_id=task.id,
-    )
-    trained = runner.invoke(
-        ToolRef("modeling", "train_model"),
-        {
-            "dataset_id": prepared.output["result_dataset_id"],
-            "recipe": "lgb",
-            "features": ["x1", "x2"],
-            "target_col": "y",
-            "split_col": "split",
-            "split_values": {"train": "train", "test": "test", "oot": "oot"},
-            "params": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
-            "seed": 23,
-        },
-        task_id=task.id,
-    )
-
-    missing_col = runner.invoke(
+    missing_col = segment_model_scenario.runner.invoke(
         ToolRef("modeling", "segment_value_evaluation"),
         {
-            "artifact_id": trained.output["artifact_id"],
-            "dataset_id": prepared.output["result_dataset_id"],
+            "artifact_id": segment_model_scenario.artifact_id,
+            "dataset_id": segment_model_scenario.dataset_id,
             "segment_col": "does_not_exist",
         },
-        task_id=task.id,
+        task_id=segment_model_scenario.task_id,
     )
     assert missing_col.ok is False
     assert "segment_col not found" in missing_col.error
@@ -1206,124 +1159,72 @@ def test_modeling_pack_tools_round_trip_via_runner(tmp_path):
     assert selected.ok is True, selected.error
     assert set(selected.output["selected"]) <= {"x1", "x2"}
 
-    train_outputs = {}
-    for recipe, params in {
-        "lgb": {"num_boost_round": 2, "learning_rate": 0.1, "num_leaves": 4},
-        "xgb": {"num_boost_round": 2, "max_depth": 2, "eta": 0.1},
-        "lr": {"max_iter": 200},
-        "scorecard": {"scorecard_max_bins": 3, "max_iter": 200},
-    }.items():
-        result = runner.invoke(
-            ToolRef("modeling", "train_model"),
-            {
-                "dataset_id": prepared.output["result_dataset_id"],
-                "recipe": recipe,
-                "features": ["x1", "x2"],
-                "target_col": "y",
-                "split_col": "split",
-                "split_values": {"train": "train", "test": "test", "oot": "oot"},
-                "params": params,
-                "seed": 23,
-            },
-            task_id=task.id,
-        )
-        assert result.ok is True, result.error
-        assert result.output["metrics"]["overfit_flag"] in {True, False}
-        assert result.output["artifact_id"]
-        train_outputs[recipe] = result.output
-
-    repeated_lr = runner.invoke(
+    trained = runner.invoke(
         ToolRef("modeling", "train_model"),
         {
             "dataset_id": prepared.output["result_dataset_id"],
-            "recipe": "lr",
+            # Keep the scorecard path as the one cross-layer smoke: its
+            # train -> PMML -> validation handoff chain is not represented by
+            # the lighter LR handoff and per-artifact unit tests.
+            "recipe": "scorecard",
             "features": ["x1", "x2"],
             "target_col": "y",
             "split_col": "split",
             "split_values": {"train": "train", "test": "test", "oot": "oot"},
-            "params": {"max_iter": 200},
+            "params": {"scorecard_max_bins": 3, "max_iter": 200},
             "seed": 23,
         },
         task_id=task.id,
     )
 
-    assert repeated_lr.ok is True, repeated_lr.error
-    assert repeated_lr.output["metrics"]["test_auc"] == train_outputs["lr"]["metrics"]["test_auc"]
+    assert trained.ok is True, trained.error
+    assert trained.output["metrics"]["overfit_flag"] in {True, False}
+    assert trained.output["artifact_id"]
 
     compared = runner.invoke(
         ToolRef("modeling", "compare_experiments"),
-        {"experiment_ids": [output["experiment_id"] for output in train_outputs.values()]},
+        {"experiment_ids": [trained.output["experiment_id"]]},
         task_id=task.id,
     )
-    exported_by_recipe = {}
-    for recipe, output in train_outputs.items():
-        exported_by_recipe[recipe] = runner.invoke(
-            ToolRef("modeling", "export_pmml"),
-            {"artifact_id": output["artifact_id"]},
-            task_id=task.id,
-        )
+    exported = runner.invoke(
+        ToolRef("modeling", "export_pmml"),
+        {"artifact_id": trained.output["artifact_id"]},
+        task_id=task.id,
+    )
     handed_off = runner.invoke(
         ToolRef("modeling", "handoff_to_validation"),
         {
-            "experiment_id": train_outputs["lr"]["experiment_id"],
-            "sample_dataset_id": prepared.output["result_dataset_id"],
-        },
-        task_id=task.id,
-    )
-    scorecard_handed_off = runner.invoke(
-        ToolRef("modeling", "handoff_to_validation"),
-        {
-            "experiment_id": train_outputs["scorecard"]["experiment_id"],
+            "experiment_id": trained.output["experiment_id"],
             "sample_dataset_id": prepared.output["result_dataset_id"],
         },
         task_id=task.id,
     )
 
     assert compared.ok is True, compared.error
-    scorecard_artifact = ModelingRepository(settings.db_path).get_model_artifact(
-        train_outputs["scorecard"]["artifact_id"]
+    assert [row["recipe"] for row in compared.output["experiments"]] == ["scorecard"]
+    capabilities = compared.output["experiments"][0]["capabilities"]
+    assert capabilities["pmml_supported"] is True
+    assert capabilities["handoff_supported"] is True
+    assert capabilities["reason"] is None
+    assert exported.ok is True, exported.error
+    assert Path(exported.output["pmml_path"]).exists()
+    meta_path = (
+        Path(settings.tasks_dir)
+        / task.id
+        / "modeling_artifacts"
+        / f"{trained.output['artifact_id']}.model_meta.json"
     )
-    assert scorecard_artifact is not None
-    assert scorecard_artifact.scorecard_table
-    assert {"feature", "bin_label", "points"} <= set(scorecard_artifact.scorecard_table[0])
-    assert [row["recipe"] for row in compared.output["experiments"]] == [
-        "lgb",
-        "xgb",
-        "lr",
-        "scorecard",
-    ]
-    rows_by_recipe = {row["recipe"]: row for row in compared.output["experiments"]}
-    for recipe in ("lgb", "xgb", "lr", "scorecard"):
-        assert rows_by_recipe[recipe]["capabilities"]["pmml_supported"] is True
-        assert rows_by_recipe[recipe]["capabilities"]["handoff_supported"] is True
-        assert rows_by_recipe[recipe]["capabilities"]["reason"] is None
-        assert exported_by_recipe[recipe].ok is True, exported_by_recipe[recipe].error
-        assert Path(exported_by_recipe[recipe].output["pmml_path"]).exists()
-        meta_path = (
-            Path(settings.tasks_dir)
-            / task.id
-            / "modeling_artifacts"
-            / f"{train_outputs[recipe]['artifact_id']}.model_meta.json"
-        )
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        assert meta["pmml_path"] == f"{train_outputs[recipe]['artifact_id']}.pmml"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta["pmml_path"] == f"{trained.output['artifact_id']}.pmml"
     pmml_audits = PluginRepository(settings.db_path).list_audit(kind="modeling.artifact.pmml")
-    assert {audit["target_ref"] for audit in pmml_audits} >= {
-        output["artifact_id"] for output in train_outputs.values()
-    }
+    assert {audit["target_ref"] for audit in pmml_audits} >= {trained.output["artifact_id"]}
     assert handed_off.ok is True, handed_off.error
-    assert scorecard_handed_off.ok is True, scorecard_handed_off.error
     validation_task = TaskRepository(settings.db_path).get_task(
         handed_off.output["validation_task_id"]
     )
-    scorecard_validation_task = TaskRepository(settings.db_path).get_task(
-        scorecard_handed_off.output["validation_task_id"]
-    )
     assert validation_task.task_type == "validation"
+    assert validation_task.algorithm == "scorecard"
     assert validation_task.pmml_path == "model.pmml"
-    assert scorecard_validation_task.task_type == "validation"
-    assert scorecard_validation_task.algorithm == "scorecard"
-    assert scorecard_validation_task.pmml_path == "model.pmml"
 
 
 def test_modeling_pack_trains_income_regression_scenario_via_runner(tmp_path):
@@ -1921,18 +1822,19 @@ def test_train_models_raises_when_every_recipe_fails(tmp_path, monkeypatch: pyte
         )
 
 
-@pytest.mark.slow
-def test_select_experiment_refits_champion_on_train_plus_test_by_default(tmp_path):
-    """TUNE-4: select_experiment defaults refit_on_train_plus_test=True -- the
-    champion's frozen hyperparameters get retrained on train+test combined (test's
-    information is otherwise permanently wasted on the delivered artifact), OOT
-    stays untouched, and the tool reports the pre/post-refit OOT metrics side by
-    side so a caller can confirm the refit actually helped."""
+def _build_selection_scenario(tmp_path, *, refit: bool):
+    """Build one real champion path for assertions spread across several tests."""
     runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
     dataset = _register_modeling_sample(registry, tmp_path, task.id)
     prepared = runner.invoke(
         ToolRef("modeling", "prepare_modeling_frame"),
-        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        {
+            "dataset_id": dataset.id,
+            "target_col": "y",
+            "feature_cols": ["x1", "x2"],
+            "split_col": "split",
+            "seed": 11,
+        },
         task_id=task.id,
     )
     assert prepared.ok is True, prepared.error
@@ -1951,26 +1853,82 @@ def test_select_experiment_refits_champion_on_train_plus_test_by_default(tmp_pat
         task_id=task.id,
     )
     assert trained.ok is True, trained.error
-    pre_refit_artifact_id = trained.output["artifact_id"]
-
+    selection_inputs = {
+        "experiment_ids": [trained.output["experiment_id"]],
+        "target_type": "binary",
+    }
+    if not refit:
+        selection_inputs.update({
+            "selected_experiment_id": trained.output["experiment_id"],
+            "refit_on_train_plus_test": False,
+        })
     selected = runner.invoke(
         ToolRef("modeling", "select_experiment"),
-        {
-            "experiment_ids": [trained.output["experiment_id"]],
-            "selected_experiment_id": trained.output["experiment_id"],
-            "target_type": "binary",
-        },
+        selection_inputs,
         task_id=task.id,
     )
-
     assert selected.ok is True, selected.error
-    refit = selected.output["refit"]
+    return SimpleNamespace(
+        runner=runner,
+        settings=settings,
+        task_id=task.id,
+        dataset=dataset,
+        trained=trained.output,
+        selected=selected.output,
+    )
+
+
+@pytest.fixture(scope="module")
+def refit_champion_scenario(tmp_path_factory):
+    return _build_selection_scenario(tmp_path_factory.mktemp("refit-champion"), refit=True)
+
+
+@pytest.fixture(scope="module")
+def non_refit_champion_scenario(tmp_path_factory):
+    return _build_selection_scenario(tmp_path_factory.mktemp("non-refit-champion"), refit=False)
+
+
+def _run_post_training_scenario(scenario):
+    post_training = scenario.runner.invoke(
+        ToolRef("modeling", "post_training_action"),
+        {
+            "experiment_id": scenario.selected["selected_experiment_id"],
+            "sample_dataset_id": scenario.dataset.id,
+            "actions": [],
+            "selection_policy_decision": scenario.selected.get("policy_decision") or {},
+        },
+        task_id=scenario.task_id,
+    )
+    assert post_training.ok is True, post_training.error
+    return post_training.output
+
+
+@pytest.fixture(scope="module")
+def refit_post_training_scenario(refit_champion_scenario):
+    return _run_post_training_scenario(refit_champion_scenario)
+
+
+@pytest.fixture(scope="module")
+def non_refit_post_training_scenario(non_refit_champion_scenario):
+    return _run_post_training_scenario(non_refit_champion_scenario)
+
+
+@pytest.mark.slow
+def test_select_experiment_refits_champion_on_train_plus_test_by_default(refit_champion_scenario):
+    """TUNE-4: select_experiment defaults refit_on_train_plus_test=True -- the
+    champion's frozen hyperparameters get retrained on train+test combined (test's
+    information is otherwise permanently wasted on the delivered artifact), OOT
+    stays untouched, and the tool reports the pre/post-refit OOT metrics side by
+    side so a caller can confirm the refit actually helped."""
+    trained = refit_champion_scenario.trained
+    selected = refit_champion_scenario.selected
+    refit = selected["refit"]
     assert refit["requested"] is True
     assert refit["applied"] is True
     # a new artifact/experiment was produced -- the pre-refit champion only ever
     # saw train, the refit artifact additionally saw test.
-    assert selected.output["artifact_id"] != pre_refit_artifact_id
-    assert selected.output["selected_experiment_id"] != trained.output["experiment_id"]
+    assert selected["artifact_id"] != trained["artifact_id"]
+    assert selected["selected_experiment_id"] != trained["experiment_id"]
     assert "oot_ks_before_refit" in refit
     assert "oot_ks_after_refit" in refit
     # pre-refit metrics are the honest train-split champion's held-out test values.
@@ -1983,8 +1941,8 @@ def test_select_experiment_refits_champion_on_train_plus_test_by_default(tmp_pat
 
     from marvis.db import ModelingRepository
 
-    modeling_repo = ModelingRepository(settings.db_path)
-    refit_artifact = modeling_repo.get_model_artifact(selected.output["artifact_id"])
+    modeling_repo = ModelingRepository(refit_champion_scenario.settings.db_path)
+    refit_artifact = modeling_repo.get_model_artifact(selected["artifact_id"])
     assert refit_artifact.params.get("refit_on_train_plus_test") is True
     # trained on the same feature set as the pre-refit champion.
     assert set(refit_artifact.feature_list) == {"x1", "x2"}
@@ -2081,104 +2039,32 @@ def test_select_experiment_refit_attach_failure_rolls_back_unattached_artifact_f
 
 
 @pytest.mark.slow
-def test_select_experiment_refit_on_train_plus_test_false_keeps_original_champion(tmp_path):
+def test_select_experiment_refit_on_train_plus_test_false_keeps_original_champion(non_refit_champion_scenario):
     """TUNE-4 escape hatch: refit_on_train_plus_test=False keeps the pre-refit
     train-only champion exactly as select_experiment always returned it."""
-    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
-    dataset = _register_modeling_sample(registry, tmp_path, task.id)
-    prepared = runner.invoke(
-        ToolRef("modeling", "prepare_modeling_frame"),
-        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
-        task_id=task.id,
-    )
-    assert prepared.ok is True, prepared.error
-    trained = runner.invoke(
-        ToolRef("modeling", "train_model"),
-        {
-            "dataset_id": prepared.output["result_dataset_id"],
-            "recipe": "lgb",
-            "features": ["x1", "x2"],
-            "target_col": "y",
-            "split_col": "split",
-            "split_values": {"train": "train", "test": "test", "oot": "oot"},
-            "params": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
-            "seed": 23,
-        },
-        task_id=task.id,
-    )
-    assert trained.ok is True, trained.error
-
-    selected = runner.invoke(
-        ToolRef("modeling", "select_experiment"),
-        {
-            "experiment_ids": [trained.output["experiment_id"]],
-            "selected_experiment_id": trained.output["experiment_id"],
-            "target_type": "binary",
-            "refit_on_train_plus_test": False,
-        },
-        task_id=task.id,
-    )
-
-    assert selected.ok is True, selected.error
-    assert selected.output["refit"] == {"applied": False, "requested": False, "reason": "未请求全量重训(refit_on_train_plus_test=false)。"}
-    assert selected.output["artifact_id"] == trained.output["artifact_id"]
-    assert selected.output["selected_experiment_id"] == trained.output["experiment_id"]
-
-
-def _train_and_select_refit_champion(runner, registry, tmp_path, task):
-    """Helper: prepare -> train -> select_experiment with the default (True) refit.
-
-    Returns (trained_output, selected_output) for the D14 refit-metric tests below.
-    """
-    dataset = _register_modeling_sample(registry, tmp_path, task.id)
-    prepared = runner.invoke(
-        ToolRef("modeling", "prepare_modeling_frame"),
-        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
-        task_id=task.id,
-    )
-    assert prepared.ok is True, prepared.error
-    trained = runner.invoke(
-        ToolRef("modeling", "train_model"),
-        {
-            "dataset_id": prepared.output["result_dataset_id"],
-            "recipe": "lgb",
-            "features": ["x1", "x2"],
-            "target_col": "y",
-            "split_col": "split",
-            "split_values": {"train": "train", "test": "test", "oot": "oot"},
-            "params": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
-            "seed": 23,
-        },
-        task_id=task.id,
-    )
-    assert trained.ok is True, trained.error
-    selected = runner.invoke(
-        ToolRef("modeling", "select_experiment"),
-        {
-            "experiment_ids": [trained.output["experiment_id"]],
-            "selected_experiment_id": trained.output["experiment_id"],
-            "target_type": "binary",
-        },
-        task_id=task.id,
-    )
-    assert selected.ok is True, selected.error
-    return dataset, trained, selected
+    trained = non_refit_champion_scenario.trained
+    selected = non_refit_champion_scenario.selected
+    assert selected["refit"] == {
+        "applied": False,
+        "requested": False,
+        "reason": "未请求全量重训(refit_on_train_plus_test=false)。",
+    }
+    assert selected["artifact_id"] == trained["artifact_id"]
+    assert selected["selected_experiment_id"] == trained["experiment_id"]
 
 
 @pytest.mark.slow
-def test_refit_headline_metrics_exclude_holdout_test_family(tmp_path):
+def test_refit_headline_metrics_exclude_holdout_test_family(refit_champion_scenario):
     """D14: the champion refit retrains on train+test and carves a random 5% slice
     back out to satisfy the non-empty-test contract, but that slice is in-distribution
     with the training data -- its test_ks/test_auc/psi_test_vs_train are optimistically
     biased and must NOT surface as the headline "final model metrics". The honest
     train_*/oot_* (refit trained on train+test, OOT untouched) stay in the headline;
     the holdout's tainted family is preserved only as renamed internal diagnostics."""
-    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
-    _dataset, _trained, selected = _train_and_select_refit_champion(runner, registry, tmp_path, task)
-
-    refit = selected.output["refit"]
+    selected = refit_champion_scenario.selected
+    refit = selected["refit"]
     assert refit["applied"] is True
-    headline = selected.output["metrics"]
+    headline = selected["metrics"]
     # honest refit metrics (train on train+test, OOT held out) stay.
     assert {"train_ks", "oot_ks"} & set(headline)
     # the random-5%-holdout test family is suppressed from the headline.
@@ -2194,26 +2080,12 @@ def test_refit_headline_metrics_exclude_holdout_test_family(tmp_path):
 
 
 @pytest.mark.slow
-def test_refit_model_card_excludes_holdout_test_metrics(tmp_path):
+def test_refit_model_card_excludes_holdout_test_metrics(refit_post_training_scenario):
     """D14: the model card reads the refit experiment.metrics structurally (not via
     the select_experiment headline dict), so it must independently detect the refit
     (artifact.params[refit_on_train_plus_test]) and drop the random-holdout test
     family from its key-metrics table, replacing it with an honest limitation note."""
-    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
-    dataset, _trained, selected = _train_and_select_refit_champion(runner, registry, tmp_path, task)
-
-    post_training = runner.invoke(
-        ToolRef("modeling", "post_training_action"),
-        {
-            "experiment_id": selected.output["selected_experiment_id"],
-            "sample_dataset_id": dataset.id,
-            "actions": [],
-            "selection_policy_decision": selected.output.get("policy_decision") or {},
-        },
-        task_id=task.id,
-    )
-    assert post_training.ok is True, post_training.error
-    card = post_training.output["model_card"]
+    card = refit_post_training_scenario["model_card"]
     metric_names = {row["metric"] for row in card["key_metrics"]}
     assert "oot_ks" in metric_names or "train_ks" in metric_names
     for tainted in ("test_ks", "test_auc", "psi_test_vs_train", "weighted_test_ks", "weighted_test_auc"):
@@ -2227,26 +2099,12 @@ def test_refit_model_card_excludes_holdout_test_metrics(tmp_path):
 
 
 @pytest.mark.slow
-def test_refit_monitoring_baseline_omits_psi_test_vs_train(tmp_path):
+def test_refit_monitoring_baseline_omits_psi_test_vs_train(refit_post_training_scenario):
     """D14: the monitoring-policy baseline reads the refit experiment.metrics; the
     default psi_test_vs_train check on a refit compares __refit_train__ vs the random
     __refit_holdout__ (same distribution, PSI ~0), so it would read spuriously green
     off a meaningless baseline. For a refit that check must be reported 'missing'."""
-    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
-    dataset, _trained, selected = _train_and_select_refit_champion(runner, registry, tmp_path, task)
-
-    post_training = runner.invoke(
-        ToolRef("modeling", "post_training_action"),
-        {
-            "experiment_id": selected.output["selected_experiment_id"],
-            "sample_dataset_id": dataset.id,
-            "actions": [],
-            "selection_policy_decision": selected.output.get("policy_decision") or {},
-        },
-        task_id=task.id,
-    )
-    assert post_training.ok is True, post_training.error
-    policy = post_training.output["monitoring_policy"]
+    policy = refit_post_training_scenario["monitoring_policy"]
     assert "psi_test_vs_train" not in (policy.get("baseline_metrics") or {}), (
         "refit's same-distribution psi_test_vs_train must not seed the monitoring baseline"
     )
@@ -2258,104 +2116,35 @@ def test_refit_monitoring_baseline_omits_psi_test_vs_train(tmp_path):
 
 
 @pytest.mark.slow
-def test_non_refit_path_still_reports_test_metrics(tmp_path):
+def test_non_refit_path_still_reports_test_metrics(
+    non_refit_champion_scenario,
+    non_refit_post_training_scenario,
+):
     """D14 guard against over-suppression: with refit disabled, select_experiment
     returns the honest pre-refit train-split champion whose test_ks is a genuine
     held-out value and must remain a first-class headline + model-card metric."""
-    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
-    dataset = _register_modeling_sample(registry, tmp_path, task.id)
-    prepared = runner.invoke(
-        ToolRef("modeling", "prepare_modeling_frame"),
-        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
-        task_id=task.id,
-    )
-    assert prepared.ok is True, prepared.error
-    trained = runner.invoke(
-        ToolRef("modeling", "train_model"),
-        {
-            "dataset_id": prepared.output["result_dataset_id"],
-            "recipe": "lgb",
-            "features": ["x1", "x2"],
-            "target_col": "y",
-            "split_col": "split",
-            "split_values": {"train": "train", "test": "test", "oot": "oot"},
-            "params": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
-            "seed": 23,
-        },
-        task_id=task.id,
-    )
-    assert trained.ok is True, trained.error
-    selected = runner.invoke(
-        ToolRef("modeling", "select_experiment"),
-        {
-            "experiment_ids": [trained.output["experiment_id"]],
-            "selected_experiment_id": trained.output["experiment_id"],
-            "target_type": "binary",
-            "refit_on_train_plus_test": False,
-        },
-        task_id=task.id,
-    )
-    assert selected.ok is True, selected.error
-    assert selected.output["refit"]["applied"] is False
-    assert "test_ks" in selected.output["metrics"]
+    selected = non_refit_champion_scenario.selected
+    assert selected["refit"]["applied"] is False
+    assert "test_ks" in selected["metrics"]
 
-    post_training = runner.invoke(
-        ToolRef("modeling", "post_training_action"),
-        {
-            "experiment_id": selected.output["selected_experiment_id"],
-            "sample_dataset_id": dataset.id,
-            "actions": [],
-            "selection_policy_decision": selected.output.get("policy_decision") or {},
-        },
-        task_id=task.id,
-    )
-    assert post_training.ok is True, post_training.error
-    card = post_training.output["model_card"]
+    card = non_refit_post_training_scenario["model_card"]
     metric_names = {row["metric"] for row in card["key_metrics"]}
     assert "test_ks" in metric_names
     # non-refit baseline still keeps its honest psi_test_vs_train.
-    policy = post_training.output["monitoring_policy"]
+    policy = non_refit_post_training_scenario["monitoring_policy"]
     assert "psi_test_vs_train" in (policy.get("baseline_metrics") or {})
 
 
 @pytest.mark.slow
-def test_refit_selection_metric_unchanged(tmp_path):
+def test_refit_selection_metric_unchanged(refit_champion_scenario):
     """D14 guard: suppressing the refit's holdout test family is a presentation-layer
     change only -- champion selection still runs on the pre-refit train-split metrics,
     so the reported selection_metric stays 'test_ks(overfit-penalized)'."""
-    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
-    dataset = _register_modeling_sample(registry, tmp_path, task.id)
-    prepared = runner.invoke(
-        ToolRef("modeling", "prepare_modeling_frame"),
-        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
-        task_id=task.id,
-    )
-    assert prepared.ok is True, prepared.error
-    trained = runner.invoke(
-        ToolRef("modeling", "train_model"),
-        {
-            "dataset_id": prepared.output["result_dataset_id"],
-            "recipe": "lgb",
-            "features": ["x1", "x2"],
-            "target_col": "y",
-            "split_col": "split",
-            "split_values": {"train": "train", "test": "test", "oot": "oot"},
-            "params": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
-            "seed": 23,
-        },
-        task_id=task.id,
-    )
-    assert trained.ok is True, trained.error
     # No explicit selected_experiment_id -> exercise the automatic selection rule
     # (the refit's holdout suppression must not perturb which basis was reported).
-    selected = runner.invoke(
-        ToolRef("modeling", "select_experiment"),
-        {"experiment_ids": [trained.output["experiment_id"]], "target_type": "binary"},
-        task_id=task.id,
-    )
-    assert selected.ok is True, selected.error
-    assert selected.output["refit"]["applied"] is True
-    assert selected.output["selection_metric"] == "test_ks(overfit-penalized)"
+    selected = refit_champion_scenario.selected
+    assert selected["refit"]["applied"] is True
+    assert selected["selection_metric"] == "test_ks(overfit-penalized)"
 
 
 @pytest.mark.slow
@@ -3947,6 +3736,26 @@ def test_post_training_action_exports_pmml_for_single_feature_model(tmp_path):
 # -- LT-3: recipe boost-round alias normalization (n_estimators collision) ------
 
 
+@pytest.mark.parametrize(
+    ("params", "expected_rounds"),
+    [
+        pytest.param({"n_estimators": 7}, 7, id="alias-used"),
+        pytest.param(
+            {"n_estimators": 400, "num_boost_round": 31},
+            31,
+            id="primary-wins",
+        ),
+    ],
+)
+def test_pop_boost_rounds_normalizes_alias_without_constructor_collision(params, expected_rounds):
+    """Shared lgb/xgb normalization is pure; cover precedence without fitting."""
+    mutable_params = dict(params)
+
+    assert pop_boost_rounds(mutable_params, default=20) == expected_rounds
+    assert "num_boost_round" not in mutable_params
+    assert "n_estimators" not in mutable_params
+
+
 @pytest.mark.slow
 def test_train_model_lgb_accepts_n_estimators_alias_without_kwarg_collision(tmp_path):
     """LT-3: the lgb recipe passes n_estimators=num_boost_round explicitly while
@@ -3954,7 +3763,8 @@ def test_train_model_lgb_accepts_n_estimators_alias_without_kwarg_collision(tmp_
     alias n_estimators into train_model's params used to crash the whole invoke
     with `got multiple values for keyword argument 'n_estimators'`. n_estimators
     must now be treated as an alias for num_boost_round: training succeeds and the
-    resolved round count is the alias value (400)."""
+    resolved round count is the alias value. This is the sole real-training smoke;
+    precedence and key stripping are covered by the pure parameterized test above."""
     runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
     dataset = _register_modeling_sample(registry, tmp_path, task.id)
     trained = runner.invoke(
@@ -3967,66 +3777,13 @@ def test_train_model_lgb_accepts_n_estimators_alias_without_kwarg_collision(tmp_
             "split_col": "split",
             "split_values": {"train": "train", "test": "test", "oot": "oot"},
             "seed": 23,
-            "params": {"n_estimators": 400},
+            "params": {"n_estimators": 7},
         },
         task_id=task.id,
     )
     assert trained.ok is True, trained.error
     artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
-    assert artifact.params["num_boost_round"] == 400
-    assert "n_estimators" not in artifact.params
-
-
-@pytest.mark.slow
-def test_train_model_lgb_num_boost_round_takes_precedence_over_n_estimators_alias(tmp_path):
-    """LT-3: when BOTH num_boost_round and its n_estimators alias are supplied,
-    the primary key (num_boost_round) wins and the alias is dropped -- no
-    collision, deterministic precedence."""
-    runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
-    dataset = _register_modeling_sample(registry, tmp_path, task.id)
-    trained = runner.invoke(
-        ToolRef("modeling", "train_model"),
-        {
-            "dataset_id": dataset.id,
-            "recipe": "lgb",
-            "features": ["x1", "x2"],
-            "target_col": "y",
-            "split_col": "split",
-            "split_values": {"train": "train", "test": "test", "oot": "oot"},
-            "seed": 23,
-            "params": {"n_estimators": 400, "num_boost_round": 31},
-        },
-        task_id=task.id,
-    )
-    assert trained.ok is True, trained.error
-    artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
-    assert artifact.params["num_boost_round"] == 31
-    assert "n_estimators" not in artifact.params
-
-
-@pytest.mark.slow
-def test_train_model_xgb_accepts_n_estimators_alias_without_kwarg_collision(tmp_path):
-    """LT-3: same alias normalization on the xgb recipe (the other estimator that
-    passes n_estimators=num_boost_round explicitly)."""
-    runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
-    dataset = _register_modeling_sample(registry, tmp_path, task.id)
-    trained = runner.invoke(
-        ToolRef("modeling", "train_model"),
-        {
-            "dataset_id": dataset.id,
-            "recipe": "xgb",
-            "features": ["x1", "x2"],
-            "target_col": "y",
-            "split_col": "split",
-            "split_values": {"train": "train", "test": "test", "oot": "oot"},
-            "seed": 23,
-            "params": {"n_estimators": 37},
-        },
-        task_id=task.id,
-    )
-    assert trained.ok is True, trained.error
-    artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
-    assert artifact.params["num_boost_round"] == 37
+    assert artifact.params["num_boost_round"] == 7
     assert "n_estimators" not in artifact.params
 
 
