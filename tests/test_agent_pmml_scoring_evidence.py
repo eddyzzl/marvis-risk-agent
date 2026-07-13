@@ -110,6 +110,8 @@ def test_v2_pmml_scoring_prompt_uses_only_scoring_coverage_and_performance():
     assert "cache_key" not in scoring
     assert "只使用 evidence.pmml_scoring" in prompt["instructions"]
     assert "不得声称执行过 Notebook" in prompt["instructions"]
+    assert "不得建议当前或后续补做" in prompt["instructions"]
+    assert "代码模型与 PMML 分数一致性" in prompt["instructions"]
     assert "AUC" in prompt["instructions"]
 
 

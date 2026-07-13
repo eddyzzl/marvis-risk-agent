@@ -1771,6 +1771,8 @@ def _stage_instructions(
                 "只使用 evidence.pmml_scoring，解读 input_row_count、success_count、failure_count、"
                 "null_count、non_finite_count、missing_inputs、status、elapsed_seconds 和 rows_per_second。"
                 "不得声称执行过 Notebook、代码模型评分或代码模型与 PMML 分数一致性比较；"
+                "不得建议当前或后续补做 Notebook 模型执行、代码模型评分、"
+                "代码模型与 PMML 分数一致性验证；"
                 "不要分析材料完备性、AUC、KS、PSI、分箱、逐月稳定性、模型压力测试或报告输出，"
                 "不要给出整体验证结论。"
             )
