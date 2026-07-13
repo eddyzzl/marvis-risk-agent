@@ -1,6 +1,8 @@
 import json
 from dataclasses import replace
 
+import pytest
+
 from marvis.agent.service import (
     answer_chat_message,
     agent_conclusions_confirmed,
@@ -148,14 +150,25 @@ def test_v2_word_conclusion_system_prompt_excludes_legacy_consistency_flow(monke
     assert "报告已进入" not in captured["system_prompt"]
 
 
-def test_v2_word_conclusion_rejects_process_narration(monkeypatch):
+@pytest.mark.parametrize(
+    "final_conclusion",
+    [
+        "材料扫描完成，报告已进入最终定稿阶段。",
+        "PMML打分测试已完成，模型效果和稳定性符合预期。",
+        "模型效果与稳定性整体可接受；建议在投产前审阅压力测试应对预案。",
+    ],
+)
+def test_v2_word_conclusion_rejects_process_narration(
+    monkeypatch,
+    final_conclusion,
+):
     class ProcessNarratingClient:
         def complete(self, **_kwargs):
             return json.dumps(
                 {
                     "TEXT:pressure_test_summary": "压力测试摘要。",
                     "TEXT:pressure_impact_recommendation": "压力测试建议。",
-                    "TEXT:final_validation_conclusion": "材料扫描完成，报告已进入最终定稿阶段。",
+                    "TEXT:final_validation_conclusion": final_conclusion,
                 },
                 ensure_ascii=False,
             )

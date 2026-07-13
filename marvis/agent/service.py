@@ -27,7 +27,7 @@ _V2_FINAL_CONCLUSION_FORBIDDEN_PATTERNS = (
     re.compile(r"验证输入契约"),
     re.compile(r"PMML\s*(?:全量)?(?:打分|评分)(?:测试|完成|通过|成功|覆盖|样本|耗时)?", re.IGNORECASE),
     re.compile(r"报告(?:已|进入|生成|产出|定稿)"),
-    re.compile(r"最终定稿|建议(?:在投产前)?审阅(?:报告|结论)|确认\s*Word", re.IGNORECASE),
+    re.compile(r"最终定稿|建议(?:在)?投产前审阅|建议审阅(?:报告|结论)|确认\s*Word", re.IGNORECASE),
     re.compile(r"可直接(?:部署|投产)"),
 )
 GLOBAL_AGENT_EVIDENCE_KEYS = frozenset(
@@ -1814,7 +1814,7 @@ def _stage_instructions(
                 "模型压力测试主要发现和最终审慎判断；最多用一个短句说明 PMML 部署可用，"
                 "不得写可直接部署或可直接投产。"
                 "不得复述材料扫描、材料完备性、验证输入契约、PMML 打分样本量或耗时、"
-                "平台执行步骤、报告产出状态、最终定稿阶段或建议审阅报告等流程信息；"
+                "平台执行步骤、报告产出状态、最终定稿阶段、投产前审阅安排等流程信息；"
                 "如果 evidence.visible_stage_summaries 中已有模型效果稳定性解读，必须吸收其模型评价要点；"
                 "PMML 相关证据最多用于判断是否可简短表述为 PMML 部署可用。"
             )
