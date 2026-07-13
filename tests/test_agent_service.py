@@ -299,6 +299,32 @@ def test_summarize_stage_fallback_does_not_claim_memory_use(monkeypatch):
     assert "memory_references" not in metadata
 
 
+def test_v2_pmml_scoring_summary_rejects_legacy_reproducibility_language(monkeypatch):
+    class LegacyNarratingClient:
+        def complete(self, **_kwargs):
+            return (
+                "PMML 打分全部成功，未发现可复现性问题。建议后续补做"
+                "代码模型与 PMML 分数一致性验证。"
+            )
+
+    monkeypatch.setattr(
+        "marvis.agent.service._client",
+        lambda _profile: LegacyNarratingClient(),
+    )
+    fallback = "PMML打分测试已完成，后续效果、稳定性和压力测试将使用本次评分结果。"
+
+    content, metadata = summarize_stage(
+        task=replace(_task(), validation_workflow_version=2),
+        stage="reproducibility",
+        evidence={"pmml_scoring": {"status": "pass"}},
+        model_profile={"model_id": "m1"},
+        fallback=fallback,
+    )
+
+    assert content == fallback
+    assert metadata["guarded_stage_summary"] is True
+
+
 def test_summarize_stage_truncates_memory_summary_in_prompt(monkeypatch):
     captured = {}
 

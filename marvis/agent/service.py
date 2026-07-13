@@ -30,6 +30,10 @@ _V2_FINAL_CONCLUSION_FORBIDDEN_PATTERNS = (
     re.compile(r"最终定稿|建议(?:在)?投产前审阅|建议审阅(?:报告|结论)|确认\s*Word", re.IGNORECASE),
     re.compile(r"可直接(?:部署|投产)"),
 )
+_V2_PMML_SCORING_LEGACY_PATTERN = re.compile(
+    r"可复现(?:性)?|(?:分数|评分|部署)?一致性|Notebook\s*模型|代码模型|原始代码模型",
+    re.IGNORECASE,
+)
 GLOBAL_AGENT_EVIDENCE_KEYS = frozenset(
     {
         "scan",
@@ -629,10 +633,17 @@ def summarize_stage(
     except LLMClientError as exc:
         return fallback, {"llm_error": str(exc), "fallback": True}
     cleaned = _strip_agent_response_preamble(content or fallback)
-    guarded = _guard_stage_summary(stage=stage, evidence=evidence, content=cleaned)
+    guarded = _guard_stage_summary(
+        task=task,
+        stage=stage,
+        evidence=evidence,
+        content=cleaned,
+        fallback=fallback,
+    )
     metadata = {"fallback": False}
     if guarded != cleaned:
         metadata["guarded_scan_summary"] = True
+        metadata["guarded_stage_summary"] = True
     return guarded, attach_memory_metadata(metadata, memory_context, use_reason=stage)
 
 
@@ -1496,7 +1507,20 @@ def _scan_check_passed(check: dict) -> bool:
     )
 
 
-def _guard_stage_summary(*, stage: str, evidence: dict, content: str) -> str:
+def _guard_stage_summary(
+    *,
+    task: TaskRecord,
+    stage: str,
+    evidence: dict,
+    content: str,
+    fallback: str,
+) -> str:
+    if (
+        stage == "reproducibility"
+        and task.validation_workflow_version == 2
+        and _V2_PMML_SCORING_LEGACY_PATTERN.search(content)
+    ):
+        return fallback
     if stage != "scan" or not isinstance(evidence, dict):
         return content
     interpretation = _scan_stage_evidence(evidence).get("scan_interpretation", {})
