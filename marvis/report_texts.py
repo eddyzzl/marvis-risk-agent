@@ -27,6 +27,7 @@ COMPUTED_REPORT_TEXT_KEYS = frozenset({
     "TEXT:oot_ks",
     "TEXT:oot_psi",
     "TEXT:reproducibility_summary",
+    "TEXT:pmml_scoring_summary",
     "TEXT:stress_test_summary",
     "TEXT:pressure_test_summary",
 })
@@ -52,6 +53,7 @@ def report_text_values_from_results(
     version_suffix = f"{results.model_version}版" if results.model_version else ""
 
     stress_summary = _stress_text(results)
+    scoring_summary = _score_test_text(results)
     values: dict[str, str] = {
         "TEXT:report_title": f"{results.model_name}模型{version_suffix}验证文档",
         "TEXT:model_name": results.model_name,
@@ -74,10 +76,14 @@ def report_text_values_from_results(
         "TEXT:oot_bad_rate": _percent(split_summary.get("oot")),
         "TEXT:oot_ks": _decimal4(overall_by_split.get("oot")),
         "TEXT:oot_psi": _decimal4_psi(overall_by_split.get("oot")),
-        "TEXT:reproducibility_summary": _reproducibility_text(results),
+        # Keep the historical placeholder populated so existing Word templates
+        # render unchanged. V2 templates may use the explicit PMML key below.
+        "TEXT:reproducibility_summary": scoring_summary,
         "TEXT:stress_test_summary": stress_summary,
         "TEXT:pressure_test_summary": stress_summary,
     }
+    if results.pmml_scoring is not None:
+        values["TEXT:pmml_scoring_summary"] = scoring_summary
     return merge_report_text_values(
         values,
         report_values=report_values,
@@ -277,6 +283,8 @@ def _decimal4_psi(row) -> str:
 
 
 def _reproducibility_text(results: ValidationResults) -> str:
+    if results.reproducibility is None:
+        raise ValueError("legacy validation results have no reproducibility evidence")
     summary = results.reproducibility.summary
     status_word = {
         ConsistencyStatus.PASS: "通过",
@@ -287,6 +295,21 @@ def _reproducibility_text(results: ValidationResults) -> str:
         f"对 {results.reproducibility.sample_size} 行抽样进行三方分数对比，"
         f"对齐 {summary.match_count} 行，差异 {summary.mismatch_count} 行，"
         f"最大绝对差 {summary.max_abs_diff:.6f}，可复现性验证 {status_word}。"
+    )
+
+
+def _score_test_text(results: ValidationResults) -> str:
+    if results.pmml_scoring is None:
+        return _reproducibility_text(results)
+    scoring = results.pmml_scoring
+    status_word = "通过" if scoring.status == "pass" else "不通过"
+    return (
+        f"PMML打分测试对全量 {scoring.input_row_count} 行样本完成评分，"
+        f"成功 {scoring.success_count} 行，失败 {scoring.failure_count} 行，"
+        f"空值 {scoring.null_count} 行，非有限值 {scoring.non_finite_count} 行；"
+        f"输出字段 {scoring.output_field}，使用 {scoring.engine} "
+        f"批量打分，耗时 {scoring.elapsed_seconds:.3f} 秒，"
+        f"吞吐 {scoring.rows_per_second:.2f} 行/秒，测试{status_word}。"
     )
 
 

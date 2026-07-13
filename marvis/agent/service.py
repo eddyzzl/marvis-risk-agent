@@ -27,6 +27,7 @@ GLOBAL_AGENT_EVIDENCE_KEYS = frozenset(
         "notebook_steps",
         "contract",
         "reproducibility",
+        "pmml_scoring",
         "validation_results",
         "report_fields",
         "visible_stage_summaries",
@@ -34,7 +35,12 @@ GLOBAL_AGENT_EVIDENCE_KEYS = frozenset(
 )
 STAGE_EVIDENCE_KEYS = {
     "scan": ("scan", "contract", "notebook_steps"),
-    "reproducibility": ("notebook_steps", "contract", "reproducibility"),
+    "reproducibility": (
+        "notebook_steps",
+        "contract",
+        "reproducibility",
+        "pmml_scoring",
+    ),
     "report": ("report_fields",),
 }
 SCAN_REQUIRED_CHECK_LABELS = (
@@ -790,6 +796,23 @@ def generate_word_conclusions(
 
 def fallback_word_conclusions(*, task: TaskRecord) -> dict[str, str]:
     name = task.model_name or "本模型"
+    if task.validation_workflow_version == 2:
+        return {
+            "TEXT:pressure_test_summary": (
+                "平台已完成模型压力测试相关指标产出。由于当前未能生成更细的模型解释文本，"
+                "建议验证人员结合结构化明细复核各压力场景下 KS、PSI 和打分分布变化。"
+            ),
+            "TEXT:pressure_impact_recommendation": (
+                "建议对模型压力测试中影响较大的数据源和特征类别设置上线后监控阈值；"
+                "如出现显著稳定性或区分能力下降，应先复核信源质量和样本分布后再继续使用。"
+            ),
+            "TEXT:final_validation_conclusion": (
+                f"本次验证已围绕{name}开展材料完备性、PMML 打分测试、模型效果与稳定性和模型压力测试。"
+                "从当前平台产物看，核心验证流程已执行至报告结论候选生成阶段；最终是否符合要求仍应以"
+                "PMML 全量评分证据、结构化指标、模型压力测试明细和验证人员复核意见为准。"
+                "建议在确认 Word 结论前重点核对 PMML 打分覆盖率、OOT 区分效果、PSI 稳定性和关键变量压力表现。"
+            ),
+        }
     return {
         "TEXT:pressure_test_summary": (
             "平台已完成压力测试相关指标产出。由于当前未能生成更细的模型解释文本，"
@@ -819,12 +842,20 @@ def _stage_prompt(
     memory_context: dict | None = None,
     user_instruction: str | None = None,
 ) -> str:
-    instructions = _stage_instructions(stage)
+    instructions = _stage_instructions(
+        stage,
+        validation_workflow_version=task.validation_workflow_version,
+    )
     payload = {
         "stage": stage,
         "task": _llm_task_meta(task),
         "evidence": _sanitize_llm_payload(
-            _stage_scoped_evidence(stage, evidence), task
+            _stage_scoped_evidence(
+                stage,
+                evidence,
+                validation_workflow_version=task.validation_workflow_version,
+            ),
+            task,
         ),
         "instructions": instructions,
     }
@@ -843,17 +874,27 @@ def _stage_prompt(
     )
 
 
-def _stage_scoped_evidence(stage: str, evidence: dict) -> dict:
+def _stage_scoped_evidence(
+    stage: str,
+    evidence: dict,
+    *,
+    validation_workflow_version: int | None = None,
+) -> dict:
     if not isinstance(evidence, dict):
         return evidence
     if stage == "scan":
         return _scan_stage_evidence(evidence)
     if stage == "reproducibility":
+        if validation_workflow_version == 2:
+            return _pmml_scoring_stage_evidence(evidence)
         return _reproducibility_stage_evidence(evidence)
     if stage == "metrics":
         return _metrics_stage_evidence(evidence)
     if stage == "word_conclusion_draft":
-        return _word_conclusion_stage_evidence(evidence)
+        return _word_conclusion_stage_evidence(
+            evidence,
+            validation_workflow_version=validation_workflow_version,
+        )
     keys = STAGE_EVIDENCE_KEYS.get(stage)
     if not keys or not _looks_like_global_agent_evidence(evidence):
         return _slim_evidence_for_llm(evidence)
@@ -881,6 +922,17 @@ def _metrics_stage_evidence(evidence: dict) -> dict:
             }
         )
     }
+
+
+def _pmml_scoring_stage_evidence(evidence: dict) -> dict:
+    validation_results = evidence.get("validation_results")
+    scoring = _compact_pmml_scoring_evidence(
+        evidence.get("pmml_scoring"),
+        validation_results.get("pmml_scoring")
+        if isinstance(validation_results, dict)
+        else None,
+    )
+    return {"pmml_scoring": scoring}
 
 
 def _reproducibility_stage_evidence(evidence: dict) -> dict:
@@ -1049,7 +1101,11 @@ def _slim_evidence_for_llm(evidence: dict) -> dict:
     return slim
 
 
-def _word_conclusion_stage_evidence(evidence: dict) -> dict:
+def _word_conclusion_stage_evidence(
+    evidence: dict,
+    *,
+    validation_workflow_version: int | None = None,
+) -> dict:
     if not _looks_like_global_agent_evidence(evidence):
         return _slim_evidence_for_llm(evidence)
     validation_results = evidence.get("validation_results")
@@ -1059,14 +1115,29 @@ def _word_conclusion_stage_evidence(evidence: dict) -> dict:
     if scan:
         scoped["scan"] = scan
 
-    reproducibility = _compact_reproducibility_evidence(
-        evidence.get("reproducibility"),
-        validation_results.get("reproducibility") if isinstance(validation_results, dict) else None,
+    pmml_scoring = _compact_pmml_scoring_evidence(
+        evidence.get("pmml_scoring"),
+        validation_results.get("pmml_scoring")
+        if isinstance(validation_results, dict)
+        else None,
     )
-    if reproducibility:
-        scoped["reproducibility"] = reproducibility
+    if pmml_scoring:
+        scoped["pmml_scoring"] = pmml_scoring
 
-    compact_validation = _compact_word_validation_results(validation_results)
+    if validation_workflow_version != 2:
+        reproducibility = _compact_reproducibility_evidence(
+            evidence.get("reproducibility"),
+            validation_results.get("reproducibility")
+            if isinstance(validation_results, dict)
+            else None,
+        )
+        if reproducibility:
+            scoped["reproducibility"] = reproducibility
+
+    compact_validation = _compact_word_validation_results(
+        validation_results,
+        validation_workflow_version=validation_workflow_version,
+    )
     if compact_validation:
         scoped["validation_results"] = compact_validation
 
@@ -1162,7 +1233,43 @@ def _compact_reproducibility_evidence(*candidates: object) -> dict:
     return {}
 
 
-def _compact_word_validation_results(validation_results: object) -> dict:
+def _compact_pmml_scoring_evidence(*candidates: object) -> dict:
+    fields = (
+        "schema_version",
+        "engine",
+        "engine_version",
+        "output_field",
+        "input_row_count",
+        "success_count",
+        "failure_count",
+        "null_count",
+        "non_finite_count",
+        "elapsed_seconds",
+        "rows_per_second",
+        "chunk_size",
+        "required_input_count",
+        "missing_inputs",
+        "status",
+        "bounded_errors",
+    )
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        compact = {
+            key: candidate.get(key)
+            for key in fields
+            if candidate.get(key) is not None
+        }
+        if compact:
+            return compact
+    return {}
+
+
+def _compact_word_validation_results(
+    validation_results: object,
+    *,
+    validation_workflow_version: int | None = None,
+) -> dict:
     if not isinstance(validation_results, dict):
         return {}
     slim = _slim_validation_results_for_llm(validation_results)
@@ -1175,9 +1282,16 @@ def _compact_word_validation_results(validation_results: object) -> dict:
     if basic_info:
         compact["basic_info"] = basic_info
 
-    reproducibility = _compact_reproducibility_evidence(slim.get("reproducibility"))
-    if reproducibility:
-        compact["reproducibility"] = reproducibility
+    if validation_workflow_version != 2:
+        reproducibility = _compact_reproducibility_evidence(
+            slim.get("reproducibility")
+        )
+        if reproducibility:
+            compact["reproducibility"] = reproducibility
+
+    pmml_scoring = _compact_pmml_scoring_evidence(slim.get("pmml_scoring"))
+    if pmml_scoring:
+        compact["pmml_scoring"] = pmml_scoring
 
     effectiveness = _compact_effectiveness_for_word(slim.get("effectiveness"))
     if effectiveness:
@@ -1608,7 +1722,11 @@ def _sanitize_llm_text(value: str, task: TaskRecord) -> str:
     return value.replace(task_id, _model_display_name(task))
 
 
-def _stage_instructions(stage: str) -> str:
+def _stage_instructions(
+    stage: str,
+    *,
+    validation_workflow_version: int | None = None,
+) -> str:
     reference_instruction = _llm_task_reference_instruction()
     if stage == "agent_start":
         return (
@@ -1633,6 +1751,16 @@ def _stage_instructions(stage: str) -> str:
             "不要分析分数一致性、AUC、KS、PSI、压力测试或最终报告结论。"
         )
     if stage == "reproducibility":
+        if validation_workflow_version == 2:
+            return (
+                reference_instruction
+                + "只针对当前 PMML 打分测试阶段，分为“结论、评分覆盖、异常情况、性能、建议”。"
+                "只使用 evidence.pmml_scoring，解读 input_row_count、success_count、failure_count、"
+                "null_count、non_finite_count、missing_inputs、status、elapsed_seconds 和 rows_per_second。"
+                "不得声称执行过 Notebook、代码模型评分或代码模型与 PMML 分数一致性比较；"
+                "不要分析材料完备性、AUC、KS、PSI、分箱、逐月稳定性、模型压力测试或报告输出，"
+                "不要给出整体验证结论。"
+            )
         return (
             reference_instruction
             + "只针对当前模型可复现性/分数一致性阶段，分为“结论、证据、风险含义、建议”。"
@@ -1657,6 +1785,23 @@ def _stage_instructions(stage: str) -> str:
             "不要重新分析材料完备性、分数一致性或效果稳定性指标。"
         )
     if stage == "word_conclusion_draft":
+        if validation_workflow_version == 2:
+            return (
+                reference_instruction
+                + "生成最终 Word 报告中的三段候选文字。只能使用 evidence 中已给出的 PMML 打分测试、"
+                "效果与稳定性指标、模型压力测试分层和阶段总结；不得编造未提供的 KS、AUC、PSI、样本量、"
+                "数据源名称或监管结论，也不得声称执行过 Notebook、代码模型评分或分数一致性比较。"
+                "输出必须是 JSON 对象，且必须完整包含三段键值："
+                "TEXT:pressure_test_summary、TEXT:pressure_impact_recommendation、"
+                "TEXT:final_validation_conclusion。TEXT:pressure_test_summary 必须说明模型压力测试目的、"
+                "方法和观察到的高/中/低风险数据源分层；证据不足时明确说明无法完成某一档分层。"
+                "TEXT:pressure_impact_recommendation 必须围绕上述风险分层给出监控、替代、降级、"
+                "人工复核或上线限制建议。TEXT:final_validation_conclusion 必须比前两段更完整，"
+                "建议 1 到 2 个自然段，覆盖开发过程或材料完备性、PMML 打分测试覆盖与异常情况、"
+                "区分效果、稳定性、模型压力测试主要发现、报告产出状态和最终审慎判断；"
+                "如果 evidence.visible_stage_summaries 中已有 PMML 打分测试或效果稳定性解读，"
+                "必须吸收其要点，不能退化成一句泛泛结论。"
+            )
         return (
             reference_instruction
             + "生成最终 Word 报告中的三段候选文字。只能使用 evidence 中已给出的结构化指标、"

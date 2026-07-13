@@ -2618,6 +2618,10 @@ def test_agent_continue_from_scanned_runs_only_notebook_stage(
     )
     monkeypatch.setattr("marvis.agent.validation_app_service.run_notebook_stage", fake_notebook_stage)
     monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_pmml_scoring_stage",
+        lambda **_kwargs: pytest.fail("v1 validation must keep the notebook stage"),
+    )
+    monkeypatch.setattr(
         "marvis.agent.validation_app_service.run_metrics_stage",
         lambda **_kwargs: unexpected.append("metrics"),
     )
@@ -2662,6 +2666,162 @@ def test_agent_continue_from_scanned_runs_only_notebook_stage(
     assert messages[0]["content"] == "继续下一步"
     assert any(message["stage"] == "reproducibility" for message in messages)
     assert "模型效果&稳定性验证" in messages[-1]["content"]
+
+
+def test_direct_agent_v2_reproducibility_stage_runs_pmml_scoring_not_notebook(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.agent.validation_app_service import run_agent_reproducibility_stage
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path, validation_workflow_version=2)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    repo.update_status(
+        task_id,
+        TaskStatus.SCANNED,
+        "scan ok",
+        expected=TaskStatus.CREATED,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_stages._require_ready_contract_for_v2",
+        lambda _settings, _task: None,
+    )
+    calls: list[str] = []
+
+    def fake_pmml_scoring_stage(
+        *, task_id, settings, stage_claimed, cancellation_check
+    ):
+        assert stage_claimed is True
+        cancellation_check()
+        calls.append("pmml")
+        TaskRepository(settings.db_path).update_status(
+            task_id,
+            TaskStatus.EXECUTED,
+            "PMML scoring complete",
+            expected=TaskStatus.RUNNING,
+        )
+
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_notebook_stage",
+        lambda **_kwargs: pytest.fail("v2 validation must not execute the notebook"),
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_pmml_scoring_stage",
+        fake_pmml_scoring_stage,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.agent_pipeline_settings",
+        lambda settings, _task: settings,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.agent_evidence_from_settings_impl",
+        lambda _settings, _task_id: {"pmml_scoring": {"row_count": 4}},
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.summarize_stage",
+        lambda **kwargs: (kwargs["fallback"], {"fallback": True}),
+    )
+
+    assert run_agent_reproducibility_stage(
+        repo,
+        SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+        task_id,
+        {"model_id": "m1"},
+    )
+
+    assert calls == ["pmml"]
+    assert repo.get_task(task_id).status == TaskStatus.EXECUTED
+    stage_messages = [
+        message
+        for message in repo.list_agent_messages(task_id)
+        if message["stage"] == "reproducibility"
+    ]
+    assert stage_messages[-1]["content"].startswith("PMML打分测试已完成")
+
+
+def test_agent_v2_reproducibility_opening_uses_pmml_scoring_copy():
+    from marvis.agent.validation_app_service import agent_stage_opening_text
+    from marvis.agent.validation_messages import agent_stage_label
+
+    v1_opening = agent_stage_opening_text(
+        "reproducibility",
+        validation_workflow_version=1,
+    )
+    v2_opening = agent_stage_opening_text(
+        "reproducibility",
+        validation_workflow_version=2,
+    )
+
+    assert "运行 Notebook" in v1_opening
+    assert "代码模型分数" in v1_opening
+    assert "PMML 打分测试" in v2_opening
+    assert "Notebook" not in v2_opening
+    assert "代码模型分数" not in v2_opening
+    assert agent_stage_label(
+        "reproducibility",
+        validation_workflow_version=2,
+    ) == "PMML打分测试"
+
+
+def test_direct_agent_v2_metrics_fallback_describes_model_stress_not_excel(
+    tmp_path,
+    monkeypatch,
+):
+    from marvis.agent.validation_app_service import run_agent_metrics_stage
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path, validation_workflow_version=2)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    repo.update_status(task_id, TaskStatus.SCANNED, "scan ok", expected=TaskStatus.CREATED)
+    repo.update_status(task_id, TaskStatus.RUNNING, "scoring", expected=TaskStatus.SCANNED)
+    repo.update_status(task_id, TaskStatus.EXECUTED, "scored", expected=TaskStatus.RUNNING)
+    monkeypatch.setattr(
+        "marvis.agent.validation_stages._require_ready_contract_for_v2",
+        lambda _settings, _task: None,
+    )
+
+    def fake_metrics_stage(*, task_id, settings, stage_claimed, cancellation_check):
+        assert stage_claimed is True
+        cancellation_check()
+        TaskRepository(settings.db_path).update_status(
+            task_id,
+            TaskStatus.WRITING_ARTIFACTS,
+            "metrics complete",
+            expected=TaskStatus.COMPUTING_METRICS,
+        )
+
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.run_metrics_stage",
+        fake_metrics_stage,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.agent_pipeline_settings",
+        lambda settings, _task: settings,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.agent_evidence_from_settings_impl",
+        lambda _settings, _task_id: {"stress_test": {"status": "completed"}},
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.summarize_stage",
+        lambda **kwargs: (kwargs["fallback"], {"fallback": True}),
+    )
+
+    assert run_agent_metrics_stage(
+        repo,
+        SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
+        task_id,
+        {"model_id": "m1"},
+    )
+
+    metrics_message = next(
+        message
+        for message in repo.list_agent_messages(task_id)
+        if message["stage"] == "metrics"
+    )
+    assert "效果、稳定性和模型压力测试结果已生成" in metrics_message["content"]
+    assert "Excel" not in metrics_message["content"]
 
 
 def test_agent_continue_after_intervening_chat_dispatches_metrics_stage(
@@ -4412,6 +4572,27 @@ def test_agent_report_confirm_writes_three_conclusions_and_dispatches_report(
         "报告已生成。右侧步骤里的“预览”可以在线查看 Word，"
         "“下载Word”用于下载验证报告，“下载Excel”用于下载指标分析明细。"
     )
+
+
+def test_v2_agent_report_ready_message_only_advertises_word(tmp_path):
+    from marvis.api_stage_helpers import add_agent_report_ready_message
+
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path, validation_workflow_version=2)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="word_conclusion_confirmed",
+        content="三段报告结论已确认。",
+    )
+
+    add_agent_report_ready_message(repo, task_id)
+
+    ready = repo.list_agent_messages(task_id)[-1]
+    assert ready["stage"] == "word_report_ready"
+    assert "下载Word" in ready["content"]
+    assert "下载Excel" not in ready["content"]
 
 
 def test_agent_report_confirm_rejects_extra_report_keys(tmp_path):

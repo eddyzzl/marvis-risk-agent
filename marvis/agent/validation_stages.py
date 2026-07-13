@@ -50,6 +50,7 @@ def _require_ready_contract_for_v2(
 class ValidationStageDependencies:
     perform_scan_task: Callable
     run_notebook_stage: Callable
+    run_pmml_scoring_stage: Callable
     run_metrics_stage: Callable
     run_report_stage: Callable
     agent_pipeline_settings: Callable
@@ -79,6 +80,7 @@ def open_agent_stage(
             task_id=task_id,
             stage=stage,
             model_profile=model_profile,
+            validation_workflow_version=task.validation_workflow_version,
         )
     if stage == "scan":
         if opening_message_id:
@@ -115,7 +117,10 @@ def open_agent_stage(
         task_id=task_id,
         message_id=opening_message_id,
         model_profile=model_profile,
-        content=agent_stage_opening_text(stage),
+        content=agent_stage_opening_text(
+            stage,
+            validation_workflow_version=task.validation_workflow_version,
+        ),
     )
 
 
@@ -125,12 +130,16 @@ def add_agent_auto_stage_start_message(
     task_id: str,
     stage: str,
     model_profile: dict,
+    validation_workflow_version: int | None = None,
 ) -> None:
     repo.add_agent_message(
         task_id,
         role="assistant",
         stage="chat",
-        content=f"接下来开始执行{agent_stage_label(stage)}。",
+        content=(
+            "接下来开始执行"
+            f"{agent_stage_label(stage, validation_workflow_version=validation_workflow_version)}。"
+        ),
         metadata={
             **model_metadata(model_profile),
             "auto_accept": True,
@@ -230,7 +239,11 @@ def run_agent_scan_stage(
         return True
     if not auto_accept:
         add_agent_continue_prompt(
-            repo, task_id, model_profile, next_stage="reproducibility"
+            repo,
+            task_id,
+            model_profile,
+            next_stage="reproducibility",
+            validation_workflow_version=task.validation_workflow_version,
         )
     return True
 
@@ -304,7 +317,7 @@ def add_agent_input_confirmation_prompt(
             f"（revision {revision}）。"
             f"{candidate_text}\n"
             "请先在验证字段确认界面逐项确认验证字段并提交；契约状态变为 ready 后，"
-            "再回复“继续”。在确认完成前，平台不会执行模型可复现性阶段。"
+            "再回复“继续”。在确认完成前，平台不会执行 PMML 打分测试。"
         ),
         metadata={
             **model_metadata(model_profile),
@@ -358,18 +371,30 @@ def run_agent_reproducibility_stage(
 ) -> bool:
     task = repo.get_task(task_id)
     _require_ready_contract_for_v2(settings, task)
+    uses_pmml_scoring = (
+        task.task_type == TASK_TYPE_VALIDATION
+        and task.validation_workflow_version == 2
+    )
     repo.update_status(
         task_id,
         TaskStatus.RUNNING,
-        "agent notebook queued",
+        "agent PMML scoring queued" if uses_pmml_scoring else "agent notebook queued",
         expected={TaskStatus.SCANNED, TaskStatus.FAILED},
     )
     raise_if_agent_cancelled(task_id)
-    deps.run_notebook_stage(
-        task_id=task_id,
-        settings=deps.agent_pipeline_settings(settings, task),
-        stage_claimed=True,
+    stage_runner = (
+        deps.run_pmml_scoring_stage if uses_pmml_scoring else deps.run_notebook_stage
     )
+    stage_kwargs = {
+        "task_id": task_id,
+        "settings": deps.agent_pipeline_settings(settings, task),
+        "stage_claimed": True,
+    }
+    if uses_pmml_scoring:
+        stage_kwargs["cancellation_check"] = lambda: raise_if_agent_cancelled(
+            task_id
+        )
+    stage_runner(**stage_kwargs)
     raise_if_agent_cancelled(task_id)
     task = repo.get_task(task_id)
     if task.status == TaskStatus.FAILED:
@@ -378,7 +403,7 @@ def run_agent_reproducibility_stage(
             repo,
             task_id=task_id,
             task=task,
-            stage_label="模型可复现性",
+            stage_label="PMML打分测试" if uses_pmml_scoring else "模型可复现性",
             error=task.status_message,
             model_profile=model_profile,
             deps=deps,
@@ -404,7 +429,11 @@ def run_agent_reproducibility_stage(
             evidence=evidence,
             memory_context=memory_context,
             model_profile=model_profile,
-            fallback="分数一致性阶段已完成，请查看可复现性证据明细。",
+            fallback=(
+                "PMML打分测试已完成，后续效果、稳定性和压力测试将使用本次评分结果。"
+                if uses_pmml_scoring
+                else "分数一致性阶段已完成，请查看可复现性证据明细。"
+            ),
             on_delta=on_delta,
         ),
         raise_if_cancelled=raise_if_agent_cancelled,
@@ -449,11 +478,16 @@ def run_agent_metrics_stage(
         expected=expected_statuses,
     )
     raise_if_agent_cancelled(task_id)
-    deps.run_metrics_stage(
-        task_id=task_id,
-        settings=deps.agent_pipeline_settings(settings, task),
-        stage_claimed=True,
-    )
+    metrics_kwargs = {
+        "task_id": task_id,
+        "settings": deps.agent_pipeline_settings(settings, task),
+        "stage_claimed": True,
+    }
+    if task.validation_workflow_version == 2:
+        metrics_kwargs["cancellation_check"] = lambda: raise_if_agent_cancelled(
+            task_id
+        )
+    deps.run_metrics_stage(**metrics_kwargs)
     raise_if_agent_cancelled(task_id)
     task = repo.get_task(task_id)
     if task.status == TaskStatus.FAILED:
@@ -488,7 +522,11 @@ def run_agent_metrics_stage(
             evidence=evidence,
             memory_context=memory_context,
             model_profile=model_profile,
-            fallback="效果、稳定性和 Excel 指标产物已生成，请结合 OOT KS、PSI 和压力测试明细复核。",
+            fallback=(
+                "效果、稳定性和模型压力测试结果已生成，请结合 OOT KS、PSI 和压力测试明细复核。"
+                if task.validation_workflow_version == 2
+                else "效果、稳定性和 Excel 指标产物已生成，请结合 OOT KS、PSI 和压力测试明细复核。"
+            ),
             on_delta=on_delta,
         ),
         raise_if_cancelled=raise_if_agent_cancelled,
@@ -756,13 +794,16 @@ def add_agent_continue_prompt(
     model_profile: dict,
     *,
     next_stage: str,
+    validation_workflow_version: int | None = None,
 ) -> None:
     repo.add_agent_message(
         task_id,
         role="assistant",
         stage="chat",
         content=(
-            f"是否继续执行【{agent_stage_label(next_stage)}】？"
+            "是否继续执行【"
+            f"{agent_stage_label(next_stage, validation_workflow_version=validation_workflow_version)}"
+            "】？"
             "你可以先继续提问；需要继续时，请明确回复“继续”。"
         ),
         metadata={**model_metadata(model_profile), "awaiting_next_stage": next_stage},

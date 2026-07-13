@@ -36,6 +36,8 @@ from marvis.validation.pmml_scoring import PmmlScorer, load_pmml_scorer
 from marvis.validation.results import (
     PMML_SCORING_RESULT_SCHEMA,
     PmmlScoringResult,
+    pmml_scoring_result_from_dict,
+    pmml_scoring_result_to_dict,
     validate_pmml_scoring_result_fields,
 )
 from marvis.validation.sample_chunks import iter_sample_chunks
@@ -60,6 +62,16 @@ class _FileFingerprint:
     size: int
     modified_ns: int
     changed_ns: int
+
+
+@dataclass(frozen=True)
+class PmmlScoringIdentity:
+    """Canonical cache/runtime identity shared by the runner and pipeline."""
+
+    cache_key: str
+    engine_version: str
+    output_field: str
+    transformation_sha256: str
 
 
 def _file_fingerprint(path: Path, *, label: str) -> _FileFingerprint:
@@ -350,6 +362,44 @@ def _transformation_sha256(specs: Sequence[TransformationSpec]) -> str:
     return sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def build_pmml_scoring_identity(
+    *,
+    contract: ValidationInputContract,
+    pmml_sha256: str,
+    sample_sha256: str,
+    chunk_size: int,
+) -> PmmlScoringIdentity:
+    """Build exactly the identity used by :func:`run_pmml_scoring`.
+
+    Keeping this computation here prevents the orchestration layer from
+    accidentally hashing all transformations when the scorer only consumes the
+    PMML-input dependency closure.
+    """
+
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
+        raise ValueError("PMML scoring chunk size must be a positive integer")
+    manifest = contract.require_pmml_manifest()
+    transformations = _transformation_closure(
+        manifest.raw_required_fields, contract.transformations
+    )
+    transformation_digest = _transformation_sha256(transformations)
+    engine_version = pypmml_engine_version()
+    output_field = contract.require_output_field()
+    return PmmlScoringIdentity(
+        cache_key=pmml_scoring_cache_key(
+            pmml_sha256=pmml_sha256,
+            sample_sha256=sample_sha256,
+            output_field=output_field,
+            engine_version=engine_version,
+            transformation_sha256=transformation_digest,
+            chunk_size=chunk_size,
+        ),
+        engine_version=engine_version,
+        output_field=output_field,
+        transformation_sha256=transformation_digest,
+    )
+
+
 def pmml_scoring_cache_key(
     *,
     pmml_sha256: str,
@@ -521,14 +571,10 @@ def run_pmml_scoring(
     projected_columns = required_transformation_inputs(
         manifest.raw_required_fields, transformations
     )
-    transformation_digest = _transformation_sha256(transformations)
-    engine_version = pypmml_engine_version()
-    cache_key = pmml_scoring_cache_key(
+    identity = build_pmml_scoring_identity(
+        contract=contract,
         pmml_sha256=resolved_pmml_sha256,
         sample_sha256=resolved_sample_sha256,
-        output_field=output_field,
-        engine_version=engine_version,
-        transformation_sha256=transformation_digest,
         chunk_size=chunk_size,
     )
     active_scorer = scorer or load_pmml_scorer(pmml_path, output_field)
@@ -578,10 +624,10 @@ def run_pmml_scoring(
             _require_unchanged_file(sample_path, sample_fingerprint, label="sample")
             _require_unchanged_file(pmml_path, pmml_fingerprint, label="PMML")
             return _build_scoring_result(
-                cache_key=cache_key,
+                cache_key=identity.cache_key,
                 pmml_sha256=resolved_pmml_sha256,
                 sample_sha256=resolved_sample_sha256,
-                engine_version=engine_version,
+                engine_version=identity.engine_version,
                 output_field=output_field,
                 input_row_count=counts.input_row_count,
                 elapsed_seconds=elapsed,
@@ -673,3 +719,162 @@ def validate_pmml_score_artifact(
         score_path, fingerprint, label="PMML score sidecar"
     )
     return replace(result, score_artifact_path=str(score_path))
+
+
+@contextmanager
+def scoring_cache_lock(
+    cache_dir: Path,
+    cache_key: str,
+    cancellation_check: Callable[[], None] | None = None,
+) -> Iterator[None]:
+    """Hold the cross-process lock for one immutable scoring cache identity."""
+
+    if _SHA256_PATTERN.fullmatch(cache_key) is None:
+        raise ValueError("invalid PMML scoring cache key")
+    with cancellable_file_lock(
+        Path(cache_dir) / ".locks" / f"{cache_key}.lock",
+        cancellation_check,
+    ):
+        yield
+
+
+def load_or_run_pmml_scoring(
+    *,
+    cache_dir: Path,
+    cache_key: str,
+    runner: Callable[[], PmmlScoringResult],
+    materialize_path: Path | None = None,
+    cancellation_check: Callable[[], None] | None = None,
+) -> PmmlScoringResult:
+    """Reuse or produce one verified baseline score artifact.
+
+    Cache verification, optional task-local materialization and verification of
+    that copy all happen under the same per-key lock. The runner is called
+    lazily, so a valid cache hit never loads a PMML model.
+    """
+
+    cache_dir = Path(cache_dir)
+    with scoring_cache_lock(cache_dir, cache_key, cancellation_check):
+        raise_if_cancelled(cancellation_check)
+        cached = _load_valid_scoring_cache_locked(
+            cache_dir,
+            cache_key,
+            cancellation_check=cancellation_check,
+        )
+        if cached is None:
+            _discard_scoring_cache_entry_locked(cache_dir, cache_key)
+            produced = runner()
+            if produced.cache_key != cache_key:
+                raise ValueError("PMML scoring result/cache key mismatch")
+            produced = validate_pmml_score_artifact(
+                produced,
+                Path(produced.score_artifact_path),
+                expected_cache_key=cache_key,
+                cancellation_check=cancellation_check,
+            )
+            _store_scoring_cache_locked(
+                cache_dir,
+                cache_key,
+                produced,
+                cancellation_check=cancellation_check,
+            )
+            cached = _load_valid_scoring_cache_locked(
+                cache_dir,
+                cache_key,
+                cancellation_check=cancellation_check,
+            )
+            if cached is None:
+                _discard_scoring_cache_entry_locked(cache_dir, cache_key)
+                raise ValueError("stored PMML scoring cache failed verification")
+        if materialize_path is None:
+            return cached
+        task_path = Path(materialize_path)
+        copy_file_cancellable(
+            Path(cached.score_artifact_path),
+            task_path,
+            cancellation_check=cancellation_check,
+        )
+        try:
+            materialized = validate_pmml_score_artifact(
+                cached,
+                task_path,
+                expected_cache_key=cache_key,
+                cancellation_check=cancellation_check,
+            )
+        except BaseException:
+            task_path.unlink(missing_ok=True)
+            raise
+        return materialized
+
+
+def _load_valid_scoring_cache_locked(
+    cache_dir: Path,
+    cache_key: str,
+    *,
+    cancellation_check: Callable[[], None] | None = None,
+) -> PmmlScoringResult | None:
+    entry = Path(cache_dir) / cache_key
+    result_path = entry / "pmml_scoring_result.json"
+    score_path = entry / "pmml_scores.parquet"
+    if not result_path.is_file() or not score_path.is_file():
+        return None
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        result = pmml_scoring_result_from_dict(payload)
+        if result.score_artifact_path != "pmml_scores.parquet":
+            raise ValueError("cached PMML scoring path must be relative")
+        return validate_pmml_score_artifact(
+            result,
+            score_path,
+            expected_cache_key=cache_key,
+            cancellation_check=cancellation_check,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, pa.ArrowException):
+        return None
+
+
+def _store_scoring_cache_locked(
+    cache_dir: Path,
+    cache_key: str,
+    result: PmmlScoringResult,
+    *,
+    cancellation_check: Callable[[], None] | None = None,
+) -> None:
+    entry = Path(cache_dir) / cache_key
+    entry.mkdir(parents=True, exist_ok=True)
+    from marvis.artifacts import ArtifactUnitOfWork
+
+    uow = ArtifactUnitOfWork()
+    try:
+        staged_score = uow.stage_file(entry, "pmml_scores.parquet")
+        copy_file_cancellable(
+            Path(result.score_artifact_path),
+            staged_score.path,
+            cancellation_check=cancellation_check,
+        )
+        cached_result = validate_pmml_score_artifact(
+            replace(result, score_artifact_path="pmml_scores.parquet"),
+            staged_score.path,
+            expected_cache_key=cache_key,
+            cancellation_check=cancellation_check,
+        )
+        staged_json = uow.stage_file(entry, "pmml_scoring_result.json")
+        staged_json.path.write_text(
+            json.dumps(
+                pmml_scoring_result_to_dict(
+                    replace(cached_result, score_artifact_path="pmml_scores.parquet")
+                ),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        raise_if_cancelled(cancellation_check)
+        uow.finalize(lambda: None)
+    except BaseException:
+        uow.rollback()
+        raise
+
+
+def _discard_scoring_cache_entry_locked(cache_dir: Path, cache_key: str) -> None:
+    shutil.rmtree(Path(cache_dir) / cache_key, ignore_errors=True)

@@ -2,7 +2,7 @@ from dataclasses import replace
 
 from marvis.report_texts import merge_report_text_values, report_text_values_from_results
 from marvis.validation.results import SplitRow
-from tests.output.test_excel import _make_results
+from tests.output.test_excel import _make_pmml_results, _make_results
 
 
 def test_text_values_cover_core_placeholders():
@@ -34,6 +34,29 @@ def test_oot_metrics_formatted_to_four_decimals():
 def test_reproducibility_summary_reflects_status():
     values = report_text_values_from_results(_make_results())
     assert "通过" in values["TEXT:reproducibility_summary"]
+
+
+def test_legacy_reproducibility_summary_wording_is_unchanged():
+    values = report_text_values_from_results(_make_results())
+
+    assert values["TEXT:reproducibility_summary"] == (
+        "对 2 行抽样进行三方分数对比，对齐 2 行，差异 0 行，"
+        "最大绝对差 0.000000，可复现性验证 通过。"
+    )
+    assert "TEXT:pmml_scoring_summary" not in values
+
+
+def test_pmml_results_use_full_sample_scoring_summary_without_reproducibility():
+    values = report_text_values_from_results(_make_pmml_results())
+
+    summary = values["TEXT:pmml_scoring_summary"]
+    assert values["TEXT:reproducibility_summary"] == summary
+    assert "PMML打分测试" in summary
+    assert "全量 3 行" in summary
+    assert "成功 3 行，失败 0 行" in summary
+    assert "probability_1" in summary
+    assert "测试通过" in summary
+    assert "三方分数对比" not in summary
 
 
 def test_stress_summary_mentions_negative_9999_sentinel():

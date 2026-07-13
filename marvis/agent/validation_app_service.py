@@ -108,6 +108,7 @@ from marvis.notebook_cancellation import request_notebook_cancellation
 from marvis.pipeline import (
     run_metrics_stage,
     run_notebook_stage,
+    run_pmml_scoring_stage,
     run_report_stage,
 )
 from marvis.repositories.validation_contracts import (
@@ -430,7 +431,10 @@ def dispatch_agent_validation_job(
                 task_id=task.id,
                 message_id=opening_message["id"],
                 model_profile=model_profile,
-                content=agent_stage_opening_text(stage),
+                content=agent_stage_opening_text(
+                    stage,
+                    validation_workflow_version=task.validation_workflow_version,
+                ),
             )
         stage_message = None
         if stage == "word_conclusion_draft":
@@ -720,6 +724,7 @@ def validation_stage_dependencies() -> ValidationStageDependencies:
     return ValidationStageDependencies(
         perform_scan_task=perform_scan_task,
         run_notebook_stage=run_notebook_stage,
+        run_pmml_scoring_stage=run_pmml_scoring_stage,
         run_metrics_stage=run_metrics_stage,
         run_report_stage=run_report_stage,
         agent_pipeline_settings=agent_pipeline_settings,
@@ -1080,5 +1085,12 @@ def stream_agent_message(
     )
 
 
-def agent_stage_opening_text(stage: str) -> str:
-    return agent_stage_opening_text_impl(stage)
+def agent_stage_opening_text(
+    stage: str,
+    *,
+    validation_workflow_version: int | None = None,
+) -> str:
+    return agent_stage_opening_text_impl(
+        stage,
+        validation_workflow_version=validation_workflow_version,
+    )

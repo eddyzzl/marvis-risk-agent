@@ -131,7 +131,11 @@ def add_agent_report_ready_message(repo: TaskRepository, task_id: str | None) ->
         stage="word_report_ready",
         content=(
             "报告已生成。右侧步骤里的“预览”可以在线查看 Word，"
-            "“下载Word”用于下载验证报告，“下载Excel”用于下载指标分析明细。"
+            + (
+                "“下载Word”用于下载验证报告。"
+                if task.validation_workflow_version == 2
+                else "“下载Word”用于下载验证报告，“下载Excel”用于下载指标分析明细。"
+            )
         ),
         metadata={"report_ready": True},
     )

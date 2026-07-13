@@ -13,7 +13,11 @@ from marvis.packs.v1_compat.adapters import (
     validation_metric_summary,
 )
 from marvis.notebooks import get_live_notebook_session
-from marvis.pipeline import run_metrics_stage, run_notebook_stage, run_report_stage
+from marvis.pipeline import (
+    run_legacy_metrics_stage as run_metrics_stage,
+    run_notebook_stage,
+    run_report_stage,
+)
 
 
 def tool_scan_materials(inputs: dict, ctx) -> dict:

@@ -10,6 +10,10 @@ from fastapi import APIRouter, Request
 from marvis.api_task_helpers import get_task_or_404
 from marvis.db import TaskRepository
 from marvis.execution_environment import load_execution_environment
+from marvis.validation.results import (
+    pmml_scoring_result_from_dict,
+    pmml_scoring_result_to_dict,
+)
 
 
 router = APIRouter(prefix="/api", tags=["evidence"])
@@ -43,6 +47,10 @@ def get_task_evidence(task_id: str, request: Request) -> dict:
         task_dir / "outputs" / "reproducibility_result.json"
     )
     results = _read_json(task_dir / "outputs" / "validation_results.json")
+    pmml_scoring = _strict_pmml_scoring_evidence(
+        _read_json(task_dir / "outputs" / "pmml_scoring_result.json"),
+        (results or {}).get("pmml_scoring"),
+    )
     environment = load_execution_environment(settings.workspace)
     task_status = str(getattr(task.status, "value", task.status) or "")
     merged_notebook_steps = _merge_notebook_and_metrics_steps(
@@ -68,8 +76,22 @@ def get_task_evidence(task_id: str, request: Request) -> dict:
         "reproducibility": (results or {}).get("reproducibility", {})
         or notebook_reproducibility
         or {},
+        "pmml_scoring": pmml_scoring,
         "execution_environment": asdict(environment),
     }
+
+
+def _strict_pmml_scoring_evidence(*candidates: object) -> dict:
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        try:
+            return pmml_scoring_result_to_dict(
+                pmml_scoring_result_from_dict(candidate)
+            )
+        except ValueError:
+            continue
+    return {}
 
 
 def _merge_notebook_and_metrics_steps(

@@ -6,8 +6,14 @@ from collections.abc import Callable
 from marvis.agent.orchestrator import AgentValidationCancelled
 
 
-def agent_stage_opening_text(stage: str) -> str:
+def agent_stage_opening_text(
+    stage: str,
+    *,
+    validation_workflow_version: int | None = None,
+) -> str:
     if stage == "reproducibility":
+        if validation_workflow_version == 2:
+            return "收到，我将继续执行 PMML 打分测试，使用提交的 PMML 对样本进行全量评分。"
         return "收到，我将继续执行模型可复现性验证，运行 Notebook 并检查代码模型分数与提交 PMML 分数的一致性。"
     if stage == "metrics":
         return "收到，我将继续执行模型效果与稳定性验证，计算 KS、PSI、分箱和压力测试等指标。"
@@ -16,10 +22,16 @@ def agent_stage_opening_text(stage: str) -> str:
     return "收到，我将继续执行下一步验证。"
 
 
-def agent_stage_label(stage: str) -> str:
+def agent_stage_label(
+    stage: str,
+    *,
+    validation_workflow_version: int | None = None,
+) -> str:
     if stage == "scan":
         return "模型材料完备性验证"
     if stage == "reproducibility":
+        if validation_workflow_version == 2:
+            return "PMML打分测试"
         return "模型可复现性验证"
     if stage == "metrics":
         return "模型效果&稳定性验证"

@@ -28,7 +28,9 @@ the codebase and test suite.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 import json
 import logging
 import math
@@ -55,6 +57,11 @@ from marvis.domain import (
     TaskStatus,
 )
 from marvis.files import scan_source_dir, write_json_atomic
+from marvis.job_cancellation import (
+    JobCancelled,
+    register_job_cancellation,
+    unregister_job_cancellation,
+)
 from marvis.memory_policy import load_memory_policy
 from marvis.notebook_cancellation import (
     NotebookCancelled,
@@ -121,14 +128,35 @@ from marvis.pipeline_memory import (
     _read_validation_results_payload,
 )
 from marvis.state_machine import IllegalTransition
+from marvis.repositories.validation_contracts import (
+    ValidationContractRepository,
+    require_confirmed_validation_input_contract,
+)
+from marvis.validation.pmml_score_artifacts import (
+    build_pmml_scoring_identity,
+    load_or_run_pmml_scoring,
+    raise_if_cancelled,
+    run_pmml_scoring,
+    sha256_file_cancellable,
+    validate_pmml_score_artifact,
+)
+from marvis.validation.pmml_scoring import TASK_PMML_SCORERS
+from marvis.validation.pmml_stress import run_pmml_stress
+from marvis.validation.stress_test import require_complete_stress_result
 from marvis.validation.platform_metrics import (
+    compute_platform_validation_results,
+    validation_config_from_input_contract,
     write_platform_validation_metrics,
     write_reproducibility_result,
 )
 from marvis.validation.results import (
     ConsistencyStatus,
+    pmml_scoring_result_from_dict,
+    pmml_scoring_result_to_dict,
+    validation_results_to_dict,
     validation_results_from_dict as validation_results_from_dict,  # noqa: F401
 )
+from marvis.validation_materials import resolve_selected_validation_materials
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +178,7 @@ class PipelineSettings:
     random_seed: int = 42
     data_dict_feature_col: str = "特征名"
     data_dict_category_col: str = "类别"
+    pmml_scoring_chunk_size: int = 10_000
 
 
 REPRODUCIBILITY_RESULT_JSON = "reproducibility_result.json"
@@ -450,7 +479,513 @@ def _notebook_stage_failure_prefix(merge_metrics: bool, execution_dir: Path) -> 
     return NOTEBOOK_STAGE_FAILURE_PREFIX
 
 
+class _ValidationIdentityInvalid(PipelineError):
+    """Selected materials or persisted score evidence no longer match."""
+
+
+@contextmanager
+def _pmml_job_cancellation(
+    job_id: str | None,
+    cancellation_check: Callable[[], None] | None = None,
+) -> Iterator[Callable[[], None] | None]:
+    if not job_id:
+        yield cancellation_check
+        return
+    token = register_job_cancellation(job_id)
+
+    def combined_check() -> None:
+        if cancellation_check is not None:
+            cancellation_check()
+        token.raise_if_cancelled()
+
+    try:
+        yield combined_check
+    finally:
+        unregister_job_cancellation(job_id, token)
+
+
+def _current_validation_material_hashes(
+    materials,
+    cancellation_check: Callable[[], None] | None,
+) -> dict[str, str]:
+    return {
+        "notebook": sha256_file_cancellable(
+            materials.notebook, cancellation_check
+        ),
+        "sample": sha256_file_cancellable(materials.sample, cancellation_check),
+        "pmml": sha256_file_cancellable(materials.pmml, cancellation_check),
+        "dictionary": sha256_file_cancellable(
+            materials.dictionary, cancellation_check
+        ),
+    }
+
+
+def _require_current_validation_materials(
+    *,
+    contract,
+    materials,
+    cancellation_check: Callable[[], None] | None,
+) -> dict[str, str]:
+    current = _current_validation_material_hashes(materials, cancellation_check)
+    if current != contract.material_hashes:
+        raise _ValidationIdentityInvalid(
+            "selected validation materials changed; rescan and reconfirm"
+        )
+    return current
+
+
+def _invalidate_v2_validation_identity(
+    repo: TaskRepository,
+    *,
+    task_id: str,
+    message: str,
+) -> None:
+    contracts = ValidationContractRepository(repo.db_path)
+    with repo.transaction() as conn:
+        current = repo.get_task(task_id).status
+        if current is TaskStatus.COMPUTING_METRICS:
+            repo.update_status_on_connection(
+                conn,
+                task_id,
+                TaskStatus.EXECUTED,
+                message=message,
+                expected=TaskStatus.COMPUTING_METRICS,
+            )
+            current = TaskStatus.EXECUTED
+        if current is not TaskStatus.SCANNED:
+            repo.update_status_on_connection(
+                conn,
+                task_id,
+                TaskStatus.SCANNED,
+                message=message,
+                expected=current,
+            )
+        contracts.invalidate_for_material_change_on_connection(conn, task_id)
+
+
+def _restore_scoring_resume_state(
+    repo: TaskRepository,
+    *,
+    task_id: str,
+    message: str,
+) -> None:
+    current = repo.get_task(task_id).status
+    if current in {TaskStatus.RUNNING, TaskStatus.EXECUTED}:
+        repo.update_status(
+            task_id,
+            TaskStatus.SCANNED,
+            message=message,
+            expected=current,
+        )
+
+
+def _restore_metrics_resume_state(
+    repo: TaskRepository,
+    *,
+    task_id: str,
+    message: str,
+) -> None:
+    if repo.get_task(task_id).status is TaskStatus.COMPUTING_METRICS:
+        repo.update_status(
+            task_id,
+            TaskStatus.EXECUTED,
+            message=message,
+            expected=TaskStatus.COMPUTING_METRICS,
+        )
+
+
+def _remove_empty_directory_chain(path: Path, *, stop_at: Path) -> None:
+    current = Path(path)
+    boundary = Path(stop_at)
+    while current != boundary.parent:
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        if current == boundary:
+            return
+        current = current.parent
+
+
+def run_pmml_scoring_stage(
+    *,
+    task_id: str,
+    settings: PipelineSettings,
+    stage_claimed: bool = False,
+    cancellation_job_id: str | None = None,
+    cancellation_check: Callable[[], None] | None = None,
+) -> None:
+    repo = TaskRepository(settings.db_path)
+    task = repo.get_task(task_id)
+    if task.validation_workflow_version != 2:
+        raise PipelineError("PMML scoring stage requires a v2 validation task")
+    if not stage_claimed:
+        repo.update_status(
+            task_id,
+            TaskStatus.RUNNING,
+            message="PMML打分测试进行中",
+            expected=TaskStatus.SCANNED,
+        )
+    try:
+        with _pmml_job_cancellation(
+            cancellation_job_id,
+            cancellation_check,
+        ) as active_cancellation_check:
+            _execute_pmml_scoring_stage(
+                task_id=task_id,
+                settings=settings,
+                cancellation_check=active_cancellation_check,
+            )
+    except JobCancelled:
+        _mark_cancelled(repo, task_id, TaskStatus.SCANNED, "PMML打分测试已取消")
+    except _ValidationIdentityInvalid as exc:
+        _invalidate_v2_validation_identity(
+            repo, task_id=task_id, message=str(exc)
+        )
+        raise
+    except Exception:
+        _restore_scoring_resume_state(
+            repo, task_id=task_id, message="PMML打分测试失败，可重试"
+        )
+        raise
+
+
+def _execute_pmml_scoring_stage(
+    *,
+    task_id: str,
+    settings: PipelineSettings,
+    cancellation_check: Callable[[], None] | None,
+) -> None:
+    repo = TaskRepository(settings.db_path)
+    task = repo.get_task(task_id)
+    raise_if_cancelled(cancellation_check)
+    try:
+        materials = resolve_selected_validation_materials(task)
+        record = require_confirmed_validation_input_contract(
+            ValidationContractRepository(settings.db_path), task_id
+        )
+    except ValueError as exc:
+        raise PipelineError(str(exc)) from exc
+    contract = record.contract
+    current_hashes = _require_current_validation_materials(
+        contract=contract,
+        materials=materials,
+        cancellation_check=cancellation_check,
+    )
+    identity = build_pmml_scoring_identity(
+        contract=contract,
+        pmml_sha256=current_hashes["pmml"],
+        sample_sha256=current_hashes["sample"],
+        chunk_size=settings.pmml_scoring_chunk_size,
+    )
+    scoring_cache = settings.workspace / "cache" / "pmml_scoring"
+    outputs_dir = settings.workspace / "tasks" / task_id / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    work_root = settings.workspace / "cache" / "pmml_scoring_work"
+    working_score = work_root / task_id / f"{identity.cache_key}.parquet"
+    working_score.parent.mkdir(parents=True, exist_ok=True)
+    uow = ArtifactUnitOfWork()
+    try:
+        staged_scores = uow.stage_file(outputs_dir, "pmml_scores.parquet")
+
+        def produce() -> object:
+            scorer = TASK_PMML_SCORERS.get(
+                task_id=task_id,
+                pmml_path=materials.pmml,
+                pmml_sha256=current_hashes["pmml"],
+                output_field=identity.output_field,
+            )
+            return run_pmml_scoring(
+                contract=contract,
+                sample_path=materials.sample,
+                pmml_path=materials.pmml,
+                score_path=working_score,
+                chunk_size=settings.pmml_scoring_chunk_size,
+                scorer=scorer,
+                pmml_sha256=current_hashes["pmml"],
+                sample_sha256=current_hashes["sample"],
+                cancellation_check=cancellation_check,
+            )
+
+        result = load_or_run_pmml_scoring(
+            cache_dir=scoring_cache,
+            cache_key=identity.cache_key,
+            runner=produce,  # type: ignore[arg-type]
+            materialize_path=staged_scores.path,
+            cancellation_check=cancellation_check,
+        )
+        persisted_result = replace(
+            result,
+            score_artifact_path="pmml_scores.parquet",
+        )
+        # Strict round-trip before publishing orchestration evidence.
+        payload = pmml_scoring_result_to_dict(persisted_result)
+        pmml_scoring_result_from_dict(payload)
+        staged_result = uow.stage_file(outputs_dir, "pmml_scoring_result.json")
+        staged_result.path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        raise_if_cancelled(cancellation_check)
+        uow.finalize_with_connection(
+            repo.transaction,
+            lambda conn: repo.update_status_on_connection(
+                conn,
+                task_id,
+                TaskStatus.EXECUTED,
+                message="PMML打分测试完成",
+                expected=TaskStatus.RUNNING,
+                begin_immediate=True,
+            ),
+        )
+    except BaseException:
+        uow.rollback()
+        raise
+    finally:
+        working_score.unlink(missing_ok=True)
+        _remove_empty_directory_chain(working_score.parent, stop_at=work_root)
+
+
 def run_metrics_stage(
+    *,
+    task_id: str,
+    settings: PipelineSettings,
+    stage_claimed: bool = False,
+    cancellation_job_id: str | None = None,
+    cancellation_check: Callable[[], None] | None = None,
+) -> None:
+    task = TaskRepository(settings.db_path).get_task(task_id)
+    if task.validation_workflow_version == 2:
+        return _run_v2_metrics_stage(
+            task_id=task_id,
+            settings=settings,
+            stage_claimed=stage_claimed,
+            cancellation_job_id=cancellation_job_id,
+            cancellation_check=cancellation_check,
+        )
+    return _run_legacy_metrics_stage(
+        task_id=task_id,
+        settings=settings,
+        stage_claimed=stage_claimed,
+        cancellation_job_id=cancellation_job_id,
+    )
+
+
+def run_legacy_metrics_stage(
+    *,
+    task_id: str,
+    settings: PipelineSettings,
+    stage_claimed: bool = False,
+    cancellation_job_id: str | None = None,
+) -> None:
+    """Explicit compatibility entry point for the built-in V1 tool pack."""
+
+    return _run_legacy_metrics_stage(
+        task_id=task_id,
+        settings=settings,
+        stage_claimed=stage_claimed,
+        cancellation_job_id=cancellation_job_id,
+    )
+
+
+def _run_v2_metrics_stage(
+    *,
+    task_id: str,
+    settings: PipelineSettings,
+    stage_claimed: bool,
+    cancellation_job_id: str | None,
+    cancellation_check: Callable[[], None] | None,
+) -> None:
+    repo = TaskRepository(settings.db_path)
+    task = repo.get_task(task_id)
+    if not stage_claimed:
+        if task.status is not TaskStatus.EXECUTED:
+            raise PipelineError(
+                "PMML metrics require completed scoring; "
+                f"current status is {task.status.value}"
+            )
+        repo.update_status(
+            task_id,
+            TaskStatus.COMPUTING_METRICS,
+            message="模型压力测试进行中",
+            expected=TaskStatus.EXECUTED,
+        )
+    try:
+        with _pmml_job_cancellation(
+            cancellation_job_id,
+            cancellation_check,
+        ) as active_cancellation_check:
+            _execute_v2_metrics_stage(
+                task_id=task_id,
+                settings=settings,
+                cancellation_check=active_cancellation_check,
+            )
+    except JobCancelled:
+        _mark_cancelled(repo, task_id, TaskStatus.EXECUTED, "模型压力测试已取消")
+    except _ValidationIdentityInvalid as exc:
+        _invalidate_v2_validation_identity(
+            repo, task_id=task_id, message=str(exc)
+        )
+        raise
+    except Exception:
+        _restore_metrics_resume_state(
+            repo, task_id=task_id, message="模型效果或模型压力测试失败，可重试"
+        )
+        raise
+
+
+def _execute_v2_metrics_stage(
+    *,
+    task_id: str,
+    settings: PipelineSettings,
+    cancellation_check: Callable[[], None] | None,
+) -> None:
+    repo = TaskRepository(settings.db_path)
+    task = repo.get_task(task_id)
+    raise_if_cancelled(cancellation_check)
+    try:
+        materials = resolve_selected_validation_materials(task)
+        record = require_confirmed_validation_input_contract(
+            ValidationContractRepository(settings.db_path), task_id
+        )
+    except ValueError as exc:
+        raise PipelineError(str(exc)) from exc
+    contract = record.contract
+    current_hashes = _require_current_validation_materials(
+        contract=contract,
+        materials=materials,
+        cancellation_check=cancellation_check,
+    )
+    outputs_dir = settings.workspace / "tasks" / task_id / "outputs"
+    score_path = outputs_dir / "pmml_scores.parquet"
+    result_path = outputs_dir / "pmml_scoring_result.json"
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        persisted_scoring = pmml_scoring_result_from_dict(payload)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise _ValidationIdentityInvalid(
+            "PMML scoring evidence is invalid; rerun PMML打分测试"
+        ) from exc
+    if persisted_scoring.score_artifact_path != "pmml_scores.parquet":
+        raise _ValidationIdentityInvalid(
+            "PMML scoring evidence path is invalid; rerun PMML打分测试"
+        )
+    identity = build_pmml_scoring_identity(
+        contract=contract,
+        pmml_sha256=current_hashes["pmml"],
+        sample_sha256=current_hashes["sample"],
+        chunk_size=settings.pmml_scoring_chunk_size,
+    )
+    if (
+        persisted_scoring.cache_key != identity.cache_key
+        or persisted_scoring.pmml_sha256 != current_hashes["pmml"]
+        or persisted_scoring.sample_sha256 != current_hashes["sample"]
+        or persisted_scoring.output_field != identity.output_field
+        or persisted_scoring.engine_version != identity.engine_version
+    ):
+        raise _ValidationIdentityInvalid(
+            "PMML scoring evidence does not match selected materials"
+        )
+    runtime_scoring = replace(
+        persisted_scoring,
+        score_artifact_path=str(score_path),
+    )
+    try:
+        runtime_scoring = validate_pmml_score_artifact(
+            runtime_scoring,
+            score_path,
+            expected_cache_key=identity.cache_key,
+            cancellation_check=cancellation_check,
+        )
+    except ValueError as exc:
+        raise _ValidationIdentityInvalid(
+            "task-local PMML score artifact is invalid; rerun PMML打分测试"
+        ) from exc
+
+    work_dir = outputs_dir / ".pmml-metrics-stage-work"
+    _remove_dir_if_exists(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=False)
+    uow: ArtifactUnitOfWork | None = None
+    try:
+        config = validation_config_from_input_contract(contract, settings)
+
+        def scorer_factory():
+            return TASK_PMML_SCORERS.get(
+                task_id=task_id,
+                pmml_path=materials.pmml,
+                pmml_sha256=current_hashes["pmml"],
+                output_field=identity.output_field,
+            )
+
+        metadata = contract.require_feature_metadata()
+        stress = run_pmml_stress(
+            contract=contract,
+            config=config,
+            sample_path=materials.sample,
+            baseline_score_path=score_path,
+            scoring_result=runtime_scoring,
+            scenario_dir=work_dir / "stress",
+            feature_categories=metadata.per_category_raw_fields,
+            scorer_factory=scorer_factory,
+            chunk_size=settings.pmml_scoring_chunk_size,
+            cancellation_check=cancellation_check,
+            category_source_counts={
+                "dictionary": len(metadata.rows),
+                "unresolved": 0,
+            },
+            baseline_cache_key=runtime_scoring.cache_key,
+            cache_dir=settings.workspace / "cache" / "pmml_stress",
+        )
+        require_complete_stress_result(stress)
+        results = compute_platform_validation_results(
+            task=task,
+            contract=contract,
+            sample_path=materials.sample,
+            score_path=score_path,
+            scoring_result=runtime_scoring,
+            metadata_resolution=metadata,
+            stress_test=stress,
+            settings=settings,
+            cancellation_check=cancellation_check,
+        )
+        persisted_results = replace(
+            results,
+            pmml_scoring=replace(
+                runtime_scoring,
+                score_artifact_path="pmml_scores.parquet",
+            ),
+        )
+        results_payload = validation_results_to_dict(persisted_results)
+        validation_results_from_dict(results_payload)
+        work_result = work_dir / "validation_results.json"
+        work_result.write_text(
+            json.dumps(results_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        raise_if_cancelled(cancellation_check)
+        uow = ArtifactUnitOfWork()
+        staged_result = uow.stage_file(outputs_dir, "validation_results.json")
+        shutil.move(str(work_result), staged_result.path)
+        raise_if_cancelled(cancellation_check)
+        uow.finalize_with_connection(
+            repo.transaction,
+            lambda conn: repo.update_status_on_connection(
+                conn,
+                task_id,
+                TaskStatus.WRITING_ARTIFACTS,
+                message="模型效果与模型压力测试完成",
+                expected=TaskStatus.COMPUTING_METRICS,
+                begin_immediate=True,
+            ),
+        )
+    except BaseException:
+        if uow is not None:
+            uow.rollback()
+        raise
+    finally:
+        _remove_dir_if_exists(work_dir)
+
+
+def _run_legacy_metrics_stage(
     *,
     task_id: str,
     settings: PipelineSettings,
@@ -764,11 +1299,7 @@ def run_report_stage(
             else:
                 report_uow.finalize(lambda: None)
             return
-        terminal_status = (
-            TaskStatus.REVIEW_REQUIRED
-            if results.reproducibility.summary.status is ConsistencyStatus.FAIL
-            else TaskStatus.SUCCEEDED
-        )
+        terminal_status = _terminal_validation_status(task, results)
         try:
             report_uow.finalize_with_connection(
                 repo.transaction,
@@ -834,6 +1365,16 @@ def run_report_stage(
 
 def _rollback_report_uow(uow: ArtifactUnitOfWork | None) -> None:
     _rollback_artifact_uow(uow)
+
+
+def _terminal_validation_status(task: TaskRecord, results) -> TaskStatus:
+    if results.reproducibility is None:
+        return TaskStatus.SUCCEEDED
+    return (
+        TaskStatus.REVIEW_REQUIRED
+        if results.reproducibility.summary.status is ConsistencyStatus.FAIL
+        else TaskStatus.SUCCEEDED
+    )
 
 
 def _rollback_artifact_uow(uow: ArtifactUnitOfWork | None) -> None:
@@ -1026,6 +1567,46 @@ def run_staged_pipeline(
     settings: PipelineSettings,
     cancellation_job_id: str | None = None,
 ) -> None:
+    task = TaskRepository(settings.db_path).get_task(task_id)
+    if task.validation_workflow_version == 2:
+        run_pmml_scoring_stage(
+            task_id=task_id,
+            settings=settings,
+            cancellation_job_id=cancellation_job_id,
+        )
+        task = TaskRepository(settings.db_path).get_task(task_id)
+        if task.status is not TaskStatus.EXECUTED:
+            return
+        run_metrics_stage(
+            task_id=task_id,
+            settings=settings,
+            cancellation_job_id=cancellation_job_id,
+        )
+        task = TaskRepository(settings.db_path).get_task(task_id)
+        if task.status not in {
+            TaskStatus.WRITING_ARTIFACTS,
+            TaskStatus.REVIEW_REQUIRED,
+        }:
+            return
+        run_report_stage(
+            task_id=task_id,
+            settings=settings,
+            cancellation_job_id=cancellation_job_id,
+        )
+        return
+    return _run_legacy_staged_pipeline(
+        task_id=task_id,
+        settings=settings,
+        cancellation_job_id=cancellation_job_id,
+    )
+
+
+def _run_legacy_staged_pipeline(
+    *,
+    task_id: str,
+    settings: PipelineSettings,
+    cancellation_job_id: str | None = None,
+) -> None:
     logger.info("staged pipeline starting task_id=%s", task_id)
     repo = TaskRepository(settings.db_path)
     task = repo.get_task(task_id)
@@ -1177,6 +1758,10 @@ def _valid_unique_strings(value: object) -> bool:
 
 
 def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
+    task = TaskRepository(settings.db_path).get_task(task_id)
+    if task.validation_workflow_version == 2:
+        run_staged_pipeline(task_id=task_id, settings=settings)
+        return
     if settings.notebook_isolated_execution:
         run_staged_pipeline(task_id=task_id, settings=settings)
         return
@@ -1325,11 +1910,7 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
             )
             return
 
-        terminal_status = (
-            TaskStatus.REVIEW_REQUIRED
-            if results.reproducibility.summary.status is ConsistencyStatus.FAIL
-            else TaskStatus.SUCCEEDED
-        )
+        terminal_status = _terminal_validation_status(task, results)
         repo.update_status(
             task_id,
             terminal_status,

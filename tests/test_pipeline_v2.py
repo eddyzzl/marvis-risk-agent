@@ -37,6 +37,7 @@ from marvis.pipeline import (
     _write_reproducibility_result_in_session,
     run_metrics_stage,
     run_notebook_stage,
+    run_pmml_scoring_stage,
     run_pipeline,
     run_report_stage,
     run_staged_pipeline,
@@ -44,6 +45,124 @@ from marvis.pipeline import (
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def test_pmml_job_cancellation_uses_agent_callback_without_job_token():
+    from marvis.pipeline import _pmml_job_cancellation
+
+    calls: list[str] = []
+    with _pmml_job_cancellation(None, lambda: calls.append("checked")) as check:
+        assert check is not None
+        check()
+
+    assert calls == ["checked"]
+
+
+@pytest.fixture
+def v2_workflow():
+    """Opt a pipeline case into the immutable v2 task-creation default."""
+
+
+@pytest.fixture(autouse=True)
+def _keep_preexisting_pipeline_cases_on_legacy_workflow(
+    request,
+    monkeypatch,
+):
+    """This module predates workflow versioning; unmarked cases are v1 specs."""
+
+    if "v2_workflow" in request.fixturenames:
+        return
+    original = TaskRepository.create_task
+
+    def create_legacy(repo, payload):
+        record = original(repo, payload)
+        if record.validation_workflow_version != 2:
+            return record
+        with repo.transaction() as conn:
+            conn.execute(
+                "UPDATE tasks SET validation_workflow_version = 1 WHERE id = ?",
+                (record.id,),
+            )
+        return replace(record, validation_workflow_version=1)
+
+    monkeypatch.setattr(TaskRepository, "create_task", create_legacy)
+
+
+def test_v2_pmml_scoring_and_metrics_never_execute_notebook(
+    ready_validation_task,
+    pipeline_settings,
+    monkeypatch,
+    v2_workflow,
+):
+    monkeypatch.setattr(
+        pipeline_module,
+        "_notebook_step_v3",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("notebook execution forbidden")
+        ),
+    )
+
+    run_pmml_scoring_stage(
+        task_id=ready_validation_task.id,
+        settings=pipeline_settings,
+    )
+    repo = TaskRepository(pipeline_settings.db_path)
+    assert repo.get_task(ready_validation_task.id).status is TaskStatus.EXECUTED
+    outputs = (
+        pipeline_settings.workspace
+        / "tasks"
+        / ready_validation_task.id
+        / "outputs"
+    )
+    scoring = json.loads(
+        (outputs / "pmml_scoring_result.json").read_text(encoding="utf-8")
+    )
+    assert scoring["score_artifact_path"] == "pmml_scores.parquet"
+    assert (outputs / "pmml_scores.parquet").is_file()
+
+    repo.update_status(
+        ready_validation_task.id,
+        TaskStatus.SCANNED,
+        "retry scoring",
+        expected=TaskStatus.EXECUTED,
+    )
+    with monkeypatch.context() as cache_hit_guard:
+        cache_hit_guard.setattr(
+            pipeline_module.TASK_PMML_SCORERS,
+            "get",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("a valid baseline cache hit must not load the PMML model")
+            ),
+        )
+        run_pmml_scoring_stage(
+            task_id=ready_validation_task.id,
+            settings=pipeline_settings,
+        )
+    assert repo.get_task(ready_validation_task.id).status is TaskStatus.EXECUTED
+
+    run_metrics_stage(
+        task_id=ready_validation_task.id,
+        settings=pipeline_settings,
+    )
+
+    assert repo.get_task(ready_validation_task.id).status is TaskStatus.WRITING_ARTIFACTS
+    results = json.loads(
+        (outputs / "validation_results.json").read_text(encoding="utf-8")
+    )
+    assert results["schema_version"] == "marvis.validation_results.v2"
+    assert results["stress_test"]["status"] == "completed"
+    assert results["pmml_scoring"]["score_artifact_path"] == "pmml_scores.parquet"
+    assert not (outputs / ".pmml-metrics-stage-work").exists()
+
+    run_report_stage(
+        task_id=ready_validation_task.id,
+        settings=pipeline_settings,
+    )
+    assert repo.get_task(ready_validation_task.id).status in {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.REVIEW_REQUIRED,
+    }
+    assert (outputs / "validation_report.docx").is_file()
 
 
 def _empty_stress_scores_payload() -> dict:

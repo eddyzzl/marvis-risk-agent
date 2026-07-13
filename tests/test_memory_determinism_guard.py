@@ -98,6 +98,13 @@ def test_metrics_endpoint_does_not_pass_agent_memory_context_to_validation_stage
             time_col="apply_month",
         )
     )
+    # This test exercises the historical deterministic metrics endpoint, not
+    # the V2 confirmation contract introduced for new validation tasks.
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE tasks SET validation_workflow_version = 1 WHERE id = ?",
+            (task.id,),
+        )
     repo.update_status(task.id, TaskStatus.SCANNED, "scanned")
     repo.update_status(task.id, TaskStatus.RUNNING, "running")
     repo.update_status(task.id, TaskStatus.EXECUTED, "executed")
