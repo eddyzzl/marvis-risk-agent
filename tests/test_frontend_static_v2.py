@@ -918,9 +918,9 @@ def test_completed_report_actions_render_below_step_copy_with_office_colors():
     step_renderer_start = app_js.index("function renderWorkflowStepper")
     step_renderer_end = app_js.index("function formatDate", step_renderer_start)
     step_renderer = app_js[step_renderer_start:step_renderer_end]
-    assert "stepActionButtonHtml(step)" in step_renderer
-    assert "stepDownloadActionsHtml(step)" in step_renderer
-    assert step_renderer.index("stepActionButtonHtml(step)") < step_renderer.index("stepDownloadActionsHtml(step)")
+    assert "stepActionButtonHtml(displayStep)" in step_renderer
+    assert "stepDownloadActionsHtml(displayStep)" in step_renderer
+    assert step_renderer.index("stepActionButtonHtml(displayStep)") < step_renderer.index("stepDownloadActionsHtml(displayStep)")
 
     action_start = styles_css.index(".step-download-actions {")
     action_end = styles_css.index("}", action_start)
@@ -5417,7 +5417,7 @@ def test_realtime_panel_keeps_only_reproducibility_evidence_in_center():
     assert "notebook_steps" in app_js
     assert "reproducibility" in app_js
     assert "renderNotebookSteps(result.notebook_steps || [], result.notebook_cells || notebookCells)" in app_js
-    assert "暂无分数一致性证据，运行完建模代码后展示结果" in index_html
+    assert "暂无 PMML 打分证据，完成 PMML 全量评分后展示结果" in index_html
     assert "暂无分数一致性证据，运行完建模代码后展示结果" in app_js
     assert "暂无 Notebook 契约证据" not in index_html
     assert "还没运行验证。扫描材料后运行当前任务验证。" not in index_html
@@ -11890,3 +11890,15 @@ def test_tool_detail_rows_render_as_grouped_list_with_right_aligned_values():
     dd_rule = _css_rule(v2_css, ".plugin-tool-impl dd")
     assert "text-align: right" in dd_rule
     assert "justify-self: end" in dd_rule
+
+
+def test_v2_validation_ui_uses_pmml_scoring_copy_and_evidence():
+    app_js = _read_static("app.js")
+    index_html = _read_static("index.html")
+
+    assert 'title: "PMML打分测试"' in app_js
+    assert 'hint: "PMML全量评分"' in app_js
+    assert 'function renderPmmlScoringEvidence' in app_js
+    assert 'renderPmmlScoringEvidence(evidence.pmml_scoring || {})' in app_js
+    assert 'id="scoringSectionTitle">PMML打分测试</h3>' in index_html
+    assert "PMML打分、效果稳定性验证，模型压力测试" in index_html

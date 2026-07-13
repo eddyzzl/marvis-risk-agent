@@ -60,17 +60,37 @@ def test_csv_inspection_uses_bounded_encoding_fallback_and_streaming_hash(tmp_pa
     assert schema.path == str(path.resolve())
 
 
-@pytest.mark.parametrize(
-    ("header", "message"),
-    [("a,a\n1,2\n", "duplicate"), ("a,\n1,2\n", "blank")],
-)
-def test_csv_rejects_raw_duplicate_and_blank_headers_before_pandas_mangling(
-    tmp_path, header, message
-):
+def test_csv_rejects_raw_duplicate_headers_before_pandas_mangling(tmp_path):
     path = tmp_path / "bad.csv"
-    path.write_text(header, encoding="utf-8")
-    with pytest.raises(ValueError, match=message):
+    path.write_text("a,a\n1,2\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate"):
         inspect_sample_schema(path)
+
+
+def test_csv_normalizes_unreferenced_blank_headers_without_blocking_projection(
+    tmp_path,
+):
+    path = tmp_path / "blank-index-columns.csv"
+    path.write_text(",,x,y\n1,1,10,0\n2,2,20,1\n", encoding="utf-8")
+
+    schema = inspect_sample_schema(path)
+    chunks = list(
+        iter_sample_projection(
+            path,
+            columns=("x", "y"),
+            chunk_size=1,
+            schema=schema,
+        )
+    )
+
+    assert schema.columns[:2] == (
+        "__marvis_unnamed_column_0__",
+        "__marvis_unnamed_column_1__",
+    )
+    assert pd.concat(chunks, ignore_index=True).to_dict("list") == {
+        "x": [10, 20],
+        "y": [0, 1],
+    }
 
 
 def test_csv_projection_is_chunked_and_preserves_requested_order(tmp_path):
@@ -413,13 +433,33 @@ def test_xlsx_projection_ignores_understated_dimension_before_full_load(
         )
 
 
-@pytest.mark.parametrize("headers", [["x", "x"], ["x", None]])
-def test_excel_rejects_raw_duplicate_and_blank_headers(tmp_path, headers):
+def test_excel_rejects_raw_duplicate_headers(tmp_path):
     path = tmp_path / "bad.xlsx"
-    rows = [headers, [1, 2]]
+    rows = [["x", "x"], [1, 2]]
     pd.DataFrame(rows).to_excel(path, index=False, header=False)
-    with pytest.raises(ValueError, match="duplicate|blank"):
+    with pytest.raises(ValueError, match="duplicate"):
         inspect_sample_schema(path)
+
+
+def test_excel_normalizes_blank_header_for_named_projection(tmp_path):
+    path = tmp_path / "blank.xlsx"
+    pd.DataFrame([[None, "x"], [1, 2]]).to_excel(
+        path, index=False, header=False
+    )
+
+    schema = inspect_sample_schema(path)
+    projected = pd.concat(
+        iter_sample_projection(
+            path,
+            columns=("x",),
+            chunk_size=1,
+            schema=schema,
+        ),
+        ignore_index=True,
+    )
+
+    assert schema.columns == ("__marvis_unnamed_column_0__", "x")
+    assert projected.to_dict("list") == {"x": [2]}
 
 
 def test_xls_dependency_or_parse_error_is_deterministic_and_bounded(tmp_path):

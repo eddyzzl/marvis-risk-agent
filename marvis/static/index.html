@@ -84,7 +84,7 @@
                 </span>
                 <span class="run-mode-copy">
                   <strong>手动模式</strong>
-                  <small data-run-mode-description="manual">逐步完成材料扫描、Notebook 复现、分数一致性、效果稳定性和报告生成</small>
+                  <small data-run-mode-description="manual">逐步完成材料扫描、PMML 打分、效果稳定性、模型压力测试和报告生成</small>
                 </span>
               </label>
               <label class="run-mode-card selected-tone-green">
@@ -1163,7 +1163,7 @@
                   <span class="welcome-task-sheen" aria-hidden="true"></span>
                 </span>
                 <strong>模型验证</strong>
-                <span>可复现性、稳定性、效果验证，压力测试</span>
+                <span>PMML打分、效果稳定性验证，模型压力测试</span>
               </button>
               <button
                 id="welcomeStrategyDevelopmentCard"
@@ -1251,9 +1251,9 @@
               </section>
               <section id="notebookSection" class="progress-panel hidden">
                 <div id="agentReproducibilityLeadMessages" class="agent-stage-messages agent-stage-lead-messages" aria-live="polite"></div>
-                <h3>分数一致性</h3>
+                <h3 id="scoringSectionTitle">PMML打分测试</h3>
                 <div id="reproducibilitySummary" class="result-summary empty">
-                  暂无分数一致性证据，运行完建模代码后展示结果
+                  暂无 PMML 打分证据，完成 PMML 全量评分后展示结果
                 </div>
                 <div id="agentReproducibilityMessages" class="agent-stage-messages agent-stage-after-messages" aria-live="polite"></div>
               </section>

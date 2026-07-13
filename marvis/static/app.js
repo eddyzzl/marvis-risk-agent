@@ -433,6 +433,40 @@ async function loadBranding() {
   }
 }
 
+function usesPmmlScoringWorkflow(task = selectedTask) {
+  return Number(task?.validation_workflow_version) === 2;
+}
+
+function workflowStepForTask(step, task = selectedTask) {
+  if (!usesPmmlScoringWorkflow(task)) return step;
+  if (step.id === "notebook") {
+    return {
+      ...step,
+      title: "PMML打分测试",
+      hint: "PMML全量评分",
+    };
+  }
+  if (step.id === "metrics") {
+    return {
+      ...step,
+      title: "模型效果&稳定性验证",
+      hint: "效果、稳定性与模型压力测试",
+    };
+  }
+  if (step.id === "report") {
+    return {
+      ...step,
+      hint: "Word验证报告",
+    };
+  }
+  return step;
+}
+
+function syncScoringSectionCopy(task = selectedTask) {
+  const title = $("scoringSectionTitle");
+  if (title) title.textContent = usesPmmlScoringWorkflow(task) ? "PMML打分测试" : "分数一致性";
+}
+
 function currentTaskSignature(task) {
   if (!task) return "empty";
   return signatureFromParts([
@@ -442,6 +476,7 @@ function currentTaskSignature(task) {
     task.failure_stage || "",
     task.active_job_kind || "",
     task.status_message || "",
+    task.validation_workflow_version || 0,
     task.report_available ? 1 : 0,
     taskStopped(task) ? 1 : 0,
   ]);
@@ -472,6 +507,7 @@ function workflowStepperSignature(task) {
     taskFailureStage(task) || "",
     task.status_message || "",
     task.active_job_kind || "",
+    task.validation_workflow_version || 0,
     task.report_available ? 1 : 0,
     taskStopped(task) ? 1 : 0,
     taskBusyAction(task.id) || "",
@@ -1422,7 +1458,9 @@ function taskFailureActionStatusTitle(task = selectedTask) {
   if (stage === "scan") return "材料识别失败。";
   if (stage === "metrics") return "模型效果&稳定性验证失败。";
   if (stage === "report") return "报告输出失败。";
-  if (stage === "notebook") return "模型可复现性验证失败。";
+  if (stage === "notebook") {
+    return usesPmmlScoringWorkflow(task) ? "PMML打分测试失败。" : "模型可复现性验证失败。";
+  }
   return "任务执行失败。";
 }
 
@@ -1459,7 +1497,7 @@ function actionFailureStatusTitle(actionId) {
     case "scan":
       return "材料识别失败。";
     case "notebook":
-      return "模型可复现性验证失败。";
+      return usesPmmlScoringWorkflow() ? "PMML打分测试失败。" : "模型可复现性验证失败。";
     case "metrics":
       return "指标概览失败。";
     case "report":
@@ -1477,7 +1515,7 @@ function actionCancelledStatusTitle(actionId) {
       return "材料扫描已停止。";
     case "notebook":
     case "cancelNotebook":
-      return "Notebook 已停止，可重新运行。";
+      return usesPmmlScoringWorkflow() ? "PMML打分测试已停止，可重新运行。" : "Notebook 已停止，可重新运行。";
     case "metrics":
     case "cancelMetrics":
       return "指标生成已停止，可重新生成。";
@@ -1506,9 +1544,15 @@ function taskActionStatusSnapshot(task = selectedTask) {
     case "configured":
       return { message: "材料识别完成。", kind: "success" };
     case "running":
-      return { message: "模型可复现性验证进行中。", kind: "busy" };
+      return {
+        message: usesPmmlScoringWorkflow(task) ? "PMML打分测试进行中。" : "模型可复现性验证进行中。",
+        kind: "busy",
+      };
     case "executed":
-      return { message: "模型可复现性验证完成。", kind: "success" };
+      return {
+        message: usesPmmlScoringWorkflow(task) ? "PMML打分测试完成。" : "模型可复现性验证完成。",
+        kind: "success",
+      };
     case "computing_metrics":
       return { message: "指标概览进行中。", kind: "busy" };
     case "writing_artifacts":
@@ -1578,6 +1622,7 @@ function renderReproducibilitySectionVisibility() {
     $("notebookSection")?.classList.add("hidden");
     return;
   }
+  syncScoringSectionCopy(selectedTask);
   $("notebookSection")?.classList.toggle("hidden", !shouldShowReproducibilitySection());
 }
 
@@ -3007,6 +3052,19 @@ function workflowStageCompleteFromEvidence(stepId) {
 }
 
 function plannedReproducibilitySteps() {
+  if (usesPmmlScoringWorkflow()) {
+    return [
+      {
+        id: "system-repro-pmml",
+        title: "PMML 全量评分",
+        status: "pending",
+        cell_count: 0,
+        cell_indexes: [],
+        source_previews: [],
+        system: true,
+      },
+    ];
+  }
   return [
     {
       id: "system-repro-pmml",
@@ -3030,6 +3088,37 @@ function plannedReproducibilitySteps() {
 }
 
 function plannedMetricSteps() {
+  if (usesPmmlScoringWorkflow()) {
+    return [
+      {
+        id: "system-metrics-prepare",
+        title: "指标数据准备",
+        status: "pending",
+        cell_count: 0,
+        cell_indexes: [],
+        source_previews: [],
+        system: true,
+      },
+      {
+        id: "system-metrics-effectiveness",
+        title: "效果与稳定性计算",
+        status: "pending",
+        cell_count: 0,
+        cell_indexes: [],
+        source_previews: [],
+        system: true,
+      },
+      {
+        id: "system-metrics-stress",
+        title: "模型压力测试",
+        status: "pending",
+        cell_count: 0,
+        cell_indexes: [],
+        source_previews: [],
+        system: true,
+      },
+    ];
+  }
   return [
     {
       id: "system-metrics-prepare",
@@ -3283,6 +3372,7 @@ function renderWorkflowStepper({ force = false } = {}) {
   stepper.innerHTML = "";
   workflowSteps.forEach((step, index) => {
     if (step.action && !stepActionIds.includes(step.action)) return;
+    const displayStep = workflowStepForTask(step, selectedTask);
     const item = document.createElement("div");
     const classes = ["step"];
     const stepStatus = workflowStepStatus(index, activeIndex);
@@ -3300,7 +3390,7 @@ function renderWorkflowStepper({ force = false } = {}) {
       classes.push("pending");
     }
     item.className = classes.join(" ");
-    item.dataset.stepTarget = step.target;
+    item.dataset.stepTarget = displayStep.target;
     item.tabIndex = 0;
     item.setAttribute("role", "group");
     item.innerHTML = [
@@ -3308,12 +3398,12 @@ function renderWorkflowStepper({ force = false } = {}) {
       stepCheckerHtml(stepStatus),
       `<span class="step-number">${index + 1}</span>`,
       '<span class="step-copy">',
-      `<strong class="step-title">${escapeHtml(step.title)}</strong>`,
-      `<small class="step-hint">${escapeHtml(step.hint)}</small>`,
+      `<strong class="step-title">${escapeHtml(displayStep.title)}</strong>`,
+      `<small class="step-hint">${escapeHtml(displayStep.hint)}</small>`,
       "</span>",
-      stepActionButtonHtml(step),
+      stepActionButtonHtml(displayStep),
       "</div>",
-      stepDownloadActionsHtml(step),
+      stepDownloadActionsHtml(displayStep),
       step.id === "notebook" ? renderNotebookStepRail(notebookStepsForRail(), "分段进度", index + 1, stepStatus, "notebook") : "",
       step.id === "metrics" ? renderNotebookStepRail(metricStepsForRail(), "计算进度", index + 1, stepStatus, "metrics") : "",
     ].join("");
@@ -3892,7 +3982,11 @@ function renderScanResult(result, notebookCells = []) {
 }
 
 function renderValidationResult(result) {
-  if (result?.status) setActionStatus("Notebook 已提交执行。", "busy");
+  if (!result?.status) return;
+  setActionStatus(
+    usesPmmlScoringWorkflow() ? "PMML 打分测试已提交执行。" : "Notebook 已提交执行。",
+    "busy",
+  );
 }
 
 function evidenceEmpty(id, message) {
@@ -3903,6 +3997,12 @@ function evidenceEmpty(id, message) {
 }
 
 function reproducibilityEmptyMessage(task = selectedTask) {
+  if (usesPmmlScoringWorkflow(task)) {
+    const stage = taskFailureStage(task);
+    if (stage === "notebook") return "PMML打分测试失败，检查 PMML 文件和输入字段后重新运行。";
+    if (stage === "scan") return "材料完备性验证未通过，暂不展示 PMML 打分证据。";
+    return "暂无 PMML 打分证据，完成 PMML 全量评分后展示结果";
+  }
   const stage = taskFailureStage(task);
   if (stage === "notebook") {
     return "模型可复现性验证失败，修复 Notebook 后重新运行该阶段。";
@@ -3916,7 +4016,9 @@ function reproducibilityEmptyMessage(task = selectedTask) {
 function metricPreviewEmptyMessage(task = selectedTask) {
   const stage = taskFailureStage(task);
   if (stage === "notebook") {
-    return "模型可复现性验证未通过，暂不展示效果&稳定性指标。";
+    return usesPmmlScoringWorkflow(task)
+      ? "PMML打分测试未通过，暂不展示效果&稳定性指标。"
+      : "模型可复现性验证未通过，暂不展示效果&稳定性指标。";
   }
   if (stage === "metrics") {
     return "模型效果&稳定性验证失败，修复后重新生成指标概览。";
@@ -4029,6 +4131,64 @@ function reproducibilityEvidenceSignature(reproducibility = {}, summary = {}, ro
 
 function currentReproducibilityTaskId() {
   return selectedTaskId || "unselected";
+}
+
+function renderPmmlScoringEvidence(scoring = {}) {
+  const element = $("reproducibilitySummary");
+  if (!element) return;
+  const taskId = currentReproducibilityTaskId();
+  if (!scoring || Object.keys(scoring).length === 0) {
+    const emptyMessage = reproducibilityEmptyMessage();
+    evidenceEmpty("reproducibilitySummary", emptyMessage);
+    renderSignatures.reproducibilityTaskId = taskId;
+    renderSignatures.reproducibilityEvidence = "";
+    renderSignatures.reproducibilityEmpty = emptyMessage;
+    return;
+  }
+  const evidenceSignature = JSON.stringify({
+    status: scoring.status || "",
+    input_row_count: scoring.input_row_count ?? null,
+    success_count: scoring.success_count ?? null,
+    failure_count: scoring.failure_count ?? null,
+    null_count: scoring.null_count ?? null,
+    non_finite_count: scoring.non_finite_count ?? null,
+    output_field: scoring.output_field || "",
+    engine: scoring.engine || "",
+    elapsed_seconds: scoring.elapsed_seconds ?? null,
+    rows_per_second: scoring.rows_per_second ?? null,
+    bounded_errors: scoring.bounded_errors || [],
+  });
+  if (
+    renderSignatures.reproducibilityTaskId === taskId
+    && renderSignatures.reproducibilityEvidence === evidenceSignature
+  ) {
+    return;
+  }
+  const passed = scoring.status === "pass";
+  const statusClass = passed ? "repro-status-pass" : "repro-status-fail";
+  const errors = Array.isArray(scoring.bounded_errors) ? scoring.bounded_errors : [];
+  const errorsHtml = errors.length
+    ? `<div class="result-summary error-detail">${errors.slice(0, 5).map((error) => `<div>${escapeHtml(error)}</div>`).join("")}</div>`
+    : "";
+  const elapsed = Number(scoring.elapsed_seconds);
+  const throughput = Number(scoring.rows_per_second);
+  element.className = "result-summary";
+  element.innerHTML = [
+    '<div class="summary-grid">',
+    `<div class="summary-item ${statusClass}"><span>状态</span><strong>${passed ? "通过" : "失败"}</strong></div>`,
+    `<div class="summary-item"><span>全量样本</span><strong>${escapeHtml(scoring.input_row_count ?? "-")}</strong></div>`,
+    `<div class="summary-item"><span>成功评分</span><strong>${escapeHtml(scoring.success_count ?? "-")}</strong></div>`,
+    `<div class="summary-item"><span>失败评分</span><strong>${escapeHtml(scoring.failure_count ?? 0)}</strong></div>`,
+    `<div class="summary-item"><span>空值 / 非有限值</span><strong>${escapeHtml(scoring.null_count ?? 0)} / ${escapeHtml(scoring.non_finite_count ?? 0)}</strong></div>`,
+    `<div class="summary-item"><span>输出字段</span><strong>${escapeHtml(scoring.output_field || "-")}</strong></div>`,
+    `<div class="summary-item"><span>批量引擎</span><strong>${escapeHtml(scoring.engine || "-")}</strong></div>`,
+    `<div class="summary-item"><span>耗时 / 吞吐</span><strong>${Number.isFinite(elapsed) ? `${elapsed.toFixed(2)}s` : "-"} / ${Number.isFinite(throughput) ? `${Math.round(throughput)} 行/s` : "-"}</strong></div>`,
+    "</div>",
+    errorsHtml,
+  ].join("");
+  renderSignatures.reproducibilityTaskId = taskId;
+  renderSignatures.reproducibilityEvidence = evidenceSignature;
+  renderSignatures.reproducibilityEmpty = "";
 }
 
 function renderReproducibilityEvidence(reproducibility = {}) {
@@ -4149,7 +4309,11 @@ function renderEvidence(evidence = {}) {
   } else {
     renderNotebookSteps(evidence.notebook_steps || [], evidence.notebook_cells || []);
   }
-  renderReproducibilityEvidence(evidence.reproducibility || {});
+  if (usesPmmlScoringWorkflow()) {
+    renderPmmlScoringEvidence(evidence.pmml_scoring || {});
+  } else {
+    renderReproducibilityEvidence(evidence.reproducibility || {});
+  }
   if (selectedTaskIsAgentMode()) {
     lastAgentRenderSignature = null;
     renderAgentConversation();
@@ -4571,11 +4735,12 @@ function agentFrozenStageConfig(stage) {
     };
   }
   if (stage === "reproducibility") {
+    const pmmlScoring = usesPmmlScoringWorkflow();
     return {
       sectionId: "notebookSection",
       contentId: "reproducibilitySummary",
-      headingHtml: "<h3>分数一致性</h3>",
-      label: "分数一致性（历史）",
+      headingHtml: pmmlScoring ? "<h3>PMML打分测试</h3>" : "<h3>分数一致性</h3>",
+      label: pmmlScoring ? "PMML打分测试（历史）" : "分数一致性（历史）",
     };
   }
   if (stage === "metrics") {

@@ -1923,12 +1923,12 @@ def test_task_evidence_endpoint_merges_only_metric_system_progress_during_metric
     ]
 
 
-def test_notebook_metrics_and_report_endpoints_dispatch_stages(tmp_path: Path, monkeypatch):
+def test_v2_scoring_metrics_and_report_endpoints_dispatch_stages(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     calls: list[tuple[str, str, object]] = []
 
-    def fake_notebook_stage(*, task_id, settings, **_kwargs):
-        calls.append(("notebook", task_id, settings))
+    def fake_pmml_scoring_stage(*, task_id, settings, **_kwargs):
+        calls.append(("pmml", task_id, settings))
 
     def fake_metrics_stage(*, task_id, settings, **_kwargs):
         calls.append(("metrics", task_id, settings))
@@ -1936,7 +1936,14 @@ def test_notebook_metrics_and_report_endpoints_dispatch_stages(tmp_path: Path, m
     def fake_report_stage(*, task_id, settings, **_kwargs):
         calls.append(("report", task_id, settings))
 
-    monkeypatch.setattr("marvis.routers.validation_stages.run_notebook_stage", fake_notebook_stage)
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.run_notebook_stage",
+        lambda **_kwargs: pytest.fail("V2 must not execute the Notebook"),
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.run_pmml_scoring_stage",
+        fake_pmml_scoring_stage,
+    )
     monkeypatch.setattr("marvis.routers.validation_stages.run_metrics_stage", fake_metrics_stage)
     monkeypatch.setattr("marvis.routers.validation_stages.run_report_stage", fake_report_stage)
 
@@ -1975,7 +1982,7 @@ def test_notebook_metrics_and_report_endpoints_dispatch_stages(tmp_path: Path, m
     assert notebook_response.status_code == 202
     assert metrics_response.status_code == 202
     assert report_response.status_code == 202
-    assert [call[0] for call in calls] == ["notebook", "metrics", "report"]
+    assert [call[0] for call in calls] == ["pmml", "metrics", "report"]
     assert calls[0][1] == task_id
     assert calls[0][2].workspace == tmp_path
 
@@ -2132,8 +2139,12 @@ def test_notebook_endpoint_claims_running_before_dispatching_stage(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.routers.validation_stages.run_notebook_stage",
+        "marvis.routers.validation_stages.run_pmml_scoring_stage",
         lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.run_notebook_stage",
+        lambda **_kwargs: pytest.fail("V2 must not execute the Notebook"),
     )
     task_id = client.post(
         "/api/tasks",
@@ -2152,19 +2163,15 @@ def test_notebook_endpoint_claims_running_before_dispatching_stage(
     assert calls[0]["stage_claimed"] is True
 
 
-def test_cancel_notebook_endpoint_requests_running_notebook_stop(
+def test_cancel_notebook_endpoint_requests_running_v2_pmml_stop(
     tmp_path: Path,
     monkeypatch,
 ):
     client = _client(tmp_path, monkeypatch)
-    requested: list[tuple[str, str | None]] = []
+    requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.routers.stage_controls.request_active_notebook_cancellation",
-        lambda task_id, *, expected_job_id=None: requested.append(
-            (task_id, expected_job_id)
-        )
-        or True,
-        raising=False,
+        "marvis.routers.stage_controls.request_job_cancellation",
+        lambda job_id: requested.append(job_id) or True,
     )
     task_id = client.post(
         "/api/tasks",
@@ -2179,7 +2186,8 @@ def test_cancel_notebook_endpoint_requests_running_notebook_stop(
 
     assert response.status_code == 202
     assert response.json()["status"] == "accepted"
-    assert requested == [(task_id, job_id)]
+    assert requested == [job_id]
+    assert "PMML scoring" in response.json()["message"]
 
 
 def test_cancel_notebook_endpoint_rejects_non_running_task(
@@ -2207,19 +2215,15 @@ def test_cancel_notebook_endpoint_rejects_non_running_task(
     assert requested == []
 
 
-def test_cancel_metrics_endpoint_requests_running_metrics_stop(
+def test_cancel_metrics_endpoint_requests_running_v2_metrics_stop(
     tmp_path: Path,
     monkeypatch,
 ):
     client = _client(tmp_path, monkeypatch)
-    requested: list[tuple[str, str | None]] = []
+    requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.routers.stage_controls.request_active_notebook_cancellation",
-        lambda task_id, *, expected_job_id=None: requested.append(
-            (task_id, expected_job_id)
-        )
-        or True,
-        raising=False,
+        "marvis.routers.stage_controls.request_job_cancellation",
+        lambda job_id: requested.append(job_id) or True,
     )
     task_id = client.post(
         "/api/tasks",
@@ -2237,9 +2241,9 @@ def test_cancel_metrics_endpoint_requests_running_metrics_stop(
 
     assert response.status_code == 202
     assert response.json()["status"] == "accepted"
-    assert requested == [(task_id, job_id)]
+    assert requested == [job_id]
     marker_path = tmp_path / "tasks" / task_id / "execution" / "metrics_cancel.requested"
-    assert marker_path.read_text(encoding="utf-8") == "cancelled\n"
+    assert marker_path.exists() is False
 
 
 def test_cancel_metrics_endpoint_rejects_non_running_metrics_task(

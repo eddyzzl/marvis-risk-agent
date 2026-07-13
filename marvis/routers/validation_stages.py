@@ -23,6 +23,7 @@ from marvis.pipeline import (
     legacy_live_notebook_execution_allowed,
     run_metrics_stage,
     run_notebook_stage,
+    run_pmml_scoring_stage,
     run_report_stage,
     run_staged_pipeline,
 )
@@ -76,6 +77,7 @@ def run_task_notebook(
     task, job_id = _start_v2_guarded_job(
         request, repo, task_id, "notebook"
     )
+    uses_pmml_scoring = task.validation_workflow_version == 2
     if task.status in {
         TaskStatus.RUNNING,
         TaskStatus.COMPUTING_METRICS,
@@ -90,7 +92,7 @@ def run_task_notebook(
         repo.update_status(
             task_id,
             TaskStatus.RUNNING,
-            "notebook queued",
+            "PMML scoring queued" if uses_pmml_scoring else "notebook queued",
             expected={
                 TaskStatus.SCANNED,
                 TaskStatus.FAILED,
@@ -107,7 +109,7 @@ def run_task_notebook(
         run_stage_job,
         job_id,
         request.app.state.settings.db_path,
-        run_notebook_stage,
+        run_pmml_scoring_stage if uses_pmml_scoring else run_notebook_stage,
         {
             "task_id": task_id,
             "settings": pipeline_settings_from_request(
@@ -119,12 +121,18 @@ def run_task_notebook(
             "cancellation_job_id": job_id,
         },
         hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
-        after_hook_event="notebook.completed",
+        after_hook_event=(
+            "pmml_scoring.completed" if uses_pmml_scoring else "notebook.completed"
+        ),
     )
     return {
         "task_id": task_id,
         "status": "accepted",
-        "message": "notebook stage dispatched; poll GET /api/tasks/{task_id}",
+        "message": (
+            "PMML scoring stage dispatched; poll GET /api/tasks/{task_id}"
+            if uses_pmml_scoring
+            else "notebook stage dispatched; poll GET /api/tasks/{task_id}"
+        ),
     }
 
 

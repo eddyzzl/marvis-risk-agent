@@ -29,6 +29,12 @@ def _client_and_task(tmp_path):
             source_dir=str(settings.workspace),
         )
     )
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE tasks SET validation_workflow_version = 1 WHERE id = ?",
+            (task.id,),
+        )
+    task = repo.get_task(task.id)
     return TestClient(app), settings, repo, task
 
 

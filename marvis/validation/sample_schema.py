@@ -456,11 +456,19 @@ def _csv_preview_rows(text: str, limit: int) -> list[list[str]]:
 
 
 def _validate_columns(values: Sequence[Any]) -> tuple[str, ...]:
+    raw_names = [None if _is_blank(value) else str(value) for value in values]
+    occupied = {name for name in raw_names if name is not None}
     columns: list[str] = []
-    for value in values:
-        if _is_blank(value):
-            raise ValueError("validation sample contains a blank column name")
-        columns.append(str(value))
+    for index, name in enumerate(raw_names):
+        if name is None:
+            candidate = f"__marvis_unnamed_column_{index}__"
+            suffix = 1
+            while candidate in occupied:
+                candidate = f"__marvis_unnamed_column_{index}_{suffix}__"
+                suffix += 1
+            name = candidate
+            occupied.add(name)
+        columns.append(name)
     if not columns:
         raise ValueError("validation sample contains no columns")
     seen: set[str] = set()

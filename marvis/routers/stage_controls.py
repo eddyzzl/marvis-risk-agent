@@ -30,7 +30,9 @@ def cancel_task_notebook(task_id: str, request: Request) -> dict:
     job_id = _active_job_id(repo, task_id, "notebook", "pipeline")
     if job_id is None:
         raise conflict("task has no active notebook job")
-    if not request_active_notebook_cancellation(
+    if task.validation_workflow_version == 2:
+        request_job_cancellation(job_id)
+    elif not request_active_notebook_cancellation(
         task_id,
         expected_job_id=job_id,
     ):
@@ -38,7 +40,11 @@ def cancel_task_notebook(task_id: str, request: Request) -> dict:
     return {
         "task_id": task_id,
         "status": "accepted",
-        "message": "notebook cancellation requested; poll GET /api/tasks/{task_id}",
+        "message": (
+            "PMML scoring cancellation requested; poll GET /api/tasks/{task_id}"
+            if task.validation_workflow_version == 2
+            else "notebook cancellation requested; poll GET /api/tasks/{task_id}"
+        ),
     }
 
 
@@ -51,12 +57,15 @@ def cancel_task_metrics(task_id: str, request: Request) -> dict:
     job_id = _active_job_id(repo, task_id, "metrics", "pipeline")
     if job_id is None:
         raise conflict("task has no active metrics job")
-    if not request_active_notebook_cancellation(
-        task_id,
-        expected_job_id=job_id,
-    ):
-        raise conflict("active metrics job has no cancellable execution token")
-    _write_metrics_cancel_marker(request.app.state.settings.tasks_dir / task_id)
+    if task.validation_workflow_version == 2:
+        request_job_cancellation(job_id)
+    else:
+        if not request_active_notebook_cancellation(
+            task_id,
+            expected_job_id=job_id,
+        ):
+            raise conflict("active metrics job has no cancellable execution token")
+        _write_metrics_cancel_marker(request.app.state.settings.tasks_dir / task_id)
     return {
         "task_id": task_id,
         "status": "accepted",
