@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import math
 
 import pandas as pd
 
@@ -189,3 +190,38 @@ def _stress_test_status(per_category: list[StressCategoryResult]) -> str:
     if statuses == {"error"}:
         return "failed"
     return "partial"
+
+
+def require_complete_stress_result(result: StressTestResult) -> StressTestResult:
+    """Hard gate for the mandatory PMML-backed model stress workflow."""
+
+    if not isinstance(result, StressTestResult) or result.status != "completed":
+        status = getattr(result, "status", "invalid")
+        raise ValueError(f"model stress test is incomplete: {status}")
+    if (
+        result.baseline.sample_count <= 0
+        or not math.isfinite(float(result.baseline.ks))
+        or not result.baseline.bin_table
+    ):
+        raise ValueError("model stress test has no complete OOT baseline")
+    if not result.per_category:
+        raise ValueError("model stress test has no completed categories")
+    if result.unclassified_features:
+        raise ValueError("model stress test contains unclassified features")
+    if result.category_source_counts.get("unresolved", 0) != 0:
+        raise ValueError("model stress test provenance contains unresolved features")
+    seen: set[str] = set()
+    for row in result.per_category:
+        if not row.category or row.category in seen:
+            raise ValueError("model stress test categories must be unique and non-empty")
+        seen.add(row.category)
+        if row.status != "completed" or row.error is not None:
+            raise ValueError(f"model stress test failed category: {row.category}")
+        if not row.dropped_features:
+            raise ValueError(f"model stress category has no fields: {row.category}")
+        values = (row.ks_after, row.ks_delta, row.psi_vs_baseline)
+        if any(value is None or not math.isfinite(float(value)) for value in values):
+            raise ValueError(f"model stress category has invalid metrics: {row.category}")
+        if not row.bin_table:
+            raise ValueError(f"model stress category has no bin table: {row.category}")
+    return result
