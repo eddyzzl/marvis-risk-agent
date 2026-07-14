@@ -16,6 +16,15 @@ from scripts.select_affected_tests import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _isolated_check_env(**updates: str) -> dict[str, str]:
+    env = os.environ.copy()
+    # Temporary repositories own their Git history. Do not let the outer CI
+    # checkout force its commit range onto their affected-test selection.
+    env.pop("CHECK_DIFF_RANGE", None)
+    env.update(updates)
+    return env
+
+
 def _write(path: Path, content: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -214,8 +223,10 @@ def test_check_fast_excludes_llm_tests(tmp_path: Path):
         '#!/bin/sh\nprintf "%s\\n" "$@" > "$CHECK_CAPTURE"\n',
     )
     fake_python.chmod(0o755)
-    env = os.environ.copy()
-    env.update({"PYTHON": str(fake_python), "CHECK_CAPTURE": str(capture)})
+    env = _isolated_check_env(
+        PYTHON=str(fake_python),
+        CHECK_CAPTURE=str(capture),
+    )
 
     completed = subprocess.run(
         [
@@ -267,8 +278,10 @@ def test_check_fast_keeps_marker_filter_with_custom_pytest_args(tmp_path: Path):
         '#!/bin/sh\nprintf "%s\\n" "$@" > "$CHECK_CAPTURE"\n',
     )
     fake_python.chmod(0o755)
-    env = os.environ.copy()
-    env.update({"PYTHON": str(fake_python), "CHECK_CAPTURE": str(capture)})
+    env = _isolated_check_env(
+        PYTHON=str(fake_python),
+        CHECK_CAPTURE=str(capture),
+    )
 
     completed = subprocess.run(
         [
@@ -332,13 +345,10 @@ def test_check_affected_runs_only_mapped_test_file(tmp_path: Path):
         'printf "%s\\n" "$@" > "$CHECK_CAPTURE"\n',
     )
     fake_python.chmod(0o755)
-    env = os.environ.copy()
-    env.update(
-        {
-            "PYTHON": str(fake_python),
-            "REAL_PYTHON": sys.executable,
-            "CHECK_CAPTURE": str(capture),
-        }
+    env = _isolated_check_env(
+        PYTHON=str(fake_python),
+        REAL_PYTHON=sys.executable,
+        CHECK_CAPTURE=str(capture),
     )
 
     completed = subprocess.run(
@@ -401,13 +411,10 @@ def test_check_affected_fallback_keeps_one_fast_marker_with_custom_args(tmp_path
         'printf "%s\\n" "$@" > "$CHECK_CAPTURE"\n',
     )
     fake_python.chmod(0o755)
-    env = os.environ.copy()
-    env.update(
-        {
-            "PYTHON": str(fake_python),
-            "REAL_PYTHON": sys.executable,
-            "CHECK_CAPTURE": str(capture),
-        }
+    env = _isolated_check_env(
+        PYTHON=str(fake_python),
+        REAL_PYTHON=sys.executable,
+        CHECK_CAPTURE=str(capture),
     )
 
     completed = subprocess.run(
