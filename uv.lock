@@ -987,7 +987,7 @@ wheels = [
 
 [[package]]
 name = "marvis"
-version = "2.1.13"
+version = "2.1.14"
 source = { editable = "." }
 dependencies = [
     { name = "catboost" },
