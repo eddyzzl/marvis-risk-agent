@@ -59,6 +59,11 @@ import { createThemeController } from "./js/theme.js";
 import { createComingSoonToastController } from "./js/toast.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
 import {
+  handleAdoptionConfirmClick as handleAdoptionConfirmClickController,
+  renderAdoptionGate,
+  submitAdoption as submitAdoptionController,
+} from "./js/v2/adoption_gate_controller.js";
+import {
   driverGateBodyHtml as driverGateBodyHtmlController,
   driverGateHasWidget as driverGateHasWidgetController,
   driverManualAnalysisHtml as driverManualAnalysisHtmlController,
@@ -5247,6 +5252,7 @@ function driverManualAnalysisHtml(messages) {
     renderScreenTable: agentMessageScreenTableHtml,
     renderTables: agentMessageTablesHtml,
     renderModelDelivery: agentMessageModelDeliveryHtml,
+    renderAdoptionGate: agentMessageAdoptionGateHtml,
     // The plain-gate confirm control now lives in the middle analysis section
     // (not the rail). renderDriverGateButton already returns "" for gates that
     // carry a structured widget, so only genuinely plain gates get this button —
@@ -5563,6 +5569,18 @@ function agentMessageModelDeliveryHtml(message, options = {}) {
   return renderModelDeliveryPanel(message, options);
 }
 
+function agentMessageAdoptionGateHtml(message, options = {}) {
+  return renderAdoptionGate(message, options);
+}
+
+async function submitAdoption(button) {
+  return submitAdoptionController(button, driverConfirmControllerContext());
+}
+
+function handleAdoptionConfirmClick(event) {
+  return handleAdoptionConfirmClickController(event, driverConfirmControllerContext());
+}
+
 async function submitModelingWeightAdjust(button) {
   return submitModelingWeightAdjustController(button, modelingSetupControllerContext());
 }
@@ -5593,6 +5611,7 @@ function modelingSetupControllerContext() {
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleModelingWeightAdjustClick);
+  document.addEventListener("click", handleAdoptionConfirmClick);
 }
 
 function agentMessageC1FormHtml(message, options = {}) {
@@ -5884,6 +5903,7 @@ function agentMessageGateBodyHtml(message, interactive) {
     renderModelingSetup: agentMessageModelingSetupHtml,
     renderScreenTable: agentMessageScreenTableHtml,
     renderTables: agentMessageTablesHtml,
+    renderAdoptionGate: agentMessageAdoptionGateHtml,
   }, { interactive });
 }
 

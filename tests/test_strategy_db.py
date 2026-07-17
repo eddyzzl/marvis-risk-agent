@@ -7,6 +7,7 @@ import marvis.repositories.strategy as strategy_repo_module
 from marvis.db import StrategyRepository, connect, init_db
 from marvis.packs.strategy import BacktestResult, build_strategy
 from marvis.state_machine import ConflictError
+from marvis.strategy_adoption import AdoptionReasonError
 
 
 def _strategy():
@@ -228,6 +229,58 @@ def test_adopt_strategy_marks_adopted_with_metadata(tmp_path):
     assert meta["version"] == 1
     audit = db_module.PluginRepository(db_path).list_audit(kind="strategy.adopt")[0]
     assert audit["target_ref"] == strategy.id
+    assert audit["detail"]["adoption_reason"] == "approved by committee"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "",
+        "   ",
+        "x",
+        "（待采纳时确认）",
+        "待确认后补充",
+        "TODO later",
+        "pending approval",
+        "placeholder text",
+    ],
+)
+def test_adopt_strategy_rejects_blank_or_placeholder_reason_without_mutation(
+    tmp_path, reason
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy, created_at="2026-06-19T00:00:00Z")
+
+    with pytest.raises(AdoptionReasonError, match="采纳理由"):
+        repo.adopt_strategy_with_audit(
+            strategy.id,
+            reason=reason,
+            audit=_adopt_audit(strategy.id),
+        )
+
+    assert repo.get_strategy_meta(strategy.id)["status"] == "draft"
+    assert db_module.PluginRepository(db_path).list_audit(kind="strategy.adopt") == []
+
+
+def test_adopt_strategy_normalizes_reason_before_persisting_and_auditing(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy, created_at="2026-06-19T00:00:00Z")
+
+    repo.adopt_strategy_with_audit(
+        strategy.id,
+        reason="  委员会批准 Q3 上线  ",
+        audit=_adopt_audit(strategy.id),
+    )
+
+    assert repo.get_strategy_meta(strategy.id)["adoption_reason"] == "委员会批准 Q3 上线"
+    audit = db_module.PluginRepository(db_path).list_audit(kind="strategy.adopt")[0]
+    assert audit["detail"]["adoption_reason"] == "委员会批准 Q3 上线"
 
 
 def test_double_adopt_raises_conflict(tmp_path):

@@ -1,9 +1,9 @@
-"""Setup (slot-filling) for the strategy task.
+"""Setup (slot-filling) for strategy tasks.
 
-Strategy analysis starts from one scored sample: a binary target column plus a
-score/probability column. This module discovers/registers the dataset and builds
-a conservative default approval strategy candidate, then the PlanDriver pauses
-before backtesting so the user can confirm or replan the rules.
+The standard product entry is governed strategy development: it resolves the
+sample and business contract but never invents an operating cutoff.  The old
+20%-quantile candidate remains available only through the explicit quick-analysis
+entry.  Rule mining and monitoring are selected before either of those modes.
 """
 
 from __future__ import annotations
@@ -52,6 +52,22 @@ _STRATEGY_MONITORING_GOAL_PATTERNS = (
     "监控策略",
 )
 
+STRATEGY_ENTRY_DEVELOPMENT = "strategy_development"
+STRATEGY_ENTRY_ANALYSIS = "strategy_analysis"
+_QUICK_STRATEGY_ANALYSIS_GOAL_PATTERNS = (
+    "快速策略分析",
+    "快速策略回测",
+    "quick strategy analysis",
+    "quick strategy backtest",
+)
+_PROFIT_PARAM_FIELDS = (
+    "annual_rate",
+    "funding_rate",
+    "lgd",
+    "operating_cost_per_loan",
+    "term_months",
+)
+
 
 def is_rule_strategy_goal(*texts: str | None) -> bool:
     haystack = " ".join(text.lower() for text in texts if text)
@@ -61,6 +77,69 @@ def is_rule_strategy_goal(*texts: str | None) -> bool:
 def is_strategy_monitoring_goal(*texts: str | None) -> bool:
     haystack = " ".join(text.lower() for text in texts if text)
     return any(pattern.lower() in haystack for pattern in _STRATEGY_MONITORING_GOAL_PATTERNS)
+
+
+def is_quick_strategy_analysis_goal(*texts: str | None) -> bool:
+    """True only for an explicit quick/lightweight request.
+
+    Generic task names such as ``额度准入策略回测`` are deliberately not treated as
+    a quick-mode choice: the product card itself uses that wording, so doing so would
+    silently turn the standard development entry back into the lightweight workflow.
+    """
+
+    haystack = " ".join(text.lower() for text in texts if text)
+    return any(
+        pattern.lower() in haystack for pattern in _QUICK_STRATEGY_ANALYSIS_GOAL_PATTERNS
+    )
+
+
+def resolve_strategy_entry_mode(strategy_input, *texts: str | None) -> str:
+    """Resolve full vs quick mode for a fresh strategy plan.
+
+    A phrase on the first turn is the most explicit operator choice.  Otherwise a
+    persisted ``strategy_input.entry_mode`` may select the compatibility workflow;
+    every absent/unknown value defaults fail-safe to full strategy development.
+    """
+
+    if is_quick_strategy_analysis_goal(*texts):
+        return STRATEGY_ENTRY_ANALYSIS
+    entry_mode = str(_input_value(strategy_input, "entry_mode") or "").strip().lower()
+    if entry_mode == STRATEGY_ENTRY_ANALYSIS:
+        return STRATEGY_ENTRY_ANALYSIS
+    return STRATEGY_ENTRY_DEVELOPMENT
+
+
+def strategy_development_clarification(strategy_input) -> dict | None:
+    """Return a structured missing-input envelope, or ``None`` when start is safe."""
+
+    missing: list[str] = []
+    objective = str(_input_value(strategy_input, "objective") or "").strip()
+    if not objective:
+        missing.append("objective")
+    if (
+        _input_value(strategy_input, "max_bad_rate") is None
+        and _input_value(strategy_input, "min_approval_rate") is None
+    ):
+        missing.append("max_bad_rate_or_min_approval_rate")
+
+    if objective == "max_profit":
+        profit = _input_value(strategy_input, "profit")
+        if not str(_input_value(profit, "ead_col") or "").strip():
+            missing.append("profit.ead_col")
+        if not str(_input_value(profit, "pd_col") or "").strip():
+            missing.append("profit.pd_col")
+        for field in _PROFIT_PARAM_FIELDS:
+            if _input_value(profit, field) is None:
+                missing.append(f"profit.{field}")
+
+    if not missing:
+        return None
+    return {
+        "code": "strategy_business_inputs_required",
+        "entry_mode": STRATEGY_ENTRY_DEVELOPMENT,
+        "missing_fields": missing,
+        "message": "完整策略开发需要先确认经营目标和约束，平台不会用技术默认值代替经营决策。",
+    }
 
 
 class StrategySetupError(ValueError):
@@ -94,12 +173,47 @@ class StrategyProposal:
 
 
 @dataclass
+class StrategyDevelopmentProposal:
+    """Slots for the full workflow, without a pre-built cutoff or rule candidate."""
+
+    dataset_id: str
+    dataset_name: str
+    target_col: str
+    score_col: str
+    objective: str
+    max_bad_rate: float | None
+    min_approval_rate: float | None
+    baseline_strategy_id: str | None
+    ead_col: str | None
+    pd_col: str | None
+    profit_params: dict | None
+    bad_rate: float | None
+    notes: list[str]
+    template_id: str = STRATEGY_ENTRY_DEVELOPMENT
+
+    def template_slots(self) -> dict:
+        slots = {
+            "dataset_id": self.dataset_id,
+            "target_col": self.target_col,
+            "score_col": self.score_col,
+            "objective": self.objective,
+            "max_bad_rate": self.max_bad_rate,
+            "min_approval_rate": self.min_approval_rate,
+            "baseline_strategy_id": self.baseline_strategy_id,
+            "ead_col": self.ead_col,
+            "pd_col": self.pd_col,
+            "profit_params": self.profit_params,
+        }
+        return {key: value for key, value in slots.items() if value is not None}
+
+
+@dataclass
 class RuleStrategyProposal:
     """S4: setup proposal that routes to the rule_strategy template. Unlike the
     lightweight strategy_analysis proposal it carries no pre-built rules -- the
     template's mine_rules step discovers them -- only the dataset/target anchor
-    and the rule-mining slots. adoption_reason is a placeholder the user reviews
-    at the mandatory adopt gate (the whole point of that forced gate)."""
+    and the rule-mining slots. The adoption reason is collected only at the final
+    evidence-bound gate, never during task setup."""
 
     dataset_id: str
     dataset_name: str
@@ -113,7 +227,6 @@ class RuleStrategyProposal:
         slots: dict = {
             "dataset_id": self.dataset_id,
             "target_col": self.target_col,
-            "adoption_reason": "（待采纳时确认）",
         }
         if self.score_col:
             slots["score_col"] = self.score_col
@@ -223,6 +336,71 @@ def build_strategy_proposal(
     )
 
 
+def build_strategy_development_proposal(
+    registry,
+    backend,
+    task_id: str,
+    source_dir,
+    *,
+    strategy_input,
+    target_col: str | None = None,
+    score_col: str | None = None,
+) -> StrategyDevelopmentProposal:
+    """Build the full-workflow slots without choosing a cutoff or creating rules."""
+
+    clarification = strategy_development_clarification(strategy_input)
+    if clarification is not None:
+        raise StrategySetupError(clarification["message"])
+
+    dataset = _resolve_dataset(registry, task_id, source_dir)
+    path = registry.resolve_path(dataset.id)
+    columns = backend.column_names(path)
+    resolved_target = _resolve_target_col(backend, path, columns, target_col)
+    resolved_score = _resolve_score_col(columns, score_col)
+    if not resolved_score.isidentifier():
+        raise StrategySetupError(
+            f"策略条件暂只支持 Python 标识符列名；评分列 `{resolved_score}` 需先重命名后再回测。"
+        )
+
+    profit = _input_value(strategy_input, "profit")
+    ead_col = _optional_text(_input_value(profit, "ead_col"))
+    pd_col = _optional_text(_input_value(profit, "pd_col"))
+    objective = str(_input_value(strategy_input, "objective") or "").strip()
+    if objective == "max_profit":
+        missing_columns = [column for column in (ead_col, pd_col) if column not in columns]
+        if missing_columns:
+            raise StrategySetupError(
+                "利润目标引用的数据列不存在：" + "、".join(f"`{column}`" for column in missing_columns)
+            )
+
+    bad_rate, n_nan_labels = _target_bad_rate(backend, path, resolved_target)
+    notes = ["尚未生成 cutoff 或规则；将按已确认的经营目标和约束扫描可行方案。"]
+    if n_nan_labels:
+        notes.append(
+            f"目标列 `{resolved_target}` 有 {n_nan_labels} 行标签为空/非法；"
+            "预览坏率已排除这些行，执行时仍需通过标签处理确认门。"
+        )
+    return StrategyDevelopmentProposal(
+        dataset_id=dataset.id,
+        dataset_name=_dataset_name(dataset),
+        target_col=resolved_target,
+        score_col=resolved_score,
+        objective=objective,
+        max_bad_rate=_optional_float_value(_input_value(strategy_input, "max_bad_rate")),
+        min_approval_rate=_optional_float_value(
+            _input_value(strategy_input, "min_approval_rate")
+        ),
+        baseline_strategy_id=_optional_text(
+            _input_value(strategy_input, "baseline_strategy_id")
+        ),
+        ead_col=ead_col,
+        pd_col=pd_col,
+        profit_params=_profit_params_payload(profit),
+        bad_rate=bad_rate,
+        notes=notes,
+    )
+
+
 def build_rule_strategy_proposal(
     registry,
     backend,
@@ -263,6 +441,29 @@ def _optional_score_col(columns: list[str], requested: str | None) -> str | None
     if requested and requested in columns:
         return requested if requested.isidentifier() else None
     return None
+
+
+def _input_value(payload, name: str):
+    if payload is None:
+        return None
+    if isinstance(payload, dict):
+        return payload.get(name)
+    return getattr(payload, name, None)
+
+
+def _optional_text(value) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _optional_float_value(value) -> float | None:
+    return None if value is None else float(value)
+
+
+def _profit_params_payload(profit) -> dict | None:
+    if profit is None or any(_input_value(profit, field) is None for field in _PROFIT_PARAM_FIELDS):
+        return None
+    return {field: _input_value(profit, field) for field in _PROFIT_PARAM_FIELDS}
 
 
 def _target_bad_rate(backend, path, target_col: str) -> tuple[float | None, int]:
@@ -390,11 +591,18 @@ def _dataset_name(dataset) -> str:
 __all__ = [
     "MonitoringSetupProposal",
     "RuleStrategyProposal",
+    "STRATEGY_ENTRY_ANALYSIS",
+    "STRATEGY_ENTRY_DEVELOPMENT",
+    "StrategyDevelopmentProposal",
     "StrategyProposal",
     "StrategySetupError",
     "build_monitoring_setup_proposal",
     "build_rule_strategy_proposal",
+    "build_strategy_development_proposal",
     "build_strategy_proposal",
+    "is_quick_strategy_analysis_goal",
     "is_rule_strategy_goal",
     "is_strategy_monitoring_goal",
+    "resolve_strategy_entry_mode",
+    "strategy_development_clarification",
 ]

@@ -1,10 +1,12 @@
 import sqlite3
 
 import pytest
+from pydantic import ValidationError
 
 import marvis.db as db_module
 import marvis.db_schema as db_schema_module
 import marvis.repositories.tasks as task_repo_module
+from marvis.api_schemas import CreateTaskRequest
 from marvis.db import (
     DatasetRepository,
     ModelingRepository,
@@ -19,6 +21,8 @@ from marvis.db import (
 from marvis.data.contracts import ColumnFingerprint, ColumnProfile, Dataset, JoinPlan
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
+    StrategyProfitInput,
+    StrategyTaskInput,
     TaskCreate,
     TaskStatus,
 )
@@ -107,6 +111,181 @@ def test_create_and_get_task_round_trips_v2_fields(tmp_path):
     values, revision = repo.get_report_values(task.id)
     assert values == {"TEXT:report_title": "自定义标题"}
     assert revision == 0
+
+
+def test_create_and_get_task_round_trips_strategy_input(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    strategy_input = StrategyTaskInput(
+        entry_mode="strategy_development",
+        objective="max_profit",
+        max_bad_rate=0.05,
+        min_approval_rate=0.6,
+        baseline_strategy_id="strategy-champion-v3",
+        profit=StrategyProfitInput(
+            ead_col="loan_amount",
+            pd_col="predicted_pd",
+            annual_rate=0.18,
+            funding_rate=0.04,
+            lgd=0.55,
+            operating_cost_per_loan=12.5,
+            term_months=12,
+        ),
+    )
+
+    task = repo.create_task(
+        _task_create(task_type="strategy", strategy_input=strategy_input)
+    )
+
+    loaded = repo.get_task(task.id)
+    assert loaded.strategy_input == strategy_input
+    assert isinstance(loaded.strategy_input, StrategyTaskInput)
+    assert isinstance(loaded.strategy_input.profit, StrategyProfitInput)
+    with connect(db_path) as conn:
+        raw = conn.execute(
+            "SELECT strategy_input_json FROM tasks WHERE id = ?", (task.id,)
+        ).fetchone()[0]
+    assert '"entry_mode":"strategy_development"' in raw
+    assert '"ead_col":"loan_amount"' in raw
+
+
+def test_strategy_input_defaults_are_explicit_and_backward_compatible(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+
+    legacy_shape = repo.create_task(_task_create(task_type="strategy"))
+    explicit_defaults = repo.create_task(
+        _task_create(task_type="strategy", strategy_input=StrategyTaskInput())
+    )
+
+    assert repo.get_task(legacy_shape.id).strategy_input is None
+    assert repo.get_task(explicit_defaults.id).strategy_input == StrategyTaskInput(
+        entry_mode="strategy_development",
+        objective="",
+    )
+
+
+def test_task_repository_rejects_strategy_input_on_non_strategy_task(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+
+    with pytest.raises(ValueError, match="strategy_input.*strategy"):
+        repo.create_task(_task_create(task_type="modeling", strategy_input=StrategyTaskInput()))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"entry_mode": "unknown"},
+        {"objective": "min_bad_rate"},
+        {"max_bad_rate": -0.001},
+        {"max_bad_rate": 1.001},
+        {"max_bad_rate": float("nan")},
+        {"min_approval_rate": -0.001},
+        {"min_approval_rate": 1.001},
+        {"min_approval_rate": float("inf")},
+        {"baseline_strategy_id": "   "},
+    ],
+)
+def test_strategy_task_input_rejects_invalid_contract_values(overrides):
+    with pytest.raises(ValueError):
+        StrategyTaskInput(**overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ead_col": ""},
+        {"pd_col": "   "},
+        {"annual_rate": -0.001},
+        {"annual_rate": 1.001},
+        {"annual_rate": float("nan")},
+        {"funding_rate": -0.001},
+        {"funding_rate": 1.001},
+        {"lgd": -0.001},
+        {"lgd": 1.001},
+        {"operating_cost_per_loan": -0.001},
+        {"operating_cost_per_loan": float("inf")},
+        {"term_months": 0},
+        {"term_months": 1.5},
+    ],
+)
+def test_strategy_profit_input_rejects_invalid_contract_values(overrides):
+    values = {
+        "ead_col": "ead",
+        "pd_col": "pd",
+        "annual_rate": 0.18,
+        "funding_rate": 0.04,
+        "lgd": 0.55,
+        "operating_cost_per_loan": 12.5,
+        "term_months": 12,
+    }
+    values.update(overrides)
+    with pytest.raises(ValueError):
+        StrategyProfitInput(**values)
+
+
+def test_create_task_request_parses_strict_nested_strategy_input():
+    request = CreateTaskRequest.model_validate(
+        {
+            "model_name": "利润策略开发",
+            "validator": "qa",
+            "source_dir": "/tmp/source",
+            "task_type": "strategy",
+            "strategy_input": {
+                "entry_mode": "strategy_development",
+                "objective": "max_profit",
+                "max_bad_rate": 0.05,
+                "profit": {
+                    "ead_col": "ead",
+                    "pd_col": "pd",
+                    "annual_rate": 0.18,
+                    "funding_rate": 0.04,
+                    "lgd": 0.55,
+                    "operating_cost_per_loan": 12.5,
+                    "term_months": 12,
+                },
+            },
+        }
+    )
+
+    assert request.strategy_input is not None
+    assert request.strategy_input.objective == "max_profit"
+    assert request.strategy_input.profit is not None
+    assert request.strategy_input.profit.term_months == 12
+
+    for invalid_strategy_input in (
+        {"entry_mode": "development"},
+        {"objective": "profit"},
+        {"max_bad_rate": 1.01},
+        {"min_approval_rate": -0.01},
+        {"max_bad_rate": "0.05"},
+        {
+            "objective": "max_profit",
+            "profit": {
+                "ead_col": "ead",
+                "pd_col": "pd",
+                "annual_rate": 0.18,
+                "funding_rate": 0.04,
+                "lgd": 1.01,
+                "operating_cost_per_loan": 12.5,
+                "term_months": 12,
+            },
+        },
+    ):
+        with pytest.raises(ValidationError):
+            CreateTaskRequest.model_validate(
+                {
+                    "model_name": "非法策略 contract",
+                    "validator": "qa",
+                    "source_dir": "/tmp/source",
+                    "task_type": "strategy",
+                    "strategy_input": invalid_strategy_input,
+                }
+            )
 
 
 def test_create_task_rejects_unknown_algorithm_and_normalizes_run_mode_defaults(tmp_path):
@@ -859,6 +1038,37 @@ def test_init_db_migration_002_adds_strategy_versioning_to_version1_database(tmp
     assert row["parent_strategy_id"] is None
     assert row["description"] == "legacy strategy"
     assert "strategy_artifacts" in tables
+
+
+def test_init_db_migration_004_adds_strategy_input_to_version3_database(tmp_path):
+    db_path = tmp_path / "legacy_v3.sqlite"
+
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                model_name TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("INSERT INTO tasks(id, model_name) VALUES ('task-1', '历史策略任务')")
+        conn.execute("PRAGMA user_version = 3")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        row = conn.execute(
+            "SELECT id, model_name, strategy_input_json FROM tasks WHERE id = 'task-1'"
+        ).fetchone()
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert "strategy_input_json" in columns
+    assert row["id"] == "task-1"
+    assert row["model_name"] == "历史策略任务"
+    assert row["strategy_input_json"] is None
 
 
 def test_init_db_is_idempotent_across_repeated_calls(tmp_path):

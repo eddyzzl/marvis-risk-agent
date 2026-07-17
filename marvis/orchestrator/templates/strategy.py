@@ -11,8 +11,13 @@ from marvis.plugins.manifest import ToolRef
 
 STRATEGY_ANALYSIS = WorkflowTemplate(
     id="strategy_analysis",
-    title="策略分析与回测",
-    goal_patterns=("策略分析", "策略回测", "策略权衡", "strategy analysis", "strategy backtest"),
+    title="快速策略分析与回测",
+    goal_patterns=(
+        "快速策略分析",
+        "快速策略回测",
+        "quick strategy analysis",
+        "quick strategy backtest",
+    ),
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
@@ -163,15 +168,27 @@ SLICE_AGGREGATE = WorkflowTemplate(
 
 
 STRATEGY_DEVELOPMENT = WorkflowTemplate(
-    # S2 conversational strategy-development template (new id; the lightweight
-    # strategy_analysis entry stays untouched). Flow: tradeoff scan (direction
+    # S2 conversational strategy-development template. It is the standard entry;
+    # strategy_analysis remains only as an explicit quick-analysis compatibility path.
+    # Flow: tradeoff scan (direction
     # self-check) -> [confirm] design cutoff bands -> build strategy from the
     # recommended rules -> [confirm] backtest -> [optional] compare vs baseline
     # -> [mandatory confirm] adopt -> render doc. goal_patterns are disjoint from
     # strategy_analysis so keyword routing never crosses the two.
     id="strategy_development",
     title="策略开发",
-    goal_patterns=("策略开发", "开发策略", "设计cutoff", "分数带策略", "strategy development"),
+    goal_patterns=(
+        "策略开发",
+        "开发策略",
+        "策略分析",
+        "策略回测",
+        "策略权衡",
+        "设计cutoff",
+        "分数带策略",
+        "strategy development",
+        "strategy analysis",
+        "strategy backtest",
+    ),
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
@@ -180,10 +197,11 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
         SlotSpec("objective", False, "user", "max_profit or max_approval"),
         SlotSpec("max_bad_rate", False, "user", "Max approved bad rate constraint"),
         SlotSpec("min_approval_rate", False, "user", "Min approval rate constraint"),
+        SlotSpec("ead_col", False, "user", "Exposure-at-default column for profit evaluation"),
+        SlotSpec("pd_col", False, "user", "Probability-of-default column for profit evaluation"),
         SlotSpec("profit_params", False, "user", "Profit parameters for expected-profit"),
         SlotSpec("strategy_type", False, "user", "Strategy type (default approval)"),
         SlotSpec("baseline_strategy_id", False, "user", "Baseline strategy id for the optional compare step"),
-        SlotSpec("adoption_reason", True, "user", "Reason recorded when the strategy is adopted"),
     ),
     steps=(
         StepTemplate(
@@ -197,6 +215,8 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
                 "objective": "{slot:objective}",
                 "max_bad_rate": "{slot:max_bad_rate}",
                 "min_approval_rate": "{slot:min_approval_rate}",
+                "ead_col": "{slot:ead_col}",
+                "pd_col": "{slot:pd_col}",
                 "profit_params": "{slot:profit_params}",
             },
             depends_on_titles=(),
@@ -214,6 +234,8 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
                 "objective": "{slot:objective}",
                 "max_bad_rate": "{slot:max_bad_rate}",
                 "min_approval_rate": "{slot:min_approval_rate}",
+                "ead_col": "{slot:ead_col}",
+                "pd_col": "{slot:pd_col}",
                 "profit_params": "{slot:profit_params}",
                 # Literal default (not {slot:band_edges}): apply_adjust's generic
                 # gate override mechanism (agent/gate_execution_adapter.py) only
@@ -254,6 +276,9 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
                 "dataset_id": "{slot:dataset_id}",
                 "strategy_id": "$ref:构造策略.output.strategy_id",
                 "target_col": "{slot:target_col}",
+                "baseline_strategy_id": "{slot:baseline_strategy_id}",
+                "ead_col": "{slot:ead_col}",
+                "pd_col": "{slot:pd_col}",
                 "profit_params": "{slot:profit_params}",
             },
             depends_on_titles=("构造策略",),
@@ -275,6 +300,8 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
                 "target_col": "{slot:target_col}",
                 "strategy_id": "$ref:构造策略.output.strategy_id",
                 "baseline_strategy_id": "{slot:baseline_strategy_id}",
+                "ead_col": "{slot:ead_col}",
+                "pd_col": "{slot:pd_col}",
                 "profit_params": "{slot:profit_params}",
             },
             depends_on_titles=("构造策略", "回测策略"),
@@ -306,7 +333,9 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
             inputs_template={
                 "strategy_id": "$ref:构造策略.output.strategy_id",
                 "backtest_id": "$ref:回测策略.output.backtest_id",
-                "adoption_reason": "{slot:adoption_reason}",
+                # The evidence-bound final gate writes the operator's reason into this
+                # explicit override target.  Task setup must never pre-authorize adoption.
+                "adoption_reason": "",
                 "band_stats": "$ref:设计分数带.output",
             },
             depends_on_titles=("设计分数带", "构造策略", "回测策略"),
@@ -351,7 +380,6 @@ RULE_STRATEGY = WorkflowTemplate(
         SlotSpec("min_support", False, "user", "Minimum rule support"),
         SlotSpec("min_lift", False, "user", "Minimum rule lift"),
         SlotSpec("top_k", False, "user", "Maximum candidate rules to return"),
-        SlotSpec("adoption_reason", True, "user", "Reason recorded when the strategy is adopted"),
     ),
     steps=(
         StepTemplate(
@@ -447,7 +475,7 @@ RULE_STRATEGY = WorkflowTemplate(
             inputs_template={
                 "strategy_id": "$ref:构造策略.output.strategy_id",
                 "backtest_id": "$ref:回测策略.output.backtest_id",
-                "adoption_reason": "{slot:adoption_reason}",
+                "adoption_reason": "",
             },
             depends_on_titles=("构造策略", "回测策略"),
             post_checks=(PostCheck("nonempty", {"field": "artifacts"}),),

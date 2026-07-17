@@ -47,6 +47,7 @@ from marvis.packs.strategy.tradeoff import (
 )
 from marvis.packs.strategy.vintage import vintage_curve, vintage_summary
 from marvis.plugins.sdk import PackRuntime
+from marvis.strategy_adoption import AdoptionReasonError, normalize_adoption_reason
 from marvis.validation.vintage import compute_vintage_curve
 
 
@@ -565,7 +566,10 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
         raise StrategyError(
             f"backtest {backtest_id} does not belong to strategy {strategy_id}"
         )
-    adoption_reason = str(inputs["adoption_reason"])
+    try:
+        adoption_reason = normalize_adoption_reason(inputs.get("adoption_reason"))
+    except AdoptionReasonError as exc:
+        raise StrategyError(str(exc)) from exc
     adopt_result = runtime.strategies.adopt_strategy_with_audit(
         strategy_id,
         reason=adoption_reason,
@@ -576,6 +580,7 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
             "detail": {
                 "task_id": str(ctx.task_id),
                 "backtest_id": backtest_id,
+                "adoption_reason": adoption_reason,
                 "approval_rate": backtest.approval_rate,
                 "approved_bad_rate": backtest.approved_bad_rate,
                 "expected_profit": backtest.expected_profit,

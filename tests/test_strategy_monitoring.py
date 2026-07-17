@@ -382,7 +382,7 @@ def test_list_monitoring_due_skips_non_adopted_and_planless(tmp_path):
                               score_col="score", default_decision="approve", description="d")
     repo.create_strategy("task-1", adopted_noplan, created_at="2026-01-01T00:00:00Z")
     repo.adopt_strategy_with_audit(
-        adopted_noplan.id, reason="x",
+        adopted_noplan.id, reason="approved",
         audit={"kind": "strategy.adopt", "target_ref": adopted_noplan.id, "outcome": "succeeded", "detail": {}},
         adopted_at="2026-01-01T00:00:00Z",
     )

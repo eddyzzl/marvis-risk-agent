@@ -66,7 +66,11 @@ _MIGRATION_TABLES = frozenset({
 # _migration_003_validation_input_contracts adds the immutable validation
 # workflow-version discriminator and the normalized, revisioned input contract.
 # It backfills only historical validation rows that still carry version 0.
-SCHEMA_VERSION = 3
+#
+# _migration_004_strategy_task_input adds the optional, governed strategy
+# business contract. Historical rows remain NULL so callers can distinguish a
+# legacy task from an explicitly supplied (possibly still incomplete) contract.
+SCHEMA_VERSION = 4
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -824,6 +828,25 @@ def _migration_003_validation_input_contracts(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_004_strategy_task_input(conn: sqlite3.Connection) -> None:
+    """Add the optional serialized StrategyTaskInput to task records.
+
+    Versioned test/repair databases can contain only a subset of baseline tables,
+    so mirror migration 3's defensive tasks-table probe.
+    """
+    tasks_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks'"
+    ).fetchone()
+    if tasks_exists is None:
+        return
+    _ensure_column(
+        conn,
+        table="tasks",
+        column="strategy_input_json",
+        definition="TEXT",
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -835,6 +858,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_001_baseline),
     (2, _migration_002_strategy_versioning),
     (3, _migration_003_validation_input_contracts),
+    (4, _migration_004_strategy_task_input),
 ]
 
 

@@ -29,9 +29,12 @@ from marvis.agent.strategy_setup import (
     StrategySetupError,
     build_monitoring_setup_proposal,
     build_rule_strategy_proposal,
+    build_strategy_development_proposal,
     build_strategy_proposal,
     is_rule_strategy_goal,
     is_strategy_monitoring_goal,
+    resolve_strategy_entry_mode,
+    strategy_development_clarification,
 )
 from marvis.agent.vintage_setup import VintageSetupError, build_vintage_proposal
 from marvis.agent_memory.api_support import audit_agent_memory_use_from_store
@@ -410,13 +413,19 @@ def _run_feature_setup(
 
 
 def _strategy_success_criteria(task: TaskRecord) -> list[dict] | None:
-    """S2: mirrors _modeling_success_criteria. task's optional
-    strategy_bad_rate_max/strategy_approval_min (getattr-based -- no schema
-    migration backs these fields today, so tasks without them simply inject no
-    criterion, same graceful default as oot_ks_min) become deterministic
-    approved_bad_rate/approval_rate thresholds final_review can evaluate."""
-    bad_rate_max = getattr(task, "strategy_bad_rate_max", None)
-    approval_min = getattr(task, "strategy_approval_min", None)
+    """Turn the governed strategy contract into deterministic final-review limits."""
+    strategy_input = getattr(task, "strategy_input", None)
+    if isinstance(strategy_input, dict):
+        bad_rate_max = strategy_input.get("max_bad_rate")
+        approval_min = strategy_input.get("min_approval_rate")
+    else:
+        bad_rate_max = getattr(strategy_input, "max_bad_rate", None)
+        approval_min = getattr(strategy_input, "min_approval_rate", None)
+    # Compatibility for tasks/tests created before StrategyTaskInput existed.
+    if bad_rate_max is None:
+        bad_rate_max = getattr(task, "strategy_bad_rate_max", None)
+    if approval_min is None:
+        approval_min = getattr(task, "strategy_approval_min", None)
     criteria: list[dict] = []
     if bad_rate_max is not None:
         criteria.append({"metric": "approved_bad_rate", "max": float(bad_rate_max)})
@@ -437,9 +446,48 @@ def _run_strategy_setup(
         return _run_strategy_monitoring_setup(runtime, repo, task, backend, registry)
     # S4 intent branch (parallel to strategy_development's goal_patterns): a rule
     # mining goal -- in the first user message or the task's own name -- routes to
-    # the rule_strategy template instead of the default strategy_analysis.
+    # the rule_strategy template before the standard strategy-development entry.
     if is_rule_strategy_goal(user_text, getattr(task, "model_name", None)):
         return _run_rule_strategy_setup(runtime, repo, task, backend, registry)
+    strategy_input = getattr(task, "strategy_input", None)
+    entry_mode = resolve_strategy_entry_mode(
+        strategy_input, user_text, getattr(task, "model_name", None)
+    )
+    if entry_mode == "strategy_development":
+        clarification = strategy_development_clarification(strategy_input)
+        if clarification is not None:
+            return _strategy_clarification_response(repo, task, clarification)
+        proposal = build_strategy_development_proposal(
+            registry,
+            backend,
+            task.id,
+            task.source_dir,
+            strategy_input=strategy_input,
+            target_col=getattr(task, "target_col", "") or None,
+            score_col=getattr(task, "score_col", "") or None,
+        )
+        note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
+        bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
+        constraints = []
+        if proposal.max_bad_rate is not None:
+            constraints.append(f"通过客群坏率 ≤ {proposal.max_bad_rate:.2%}")
+        if proposal.min_approval_rate is not None:
+            constraints.append(f"通过率 ≥ {proposal.min_approval_rate:.2%}")
+        repo.add_agent_message(
+            task.id,
+            role="assistant",
+            stage="chat",
+            content=(
+                f"开始完整策略开发:样本 `{proposal.dataset_name}`，目标列 "
+                f"`{proposal.target_col}`{bad}，评分列 `{proposal.score_col}`。"
+                f"经营目标 `{proposal.objective}`，约束 {'；'.join(constraints)}。"
+                "尚未生成 cutoff 或默认规则，确认计划后才会按这些口径扫描可行方案。"
+                f"{note_text}"
+            ),
+            metadata={"intent": "strategy_development"},
+        )
+        return (proposal.template_id, proposal.template_slots(), {})
+
     proposal = build_strategy_proposal(
         registry,
         backend,
@@ -462,6 +510,32 @@ def _run_strategy_setup(
         metadata={"intent": "strategy"},
     )
     return (proposal.template_id, proposal.template_slots(), {})
+
+
+def _strategy_clarification_response(
+    repo: TaskRepository, task: TaskRecord, clarification: dict
+) -> dict:
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=(
+            f"{clarification['message']} 缺少："
+            + "、".join(f"`{field}`" for field in clarification["missing_fields"])
+            + "。请补充后再开始策略开发；如只需技术预览，请明确选择“快速策略分析”。"
+        ),
+        metadata={
+            "intent": "strategy_clarification",
+            "kind": "clarification",
+            "clarification": dict(clarification),
+        },
+    )
+    return {
+        "task_id": task.id,
+        "status": "clarification_required",
+        "clarification": dict(clarification),
+        "messages": repo.list_agent_messages(task.id),
+    }
 
 
 def _run_rule_strategy_setup(
@@ -798,6 +872,8 @@ def dispatch_driver_turn(
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
     )
+    if result.get("status") == "clarification_required":
+        return result
     if agent_client is not None and auto_accept_enabled:
         agent_autodrive_turn(runtime, repo, task, client=agent_client)
         return join_turn_response(repo, task.id)

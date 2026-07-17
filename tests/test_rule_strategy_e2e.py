@@ -111,7 +111,7 @@ def test_rule_strategy_full_journey_with_text_selection_override(tmp_path):
         task_id=task.id, template_id="rule_strategy",
         slots={
             "dataset_id": dataset.id, "target_col": "bad", "feature_cols": ["f1", "f2"],
-            "min_support": 0.05, "min_lift": 1.2, "adoption_reason": "committee approved",
+            "min_support": 0.05, "min_lift": 1.2,
         },
     )
     assert turn.status == PlanStatus.VALIDATED.value
@@ -175,8 +175,15 @@ def test_rule_strategy_full_journey_with_text_selection_override(tmp_path):
     adopt_step = next(s for s in plan.steps if s.title == "采纳策略")
     assert adopt_step.status.value == "awaiting_confirm"  # mandatory gate
 
-    # Confirm adoption -> runs 采纳策略 + 策略文档 -> DONE.
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=5)
+    # Bind the final reason to the exact adoption gate instead of inheriting a
+    # prefilled task/template value.
+    turn = driver.resume(
+        plan_id=plan_id,
+        user_text="确认采纳",
+        run_seq=5,
+        adjust_params={"adoption_reason": "committee approved"},
+        expected_step_id=adopt_step.id,
+    )
     assert turn.status == PlanStatus.DONE.value
     done = turn.messages[-1]
     assert done.stage == "done"
@@ -217,7 +224,7 @@ def test_rule_strategy_keep_all_via_confirm(tmp_path):
         task_id=task.id, template_id="rule_strategy",
         slots={
             "dataset_id": dataset.id, "target_col": "bad", "feature_cols": ["f1", "f2"],
-            "min_support": 0.05, "min_lift": 1.2, "adoption_reason": "keep all",
+            "min_support": 0.05, "min_lift": 1.2,
         },
     )
     plan_id = turn.plan_id

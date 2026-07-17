@@ -12,6 +12,7 @@ from marvis.packs.strategy.contracts import (
     StrategyRule,
 )
 from marvis.state_machine import ConflictError
+from marvis.strategy_adoption import normalize_adoption_reason
 
 
 def _now() -> str:
@@ -119,6 +120,13 @@ class StrategyRepository:
         adopt of the same strategy raises instead of silently double-adopting
         (the confirm_step compare-and-swap lesson, tests/test_concurrency.py).
         Returns {"version", "retired_strategy_ids"}."""
+        normalized_reason = normalize_adoption_reason(reason)
+        adoption_audit = dict(audit)
+        adoption_audit["detail"] = {
+            **dict(audit.get("detail") or {}),
+            "strategy_id": strategy_id,
+            "adoption_reason": normalized_reason,
+        }
         stamp = adopted_at or _now()
         with connect(self.db_path) as conn:
             head = conn.execute(
@@ -176,7 +184,7 @@ class StrategyRepository:
                    SET status = 'adopted', adopted_at = ?, adoption_reason = ?
                  WHERE id = ? AND status = 'draft'
                 """,
-                (stamp, reason, strategy_id),
+                (stamp, normalized_reason, strategy_id),
             )
             if cursor.rowcount == 0:
                 current = conn.execute(
@@ -186,7 +194,7 @@ class StrategyRepository:
                 raise ConflictError(
                     f"strategy {strategy_id} is not draft: {current['status']}"
                 )
-            _write_audit_row(conn, **audit)
+            _write_audit_row(conn, **adoption_audit)
         return {"version": version, "retired_strategy_ids": retired_ids}
 
     def new_version_from(

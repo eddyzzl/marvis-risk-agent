@@ -18,7 +18,12 @@ from marvis.api_task_helpers import (
 )
 from marvis.api_task_payloads import list_task_payloads, task_payload
 from marvis.db import TaskRepository
-from marvis.domain import TaskCreate
+from marvis.domain import (
+    TASK_TYPE_STRATEGY,
+    StrategyProfitInput,
+    StrategyTaskInput,
+    TaskCreate,
+)
 from marvis.model_algorithms import normalize_algorithm
 from marvis.notebooks import close_live_notebook_session
 from marvis.state_machine import ConflictError
@@ -85,6 +90,8 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
         raise unprocessable(str(exc)) from exc
     if payload.oot_ks_min is not None and not (0.0 <= payload.oot_ks_min <= 1.0):
         raise unprocessable("oot_ks_min 必须是 0 到 1 之间的数字。")
+    if payload.strategy_input is not None and payload.task_type != TASK_TYPE_STRATEGY:
+        raise unprocessable("strategy_input 只能用于 strategy 类型任务。")
     # Normalize source_dir once at write time so pipeline.py and /scan agree on
     # the canonical absolute path.
     normalized_source_dir = str(
@@ -109,6 +116,7 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
             recipes=payload.recipes,
             sample_weight_col=str(payload.sample_weight_col or "").strip(),
             oot_ks_min=payload.oot_ks_min,
+            strategy_input=_strategy_task_input(payload),
             metrics=payload.metrics,
             capability_tier=normalized_capability_tier(payload.capability_tier),
             notebook_path=payload.notebook_path,
@@ -125,6 +133,25 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
         task_id=task.id,
     )
     return task_payload(repo, task, request.app.state.settings.tasks_dir)
+
+
+def _strategy_task_input(payload: CreateTaskRequest) -> StrategyTaskInput | None:
+    contract = payload.strategy_input
+    if contract is None:
+        return None
+    profit = (
+        StrategyProfitInput(**contract.profit.model_dump())
+        if contract.profit is not None
+        else None
+    )
+    return StrategyTaskInput(
+        entry_mode=contract.entry_mode,
+        objective=contract.objective,
+        max_bad_rate=contract.max_bad_rate,
+        min_approval_rate=contract.min_approval_rate,
+        baseline_strategy_id=contract.baseline_strategy_id,
+        profit=profit,
+    )
 
 
 @router.get("/tasks/{task_id}")

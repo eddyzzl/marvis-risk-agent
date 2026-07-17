@@ -11230,6 +11230,77 @@ def test_gate_confirm_button_states_consequence_by_tool():
     assert ">确认<" in payload["genericHtml"]
 
 
+def test_strategy_create_dialog_captures_governed_business_input():
+    """Phase 0A: strategy development must not invent an operating objective."""
+    index_html = _read_static("index.html")
+    task_types_js = _read_static("js/task-types.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
+
+    assert 'id="createTaskStrategyField"' in index_html
+    assert 'id="strategyEntryMode"' in index_html
+    assert 'id="strategyObjective"' in index_html
+    assert 'id="strategyMaxBadRate"' in index_html
+    assert 'id="strategyMinApprovalRate"' in index_html
+    assert 'id="strategyEadCol"' in index_html
+    assert 'id="strategyPdCol"' in index_html
+    assert "strategyField: true" in task_types_js
+    assert "payload.strategy_input = strategyInput;" in create_dialog_js
+    assert 'const entryMode = $("strategyEntryMode").value;' in create_dialog_js
+    assert 'const objective = $("strategyObjective").value;' in create_dialog_js
+    assert "entry_mode: entryMode" in create_dialog_js
+    assert "objective," in create_dialog_js
+    assert "完整策略开发至少需要一个坏率上限或通过率下限" in create_dialog_js
+    assert "利润最大化需要填写 EAD/PD 列和完整收益参数" in create_dialog_js
+
+
+def test_adoption_gate_requires_reason_and_submits_gate_bound_payload():
+    """Phase 0A: one request binds a real reason to the current adopt gate."""
+    module_url = (STATIC_DIR / "js" / "v2" / "adoption_gate_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ renderAdoptionGate, submitAdoption }} from {json.dumps(module_url)};",
+            "const message = { metadata: {",
+            "  kind: 'gate', step_id: 'adopt-step',",
+            "  editable_input_schema: { type: 'object', properties: { adoption_reason: { type: 'string', minLength: 2 } }, required: ['adoption_reason'] },",
+            "} };",
+            "const html = renderAdoptionGate(message, { interactive: true });",
+            "const calls = [];",
+            "const wrap = {",
+            "  dataset: { adoptionStepId: 'adopt-step' },",
+            "  querySelector: (selector) => selector === '[data-adoption-reason]' ? { value: '委员会批准 Q3 本地采纳' } : null,",
+            "};",
+            "const button = { disabled: false, closest: () => wrap };",
+            "const context = {",
+            "  selectedTaskId: 'task-1',",
+            "  setActionStatus: () => {}, setAgentMessages: () => {}, renderAgentConversation: () => {},",
+            "  resetFetchThrottle: () => {}, renderWorkflowStepper: () => {},",
+            "  pollAgentMessagesUntilSettled: async (_taskId, promise) => promise,",
+            "  api: async (url, options) => { calls.push([url, JSON.parse(options.body)]); return { messages: [] }; },",
+            "};",
+            "await submitAdoption(button, context);",
+            "process.stdout.write(JSON.stringify({ html, calls }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert "采纳理由" in payload["html"]
+    assert "填写理由并采纳" in payload["html"]
+    assert payload["calls"] == [[
+        "/api/tasks/task-1/agent/messages",
+        {
+            "content": "确认采纳",
+            "adjust_params": {"adoption_reason": "委员会批准 Q3 本地采纳"},
+            "expected_step_id": "adopt-step",
+        },
+    ]]
+
+
 def test_all_rail_interactions_move_to_middle_workspace():
     """所有交互（确认/开始执行/下载报告）都在中间主区进行，右侧 rail 只保留
     状态徽标 + 轻量定位入口。

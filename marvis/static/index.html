@@ -155,6 +155,68 @@
               <input id="createGoodSampleDefinition" data-create-report-key="TEXT:good_sample_definition" autocomplete="off" />
             </label>
           </section>
+          <section id="createTaskStrategyField" class="task-form-section" hidden>
+            <h3>策略业务目标</h3>
+            <p class="dialog-subtitle">完整开发必须先声明经营目标和约束；快速分析仅用于探索，不会进入采纳闭环。</p>
+            <label>
+              <span>分析模式</span>
+              <select id="strategyEntryMode">
+                <option value="strategy_development" selected>完整策略开发</option>
+                <option value="strategy_analysis">快速策略分析</option>
+              </select>
+            </label>
+            <label>
+              <span>优化目标</span>
+              <select id="strategyObjective">
+                <option value="">请选择业务目标</option>
+                <option value="max_approval">约束坏率下最大化通过率</option>
+                <option value="max_profit">最大化预期利润</option>
+              </select>
+            </label>
+            <label>
+              <span>审批后坏率上限（0-1）</span>
+              <input id="strategyMaxBadRate" type="number" min="0" max="1" step="0.001" placeholder="例如：0.05" autocomplete="off" />
+            </label>
+            <label>
+              <span>通过率下限（0-1）</span>
+              <input id="strategyMinApprovalRate" type="number" min="0" max="1" step="0.001" placeholder="例如：0.60" autocomplete="off" />
+            </label>
+            <label class="wide-field">
+              <span>基线策略 ID（可选）</span>
+              <input id="strategyBaselineId" placeholder="用于 champion/challenger 对比" autocomplete="off" />
+            </label>
+            <div id="strategyProfitFields" class="strategy-profit-fields" hidden>
+              <p class="dialog-subtitle">利润目标必须提供 EAD、PD 及完整收益成本参数，平台不会把缺失利润静默当作 0。</p>
+              <label>
+                <span>EAD 列</span>
+                <input id="strategyEadCol" placeholder="例如：ead" autocomplete="off" />
+              </label>
+              <label>
+                <span>PD 列</span>
+                <input id="strategyPdCol" placeholder="例如：pd" autocomplete="off" />
+              </label>
+              <label>
+                <span>年化利率</span>
+                <input id="strategyAnnualRate" type="number" min="0" max="1" step="0.001" placeholder="例如：0.18" autocomplete="off" />
+              </label>
+              <label>
+                <span>资金成本率</span>
+                <input id="strategyFundingRate" type="number" min="0" max="1" step="0.001" placeholder="例如：0.04" autocomplete="off" />
+              </label>
+              <label>
+                <span>LGD</span>
+                <input id="strategyLgd" type="number" min="0" max="1" step="0.001" placeholder="例如：0.60" autocomplete="off" />
+              </label>
+              <label>
+                <span>单笔运营成本</span>
+                <input id="strategyOperatingCost" type="number" min="0" step="0.01" placeholder="例如：20" autocomplete="off" />
+              </label>
+              <label>
+                <span>期限（月）</span>
+                <input id="strategyTermMonths" type="number" min="1" step="1" placeholder="例如：12" autocomplete="off" />
+              </label>
+            </div>
+          </section>
           <section id="createTaskMaterialSection" class="task-form-section material-source-section">
             <div class="material-source-segment" role="tablist" aria-label="材料来源">
               <button

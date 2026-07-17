@@ -671,7 +671,7 @@ def test_create_app_can_create_strategy_analysis_plan_from_goal(tmp_path):
     response = client.post(
         f"/api/tasks/{task_id}/plans",
         json={
-            "goal": "做策略回测并看风险收益权衡",
+            "goal": "做快速策略回测并看风险收益权衡",
             "slots": {
                 "dataset_id": "dataset-1",
                 "target_col": "bad_flag",

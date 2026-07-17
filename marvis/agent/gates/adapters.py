@@ -41,6 +41,7 @@ from typing import Any, Protocol
 from marvis.agent.driver_turn import DriverTurn
 from marvis.agent.plan_utils import find_step
 from marvis.orchestrator.contracts import Plan, PlanStep
+from marvis.strategy_adoption import ADOPTION_REASON_MIN_LENGTH
 
 
 def _pending_dedup_features(plan: Plan, gate: PlanStep, load_output: Callable[[str], Any]) -> list[str]:
@@ -363,6 +364,54 @@ class _MonitoringDispositionAdapter:
 
 
 # ---------------------------------------------------------------------------
+# strategy adoption reason adapter (adopt_strategy gate)
+# ---------------------------------------------------------------------------
+class _AdoptionReasonAdapter:
+    """Declare the gate-time business reason required by ``adopt_strategy``.
+
+    The value is submitted through the structured ``adjust_params`` channel and
+    consumed atomically by :class:`PlanDriver`; this adapter intentionally does
+    not guess a reason from arbitrary free text.
+    """
+
+    tool = "adopt_strategy"
+
+    def parse_reply(self, text: str, ctx: GateReplyContext) -> None:
+        return None
+
+    def apply(
+        self,
+        driver,
+        plan: Plan,
+        gate: PlanStep,
+        parsed: Any,
+        *,
+        run_seq,
+    ) -> None:
+        return None
+
+    def adjust_schema(
+        self,
+        plan: Plan,
+        gate: PlanStep,
+        load_output: Callable[[str], Any],
+    ) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "adoption_reason": {
+                    "type": "string",
+                    "title": "采纳理由",
+                    "description": "说明基于当前策略与回测证据采纳该版本的业务理由。",
+                    "minLength": ADOPTION_REASON_MIN_LENGTH,
+                }
+            },
+            "required": ["adoption_reason"],
+            "additionalProperties": False,
+        }
+
+
+# ---------------------------------------------------------------------------
 # registry
 # ---------------------------------------------------------------------------
 _ADAPTERS: dict[str, GateReplyAdapter] = {
@@ -371,6 +420,7 @@ _ADAPTERS: dict[str, GateReplyAdapter] = {
         _JoinDedupAdapter(),
         _RuleSelectionAdapter(),
         _MonitoringDispositionAdapter(),
+        _AdoptionReasonAdapter(),
     )
 }
 

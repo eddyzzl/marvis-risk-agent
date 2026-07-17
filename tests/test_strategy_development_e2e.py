@@ -132,7 +132,6 @@ def test_strategy_development_full_journey_with_manual_band_edges_override(tmp_p
             # gap in design_cutoff_bands worth a follow-up, not papered over
             # silently: flagged separately, not fixed in this commit.
             "max_bad_rate": 0.05,
-            "adoption_reason": "committee approved for Q3 rollout",
         },
     )
     assert turn.status == PlanStatus.VALIDATED.value
@@ -203,8 +202,15 @@ def test_strategy_development_full_journey_with_manual_band_edges_override(tmp_p
     adopt_step = next(s for s in plan.steps if s.title == "采纳策略")
     assert adopt_step.status.value == "awaiting_confirm"  # mandatory gate: not yet executed
 
-    # Confirm adoption (the forced gate) -> runs 采纳策略 + 策略文档 -> DONE.
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=5)
+    # Adoption binds the reviewed evidence, a real operator reason, and the
+    # current gate token in one request; task setup never pre-authorizes it.
+    turn = driver.resume(
+        plan_id=plan_id,
+        user_text="确认采纳",
+        run_seq=5,
+        adjust_params={"adoption_reason": "committee approved for Q3 rollout"},
+        expected_step_id=adopt_step.id,
+    )
     assert turn.status == PlanStatus.DONE.value
     done = turn.messages[-1]
     assert done.stage == "done"
@@ -256,14 +262,21 @@ def test_strategy_development_double_adopt_confirm_conflicts_gracefully(tmp_path
             "score_col": "score",
             "score_direction": "higher_is_better",
             "max_bad_rate": 0.05,
-            "adoption_reason": "first adoption",
         },
     )
     plan_id = turn.plan_id
     driver.resume(plan_id=plan_id, user_text="开始", run_seq=1)  # -> 设计分数带 gate
     driver.resume(plan_id=plan_id, user_text="确认", run_seq=2)  # -> 回测策略 gate
     driver.resume(plan_id=plan_id, user_text="确认", run_seq=3)  # -> 采纳策略 gate
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=4)  # -> DONE
+    plan = plan_repo.load_plan(plan_id)
+    adopt_step = next(s for s in plan.steps if s.title == "采纳策略")
+    turn = driver.resume(
+        plan_id=plan_id,
+        user_text="确认采纳",
+        run_seq=4,
+        adjust_params={"adoption_reason": "first adoption"},
+        expected_step_id=adopt_step.id,
+    )  # -> DONE
     assert turn.status == PlanStatus.DONE.value
 
     plan = plan_repo.load_plan(plan_id)

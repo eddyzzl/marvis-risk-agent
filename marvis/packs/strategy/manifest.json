@@ -879,8 +879,7 @@
             "minLength": 1
           },
           "adoption_reason": {
-            "type": "string",
-            "minLength": 1
+            "type": "string"
           },
           "band_stats": {
             "type": "object"

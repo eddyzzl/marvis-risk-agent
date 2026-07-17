@@ -2,13 +2,17 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from marvis.db_schema import connect
 from marvis.domain import (
+    TASK_TYPE_STRATEGY,
     TASK_TYPE_VALIDATION,
     VALID_TASK_TYPES,
+    StrategyProfitInput,
+    StrategyTaskInput,
     TaskCreate,
     TaskRecord,
     TaskStatus,
@@ -1181,6 +1185,8 @@ def _row_to_agent_message(row: sqlite3.Row) -> dict:
 def _task_record_from_create(payload: TaskCreate) -> TaskRecord:
     now = _now()
     task_type = _normalize_task_type(payload.task_type)
+    if payload.strategy_input is not None and task_type != TASK_TYPE_STRATEGY:
+        raise ValueError("strategy_input may only be persisted on a strategy task")
     return TaskRecord(
         id=uuid.uuid4().hex,
         task_type=task_type,
@@ -1199,6 +1205,7 @@ def _task_record_from_create(payload: TaskCreate) -> TaskRecord:
         recipes=list(payload.recipes),
         sample_weight_col=payload.sample_weight_col,
         oot_ks_min=payload.oot_ks_min,
+        strategy_input=payload.strategy_input,
         metrics=list(payload.metrics),
         capability_tier=payload.capability_tier,
         notebook_path=payload.notebook_path,
@@ -1227,12 +1234,12 @@ def _insert_task_record_row(
         (
             id, task_type, validation_workflow_version, model_name, model_version, validator, source_dir,
             algorithm, run_mode, target_col, score_col, split_col,
-            time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, oot_ks_min, metrics_json, capability_tier, notebook_path, sample_path,
+            time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, oot_ks_min, strategy_input_json, metrics_json, capability_tier, notebook_path, sample_path,
             pmml_path, dictionary_path, report_values_json,
             report_values_revision, status, status_message,
             status_reason_code, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             record.id,
@@ -1253,6 +1260,7 @@ def _insert_task_record_row(
             _dump_json_list(record.recipes),
             record.sample_weight_col,
             record.oot_ks_min,
+            _dump_strategy_input(record.strategy_input),
             _dump_json_list(record.metrics),
             record.capability_tier,
             record.notebook_path,
@@ -1294,6 +1302,9 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         recipes=_load_json_list(row["recipes_json"]),
         sample_weight_col=(row["sample_weight_col"] if "sample_weight_col" in row.keys() else "") or "",
         oot_ks_min=(row["oot_ks_min"] if "oot_ks_min" in row.keys() else None),
+        strategy_input=_load_strategy_input(
+            row["strategy_input_json"] if "strategy_input_json" in row.keys() else None
+        ),
         metrics=_load_json_list(row["metrics_json"]),
         capability_tier=(row["capability_tier"] if "capability_tier" in row.keys() else "") or "",
         notebook_path=row["notebook_path"],
@@ -1420,6 +1431,14 @@ def _dump_json_dict(values: dict[str, str]) -> str:
     return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
 
 
+def _dump_strategy_input(value: StrategyTaskInput | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, StrategyTaskInput):
+        raise ValueError("strategy_input must be a StrategyTaskInput or None")
+    return json.dumps(asdict(value), ensure_ascii=False, separators=(",", ":"))
+
+
 def _load_json_list(raw: str | None) -> list[str]:
     if not raw:
         return []
@@ -1429,6 +1448,42 @@ def _load_json_list(raw: str | None) -> list[str]:
     ):
         raise ValueError("feature_columns_json must be a JSON array of strings")
     return value
+
+
+def _load_strategy_input(raw: str | None) -> StrategyTaskInput | None:
+    if not raw:
+        return None
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("strategy_input_json must be a JSON object")
+    allowed_keys = {
+        "entry_mode",
+        "objective",
+        "max_bad_rate",
+        "min_approval_rate",
+        "baseline_strategy_id",
+        "profit",
+    }
+    unknown_keys = sorted(set(value) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(
+            "strategy_input_json contains unknown fields: " + ", ".join(unknown_keys)
+        )
+    profit_payload = value.get("profit")
+    if profit_payload is not None and not isinstance(profit_payload, dict):
+        raise ValueError("strategy_input_json.profit must be a JSON object or null")
+    try:
+        profit = StrategyProfitInput(**profit_payload) if profit_payload is not None else None
+        return StrategyTaskInput(
+            entry_mode=value.get("entry_mode", "strategy_development"),
+            objective=value.get("objective", ""),
+            max_bad_rate=value.get("max_bad_rate"),
+            min_approval_rate=value.get("min_approval_rate"),
+            baseline_strategy_id=value.get("baseline_strategy_id"),
+            profit=profit,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid strategy_input_json: {exc}") from exc
 
 
 def _load_json_dict(raw: str | None) -> dict[str, str]:

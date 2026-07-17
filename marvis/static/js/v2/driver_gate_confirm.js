@@ -19,7 +19,13 @@ function escapeHtml(value) {
 // when no widget is mounted, in either mode.
 function gateHasStructuredWidget(message) {
   const meta = message?.metadata || {};
-  return Boolean(meta.join_c1 || meta.screen || meta.modeling_setup || meta.dedup);
+  return Boolean(
+    meta.join_c1
+    || meta.screen
+    || meta.modeling_setup
+    || meta.dedup
+    || meta.editable_input_schema?.properties?.adoption_reason
+  );
 }
 
 // UX-10: a bare "确认" button looks identical whether it writes artifacts to disk
@@ -34,6 +40,7 @@ const GATE_CONFIRM_LABELS = {
   select_features: "确认所选特征",
   train_model: "确认并开始训练",
   tune_hyperparameters: "确认并开始调参",
+  adopt_strategy: "填写理由并采纳",
 };
 
 export function gateConfirmLabel(toolName) {

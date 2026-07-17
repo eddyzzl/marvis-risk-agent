@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -8,12 +8,42 @@ from pydantic import (
     StrictFloat,
     StrictInt,
     StrictStr,
+    StringConstraints,
 )
 
 from marvis.domain import TASK_TYPE_VALIDATION
 
 
 StrictJsonScalar = StrictStr | StrictInt | StrictFloat | StrictBool | None
+StrictRatio = Annotated[StrictInt | StrictFloat, Field(ge=0.0, le=1.0)]
+StrictNonNegativeNumber = Annotated[StrictInt | StrictFloat, Field(ge=0.0)]
+StrictNonEmptyStr = Annotated[
+    StrictStr,
+    StringConstraints(strip_whitespace=True, min_length=1),
+]
+
+
+class StrategyProfitInputRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ead_col: StrictNonEmptyStr
+    pd_col: StrictNonEmptyStr
+    annual_rate: StrictRatio
+    funding_rate: StrictRatio
+    lgd: StrictRatio
+    operating_cost_per_loan: StrictNonNegativeNumber
+    term_months: StrictInt = Field(ge=1)
+
+
+class StrategyTaskInputRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    entry_mode: Literal["strategy_development", "strategy_analysis"] = "strategy_development"
+    objective: Literal["", "max_profit", "max_approval"] = ""
+    max_bad_rate: StrictRatio | None = None
+    min_approval_rate: StrictRatio | None = None
+    baseline_strategy_id: StrictNonEmptyStr | None = None
+    profit: StrategyProfitInputRequest | None = None
 
 
 class CreateTaskRequest(BaseModel):
@@ -35,6 +65,7 @@ class CreateTaskRequest(BaseModel):
     # AGT-4 (optional, modeling tasks only): None/absent → no success criterion is
     # injected into the plan. Never defaulted to a platform-chosen number.
     oot_ks_min: float | None = None
+    strategy_input: StrategyTaskInputRequest | None = None
     metrics: list[str] = Field(default_factory=list)
     # Per-task capability tier (conservative/balanced/aggressive); "" → global default.
     capability_tier: str = ""

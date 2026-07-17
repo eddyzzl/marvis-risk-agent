@@ -382,6 +382,10 @@ def test_agent_mode_autodrives_strategy_to_completion(client: TestClient, tmp_pa
         "run_mode": "agent",
         "target_col": "bad",
         "score_col": "score",
+        # This test exercises the legacy lightweight AUTO hand-off.  Full
+        # strategy development is now the product default and requires a
+        # governed business contract, so the compatibility route is explicit.
+        "strategy_input": {"entry_mode": "strategy_analysis"},
     }).json()["id"]
 
     resp = client.post(f"/api/tasks/{task_id}/agent/start", json={"acceptance_mode": "auto_accept"})

@@ -250,6 +250,73 @@ class PlanRepository:
                 outcome="succeeded",
             )
 
+    def confirm_step_with_inputs(
+        self,
+        step_id: str,
+        *,
+        input_updates: dict,
+    ) -> None:
+        """Atomically merge reviewed gate inputs and confirm the current step.
+
+        This is the structured-control counterpart to ``confirm_step``.  The
+        input mutation and one-shot confirmation share the same transaction and
+        compare-and-swap guard, so an adoption reason cannot be persisted without
+        the confirmation it belongs to (or vice versa).
+        """
+
+        if not isinstance(input_updates, dict) or not input_updates:
+            raise ValueError("input_updates must be a non-empty object")
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT status, confirmed, inputs_json FROM plan_steps WHERE id = ?",
+                (step_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(step_id)
+            if int(row["confirmed"] or 0):
+                raise ConflictError("step is already confirmed")
+            if str(row["status"]) != StepStatus.AWAITING_CONFIRM.value:
+                raise ConflictError(
+                    f"step is not awaiting confirmation: {row['status']}"
+                )
+            current_inputs = json.loads(str(row["inputs_json"] or "{}"))
+            if not isinstance(current_inputs, dict):
+                raise ValueError(f"step {step_id} inputs are not an object")
+            merged_inputs = {**current_inputs, **input_updates}
+            cursor = conn.execute(
+                """
+                UPDATE plan_steps
+                   SET inputs_json = ?, confirmed = 1
+                 WHERE id = ?
+                   AND status = ?
+                   AND confirmed = 0
+                """,
+                (
+                    json.dumps(merged_inputs, ensure_ascii=False),
+                    step_id,
+                    StepStatus.AWAITING_CONFIRM.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                latest = conn.execute(
+                    "SELECT status, confirmed FROM plan_steps WHERE id = ?",
+                    (step_id,),
+                ).fetchone()
+                if latest is None:
+                    raise KeyError(step_id)
+                if int(latest["confirmed"] or 0):
+                    raise ConflictError("step is already confirmed")
+                raise ConflictError(
+                    f"step is not awaiting confirmation: {latest['status']}"
+                )
+            _write_audit_row(
+                conn,
+                kind="plan.step.confirm",
+                target_ref=step_id,
+                outcome="succeeded",
+                detail={"updated_input_keys": sorted(str(key) for key in input_updates)},
+            )
+
     def reset_step(self, step_id: str, *, inputs: dict | None = None) -> None:
         """Reset a step to pending and clear its output / error / confirmation so it
         can run again (the gate-adjust path). Optionally replace its inputs with a

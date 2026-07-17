@@ -23,17 +23,66 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(tmp_path))
 
 
-def test_strategy_agent_start_builds_plan_and_reaches_strategy_gate(client, tmp_path):
+def _strategy_source(tmp_path: Path) -> Path:
     src = tmp_path / "strategy"
     src.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({
         "bad": [1, 0, 0, 0, 1, 0],
         "score": [580, 620, 730, 760, 590, 800],
     }).to_csv(src / "strategy.csv", index=False)
+    return src
+
+
+def test_strategy_agent_start_defaults_to_full_development_plan(client, tmp_path):
+    src = _strategy_source(tmp_path)
     created = client.post(
         "/api/tasks",
         json={
-            "model_name": "策略回测",
+            "model_name": "额度准入策略",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {
+                "objective": "max_approval",
+                "max_bad_rate": 0.20,
+            },
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert started.status_code == 202, started.text
+    assert started.json()["status"] == "ok"
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert plans[-1]["template_id"] == "strategy_development"
+    assert plans[-1]["success_criteria"] == [
+        {"metric": "approved_bad_rate", "max": 0.20}
+    ]
+    assert [step["title"] for step in plans[-1]["steps"]] == [
+        "权衡扫描",
+        "设计分数带",
+        "构造策略",
+        "回测策略",
+        "对比基线",
+        "挑战者报告",
+        "采纳策略",
+        "策略文档",
+    ]
+
+
+def test_strategy_development_without_business_constraints_clarifies_without_plan(
+    client, tmp_path
+):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "缺经营口径的策略",
             "validator": "qa",
             "source_dir": str(src),
             "task_type": "strategy",
@@ -46,10 +95,81 @@ def test_strategy_agent_start_builds_plan_and_reaches_strategy_gate(client, tmp_
     task_id = created.json()["id"]
 
     started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert started.status_code == 202, started.text
+    assert started.json()["status"] == "clarification_required"
+    clarification = started.json()["clarification"]
+    assert clarification["code"] == "strategy_business_inputs_required"
+    assert set(clarification["missing_fields"]) == {
+        "objective",
+        "max_bad_rate_or_min_approval_rate",
+    }
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+
+
+def test_max_profit_strategy_requires_complete_profit_contract(client, tmp_path):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "利润目标策略",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {
+                "objective": "max_profit",
+                "max_bad_rate": 0.20,
+            },
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert started.status_code == 202, started.text
+    assert started.json()["status"] == "clarification_required"
+    missing = set(started.json()["clarification"]["missing_fields"])
+    assert missing == {
+        "profit.ead_col",
+        "profit.pd_col",
+        "profit.annual_rate",
+        "profit.funding_rate",
+        "profit.lgd",
+        "profit.operating_cost_per_loan",
+        "profit.term_months",
+    }
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+
+
+def test_explicit_quick_strategy_analysis_keeps_lightweight_workflow(client, tmp_path):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "兼容轻量策略",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {"entry_mode": "strategy_analysis"},
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert started.status_code == 202, started.text
     start_messages = started.json()["messages"]
     assert any("开始策略分析" in message["content"] for message in start_messages)
     assert start_messages[-1]["metadata"]["kind"] == "plan_overview"
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert plans[-1]["template_id"] == "strategy_analysis"
 
     confirmed = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
     assert confirmed.status_code == 202, confirmed.text
@@ -66,6 +186,67 @@ def test_strategy_agent_start_builds_plan_and_reaches_strategy_gate(client, tmp_
     done = finished.json()["messages"][-1]
     assert "策略权衡视图完成" in done["content"]
     assert any(table["title"] == "cutoff 权衡点" for table in done["metadata"]["tables"])
+
+
+def test_quick_strategy_analysis_phrase_overrides_development_default(client, tmp_path):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "临时策略预览",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    started = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "快速策略分析"},
+    )
+
+    assert started.status_code == 202, started.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert plans[-1]["template_id"] == "strategy_analysis"
+
+
+def test_start_strategy_development_message_uses_full_product_route(client, tmp_path):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "对话式策略任务",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {
+                "objective": "max_approval",
+                "min_approval_rate": 0.60,
+            },
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    started = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "开始策略开发"},
+    )
+
+    assert started.status_code == 202, started.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert plans[-1]["template_id"] == "strategy_development"
+    assert plans[-1]["success_criteria"] == [
+        {"metric": "approval_rate", "min": 0.60}
+    ]
 
 
 def test_strategy_rule_mining_goal_routes_to_rule_strategy_template(client, tmp_path):

@@ -85,6 +85,7 @@ export const taskTypeDefinitions = {
     sourceLabel: "策略数据目录",
     sourcePlaceholder: "/path/to/strategy-data",
     reportFields: false,
+    strategyField: true,
     defaultRunMode: "",
     manualEnabled: true,
     manualModeDescription: "识别评分列和目标列，生成候选规则，在回测前确认并查看收益权衡",

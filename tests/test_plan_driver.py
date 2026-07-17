@@ -182,6 +182,76 @@ def _gated_join_dedup_plan() -> Plan:
     return plan
 
 
+def _gated_strategy_adoption_plan() -> Plan:
+    backtest = _dataclass_replace(
+        _step("backtest", index=0, tool="backtest_strategy"),
+        plan_id="plan-adopt",
+        tool_ref=ToolRef("strategy", "backtest_strategy"),
+    )
+    adopt = _dataclass_replace(
+        _step(
+            "adopt",
+            index=1,
+            tool="adopt_strategy",
+            depends_on=["backtest"],
+            needs_confirmation=True,
+        ),
+        plan_id="plan-adopt",
+        tool_ref=ToolRef("strategy", "adopt_strategy"),
+        inputs={
+            "strategy_id": "strategy-1",
+            "backtest_id": "backtest-1",
+            "adoption_reason": "",
+        },
+    )
+    return Plan(
+        id="plan-adopt",
+        task_id="task-adopt",
+        goal="strategy adoption",
+        source="template",
+        template_id="strategy_development",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[backtest, adopt],
+    )
+
+
+def _adoption_driver(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_gated_strategy_adoption_plan())
+    runner = FakeRunner([
+        {
+            "backtest_id": "backtest-1",
+            "strategy_id": "strategy-1",
+            "approval_rate": 0.7,
+            "approved_bad_rate": 0.04,
+            "rejected_bad_rate": 0.22,
+            "expected_profit": 2300.0,
+            "swap_in_count": 5,
+            "swap_out_count": 8,
+            "by_segment": [],
+        },
+        {
+            "strategy_id": "strategy-1",
+            "version": 1,
+            "status": "adopted",
+            "retired_strategy_ids": [],
+            "artifacts": [],
+        },
+    ])
+    executor = PlanExecutor(
+        repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(repo),
+    )
+    return PlanDriver(repo, executor), repo, runner
+
+
 def _driver(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -1512,6 +1582,134 @@ def test_resume_plain_confirm_rejects_stale_gate_token_when_supplied(tmp_path):
         driver.resume(plan_id="plan-1", user_text="确认", run_seq=1, expected_step_id="old-gate")
 
 
+def test_adoption_gate_exposes_required_reason_schema_and_bare_confirm_fails_closed(tmp_path):
+    driver, repo, runner = _adoption_driver(tmp_path)
+    repo.confirm_plan("plan-adopt")
+
+    paused = driver._run_and_handle("plan-adopt", run_seq=0)
+
+    assert paused.status == PlanStatus.AWAITING_CONFIRM.value
+    schema = paused.messages[-1].metadata["editable_input_schema"]
+    assert schema["required"] == ["adoption_reason"]
+    assert schema["properties"]["adoption_reason"]["minLength"] == 2
+
+    with pytest.raises(DriverError, match="采纳理由"):
+        driver.resume(
+            plan_id="plan-adopt",
+            user_text="确认",
+            run_seq=1,
+            expected_step_id="adopt",
+        )
+
+    loaded = repo.load_plan("plan-adopt")
+    adopt = next(step for step in loaded.steps if step.id == "adopt")
+    assert loaded.status == PlanStatus.AWAITING_CONFIRM
+    assert adopt.status == StepStatus.AWAITING_CONFIRM
+    assert repo.is_step_confirmed("adopt") is False
+    assert [call[0] for call in runner.calls] == ["backtest_strategy"]
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["", "   ", "x", "（待采纳时确认）", "TODO later", "pending approval"],
+)
+def test_adoption_reason_control_rejects_invalid_value_without_confirming(tmp_path, reason):
+    driver, repo, runner = _adoption_driver(tmp_path)
+    repo.confirm_plan("plan-adopt")
+    driver._run_and_handle("plan-adopt", run_seq=0)
+
+    with pytest.raises(DriverError, match="采纳理由"):
+        driver.resume(
+            plan_id="plan-adopt",
+            user_text="确认",
+            run_seq=1,
+            adjust_params={"adoption_reason": reason},
+            expected_step_id="adopt",
+        )
+
+    assert repo.load_plan("plan-adopt").status == PlanStatus.AWAITING_CONFIRM
+    assert repo.is_step_confirmed("adopt") is False
+    assert [call[0] for call in runner.calls] == ["backtest_strategy"]
+
+
+def test_adoption_reason_control_requires_current_gate_token_and_adopt_gate(tmp_path):
+    driver, repo, runner = _adoption_driver(tmp_path)
+    repo.confirm_plan("plan-adopt")
+    driver._run_and_handle("plan-adopt", run_seq=0)
+
+    with pytest.raises(DriverError, match="缺少待确认步骤校验"):
+        driver.resume(
+            plan_id="plan-adopt",
+            user_text="确认",
+            run_seq=1,
+            adjust_params={"adoption_reason": "委员会批准"},
+        )
+    with pytest.raises(DriverError, match="待确认步骤已变化"):
+        driver.resume(
+            plan_id="plan-adopt",
+            user_text="确认",
+            run_seq=1,
+            adjust_params={"adoption_reason": "委员会批准"},
+            expected_step_id="old-adopt",
+        )
+    assert repo.is_step_confirmed("adopt") is False
+    assert [call[0] for call in runner.calls] == ["backtest_strategy"]
+
+    other_path = tmp_path / "other"
+    other_path.mkdir()
+    other_driver, other_repo = _driver(other_path)
+    other_repo.confirm_plan("plan-1")
+    other_driver._run_and_handle("plan-1", run_seq=0)
+    with pytest.raises(DriverError, match="采纳策略确认步骤"):
+        other_driver.resume(
+            plan_id="plan-1",
+            user_text="确认",
+            run_seq=1,
+            adjust_params={"adoption_reason": "委员会批准"},
+            expected_step_id="tune",
+        )
+
+
+def test_adoption_reason_control_atomically_updates_confirms_and_runs(tmp_path):
+    driver, repo, runner = _adoption_driver(tmp_path)
+    repo.confirm_plan("plan-adopt")
+    driver._run_and_handle("plan-adopt", run_seq=0)
+
+    turn = driver.resume(
+        plan_id="plan-adopt",
+        user_text="确认采纳",
+        run_seq=1,
+        adjust_params={"adoption_reason": "  委员会批准 Q3 上线  "},
+        expected_step_id="adopt",
+    )
+
+    assert turn.status == PlanStatus.DONE.value
+    assert [call[0] for call in runner.calls] == ["backtest_strategy", "adopt_strategy"]
+    assert runner.calls[-1][1]["adoption_reason"] == "委员会批准 Q3 上线"
+    adopt = next(step for step in repo.load_plan("plan-adopt").steps if step.id == "adopt")
+    assert adopt.status == StepStatus.DONE
+    assert adopt.inputs["adoption_reason"] == "委员会批准 Q3 上线"
+    assert repo.is_step_confirmed("adopt") is True
+
+
+def test_adoption_reason_control_requires_explicit_confirm_intent(tmp_path):
+    driver, repo, runner = _adoption_driver(tmp_path)
+    repo.confirm_plan("plan-adopt")
+    driver._run_and_handle("plan-adopt", run_seq=0)
+
+    with pytest.raises(DriverError, match="同时确认采纳"):
+        driver.resume(
+            plan_id="plan-adopt",
+            user_text="先记录理由",
+            run_seq=1,
+            adjust_params={"adoption_reason": "委员会批准"},
+            expected_step_id="adopt",
+        )
+
+    assert repo.is_step_confirmed("adopt") is False
+    assert [call[0] for call in runner.calls] == ["backtest_strategy"]
+
+
 def test_resume_dedup_control_rejects_stale_or_missing_gate_token(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -2079,6 +2277,7 @@ def test_is_confirm_accepts_task_start_shortcuts():
     assert is_confirm("开始建模")
     assert is_confirm("开始模型开发")
     assert is_confirm("开始策略开发")
+    assert is_confirm("确认采纳")
     assert not is_confirm("不要开始建模")
     assert not is_confirm("开始建模吗？")
 

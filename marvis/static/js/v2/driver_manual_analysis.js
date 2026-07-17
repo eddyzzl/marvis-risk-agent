@@ -41,7 +41,13 @@ export function lastAssistantMessageId(messages = []) {
 // in exactly one place.
 export function driverGateHasWidget(message) {
   const meta = message?.metadata || {};
-  return Boolean(meta.join_c1 || meta.screen || meta.modeling_setup || meta.dedup);
+  return Boolean(
+    meta.join_c1
+    || meta.screen
+    || meta.modeling_setup
+    || meta.dedup
+    || meta.editable_input_schema?.properties?.adoption_reason
+  );
 }
 
 // UX-2: mounts the FULL body (structured widget(s) + any accompanying
@@ -60,6 +66,7 @@ export function driverGateBodyHtml(message, renderers = {}, options = {}) {
   const renderDedupPicker = renderers.renderDedupPicker || emptyRenderer;
   const renderModelingSetup = renderers.renderModelingSetup || emptyRenderer;
   const renderScreenTable = renderers.renderScreenTable || emptyRenderer;
+  const renderAdoptionGate = renderers.renderAdoptionGate || emptyRenderer;
   const renderTables = renderers.renderTables || emptyRenderer;
   const meta = message?.metadata || {};
   const interactive = options.interactive !== false;
@@ -67,6 +74,9 @@ export function driverGateBodyHtml(message, renderers = {}, options = {}) {
   if (meta.screen) return `${renderModelingSetup(message, { interactive })}${renderScreenTable(message, { interactive })}`;
   if (meta.modeling_setup) return `${renderModelingSetup(message, { interactive })}${renderTables(message)}`;
   if (meta.dedup) return `${renderTables(message)}${renderDedupPicker(message, { interactive })}`;
+  if (meta.editable_input_schema?.properties?.adoption_reason) {
+    return `${renderTables(message)}${renderAdoptionGate(message, { interactive })}`;
+  }
   return "";
 }
 

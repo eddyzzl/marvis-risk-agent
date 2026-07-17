@@ -527,7 +527,19 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
             "dataset_id": "dataset-1",
             "target_col": "bad_flag",
             "score_col": "score",
-            "adoption_reason": "committee approved",
+            "objective": "max_profit",
+            "max_bad_rate": 0.05,
+            "min_approval_rate": 0.50,
+            "baseline_strategy_id": "strategy-baseline",
+            "ead_col": "ead",
+            "pd_col": "pd",
+            "profit_params": {
+                "annual_rate": 0.12,
+                "funding_rate": 0.03,
+                "lgd": 0.50,
+                "operating_cost_per_loan": 10.0,
+                "term_months": 12,
+            },
         },
         task_id="task-1",
     )
@@ -550,23 +562,44 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
     report_step = plan.steps[5]
     adopt_step = plan.steps[6]
     doc_step = plan.steps[7]
+    profit_params = {
+        "annual_rate": 0.12,
+        "funding_rate": 0.03,
+        "lgd": 0.50,
+        "operating_cost_per_loan": 10.0,
+        "term_months": 12,
+    }
+    for step in (plan.steps[0], bands_step):
+        assert step.inputs["objective"] == "max_profit"
+        assert step.inputs["max_bad_rate"] == 0.05
+        assert step.inputs["min_approval_rate"] == 0.50
+        assert step.inputs["ead_col"] == "ead"
+        assert step.inputs["pd_col"] == "pd"
+        assert step.inputs["profit_params"] == profit_params
+    for step in (backtest_step, compare_step):
+        assert step.inputs["ead_col"] == "ead"
+        assert step.inputs["pd_col"] == "pd"
+        assert step.inputs["profit_params"] == profit_params
+    assert backtest_step.inputs["baseline_strategy_id"] == "strategy-baseline"
+    assert compare_step.inputs["baseline_strategy_id"] == "strategy-baseline"
     assert bands_step.needs_confirmation is True
     assert backtest_step.needs_confirmation is True
     assert backtest_step.decision_point is True
     # Mandatory adoption gate: auto-accept must not skip it (delivery-gate precedent).
     assert adopt_step.needs_confirmation is True
+    # The reason belongs to the final evidence-bound adoption gate, not task setup.
+    # Keeping an explicit empty key gives that gate a structured override target.
+    assert adopt_step.inputs["adoption_reason"] == ""
     assert build_step.inputs["rules"] == f"$ref:{bands_step.id}.output.recommended_rules"
     assert adopt_step.inputs["backtest_id"] == f"$ref:{backtest_step.id}.output.backtest_id"
     assert adopt_step.inputs["band_stats"] == f"$ref:{bands_step.id}.output"
     assert doc_step.inputs["strategy_id"] == f"$ref:{build_step.id}.output.strategy_id"
-    # S6: the optional challenger report step sits after compare, before adopt. Its
-    # numbers come from the compare + backtest outputs (report follows tool output); with
-    # baseline_strategy_id omitted the champion slot drops and the tool degrades to a
-    # no-baseline no-op (工具级优雅降级) rather than the plan failing.
+    # S6: the challenger report sits after compare, before adopt. Its numbers come
+    # from the compare + backtest outputs and the governed baseline is threaded to it.
     assert report_step.inputs["compare"] == f"$ref:{compare_step.id}.output"
     assert report_step.inputs["challenger_backtest"] == f"$ref:{backtest_step.id}.output"
     assert report_step.inputs["strategy_id"] == f"$ref:{build_step.id}.output.strategy_id"
-    assert "champion_strategy_id" not in report_step.inputs  # omitted baseline slot dropped
+    assert report_step.inputs["champion_strategy_id"] == "strategy-baseline"
 
 
 def test_strategy_development_goal_patterns_do_not_cross_strategy_analysis(tmp_path):
@@ -586,7 +619,6 @@ def test_rule_strategy_template_instantiates_and_validates(tmp_path):
         {
             "dataset_id": "dataset-1",
             "target_col": "bad_flag",
-            "adoption_reason": "committee approved",
         },
         task_id="task-1",
     )
@@ -615,6 +647,7 @@ def test_rule_strategy_template_instantiates_and_validates(tmp_path):
     assert evaluate.inputs["rules"] == f"$ref:{select.id}.output.selected_rules"
     assert build.inputs["rules"] == f"$ref:{select.id}.output.selected_rules"
     assert adopt.inputs["backtest_id"] == f"$ref:{backtest.id}.output.backtest_id"
+    assert adopt.inputs["adoption_reason"] == ""
     assert doc.inputs["strategy_id"] == f"$ref:{build.id}.output.strategy_id"
     # optional score_col slot omitted -> dropped, not None (build_strategy skips
     # the direction self-check for arbitrary-feature rules).

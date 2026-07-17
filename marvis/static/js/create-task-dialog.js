@@ -60,6 +60,7 @@ export function createCreateTaskDialogController({
     $("sourceDir").placeholder = definition.sourcePlaceholder;
     $("createTaskReportFields").hidden = !definition.reportFields;
     $("createTaskReportFields").classList.toggle("hidden", !definition.reportFields);
+    toggleConditionalField("createTaskStrategyField", Boolean(definition.strategyField));
     setRunModeCardState("manual", {
       disabled: !definition.manualEnabled,
       checked: false,
@@ -79,6 +80,7 @@ export function createCreateTaskDialogController({
     toggleConditionalField("createTaskAlgorithmField", Boolean(definition.algorithmField) && runMode === "manual");
     toggleConditionalField("createTaskMetricField", Boolean(definition.metricField) && runMode === "manual");
     toggleConditionalField("createTaskTierField", Boolean(definition.tierField) && runMode === "agent");
+    toggleConditionalField("createTaskStrategyField", Boolean(definition.strategyField));
   }
 
   function syncCreateTaskTierDefault() {
@@ -107,6 +109,102 @@ export function createCreateTaskDialogController({
     const weightInput = $("modelSampleWeightCol");
     if (weightInput) weightInput.value = "";
     updateSampleWeightCreateState();
+  }
+
+  function resetStrategyTaskInput() {
+    const defaults = {
+      strategyEntryMode: "strategy_development",
+      strategyObjective: "",
+      strategyMaxBadRate: "",
+      strategyMinApprovalRate: "",
+      strategyBaselineId: "",
+      strategyEadCol: "",
+      strategyPdCol: "",
+      strategyAnnualRate: "",
+      strategyFundingRate: "",
+      strategyLgd: "",
+      strategyOperatingCost: "",
+      strategyTermMonths: "",
+    };
+    for (const [id, value] of Object.entries(defaults)) {
+      const input = $(id);
+      if (input) input.value = value;
+    }
+    updateStrategyProfitVisibility();
+  }
+
+  function updateStrategyProfitVisibility() {
+    const show = $("strategyEntryMode")?.value === "strategy_development"
+      && $("strategyObjective")?.value === "max_profit";
+    toggleConditionalField("strategyProfitFields", show);
+  }
+
+  function optionalNumber(id) {
+    const raw = $(id)?.value?.trim?.() || "";
+    return raw === "" ? null : Number(raw);
+  }
+
+  function collectStrategyTaskInput() {
+    const entryMode = $("strategyEntryMode").value;
+    const objective = $("strategyObjective").value;
+    const input = {
+      entry_mode: entryMode,
+      objective,
+      max_bad_rate: optionalNumber("strategyMaxBadRate"),
+      min_approval_rate: optionalNumber("strategyMinApprovalRate"),
+      baseline_strategy_id: $("strategyBaselineId").value.trim() || null,
+      profit: null,
+    };
+    if (entryMode === "strategy_development" && objective === "max_profit") {
+      input.profit = {
+        ead_col: $("strategyEadCol").value.trim(),
+        pd_col: $("strategyPdCol").value.trim(),
+        annual_rate: optionalNumber("strategyAnnualRate"),
+        funding_rate: optionalNumber("strategyFundingRate"),
+        lgd: optionalNumber("strategyLgd"),
+        operating_cost_per_loan: optionalNumber("strategyOperatingCost"),
+        term_months: optionalNumber("strategyTermMonths"),
+      };
+    }
+    return input;
+  }
+
+  function strategyInputError(input) {
+    if (input.entry_mode === "strategy_analysis") return "";
+    if (!input.objective) return "请选择完整策略开发的业务目标。";
+    for (const [label, value] of [
+      ["审批后坏率上限", input.max_bad_rate],
+      ["通过率下限", input.min_approval_rate],
+    ]) {
+      if (value !== null && (!Number.isFinite(value) || value < 0 || value > 1)) {
+        return `${label}必须是 0 到 1 之间的数字。`;
+      }
+    }
+    if (input.max_bad_rate === null && input.min_approval_rate === null) {
+      return "完整策略开发至少需要一个坏率上限或通过率下限。";
+    }
+    if (input.objective !== "max_profit") return "";
+    const profit = input.profit || {};
+    const numeric = [
+      profit.annual_rate,
+      profit.funding_rate,
+      profit.lgd,
+      profit.operating_cost_per_loan,
+      profit.term_months,
+    ];
+    if (!profit.ead_col || !profit.pd_col || numeric.some((value) => value === null || !Number.isFinite(value))) {
+      return "利润最大化需要填写 EAD/PD 列和完整收益参数。";
+    }
+    if (
+      profit.annual_rate < 0 || profit.annual_rate > 1
+      || profit.funding_rate < 0 || profit.funding_rate > 1
+      || profit.lgd < 0 || profit.lgd > 1
+      || profit.operating_cost_per_loan < 0
+      || !Number.isInteger(profit.term_months) || profit.term_months < 1
+    ) {
+      return "利润参数范围无效：率和 LGD 需在 0-1，成本不得为负，期限必须是正整数。";
+    }
+    return "";
   }
 
   function updateSampleWeightCreateState() {
@@ -143,6 +241,7 @@ export function createCreateTaskDialogController({
       input.checked = false;
     });
     resetModelAlgorithmChoices();
+    resetStrategyTaskInput();
     syncCreateTaskTierDefault();
     updateAlgorithmFieldVisibility();
     document.querySelectorAll(".run-mode-card").forEach((card) => {
@@ -203,6 +302,8 @@ export function createCreateTaskDialogController({
       input.addEventListener("change", () => normalizeModelAlgorithmFamilies(input));
     });
     $("modelSampleWeightPolicy")?.addEventListener("change", updateSampleWeightCreateState);
+    $("strategyEntryMode")?.addEventListener("change", updateStrategyProfitVisibility);
+    $("strategyObjective")?.addEventListener("change", updateStrategyProfitVisibility);
   }
 
   function taskTextSeed() {
@@ -320,6 +421,15 @@ export function createCreateTaskDialogController({
       run_mode: selectedRunMode,
       report_values: definition.reportFields ? collectCreateTaskReportValues() : {},
     };
+    if (definition.strategyField) {
+      const strategyInput = collectStrategyTaskInput();
+      const error = strategyInputError(strategyInput);
+      if (error) {
+        setCreateStatus(error, "error");
+        return null;
+      }
+      payload.strategy_input = strategyInput;
+    }
     if (definition.algorithmField && selectedRunMode === "manual") {
       normalizeModelAlgorithmFamilies();
       payload.recipes = [...document.querySelectorAll('input[name="modelAlgorithm"]:checked')].map((box) => box.value);

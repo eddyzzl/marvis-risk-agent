@@ -35,6 +35,7 @@ from marvis.agent.plan_message_composer import PlanMessageComposer
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.templates import get_template
+from marvis.strategy_adoption import AdoptionReasonError, normalize_adoption_reason
 
 # A reply counts as confirmation of the current gate only when, after stripping
 # whitespace/punctuation, the *entire* remaining text is made up of short affirmative
@@ -52,6 +53,7 @@ _CONFIRM_DIRECT_COMMANDS = {
     "开始模型开发",
     "开始模型验证",
     "开始策略开发",
+    "确认采纳",
 }
 # Interrogative guard: any hard question mark/particle disqualifies a reply from
 # being read as confirmation even if it also contains an affirmative token (e.g.
@@ -108,6 +110,18 @@ def is_confirm(text: str) -> bool:
     if direct_confirm:
         return True
     return bool(_CONFIRM_FULLMATCH.fullmatch(compact))
+
+
+def _has_adoption_reason_adjust(adjust_params) -> bool:
+    return isinstance(adjust_params, dict) and "adoption_reason" in adjust_params
+
+
+def _is_adoption_gate(gate: PlanStep | None) -> bool:
+    return bool(
+        gate is not None
+        and gate.tool_ref is not None
+        and gate.tool_ref.tool == "adopt_strategy"
+    )
 
 
 class DriverError(Exception):
@@ -222,13 +236,33 @@ class PlanDriver:
         if dedup_strategies and gate is not None:
             self._gate_execution.apply_dedup_strategies(plan, gate, dedup_strategies)
             return self._run_and_handle(plan_id, run_seq=run_seq)
+        if _has_adoption_reason_adjust(adjust_params) and gate is not None:
+            if not is_confirm(user_text):
+                raise DriverError("提交采纳理由时必须同时确认采纳。")
+            adoption_reason = self._require_adoption_reason(
+                (adjust_params or {}).get("adoption_reason")
+            )
+            self._repo.confirm_step_with_inputs(
+                gate.id,
+                input_updates={"adoption_reason": adoption_reason},
+            )
+            return self._run_and_handle(plan_id, run_seq=run_seq)
         if adjust_params and gate is not None:
             return self._gate_execution.apply_adjust(plan, gate, adjust_params, run_seq)
         if is_confirm(user_text):
             if gate is not None:
                 if selection is not None:
                     self._gate_execution.apply_screen_selection(plan, gate, selection)
-                self._repo.confirm_step(gate.id)
+                if _is_adoption_gate(gate):
+                    adoption_reason = self._require_adoption_reason(
+                        (gate.inputs or {}).get("adoption_reason")
+                    )
+                    self._repo.confirm_step_with_inputs(
+                        gate.id,
+                        input_updates={"adoption_reason": adoption_reason},
+                    )
+                else:
+                    self._repo.confirm_step(gate.id)
             return self._run_and_handle(plan_id, run_seq=run_seq)
         # Manual-mode TEXT gate reply, dispatched through the per-tool gate adapter
         # registry (marvis/agent/gates/adapters.py) instead of an inline per-tool
@@ -296,7 +330,16 @@ class PlanDriver:
             if plan.status == PlanStatus.VALIDATED:
                 self._repo.confirm_plan(plan.id)
             elif gate is not None:
-                self._repo.confirm_step(gate.id)
+                if _is_adoption_gate(gate):
+                    adoption_reason = self._require_adoption_reason(
+                        (gate.inputs or {}).get("adoption_reason")
+                    )
+                    self._repo.confirm_step_with_inputs(
+                        gate.id,
+                        input_updates={"adoption_reason": adoption_reason},
+                    )
+                else:
+                    self._repo.confirm_step(gate.id)
             return self._run_and_handle(plan.id, run_seq=run_seq)
         if action == "adjust" and gate is not None and gate.depends_on:
             return self._gate_execution.apply_adjust(plan, gate, route["params"], run_seq)
@@ -323,6 +366,13 @@ class PlanDriver:
             plan.status.value,
             [self._composer.manual_adjust_placeholder_message(plan, gate, run_seq=run_seq)],
         )
+
+    @staticmethod
+    def _require_adoption_reason(value) -> str:
+        try:
+            return normalize_adoption_reason(value)
+        except AdoptionReasonError as exc:
+            raise DriverError(str(exc)) from exc
 
     # -- plan build -----------------------------------------------------------
     def build_plan(

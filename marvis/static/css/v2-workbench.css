@@ -2211,6 +2211,41 @@ body[data-theme="dark"] .plan-driver-action-card {
   justify-content: flex-end;
 }
 
+.adoption-gate {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  background: var(--surface-soft);
+}
+
+.adoption-reason-field {
+  display: grid;
+  gap: 6px;
+}
+
+.adoption-reason-field span {
+  font-weight: 650;
+}
+
+.adoption-reason-field textarea {
+  width: 100%;
+  min-height: 84px;
+  resize: vertical;
+}
+
+.adoption-gate-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.adoption-gate .adoption-confirm {
+  justify-self: start;
+}
+
 /* Modeling setup gate controls. */
 .modeling-setup-panel {
   margin-top: 10px;

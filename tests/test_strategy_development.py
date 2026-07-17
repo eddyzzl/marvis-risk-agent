@@ -720,6 +720,47 @@ def test_tool_adopt_strategy_rejects_foreign_backtest(tmp_path):
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "",
+        "   ",
+        "x",
+        "（待采纳时确认）",
+        "待确认后补充",
+        "TODO later",
+        "pending approval",
+    ],
+)
+def test_tool_adopt_strategy_rejects_blank_or_placeholder_reason(tmp_path, reason):
+    runner, registry, task = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "score": [100, 200, 300, 400, 500, 600],
+        "bad": [1, 0, 1, 0, 0, 0],
+    })
+    dataset = _register(registry, tmp_path, frame, "adopt_reason", task.id)
+    strategy_id, backtest_id = _build_and_backtest(runner, dataset, task, "score < 250")
+
+    adopt = runner.invoke(
+        ToolRef("strategy", "adopt_strategy"),
+        {
+            "strategy_id": strategy_id,
+            "backtest_id": backtest_id,
+            "adoption_reason": reason,
+        },
+        task_id=task.id,
+    )
+
+    assert adopt.ok is False
+    assert adopt.error_kind == "execution"
+    assert "采纳理由" in (adopt.error or "")
+    settings = build_settings(tmp_path / "workspace")
+    from marvis.repositories.strategy import StrategyRepository
+
+    assert StrategyRepository(settings.db_path).get_strategy_meta(strategy_id)["status"] == "draft"
+
+
+@pytest.mark.slow
 def test_tool_adopt_strategy_lands_and_registers_deliverables(tmp_path):
     runner, registry, task = _runtime(tmp_path)
     frame = pd.DataFrame({"score": [100, 200, 300, 400, 500, 600], "bad": [1, 0, 1, 0, 0, 0]})
