@@ -5,6 +5,8 @@
 > **与 master backlog 的关系**：`v2-master-backlog.md` 仍是唯一进度权威——本计划批准后在 backlog 追加 Phase T / Phase C 两个 section 与本文档指针，进度只在 backlog 更新；本文档冻结为决策记录与 spec 总纲。
 > **交付节奏**：沿用既定偏好——每份 spec 单独出、单独审（函数级 + 内部伪代码颗粒度），审过再实现。
 
+> **范围变更（2026-07-17）**：本文的 Phase T/C 已完成证据继续有效；其中关于评分 API、shadow、监控调度、推送告警和 maker-checker 的延期裁决已被“全部已列能力归入 V2.x”的新产品决定取代。后续范围与进度以 `docs/roadmap.md`、`v2-master-backlog.md` 和 `docs/superpowers/plans/2026-07-17-strategy-platform-gap-analysis-and-roadmap.md` 为准。
+
 ---
 
 ## 0. 拍板记录（2026-07-04，共 6 项）

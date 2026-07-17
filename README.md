@@ -37,7 +37,7 @@ Current status in this checkout:
 
 ## Core Docs
 
-- [Roadmap](docs/roadmap.md): current V2 platform map, V1 compatibility boundary, future V3/V4 directions, and Plugin/Tool/Hook/Workflow terminology.
+- [Roadmap](docs/roadmap.md): complete V2 platform scope, V1 compatibility boundary, implementation tracks, and Plugin/Tool/Hook/Workflow terminology.
 - [Versioning](docs/versioning.md): release helper, tags, version bumps, and forward-port rules.
 - [Notebook contract](docs/notebook_contract.md): the current model-validation notebook runtime contract.
 - [Design](DESIGN.md): product experience and UI/UX decision source of truth.

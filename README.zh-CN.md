@@ -37,7 +37,7 @@ V2 不是只有运行时外壳：欢迎页露出的每个任务入口都是真�
 
 ## 核心文档
 
-- [Roadmap](docs/roadmap.md)：当前 V2 平台地图、V1 兼容边界、未来 V3/V4 方向和 Plugin/Tool/Hook/Workflow 术语。
+- [Roadmap](docs/roadmap.md)：完整 V2 平台范围、V1 兼容边界、实施轨和 Plugin/Tool/Hook/Workflow 术语。
 - [Versioning](docs/versioning.md)：发布 helper、tag、版本更新和 forward-port 规则。
 - [Notebook contract](docs/notebook_contract.md)：当前模型验证 Notebook 运行契约。
 - [Design](DESIGN.md)：产品体验和 UI/UX 决策来源。
