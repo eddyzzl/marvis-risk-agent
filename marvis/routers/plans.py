@@ -11,6 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from marvis.errors import conflict, not_found, unprocessable
 from pydantic import BaseModel, Field
 
+from marvis.agent.strategy_setup import strategy_development_slot_clarification
 from marvis.db import PlanRepository, TaskRepository
 from marvis.orchestrator.capability import TIERS, resolve_tier, tier_from_settings
 from marvis.agent.gates import build_failure_envelope
@@ -26,6 +27,14 @@ router = APIRouter(prefix="/api", tags=["plans"])
 logger = logging.getLogger(__name__)
 PLAN_JOB_KIND = "plan"
 ACTIVE_JOB_DETAIL = "task already has an active job"
+_TRUSTED_GENERIC_STRATEGY_TEMPLATE_IDS = frozenset(
+    {
+        "strategy_analysis",
+        "strategy_development",
+        "rule_strategy",
+        "strategy_monitoring",
+    }
+)
 
 
 class CreatePlanRequest(BaseModel):
@@ -48,10 +57,24 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
     planner = request.app.state.planner
     validator = request.app.state.plan_validator
     repo = request.app.state.plan_repo
-    task_context = _task_context(task_id, body)
-    tier = _requested_tier(request, body.tier)
+    db_path = _db_path(request)
+    task_repo = TaskRepository(db_path)
+    try:
+        task_repo.get_task(task_id)
+    except KeyError as exc:
+        raise not_found("task not found") from exc
+
+    # Plan creation participates in the same task-level lease as driver turns and
+    # plan execution.  The lease starts before intent routing and is held through
+    # validation + persistence, so a strategy-input continuation cannot observe
+    # "no plan" and mutate the contract while this request is constructing one.
+    job_id = _start_plan_job(request, task_id)
+    if not task_repo.mark_job_running(job_id):
+        raise conflict(ACTIVE_JOB_DETAIL)
 
     try:
+        task_context = _task_context(task_id, body)
+        tier = _requested_tier(request, body.tier)
         intent = intent_router.route(body.goal, task_context)
         if intent.kind == "template":
             plan = planner.from_template(
@@ -70,19 +93,31 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
                 tier=tier,
                 novel_mode=body.novel_mode,
             )
-    except (KeyError, PlanningError, ValueError) as exc:
-        raise unprocessable(str(exc)) from exc
+        entry_error = _strategy_plan_entry_error(plan)
+        if entry_error is not None:
+            raise unprocessable(entry_error)
 
-    problems = validator.validate(plan)
-    if problems:
-        raise HTTPException(status_code=422, detail={"problems": problems})
+        problems = validator.validate(plan)
+        if problems:
+            raise HTTPException(status_code=422, detail={"problems": problems})
 
-    plan.status = PlanStatus.VALIDATED
-    try:
+        plan.status = PlanStatus.VALIDATED
         repo.create_plan(plan)
+        payload = _plan_payload(request, plan)
+    except HTTPException as exc:
+        _fail_plan_job(db_path, job_id, exc)
+        raise
+    except (KeyError, PlanningError, ValueError) as exc:
+        _fail_plan_job(db_path, job_id, exc)
+        raise unprocessable(str(exc)) from exc
     except sqlite3.IntegrityError as exc:
+        _fail_plan_job(db_path, job_id, exc)
         raise conflict("plan already exists") from exc
-    return _plan_payload(request, plan)
+    except Exception as exc:
+        _fail_plan_job(db_path, job_id, exc)
+        raise
+    task_repo.finish_job(job_id, status="succeeded")
+    return payload
 
 
 @router.get("/capability-tiers")
@@ -369,6 +404,82 @@ def _sub_agent_payload(sub) -> dict:
         "status": sub.status.value,
         "result_ref": sub.result_ref,
     }
+
+
+def _strategy_plan_entry_error(plan) -> dict | None:
+    """Fail closed at the generic create-plan boundary for strategy tools.
+
+    This is an entry guard, not the Phase 0B Runner/replan authorization state
+    machine.  It prevents generic/novel/user templates from becoming an alternate
+    route around today's governed built-ins while that broader invariant is built.
+    """
+
+    strategy_steps = [step for step in plan.steps if step.tool_ref.plugin == "strategy"]
+    strategy_grants = [
+        (step, ref)
+        for step in plan.steps
+        for ref in step.granted_tools
+        if ref.plugin == "strategy"
+    ]
+    if not strategy_steps and not strategy_grants:
+        return None
+
+    strategy_tools = sorted(
+        {step.tool_ref.tool for step in strategy_steps}
+        | {ref.tool for _step, ref in strategy_grants}
+    )
+    trusted_template = (
+        plan.source == "template"
+        and plan.template_id in _TRUSTED_GENERIC_STRATEGY_TEMPLATE_IDS
+    )
+    if not trusted_template:
+        return {
+            "code": "strategy_plan_entry_not_allowed",
+            "message": (
+                "generic plan creation only accepts governed built-in strategy templates"
+            ),
+            "plan_source": plan.source,
+            "template_id": plan.template_id,
+            "strategy_tools": strategy_tools,
+            "allowed_template_ids": sorted(_TRUSTED_GENERIC_STRATEGY_TEMPLATE_IDS),
+        }
+
+    granted_adoption_step_ids = {
+        step.id for step, ref in strategy_grants if ref.tool == "adopt_strategy"
+    }
+    ungated_adoption_steps = [
+        step.id
+        for step in plan.steps
+        if (
+            step.tool_ref.plugin == "strategy"
+            and step.tool_ref.tool == "adopt_strategy"
+            and not step.needs_confirmation
+        )
+        or step.id in granted_adoption_step_ids
+    ]
+    if ungated_adoption_steps:
+        return {
+            "code": "strategy_adoption_confirmation_required",
+            "message": "strategy adoption must remain behind an explicit confirmation gate",
+            "template_id": plan.template_id,
+            "step_ids": ungated_adoption_steps,
+        }
+
+    if plan.template_id == "strategy_development":
+        contract_step = next(
+            (
+                step
+                for step in strategy_steps
+                if step.tool_ref.tool in {"tradeoff_view", "design_cutoff_bands"}
+            ),
+            None,
+        )
+        clarification = strategy_development_slot_clarification(
+            {} if contract_step is None else contract_step.inputs
+        )
+        if clarification is not None:
+            return clarification
+    return None
 
 
 def _task_context(task_id: str, body: CreatePlanRequest) -> dict:

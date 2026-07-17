@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Callable
 import json
 
@@ -26,14 +26,18 @@ from marvis.agent.portfolio_setup import (
     parse_states_reply,
 )
 from marvis.agent.strategy_setup import (
+    STRATEGY_INTENT_FULL_DEVELOPMENT,
+    STRATEGY_INTENT_LIMIT_PRICING,
+    STRATEGY_INTENT_MONITORING,
+    STRATEGY_INTENT_PORTFOLIO_ANALYSIS,
+    STRATEGY_INTENT_QUICK_ANALYSIS,
+    STRATEGY_INTENT_RULE_MINING,
     StrategySetupError,
     build_monitoring_setup_proposal,
     build_rule_strategy_proposal,
     build_strategy_development_proposal,
     build_strategy_proposal,
-    is_rule_strategy_goal,
-    is_strategy_monitoring_goal,
-    resolve_strategy_entry_mode,
+    resolve_strategy_intent,
     strategy_development_clarification,
 )
 from marvis.agent.vintage_setup import VintageSetupError, build_vintage_proposal
@@ -437,23 +441,22 @@ def _strategy_success_criteria(task: TaskRecord) -> list[dict] | None:
 def _run_strategy_setup(
     runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
 ) -> dict | tuple:
-    backend, registry = _modeling_data_runtime(runtime.settings)
-    # S5 intent branch (checked first, more specific than development/mining): a
-    # monitoring goal -- in the first user message or the task's own name -- routes
-    # to the strategy_monitoring template (run one monitoring pass for the task's
-    # adopted strategy). Same S4 multi-recognize precedent as rule_strategy below.
-    if is_strategy_monitoring_goal(user_text, getattr(task, "model_name", None)):
-        return _run_strategy_monitoring_setup(runtime, repo, task, backend, registry)
-    # S4 intent branch (parallel to strategy_development's goal_patterns): a rule
-    # mining goal -- in the first user message or the task's own name -- routes to
-    # the rule_strategy template before the standard strategy-development entry.
-    if is_rule_strategy_goal(user_text, getattr(task, "model_name", None)):
-        return _run_rule_strategy_setup(runtime, repo, task, backend, registry)
     strategy_input = getattr(task, "strategy_input", None)
-    entry_mode = resolve_strategy_entry_mode(
+    intent = resolve_strategy_intent(
         strategy_input, user_text, getattr(task, "model_name", None)
     )
-    if entry_mode == "strategy_development":
+    if intent in {
+        STRATEGY_INTENT_LIMIT_PRICING,
+        STRATEGY_INTENT_PORTFOLIO_ANALYSIS,
+    }:
+        return _strategy_intent_redirect_response(repo, task, intent)
+
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    if intent == STRATEGY_INTENT_MONITORING:
+        return _run_strategy_monitoring_setup(runtime, repo, task, backend, registry)
+    if intent == STRATEGY_INTENT_RULE_MINING:
+        return _run_rule_strategy_setup(runtime, repo, task, backend, registry)
+    if intent == STRATEGY_INTENT_FULL_DEVELOPMENT:
         clarification = strategy_development_clarification(strategy_input)
         if clarification is not None:
             return _strategy_clarification_response(repo, task, clarification)
@@ -484,10 +487,12 @@ def _run_strategy_setup(
                 "尚未生成 cutoff 或默认规则，确认计划后才会按这些口径扫描可行方案。"
                 f"{note_text}"
             ),
-            metadata={"intent": "strategy_development"},
+            metadata={"intent": STRATEGY_INTENT_FULL_DEVELOPMENT},
         )
         return (proposal.template_id, proposal.template_slots(), {})
 
+    if intent != STRATEGY_INTENT_QUICK_ANALYSIS:
+        raise StrategySetupError(f"unsupported strategy intent: {intent}")
     proposal = build_strategy_proposal(
         registry,
         backend,
@@ -507,14 +512,74 @@ def _run_strategy_setup(
             f"评分列 `{proposal.score_col}`。已生成默认审批策略候选，回测前会停下确认。"
             f"{note_text}"
         ),
-        metadata={"intent": "strategy"},
+        metadata={"intent": STRATEGY_INTENT_QUICK_ANALYSIS},
     )
     return (proposal.template_id, proposal.template_slots(), {})
+
+
+def _strategy_intent_redirect_response(
+    repo: TaskRepository, task: TaskRecord, intent: str
+) -> dict:
+    if intent == STRATEGY_INTENT_LIMIT_PRICING:
+        detail = {
+            "intent": intent,
+            "code": "strategy_limit_pricing_workflow_planned",
+            "planned_v2_workflow": "limit_pricing_matrix",
+            "message": (
+                "已识别为额度定价/定价矩阵意图。额度定价执行 Workflow 已纳入 V2 后续"
+                "交付批次，尚未接入本阶段标准入口；当前不会把它误建为额度准入 approval plan。"
+            ),
+        }
+    elif intent == STRATEGY_INTENT_PORTFOLIO_ANALYSIS:
+        detail = {
+            "intent": intent,
+            "code": "strategy_portfolio_task_redirect",
+            "suggested_task_type": TASK_TYPE_PORTFOLIO,
+            "message": (
+                "已识别为组合分析意图。组合分析属于 V2 的独立 portfolio 任务线；"
+                "请创建或切换到组合分析任务，当前策略任务不会误建 approval plan。"
+            ),
+        }
+    else:
+        raise StrategySetupError(f"unsupported strategy redirect intent: {intent}")
+
+    redirect_fields = {
+        key: value
+        for key, value in detail.items()
+        if key in {"planned_v2_workflow", "suggested_task_type"}
+    }
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=detail["message"],
+        metadata={
+            "intent": intent,
+            "kind": "clarification",
+            "code": detail["code"],
+            **redirect_fields,
+            "clarification": dict(detail),
+        },
+    )
+    return {
+        "task_id": task.id,
+        "status": "clarification_required",
+        "intent": intent,
+        "code": detail["code"],
+        **redirect_fields,
+        "clarification": dict(detail),
+        "messages": repo.list_agent_messages(task.id),
+    }
 
 
 def _strategy_clarification_response(
     repo: TaskRepository, task: TaskRecord, clarification: dict
 ) -> dict:
+    current_input = _strategy_input_snapshot(getattr(task, "strategy_input", None))
+    clarification_payload = {
+        **dict(clarification),
+        "current_input": current_input,
+    }
     repo.add_agent_message(
         task.id,
         role="assistant",
@@ -527,15 +592,40 @@ def _strategy_clarification_response(
         metadata={
             "intent": "strategy_clarification",
             "kind": "clarification",
-            "clarification": dict(clarification),
+            "current_input": current_input,
+            "clarification": clarification_payload,
         },
     )
     return {
         "task_id": task.id,
         "status": "clarification_required",
-        "clarification": dict(clarification),
+        "current_input": current_input,
+        "clarification": clarification_payload,
         "messages": repo.list_agent_messages(task.id),
     }
+
+
+def _strategy_input_snapshot(strategy_input) -> dict | None:
+    """Return only the governed strategy contract for clarification prefill."""
+
+    if strategy_input is None:
+        return None
+    if not isinstance(strategy_input, dict):
+        return asdict(strategy_input)
+
+    allowed = (
+        "entry_mode",
+        "objective",
+        "max_bad_rate",
+        "min_approval_rate",
+        "baseline_strategy_id",
+        "profit",
+    )
+    payload = {key: strategy_input[key] for key in allowed if key in strategy_input}
+    profit = payload.get("profit")
+    if profit is not None and not isinstance(profit, dict):
+        payload["profit"] = asdict(profit)
+    return payload
 
 
 def _run_rule_strategy_setup(
@@ -559,7 +649,7 @@ def _run_rule_strategy_setup(
             f"开始规则策略挖掘:样本 `{proposal.dataset_name}`，目标列 `{proposal.target_col}`{bad}。"
             f"将挖掘候选拒绝规则，选定规则集后回测并采纳。{note_text}"
         ),
-        metadata={"intent": "strategy"},
+        metadata={"intent": STRATEGY_INTENT_RULE_MINING},
     )
     return (proposal.template_id, proposal.template_slots(), {})
 
@@ -585,7 +675,7 @@ def _run_strategy_monitoring_setup(
             f"开始策略监控:对已采纳策略 `{proposal.strategy_id}` 跑一次监控,样本 "
             f"`{proposal.dataset_name}`。监控完成后会在告警门停下确认。{note_text}"
         ),
-        metadata={"intent": "strategy"},
+        metadata={"intent": STRATEGY_INTENT_MONITORING},
     )
     return (proposal.template_id, proposal.template_slots(), {})
 

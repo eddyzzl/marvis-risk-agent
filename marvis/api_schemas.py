@@ -151,6 +151,10 @@ class AgentMessageRequest(BaseModel):
     model_id: str | None = None
     effort: str | None = None
     acceptance_mode: str | None = None
+    # Structured continuation for a strategy setup clarification. This is kept
+    # separate from free text so the backend never has to infer business targets
+    # or constraints from the conversation.
+    strategy_input: StrategyTaskInputRequest | None = None
     # Optional edited feature set from the §4 interactive screening table; when a
     # screening gate is confirmed this overrides the screen's proposed `selected`.
     selection: list[str] | None = None

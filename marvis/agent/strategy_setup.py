@@ -3,12 +3,14 @@
 The standard product entry is governed strategy development: it resolves the
 sample and business contract but never invents an operating cutoff.  The old
 20%-quantile candidate remains available only through the explicit quick-analysis
-entry.  Rule mining and monitoring are selected before either of those modes.
+entry.  More-specific strategy intents are classified before either entry mode so
+pricing or portfolio requests can never fall through to an approval plan.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -16,7 +18,7 @@ import pandas as pd
 from marvis.agent.sample_setup import detect_setup
 from marvis.data.labels import nan_label_mask
 from marvis.db import StrategyRepository
-from marvis.domain import FileRole
+from marvis.domain import STRATEGY_OBJECTIVES, FileRole
 from marvis.files import scan_source_dir
 
 _DATA_ROLES = frozenset({FileRole.SAMPLE.value, "sample", "strategy_sample"})
@@ -60,6 +62,24 @@ _QUICK_STRATEGY_ANALYSIS_GOAL_PATTERNS = (
     "quick strategy analysis",
     "quick strategy backtest",
 )
+_LIMIT_PRICING_GOAL_PATTERNS = (
+    "额度定价",
+    "定价矩阵",
+    "limit pricing",
+    "limit-pricing",
+)
+_PORTFOLIO_ANALYSIS_GOAL_PATTERNS = (
+    "组合分析",
+    "组合风险分析",
+    "portfolio analysis",
+)
+
+STRATEGY_INTENT_FULL_DEVELOPMENT = "full_development"
+STRATEGY_INTENT_QUICK_ANALYSIS = "quick_analysis"
+STRATEGY_INTENT_RULE_MINING = "rule_mining"
+STRATEGY_INTENT_MONITORING = "monitoring"
+STRATEGY_INTENT_LIMIT_PRICING = "limit_pricing"
+STRATEGY_INTENT_PORTFOLIO_ANALYSIS = "portfolio_analysis"
 _PROFIT_PARAM_FIELDS = (
     "annual_rate",
     "funding_rate",
@@ -93,20 +113,43 @@ def is_quick_strategy_analysis_goal(*texts: str | None) -> bool:
     )
 
 
-def resolve_strategy_entry_mode(strategy_input, *texts: str | None) -> str:
-    """Resolve full vs quick mode for a fresh strategy plan.
+def is_limit_pricing_goal(*texts: str | None) -> bool:
+    """Recognize an explicit limit/pricing request without matching generic 额度准入."""
 
-    A phrase on the first turn is the most explicit operator choice.  Otherwise a
-    persisted ``strategy_input.entry_mode`` may select the compatibility workflow;
-    every absent/unknown value defaults fail-safe to full strategy development.
+    haystack = " ".join(text.lower() for text in texts if text)
+    return any(pattern.lower() in haystack for pattern in _LIMIT_PRICING_GOAL_PATTERNS)
+
+
+def is_portfolio_analysis_goal(*texts: str | None) -> bool:
+    haystack = " ".join(text.lower() for text in texts if text)
+    return any(
+        pattern.lower() in haystack for pattern in _PORTFOLIO_ANALYSIS_GOAL_PATTERNS
+    )
+
+
+def resolve_strategy_intent(strategy_input, *texts: str | None) -> str:
+    """Return the canonical strategy intent using one explicit priority order.
+
+    Monitoring and rule operations retain their existing precedence.  The two
+    recognized-but-not-executed intents follow, so they can return a governed
+    redirect instead of silently becoming an approval strategy.  Quick analysis
+    must remain explicit; every other strategy request is full development.
     """
 
+    if is_strategy_monitoring_goal(*texts):
+        return STRATEGY_INTENT_MONITORING
+    if is_rule_strategy_goal(*texts):
+        return STRATEGY_INTENT_RULE_MINING
+    if is_limit_pricing_goal(*texts):
+        return STRATEGY_INTENT_LIMIT_PRICING
+    if is_portfolio_analysis_goal(*texts):
+        return STRATEGY_INTENT_PORTFOLIO_ANALYSIS
     if is_quick_strategy_analysis_goal(*texts):
-        return STRATEGY_ENTRY_ANALYSIS
+        return STRATEGY_INTENT_QUICK_ANALYSIS
     entry_mode = str(_input_value(strategy_input, "entry_mode") or "").strip().lower()
     if entry_mode == STRATEGY_ENTRY_ANALYSIS:
-        return STRATEGY_ENTRY_ANALYSIS
-    return STRATEGY_ENTRY_DEVELOPMENT
+        return STRATEGY_INTENT_QUICK_ANALYSIS
+    return STRATEGY_INTENT_FULL_DEVELOPMENT
 
 
 def strategy_development_clarification(strategy_input) -> dict | None:
@@ -140,6 +183,108 @@ def strategy_development_clarification(strategy_input) -> dict | None:
         "missing_fields": missing,
         "message": "完整策略开发需要先确认经营目标和约束，平台不会用技术默认值代替经营决策。",
     }
+
+
+def strategy_development_slot_clarification(slots) -> dict | None:
+    """Validate the generic-plan slot shape before a full plan is instantiated.
+
+    Generic plans expose EAD/PD as top-level slots and the financial assumptions
+    under ``profit_params``.  This is intentionally a business one-of/conditional
+    validator rather than a set of globally-required ``SlotSpec`` declarations.
+    """
+
+    missing: list[str] = []
+    invalid: list[str] = []
+    objective_value = _input_value(slots, "objective")
+    objective = str(objective_value or "").strip()
+    if _contract_value_missing(objective_value):
+        missing.append("objective")
+    elif not isinstance(objective_value, str) or objective not in STRATEGY_OBJECTIVES - {""}:
+        invalid.append("objective")
+
+    constraint_values = {
+        "max_bad_rate": _input_value(slots, "max_bad_rate"),
+        "min_approval_rate": _input_value(slots, "min_approval_rate"),
+    }
+    supplied_constraints = [
+        field
+        for field, value in constraint_values.items()
+        if not _contract_value_missing(value)
+    ]
+    if not supplied_constraints:
+        missing.append("max_bad_rate_or_min_approval_rate")
+    else:
+        for field in supplied_constraints:
+            if not _valid_contract_number(
+                constraint_values[field], minimum=0.0, maximum=1.0
+            ):
+                invalid.append(field)
+
+    if objective == "max_profit":
+        for field in ("ead_col", "pd_col"):
+            value = _input_value(slots, field)
+            if _contract_value_missing(value):
+                missing.append(field)
+            elif not isinstance(value, str):
+                invalid.append(field)
+        profit_params = _input_value(slots, "profit_params")
+        if profit_params is not None and not isinstance(profit_params, dict):
+            invalid.append("profit_params")
+        else:
+            for field in _PROFIT_PARAM_FIELDS:
+                path = f"profit_params.{field}"
+                value = _input_value(profit_params, field)
+                if _contract_value_missing(value):
+                    missing.append(path)
+                    continue
+                if field in {"annual_rate", "funding_rate", "lgd"}:
+                    valid = _valid_contract_number(value, minimum=0.0, maximum=1.0)
+                elif field == "operating_cost_per_loan":
+                    valid = _valid_contract_number(value, minimum=0.0)
+                else:
+                    valid = (
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and value >= 1
+                    )
+                if not valid:
+                    invalid.append(path)
+
+    if not missing and not invalid:
+        return None
+    return {
+        "code": (
+            "strategy_business_inputs_invalid"
+            if invalid
+            else "strategy_business_inputs_required"
+        ),
+        "template_id": STRATEGY_ENTRY_DEVELOPMENT,
+        "missing_fields": missing,
+        "invalid_fields": invalid,
+        "message": (
+            "完整策略开发参数格式或范围无效，请按经营 contract 修正。"
+            if invalid
+            else "完整策略开发需要先确认经营目标和约束，平台不会用技术默认值代替经营决策。"
+        ),
+    }
+
+
+def _contract_value_missing(value) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _valid_contract_number(
+    value,
+    *,
+    minimum: float,
+    maximum: float | None = None,
+) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    number = float(value)
+    if not math.isfinite(number) or number < minimum:
+        return False
+    return maximum is None or number <= maximum
 
 
 class StrategySetupError(ValueError):
@@ -593,6 +738,12 @@ __all__ = [
     "RuleStrategyProposal",
     "STRATEGY_ENTRY_ANALYSIS",
     "STRATEGY_ENTRY_DEVELOPMENT",
+    "STRATEGY_INTENT_FULL_DEVELOPMENT",
+    "STRATEGY_INTENT_LIMIT_PRICING",
+    "STRATEGY_INTENT_MONITORING",
+    "STRATEGY_INTENT_PORTFOLIO_ANALYSIS",
+    "STRATEGY_INTENT_QUICK_ANALYSIS",
+    "STRATEGY_INTENT_RULE_MINING",
     "StrategyDevelopmentProposal",
     "StrategyProposal",
     "StrategySetupError",
@@ -600,9 +751,12 @@ __all__ = [
     "build_rule_strategy_proposal",
     "build_strategy_development_proposal",
     "build_strategy_proposal",
+    "is_limit_pricing_goal",
+    "is_portfolio_analysis_goal",
     "is_quick_strategy_analysis_goal",
     "is_rule_strategy_goal",
     "is_strategy_monitoring_goal",
-    "resolve_strategy_entry_mode",
+    "resolve_strategy_intent",
     "strategy_development_clarification",
+    "strategy_development_slot_clarification",
 ]

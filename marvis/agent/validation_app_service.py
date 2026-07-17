@@ -99,6 +99,7 @@ from marvis.domain import (
     TASK_TYPE_STRATEGY,
     TASK_TYPE_VALIDATION,
     TASK_TYPE_VINTAGE,
+    StrategyTaskInput,
     TaskRecord,
     TaskStatus,
 )
@@ -117,6 +118,7 @@ from marvis.repositories.validation_contracts import (
     require_confirmed_validation_input_contract,
 )
 from marvis.state_machine import ConflictError
+from marvis.orchestrator.contracts import PlanStatus
 
 
 AGENT_ACCEPTANCE_NORMAL = "normal"
@@ -127,6 +129,9 @@ _VALID_EFFORTS = ("low", "medium", "high")
 
 _DRIVER_JOB_KIND = "driver"
 _DRIVER_JOB_BUSY_DETAIL = "该任务正在执行上一步，请等待完成"
+_TERMINAL_PLAN_STATUSES = frozenset(
+    {PlanStatus.DONE, PlanStatus.FAILED, PlanStatus.CANCELLED}
+)
 
 
 def repo(request: Request) -> TaskRepository:
@@ -263,6 +268,7 @@ def dispatch_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    strategy_input: StrategyTaskInput | None = None,
 ) -> dict:
     """Run one driver turn. ``acceptance_mode`` controls the agent-mode behavior at
     gates (spec §6, two 受控度): AUTO(自动审查) lets the LLM auto-drive ALL gates;
@@ -288,16 +294,23 @@ def dispatch_driver_turn(
         raise conflict(_DRIVER_JOB_BUSY_DETAIL) from exc
     if repo_.mark_job_running(job_id) is False:
         raise conflict(_DRIVER_JOB_BUSY_DETAIL)
-    runtime = DriverTurnRuntime(
-        settings=request.app.state.settings,
-        plan_repo=request.app.state.plan_repo,
-        plan_executor=request.app.state.plan_executor,
-        planner=request.app.state.planner,
-        plan_validator=request.app.state.plan_validator,
-        llm_client=driver_llm_client(request, task),
-        tier=task_tier(request, task),
-    )
     try:
+        if strategy_input is not None:
+            if task.task_type != TASK_TYPE_STRATEGY:
+                raise DriverError("strategy_input 只能用于 strategy 类型任务。")
+            plans = request.app.state.plan_repo.list_plans_for_task(task.id)
+            if any(plan.status not in _TERMINAL_PLAN_STATUSES for plan in plans):
+                raise DriverError("当前策略任务已有进行中的计划，不能修改业务口径。")
+            task = repo_.update_strategy_input(task.id, strategy_input)
+        runtime = DriverTurnRuntime(
+            settings=request.app.state.settings,
+            plan_repo=request.app.state.plan_repo,
+            plan_executor=request.app.state.plan_executor,
+            planner=request.app.state.planner,
+            plan_validator=request.app.state.plan_validator,
+            llm_client=driver_llm_client(request, task),
+            tier=task_tier(request, task),
+        )
         result = dispatch_plan_driver_turn(
             runtime, repo_, task, user_text=user_text, agent_client=agent_client,
             auto_accept_enabled=agent_auto_accept(acceptance_mode), selection=selection,

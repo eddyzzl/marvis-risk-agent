@@ -1,3 +1,5 @@
+import { isStrategyClarificationMessage } from "./strategy_clarification_controller.js";
+
 const emptyRenderer = () => "";
 const markdownRenderer = (value) => String(value || "");
 
@@ -88,6 +90,7 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
   const renderMarkdown = renderers.renderAgentMarkdown || markdownRenderer;
   const renderTables = renderers.renderTables || emptyRenderer;
   const renderModelDelivery = renderers.renderModelDelivery || emptyRenderer;
+  const renderStrategyClarification = renderers.renderStrategyClarification || emptyRenderer;
   // The plain-gate confirm control (a gate with no structured widget). In manual
   // mode ALL interactive controls live in this middle region now, so the pending
   // gate section renders its own confirm button here instead of the rail. Widget
@@ -117,6 +120,16 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
       continue;
     }
     const intro = renderMarkdown(stripChatInstructions(message.content || ""));
+    if (isStrategyClarificationMessage(message)) {
+      const interactive = String(message.id || "") === lastMessageId;
+      const clarificationClass = interactive
+        ? "driver-analysis-section is-clarification is-clarification-pending"
+        : "driver-analysis-section is-clarification";
+      sections.push(
+        `<section class="${clarificationClass}">${intro}${renderStrategyClarification(message, { interactive })}</section>`,
+      );
+      continue;
+    }
     if (meta.join_c1) {
       sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive: isPendingGate })}</section>`);
       continue;

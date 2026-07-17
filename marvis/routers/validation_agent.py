@@ -11,6 +11,7 @@ from marvis.agent.service import (
     is_stop_validation_intent,
     summarize_stage,
 )
+from marvis.agent.strategy_setup import strategy_development_clarification
 from marvis.agent.turn_handlers import DRIVER_AGENT_TASK_TYPES
 from marvis.agent.validation_app_service import (
     WIRED_AGENT_TASK_TYPES,
@@ -44,13 +45,44 @@ from marvis.api_schemas import (
     AgentMessageRequest,
     AgentModelRequest,
     AgentReportDraftConfirmRequest,
+    StrategyTaskInputRequest,
 )
 from marvis.api_task_helpers import get_task_or_404, reject_if_task_has_active_job
+from marvis.domain import TASK_TYPE_STRATEGY, StrategyProfitInput, StrategyTaskInput
 
 
 router = APIRouter(prefix="/api", tags=["validation-agent"])
 REPORT_DIRECTIVE_LIMIT = 6
 REPORT_DIRECTIVE_CHARS = 1_600
+
+
+def _domain_strategy_input(
+    contract: StrategyTaskInputRequest | None,
+) -> StrategyTaskInput | None:
+    if contract is None:
+        return None
+    profit = contract.profit
+    domain_profit = (
+        StrategyProfitInput(
+            ead_col=profit.ead_col,
+            pd_col=profit.pd_col,
+            annual_rate=profit.annual_rate,
+            funding_rate=profit.funding_rate,
+            lgd=profit.lgd,
+            operating_cost_per_loan=profit.operating_cost_per_loan,
+            term_months=profit.term_months,
+        )
+        if profit is not None
+        else None
+    )
+    return StrategyTaskInput(
+        entry_mode=contract.entry_mode,
+        objective=contract.objective,
+        max_bad_rate=contract.max_bad_rate,
+        min_approval_rate=contract.min_approval_rate,
+        baseline_strategy_id=contract.baseline_strategy_id,
+        profit=domain_profit,
+    )
 
 
 def _report_revision_instruction_context(
@@ -154,11 +186,23 @@ def post_agent_message(
 ) -> dict:
     repo = agent_repo(request)
     task = get_task_or_404(repo, task_id)
+    if payload.strategy_input is not None and task.task_type != TASK_TYPE_STRATEGY:
+        raise unprocessable("strategy_input 只能用于 strategy 类型任务。")
     require_agent_task(task, DRIVER_AGENT_TASK_TYPES)
     require_wired_agent_task_type(task, WIRED_AGENT_TASK_TYPES)
     content = payload.content.strip()
     if not content:
         raise unprocessable("message content is required")
+    strategy_input = _domain_strategy_input(payload.strategy_input)
+    if strategy_input is not None and is_stop_validation_intent(content):
+        raise unprocessable("停止指令不能与 strategy_input 同时提交。")
+    if (
+        strategy_input is not None
+        and strategy_input.entry_mode == "strategy_development"
+    ):
+        clarification = strategy_development_clarification(strategy_input)
+        if clarification is not None:
+            raise unprocessable(clarification)
     if is_stop_validation_intent(content):
         user_message = repo.add_agent_message(
             task_id,
@@ -182,6 +226,7 @@ def post_agent_message(
             dedup_strategies=payload.dedup_strategies,
             adjust_params=payload.adjust_params,
             expected_step_id=payload.expected_step_id,
+            strategy_input=strategy_input,
         )
     if is_agent_material_reselection_intent(content):
         reject_if_task_has_active_job(repo, task_id)

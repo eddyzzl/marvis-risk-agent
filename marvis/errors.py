@@ -40,7 +40,7 @@ def conflict(detail: str) -> HTTPException:
     return HTTPException(status_code=409, detail=detail)
 
 
-def unprocessable(detail: str) -> HTTPException:
+def unprocessable(detail: object) -> HTTPException:
     """422 -- syntactically valid but semantically invalid input. ``detail`` verbatim."""
     return HTTPException(status_code=422, detail=detail)
 

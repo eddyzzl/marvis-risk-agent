@@ -2246,6 +2246,158 @@ body[data-theme="dark"] .plan-driver-action-card {
   justify-self: start;
 }
 
+/* Strategy setup continuation. The same card is mounted in Agent chat and in
+   manual driver analysis; only the newest clarification keeps enabled fields. */
+.strategy-clarification-card {
+  position: relative;
+  z-index: 25;
+  display: grid;
+  gap: 14px;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--warning-border);
+  border-left: 3px solid var(--warning-strong);
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--warning-soft) 62%, var(--surface));
+  box-shadow: var(--glass-edge);
+}
+
+.strategy-clarification-head {
+  display: grid;
+  gap: 6px;
+}
+
+.strategy-clarification-head h4,
+.strategy-clarification-head p {
+  margin: 0;
+}
+
+.strategy-clarification-head h4 {
+  margin-top: 4px;
+  color: var(--text-primary);
+  font-size: 15px;
+}
+
+.strategy-clarification-head p {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.strategy-clarification-eyebrow {
+  display: inline-flex;
+  width: fit-content;
+  padding: 2px 8px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-pill);
+  color: var(--warning-strong);
+  background: var(--warning-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.strategy-clarification-missing {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--warning-strong);
+  background: var(--warning-soft);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.strategy-clarification-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+}
+
+.strategy-clarification-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.strategy-clarification-field.is-wide {
+  grid-column: 1 / -1;
+}
+
+.strategy-clarification-field b {
+  color: var(--danger);
+}
+
+.strategy-clarification-field input,
+.strategy-clarification-field select {
+  width: 100%;
+  min-height: 38px;
+  color: var(--text-primary);
+  background: var(--surface);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.strategy-clarification-field input:disabled,
+.strategy-clarification-field select:disabled {
+  color: var(--text-muted);
+  background: var(--surface-soft);
+}
+
+.strategy-clarification-profit {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-soft) 72%, transparent);
+}
+
+.strategy-clarification-profit[hidden] {
+  display: none;
+}
+
+.strategy-clarification-profit legend {
+  padding: 0 6px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.strategy-clarification-profit > p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.strategy-clarification-error {
+  min-height: 18px;
+  margin: 0;
+  color: var(--danger-strong);
+  font-size: 12px;
+}
+
+.strategy-clarification-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.strategy-clarification-card[data-strategy-clarification-readonly="true"] {
+  background: var(--surface-soft);
+  border-color: var(--border-color);
+  border-left-color: var(--text-subtle);
+  box-shadow: none;
+}
+
+.strategy-clarification-card[data-strategy-clarification-readonly="true"]
+  .strategy-clarification-eyebrow {
+  color: var(--text-muted);
+  border-color: var(--border-color);
+  background: var(--surface-subtle);
+}
+
 /* Modeling setup gate controls. */
 .modeling-setup-panel {
   margin-top: 10px;

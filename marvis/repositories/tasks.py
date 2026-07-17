@@ -128,6 +128,35 @@ class TaskRepository:
                 raise KeyError(f"Task not found: {task_id}")
         return self.get_task(task_id)
 
+    def update_strategy_input(
+        self,
+        task_id: str,
+        strategy_input: StrategyTaskInput,
+    ) -> TaskRecord:
+        """Replace a strategy task's governed business contract atomically."""
+
+        if not isinstance(strategy_input, StrategyTaskInput):
+            raise ValueError("strategy_input must be a StrategyTaskInput")
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT task_type FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Task not found: {task_id}")
+            if str(row["task_type"]) != TASK_TYPE_STRATEGY:
+                raise ValueError("strategy_input may only be persisted on a strategy task")
+            conn.execute(
+                """
+                UPDATE tasks
+                   SET strategy_input_json = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (_dump_strategy_input(strategy_input), _now(), task_id),
+            )
+        return self.get_task(task_id)
+
     def update_material_paths(
         self,
         task_id: str,

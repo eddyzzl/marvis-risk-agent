@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -54,6 +56,85 @@ class FakePlanner:
         return _plan(task_id=task_id, source="generated", template_id=None)
 
 
+class HandcraftedStrategyPlanner(FakePlanner):
+    def generate(
+        self,
+        goal,
+        task_id,
+        *,
+        memory_context,
+        task_context,
+        tier=None,
+        novel_mode="plan_ahead",
+    ):
+        self.generated.append((goal, task_id, memory_context, task_context, tier, novel_mode))
+        return Plan(
+            id="novel-strategy-plan",
+            task_id=task_id,
+            goal=goal,
+            source="generated",
+            template_id=None,
+            steps=[
+                PlanStep(
+                    id="novel-adopt-step",
+                    plan_id="novel-strategy-plan",
+                    index=0,
+                    title="Adopt strategy without a governed template",
+                    tool_ref=ToolRef("strategy", "adopt_strategy"),
+                    inputs={
+                        "strategy_id": "strategy-1",
+                        "backtest_id": "backtest-1",
+                        "adoption_reason": "generated default",
+                    },
+                    depends_on=[],
+                    post_checks=[],
+                )
+            ],
+            autonomy_level=1,
+        )
+
+
+class HandcraftedStrategyGrantPlanner(FakePlanner):
+    def __init__(self, *, source="generated", template_id=None):
+        super().__init__()
+        self.source = source
+        self.template_id = template_id
+
+    def generate(
+        self,
+        goal,
+        task_id,
+        *,
+        memory_context,
+        task_context,
+        tier=None,
+        novel_mode="plan_ahead",
+    ):
+        self.generated.append((goal, task_id, memory_context, task_context, tier, novel_mode))
+        return Plan(
+            id="novel-strategy-grant-plan",
+            task_id=task_id,
+            goal=goal,
+            source=self.source,
+            template_id=self.template_id,
+            steps=[
+                PlanStep(
+                    id="novel-strategy-grant-step",
+                    plan_id="novel-strategy-grant-plan",
+                    index=0,
+                    title="Delegate strategy adoption",
+                    tool_ref=ToolRef("_sample", "echo"),
+                    inputs={"message": "delegate"},
+                    depends_on=[],
+                    post_checks=[],
+                    sub_agent_scope="Adopt the generated strategy",
+                    granted_tools=[ToolRef("strategy", "adopt_strategy")],
+                )
+            ],
+            autonomy_level=1,
+        )
+
+
 class FakeValidator:
     def __init__(self, problems=None):
         self.problems = problems or []
@@ -80,14 +161,24 @@ class FakeHookDispatcher:
         return []
 
 
-def _client(tmp_path, *, validator=None, intent=None):
+def _client(tmp_path, *, validator=None, intent=None, planner=None):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
+    seeded = TaskRepository(db_path).create_task(
+        TaskCreate(
+            model_name="test",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(tmp_path),
+        )
+    )
+    with connect(db_path) as conn:
+        conn.execute("UPDATE tasks SET id = ? WHERE id = ?", ("task-1", seeded.id))
     app = FastAPI()
     app.include_router(router)
     app.state.plan_repo = PlanRepository(db_path)
     app.state.intent_router = intent or FakeIntentRouter()
-    app.state.planner = FakePlanner()
+    app.state.planner = planner or FakePlanner()
     app.state.plan_validator = validator or FakeValidator()
     app.state.plan_executor = FakeExecutor()
     return TestClient(app)
@@ -181,6 +272,86 @@ def test_create_plan_endpoint_passes_capability_tier_and_novel_mode(tmp_path):
     call = client.app.state.planner.generated[0]
     assert call[4].name == "autonomous"
     assert call[5] == "explore"
+
+
+def test_create_plan_endpoint_rejects_handcrafted_novel_strategy_plan_without_persisting(
+    tmp_path,
+):
+    client = _client(
+        tmp_path,
+        intent=FakeIntentRouter(kind="novel"),
+        planner=HandcraftedStrategyPlanner(),
+    )
+
+    response = client.post(
+        "/api/tasks/task-1/plans",
+        json={"goal": "invent and adopt a new strategy workflow"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == {
+        "code": "strategy_plan_entry_not_allowed",
+        "message": "generic plan creation only accepts governed built-in strategy templates",
+        "plan_source": "generated",
+        "template_id": None,
+        "strategy_tools": ["adopt_strategy"],
+        "allowed_template_ids": [
+            "rule_strategy",
+            "strategy_analysis",
+            "strategy_development",
+            "strategy_monitoring",
+        ],
+    }
+    assert client.app.state.plan_repo.list_plans_for_task("task-1") == []
+    assert _job_statuses(client.app.state.plan_repo.db_path) == ["failed"]
+
+
+def test_create_plan_endpoint_rejects_novel_plan_with_strategy_tool_grant(tmp_path):
+    client = _client(
+        tmp_path,
+        intent=FakeIntentRouter(kind="novel"),
+        planner=HandcraftedStrategyGrantPlanner(),
+    )
+
+    response = client.post(
+        "/api/tasks/task-1/plans",
+        json={"goal": "delegate strategy adoption to a sub-agent"},
+    )
+
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "strategy_plan_entry_not_allowed"
+    assert detail["plan_source"] == "generated"
+    assert detail["template_id"] is None
+    assert detail["strategy_tools"] == ["adopt_strategy"]
+    assert client.app.state.plan_repo.list_plans_for_task("task-1") == []
+    assert _job_statuses(client.app.state.plan_repo.db_path) == ["failed"]
+
+
+def test_trusted_strategy_template_cannot_hide_adoption_in_tool_grant(tmp_path):
+    client = _client(
+        tmp_path,
+        intent=FakeIntentRouter(kind="novel"),
+        planner=HandcraftedStrategyGrantPlanner(
+            source="template",
+            template_id="strategy_analysis",
+        ),
+    )
+
+    response = client.post(
+        "/api/tasks/task-1/plans",
+        json={"goal": "forge a trusted strategy template label"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == {
+        "code": "strategy_adoption_confirmation_required",
+        "message": "strategy adoption must remain behind an explicit confirmation gate",
+        "template_id": "strategy_analysis",
+        "step_ids": ["novel-strategy-grant-step"],
+    }
+    assert client.app.state.plan_repo.list_plans_for_task("task-1") == []
+    assert _job_statuses(client.app.state.plan_repo.db_path) == ["failed"]
 
 
 def test_capability_tiers_endpoint_lists_defaults(tmp_path):
@@ -693,6 +864,208 @@ def test_create_app_can_create_strategy_analysis_plan_from_goal(tmp_path):
     ]
     assert [step["title"] for step in plan["steps"] if step["needs_confirmation"]] == ["回测策略"]
     assert [step["title"] for step in plan["steps"] if step["decision_point"]] == ["回测策略"]
+
+
+def test_create_app_can_create_strategy_development_plan_with_business_contract(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _create_task(app.state.plan_repo.db_path)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/plans",
+        json={
+            "goal": "开始策略开发",
+            "slots": {
+                "dataset_id": "dataset-1",
+                "target_col": "bad_flag",
+                "score_col": "score",
+                "objective": "max_approval",
+                "max_bad_rate": 0.05,
+            },
+        },
+    )
+
+    assert response.status_code == 201, response.json()
+    plan = response.json()["plan"]
+    assert plan["template_id"] == "strategy_development"
+    assert plan["status"] == "validated"
+
+
+def test_create_plan_holds_task_job_lock_against_strategy_input_continuation(tmp_path):
+    app = create_app(tmp_path)
+    task_repo = TaskRepository(app.state.settings.db_path)
+    task = task_repo.create_task(
+        TaskCreate(
+            task_type="strategy",
+            model_name="额度准入策略",
+            model_version="",
+            validator="qa",
+            source_dir=str(tmp_path),
+            run_mode="manual",
+        )
+    )
+    route_entered = Event()
+    release_route = Event()
+    original_route = app.state.intent_router.route
+
+    def blocking_route(goal, task_context):
+        route_entered.set()
+        if not release_route.wait(timeout=5):
+            raise TimeoutError("test did not release plan routing")
+        return original_route(goal, task_context)
+
+    app.state.intent_router.route = blocking_route
+    plan_client = TestClient(app)
+    continuation_client = TestClient(app)
+
+    def create_strategy_plan():
+        return plan_client.post(
+            f"/api/tasks/{task.id}/plans",
+            json={
+                "goal": "开始策略开发",
+                "slots": {
+                    "dataset_id": "dataset-1",
+                    "target_col": "bad_flag",
+                    "score_col": "score",
+                    "objective": "max_approval",
+                    "max_bad_rate": 0.05,
+                },
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(create_strategy_plan)
+        assert route_entered.wait(timeout=5), "plan request never entered intent routing"
+        running_job = task_repo.get_latest_job(task.id, kind="plan")
+        assert running_job is not None
+        assert running_job["status"] == "running"
+        try:
+            continuation = continuation_client.post(
+                f"/api/tasks/{task.id}/agent/messages",
+                json={
+                    "content": "补充策略业务口径",
+                    "strategy_input": {
+                        "entry_mode": "strategy_development",
+                        "objective": "max_approval",
+                        "max_bad_rate": 0.20,
+                    },
+                },
+            )
+        finally:
+            release_route.set()
+        plan_response = future.result(timeout=10)
+
+    assert continuation.status_code == 409, continuation.text
+    assert task_repo.get_task(task.id).strategy_input is None
+    assert plan_response.status_code == 201, plan_response.text
+    assert task_repo.get_latest_job(task.id, kind="plan")["status"] == "succeeded"
+
+
+def test_strategy_development_generic_plan_rejects_missing_business_contract(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _create_task(app.state.plan_repo.db_path)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/plans",
+        json={
+            "goal": "开始策略开发",
+            "slots": {
+                "dataset_id": "dataset-1",
+                "target_col": "bad_flag",
+                "score_col": "score",
+            },
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "strategy_business_inputs_required"
+    assert response.json()["detail"]["template_id"] == "strategy_development"
+    assert response.json()["detail"]["missing_fields"] == [
+        "objective",
+        "max_bad_rate_or_min_approval_rate",
+    ]
+    assert app.state.plan_repo.list_plans_for_task(task_id) == []
+
+
+def test_strategy_development_generic_profit_plan_rejects_incomplete_inputs(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _create_task(app.state.plan_repo.db_path)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/plans",
+        json={
+            "goal": "开始策略开发",
+            "slots": {
+                "dataset_id": "dataset-1",
+                "target_col": "bad_flag",
+                "score_col": "score",
+                "objective": "max_profit",
+                "max_bad_rate": 0.05,
+            },
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "strategy_business_inputs_required"
+    assert detail["template_id"] == "strategy_development"
+    assert detail["missing_fields"] == [
+        "ead_col",
+        "pd_col",
+        "profit_params.annual_rate",
+        "profit_params.funding_rate",
+        "profit_params.lgd",
+        "profit_params.operating_cost_per_loan",
+        "profit_params.term_months",
+    ]
+    assert app.state.plan_repo.list_plans_for_task(task_id) == []
+
+
+def test_strategy_development_generic_plan_rejects_out_of_range_contract(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _create_task(app.state.plan_repo.db_path)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/plans",
+        json={
+            "goal": "开始策略开发",
+            "slots": {
+                "dataset_id": "dataset-1",
+                "target_col": "bad_flag",
+                "score_col": "score",
+                "objective": "max_profit",
+                "max_bad_rate": 1.2,
+                "min_approval_rate": -0.1,
+                "ead_col": "ead",
+                "pd_col": "pd",
+                "profit_params": {
+                    "annual_rate": 1.1,
+                    "funding_rate": -0.01,
+                    "lgd": 1.5,
+                    "operating_cost_per_loan": -1,
+                    "term_months": 0,
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "strategy_business_inputs_invalid"
+    assert detail["missing_fields"] == []
+    assert detail["invalid_fields"] == [
+        "max_bad_rate",
+        "min_approval_rate",
+        "profit_params.annual_rate",
+        "profit_params.funding_rate",
+        "profit_params.lgd",
+        "profit_params.operating_cost_per_loan",
+        "profit_params.term_months",
+    ]
+    assert app.state.plan_repo.list_plans_for_task(task_id) == []
 
 
 def _job_statuses(db_path):

@@ -56,6 +56,7 @@ def _confirm_gate(client: TestClient, task_id: str, gate: dict) -> dict:
 
 
 @pytest.mark.slow
+@pytest.mark.e2e
 def test_strategy_development_product_entry_requires_evidence_bound_adoption_reason(
     tmp_path: Path,
 ):

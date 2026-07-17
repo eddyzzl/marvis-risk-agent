@@ -11301,6 +11301,263 @@ def test_adoption_gate_requires_reason_and_submits_gate_bound_payload():
     ]]
 
 
+def test_strategy_clarification_controller_renders_exact_contract_and_readonly_history():
+    """Phase 0A: only the locked strategy clarification code gets a governed form.
+
+    Historical clarification messages keep the same evidence-visible form but
+    cannot submit stale business inputs; the newest message is interactive.
+    """
+    module_url = (
+        STATIC_DIR / "js" / "v2" / "strategy_clarification_controller.js"
+    ).as_uri()
+    script = "\n".join(
+        [
+            f"import {{ renderStrategyClarification }} from {json.dumps(module_url)};",
+            "const message = { id: 'clarify-2', role: 'assistant', metadata: {",
+            "  kind: 'clarification', clarification: {",
+            "    code: 'strategy_business_inputs_required',",
+            "    missing_fields: ['max_bad_rate_or_min_approval_rate'],",
+            "    current_input: { objective: 'max_approval', max_bad_rate: null, min_approval_rate: null, baseline_strategy_id: 'champion-v2', profit: null },",
+            "  },",
+            "} };",
+            "const profitMessage = { id: 'clarify-profit', role: 'assistant', metadata: {",
+            "  kind: 'clarification', clarification: { code: 'strategy_business_inputs_required',",
+            "    missing_fields: ['profit.pd_col'], current_input: { objective: 'max_profit',",
+            "      max_bad_rate: 0.07, min_approval_rate: null, baseline_strategy_id: 'profit-v1',",
+            "      profit: { ead_col: 'ead_balance', pd_col: '', annual_rate: 0.18, funding_rate: 0.04, lgd: 0.6, operating_cost_per_loan: 20, term_months: 12 } } } } };",
+            "const wrong = { metadata: { kind: 'clarification', clarification: { code: 'other' } } };",
+            "process.stdout.write(JSON.stringify({",
+            "  interactive: renderStrategyClarification(message, { interactive: true }),",
+            "  historical: renderStrategyClarification(message, { interactive: false }),",
+            "  profit: renderStrategyClarification(profitMessage, { interactive: true }),",
+            "  wrong: renderStrategyClarification(wrong, { interactive: true }),",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert 'data-strategy-clarification="1"' in payload["interactive"]
+    assert 'data-strategy-objective' in payload["interactive"]
+    assert 'data-strategy-max-bad-rate' in payload["interactive"]
+    assert 'data-strategy-min-approval-rate' in payload["interactive"]
+    assert 'data-strategy-profit-fields' in payload["interactive"]
+    assert "缺少：至少一项策略约束" in payload["interactive"]
+    assert '<option value="max_approval" selected>' in payload["interactive"]
+    assert 'data-strategy-baseline-id' in payload["interactive"]
+    assert 'value="champion-v2"' in payload["interactive"]
+    assert 'data-strategy-clarification-readonly="false"' in payload["interactive"]
+    assert 'data-strategy-clarification-submit="1"' in payload["interactive"]
+    assert 'data-strategy-clarification-readonly="true"' in payload["historical"]
+    assert "disabled" in payload["historical"]
+    assert 'title="此为历史澄清请求，只能查看，不能再次提交"' in payload["historical"]
+    assert '<option value="max_profit" selected>' in payload["profit"]
+    assert 'value="0.07"' in payload["profit"]
+    assert 'value="ead_balance"' in payload["profit"]
+    assert 'value="0.18"' in payload["profit"]
+    assert 'value="12"' in payload["profit"]
+    assert payload["wrong"] == ""
+
+
+def test_strategy_clarification_submits_exact_http_payload_and_refreshes_workspace():
+    """The continuation form must post the exact locked backend contract."""
+    module_url = (
+        STATIC_DIR / "js" / "v2" / "strategy_clarification_controller.js"
+    ).as_uri()
+    script = "\n".join(
+        [
+            f"import {{ submitStrategyClarification }} from {json.dumps(module_url)};",
+            "const controls = new Map([",
+            "  ['[data-strategy-objective]', { value: 'max_profit' }],",
+            "  ['[data-strategy-max-bad-rate]', { value: '0.05' }],",
+            "  ['[data-strategy-min-approval-rate]', { value: '0.62' }],",
+            "  ['[data-strategy-baseline-id]', { value: '   ' }],",
+            "  ['[data-strategy-ead-col]', { value: 'ead' }],",
+            "  ['[data-strategy-pd-col]', { value: 'pd' }],",
+            "  ['[data-strategy-annual-rate]', { value: '0.18' }],",
+            "  ['[data-strategy-funding-rate]', { value: '0.04' }],",
+            "  ['[data-strategy-lgd]', { value: '0.6' }],",
+            "  ['[data-strategy-operating-cost]', { value: '20' }],",
+            "  ['[data-strategy-term-months]', { value: '12' }],",
+            "  ['[data-strategy-clarification-error]', { textContent: '' }],",
+            "]);",
+            "const wrap = { querySelector: (selector) => controls.get(selector) || null };",
+            "const button = { disabled: false, closest: () => wrap };",
+            "const calls = []; const statuses = []; const refreshes = []; const rails = [];",
+            "let rendered = 0; let messages = null;",
+            "const context = {",
+            "  selectedTaskId: 'task-1',",
+            "  setActionStatus: (...args) => statuses.push(args),",
+            "  setAgentMessages: (value) => { messages = value; },",
+            "  renderAgentConversation: () => { rendered += 1; },",
+            "  pollAgentMessagesUntilSettled: async (_taskId, promise) => promise,",
+            "  refreshAgentMessages: async (taskId) => { refreshes.push(taskId); },",
+            "  resetFetchThrottle: (taskId) => rails.push(['reset', taskId]),",
+            "  renderWorkflowStepper: (options) => rails.push(['render', options]),",
+            "  api: async (url, options) => {",
+            "    calls.push([url, options.method, JSON.parse(options.body)]);",
+            "    return { messages: [{ id: 'plan-overview' }] };",
+            "  },",
+            "};",
+            "await submitStrategyClarification(button, context);",
+            "process.stdout.write(JSON.stringify({ calls, statuses, refreshes, rails, rendered, messages }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["calls"] == [[
+        "/api/tasks/task-1/agent/messages",
+        "POST",
+        {
+            "content": "补充策略业务口径",
+            "strategy_input": {
+                "entry_mode": "strategy_development",
+                "objective": "max_profit",
+                "max_bad_rate": 0.05,
+                "min_approval_rate": 0.62,
+                "baseline_strategy_id": None,
+                "profit": {
+                    "ead_col": "ead",
+                    "pd_col": "pd",
+                    "annual_rate": 0.18,
+                    "funding_rate": 0.04,
+                    "lgd": 0.6,
+                    "operating_cost_per_loan": 20,
+                    "term_months": 12,
+                },
+            },
+        },
+    ]]
+    assert payload["refreshes"] == ["task-1"]
+    assert payload["messages"] == [{"id": "plan-overview"}]
+    assert payload["rendered"] == 1
+    assert payload["rails"][-2:] == [
+        ["reset", "task-1"],
+        ["render", {"force": True}],
+    ]
+
+
+def test_strategy_clarification_validation_and_request_error_keep_form_editable():
+    module_url = (
+        STATIC_DIR / "js" / "v2" / "strategy_clarification_controller.js"
+    ).as_uri()
+    script = "\n".join(
+        [
+            f"import {{ submitStrategyClarification }} from {json.dumps(module_url)};",
+            "function makeForm(values) {",
+            "  const error = { textContent: '' };",
+            "  const controls = new Map(Object.entries(values).map(([key, value]) => [key, { value }]));",
+            "  controls.set('[data-strategy-clarification-error]', error);",
+            "  return { error, wrap: { querySelector: (selector) => controls.get(selector) || null }, controls };",
+            "}",
+            "const calls = []; const statuses = [];",
+            "const noConstraint = makeForm({",
+            "  '[data-strategy-objective]': 'max_approval',",
+            "  '[data-strategy-max-bad-rate]': '', '[data-strategy-min-approval-rate]': '',",
+            "  '[data-strategy-baseline-id]': '',",
+            "});",
+            "const invalidButton = { disabled: false, closest: () => noConstraint.wrap };",
+            "const base = { selectedTaskId: 'task-1', setActionStatus: (...args) => statuses.push(args),",
+            "  api: async (...args) => { calls.push(args); return { messages: [] }; } };",
+            "await submitStrategyClarification(invalidButton, base);",
+            "const partialProfit = makeForm({",
+            "  '[data-strategy-objective]': 'max_profit',",
+            "  '[data-strategy-max-bad-rate]': '0.08', '[data-strategy-min-approval-rate]': '',",
+            "  '[data-strategy-baseline-id]': '', '[data-strategy-ead-col]': 'ead',",
+            "  '[data-strategy-pd-col]': '', '[data-strategy-annual-rate]': '0.18',",
+            "});",
+            "const partialButton = { disabled: false, closest: () => partialProfit.wrap };",
+            "await submitStrategyClarification(partialButton, base);",
+            "const backendFailure = makeForm({",
+            "  '[data-strategy-objective]': 'max_approval',",
+            "  '[data-strategy-max-bad-rate]': '0.08', '[data-strategy-min-approval-rate]': '',",
+            "  '[data-strategy-baseline-id]': 'base-v1',",
+            "});",
+            "const failureButton = { disabled: false, closest: () => backendFailure.wrap };",
+            "await submitStrategyClarification(failureButton, { ...base, api: async () => { throw new Error('后端拒绝'); } });",
+            "process.stdout.write(JSON.stringify({",
+            "  calls: calls.length, invalidError: noConstraint.error.textContent, partialError: partialProfit.error.textContent,",
+            "  failureError: backendFailure.error.textContent, failureDisabled: failureButton.disabled,",
+            "  preservedObjective: backendFailure.controls.get('[data-strategy-objective]').value,",
+            "  preservedConstraint: backendFailure.controls.get('[data-strategy-max-bad-rate]').value,",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["calls"] == 0
+    assert "至少填写一个" in payload["invalidError"]
+    assert "EAD/PD 列和完整收益参数" in payload["partialError"]
+    assert payload["failureError"] == "后端拒绝"
+    assert payload["failureDisabled"] is False
+    assert payload["preservedObjective"] == "max_approval"
+    assert payload["preservedConstraint"] == "0.08"
+
+
+def test_strategy_clarification_uses_one_renderer_in_agent_and_manual_modes():
+    manual_url = (STATIC_DIR / "js" / "v2" / "driver_manual_analysis.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ driverManualAnalysisHtml }} from {json.dumps(manual_url)};",
+            "const messages = [",
+            "  { id: 'old', role: 'assistant', content: '旧请求', metadata: { kind: 'clarification', clarification: { code: 'strategy_business_inputs_required', missing_fields: ['objective'] } } },",
+            "  { id: 'new', role: 'assistant', content: '新请求', metadata: { kind: 'clarification', clarification: { code: 'strategy_business_inputs_required', missing_fields: ['constraints'] } } },",
+            "];",
+            "const calls = [];",
+            "const html = driverManualAnalysisHtml(messages, {",
+            "  renderAgentMarkdown: (value) => value,",
+            "  renderStrategyClarification: (message, options) => {",
+            "    calls.push([message.id, options.interactive]);",
+            "    return `<form data-id=\"${message.id}\" data-interactive=\"${options.interactive}\"></form>`;",
+            "  },",
+            "});",
+            "process.stdout.write(JSON.stringify({ html, calls }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    app_js = _read_static("app.js")
+
+    assert payload["calls"] == [["old", False], ["new", True]]
+    assert 'data-id="old" data-interactive="false"' in payload["html"]
+    assert 'data-id="new" data-interactive="true"' in payload["html"]
+    assert 'from "./js/v2/strategy_clarification_controller.js"' in app_js
+    assert "renderStrategyClarification: agentMessageStrategyClarificationHtml" in app_js
+    assert (
+        "agentMessageStrategyClarificationBodyHtml(message, clarificationInteractive)"
+        in app_js
+    )
+    assert "return renderStrategyClarification(message, options);" in app_js
+    assert "handleStrategyClarificationSubmit" in app_js
+    clarification_css = _css_rule(
+        _read_static("css/v2-workbench.css"), ".strategy-clarification-card"
+    )
+    assert "position: relative" in clarification_css
+    assert "z-index: 25" in clarification_css
+
+
 def test_all_rail_interactions_move_to_middle_workspace():
     """所有交互（确认/开始执行/下载报告）都在中间主区进行，右侧 rail 只保留
     状态徽标 + 轻量定位入口。

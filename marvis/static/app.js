@@ -67,6 +67,7 @@ import {
   driverGateBodyHtml as driverGateBodyHtmlController,
   driverGateHasWidget as driverGateHasWidgetController,
   driverManualAnalysisHtml as driverManualAnalysisHtmlController,
+  lastAssistantMessageId as lastAssistantMessageIdController,
   latestInteractiveScreenMessageId as latestInteractiveScreenMessageIdController,
   stripChatInstructions as stripChatInstructionsController,
 } from "./js/v2/driver_manual_analysis.js";
@@ -108,6 +109,12 @@ import {
   submitScreenThresholdAdjust as submitScreenThresholdAdjustController,
 } from "./js/v2/screen_gate_controller.js";
 import { renderSkillManager } from "./js/v2/skill_manager.js";
+import {
+  handleStrategyClarificationChange as handleStrategyClarificationChangeController,
+  handleStrategyClarificationSubmit as handleStrategyClarificationSubmitController,
+  isStrategyClarificationMessage as isStrategyClarificationMessageController,
+  renderStrategyClarification,
+} from "./js/v2/strategy_clarification_controller.js";
 import { getSelectedTier, onSelectedTierChange } from "./js/v2/state_v2.js";
 import {
   columnFractions,
@@ -5253,6 +5260,7 @@ function driverManualAnalysisHtml(messages) {
     renderTables: agentMessageTablesHtml,
     renderModelDelivery: agentMessageModelDeliveryHtml,
     renderAdoptionGate: agentMessageAdoptionGateHtml,
+    renderStrategyClarification: agentMessageStrategyClarificationHtml,
     // The plain-gate confirm control now lives in the middle analysis section
     // (not the rail). renderDriverGateButton already returns "" for gates that
     // carry a structured widget, so only genuinely plain gates get this button —
@@ -5573,6 +5581,28 @@ function agentMessageAdoptionGateHtml(message, options = {}) {
   return renderAdoptionGate(message, options);
 }
 
+function agentMessageStrategyClarificationHtml(message, options = {}) {
+  return renderStrategyClarification(message, options);
+}
+
+function handleStrategyClarificationSubmit(event) {
+  return handleStrategyClarificationSubmitController(
+    event,
+    strategyClarificationControllerContext(),
+  );
+}
+
+function handleStrategyClarificationChange(event) {
+  return handleStrategyClarificationChangeController(event);
+}
+
+function strategyClarificationControllerContext() {
+  return {
+    ...driverConfirmControllerContext(),
+    refreshAgentMessages: (taskId) => loadAgentMessages(taskId),
+  };
+}
+
 async function submitAdoption(button) {
   return submitAdoptionController(button, driverConfirmControllerContext());
 }
@@ -5612,6 +5642,8 @@ function modelingSetupControllerContext() {
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleModelingWeightAdjustClick);
   document.addEventListener("click", handleAdoptionConfirmClick);
+  document.addEventListener("click", handleStrategyClarificationSubmit);
+  document.addEventListener("change", handleStrategyClarificationChange);
 }
 
 function agentMessageC1FormHtml(message, options = {}) {
@@ -5907,8 +5939,14 @@ function agentMessageGateBodyHtml(message, interactive) {
   }, { interactive });
 }
 
+function agentMessageStrategyClarificationBodyHtml(message, interactive) {
+  return agentMessageStrategyClarificationHtml(message, { interactive });
+}
+
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const role = message.role === "user" ? "user" : "assistant";
+  const isStrategyClarification = role === "assistant"
+    && isStrategyClarificationMessageController(message);
   // join_c1 turns carry no explicit metadata.kind (backend groups them with
   // "gate" for turn-boundary purposes at turn_handlers.py:612) but are the
   // same needs_confirmation moment — the C1 role-assignment form — so they
@@ -5918,7 +5956,7 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const hasWidget = isGate && driverGateHasWidgetController(message);
   const className = role === "user"
     ? "agent-message user"
-    : `agent-message assistant${isGate ? " has-gate-card" : ""}`;
+    : `agent-message assistant${isGate ? " has-gate-card" : ""}${isStrategyClarification ? " has-strategy-clarification" : ""}`;
   const streaming = agentMessageIsStreaming(message);
   const thinking = agentMessageIsThinking(message);
   const contentHtml = thinking
@@ -5938,8 +5976,14 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   // read-only snapshots so a stale card cannot be actioned against an
   // already-advanced step.
   const interactive = hasWidget && Boolean(options.isLatestGate);
+  const clarificationInteractive = isStrategyClarification
+    && Boolean(messageId)
+    && messageId === lastAssistantMessageIdController(agentMessages);
   const bodyHtml = [
     `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
+    isStrategyClarification
+      ? agentMessageStrategyClarificationBodyHtml(message, clarificationInteractive)
+      : "",
     role === "assistant" && hasWidget ? agentMessageGateBodyHtml(message, interactive) : "",
     role === "assistant" && !hasWidget ? `${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}` : "",
     role === "assistant" ? agentMessageGateButtonHtml(message) : "",
