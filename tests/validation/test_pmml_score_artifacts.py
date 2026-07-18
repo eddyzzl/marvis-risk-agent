@@ -77,6 +77,7 @@ class _StaticScorer:
         return pd.Series(values)
 
 
+@pytest.mark.pmml_runtime
 def test_run_pmml_scoring_real_model_writes_exact_schema_and_all_rows(
     tmp_path, ready_contract
 ):

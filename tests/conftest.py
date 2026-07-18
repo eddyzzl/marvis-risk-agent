@@ -1,7 +1,8 @@
 """Shared pytest fixtures.
 
-Pre-warm the pypmml JVM gateway once per test session, in the clean startup
-environment, before any test runs.
+Pre-warm the pypmml JVM gateway once per PMML-runtime test session, in the clean
+startup environment, before any test runs. Pure strategy/data/frontend selections
+must not pay the JVM cold-start cost.
 
 Why: the suite uses pytest-randomly (random test order). pypmml's JVM gateway
 is a process-wide singleton that is cold-started lazily on the first PMML use.
@@ -9,34 +10,33 @@ If that first use happens *after* another test has mutated the process state
 (working directory, environment), the JVM launch can intermittently return an
 empty gateway port and fail with ``int(b'')``. Establishing the gateway at
 session start sidesteps the order dependency: every later PMML test reuses the
-already-running singleton instead of cold-starting it.
+already-running singleton instead of cold-starting it. The explicit
+``pmml_runtime`` marker below keeps this protection for real PMML runs while making
+focused development tests start immediately.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
+from collections.abc import Iterable
+from typing import Protocol
 
-import pandas as pd
 import pytest
-from docx import Document
 
-from marvis.api_scan_helpers import perform_scan_task
-from marvis.db import TaskRepository, init_db
-from marvis.domain import TaskCreate, TaskStatus
-from marvis.pipeline import PipelineSettings
-from marvis.repositories.validation_contracts import ValidationContractRepository
-from marvis.settings import build_settings
-from marvis.validation.input_contracts import PmmlInputManifest, StressUnit
-from marvis.validation.input_confirmation import (
-    validate_confirmation_against_materials,
-)
-from marvis.validation_materials import resolve_selected_validation_materials
-from tests.validation_builders import make_ready_contract, make_validation_confirmation
-from tests.validation_material_builders import write_validation_material_bundle
+
+class _CollectedItem(Protocol):
+    def get_closest_marker(self, name: str): ...
+
+
+def _requires_pmml_gateway(items: Iterable[_CollectedItem]) -> bool:
+    """Return whether the collected selection contains a real PMML runtime test."""
+
+    return any(item.get_closest_marker("pmml_runtime") is not None for item in items)
 
 
 @pytest.fixture
 def ready_contract():
+    from tests.validation_builders import make_ready_contract
+
     return make_ready_contract()
 
 
@@ -52,6 +52,8 @@ def direct_manifest(ready_contract):
 
 @pytest.fixture
 def derived_manifest():
+    from marvis.validation.input_contracts import PmmlInputManifest, StressUnit
+
     return PmmlInputManifest(
         schema_version="marvis.pmml_input_manifest.v1",
         raw_required_fields=("age", "income"),
@@ -69,6 +71,12 @@ def derived_manifest():
 
 @pytest.fixture
 def pipeline_settings(tmp_path):
+    from docx import Document
+
+    from marvis.db import init_db
+    from marvis.pipeline import PipelineSettings
+    from marvis.settings import build_settings
+
     app_settings = build_settings(tmp_path / "workspace")
     app_settings.report_template_path.parent.mkdir(parents=True, exist_ok=True)
     template = Document()
@@ -86,6 +94,22 @@ def pipeline_settings(tmp_path):
 
 @pytest.fixture
 def ready_validation_task(pipeline_settings):
+    from dataclasses import replace
+
+    import pandas as pd
+
+    from marvis.api_scan_helpers import perform_scan_task
+    from marvis.db import TaskRepository
+    from marvis.domain import TaskCreate, TaskStatus
+    from marvis.repositories.validation_contracts import ValidationContractRepository
+    from marvis.settings import build_settings
+    from marvis.validation.input_confirmation import (
+        validate_confirmation_against_materials,
+    )
+    from marvis.validation_materials import resolve_selected_validation_materials
+    from tests.validation_builders import make_validation_confirmation
+    from tests.validation_material_builders import write_validation_material_bundle
+
     app_settings = build_settings(pipeline_settings.workspace)
     bundle = write_validation_material_bundle(
         app_settings.workspace / "ready-bundle",
@@ -147,14 +171,16 @@ def ready_validation_task(pipeline_settings):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _prewarm_pmml_gateway():
-    """Start the pypmml JVM gateway once at session start (best effort)."""
-    try:
-        from pypmml.base import PMMLContext
+def _prewarm_pmml_gateway(request):
+    """Start pypmml once, but only when this selection can execute PMML."""
 
-        PMMLContext.getOrCreate()
-    except Exception:
-        # If pypmml or a JVM is unavailable, individual PMML tests will surface
-        # that on their own; pre-warming must never block the rest of the suite.
-        pass
+    if _requires_pmml_gateway(request.session.items):
+        try:
+            from pypmml.base import PMMLContext
+
+            PMMLContext.getOrCreate()
+        except Exception:
+            # If pypmml or a JVM is unavailable, individual PMML tests will surface
+            # that on their own; pre-warming must never block the rest of the suite.
+            pass
     yield

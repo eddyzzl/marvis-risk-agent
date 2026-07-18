@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from marvis.validation.pmml_scoring import (
     PmmlScorer,
@@ -40,6 +41,7 @@ def test_score_chunk_preserves_input_order_and_marks_nulls():
     assert scores.iloc[2] == float("inf")
 
 
+@pytest.mark.pmml_runtime
 def test_real_pmml_dataframe_batch_matches_legacy_single_row_semantics():
     from pypmml import Model
 
@@ -63,6 +65,7 @@ def test_real_pmml_dataframe_batch_matches_legacy_single_row_semantics():
     np.testing.assert_allclose(batch, legacy, rtol=1e-12, atol=1e-12)
 
 
+@pytest.mark.pmml_runtime
 def test_real_pmml_empty_dataframe_short_circuits_without_entering_jvm():
     from pypmml import Model
 

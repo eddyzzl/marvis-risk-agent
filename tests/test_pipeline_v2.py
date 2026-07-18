@@ -88,6 +88,7 @@ def _keep_preexisting_pipeline_cases_on_legacy_workflow(
     monkeypatch.setattr(TaskRepository, "create_task", create_legacy)
 
 
+@pytest.mark.pmml_runtime
 def test_v2_pmml_scoring_and_metrics_never_execute_notebook(
     ready_validation_task,
     pipeline_settings,
