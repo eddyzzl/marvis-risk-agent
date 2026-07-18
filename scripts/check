@@ -14,6 +14,7 @@ RUN_DIFF=1
 RUN_AUDIT=0
 FAST=0
 AFFECTED=0
+AFFECTED_FULL=0
 FAST_MARKERS="not slow and not e2e and not llm"
 
 usage() {
@@ -31,7 +32,11 @@ Options:
                   (-m "not slow and not e2e and not llm").
   --affected      Run tests affected by the current git diff. Uses
                   CHECK_DIFF_RANGE when set; otherwise checks local changes.
-                  Falls back to the fast tier when mapping is uncertain.
+                  Runs only fast tests and falls back to the fast tier when
+                  mapping is uncertain.
+  --affected-full Run every tier in the affected test files. When mapping is
+                  uncertain, remove the tier filter; explicit pytest selectors
+                  passed after "--" still apply. Use at phase close.
   --audit         Run pip-audit against the locked dependencies (skipped
                    with a warning if pip-audit is not installed).
   -h, --help      Show this help.
@@ -45,7 +50,7 @@ Environment:
                   for example origin/main...HEAD.
 
 Pytest arguments may follow "--". Custom -m expressions cannot be combined
-with --fast or --affected because those modes own the marker filter.
+with --fast, --affected, or --affected-full because those modes own test tiers.
 USAGE
 }
 
@@ -75,6 +80,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --affected)
       AFFECTED=1
+      shift
+      ;;
+    --affected-full)
+      AFFECTED=1
+      AFFECTED_FULL=1
       shift
       ;;
     --audit)
@@ -138,10 +148,15 @@ if [[ "$AFFECTED" -eq 1 && "$RUN_PYTEST" -eq 1 ]]; then
   AFFECTED_STATUS=$?
   set -e
   if [[ "$AFFECTED_STATUS" -eq 2 ]]; then
-    if [[ "$PYTEST_ARGS_ARE_DEFAULT" -eq 1 ]]; then
-      PYTEST_ARGS=("-q" "-m" "$FAST_MARKERS")
+    if [[ "$AFFECTED_FULL" -eq 0 ]]; then
+      echo "affected mode: mapping uncertain; running fast tier" >&2
+      if [[ "$PYTEST_ARGS_ARE_DEFAULT" -eq 1 ]]; then
+        PYTEST_ARGS=("-q" "-m" "$FAST_MARKERS")
+      else
+        PYTEST_ARGS=("-m" "$FAST_MARKERS" "${PYTEST_ARGS[@]}")
+      fi
     else
-      PYTEST_ARGS=("-m" "$FAST_MARKERS" "${PYTEST_ARGS[@]}")
+      echo "affected-full mode: mapping uncertain; running all test tiers" >&2
     fi
   elif [[ "$AFFECTED_STATUS" -ne 0 ]]; then
     echo "error: affected-test selector failed with status $AFFECTED_STATUS" >&2
@@ -154,6 +169,9 @@ if [[ "$AFFECTED" -eq 1 && "$RUN_PYTEST" -eq 1 ]]; then
       [[ -n "$test_path" ]] && AFFECTED_TESTS+=("$test_path")
     done < "$AFFECTED_OUTPUT_FILE"
     PYTEST_ARGS=("${AFFECTED_TESTS[@]}" "${PYTEST_ARGS[@]}")
+    if [[ "$AFFECTED_FULL" -eq 0 ]]; then
+      PYTEST_ARGS+=("-m" "$FAST_MARKERS")
+    fi
   fi
   cleanup_affected_output
   trap - EXIT
@@ -193,7 +211,19 @@ fi
 
 if [[ "$RUN_PYTEST" -eq 1 ]]; then
   echo "==> pytest ${PYTEST_ARGS[*]}"
+  set +e
   "$PYTHON_BIN" -m pytest "${PYTEST_ARGS[@]}"
+  PYTEST_STATUS=$?
+  set -e
+  if [[ "$PYTEST_STATUS" -eq 5
+    && "$AFFECTED" -eq 1
+    && "$AFFECTED_FULL" -eq 0
+    && "$PYTEST_ARGS_ARE_DEFAULT" -eq 1
+  ]]; then
+    echo "affected mode: no fast tests selected; use --affected-full for excluded tiers" >&2
+  elif [[ "$PYTEST_STATUS" -ne 0 ]]; then
+    exit "$PYTEST_STATUS"
+  fi
 fi
 
 if [[ "$RUN_AUDIT" -eq 1 ]]; then

@@ -21,6 +21,39 @@ from typing import Iterable, Literal
 FAST_FALLBACK_EXIT = 2
 SelectionMode = Literal["targeted", "none", "fallback"]
 
+# These trees are outside the Python/runtime surfaces validated by
+# ``scripts/check``.  Keeping an unrelated local website or generated build
+# output untracked must not turn every small backend edit into the whole fast
+# suite.  Unknown untracked roots remain conservative and still request the
+# fallback tier.
+NON_PYTEST_UNTRACKED_ROOTS = frozenset({"build", "dist", "website"})
+CURATED_DYNAMIC_PACKS = frozenset({"strategy"})
+PLUGIN_CONTRACT_TEST_NAMES = frozenset(
+    {
+        "test_frontend_v2_plugin.py",
+        "test_package_data.py",
+        "test_windows_packaging.py",
+        "test_worker_import_offline.py",
+    }
+)
+STRATEGY_PACK_SHARED_TEST_NAMES = frozenset(
+    {
+        "test_agent_autodrive.py",
+        "test_agent_gate_contracts.py",
+        "test_agent_task_routing.py",
+        "test_governance_api.py",
+        "test_governance_policy.py",
+        "test_orch_templates.py",
+        "test_plan_driver.py",
+        "test_plugin_api.py",
+        "test_plugin_loader.py",
+        "test_plugin_manifest.py",
+        "test_plugin_registry.py",
+        "test_plugin_schema.py",
+        "test_v2_memory_wiring.py",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Selection:
@@ -79,7 +112,22 @@ def discover_changed_files(root: Path, diff_range: str | None) -> Selection | li
         untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
         if changed.returncode != 0 or untracked.returncode != 0:
             return Selection("fallback", reason="cannot inspect local git changes")
-        payloads = [changed.stdout, untracked.stdout]
+        payloads = [changed.stdout]
+        untracked_paths = [
+            item.decode(errors="surrogateescape")
+            for item in untracked.stdout.split(b"\0")
+            if item
+        ]
+        payloads.append(
+            b"\0".join(
+                path.encode(errors="surrogateescape")
+                for path in untracked_paths
+                if not (
+                    PurePosixPath(path).parts
+                    and PurePosixPath(path).parts[0] in NON_PYTEST_UNTRACKED_ROOTS
+                )
+            )
+        )
 
     paths: set[str] = set()
     for payload in payloads:
@@ -273,6 +321,83 @@ def _frontend_tests(root: Path) -> set[str]:
     return selected
 
 
+def _references_dynamic_pack(tree: ast.AST, pack_name: str) -> bool:
+    """Detect structured Tool/Workflow references to a dynamically loaded pack."""
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value.startswith(f"{pack_name}."):
+                return True
+            continue
+        if isinstance(node, ast.Call):
+            func_name = ""
+            if isinstance(node.func, ast.Name):
+                func_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                func_name = node.func.attr
+            if (
+                func_name == "ToolRef"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == pack_name
+            ):
+                return True
+            continue
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values, strict=True):
+            if (
+                isinstance(key, ast.Constant)
+                and key.value in {"pack", "plugin", "plugin_id"}
+                and isinstance(value, ast.Constant)
+                and value.value == pack_name
+            ):
+                return True
+    return False
+
+
+def _curated_dynamic_pack_tests(root: Path, pack_name: str) -> set[str]:
+    """Return the maintained blast-radius group for a dynamic built-in pack.
+
+    Dynamic Tool references are strings, so Python import analysis alone cannot
+    discover their consumers.  A pack is eligible only after it has an explicit
+    curated group here.  For Strategy, select every test that names the product
+    surface plus the generic Plugin contract/packaging tests that enumerate all
+    built-in manifests.
+    """
+
+    if pack_name not in CURATED_DYNAMIC_PACKS:
+        return set()
+    selected: set[str] = set()
+    for path in (root / "tests").rglob("test_*.py"):
+        relative = path.relative_to(root).as_posix()
+        if (
+            pack_name in path.name.lower()
+            or path.name in STRATEGY_PACK_SHARED_TEST_NAMES
+            or path.name in PLUGIN_CONTRACT_TEST_NAMES
+        ):
+            selected.add(relative)
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, SyntaxError, UnicodeError):
+            # The common dependency-expansion pass below reports parse errors
+            # as a conservative fallback, so do not silently bless this pack.
+            continue
+        imports = _import_names(
+            tree,
+            _module_name(root, path),
+            path.name == "__init__.py",
+        )
+        pack_module = f"marvis.packs.{pack_name}"
+        if any(
+            imported == pack_module or imported.startswith(f"{pack_module}.")
+            for imported in imports
+        ) or _references_dynamic_pack(tree, pack_name):
+            selected.add(relative)
+    return selected
+
+
 def select_affected_tests(root: Path, changed_files: Iterable[str]) -> Selection:
     root = root.resolve()
     changed = sorted(set(changed_files))
@@ -281,6 +406,7 @@ def select_affected_tests(root: Path, changed_files: Iterable[str]) -> Selection
 
     direct_tests: set[str] = set()
     changed_modules: set[str] = set()
+    changed_dynamic_packs: set[str] = set()
     include_frontend = False
     saw_runtime_change = False
 
@@ -306,8 +432,13 @@ def select_affected_tests(root: Path, changed_files: Iterable[str]) -> Selection
             continue
         if len(path.parts) >= 2 and path.parts[:2] == ("marvis", "packs"):
             # Built-in packs are discovered from manifests and imported by
-            # string at runtime.  Static Python imports cannot prove the full
-            # API/workflow blast radius, so a targeted subset would be unsafe.
+            # string at runtime.  Only packs with an explicit maintained test
+            # group may use targeted selection; every other pack stays on the
+            # conservative fallback.
+            if len(path.parts) >= 3 and path.parts[2] in CURATED_DYNAMIC_PACKS:
+                changed_dynamic_packs.add(path.parts[2])
+                saw_runtime_change = True
+                continue
             return Selection(
                 "fallback",
                 reason=f"dynamically loaded plugin pack changed: {raw_path}",
@@ -320,6 +451,15 @@ def select_affected_tests(root: Path, changed_files: Iterable[str]) -> Selection
             saw_runtime_change = True
             continue
         return Selection("fallback", reason=f"no safe test mapping for: {raw_path}")
+
+    for pack_name in sorted(changed_dynamic_packs):
+        pack_tests = _curated_dynamic_pack_tests(root, pack_name)
+        if not pack_tests:
+            return Selection(
+                "fallback",
+                reason=f"curated plugin pack has no mapped tests: {pack_name}",
+            )
+        direct_tests.update(pack_tests)
 
     if include_frontend:
         frontend = _frontend_tests(root)
@@ -416,7 +556,10 @@ def main(argv: list[str] | None = None) -> int:
         selection = select_affected_tests(root, discovered)
 
     if selection.mode == "fallback":
-        print(f"affected-test selection: {selection.reason}; using fast tier", file=sys.stderr)
+        print(
+            f"affected-test selection: {selection.reason}; fallback required",
+            file=sys.stderr,
+        )
         return FAST_FALLBACK_EXIT
     if selection.mode == "none":
         print(f"affected-test selection: {selection.reason}; pytest not needed", file=sys.stderr)

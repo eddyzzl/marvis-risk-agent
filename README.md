@@ -242,10 +242,19 @@ scripts/check --fast
 ```
 
 For a small local change, `scripts/check --affected` follows local Python
-imports and runs only the mapped test files. It uses `CHECK_DIFF_RANGE` when
-provided and conservatively falls back to the fast tier when any changed file
-cannot be mapped safely. Pull-request and push CI use the fast tier; manual CI
-dispatch and the release gate run the full, untiered suite.
+imports and runs the fast tests in only the mapped test files. It uses
+`CHECK_DIFF_RANGE` when provided and conservatively falls back to the whole
+fast tier when a runtime change cannot be mapped safely. Untracked local trees
+outside the MARVIS runtime/test surfaces (for example `website/` or build
+output) do not force that fallback. The dynamically loaded Strategy pack has a
+maintained strategy/API/workflow/Plugin-contract test group; uncurated packs
+still use the conservative fallback.
+
+At phase close, `scripts/check --affected-full` runs every tier in the mapped
+test files. For an uncertain mapping it removes the tier filter; explicit
+pytest selectors supplied after `--` still apply. Pull-request and push CI use
+the fast tier; manual CI dispatch and the release gate run the full, untiered
+suite.
 
 ## Release Push
 
