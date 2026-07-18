@@ -37,6 +37,14 @@ def _clean_actions(values: Any) -> tuple[str, ...]:
     return tuple(actions) or DEFAULT_GATE_ACTIONS
 
 
+def _clean_governance_requirement(value: Any) -> str:
+    """Normalize the additive gate contract while failing closed on bad values."""
+    requirement = _clean_str(value).lower()
+    if requirement in {"", "none"}:
+        return "none"
+    return "required"
+
+
 def _dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
@@ -140,6 +148,9 @@ class GateEnvelope:
     controls: tuple[GateControl, ...] = ()
     render_blocks: tuple[GateRenderBlock, ...] = ()
     risk_flags: tuple[str, ...] = ()
+    human_decision_gate: str = "none"
+    effect_authorization: str = "none"
+    policy_hash: str | None = None
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     downstream_reset_policy: dict[str, Any] = field(default_factory=dict)
 
@@ -156,11 +167,15 @@ class GateEnvelope:
             "controls": [control.to_dict() for control in self.controls],
             "render_blocks": [block.to_dict() for block in self.render_blocks],
             "risk_flags": list(self.risk_flags),
+            "human_decision_gate": self.human_decision_gate,
+            "effect_authorization": self.effect_authorization,
             "retry_policy": self.retry_policy.to_dict(),
             "downstream_reset_policy": dict(self.downstream_reset_policy),
         }
         if self.stale_token:
             data["stale_token"] = self.stale_token
+        if self.policy_hash:
+            data["policy_hash"] = self.policy_hash
         return data
 
     @classmethod
@@ -177,6 +192,13 @@ class GateEnvelope:
             controls=controls,
             render_blocks=render_blocks,
             risk_flags=tuple(_clean_str(item) for item in payload.get("risk_flags") or [] if _clean_str(item)),
+            human_decision_gate=_clean_governance_requirement(
+                payload.get("human_decision_gate")
+            ),
+            effect_authorization=_clean_governance_requirement(
+                payload.get("effect_authorization")
+            ),
+            policy_hash=_clean_str(payload.get("policy_hash")) or None,
             retry_policy=RetryPolicy.from_dict(payload.get("retry_policy")),
             downstream_reset_policy=_dict(payload.get("downstream_reset_policy")),
         )
@@ -445,6 +467,13 @@ def infer_gate_envelope(meta: Mapping[str, Any]) -> GateEnvelope:
         controls=tuple(controls),
         render_blocks=tuple(render_blocks),
         risk_flags=_infer_risk_flags(meta),
+        human_decision_gate=_clean_governance_requirement(
+            meta.get("human_decision_gate")
+        ),
+        effect_authorization=_clean_governance_requirement(
+            meta.get("effect_authorization")
+        ),
+        policy_hash=_clean_str(meta.get("policy_hash")) or None,
     )
 
 

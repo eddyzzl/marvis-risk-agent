@@ -17,7 +17,13 @@ from marvis.agent.memory_bridge import (
     fetch_field_convention_hints,
 )
 from marvis.agent.modeling_setup import ModelingSetupError, build_modeling_proposal
-from marvis.agent.plan_driver import DriverError, PlanDriver, is_confirm
+from marvis.agent.plan_driver import (
+    CONFIRMATION_SOURCE_AUTO,
+    CONFIRMATION_SOURCE_HUMAN,
+    DriverError,
+    PlanDriver,
+    is_confirm,
+)
 from marvis.agent.portfolio_setup import (
     PortfolioProposal,
     PortfolioSetupError,
@@ -92,6 +98,8 @@ class DriverTurnRuntime:
     plan_validator: PlanValidator
     llm_client: OpenAICompatibleLLMClient | None
     tier: str
+    governance_service: object | None = None
+    local_principal: object | None = None
 
 
 # ARCH-4: the five run_*_driver_turn entry points below share one skeleton
@@ -148,6 +156,7 @@ def run_join_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
 ) -> dict:
     return _run_driver_turn(
         _JOIN_SPEC,
@@ -159,6 +168,7 @@ def run_join_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        confirmation_source=confirmation_source,
     )
 
 
@@ -172,6 +182,7 @@ def run_feature_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
 ) -> dict:
     return _run_driver_turn(
         _FEATURE_SPEC,
@@ -183,6 +194,7 @@ def run_feature_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        confirmation_source=confirmation_source,
     )
 
 
@@ -196,6 +208,7 @@ def run_strategy_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
 ) -> dict:
     return _run_driver_turn(
         _STRATEGY_SPEC,
@@ -207,6 +220,7 @@ def run_strategy_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        confirmation_source=confirmation_source,
     )
 
 
@@ -220,6 +234,7 @@ def run_vintage_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
 ) -> dict:
     return _run_driver_turn(
         _VINTAGE_SPEC,
@@ -231,6 +246,7 @@ def run_vintage_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        confirmation_source=confirmation_source,
     )
 
 
@@ -244,6 +260,7 @@ def run_portfolio_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
 ) -> dict:
     return _run_driver_turn(
         _PORTFOLIO_SPEC,
@@ -255,6 +272,7 @@ def run_portfolio_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        confirmation_source=confirmation_source,
     )
 
 
@@ -268,6 +286,7 @@ def run_modeling_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
 ) -> dict:
     return _run_driver_turn(
         _MODELING_SPEC,
@@ -279,6 +298,7 @@ def run_modeling_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        confirmation_source=confirmation_source,
     )
 
 
@@ -293,6 +313,7 @@ def _run_driver_turn(
     dedup_strategies: dict | None,
     adjust_params: dict | None,
     expected_step_id: str | None,
+    confirmation_source: str,
 ) -> dict:
     driver = _driver(runtime)
     if user_text is not None:
@@ -313,6 +334,7 @@ def _run_driver_turn(
                 dedup_strategies=dedup_strategies,
                 adjust_params=adjust_params,
                 expected_step_id=expected_step_id,
+                confirmation_source=confirmation_source,
             )
             _append_spec_messages(spec, repo, task, turn, runtime)
             return join_turn_response(repo, task.id)
@@ -941,6 +963,7 @@ def dispatch_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
 ) -> dict:
     # S6 ad-hoc 问数 branch (checked BEFORE the normal type dispatch). It is
     # deliberately defensive: it only ever handles a turn that is either (round B)
@@ -961,6 +984,7 @@ def dispatch_driver_turn(
         dedup_strategies=dedup_strategies,
         adjust_params=adjust_params,
         expected_step_id=expected_step_id,
+        confirmation_source=confirmation_source,
     )
     if result.get("status") == "clarification_required":
         return result
@@ -1173,7 +1197,14 @@ def agent_autodrive_turn(
         gate_meta = gate.get("metadata") if isinstance(gate.get("metadata"), dict) else {}
         gate_step_id = gate_meta.get("step_id")
         if action == "confirm":
-            turn_fn(runtime, repo, task, user_text="确认", expected_step_id=gate_step_id)
+            turn_fn(
+                runtime,
+                repo,
+                task,
+                user_text="确认",
+                expected_step_id=gate_step_id,
+                confirmation_source=CONFIRMATION_SOURCE_AUTO,
+            )
             continue
         if action == "adjust":
             params = decision.get("params") if isinstance(decision.get("params"), dict) else None
@@ -1190,6 +1221,7 @@ def agent_autodrive_turn(
                 dedup_strategies=dedup,
                 adjust_params=params,
                 expected_step_id=gate_meta.get("step_id"),
+                confirmation_source=CONFIRMATION_SOURCE_AUTO,
             )
             continue
         if action == "replan":
@@ -1207,7 +1239,10 @@ def agent_autodrive_turn(
             driver = _driver(runtime)
             try:
                 turn = driver.replan_structured(
-                    plan_id=plan_id, goal=goal, expected_step_id=gate_step_id
+                    plan_id=plan_id,
+                    goal=goal,
+                    expected_step_id=gate_step_id,
+                    confirmation_source=CONFIRMATION_SOURCE_AUTO,
                 )
             except DriverError:
                 return
@@ -1289,6 +1324,8 @@ def _driver(runtime: DriverTurnRuntime) -> PlanDriver:
         planner=runtime.planner,
         validator=runtime.plan_validator,
         llm_client=runtime.llm_client,
+        governance_service=runtime.governance_service,
+        local_principal=runtime.local_principal,
     )
 
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -25,8 +26,8 @@ from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.packs.strategy.monitoring_plan import load_monitoring_plan
-from marvis.plugins.loader import load_builtin_packs
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.loader import load_manifest
+from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.repositories.strategy import StrategyRepository
@@ -40,7 +41,7 @@ def _runtime(tmp_path):
     plugin_repo = PluginRepository(settings.db_path)
     plugin_registry = PluginRegistry(plugin_repo)
     packs_root = Path(__file__).parents[1] / "marvis" / "packs"
-    load_builtin_packs(plugin_registry, packs_root)
+    _register_policy_neutral_strategy_pack(plugin_registry, packs_root)
     runner = ToolRunner(
         ToolRegistry(plugin_registry),
         plugin_repo,
@@ -65,6 +66,18 @@ def _runtime(tmp_path):
         )
     )
     return runner, registry, task, settings
+
+
+def _register_policy_neutral_strategy_pack(plugin_registry, packs_root):
+    """Register real monitoring kernels behind a policy-neutral test manifest."""
+    manifest = load_manifest(packs_root / "strategy", builtin=True)
+    neutral_manifest = replace(
+        manifest,
+        tools=tuple(
+            replace(tool, policy=GovernancePolicy()) for tool in manifest.tools
+        ),
+    )
+    plugin_registry.register(neutral_manifest, enabled=True)
 
 
 def _register(registry, tmp_path, frame: pd.DataFrame, name: str, task_id: str):

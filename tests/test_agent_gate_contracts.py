@@ -1,4 +1,5 @@
 from marvis.agent.gates import FailureEnvelope, GateEnvelope, extract_gate_envelope
+from marvis.plugins.manifest import GovernancePolicy, governance_policy_hash
 
 
 def test_explicit_gate_envelope_round_trips_allowed_actions_and_controls():
@@ -31,6 +32,28 @@ def test_explicit_gate_envelope_round_trips_allowed_actions_and_controls():
     assert payload["target_step_id"] == "gate-1"
     assert payload["controls"][0]["id"] == "leakage_ks"
     assert GateEnvelope.from_dict(payload).to_dict() == payload
+
+
+def test_gate_envelope_round_trips_canonical_governance_policy_fields():
+    policy = GovernancePolicy(human_decision_gate="required")
+    payload = GateEnvelope(
+        kind="strategy_decision",
+        human_decision_gate=policy.human_decision_gate,
+        effect_authorization=policy.effect_authorization,
+        policy_hash=governance_policy_hash(policy),
+    ).to_dict()
+
+    assert payload["human_decision_gate"] == "required"
+    assert payload["effect_authorization"] == "none"
+    assert payload["policy_hash"] == governance_policy_hash(policy)
+    assert GateEnvelope.from_dict(payload).to_dict() == payload
+
+
+def test_legacy_gate_envelope_defaults_to_no_mandatory_governance():
+    envelope = GateEnvelope.from_dict({"kind": "gate"})
+
+    assert envelope.human_decision_gate == "none"
+    assert envelope.effect_authorization == "none"
 
 
 def test_legacy_screen_metadata_infers_adjustable_gate_envelope():

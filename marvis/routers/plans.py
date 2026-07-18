@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from marvis.errors import conflict, not_found, unprocessable
-from pydantic import BaseModel, Field
+from marvis.governance.errors import AuthorizationError
+from marvis.errors import conflict, forbidden, not_found, unprocessable
+from pydantic import BaseModel, ConfigDict, Field
 
 from marvis.agent.strategy_setup import strategy_development_slot_clarification
 from marvis.db import PlanRepository, TaskRepository
@@ -49,6 +50,14 @@ class CreatePlanRequest(BaseModel):
 
 class RetryStepRequest(BaseModel):
     inputs: dict | None = None
+
+
+class HumanDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject"]
+    reason: str = Field(min_length=1, max_length=4000)
+    expected_plan_revision: int = Field(ge=0)
 
 
 @router.post("/tasks/{task_id}/plans", status_code=201)
@@ -222,8 +231,19 @@ def confirm_step(
     background_tasks: BackgroundTasks,
 ) -> dict:
     plan = _load_plan(request, plan_id)
-    if step_id not in {step.id for step in plan.steps}:
+    step = next((item for item in plan.steps if item.id == step_id), None)
+    if step is None:
         raise not_found("step not found")
+    governance_service = getattr(request.app.state, "governance_service", None)
+    if governance_service is not None:
+        try:
+            requires_human_decision = governance_service.requires_human_decision(step)
+        except AuthorizationError as exc:
+            raise conflict(str(exc)) from exc
+        if requires_human_decision:
+            raise conflict(
+                "this step requires the dedicated human decision endpoint"
+            )
     job_id = _start_plan_job(request, plan.task_id)
     try:
         request.app.state.plan_repo.confirm_step(step_id)
@@ -241,6 +261,84 @@ def confirm_step(
         plan_id,
     )
     return {"ok": True, "plan_id": plan_id, "step_id": step_id, "job_id": job_id}
+
+
+@router.post(
+    "/plans/{plan_id}/steps/{step_id}/decisions",
+    status_code=202,
+)
+def decide_step(
+    request: Request,
+    plan_id: str,
+    step_id: str,
+    body: HumanDecisionRequest,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    """Record an immutable, server-attributed human decision for one gate."""
+
+    plan = _load_plan(request, plan_id)
+    if not any(step.id == step_id for step in plan.steps):
+        raise not_found("step not found")
+    principal = getattr(request.state, "local_principal", None)
+    if principal is None:
+        raise forbidden("a server-issued local session principal is required")
+    service = request.app.state.governance_service
+    if body.decision == "reject":
+        try:
+            grant = service.reject_step(
+                plan_id=plan_id,
+                step_id=step_id,
+                principal=principal,
+                reason=body.reason,
+                expected_plan_revision=body.expected_plan_revision,
+            )
+        except AuthorizationError as exc:
+            raise conflict(str(exc)) from exc
+        return {
+            "ok": True,
+            "decision": "reject",
+            "decision_id": grant.decision.id,
+            "approval_id": None,
+            "principal_id": principal.id,
+            "task_id": plan.task_id,
+            "plan_id": plan_id,
+            "step_id": step_id,
+            "job_id": None,
+        }
+
+    job_id = _start_plan_job(request, plan.task_id)
+    try:
+        grant = service.authorize_step(
+            plan_id=plan_id,
+            step_id=step_id,
+            principal=principal,
+            reason=body.reason,
+            expected_plan_revision=body.expected_plan_revision,
+        )
+    except AuthorizationError as exc:
+        _fail_plan_job(_db_path(request), job_id, exc)
+        raise conflict(str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        _fail_plan_job(_db_path(request), job_id, exc)
+        raise unprocessable(str(exc)) from exc
+    background_tasks.add_task(
+        _run_plan_job,
+        job_id,
+        _db_path(request),
+        request.app.state.plan_executor,
+        plan_id,
+    )
+    return {
+        "ok": True,
+        "decision": "approve",
+        "decision_id": grant.decision.id,
+        "approval_id": None if grant.approval is None else grant.approval.id,
+        "principal_id": principal.id,
+        "task_id": plan.task_id,
+        "plan_id": plan_id,
+        "step_id": step_id,
+        "job_id": job_id,
+    }
 
 
 @router.post("/plans/{plan_id}/steps/{step_id}/retry", status_code=202)

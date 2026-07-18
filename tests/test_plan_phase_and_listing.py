@@ -9,10 +9,12 @@ Covers the two backend gaps the V2 plan review confirmed:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from marvis.db import PlanRepository, init_db
+from marvis.db import PlanRepository, PluginRepository, init_db
 from marvis.orchestrator.contracts import (
     Plan,
     PlanStatus,
@@ -22,8 +24,21 @@ from marvis.orchestrator.contracts import (
 )
 from marvis.orchestrator.planner import Planner
 from marvis.orchestrator.templates import SlotSpec, StepTemplate, WorkflowTemplate
+from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
+from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.routers.plans import router as plans_router
+
+
+def _tool_registry(tmp_path) -> ToolRegistry:
+    db_path = tmp_path / "plugins.sqlite"
+    init_db(db_path)
+    plugin_registry = PluginRegistry(PluginRepository(db_path))
+    load_builtin_packs(
+        plugin_registry,
+        Path(__file__).parents[1] / "marvis" / "packs",
+    )
+    return ToolRegistry(plugin_registry)
 
 
 def _phased_plan(
@@ -141,8 +156,9 @@ def test_from_template_threads_phase_onto_steps(tmp_path):
             ),
         ),
     )
-    # from_template does not touch the tool registry / validator, so None is fine.
-    planner = Planner(None, None, None)
+    # Template instantiation resolves the live manifest policy so a template
+    # cannot weaken a tool's governance lower bound.
+    planner = Planner(_tool_registry(tmp_path), None, None)
     plan = planner.from_template(template, {}, task_id="task-9")
 
     assert plan.steps[0].phase == "建模"

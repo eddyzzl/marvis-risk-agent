@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from marvis.db import PluginRepository
+from marvis.governance.errors import AuthorizationError
 from marvis.plugins.contracts import PROTOCOL_VERSION, WORKER_RESULT_SENTINEL
 from marvis.plugins.contracts import ToolContext as ToolContext  # noqa: F401 (re-exported for compatibility)
 from marvis.plugins.manifest import PluginManifest, ToolRef
@@ -109,6 +110,8 @@ class ToolRunner:
         workspace: Path,
         plugin_paths: list[Path] | None = None,
         rss_memory_limit_mb: int | None = DEFAULT_RSS_MEMORY_LIMIT_MB,
+        governance=None,
+        binding_resolver=None,
     ):
         self._tools = tool_registry
         self._repo = repo
@@ -117,6 +120,8 @@ class ToolRunner:
         self._workspace = workspace
         self._plugin_paths = tuple(Path(path) for path in (plugin_paths or ()))
         self._rss_memory_limit_mb = rss_memory_limit_mb
+        self._governance = governance
+        self._binding_resolver = binding_resolver
 
     def invoke(
         self,
@@ -125,6 +130,7 @@ class ToolRunner:
         *,
         task_id: str,
         seed: int | None = None,
+        execution_context=None,
     ) -> ToolResult:
         started = time.monotonic()
         target_ref = ref.label()
@@ -139,6 +145,46 @@ class ToolRunner:
         except PermissionError as exc:
             result = _failed_result(started, "permission", str(exc))
             return self._finalize_audited_result(started, target_ref, inputs, result)
+        manifest_human_required = tool.policy.human_decision_gate == "required"
+        manifest_effect_required = tool.policy.effect_authorization == "required"
+        context_human_required = bool(
+            execution_context is not None
+            and getattr(execution_context, "human_decision_required", False) is True
+        )
+        context_effect_required = bool(
+            execution_context is not None
+            and getattr(execution_context, "effect_authorization_required", False) is True
+        )
+        effect_authorization_required = (
+            manifest_effect_required or context_effect_required
+        )
+        human_decision_required = (
+            manifest_human_required
+            or context_human_required
+            or effect_authorization_required
+        )
+        protected_execution = human_decision_required or effect_authorization_required
+        governance_method = (
+            getattr(self._governance, "reserve_effect", None)
+            if effect_authorization_required
+            else getattr(self._governance, "verify_decision", None)
+        )
+        if protected_execution and (
+            not callable(governance_method)
+            or not _has_binding_resolver(self._binding_resolver)
+            or execution_context is None
+        ):
+            result = _failed_result(
+                started,
+                "authorization",
+                f"tool {target_ref} requires a live, bound governance decision",
+            )
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+            )
         effective_seed = seed
         if effective_seed is None and tool.determinism == "stochastic":
             effective_seed = _input_seed(inputs)
@@ -156,6 +202,45 @@ class ToolRunner:
         if checkpoint_error is not None:
             return checkpoint_error
 
+        effect_execution = None
+        if protected_execution:
+            authorization_phase = "binding"
+            try:
+                live_binding = self._resolve_governance_binding(
+                    task_id=task_id,
+                    ref=ref,
+                    inputs=inputs,
+                    execution_context=execution_context,
+                    manifest=manifest,
+                    tool=tool,
+                )
+                if effect_authorization_required:
+                    authorization_phase = "reserve"
+                    effect_execution = self._governance.reserve_effect(
+                        execution_context,
+                        live_binding,
+                    )
+                else:
+                    authorization_phase = "verify"
+                    self._governance.verify_decision(
+                        execution_context,
+                        live_binding,
+                    )
+            except AuthorizationError as exc:
+                result = _failed_result(
+                    started,
+                    "authorization",
+                    f"governance authorization rejected for {target_ref}: {exc}",
+                    error_detail={"authorization_phase": authorization_phase},
+                )
+                return self._finalize_audited_result(
+                    started,
+                    target_ref,
+                    inputs,
+                    result,
+                    seed=effective_seed,
+                )
+
         job = {
             "protocol_version": PROTOCOL_VERSION,
             "module": manifest.module,
@@ -172,6 +257,40 @@ class ToolRunner:
             "side_effects": list(tool.side_effects),
             "builtin": bool(manifest.builtin),
         }
+        if effect_execution is not None:
+            # Execution authorization is platform metadata, not a business
+            # input.  Keeping it out-of-band means a model/client cannot forge
+            # it through the tool's JSON input contract.
+            try:
+                job["effect_execution_id"] = _effect_execution_id(effect_execution)
+                job["runtime_generation"] = _runtime_generation(
+                    effect_execution,
+                    execution_context,
+                )
+                self._governance.mark_effect_dispatched(
+                    _effect_execution_id(effect_execution),
+                    reservation_id=_effect_reservation_id(effect_execution),
+                )
+            except Exception as exc:
+                self._release_prepared_effect(
+                    effect_execution,
+                    reason=f"dispatch checkpoint failed before worker start: {exc}",
+                )
+                if not isinstance(exc, AuthorizationError):
+                    raise
+                result = _failed_result(
+                    started,
+                    "authorization",
+                    f"effect dispatch checkpoint failed for {target_ref}: {exc}",
+                    error_detail={"authorization_phase": "dispatch"},
+                )
+                return self._finalize_audited_result(
+                    started,
+                    target_ref,
+                    inputs,
+                    result,
+                    seed=effective_seed,
+                )
         try:
             completed = _run_worker(
                 self._python_executable,
@@ -187,11 +306,12 @@ class ToolRunner:
                 stdout_tail=_tail(exc.stdout),
                 stderr_tail=_tail(exc.stderr),
             )
-            return self._finalize_audited_result(
+            return self._finalize_effect_result(
                 started,
                 target_ref,
                 inputs,
                 result,
+                effect_execution=effect_execution,
                 seed=effective_seed,
             )
         except WorkerResourceLimitExceeded as exc:
@@ -201,11 +321,28 @@ class ToolRunner:
                 str(exc),
                 resource_limits=exc.resource_usage,
             )
-            return self._finalize_audited_result(
+            return self._finalize_effect_result(
                 started,
                 target_ref,
                 inputs,
                 result,
+                effect_execution=effect_execution,
+                seed=effective_seed,
+            )
+        except Exception as exc:
+            if effect_execution is None:
+                raise
+            result = _failed_result(
+                started,
+                "execution",
+                f"tool {target_ref} worker launch failed: {exc}",
+            )
+            return self._finalize_effect_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                effect_execution=effect_execution,
                 seed=effective_seed,
             )
 
@@ -218,11 +355,12 @@ class ToolRunner:
                 stdout_tail=_tail(completed.stdout),
                 stderr_tail=_tail(completed.stderr),
             )
-            return self._finalize_audited_result(
+            return self._finalize_effect_result(
                 started,
                 target_ref,
                 inputs,
                 result,
+                effect_execution=effect_execution,
                 seed=effective_seed,
             )
 
@@ -236,11 +374,12 @@ class ToolRunner:
                 stderr_tail=_tail(protocol.get("stderr") or completed.stderr),
                 error_detail=_protocol_version_error_detail(protocol),
             )
-            return self._finalize_audited_result(
+            return self._finalize_effect_result(
                 started,
                 target_ref,
                 inputs,
                 result,
+                effect_execution=effect_execution,
                 seed=effective_seed,
             )
 
@@ -255,11 +394,12 @@ class ToolRunner:
                 error_detail=error_detail if isinstance(error_detail, dict) else None,
                 resource_limits=_protocol_resource_limits(protocol),
             )
-            return self._finalize_audited_result(
+            return self._finalize_effect_result(
                 started,
                 target_ref,
                 inputs,
                 result,
+                effect_execution=effect_execution,
                 seed=effective_seed,
             )
 
@@ -280,11 +420,12 @@ class ToolRunner:
                 stderr_tail=_tail(protocol.get("stderr") or completed.stderr),
                 resource_limits=_protocol_resource_limits(protocol),
             )
-            return self._finalize_audited_result(
+            return self._finalize_effect_result(
                 started,
                 target_ref,
                 inputs,
                 result,
+                effect_execution=effect_execution,
                 seed=effective_seed,
             )
         except PermissionError as exc:
@@ -296,11 +437,12 @@ class ToolRunner:
                 stderr_tail=_tail(protocol.get("stderr") or completed.stderr),
                 resource_limits=_protocol_resource_limits(protocol),
             )
-            return self._finalize_audited_result(
+            return self._finalize_effect_result(
                 started,
                 target_ref,
                 inputs,
                 result,
+                effect_execution=effect_execution,
                 seed=effective_seed,
             )
 
@@ -314,13 +456,143 @@ class ToolRunner:
             stderr_tail=_tail(protocol.get("stderr") or ""),
             resource_limits=_protocol_resource_limits(protocol),
         )
+        return self._finalize_effect_result(
+            started,
+            target_ref,
+            inputs,
+            result,
+            effect_execution=effect_execution,
+            seed=effective_seed,
+        )
+
+    def _resolve_governance_binding(
+        self,
+        *,
+        task_id: str,
+        ref: ToolRef,
+        inputs: dict,
+        execution_context,
+        manifest: PluginManifest,
+        tool,
+    ):
+        resolver = self._binding_resolver
+        resolve = getattr(resolver, "resolve_binding", None)
+        if resolve is None:
+            resolve = resolver
+        if not callable(resolve):
+            raise TypeError("binding_resolver must be callable or expose resolve_binding")
+        return resolve(
+            task_id=task_id,
+            ref=ref,
+            inputs=inputs,
+            execution_context=execution_context,
+            manifest=manifest,
+            tool=tool,
+        )
+
+    def _release_prepared_effect(self, effect_execution, *, reason: str) -> None:
+        try:
+            self._governance.release_prepared_effect(
+                _effect_execution_id(effect_execution),
+                reservation_id=_effect_reservation_id(effect_execution),
+                reason=reason,
+            )
+        except Exception:
+            # The worker was never dispatched.  Startup reconciliation can
+            # safely release a stranded PREPARED record; never start the worker
+            # merely because this cleanup checkpoint failed.
+            logger.exception("failed to release prepared effect execution")
+
+    def _finalize_effect_result(
+        self,
+        started: float,
+        target_ref: str,
+        inputs: dict,
+        result: ToolResult,
+        *,
+        effect_execution,
+        seed: int | None,
+    ) -> ToolResult:
+        if effect_execution is None:
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=seed,
+            )
+        effect_id = _effect_execution_id(effect_execution)
+        reservation_id = _effect_reservation_id(effect_execution)
+        if result.ok:
+            try:
+                result_hash = "sha256:" + _hash_inputs(result.output or {})
+                if self._effect_is_committed(effect_id):
+                    # Some domain tools (strategy adoption) atomically commit
+                    # the domain transition and effect receipt in one DB
+                    # transaction. Re-validating that terminal state must not
+                    # replace its domain receipt hash with a host output hash.
+                    result_hash = None
+                self._governance.mark_effect_committed(
+                    effect_id,
+                    reservation_id=reservation_id,
+                    result_hash=result_hash,
+                )
+            except Exception as exc:
+                self._mark_effect_uncertain(
+                    effect_execution,
+                    reason=f"effect result could not be committed: {exc}",
+                )
+                if not isinstance(exc, AuthorizationError):
+                    raise
+                result = _failed_result(
+                    started,
+                    "authorization",
+                    f"effect commit checkpoint failed for {target_ref}: {exc}",
+                    stdout_tail=result.stdout_tail,
+                    stderr_tail=result.stderr_tail,
+                    error_detail={
+                        "authorization_phase": "commit",
+                        "effect_execution_id": effect_id,
+                    },
+                    resource_limits=result.resource_limits,
+                )
+        else:
+            self._mark_effect_uncertain(
+                effect_execution,
+                reason=f"post-dispatch {result.error_kind or 'execution'} failure: {result.error or ''}",
+            )
         return self._finalize_audited_result(
             started,
             target_ref,
             inputs,
             result,
-            seed=effective_seed,
+            seed=seed,
         )
+
+    def _mark_effect_uncertain(self, effect_execution, *, reason: str) -> None:
+        if self._effect_is_committed(_effect_execution_id(effect_execution)):
+            # A domain transaction may have committed before a later artifact
+            # or worker-protocol failure. Never downgrade/revoke that terminal
+            # effect and never make its approval replayable.
+            return
+        try:
+            self._governance.mark_effect_uncertain(
+                _effect_execution_id(effect_execution),
+                reservation_id=_effect_reservation_id(effect_execution),
+                reason=reason,
+            )
+        except Exception:
+            # A DISPATCHED effect must never be reissued on a cleanup failure.
+            # Startup reconciliation keeps the approval terminal/uncertain.
+            logger.exception("failed to mark dispatched effect execution uncertain")
+
+    def _effect_is_committed(self, effect_id: str) -> bool:
+        load = getattr(self._governance, "get_effect_execution", None)
+        if not callable(load):
+            return False
+        current = load(effect_id)
+        state = getattr(current, "state", None)
+        return str(getattr(state, "value", state) or "") == "committed"
 
     def invoke_adhoc(
         self,
@@ -339,6 +611,30 @@ class ToolRunner:
         started = time.monotonic()
         target_ref = f"{mode}.{entrypoint}"
         audit_kind = f"{mode}.invoke"
+        registered_manifest = _registered_manifest_for_module(
+            self._tools,
+            Path(module),
+            plugin_paths=self._plugin_paths,
+        )
+        if registered_manifest is not None:
+            # Ad-hoc execution has no manifest policy or bound ExecutionContext.
+            # Letting it point at an installed module would therefore create a
+            # second, policy-blind entry to every registered Tool (including
+            # strategy adoption). Registered code must always use invoke().
+            result = _failed_result(
+                started,
+                "authorization",
+                f"registered plugin module {registered_manifest} must be invoked through its manifest-aware Tool path",
+            )
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=seed,
+                kind=audit_kind,
+                mode=mode,
+            )
         try:
             validate_against_schema(inputs, input_schema, label="inputs")
         except SchemaValidationError as exc:
@@ -639,6 +935,47 @@ class ToolRunner:
         )
 
 
+def _has_binding_resolver(resolver) -> bool:
+    return callable(getattr(resolver, "resolve_binding", None)) or callable(resolver)
+
+
+def _registered_manifest_for_module(
+    tools,
+    module_path: Path,
+    *,
+    plugin_paths: tuple[Path, ...],
+) -> str | None:
+    """Identify an installed module even when it is addressed by filesystem path."""
+
+    list_manifests = getattr(tools, "manifests", None)
+    if not callable(list_manifests):
+        return None
+    requested = module_path.resolve()
+    project_root = Path(__file__).resolve().parents[2]
+    roots = (project_root, *plugin_paths)
+    for manifest in list_manifests():
+        relative = Path(*str(manifest.module).split("."))
+        candidates: set[Path] = set()
+        for root in roots:
+            base = Path(root).resolve() / relative
+            candidates.add(base.with_suffix(".py"))
+            candidates.add(base / "__init__.py")
+        if any(_same_module_file(requested, candidate) for candidate in candidates):
+            return f"{manifest.name}@{manifest.version}"
+    return None
+
+
+def _same_module_file(requested: Path, candidate: Path) -> bool:
+    """Compare file identity, including aliases on case-insensitive filesystems."""
+
+    try:
+        return requested.samefile(candidate)
+    except OSError:
+        # Preserve a deterministic lexical fallback for missing paths. Existing
+        # files use samefile(), which also closes symlink and hard-link aliases.
+        return requested == candidate.resolve()
+
+
 def _require_tool_permissions(manifest: PluginManifest, side_effects: tuple[str, ...]) -> None:
     allowed = set(manifest.permissions)
     missing = [effect for effect in side_effects if effect not in allowed]
@@ -917,6 +1254,31 @@ def _tail(value: str | bytes | None, *, limit: int = 4000) -> str:
 def _hash_inputs(inputs: dict) -> str:
     raw = json.dumps(inputs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _effect_execution_id(effect_execution) -> str:
+    value = getattr(effect_execution, "effect_execution_id", None)
+    if value is None:
+        value = getattr(effect_execution, "id", None)
+    if not str(value or "").strip():
+        raise ValueError("governance reservation did not return an effect execution id")
+    return str(value)
+
+
+def _effect_reservation_id(effect_execution) -> str:
+    value = getattr(effect_execution, "reservation_id", None)
+    if not str(value or "").strip():
+        raise ValueError("governance reservation did not return a reservation id")
+    return str(value)
+
+
+def _runtime_generation(effect_execution, execution_context) -> str:
+    value = getattr(effect_execution, "runtime_generation", None)
+    if not str(value or "").strip():
+        value = getattr(execution_context, "runtime_generation", None)
+    if not str(value or "").strip():
+        raise ValueError("execution context did not include a runtime generation")
+    return str(value)
 
 
 def _input_seed(inputs: dict) -> int | None:

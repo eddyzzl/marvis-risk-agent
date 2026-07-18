@@ -7004,11 +7004,10 @@ $("agentAcceptanceModeSelect").onchange = (event) => {
   event.target.value = agentAcceptanceMode;
   renderAgentAcceptanceModePreference();
   persistCurrentAgentComposerPreference({ acceptance_mode: agentAcceptanceMode });
-  // UX-10: switching INTO auto mode is the moment the risk (Agent confirms every
-  // gate on the user's behalf, including destructive ones like execute_join) becomes
-  // real — surface it once here rather than relying only on the chip's hover title.
+  // Phase 0B: AUTO only operates low-risk nodes.  Mandatory business decisions
+  // and effect authorizations always stay with the local human principal.
   if (agentAcceptanceMode === "auto_accept" && previousMode !== "auto_accept") {
-    setAgentComposerNotice("自动模式下 Agent 将替你确认全部关键节点（含拼接执行与训练）。", "info");
+    setAgentComposerNotice("自动模式仅处理低风险节点；强制业务决策与副作用授权始终需要人工操作。", "info");
   }
   event.target.blur();
 };

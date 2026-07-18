@@ -1,6 +1,9 @@
+import pytest
+
 from marvis.db import PlanRepository, connect, init_db
 from marvis.orchestrator.contracts import LoopEvent, Plan, PlanStatus, PlanStep, StepStatus
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.manifest import EffectTargetPolicy, GovernancePolicy, ToolRef
+from marvis.state_machine import ConflictError
 
 
 def test_plan_repository_migrates_adaptive_columns_on_existing_tables(tmp_path):
@@ -139,6 +142,59 @@ def test_plan_repository_loop_event_without_type_does_not_rollback_replan(tmp_pa
     assert loaded.replan_count == 1
     assert loaded.loop_events[0].type == "unknown"
     assert loaded.loop_events[0].reason == "manual"
+
+
+@pytest.mark.parametrize("replacement", ["deleted", "lowered", "changed_tool"])
+def test_replan_cannot_delete_or_lower_mandatory_governance_policy(
+    tmp_path,
+    replacement,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _plan()
+    plan.steps[1].needs_confirmation = True
+    plan.steps[1].policy = GovernancePolicy(
+        human_decision_gate="required",
+        effect_authorization="required",
+        effect_target=EffectTargetPolicy(
+            kind="strategy",
+            id_input="strategy_id",
+            expected_statuses=("draft",),
+            result_status="adopted",
+        ),
+    )
+    plan.steps[1].inputs = {"strategy_id": "strategy-1"}
+    repo.create_plan(plan)
+
+    candidates = [_step("step-1", 0)]
+    if replacement != "deleted":
+        candidate = _step("step-2", 1)
+        candidate.inputs = {"strategy_id": "strategy-1"}
+        if replacement == "changed_tool":
+            candidate.tool_ref = ToolRef("_sample", "sleep")
+        candidates.append(candidate)
+
+    with pytest.raises(ConflictError, match="mandatory governance policy"):
+        repo.replace_remaining_steps("plan-1", _plan(*candidates))
+
+
+def test_replan_preserves_mandatory_governance_policy_when_step_is_retained(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _plan()
+    plan.steps[1].needs_confirmation = True
+    plan.steps[1].policy = GovernancePolicy(human_decision_gate="required")
+    repo.create_plan(plan)
+
+    replacement = _plan(_step("step-1", 0), _step("step-2", 1))
+    replacement.steps[1].needs_confirmation = True
+    replacement.steps[1].policy = GovernancePolicy(human_decision_gate="required")
+    repo.replace_remaining_steps("plan-1", replacement)
+
+    loaded = repo.load_plan("plan-1")
+    assert loaded.steps[1].policy.human_decision_gate == "required"
 
 
 def test_plan_repository_appends_steps_and_lists_recent_failed_refs(tmp_path):

@@ -346,7 +346,11 @@ class _MonitoringDispositionAdapter:
 
     def apply(self, driver, plan: Plan, gate: PlanStep, parsed: str, *, run_seq) -> DriverTurn:
         driver._apply_monitoring_disposition(gate, parsed)
-        driver._repo.confirm_step(gate.id)
+        driver._confirm_gate(
+            plan,
+            gate,
+            reason=f"人工选择监控处置：{parsed}",
+        )
         return driver._run_and_handle(plan.id, run_seq=run_seq)
 
     def adjust_schema(self, plan: Plan, gate: PlanStep, load_output: Callable[[str], Any]) -> dict:

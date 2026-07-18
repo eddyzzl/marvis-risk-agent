@@ -17,6 +17,7 @@ from marvis.agent.gates.adapters import gate_editable_input_schema
 from marvis.agent.plan_utils import downstream_step_ids, find_step
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStep, StepStatus
+from marvis.plugins.manifest import governance_policy_hash
 
 
 class PlanMessageComposer:
@@ -73,6 +74,14 @@ class PlanMessageComposer:
         # halt a bare AUTO confirm on them.
         if gate is not None and gate.tool_ref is not None:
             meta["gate_source_tool"] = gate.tool_ref.tool
+        if gate is not None:
+            # Phase 0B: AUTO and the frontend consume the same immutable policy
+            # snapshot the validator accepted for this plan step.  Tool names and
+            # free-form risk text remain useful context, but are no longer the
+            # authority for whether a human must act.
+            meta["human_decision_gate"] = gate.policy.human_decision_gate
+            meta["effect_authorization"] = gate.policy.effect_authorization
+            meta["policy_hash"] = governance_policy_hash(gate.policy)
         if rendered.output_refs:
             meta["output_refs"] = rendered.output_refs
         if rendered.screen is not None:

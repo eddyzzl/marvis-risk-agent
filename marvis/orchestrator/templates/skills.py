@@ -13,7 +13,12 @@ from marvis.orchestrator.templates import (
     builtin_template_ids,
     register_user_template,
 )
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.errors import ManifestError, PluginNotFoundError, ToolNotFoundError
+from marvis.plugins.manifest import (
+    GovernancePolicy,
+    ToolRef,
+    merge_governance_policies,
+)
 
 
 class SkillTemplateError(Exception):
@@ -61,7 +66,7 @@ def validate_skill_template(template, tool_registry, plan_validator) -> list[str
     if template.id in builtin_template_ids():
         problems.append(f"skill id '{template.id}' shadows a builtin template")
     try:
-        plan = _dry_instantiate(template)
+        plan = _dry_instantiate(template, tool_registry)
     except SkillTemplateError as exc:
         problems.append(str(exc))
     else:
@@ -98,12 +103,28 @@ def load_user_skill_templates(workspace, tool_registry, plan_validator) -> Skill
     return report
 
 
-def _dry_instantiate(template: WorkflowTemplate) -> Plan:
+def _dry_instantiate(template: WorkflowTemplate, tool_registry) -> Plan:
     slot_values = {slot.name: f"{{slot:{slot.name}}}" for slot in template.slots}
     title_to_id = _title_to_step_id(template)
     steps = []
     for index, step_template in enumerate(template.steps):
         step_id = title_to_id[step_template.title]
+        try:
+            manifest_policy = tool_registry.resolve(step_template.tool_ref).policy
+        except (PluginNotFoundError, ToolNotFoundError):
+            # Leave existence reporting to PlanValidator so callers receive the
+            # normal structured skill-validation problem instead of an exception.
+            manifest_policy = GovernancePolicy()
+        legacy_gate_policy = GovernancePolicy(
+            human_decision_gate=(
+                "required" if step_template.needs_confirmation else "none"
+            )
+        )
+        effective_policy = merge_governance_policies(
+            manifest_policy,
+            step_template.policy,
+            legacy_gate_policy,
+        )
         steps.append(
             PlanStep(
                 id=step_id,
@@ -117,7 +138,10 @@ def _dry_instantiate(template: WorkflowTemplate) -> Plan:
                     for title in step_template.depends_on_titles
                 ],
                 post_checks=list(step_template.post_checks),
-                needs_confirmation=step_template.needs_confirmation,
+                needs_confirmation=(
+                    effective_policy.human_decision_gate == "required"
+                ),
+                policy=effective_policy,
                 decision_point=step_template.decision_point,
                 sub_agent_scope=step_template.sub_agent_scope,
                 granted_tools=list(step_template.granted_tools),
@@ -195,6 +219,10 @@ def _parse_slot(item: Any, index: int) -> SlotSpec:
 def _parse_step(item: Any, index: int) -> StepTemplate:
     if not isinstance(item, dict):
         raise SkillTemplateError(f"steps[{index}] must be an object")
+    try:
+        policy = GovernancePolicy.from_dict(item.get("policy"))
+    except ManifestError as exc:
+        raise SkillTemplateError(f"steps[{index}].policy: {exc}") from exc
     return StepTemplate(
         title=_required_text(item, "title", label=f"steps[{index}]"),
         tool_ref=_parse_tool_ref(item.get("tool"), f"steps[{index}].tool"),
@@ -205,6 +233,7 @@ def _parse_step(item: Any, index: int) -> StepTemplate:
             for check_index, check in enumerate(item.get("post_checks") or [])
         ),
         needs_confirmation=bool(item.get("needs_confirmation", False)),
+        policy=policy,
         decision_point=bool(item.get("decision_point", False)),
         sub_agent_scope=_optional_text(item.get("sub_agent_scope")),
         granted_tools=tuple(

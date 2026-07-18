@@ -1,4 +1,5 @@
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -14,8 +15,8 @@ from marvis.packs.strategy import build_strategy
 from marvis.packs.strategy.bands import design_cutoff_bands
 from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.tradeoff import tradeoff_feasible_flags, tradeoff_view
-from marvis.plugins.loader import load_builtin_packs
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.loader import load_manifest
+from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.settings import build_settings
@@ -326,7 +327,7 @@ def _runtime(tmp_path):
     plugin_repo = PluginRepository(settings.db_path)
     plugin_registry = PluginRegistry(plugin_repo)
     packs_root = Path(__file__).parents[1] / "marvis" / "packs"
-    load_builtin_packs(plugin_registry, packs_root)
+    _register_policy_neutral_strategy_pack(plugin_registry, packs_root)
     runner = ToolRunner(
         ToolRegistry(plugin_registry),
         plugin_repo,
@@ -350,6 +351,24 @@ def _runtime(tmp_path):
         )
     )
     return runner, registry, task
+
+
+def _register_policy_neutral_strategy_pack(plugin_registry, packs_root):
+    """Expose real strategy kernels without exercising Phase 0B governance.
+
+    Governance authorization has dedicated contract/repository/runner tests.  These
+    tests assert deterministic strategy-tool semantics, so they register a cloned
+    test manifest whose tool policies are explicitly neutral while leaving the
+    shipped builtin manifest untouched.
+    """
+    manifest = load_manifest(packs_root / "strategy", builtin=True)
+    neutral_manifest = replace(
+        manifest,
+        tools=tuple(
+            replace(tool, policy=GovernancePolicy()) for tool in manifest.tools
+        ),
+    )
+    plugin_registry.register(neutral_manifest, enabled=True)
 
 
 def _register(registry, tmp_path, frame: pd.DataFrame, name: str, task_id: str):

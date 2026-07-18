@@ -54,16 +54,26 @@ _BANNED_SNIPPETS = (
     "os.unlink",
     "os.rmdir",
 )
-_BANNED_IMPORT_ROOTS = {
-    "httpx",
-    "os",
-    "pathlib",
-    "requests",
-    "shutil",
-    "socket",
-    "subprocess",
-    "urllib",
-}
+# Drafts execute in a subprocess, but that process still shares the host
+# filesystem and Python environment.  Keep imports fail-closed: adding a safe
+# computation module is an explicit platform decision, rather than trying to
+# enumerate every database, network, dynamic-import, or internal package that a
+# generated draft must not reach.
+_ALLOWED_IMPORT_ROOTS = frozenset({
+    "__future__",
+    "collections",
+    "decimal",
+    "fractions",
+    "functools",
+    "itertools",
+    "json",
+    "math",
+    "operator",
+    "random",
+    "re",
+    "statistics",
+    "string",
+})
 _BANNED_CALL_NAMES = {"eval", "exec", "open", "__import__"}
 _BANNED_ATTR_CALLS = {
     "glob",
@@ -181,11 +191,13 @@ def _ast_safety_hits(code: str) -> list[str]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = str(alias.name).split(".", 1)[0]
-                if root in _BANNED_IMPORT_ROOTS:
+                if root not in _ALLOWED_IMPORT_ROOTS:
                     hits.append(f"import {root}")
         elif isinstance(node, ast.ImportFrom):
             root = str(node.module or "").split(".", 1)[0]
-            if root in _BANNED_IMPORT_ROOTS:
+            if node.level:
+                hits.append("relative import")
+            elif root not in _ALLOWED_IMPORT_ROOTS:
                 hits.append(f"from {root} import")
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in _BANNED_CALL_NAMES:

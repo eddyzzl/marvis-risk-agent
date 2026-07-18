@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 import sqlite3
@@ -70,7 +71,12 @@ _MIGRATION_TABLES = frozenset({
 # _migration_004_strategy_task_input adds the optional, governed strategy
 # business contract. Historical rows remain NULL so callers can distinguish a
 # legacy task from an explicitly supplied (possibly still incomplete) contract.
-SCHEMA_VERSION = 4
+#
+# _migration_005_governance_authorization adds the Phase 0B immutable policy
+# snapshot plus server-issued local principals, immutable human DecisionRecords,
+# one-shot ApprovalRecords, and the crash-safe effect execution ledger used by
+# ToolRunner.
+SCHEMA_VERSION = 5
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -847,6 +853,193 @@ def _migration_004_strategy_task_input(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_005_governance_authorization(conn: sqlite3.Connection) -> None:
+    plan_steps_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plan_steps'"
+    ).fetchone()
+    if plan_steps_exists is not None:
+        _ensure_column(
+            conn,
+            table="plan_steps",
+            column="policy_json",
+            definition=(
+                "TEXT NOT NULL DEFAULT "
+                "'{\"schema_version\":\"tool-policy.v1\","
+                "\"human_decision_gate\":\"none\","
+                "\"effect_authorization\":\"none\"}'"
+            ),
+        )
+        # ALTER TABLE gives every historical row the permissive default. Raise
+        # (never lower) pre-upgrade explicit gates before stamping migration 5,
+        # otherwise a later replan could silently discard them.
+        legacy_gate_rows = conn.execute(
+            "SELECT id, policy_json FROM plan_steps WHERE needs_confirmation = 1"
+        ).fetchall()
+        for row in legacy_gate_rows:
+            try:
+                policy = json.loads(str(row["policy_json"] or "{}"))
+            except (TypeError, ValueError):
+                policy = {}
+            if not isinstance(policy, dict):
+                policy = {}
+            policy["schema_version"] = "tool-policy.v1"
+            policy["human_decision_gate"] = "required"
+            policy.setdefault("effect_authorization", "none")
+            conn.execute(
+                "UPDATE plan_steps SET policy_json = ? WHERE id = ?",
+                (
+                    json.dumps(
+                        policy,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    row["id"],
+                ),
+            )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS local_principals (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL CHECK(kind = 'local_session'),
+            display_name TEXT NOT NULL,
+            session_token_hash TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL CHECK(status IN ('active', 'expired', 'revoked')),
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_records (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            plan_revision INTEGER NOT NULL,
+            step_id TEXT NOT NULL,
+            tool_ref TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            decision TEXT NOT NULL CHECK(decision IN ('approve', 'reject')),
+            reason TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            evidence_hash TEXT NOT NULL,
+            effect_target_json TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(principal_id) REFERENCES local_principals(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_decision_records_step "
+        "ON decision_records(plan_id, step_id, created_at)"
+    )
+    # A DecisionRecord is evidence, not mutable application state. Reversal is
+    # represented by a later DecisionRecord/Approval revocation; silently
+    # rewriting or deleting the original would destroy the audit chain.
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_decision_records_immutable_update
+        BEFORE UPDATE ON decision_records
+        BEGIN
+            SELECT RAISE(ABORT, 'decision_records are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_decision_records_immutable_delete
+        BEFORE DELETE ON decision_records
+        BEGIN
+            SELECT RAISE(ABORT, 'decision_records are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS approval_records (
+            id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            plan_revision INTEGER NOT NULL,
+            step_id TEXT NOT NULL,
+            tool_ref TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            evidence_hash TEXT NOT NULL,
+            effect_target_json TEXT NOT NULL,
+            nonce TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL CHECK(
+                status IN ('issued', 'reserved', 'consumed', 'expired', 'revoked')
+            ),
+            issued_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            reserved_at TEXT,
+            reservation_id TEXT,
+            consumed_at TEXT,
+            revoked_at TEXT,
+            revoke_reason TEXT,
+            FOREIGN KEY(decision_id) REFERENCES decision_records(id),
+            FOREIGN KEY(principal_id) REFERENCES local_principals(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approval_records_step "
+        "ON approval_records(plan_id, step_id, issued_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approval_records_status "
+        "ON approval_records(status, expires_at)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS effect_executions (
+            id TEXT PRIMARY KEY,
+            approval_id TEXT NOT NULL,
+            reservation_id TEXT NOT NULL UNIQUE,
+            runtime_generation TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(
+                status IN ('prepared', 'dispatched', 'committed', 'uncertain')
+            ),
+            prepared_at TEXT NOT NULL,
+            dispatched_at TEXT,
+            committed_at TEXT,
+            uncertain_at TEXT,
+            released_at TEXT,
+            release_reason TEXT,
+            uncertain_reason TEXT,
+            result_hash TEXT,
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(approval_id) REFERENCES approval_records(id)
+        )
+        """
+    )
+    # An approval is one-shot. A preparation that provably never dispatched may
+    # be released (released_at != NULL), after which the same still-valid
+    # approval can be reserved again. Dispatched/uncertain/committed executions
+    # keep the uniqueness lock permanently and can never be blindly replayed.
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_effect_executions_active_approval
+            ON effect_executions(approval_id)
+         WHERE released_at IS NULL
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_effect_executions_status "
+        "ON effect_executions(status, prepared_at)"
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -859,6 +1052,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (2, _migration_002_strategy_versioning),
     (3, _migration_003_validation_input_contracts),
     (4, _migration_004_strategy_task_input),
+    (5, _migration_005_governance_authorization),
 ]
 
 

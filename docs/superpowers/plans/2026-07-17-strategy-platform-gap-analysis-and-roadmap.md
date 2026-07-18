@@ -359,7 +359,7 @@ V2 通过兼容迁移把当前 `adopted` 扩展为策略版本自身的 `draft �
 
 Phase 0B 可先用服务端派生的本地 session principal 关闭当前绕过面；V2 后续治理阶段必须升级为真实用户身份、RBAC 和 maker-checker。客户端或 LLM 永远不能自填 actor，也不能替人工签发批准。
 
-PlanExecutor 通过带外 `ExecutionContext(plan_id, plan_revision, step_id, approval_id)` 把授权传给 ToolRunner。任何直接调用高风险 Runner 的路径缺少有效授权时必须 fail closed。
+PlanExecutor 通过带外 `ExecutionContext(plan_id, plan_revision, step_id, decision_id, approval_id?, runtime_generation, human_decision_required, effect_authorization_required)` 把人工决策证明和可选的一次性副作用授权传给 ToolRunner。纯人工决策门必须验证 DecisionRecord；受保护副作用还必须 reserve/consume 对应 ApprovalRecord。任何直接调用受治理 Runner 的路径缺少有效、完整绑定的证明时必须 fail closed。
 
 批准记录至少绑定：
 
@@ -418,7 +418,7 @@ PlanExecutor 通过带外 `ExecutionContext(plan_id, plan_revision, step_id, app
 
 退出标准使用策略矩阵测试证明：
 
-- `strategy_analysis` 回测、`strategy_development` cutoff/回测/采纳、`rule_strategy` 规则选择/回测/采纳、monitoring disposition/阈值变更都遵守对应 policy；
+- `strategy_analysis` 回测、`strategy_development` cutoff/回测/采纳、`rule_strategy` 规则选择/回测/采纳和当前已有的 monitoring disposition/report gate 都遵守对应 policy；
 - template、novel plan、generic plan API、decision replan 和 failure replan 删除或降低强制门时均失败；
 - AUTO 对所有 `human_decision_gate=required` 只能 halt，且不能签发 `effect_authorization`；
 - Runner 无凭证、错 plan/step/tool、跨任务、过期、重复消费或 policy/manifest 不匹配时 fail closed；
@@ -427,9 +427,15 @@ PlanExecutor 通过带外 `ExecutionContext(plan_id, plan_revision, step_id, app
 
 Phase 0B 的状态机和调用链影响面大，**7-12 人日包含 1-2 人日 spike，但仍须在 spike 后重估，不作为承诺**。
 
+**实施状态（2026-07-18）**：Phase 0B 的治理运行时基础已完成代码收口，包含统一 policy snapshot、validator/replan 防降级、AUTO 强制停机、服务端本地 session principal、不可变 DecisionRecord、一次性 ApprovalRecord、effect execution ledger、带外 ExecutionContext、Runner/Executor fail-closed、策略采纳原子 receipt、启动恢复，以及当前已有 monitoring disposition/report gate 的强制人工决策约束。专项回归覆盖治理、策略开发、规则策略、监控和 API 链路，提交前仍以全量 `scripts/check` 结果为准；本地 session 仍是 V2 单机阶段的过渡身份，真实用户、RBAC 和 maker-checker 继续按后续治理阶段实施。
+
+Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁，不把尚未实现的监控能力计为已交付。自定义阈值真实参与判级、阈值变更生成版本化 monitoring plan 并重跑，以及监控红灯到新策略版本的 handoff 仍由紧接的 Phase 1 实现；这些缺口和后续全部范围都保留在 V2.x，不迁移到 V3/V4。
+
 ### Phase 1：现有策略闭环和统一 DSL（V2.x P1，9-14 人日）
 
 **目标**：把现有 17 个 Tool 变成真实可交付产品链路，并建立后续扩展的唯一策略语义。
+
+**当前状态（2026-07-18）**：Phase 1 尚未完成。特别是版本化监控阈值、按新阈值真实重跑和监控到新版本的 handoff 仍是本阶段待交付能力，不能因 Phase 0B 治理底座完成而标记为已实现。
 
 先做逐类型 contract/design spike，分别钉死 approval、reject、limit、pricing、segmentation 的：输入、rule value、默认决策、核心回测指标、采纳产物和监控基线；未完成设计的类型不能只靠修改 `strategy_type` 字符串宣称可用。
 

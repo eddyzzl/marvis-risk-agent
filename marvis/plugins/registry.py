@@ -119,6 +119,11 @@ class ToolRegistry:
                 return manifest, tool
         raise ToolNotFoundError(ref.label())
 
+    def manifests(self) -> tuple[PluginManifest, ...]:
+        """Return all manifests for runtime boundary checks."""
+
+        return tuple(self._plugins.list(include_disabled=True))
+
     def catalog_for_planner(self) -> list[dict]:
         catalog: list[dict] = []
         for manifest in self._plugins.list():
@@ -133,5 +138,6 @@ class ToolRegistry:
                     "input_schema": tool.input_schema,
                     "output_schema": tool.output_schema,
                     "determinism": tool.determinism,
+                    "policy": tool.policy.to_dict(),
                 })
         return catalog

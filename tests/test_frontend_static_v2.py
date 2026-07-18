@@ -11694,18 +11694,19 @@ def test_all_rail_interactions_move_to_middle_workspace():
 
 
 def test_acceptance_mode_chip_explains_auto_mode_scope():
-    """UX-10: the acceptance-mode chip/select must explain, on hover, that auto
-    mode confirms every gate (including destructive ones) on the user's
-    behalf — previously there was no title/tooltip at all.
-    """
+    """AUTO is limited to low-risk nodes and never represents human approval."""
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
 
     assert 'id="agentAcceptanceModeSelect"' in index_html
-    assert "自动模式下 Agent 将替你确认全部关键节点" in index_html
+    assert "自动模式仅处理低风险节点" in index_html
+    assert "强制业务决策与副作用授权始终需要人工操作" in index_html
+    assert "替你确认全部关键节点" not in index_html
     # fires the composer notice once on switching INTO auto mode.
     assert 'agentAcceptanceMode === "auto_accept" && previousMode !== "auto_accept"' in app_js
-    assert "setAgentComposerNotice(\"自动模式下 Agent 将替你确认全部关键节点（含拼接执行与训练）。\", \"info\")" in app_js
+    assert "自动模式仅处理低风险节点" in app_js
+    assert "强制业务决策与副作用授权始终需要人工操作" in app_js
+    assert "替你确认全部关键节点" not in app_js
 
 
 def test_calibration_and_score_band_chart_functions_exist_in_metric_tables():

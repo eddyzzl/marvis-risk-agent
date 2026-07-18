@@ -570,6 +570,10 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
         adoption_reason = normalize_adoption_reason(inputs.get("adoption_reason"))
     except AdoptionReasonError as exc:
         raise StrategyError(str(exc)) from exc
+    effect_execution_id = _optional_str(getattr(ctx, "effect_execution_id", None))
+    runtime_generation = _optional_str(getattr(ctx, "runtime_generation", None))
+    if (effect_execution_id is None) != (runtime_generation is None):
+        raise StrategyError("治理执行元数据不完整，拒绝采纳策略")
     adopt_result = runtime.strategies.adopt_strategy_with_audit(
         strategy_id,
         reason=adoption_reason,
@@ -586,6 +590,8 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
                 "expected_profit": backtest.expected_profit,
             },
         },
+        effect_execution_id=effect_execution_id,
+        runtime_generation=runtime_generation,
     )
     version = int(adopt_result["version"])
     strategy_dir = Path(runtime.settings.tasks_dir) / str(ctx.task_id) / "strategy"

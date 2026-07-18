@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -17,6 +18,220 @@ from marvis.strategy_adoption import normalize_adoption_reason
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _strategy_effect_conflict(reason: str) -> ConflictError:
+    return ConflictError(f"策略效果授权无效：{reason}")
+
+
+def _strategy_spec_hash_from_row(row: sqlite3.Row) -> str:
+    """Hash the reviewed strategy definition, excluding lifecycle metadata."""
+
+    payload = {
+        "strategy_type": str(row["strategy_type"]),
+        "rules": json.loads(str(row["rules_json"])),
+        "score_col": _optional_str(row["score_col"]),
+        "default_decision": json.loads(str(row["default_decision_json"])),
+        "description": str(row["description"]),
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_strategy_effect_authorization(
+    conn: sqlite3.Connection,
+    *,
+    effect_execution_id: str,
+    runtime_generation: str,
+    strategy_id: str,
+    task_id: str,
+    strategy_type: str,
+    version: int,
+    status: str,
+    strategy_spec_hash: str,
+) -> dict:
+    """Validate the one-shot effect receipt and its frozen strategy target.
+
+    The worker receives only an opaque execution id and a host generation.  It
+    never receives an approval id, reservation id, or target binding as tool
+    inputs.  Those values are loaded from the local governance ledger and
+    cross-checked against current domain state while the caller holds the same
+    SQLite writer transaction used for adoption.
+    """
+    row = conn.execute(
+        """
+        SELECT e.id AS effect_execution_id,
+               e.approval_id,
+               e.reservation_id AS effect_reservation_id,
+               e.runtime_generation,
+               e.status AS effect_status,
+               e.released_at,
+               e.detail_json,
+               a.status AS approval_status,
+               a.reservation_id AS approval_reservation_id,
+               a.task_id AS approval_task_id,
+               a.tool_ref,
+               a.effect_target_json
+          FROM effect_executions e
+          JOIN approval_records a ON a.id = e.approval_id
+         WHERE e.id = ?
+        """,
+        (effect_execution_id,),
+    ).fetchone()
+    if row is None:
+        raise _strategy_effect_conflict("效果执行记录不存在")
+    if str(row["effect_status"]) != "dispatched" or row["released_at"] is not None:
+        raise _strategy_effect_conflict("效果执行记录不是可提交的 dispatched 状态")
+    if str(row["approval_status"]) != "reserved":
+        raise _strategy_effect_conflict("批准记录不是 reserved 状态")
+    effect_reservation_id = str(row["effect_reservation_id"] or "")
+    if not effect_reservation_id or effect_reservation_id != str(
+        row["approval_reservation_id"] or ""
+    ):
+        raise _strategy_effect_conflict("reservation 绑定不一致")
+    if str(row["runtime_generation"]) != runtime_generation:
+        raise _strategy_effect_conflict("runtime generation 已被隔离")
+    if str(row["approval_task_id"]) != task_id:
+        raise _strategy_effect_conflict("批准任务与策略任务不一致")
+    tool_ref = str(row["tool_ref"])
+    if not tool_ref.startswith("strategy.adopt_strategy@"):
+        raise _strategy_effect_conflict("批准工具不是 strategy.adopt_strategy")
+
+    try:
+        target = json.loads(str(row["effect_target_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise _strategy_effect_conflict("effect target 不是有效 JSON") from exc
+    if not isinstance(target, dict):
+        raise _strategy_effect_conflict("effect target 必须是对象")
+
+    expected_status = target.get("expected_status")
+    if expected_status is None:
+        expected_statuses = target.get("expected_statuses")
+        if isinstance(expected_statuses, list) and len(expected_statuses) == 1:
+            expected_status = expected_statuses[0]
+    expected = {
+        "kind": "strategy",
+        "id": strategy_id,
+        "expected_status": "draft",
+        "result_status": "adopted",
+        "version": version,
+        "task_id": task_id,
+        "strategy_type": strategy_type,
+        "strategy_spec_hash": strategy_spec_hash,
+    }
+    actual = {
+        "kind": target.get("kind"),
+        "id": target.get("id"),
+        "expected_status": expected_status,
+        "result_status": target.get("result_status"),
+        "version": target.get("version"),
+        "task_id": target.get("task_id"),
+        "strategy_type": target.get("strategy_type"),
+        "strategy_spec_hash": target.get("strategy_spec_hash"),
+    }
+    if actual != expected or status != "draft":
+        raise _strategy_effect_conflict("目标 id/status/version/task/type/spec 已漂移")
+
+    champion_rows = conn.execute(
+        """
+        SELECT id
+          FROM strategies
+         WHERE task_id = ? AND strategy_type = ? AND status = 'adopted'
+           AND id <> ?
+         ORDER BY id
+        """,
+        (task_id, strategy_type, strategy_id),
+    ).fetchall()
+    current_champion_ids = sorted(str(item["id"]) for item in champion_rows)
+    bound_champions = target.get("current_champion_ids")
+    if bound_champions is None and "current_champion_id" in target:
+        singular = target.get("current_champion_id")
+        bound_champions = [] if singular in (None, "") else [singular]
+    if not isinstance(bound_champions, list):
+        raise _strategy_effect_conflict("授权未冻结 current champion 列表")
+    normalized_bound_champions = sorted(str(item) for item in bound_champions)
+    if normalized_bound_champions != current_champion_ids:
+        raise _strategy_effect_conflict("current champion 已漂移")
+
+    return {
+        "effect_execution_id": effect_execution_id,
+        "approval_id": str(row["approval_id"]),
+        "reservation_id": effect_reservation_id,
+        "runtime_generation": runtime_generation,
+        "detail": _json_object_or_empty(row["detail_json"]),
+    }
+
+
+def _commit_strategy_effect_receipt(
+    conn: sqlite3.Connection,
+    *,
+    receipt: dict,
+    strategy_id: str,
+    version: int,
+    retired_strategy_ids: list[str],
+) -> None:
+    committed_at = _now()
+    domain_receipt = {
+        "kind": "strategy.adopt",
+        "strategy_id": strategy_id,
+        "version": version,
+        "status": "adopted",
+        "retired_strategy_ids": list(retired_strategy_ids),
+    }
+    result_hash = hashlib.sha256(
+        json.dumps(
+            domain_receipt,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    detail = dict(receipt["detail"])
+    detail["domain_receipt"] = domain_receipt
+    effect_cursor = conn.execute(
+        """
+        UPDATE effect_executions
+           SET status = 'committed', committed_at = ?, result_hash = ?,
+               detail_json = ?
+         WHERE id = ? AND status = 'dispatched' AND released_at IS NULL
+           AND reservation_id = ? AND runtime_generation = ?
+        """,
+        (
+            committed_at,
+            result_hash,
+            json.dumps(detail, ensure_ascii=False, sort_keys=True),
+            receipt["effect_execution_id"],
+            receipt["reservation_id"],
+            receipt["runtime_generation"],
+        ),
+    )
+    if effect_cursor.rowcount != 1:
+        raise _strategy_effect_conflict("效果执行提交发生并发冲突")
+    approval_cursor = conn.execute(
+        """
+        UPDATE approval_records
+           SET status = 'consumed', consumed_at = ?
+         WHERE id = ? AND status = 'reserved' AND reservation_id = ?
+        """,
+        (committed_at, receipt["approval_id"], receipt["reservation_id"]),
+    )
+    if approval_cursor.rowcount != 1:
+        raise _strategy_effect_conflict("批准消费发生并发冲突")
+
+
+def _json_object_or_empty(value) -> dict:
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
 
 
 class StrategyRepository:
@@ -76,6 +291,21 @@ class StrategyRepository:
             ).fetchone()
         return None if row is None else _strategy_meta_from_row(row)
 
+    def get_strategy_spec_hash(self, strategy_id: str) -> str | None:
+        """Return a canonical hash of the strategy definition under review."""
+
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT strategy_type, rules_json, score_col,
+                       default_decision_json, description
+                  FROM strategies
+                 WHERE id = ?
+                """,
+                (strategy_id,),
+            ).fetchone()
+        return None if row is None else _strategy_spec_hash_from_row(row)
+
     def list_for_task(self, task_id: str) -> list[Strategy]:
         with connect(self.db_path) as conn:
             rows = conn.execute(
@@ -111,6 +341,8 @@ class StrategyRepository:
         reason: str,
         audit: dict,
         adopted_at: str | None = None,
+        effect_execution_id: str | None = None,
+        runtime_generation: str | None = None,
     ) -> dict:
         """Atomically move a draft strategy to adopted, retiring any sibling
         adopted strategy (same task_id + strategy_type) in the same transaction.
@@ -120,6 +352,13 @@ class StrategyRepository:
         adopt of the same strategy raises instead of silently double-adopting
         (the confirm_step compare-and-swap lesson, tests/test_concurrency.py).
         Returns {"version", "retired_strategy_ids"}."""
+        governed_effect = effect_execution_id is not None or runtime_generation is not None
+        if governed_effect and (
+            not str(effect_execution_id or "").strip()
+            or not str(runtime_generation or "").strip()
+        ):
+            raise ConflictError("策略效果授权无效：治理执行元数据不完整")
+
         normalized_reason = normalize_adoption_reason(reason)
         adoption_audit = dict(audit)
         adoption_audit["detail"] = {
@@ -129,8 +368,19 @@ class StrategyRepository:
         }
         stamp = adopted_at or _now()
         with connect(self.db_path) as conn:
+            # A governed side effect must validate its immutable authorization
+            # snapshot and mutate the domain under the same writer lock.  Without
+            # BEGIN IMMEDIATE a different adoption could land after the champion
+            # snapshot check but before our guarded writes, defeating the fence.
+            if governed_effect:
+                conn.execute("BEGIN IMMEDIATE")
             head = conn.execute(
-                "SELECT task_id, strategy_type, version FROM strategies WHERE id = ?",
+                """
+                SELECT task_id, strategy_type, version, status, rules_json,
+                       score_col, default_decision_json, description
+                  FROM strategies
+                 WHERE id = ?
+                """,
                 (strategy_id,),
             ).fetchone()
             if head is None:
@@ -138,6 +388,19 @@ class StrategyRepository:
             task_id = str(head["task_id"])
             strategy_type = str(head["strategy_type"])
             version = int(head["version"])
+            effect_receipt = None
+            if governed_effect:
+                effect_receipt = _validate_strategy_effect_authorization(
+                    conn,
+                    effect_execution_id=str(effect_execution_id),
+                    runtime_generation=str(runtime_generation),
+                    strategy_id=strategy_id,
+                    task_id=task_id,
+                    strategy_type=strategy_type,
+                    version=version,
+                    status=str(head["status"]),
+                    strategy_spec_hash=_strategy_spec_hash_from_row(head),
+                )
             # Retire in-role siblings first, in the same transaction, so the
             # "at most one adopted per (task, type)" invariant holds atomically.
             retired_rows = conn.execute(
@@ -195,6 +458,14 @@ class StrategyRepository:
                     f"strategy {strategy_id} is not draft: {current['status']}"
                 )
             _write_audit_row(conn, **adoption_audit)
+            if effect_receipt is not None:
+                _commit_strategy_effect_receipt(
+                    conn,
+                    receipt=effect_receipt,
+                    strategy_id=strategy_id,
+                    version=version,
+                    retired_strategy_ids=retired_ids,
+                )
         return {"version": version, "retired_strategy_ids": retired_ids}
 
     def new_version_from(

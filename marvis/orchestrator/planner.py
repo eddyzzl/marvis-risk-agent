@@ -14,7 +14,12 @@ from marvis.orchestrator.context.budget import fit_to_budget, truncate_items_to_
 from marvis.orchestrator.context.ledger import build_progress_ledger
 from marvis.orchestrator.contracts import Plan, PlanStep, PostCheck, StepStatus
 from marvis.orchestrator.templates import WorkflowTemplate
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.errors import PluginNotFoundError, ToolNotFoundError
+from marvis.plugins.manifest import (
+    GovernancePolicy,
+    ToolRef,
+    merge_governance_policies,
+)
 
 
 # LLM-10: prompt text/versions now live in marvis.llm_prompts; these module-level
@@ -117,6 +122,17 @@ class Planner:
         steps = []
         for index, step_template in enumerate(template.steps):
             step_id = title_to_id[step_template.title]
+            manifest_policy = self._tools.resolve(step_template.tool_ref).policy
+            legacy_gate_policy = GovernancePolicy(
+                human_decision_gate=(
+                    "required" if step_template.needs_confirmation else "none"
+                )
+            )
+            effective_policy = merge_governance_policies(
+                manifest_policy,
+                step_template.policy,
+                legacy_gate_policy,
+            )
             steps.append(
                 PlanStep(
                     id=step_id,
@@ -130,7 +146,10 @@ class Planner:
                         for title in step_template.depends_on_titles
                     ],
                     post_checks=list(step_template.post_checks),
-                    needs_confirmation=step_template.needs_confirmation,
+                    needs_confirmation=(
+                        effective_policy.human_decision_gate == "required"
+                    ),
+                    policy=effective_policy,
                     decision_point=step_template.decision_point,
                     sub_agent_scope=step_template.sub_agent_scope,
                     granted_tools=list(step_template.granted_tools),
@@ -260,6 +279,7 @@ class Planner:
                     start_index=_next_remaining_index(plan),
                     max_steps=tier.max_plan_depth,
                 )
+                self._apply_governance_policies(revised_remaining)
                 new_plan = _splice_remaining(plan, revised_remaining, tier)
             except PlanningError as exc:
                 last_error = str(exc)
@@ -313,6 +333,7 @@ class Planner:
                     start_index=_next_append_index(plan),
                     max_steps=tier.explore_segment_size,
                 )
+                self._apply_governance_policies(steps)
                 candidate = _append_segment_plan(plan, steps, tier)
             except PlanningError as exc:
                 last_error = str(exc)
@@ -349,6 +370,7 @@ class Planner:
                 _step_from_json(item, index=index, plan_id=plan_id)
                 for index, item in enumerate(raw_steps[:max_steps])
             ]
+            self._apply_governance_policies(steps)
             return Plan(
                 id=plan_id,
                 task_id=task_id,
@@ -367,6 +389,34 @@ class Planner:
             )
         except (TypeError, ValueError) as exc:
             raise PlanningError(f"invalid plan fields: {exc}") from exc
+
+    def _apply_governance_policies(self, steps: list[PlanStep]) -> None:
+        """Resolve every dynamic step against the installed Tool policy.
+
+        LLM/user-authored policy is only a possible raise.  The manifest remains
+        the authoritative lower bound, so omitting a policy can never turn a
+        protected Tool into an unguarded step.
+        """
+
+        for step in steps:
+            try:
+                manifest_policy = self._tools.resolve(step.tool_ref).policy
+            except (PluginNotFoundError, ToolNotFoundError):
+                # Preserve the normal validator/retry path for unknown tools.
+                continue
+            legacy_gate_policy = GovernancePolicy(
+                human_decision_gate=(
+                    "required" if step.needs_confirmation else "none"
+                )
+            )
+            step.policy = merge_governance_policies(
+                manifest_policy,
+                step.policy,
+                legacy_gate_policy,
+            )
+            step.needs_confirmation = (
+                step.policy.human_decision_gate == "required"
+            )
 
 
 def build_plan_prompt(
@@ -674,6 +724,7 @@ def _step_from_json(item: Any, *, index: int, plan_id: str) -> PlanStep:
             for check_index, check in enumerate(item.get("post_checks") or [])
         ],
         needs_confirmation=bool(item.get("needs_confirmation", False)),
+        policy=GovernancePolicy.from_dict(item.get("policy")),
         decision_point=bool(item.get("decision_point", False)),
         sub_agent_scope=_optional_text(item.get("sub_agent_scope")),
         granted_tools=[

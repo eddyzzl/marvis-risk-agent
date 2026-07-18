@@ -215,6 +215,7 @@ def test_agent_autodrive_binds_gate_step_token_to_confirm_action(monkeypatch):
 
     assert calls
     assert calls[0]["expected_step_id"] == "gate-1"
+    assert calls[0]["confirmation_source"] == "auto"
 
 
 def test_agent_autodrive_replan_goes_through_structured_driver_path(monkeypatch):
@@ -224,8 +225,21 @@ def test_agent_autodrive_replan_goes_through_structured_driver_path(monkeypatch)
     calls = []
 
     class _FakeDriver:
-        def replan_structured(self, *, plan_id, goal, expected_step_id=None, run_seq=0):
-            calls.append({"plan_id": plan_id, "goal": goal, "expected_step_id": expected_step_id})
+        def replan_structured(
+            self,
+            *,
+            plan_id,
+            goal,
+            expected_step_id=None,
+            run_seq=0,
+            confirmation_source="human",
+        ):
+            calls.append({
+                "plan_id": plan_id,
+                "goal": goal,
+                "expected_step_id": expected_step_id,
+                "confirmation_source": confirmation_source,
+            })
             from marvis.agent.driver_turn import DriverMessage, DriverTurn
             return DriverTurn(plan_id, "confirmed", [DriverMessage("chat", "已重规划。", {})])
 
@@ -246,6 +260,36 @@ def test_agent_autodrive_replan_goes_through_structured_driver_path(monkeypatch)
     assert calls[0]["plan_id"] == "plan-9"
     assert calls[0]["goal"] == "重规划当前步骤"
     assert calls[0]["expected_step_id"] == "gate-1"
+    assert calls[0]["confirmation_source"] == "auto"
+
+
+def test_agent_autodrive_marks_structured_adjust_turn_as_auto_source(monkeypatch):
+    calls = []
+
+    def fake_turn(runtime, repo, task, **kwargs):
+        calls.append(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setitem(DRIVER_TURN_FUNCS, TASK_TYPE_MODELING, fake_turn)
+    repo = _TokenRepo()
+    repo.messages[0]["metadata"]["gate_envelope"] = {
+        "kind": "screen",
+        "target_step_id": "gate-1",
+        "allowed_actions": ["confirm", "adjust", "halt"],
+        "controls": [{"id": "leakage_ks", "kind": "number"}],
+    }
+    task = SimpleNamespace(id="task-1", task_type=TASK_TYPE_MODELING)
+    client = _FakeLLM(action="adjust", reason="放宽筛选阈值")
+    client._payload = json.dumps({
+        "action": "adjust",
+        "reason": "放宽筛选阈值",
+        "params": {"leakage_ks": 0.35},
+    })
+
+    agent_autodrive_turn(SimpleNamespace(), repo, task, client=client)
+
+    assert calls
+    assert calls[0]["confirmation_source"] == "auto"
 
 
 def test_agent_autodrive_warns_when_gate_budget_exhausted(monkeypatch):
@@ -1189,6 +1233,56 @@ def test_auto_safety_policy_still_blocks_declared_risk_flags_on_model_delivery_g
 
     assert result["action"] == "halt"
     assert "production_deploy_champion_model" in result["reason"]
+
+
+@pytest.mark.parametrize("action", ["confirm", "adjust", "replan", "clarify", "halt"])
+def test_auto_safety_policy_always_halts_canonical_mandatory_human_gate(action):
+    envelope = extract_gate_envelope({
+        "metadata": {
+            "gate_envelope": {
+                "kind": "strategy_decision",
+                "target_step_id": "opaque-step-id",
+                "allowed_actions": ["confirm", "adjust", "replan", "clarify", "halt"],
+                "human_decision_gate": "required",
+                "effect_authorization": "none",
+                "policy_hash": "sha256:canonical",
+                "risk_flags": [],
+            },
+        },
+    })
+
+    result = _apply_safety_policy(
+        {"action": action, "reason": "AUTO says it can proceed", "replan_goal": "retry"},
+        envelope,
+    )
+
+    assert result["action"] == "halt"
+    assert "强制人工" in result["reason"]
+
+
+def test_auto_safety_policy_never_claims_effect_authorization_even_without_risk_flags():
+    envelope = extract_gate_envelope({
+        "metadata": {
+            "gate_envelope": {
+                "kind": "effect_authorization",
+                "target_step_id": "opaque-step-id",
+                "allowed_actions": ["confirm", "halt"],
+                "human_decision_gate": "required",
+                "effect_authorization": "required",
+                "policy_hash": "sha256:canonical",
+                "risk_flags": [],
+            },
+        },
+    })
+
+    result = _apply_safety_policy(
+        {"action": "confirm", "reason": "AUTO authorizes this effect"},
+        envelope,
+    )
+
+    assert result["action"] == "halt"
+    assert "副作用授权" in result["reason"]
+    assert "AUTO 无权" in result["reason"]
 
 
 # -- LT-2: AUTO stale-control rejection ----------------------------------------

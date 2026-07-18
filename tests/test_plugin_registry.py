@@ -281,6 +281,11 @@ def test_tool_registry_catalog_for_planner_is_compact_and_safe(tmp_path):
                 "required": ["echoed"],
             },
             "determinism": "deterministic",
+            "policy": {
+                "schema_version": "tool-policy.v1",
+                "human_decision_gate": "none",
+                "effect_authorization": "none",
+            },
         }
     ]
     assert "entrypoint" not in catalog[0]

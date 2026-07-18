@@ -1,4 +1,5 @@
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -8,8 +9,8 @@ from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
-from marvis.plugins.loader import load_builtin_packs
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.loader import load_builtin_packs, load_manifest
+from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.settings import build_settings
@@ -21,7 +22,7 @@ def _runtime(tmp_path):
     plugin_repo = PluginRepository(settings.db_path)
     plugin_registry = PluginRegistry(plugin_repo)
     packs_root = Path(__file__).parents[1] / "marvis" / "packs"
-    load_builtin_packs(plugin_registry, packs_root)
+    _register_policy_neutral_strategy_pack(plugin_registry, packs_root)
     runner = ToolRunner(
         ToolRegistry(plugin_registry),
         plugin_repo,
@@ -50,6 +51,28 @@ def _runtime(tmp_path):
     return runner, plugin_registry, registry, task
 
 
+def _register_policy_neutral_strategy_pack(plugin_registry, packs_root):
+    """Register a policy-neutral clone for direct strategy-kernel tests only."""
+    manifest = load_manifest(packs_root / "strategy", builtin=True)
+    neutral_manifest = replace(
+        manifest,
+        tools=tuple(
+            replace(tool, policy=GovernancePolicy()) for tool in manifest.tools
+        ),
+    )
+    plugin_registry.register(neutral_manifest, enabled=True)
+
+
+def _real_builtin_registry(tmp_path):
+    """Load shipped manifests unchanged for manifest contract assertions."""
+    settings = build_settings(tmp_path / "manifest-workspace")
+    init_db(settings.db_path)
+    plugin_registry = PluginRegistry(PluginRepository(settings.db_path))
+    packs_root = Path(__file__).parents[1] / "marvis" / "packs"
+    load_builtin_packs(plugin_registry, packs_root)
+    return plugin_registry
+
+
 def _register_strategy_sample(registry, tmp_path, task_id: str):
     frame = pd.DataFrame({
         "customer_id": ["A", "A", "B", "B", "C", "C"],
@@ -69,7 +92,7 @@ def _register_strategy_sample(registry, tmp_path, task_id: str):
 
 
 def test_strategy_manifest_registers_expected_tools(tmp_path):
-    _runner, plugin_registry, _registry, _task = _runtime(tmp_path)
+    plugin_registry = _real_builtin_registry(tmp_path)
 
     manifest = plugin_registry.get("strategy")
     tool_names = {tool.name for tool in manifest.tools}

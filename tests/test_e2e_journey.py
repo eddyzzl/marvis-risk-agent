@@ -123,18 +123,28 @@ def _poll_plan_until(
 
 
 def _confirm_gate_and_wait(client: httpx.Client, plan_id: str, step_id: str) -> dict:
-    """Confirm a gate step and wait for the executor's background job to make
-    real progress on it.
+    """Approve a governed gate and wait for the executor's background job to
+    make real progress on it.
 
-    The confirm endpoint returns 202 and schedules the run as a FastAPI
+    The decision endpoint returns 202 and schedules the run as a FastAPI
     BackgroundTask; the HTTP response can land before that task starts, so a
-    plan poll immediately after 202 can still observe the *pre-confirm*
-    snapshot (the just-confirmed step still shows "awaiting_confirm", and so
-    does the plan). Wait for the confirmed step itself to leave
+    plan poll immediately after 202 can still observe the *pre-decision*
+    snapshot (the just-approved step still shows "awaiting_confirm", and so
+    does the plan). Wait for the approved step itself to leave
     "awaiting_confirm" before applying the caller's target-status wait --
     otherwise the stale snapshot is mistaken for the *next* gate.
     """
-    resp = client.post(f"/api/plans/{plan_id}/steps/{step_id}/confirm")
+    current = client.get(f"/api/plans/{plan_id}")
+    assert current.status_code == 200, current.text
+    revision = current.json()["plan"]["replan_count"]
+    resp = client.post(
+        f"/api/plans/{plan_id}/steps/{step_id}/decisions",
+        json={
+            "decision": "approve",
+            "reason": "E2E reviewer approved this modeling gate",
+            "expected_plan_revision": revision,
+        },
+    )
     assert resp.status_code == 202, resp.text
 
     deadline = time.monotonic() + STEP_POLL_TIMEOUT_S

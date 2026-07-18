@@ -21,6 +21,8 @@ from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, PlanRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
+from marvis.governance.repository import GovernanceRepository
+from marvis.governance.service import GovernanceService
 from marvis.orchestrator.contracts import PlanStatus
 from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.harness_state import HarnessState
@@ -29,7 +31,6 @@ from marvis.orchestrator.reviewer import Reviewer
 from marvis.orchestrator.templates import load_builtin_templates
 from marvis.orchestrator.validator import PlanValidator
 from marvis.plugins.loader import load_builtin_packs
-from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.repositories.strategy import StrategyRepository
@@ -56,20 +57,47 @@ def _monitoring_driver(tmp_path):
     packs_root = Path(__file__).parents[1] / "marvis" / "packs"
     load_builtin_packs(plugin_registry, packs_root)
     tool_registry = ToolRegistry(plugin_registry)
+    plan_repo = PlanRepository(settings.db_path)
+    governance_repo = GovernanceRepository(settings.db_path)
+    principal = governance_repo.create_local_principal(
+        display_name="策略监控 E2E 操作员"
+    )
+    governance_service = GovernanceService(
+        plan_repo=plan_repo,
+        tool_registry=tool_registry,
+        strategy_repo=StrategyRepository(settings.db_path),
+        governance_repo=governance_repo,
+    )
     runner = ToolRunner(
         tool_registry,
         plugin_repo,
         python_executable=sys.executable,
         datasets_root=settings.datasets_dir,
         workspace=settings.workspace,
+        governance=governance_repo,
+        binding_resolver=governance_service,
     )
     data_repo = DatasetRepository(settings.db_path)
     backend = DataBackend(settings.datasets_dir)
     registry = DatasetRegistry(data_repo, backend, settings.datasets_dir)
-    plan_repo = PlanRepository(settings.db_path)
-    executor = PlanExecutor(plan_repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(plan_repo))
+    executor = PlanExecutor(
+        plan_repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(plan_repo),
+        authorizer=governance_service,
+    )
     planner = Planner(tool_registry, lambda: FakeLLM(), PlanValidator(tool_registry))
-    driver = PlanDriver(plan_repo, executor, planner=planner, validator=PlanValidator(tool_registry))
+    driver = PlanDriver(
+        plan_repo,
+        executor,
+        planner=planner,
+        validator=PlanValidator(tool_registry),
+        governance_service=governance_service,
+        local_principal=principal,
+    )
     load_builtin_templates()
     task = TaskRepository(settings.db_path).create_task(
         TaskCreate(
@@ -84,7 +112,7 @@ def _monitoring_driver(tmp_path):
             score_col="score",
         )
     )
-    return driver, runner, registry, plan_repo, settings, task
+    return driver, registry, plan_repo, settings, task
 
 
 def _register(registry, tmp_path, frame, name, task_id):
@@ -93,32 +121,53 @@ def _register(registry, tmp_path, frame, name, task_id):
     return registry.register_existing(path, task_id=task_id, role="strategy_sample")
 
 
-def _adopt_strategy(runner, registry, tmp_path, task):
+def _adopt_strategy(driver, registry, plan_repo, tmp_path, task):
     # Baseline: rule `score < 500` -> approval 0.80, approved bad rate 1/16 = 0.0625.
     scores = list(range(100, 2100, 100))
     bad = [1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     baseline = _register(registry, tmp_path, pd.DataFrame({"score": scores, "bad": bad}), "baseline", task.id)
-    built = runner.invoke(
-        ToolRef("strategy", "build_strategy"),
-        {"strategy_type": "approval",
-         "rules": [{"condition": "score < 500", "decision": "reject"}],
-         "score_col": "score", "default_decision": "approve"},
+    turn = driver.start(
         task_id=task.id,
+        template_id="strategy_development",
+        slots={
+            "dataset_id": baseline.id,
+            "target_col": "bad",
+            "score_col": "score",
+            "score_direction": "higher_is_better",
+            "max_bad_rate": 0.1,
+        },
     )
-    assert built.ok, built.error
-    strategy_id = built.output["strategy_id"]
-    bt = runner.invoke(
-        ToolRef("strategy", "backtest_strategy"),
-        {"dataset_id": baseline.id, "strategy_id": strategy_id, "target_col": "bad"},
-        task_id=task.id,
+    plan_id = turn.plan_id
+    turn = driver.resume(plan_id=plan_id, user_text="开始", run_seq=1)
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+
+    # Force the deterministic development path to reproduce the baseline rule,
+    # while still reviewing and authorizing every canonical human/effect gate.
+    turn = driver.resume(
+        plan_id=plan_id,
+        user_text="",
+        run_seq=2,
+        adjust_params={"band_edges": [0, 500, 2100]},
     )
-    assert bt.ok, bt.error
-    adopted = runner.invoke(
-        ToolRef("strategy", "adopt_strategy"),
-        {"strategy_id": strategy_id, "backtest_id": bt.output["backtest_id"], "adoption_reason": "committee"},
-        task_id=task.id,
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=3)
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=4)
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    plan = plan_repo.load_plan(plan_id)
+    adopt_step = next(step for step in plan.steps if step.tool_ref.tool == "adopt_strategy")
+    turn = driver.resume(
+        plan_id=plan_id,
+        user_text="确认采纳",
+        run_seq=5,
+        adjust_params={"adoption_reason": "committee approved monitoring baseline"},
+        expected_step_id=adopt_step.id,
     )
-    assert adopted.ok, adopted.error
+    assert turn.status == PlanStatus.DONE.value
+    adopted = plan_repo.load_step_output(adopt_step.id)
+    strategy_id = adopted["strategy_id"]
+    strategy = StrategyRepository(plan_repo.db_path).get_strategy(strategy_id)
+    assert [rule.condition for rule in strategy.rules] == ["score < 500"]
     return strategy_id
 
 
@@ -133,8 +182,8 @@ def _awaiting_step(plan_repo, plan_id):
 
 @pytest.mark.slow
 def test_strategy_monitoring_e2e_red_then_new_version_then_report(tmp_path):
-    driver, runner, registry, plan_repo, settings, task = _monitoring_driver(tmp_path)
-    strategy_id = _adopt_strategy(runner, registry, tmp_path, task)
+    driver, registry, plan_repo, settings, task = _monitoring_driver(tmp_path)
+    strategy_id = _adopt_strategy(driver, registry, plan_repo, tmp_path, task)
 
     # Drift-injected fresh sample: 100 rows, 30 rejected (score<500), 70 approved
     # with 25 bad -> approved bad rate 25/70=0.357, drift +0.294 (>0.10) -> RED.

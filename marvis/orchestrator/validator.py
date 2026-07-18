@@ -55,6 +55,7 @@ class PlanValidator:
         problems.extend(self._check_determinism_checks(plan))
         problems.extend(self._check_subagent_grants(plan))
         problems.extend(self._check_decision_points(plan))
+        problems.extend(self._check_governance_policies(plan))
         return problems
 
     def _check_tools_exist(self, plan: Plan) -> list[str]:
@@ -205,6 +206,63 @@ class PlanValidator:
             for step in plan.steps
             if step.decision_point and is_safety_step(step)
         ]
+
+    def _check_governance_policies(self, plan: Plan) -> list[str]:
+        """A plan may strengthen a manifest policy but may never weaken it."""
+
+        problems: list[str] = []
+        for step in plan.steps:
+            tool = self._resolve_step_tool(step)
+            if tool is None:
+                continue
+            required = tool.policy
+            actual = step.policy
+            if (
+                required.human_decision_gate == "required"
+                and actual.human_decision_gate != "required"
+            ):
+                problems.append(
+                    f"step {step.title}: human_decision_gate cannot be lower than tool policy"
+                )
+            if (
+                required.effect_authorization == "required"
+                and actual.effect_authorization != "required"
+            ):
+                problems.append(
+                    f"step {step.title}: effect_authorization cannot be lower than tool policy"
+                )
+            if (
+                required.effect_authorization == "required"
+                and actual.effect_authorization == "required"
+                and actual.effect_target != required.effect_target
+            ):
+                problems.append(
+                    f"step {step.title}: effect_authorization target must match tool policy"
+                )
+            if (
+                actual.human_decision_gate == "required"
+                and not step.needs_confirmation
+            ):
+                problems.append(
+                    f"step {step.title}: human_decision_gate=required needs confirmation"
+                )
+
+            for ref in step.granted_tools:
+                try:
+                    granted = self._tools.resolve(ref)
+                except (PluginNotFoundError, ToolNotFoundError):
+                    continue
+                if granted.policy.effect_authorization == "required":
+                    problems.append(
+                        f"sub-agent step {step.title}: effect-authorized tool "
+                        f"{ref.label()} cannot be granted to a sub-agent"
+                    )
+                elif granted.policy.human_decision_gate == "required":
+                    problems.append(
+                        f"sub-agent step {step.title}: human-decision-gated tool "
+                        f"{ref.label()} cannot be granted to a sub-agent"
+                    )
+        return problems
 
     def _resolve_step_tool(self, step: PlanStep):
         try:

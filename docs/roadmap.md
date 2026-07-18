@@ -10,6 +10,7 @@
 - 模型验证是稳定兼容工作流之一：继续保留 V1.1 手动模式和 Agent 辅助验证能力，Notebook 契约、PMML 对比、确定性验证指标和 Excel/Word 产出必须保持兼容。
 - V2 不是只有 Plugin/Tool runtime 外壳；欢迎页展示的入口必须对应真实可用的端到端 workflow：人在环确认、受控工具执行、结构化结果、下载/报告或可审计产物。
 - Portfolio / 组合分析能力已有后端工具、模板和测试覆盖；具体是否作为首屏入口或 Agent start allowlist 暴露，以当前代码和 UI 为准。
+- 策略平台改造的 Phase 0A（真实完整开发入口与业务 contract）已完成；Phase 0B 已完成运行时门禁、人工决策证明和一次性副作用授权等治理底座，并覆盖当前已有的 monitoring disposition/report gate。这里的“Phase 0B 完成”不表示版本化监控阈值已经交付：自定义阈值真实判级、阈值变更生成版本化 plan 并重跑，以及监控红灯到新版本的 handoff 属于紧接的 Phase 1。Phase 1 及全部后续范围仍在 V2.x 内交付，不得推到 V3/V4。
 
 ## 术语
 

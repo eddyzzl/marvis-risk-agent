@@ -42,6 +42,12 @@ from marvis.db import (
 from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
 from marvis.execution_environment import load_execution_environment
+from marvis.governance.errors import AuthorizationError
+from marvis.governance.repository import (
+    DEFAULT_SESSION_TTL_SECONDS,
+    GovernanceRepository,
+)
+from marvis.governance.service import GovernanceService
 from marvis.llm_client import OpenAICompatibleLLMClient
 from marvis.llm_settings import load_llm_settings, resolve_llm_model
 from marvis.memory_policy import load_memory_policy
@@ -97,6 +103,7 @@ _REMOTE_READ_ENV = "MARVIS_ALLOW_REMOTE_READ"
 _TRUSTED_PROXY_ENV = "MARVIS_TRUSTED_PROXY_HOSTS"
 _LOCAL_TOKEN_ENV = "MARVIS_LOCAL_TOKEN"
 _LOCAL_TOKEN_HEADER = "x-marvis-token"
+_LOCAL_SESSION_COOKIE = "marvis_local_session"
 _FORWARDED_CLIENT_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded")
 # PERF-9: cache busting must cover every JS/CSS asset the frontend can load,
 # not just the 4 entry files -- the version hash below is derived from a live
@@ -268,6 +275,8 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     settings = workspace if isinstance(workspace, Settings) else build_settings(workspace)
     logger.info("MARVIS starting up workspace=%s version=%s", settings.workspace, __version__)
     init_db(settings.db_path)
+    governance_repo = GovernanceRepository(settings.db_path)
+    governance_reconciliation = governance_repo.reconcile_startup()
     reclaim_stale_running_tasks(settings.db_path, tasks_dir=settings.tasks_dir)
     artifact_recovery_report = reconcile_workspace_artifacts(settings)
     _recovery_actions = (
@@ -285,6 +294,8 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
 
     app = FastAPI(title="MARVIS-Agent")
     app.state.settings = settings
+    app.state.governance_repo = governance_repo
+    app.state.governance_reconciliation = governance_reconciliation
     # Per-workspace plugin-admin secret (replaces the old "local-dev" magic
     # header): minted into the workspace on first startup, stored 0600.
     app.state.plugin_admin_token = ensure_plugin_admin_token(settings.plugin_admin_token_path)
@@ -310,6 +321,19 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
         method = request.method.upper()
         path = request.url.path
         is_local = _is_local_client(_effective_client_host(request))
+        pending_session_token = None
+        request.state.local_principal = None
+        if is_local:
+            session_token = request.cookies.get(_LOCAL_SESSION_COOKIE)
+            try:
+                if not session_token:
+                    raise AuthorizationError("local session cookie is missing")
+                principal = governance_repo.resolve_local_session(session_token)
+            except AuthorizationError:
+                session = governance_repo.create_local_session()
+                principal = session.principal
+                pending_session_token = session.token
+            request.state.local_principal = principal
         if not is_local:
             if method not in _SAFE_METHODS:
                 return JSONResponse(
@@ -339,7 +363,17 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
                     status_code=403,
                     content={"detail": "missing or invalid X-Marvis-Token"},
                 )
-        return await call_next(request)
+        response = await call_next(request)
+        if pending_session_token is not None:
+            response.set_cookie(
+                _LOCAL_SESSION_COOKIE,
+                pending_session_token,
+                max_age=DEFAULT_SESSION_TTL_SECONDS,
+                path="/",
+                httponly=True,
+                samesite="strict",
+            )
+        return response
 
     @app.middleware("http")
     async def _static_cache_control(request, call_next):
@@ -484,6 +518,13 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
     plugin_registry.load_from_db()
     load_builtin_packs(plugin_registry, packs_root)
     tool_registry = ToolRegistry(plugin_registry)
+    plan_repo = PlanRepository(settings.db_path)
+    governance_service = GovernanceService(
+        plan_repo=plan_repo,
+        tool_registry=tool_registry,
+        strategy_repo=StrategyRepository(settings.db_path),
+        governance_repo=app.state.governance_repo,
+    )
     environment = load_execution_environment(settings.workspace)
     python_executable = environment.python_executable or sys.executable
     tool_runner = ToolRunner(
@@ -494,6 +535,8 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
         workspace=settings.workspace,
         plugin_paths=[settings.plugins_dir],
         rss_memory_limit_mb=environment.rss_memory_limit_mb,
+        governance=app.state.governance_repo,
+        binding_resolver=governance_service,
     )
     hook_dispatcher = HookDispatcher(plugin_registry, tool_runner, plugin_repo)
     hook_dispatcher.rebuild_index()
@@ -512,6 +555,8 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
     app.state.plugin_repo = plugin_repo
     app.state.plugin_registry = plugin_registry
     app.state.tool_registry = tool_registry
+    app.state.plan_repo = plan_repo
+    app.state.governance_service = governance_service
     app.state.tool_runner = tool_runner
     app.state.hook_dispatcher = hook_dispatcher
     app.state.draft_repo = draft_repo
@@ -526,7 +571,7 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
 def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
     load_builtin_templates()
     clear_user_templates()
-    plan_repo = PlanRepository(settings.db_path)
+    plan_repo = app.state.plan_repo
     plan_validator = PlanValidator(app.state.tool_registry)
     skill_report = load_user_skill_templates(
         settings.workspace,
@@ -554,6 +599,8 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
             workspace=settings.workspace,
             plugin_paths=app.state.plugin_paths,
             rss_memory_limit_mb=app.state.plugin_rss_memory_limit_mb,
+            governance=app.state.governance_repo,
+            binding_resolver=app.state.governance_service,
         )
         return PlanExecutor(
             plan_repo,
@@ -562,6 +609,7 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
             None,
             app.state.hook_dispatcher,
             harness_state,
+            authorizer=app.state.governance_service,
         )
 
     def subagent_planner_factory(restricted_registry):
@@ -587,6 +635,7 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
         app.state.hook_dispatcher,
         harness_state,
         planner=planner,
+        authorizer=app.state.governance_service,
     )
     app.state.plan_repo = plan_repo
     app.state.plan_validator = plan_validator

@@ -73,7 +73,7 @@ from marvis.agent.validation_service import (
     mark_agent_cancelled,
     raise_if_agent_cancelled,
 )
-from marvis.agent.plan_driver import DriverError
+from marvis.agent.plan_driver import CONFIRMATION_SOURCE_HUMAN, DriverError
 from marvis.agent_memory.api_support import (
     agent_memory_context_from_store,
     audit_agent_memory_use_from_store,
@@ -271,8 +271,9 @@ def dispatch_driver_turn(
     strategy_input: StrategyTaskInput | None = None,
 ) -> dict:
     """Run one driver turn. ``acceptance_mode`` controls the agent-mode behavior at
-    gates (spec §6, two 受控度): AUTO(自动审查) lets the LLM auto-drive ALL gates;
-    NORMAL(默认权限) runs a single turn and STOPS at the first gate for the user to
+    gates (spec §6, two 受控度): AUTO(自动审查) lets the LLM auto-drive low-risk gates;
+    canonical mandatory business/effect gates still stop for a human. NORMAL(默认权限)
+    runs a single turn and STOPS at the first gate for the user to
     confirm — even with an LLM configured. Manual mode (agent_client None) always
     stops at the gate for the control button. ``selection`` carries an edited feature
     set from the §4 screening table; ``dedup_strategies`` carries the per-feature dedup
@@ -310,12 +311,15 @@ def dispatch_driver_turn(
             plan_validator=request.app.state.plan_validator,
             llm_client=driver_llm_client(request, task),
             tier=task_tier(request, task),
+            governance_service=getattr(request.app.state, "governance_service", None),
+            local_principal=getattr(request.state, "local_principal", None),
         )
         result = dispatch_plan_driver_turn(
             runtime, repo_, task, user_text=user_text, agent_client=agent_client,
             auto_accept_enabled=agent_auto_accept(acceptance_mode), selection=selection,
             dedup_strategies=dedup_strategies, adjust_params=adjust_params,
             expected_step_id=expected_step_id,
+            confirmation_source=CONFIRMATION_SOURCE_HUMAN,
         )
     except DriverError as exc:
         repo_.finish_job(job_id, status="failed", error_name="DriverError", error_value=str(exc))

@@ -17,7 +17,7 @@ from marvis.orchestrator.contracts import (
     SubAgent,
 )
 from marvis.routers.plans import router
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.state_machine import ConflictError
 
 
@@ -613,6 +613,25 @@ def test_plan_step_confirm_endpoint_rejects_non_awaiting_step(tmp_path):
 
     assert response.status_code == 409
     assert "not awaiting confirmation" in response.json()["detail"]
+    assert client.app.state.plan_executor.calls == []
+    assert repo.is_step_confirmed("step-1") is False
+    assert _job_statuses(repo.db_path) == ["failed"]
+
+
+def test_plan_step_confirm_without_service_fails_closed_for_governed_policy(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    plan = _plan(status=PlanStatus.RUNNING, task_id=task_id)
+    plan.steps[0].status = StepStatus.AWAITING_CONFIRM
+    plan.steps[0].needs_confirmation = True
+    plan.steps[0].policy = GovernancePolicy(human_decision_gate="required")
+    repo.create_plan(plan)
+
+    response = client.post("/api/plans/plan-1/steps/step-1/confirm")
+
+    assert response.status_code == 409
+    assert "governed human-decision" in response.json()["detail"]
     assert client.app.state.plan_executor.calls == []
     assert repo.is_step_confirmed("step-1") is False
     assert _job_statuses(repo.db_path) == ["failed"]

@@ -520,6 +520,11 @@
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_backtest_strategy",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "none"
+      },
       "side_effects": [
         "read:dataset",
         "read:strategy",
@@ -769,6 +774,11 @@
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_design_cutoff_bands",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "none"
+      },
       "side_effects": [
         "read:dataset"
       ],
@@ -934,6 +944,19 @@
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_adopt_strategy",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "required",
+        "effect_target": {
+          "kind": "strategy",
+          "id_input": "strategy_id",
+          "expected_statuses": [
+            "draft"
+          ],
+          "result_status": "adopted"
+        }
+      },
       "side_effects": [
         "read:strategy",
         "write:strategy"
@@ -1238,6 +1261,11 @@
       "timeout_seconds": 60,
       "failure_policy": "fail",
       "entrypoint": "tool_select_rule_set",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "none"
+      },
       "side_effects": [],
       "memory_limit_mb": 1024
     },
@@ -1402,6 +1430,11 @@
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_render_monitoring_report",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "none"
+      },
       "side_effects": [
         "read:strategy",
         "write:strategy"
