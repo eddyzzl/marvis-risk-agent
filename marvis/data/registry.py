@@ -18,7 +18,12 @@ from marvis.data.backend import DataBackend
 from marvis.data.contracts import Dataset
 from marvis.data.csv_ingest import CsvIngestReport, read_csv_with_fallback_encoding
 from marvis.data.errors import DataBackendError, DatasetContentDriftError
-from marvis.data.excel_ingest import ingest_sheet, is_xlsx_workbook, list_sheets
+from marvis.data.excel_ingest import (
+    detect_excel_container_format,
+    ingest_sheet,
+    list_sheets,
+    require_excel_format,
+)
 from marvis.data.profiler import profile_dataset
 from marvis.data.schema_infer import detect_target_column
 from marvis.files import sha256_file
@@ -73,13 +78,17 @@ class DatasetRegistry:
         role: str = "unknown",
         seed: int = 0,
         max_excel_rows: int | None = None,
+        audit_factory: Callable[[Dataset], dict] | None = None,
     ) -> Dataset:
+        if audit_factory is not None:
+            self._require_atomic_upload_audit_support()
         source_path = Path(source_path)
         dataset_dir = self._dataset_dir(task_id)
         dataset_dir.mkdir(parents=True, exist_ok=True)
         uow = ArtifactUnitOfWork()
         final_name = f"{source_path.stem}_{uuid.uuid4().hex[:8]}.parquet"
         artifact = uow.stage_file(dataset_dir, final_name)
+        pending_notice: dict | None = None
         try:
             self.last_csv_ingest_report = None
             self._pending_ingest_notice = None
@@ -87,9 +96,7 @@ class DatasetRegistry:
                 source_path, artifact.path, max_excel_rows=max_excel_rows
             )
             if self._pending_ingest_notice is not None:
-                self._ingest_notices_by_task.setdefault(str(task_id), []).append(
-                    dict(self._pending_ingest_notice)
-                )
+                pending_notice = dict(self._pending_ingest_notice)
             content_hash = sha256_file(artifact.path)
             find_by_hash = getattr(self._repo, "find_dataset_by_content_hash", None)
             existing = find_by_hash(content_hash) if callable(find_by_hash) else None
@@ -116,25 +123,49 @@ class DatasetRegistry:
                 created_at=_now_iso(),
                 content_hash=content_hash,
             )
-            atomic_result = self._register_upload_atomically(uow, dataset)
+            atomic_result = self._register_upload_atomically(
+                uow,
+                dataset,
+                audit_factory=audit_factory,
+            )
             if atomic_result is not None:
-                return atomic_result
-            create_on_connection = getattr(self._repo, "create_dataset_on_connection", None)
-            transaction = getattr(self._repo, "transaction", None)
-            if callable(create_on_connection) and callable(transaction):
-                return uow.finalize_with_connection(
-                    transaction,
-                    lambda conn: _create_dataset_on_connection(create_on_connection, conn, dataset),
+                result = atomic_result
+            else:
+                create_on_connection = getattr(
+                    self._repo,
+                    "create_dataset_on_connection",
+                    None,
                 )
-            return uow.finalize(lambda: _create_dataset(self._repo.create_dataset, dataset))
+                transaction = getattr(self._repo, "transaction", None)
+                if callable(create_on_connection) and callable(transaction):
+                    result = uow.finalize_with_connection(
+                        transaction,
+                        lambda conn: _create_dataset_on_connection(
+                            create_on_connection,
+                            conn,
+                            dataset,
+                        ),
+                    )
+                else:
+                    result = uow.finalize(
+                        lambda: _create_dataset(self._repo.create_dataset, dataset)
+                    )
+            if pending_notice is not None:
+                self._ingest_notices_by_task.setdefault(str(task_id), []).append(
+                    pending_notice
+                )
+            return result
         except Exception:
             uow.rollback()
+            self._pending_ingest_notice = None
             raise
 
     def _register_upload_atomically(
         self,
         uow: ArtifactUnitOfWork,
         dataset: Dataset,
+        *,
+        audit_factory: Callable[[Dataset], dict] | None = None,
     ) -> Dataset | None:
         transaction = getattr(self._repo, "transaction", None)
         find_on_connection = getattr(
@@ -148,15 +179,22 @@ class DatasetRegistry:
             "create_dataset_with_audit_on_connection",
             None,
         )
-        if not all(
-            callable(method)
-            for method in (
-                transaction,
-                find_on_connection,
-                create_on_connection,
-                create_with_audit_on_connection,
-            )
-        ):
+        write_audit_on_connection = getattr(
+            self._repo,
+            "write_audit_on_connection",
+            None,
+        )
+        required_methods = (
+            transaction,
+            find_on_connection,
+            create_on_connection,
+            create_with_audit_on_connection,
+        )
+        if audit_factory is not None:
+            required_methods += (write_audit_on_connection,)
+        if not all(callable(method) for method in required_methods):
+            if audit_factory is not None:
+                self._require_atomic_upload_audit_support()
             return None
 
         promoted = False
@@ -179,6 +217,8 @@ class DatasetRegistry:
                         result,
                         audit=_dedup_reference_audit(result, existing),
                     )
+                if audit_factory is not None:
+                    write_audit_on_connection(conn, **audit_factory(result))
         except Exception:
             uow.rollback()
             raise
@@ -187,6 +227,25 @@ class DatasetRegistry:
         else:
             uow.rollback()
         return result
+
+    def _require_atomic_upload_audit_support(self) -> None:
+        required_methods = (
+            "transaction",
+            "find_dataset_by_content_hash_on_connection",
+            "create_dataset_on_connection",
+            "create_dataset_with_audit_on_connection",
+            "write_audit_on_connection",
+        )
+        missing = [
+            name
+            for name in required_methods
+            if not callable(getattr(self._repo, name, None))
+        ]
+        if missing:
+            raise DataBackendError(
+                "dataset repository does not support atomic audited upload registration; "
+                f"missing connection-scoped methods: {', '.join(missing)}"
+            )
 
     def register_existing(
         self,
@@ -431,7 +490,8 @@ class DatasetRegistry:
             shutil.copy2(source_path, out_path)
             return None
         if suffix == ".csv":
-            if is_xlsx_workbook(source_path):
+            if detect_excel_container_format(source_path) is not None:
+                detected_excel_format = require_excel_format(source_path)
                 sheet = self._write_excel_upload_as_parquet(
                     source_path,
                     out_path,
@@ -443,9 +503,10 @@ class DatasetRegistry:
                     "severity": "warning",
                     "file": source_path.name,
                     "declared_format": "csv",
-                    "detected_format": "xlsx",
+                    "detected_format": detected_excel_format,
                     "message": (
-                        f"`{source_path.name}` 扩展名是 `.csv`，但内容是 Excel 工作簿；"
+                        f"`{source_path.name}` 扩展名是 `.csv`，但内容是 "
+                        f"{detected_excel_format.upper()} Excel 工作簿；"
                         "已按 Excel 工作簿读取，原文件未修改。"
                     ),
                 }
@@ -472,7 +533,7 @@ class DatasetRegistry:
             frame = pd.read_feather(source_path)
             frame.to_parquet(out_path, index=False)
             return None
-        if suffix in {".xlsx", ".xlsm"}:
+        if suffix in {".xls", ".xlsx", ".xlsm"}:
             return self._write_excel_upload_as_parquet(
                 source_path,
                 out_path,

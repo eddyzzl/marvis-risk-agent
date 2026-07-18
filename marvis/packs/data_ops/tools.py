@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict
 import os
 from pathlib import Path
+import shutil
+import tempfile
 
 import pandas as pd
 
@@ -15,8 +17,16 @@ from marvis.data.backend import (
 )
 from marvis.data.contracts import SMALL_SAMPLE_N
 from marvis.data.dedup import two_level_dedup
-from marvis.data.errors import DedupRequiredError, KeyDtypeMismatchError
-from marvis.data.excel_ingest import ingest_sheet, list_sheets
+from marvis.data.errors import (
+    DatasetTooLargeError,
+    DedupRequiredError,
+    KeyDtypeMismatchError,
+)
+from marvis.data.excel_ingest import (
+    ingest_sheet,
+    list_sheets,
+    new_excel_artifact_name,
+)
 from marvis.data.join_engine import JoinEngine, _key_fps
 from marvis.provenance import NumberProvenance
 from marvis.reconcile import EXACT_ABS_TOL, EXACT_REL_TOL, ReconcileReport, reconcile
@@ -29,29 +39,64 @@ from marvis.safe_paths import assert_within
 def tool_ingest_excel(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     path = _resolve_material_path(str(inputs["path"]), ctx)
-    requested_sheets = inputs.get("sheets") or list_sheets(path)
+    size_bytes = path.stat().st_size
+    if size_bytes > runtime.settings.max_excel_upload_bytes:
+        raise DatasetTooLargeError(
+            reason="Excel 材料文件大小超过上限",
+            limit=runtime.settings.max_excel_upload_bytes,
+            actual=size_bytes,
+        )
+    requested_sheets = [str(sheet) for sheet in (inputs.get("sheets") or list_sheets(path))]
     role = str(inputs.get("role") or "feature")
     out_dir = runtime.datasets_root / ctx.task_id / "excel"
-    datasets = []
+    out_dir.mkdir(parents=True, exist_ok=True)
+    uow = ArtifactUnitOfWork()
+    staged_sheets = []
     reports = []
-    for sheet in requested_sheets:
-        parquet_path, report = ingest_sheet(path, str(sheet), out_dir)
-        dataset = runtime.registry.register_existing(
-            parquet_path,
-            task_id=ctx.task_id,
-            role=role,
-            seed=_seed(ctx),
+    try:
+        with tempfile.TemporaryDirectory(prefix=".excel_ingest_", dir=out_dir) as scratch:
+            scratch_dir = Path(scratch)
+            for sheet in requested_sheets:
+                parquet_path, report = ingest_sheet(
+                    path,
+                    sheet,
+                    scratch_dir,
+                    max_rows=runtime.settings.max_excel_rows,
+                )
+                artifact = uow.stage_file(
+                    out_dir,
+                    new_excel_artifact_name(report.sheet),
+                )
+                shutil.move(parquet_path, artifact.path)
+                staged_sheets.append((artifact.final_path, report))
+                reports.append({
+                    "sheet": report.sheet,
+                    "header_rows": report.header_rows,
+                    "data_start_row": report.data_start_row,
+                    "flattened_columns": report.flattened_columns,
+                    "original_shape": list(report.original_shape),
+                    "warnings": [],
+                })
+        registered = uow.finalize_with_connection(
+            runtime.registry.transaction,
+            lambda conn: [
+                runtime.registry.register_existing_on_connection(
+                    conn,
+                    parquet_path,
+                    task_id=ctx.task_id,
+                    role=role,
+                    seed=_seed(ctx),
+                )
+                for parquet_path, _report in staged_sheets
+            ],
         )
-        datasets.append(_dataset_payload(dataset))
-        reports.append({
-            "sheet": report.sheet,
-            "header_rows": report.header_rows,
-            "data_start_row": report.data_start_row,
-            "flattened_columns": report.flattened_columns,
-            "original_shape": list(report.original_shape),
-            "warnings": [],
-        })
-    return {"datasets": datasets, "reports": reports}
+    except Exception:
+        uow.rollback()
+        raise
+    return {
+        "datasets": [_dataset_payload(dataset) for dataset in registered],
+        "reports": reports,
+    }
 
 
 def _resolve_material_path(raw_path: str, ctx) -> Path:

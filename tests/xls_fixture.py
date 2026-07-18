@@ -1,0 +1,28 @@
+from __future__ import annotations
+
+import base64
+import zlib
+
+
+# A tiny BIFF8 workbook generated with xlwt once and stored compressed so the
+# read-path tests do not need an obsolete Excel writer dependency at runtime.
+_LEGACY_XLS_ZLIB_BASE64 = """
+eNrtWE1IVFEU/u51/pz8mTENNDARsjIXI25soVNCukqsFkUE9kZfIY4zMumiFmXZLIOgVdHGcNPGatMPFdSuRWDUIggCp3a1Cgpa
+6LzOOe/NNNYIDtWQ8b7HPe/cc+959879zj3vznu5GF6au9uUwU/oRQWyViV8BTZFpTJXCYHaLYvV3D1AxXKxoVAZICJ9XjyqfuFn
+DpnvDDTueJ6RBN5TOY5JDCYTZksZ0SdzMBTPoUd5KPY0blCpQaPMq07kiMjNIm9L38ci94rlssge6rukjmExOtje7cTxUd0qbTUk
+Fe6Lz1uxdKIBzzmOz19Rdl8v9qXGjPi/2dDsqcI8iLkBM2GmjPgS6onCeXy1WoAvub36tMW1l9euQPZvq+3+Ivar2gPMwDqhOBDT
+FJABj70NDxsTk3EzjVp89LLFj37TmJpOmcsYlCzss8tEMjYWNyn1xozR4ZNx49QmIJ40EsPGRHI6MUW1zq7uSERERGp7uEYiQs89
+PZJMmUHO65IHQqvyQLXsjiqSozQN1sOyR0KU6ZdvfX51IDYUHRbLjOR++w2xnX8SLFxgD3KukZaKvGwXj90iL8pTt4reJLKeIpvu
+bUMNjtI/K30uSWsbjdMleB3dUaDvJD396eCD5vSH6C7SFwYyZ+sX3kTn0EprNUr+fM2iQ3Wo69cYD6O5u3JyyTuRjb/klYAOOXO3
+nNdgLVYQFDUs0q7x6qh8TTtrxd6qiLcSb16PJzS+yq9tGDdr2Zv9dBE/u4/H8bM58Ymtbxv79eo63ONOlAN/oHwM6w3MsF4Hw94C
+TvWanJ7TQYfT9iDyXOo1ueT+9urX0dYWDlGMQxcuXLhw4cKFi9+Hcs5sfGrhk4jXORn6ne86K1Sy7meS/xaHkKRriv6W7keC7imc
+KSl+tsCrcs9S6/TJfS9kHKHRUxhHTOYxXnL80sleFf6edTuG/twWKnX8bCnz/Mvjfwe74Ai6
+"""
+
+
+def legacy_xls_bytes() -> bytes:
+    encoded = "".join(_LEGACY_XLS_ZLIB_BASE64.split())
+    return zlib.decompress(base64.b64decode(encoded))
+
+
+__all__ = ["legacy_xls_bytes"]

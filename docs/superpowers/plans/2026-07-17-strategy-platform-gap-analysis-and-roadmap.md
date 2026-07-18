@@ -482,7 +482,9 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 负责 report-ready 指标、当前状况、样本和外部历史资料的结构化语义。
 
-**首个纵切（已完成）**：已建立 task-scoped `DataWorkspaceSnapshot`，用 revision/`If-Match` 保存 active dataset、dataset hash、analysis generation、页面选择和字段语义；新增 task-owned preview，并复用现有 CSV/XLSX 导入。切换 active dataset 必须清空旧字段选择和语义，旧 dataset/artifact 仍保留为历史证据；底层 parquet 若与注册 hash 漂移，工作区读取、保存和预览均失败关闭；保存请求在途时不允许用本地 discard 冒充服务端写入已撤销。`.xls`、SQL connector、完整变换、统计和导出随后分提交完成，但仍全部属于本 Phase 和 V2.x。
+**首个纵切（已完成）**：已建立 task-scoped `DataWorkspaceSnapshot`，用 revision/`If-Match` 保存 active dataset、dataset hash、analysis generation、页面选择和字段语义；新增 task-owned preview，并复用现有 CSV/XLSX 导入。切换 active dataset 必须清空旧字段选择和语义，旧 dataset/artifact 仍保留为历史证据；底层 parquet 若与注册 hash 漂移，工作区读取、保存和预览均失败关闭；保存请求在途时不允许用本地 discard 冒充服务端写入已撤销。
+
+**旧版 Excel 纵切（已完成）**：HTTP 上传、本地路径注册和 Agent `data_ops.ingest_excel` 均可按真实文件内容读取 BIFF `.xls`，并与 `.xlsx/.xlsm` 共用工作表、精确数据行数和文件体积门禁；扩展名伪装不能绕过 Excel 上限，损坏或 HTML 伪装文件会显式失败且不登记半成品。测试使用固定真实 BIFF fixture，不引入过时的写入依赖。SQL connector、完整变换、统计和导出随后分提交完成，但仍全部属于本 Phase 和 V2.x。
 
 交付：
 

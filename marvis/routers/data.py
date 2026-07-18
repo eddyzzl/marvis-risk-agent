@@ -61,7 +61,14 @@ from marvis.data.errors import (
     InvalidDatasetPathError,
     JoinNotConfirmedError,
 )
-from marvis.data.excel_ingest import ingest_sheet, list_sheets
+from marvis.data.excel_ingest import (
+    detect_excel_container_format,
+    detect_excel_container_format_from_prefix,
+    ingest_sheet,
+    list_sheets,
+    new_excel_artifact_name,
+    require_excel_format,
+)
 from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.data.workspace import (
@@ -87,8 +94,8 @@ DEDUP_STRATEGIES = {None, "first", "last", "agg_mean", "agg_max"}
 UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 # TST-2 (roadmap-1e): local-path registration only accepts these extensions --
 # an explicit whitelist, not "whatever register_from_upload happens to parse".
-DATASET_PATH_SUFFIXES = {".csv", ".xlsx", ".parquet"}
-_EXCEL_UPLOAD_SUFFIXES = {".xlsx", ".xlsm"}
+DATASET_PATH_SUFFIXES = {".csv", ".xls", ".xlsx", ".xlsm", ".parquet"}
+_EXCEL_UPLOAD_SUFFIXES = {".xls", ".xlsx", ".xlsm"}
 _MATCH_METHODS = frozenset({
     "exact",
     "exact_lower",
@@ -109,6 +116,20 @@ def _max_upload_bytes_for_suffix(settings, suffix: str) -> int:
     if suffix in _EXCEL_UPLOAD_SUFFIXES:
         return settings.max_excel_upload_bytes
     return settings.max_csv_upload_bytes
+
+
+def _verified_excel_format(path: Path, settings) -> str | None:
+    container_format = detect_excel_container_format(path)
+    if container_format is None:
+        return None
+    size_bytes = path.stat().st_size
+    if size_bytes > settings.max_excel_upload_bytes:
+        raise DatasetTooLargeError(
+            reason="检测为 Excel 的文件大小超过上限",
+            limit=settings.max_excel_upload_bytes,
+            actual=size_bytes,
+        )
+    return require_excel_format(path)
 
 
 def _reject_by_content_length(request: Request, max_bytes: int) -> None:
@@ -136,7 +157,13 @@ def _reject_by_content_length(request: Request, max_bytes: int) -> None:
         )
 
 
-def _stream_upload_to_path(file: UploadFile, destination: Path, *, max_bytes: int) -> int:
+def _stream_upload_to_path(
+    file: UploadFile,
+    destination: Path,
+    *,
+    max_bytes: int,
+    max_excel_bytes: int | None = None,
+) -> int:
     """Stream ``file`` to ``destination`` in fixed-size chunks instead of
     ``file.file.read()`` (whole-file-into-memory). Sync read of the underlying
     SpooledTemporaryFile: this endpoint is a plain `def` so FastAPI already
@@ -146,16 +173,28 @@ def _stream_upload_to_path(file: UploadFile, destination: Path, *, max_bytes: in
     or spoofed, see `_reject_by_content_length`).
     """
     total_bytes = 0
+    effective_max_bytes = max_bytes
+    detected_excel = False
     with destination.open("wb") as output:
         while True:
             chunk = file.file.read(UPLOAD_CHUNK_SIZE)
             if not chunk:
                 break
+            if total_bytes == 0 and max_excel_bytes is not None:
+                detected_excel = (
+                    detect_excel_container_format_from_prefix(chunk) is not None
+                )
+                if detected_excel:
+                    effective_max_bytes = min(effective_max_bytes, max_excel_bytes)
             total_bytes += len(chunk)
-            if total_bytes > max_bytes:
+            if total_bytes > effective_max_bytes:
                 raise DatasetTooLargeError(
-                    reason="上传文件大小超过上限",
-                    limit=max_bytes,
+                    reason=(
+                        "检测为 Excel 的上传文件大小超过上限"
+                        if detected_excel
+                        else "上传文件大小超过上限"
+                    ),
+                    limit=effective_max_bytes,
                     actual=total_bytes,
                 )
             output.write(chunk)
@@ -198,21 +237,39 @@ def _resolve_local_dataset_path(raw_path: str) -> Path:
     return resolved
 
 
-def _copy_local_dataset_path(source: Path, destination: Path, *, max_bytes: int) -> int:
+def _copy_local_dataset_path(
+    source: Path,
+    destination: Path,
+    *,
+    max_bytes: int,
+    max_excel_bytes: int | None = None,
+) -> int:
     """Chunked copy (mirrors ``_stream_upload_to_path``) so a large local file
     is never fully buffered in memory, and so it is subject to the same size
     guardrail as an HTTP upload of the same file type."""
     total_bytes = 0
+    effective_max_bytes = max_bytes
+    detected_excel = False
     with source.open("rb") as input_file, destination.open("wb") as output:
         while True:
             chunk = input_file.read(UPLOAD_CHUNK_SIZE)
             if not chunk:
                 break
+            if total_bytes == 0 and max_excel_bytes is not None:
+                detected_excel = (
+                    detect_excel_container_format_from_prefix(chunk) is not None
+                )
+                if detected_excel:
+                    effective_max_bytes = min(effective_max_bytes, max_excel_bytes)
             total_bytes += len(chunk)
-            if total_bytes > max_bytes:
+            if total_bytes > effective_max_bytes:
                 raise DatasetTooLargeError(
-                    reason="本地路径注册文件大小超过上限",
-                    limit=max_bytes,
+                    reason=(
+                        "检测为 Excel 的本地路径文件大小超过上限"
+                        if detected_excel
+                        else "本地路径注册文件大小超过上限"
+                    ),
+                    limit=effective_max_bytes,
                     actual=total_bytes,
                 )
             output.write(chunk)
@@ -456,7 +513,12 @@ def upload_task_dataset(
     # byte count is the authoritative size guard; Content-Length above is only
     # a fast pre-check and can be absent or spoofed.
     try:
-        _stream_upload_to_path(file, upload_artifact.path, max_bytes=max_upload_bytes)
+        _stream_upload_to_path(
+            file,
+            upload_artifact.path,
+            max_bytes=max_upload_bytes,
+            max_excel_bytes=settings.max_excel_upload_bytes,
+        )
     except DatasetTooLargeError as exc:
         upload_uow.rollback()
         raise payload_too_large(str(exc)) from exc
@@ -464,7 +526,8 @@ def upload_task_dataset(
     try:
         upload_uow.promote_all()
         suffix = upload_path.suffix.lower()
-        if suffix in {".xlsx", ".xlsm"}:
+        detected_excel_format = _verified_excel_format(upload_path, settings)
+        if detected_excel_format is not None or suffix in _EXCEL_UPLOAD_SUFFIXES:
             sheets = list_sheets(upload_path)
             if sheet:
                 if sheet not in sheets:
@@ -486,7 +549,10 @@ def upload_task_dataset(
                             scratch_dir,
                             max_rows=settings.max_excel_rows,
                         )
-                        artifact = uow.stage_file(out_dir, parquet_path.name)
+                        artifact = uow.stage_file(
+                            out_dir,
+                            new_excel_artifact_name(report.sheet),
+                        )
                         shutil.move(parquet_path, artifact.path)
                         staged_sheets.append((artifact.final_path, report))
                         excel_warnings = []
@@ -595,7 +661,7 @@ def register_task_dataset_from_path(
     if role not in DATASET_ROLES:
         raise unprocessable("invalid dataset role")
     settings = request.app.state.settings
-    repo_data, _backend, registry, _join_engine = _data_runtime(request)
+    _repo_data, _backend, registry, _join_engine = _data_runtime(request)
     try:
         source_path = _resolve_local_dataset_path(str(payload.get("path") or ""))
     except InvalidDatasetPathError as exc:
@@ -609,7 +675,12 @@ def register_task_dataset_from_path(
     )
     max_bytes = _max_upload_bytes_for_suffix(settings, source_path.suffix.lower())
     try:
-        _copy_local_dataset_path(source_path, upload_artifact.path, max_bytes=max_bytes)
+        _copy_local_dataset_path(
+            source_path,
+            upload_artifact.path,
+            max_bytes=max_bytes,
+            max_excel_bytes=settings.max_excel_upload_bytes,
+        )
     except DatasetTooLargeError as exc:
         upload_uow.rollback()
         raise payload_too_large(str(exc)) from exc
@@ -619,6 +690,7 @@ def register_task_dataset_from_path(
     upload_path = upload_artifact.final_path
     try:
         upload_uow.promote_all()
+        _verified_excel_format(upload_path, settings)
         # register_from_upload already gives GAP-7 content-hash dedup / idempotency
         # for free -- registering the same local path twice reuses the existing
         # dataset's parquet instead of duplicating it, exactly like a repeat HTTP
@@ -628,6 +700,18 @@ def register_task_dataset_from_path(
             upload_path,
             role=role,
             max_excel_rows=settings.max_excel_rows,
+            audit_factory=lambda registered: {
+                "kind": "dataset.registered_from_path",
+                "target_ref": registered.id,
+                "outcome": "succeeded",
+                "detail": {
+                    "task_id": task_id,
+                    "dataset_id": registered.id,
+                    "role": registered.role,
+                    "source_path": str(source_path),
+                    "content_hash": registered.content_hash,
+                },
+            },
         )
     except HTTPException:
         upload_uow.rollback()
@@ -642,21 +726,6 @@ def register_task_dataset_from_path(
         upload_uow.rollback()
         raise
     upload_uow.commit()
-    # INV-8: audit every local-path registration, regardless of dedup outcome --
-    # a hard write (not a soft getattr probe): a failure here must be a visible
-    # 500, not a silently-skipped audit trail for a security-sensitive path.
-    repo_data.write_audit(
-        kind="dataset.registered_from_path",
-        target_ref=dataset.id,
-        outcome="succeeded",
-        detail={
-            "task_id": task_id,
-            "dataset_id": dataset.id,
-            "role": dataset.role,
-            "source_path": str(source_path),
-            "content_hash": dataset.content_hash,
-        },
-    )
     dispatch_platform_hook(
         getattr(request.app.state, "hook_dispatcher", None),
         "dataset.registered",

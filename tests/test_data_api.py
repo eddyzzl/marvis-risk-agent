@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+from io import BytesIO
 import json
 import time
 
@@ -8,6 +9,7 @@ import pandas as pd
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 
 from marvis.api import router
 from marvis.app import create_app
@@ -24,6 +26,7 @@ from marvis.job_cancellation import (
 from marvis.routers.data import _run_join_execute_job, router as data_router
 from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.settings import build_settings
+from tests.xls_fixture import legacy_xls_bytes
 
 
 class FakeHookDispatcher:
@@ -73,6 +76,33 @@ def _registry(settings):
     repo = DatasetRepository(settings.db_path)
     backend = DataBackend(settings.datasets_dir)
     return DatasetRegistry(repo, backend, settings.datasets_dir)
+
+
+def _xlsx_bytes(sheets: dict[str, list[list[object]]]) -> bytes:
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for sheet_name, rows in sheets.items():
+        worksheet = workbook.create_sheet(sheet_name)
+        for row in rows:
+            worksheet.append(row)
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _malformed_ole_csv_bytes(*, padding: int = 0) -> bytes:
+    return (
+        bytes.fromhex("d0cf11e0a1b11ae1")
+        + b"mobile,bad_flag\n13800138000,0\n"
+        + (b"x" * padding)
+    )
+
+
+def _task_dataset_files(settings, task_id: str) -> list:
+    task_dir = settings.datasets_dir / task_id
+    if not task_dir.exists():
+        return []
+    return [path for path in task_dir.rglob("*") if path.is_file()]
 
 
 def _register_csv(settings, tmp_path, task_id: str, name: str, frame: pd.DataFrame, role: str):
@@ -333,6 +363,296 @@ def test_dataset_upload_rejects_invalid_excel_sheet(tmp_path):
     assert not any(upload_dir.rglob("*"))
 
 
+def test_dataset_upload_rejects_malformed_ole_candidate_named_csv_without_artifacts(
+    tmp_path,
+):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={
+            "file": (
+                "malformed.csv",
+                _malformed_ole_csv_bytes(),
+                "text/csv",
+            )
+        },
+    )
+
+    assert response.status_code == 400
+    assert "workbook" in response.json()["detail"].lower()
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+    assert _task_dataset_files(settings, task.id) == []
+
+
+def test_dataset_upload_uses_ole_container_excel_cap_before_workbook_parser(
+    tmp_path,
+    monkeypatch,
+):
+    client, settings = _client(tmp_path)
+    object.__setattr__(settings, "max_excel_upload_bytes", 512)
+    object.__setattr__(settings, "max_csv_upload_bytes", 4096)
+    task = _create_task(settings)
+
+    def parser_must_not_run(*args, **kwargs):
+        raise AssertionError("workbook parser ran before the cheap Excel size guard")
+
+    monkeypatch.setattr(
+        "marvis.data.excel_ingest.xlrd.open_workbook",
+        parser_must_not_run,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={
+            "file": (
+                "oversized.csv",
+                _malformed_ole_csv_bytes(padding=1024),
+                "text/csv",
+            )
+        },
+    )
+
+    assert response.status_code == 413
+    assert "Excel" in response.json()["detail"]
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+    assert _task_dataset_files(settings, task.id) == []
+
+
+def test_dataset_upload_accepts_xlsx_content_named_xls(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    workbook_bytes = _xlsx_bytes({
+        "Sample": [["metric", "bad_flag"], [101, 0], [102, 1]],
+    })
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample", "sheet": "Sample"},
+        files={"file": ("wrong.xls", workbook_bytes, "application/vnd.ms-excel")},
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["reports"][0]["sheet"] == "Sample"
+    dataset = payload["datasets"][0]
+    preview = client.get(f"/api/datasets/{dataset['id']}/preview?rows=2")
+    assert preview.status_code == 200
+    assert preview.json()["columns"] == ["metric", "bad_flag"]
+    assert preview.json()["rows"][0]["metric"] == 101
+
+
+def test_dataset_upload_accepts_biff_content_named_xlsx(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "feature", "sheet": "Feature"},
+        files={
+            "file": (
+                "wrong.xlsx",
+                legacy_xls_bytes(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["reports"][0]["sheet"] == "Feature"
+    dataset = payload["datasets"][0]
+    preview = client.get(f"/api/datasets/{dataset['id']}/preview?rows=2")
+    assert preview.status_code == 200
+    assert preview.json()["columns"] == ["mobile", "score"]
+    assert preview.json()["rows"][0]["score"] == 650
+
+
+def test_dataset_upload_biff_named_csv_honors_requested_sheet(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "feature", "sheet": "Feature"},
+        files={"file": ("legacy.csv", legacy_xls_bytes(), "text/csv")},
+    )
+
+    assert response.status_code == 201
+    dataset = response.json()["datasets"][0]
+    preview = client.get(f"/api/datasets/{dataset['id']}/preview?rows=2")
+    assert preview.status_code == 200
+    assert preview.json()["columns"] == ["mobile", "score"]
+    assert preview.json()["rows"][0]["score"] == 650
+
+
+def test_dataset_upload_sanitize_colliding_sheet_names_keep_distinct_files(
+    tmp_path,
+):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    workbook_bytes = _xlsx_bytes({
+        "Risk Sheet": [["metric"], [101]],
+        "Risk_Sheet": [["metric"], [202]],
+    })
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "feature"},
+        files={
+            "file": (
+                "collisions.xlsx",
+                workbook_bytes,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert [report["sheet"] for report in payload["reports"]] == [
+        "Risk Sheet",
+        "Risk_Sheet",
+    ]
+    datasets = payload["datasets"]
+    assert len(datasets) == 2
+    assert len({dataset["source_path"] for dataset in datasets}) == 2
+    assert len({dataset["content_hash"] for dataset in datasets}) == 2
+    assert all(
+        (settings.datasets_dir / dataset["source_path"]).is_file()
+        for dataset in datasets
+    )
+    previews = [
+        client.get(f"/api/datasets/{dataset['id']}/preview?rows=1")
+        for dataset in datasets
+    ]
+    assert [preview.status_code for preview in previews] == [200, 200]
+    assert [preview.json()["rows"][0]["metric"] for preview in previews] == [
+        101,
+        202,
+    ]
+
+
+def test_dataset_upload_same_sheet_twice_preserves_first_dataset_bytes_and_preview(
+    tmp_path,
+):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+
+    def upload(metric: int) -> dict:
+        response = client.post(
+            f"/api/tasks/{task.id}/datasets/upload",
+            data={"role": "feature", "sheet": "Sample"},
+            files={
+                "file": (
+                    "same.xlsx",
+                    _xlsx_bytes({"Sample": [["metric"], [metric]]}),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert response.status_code == 201
+        return response.json()["datasets"][0]
+
+    first = upload(111)
+    first_path = settings.datasets_dir / first["source_path"]
+    first_bytes_hash = hashlib.sha256(first_path.read_bytes()).hexdigest()
+    second = upload(222)
+
+    assert first["id"] != second["id"]
+    assert first["source_path"] != second["source_path"]
+    assert first["content_hash"] != second["content_hash"]
+    assert first_path.is_file()
+    assert hashlib.sha256(first_path.read_bytes()).hexdigest() == first_bytes_hash
+    assert first_bytes_hash == first["content_hash"]
+    first_preview = client.get(f"/api/datasets/{first['id']}/preview?rows=1")
+    second_preview = client.get(f"/api/datasets/{second['id']}/preview?rows=1")
+    assert first_preview.status_code == 200
+    assert second_preview.status_code == 200
+    assert first_preview.json()["rows"][0]["metric"] == 111
+    assert second_preview.json()["rows"][0]["metric"] == 222
+
+
+def test_dataset_upload_accepts_legacy_xls_and_previews_registered_sheet(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample", "sheet": "Sample"},
+        files={
+            "file": (
+                "legacy.xls",
+                legacy_xls_bytes(),
+                "application/vnd.ms-excel",
+            )
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["reports"][0]["sheet"] == "Sample"
+    dataset = payload["datasets"][0]
+    assert dataset["content_hash"]
+    preview = client.get(
+        f"/api/tasks/{task.id}/datasets/{dataset['id']}/preview?rows=2"
+    )
+    assert preview.status_code == 200
+    assert preview.json()["columns"] == ["mobile", "bad_flag", "loan_amount"]
+    assert preview.json()["rows"][0]["mobile"] == "138******00"
+
+
+def test_dataset_upload_legacy_xls_registers_all_sheets_by_default(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "feature"},
+        files={
+            "file": (
+                "legacy.xls",
+                legacy_xls_bytes(),
+                "application/vnd.ms-excel",
+            )
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert [report["sheet"] for report in payload["reports"]] == [
+        "Sample",
+        "Feature",
+    ]
+    assert len(payload["datasets"]) == 2
+
+
+def test_dataset_upload_rejects_fake_xls_without_partial_artifacts(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={
+            "file": (
+                "fake.xls",
+                b"<html><table><tr><td>not BIFF</td></tr></table></html>",
+                "application/vnd.ms-excel",
+            )
+        },
+    )
+
+    assert response.status_code == 400
+    assert "not a readable" in response.json()["detail"]
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+    upload_dir = settings.datasets_dir / task.id / "uploads"
+    assert not any(upload_dir.rglob("*"))
+
+
 def test_dataset_upload_streams_to_disk_without_full_buffer_read(tmp_path, monkeypatch):
     """TST-2: the upload endpoint must never pull the whole file into memory
     via a single unbounded read -- assert every read the router issues against
@@ -466,6 +786,51 @@ def test_dataset_upload_rejects_excel_sheet_over_row_guardrail(tmp_path, monkeyp
     assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
 
 
+def test_dataset_upload_rejects_legacy_xls_over_row_guardrail(tmp_path):
+    client, settings = _client(tmp_path)
+    object.__setattr__(settings, "max_excel_rows", 1)
+    task = _create_task(settings)
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={
+            "file": (
+                "legacy.xls",
+                legacy_xls_bytes(),
+                "application/vnd.ms-excel",
+            )
+        },
+    )
+
+    assert response.status_code == 413
+    assert "行数超过上限" in response.json()["detail"]
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+
+
+def test_excel_content_disguised_as_csv_still_uses_excel_byte_limit(tmp_path):
+    client, settings = _client(tmp_path)
+    object.__setattr__(settings, "max_excel_upload_bytes", 1024)
+    object.__setattr__(settings, "max_csv_upload_bytes", 20_000)
+    task = _create_task(settings)
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={
+            "file": (
+                "disguised.csv",
+                legacy_xls_bytes(),
+                "text/csv",
+            )
+        },
+    )
+
+    assert response.status_code == 413
+    assert "检测为 Excel" in response.json()["detail"]
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+
+
 def test_build_settings_reads_upload_guardrails_from_env(tmp_path, monkeypatch):
     """TST-2: upload size/row guardrails are configurable via env var, with
     sane defaults (2GB CSV / 500MB Excel / 2M Excel rows) when unset."""
@@ -526,6 +891,64 @@ def test_register_path_dataset_end_to_end_then_appears_in_list_and_preview(tmp_p
     assert audit_rows[0]["target_ref"] == dataset["id"]
     assert audit_rows[0]["detail"]["source_path"] == str(source_path.resolve())
     assert audit_rows[0]["detail"]["task_id"] == task.id
+
+
+def test_register_path_rejects_malformed_ole_candidate_named_csv_without_artifacts(
+    tmp_path,
+):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    source_path = tmp_path / "malformed.csv"
+    source_path.write_bytes(_malformed_ole_csv_bytes())
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/register-path",
+        json={"path": str(source_path), "role": "sample"},
+    )
+
+    assert response.status_code == 400
+    assert "workbook" in response.json()["detail"].lower()
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+    assert _task_dataset_files(settings, task.id) == []
+
+
+def test_register_path_accepts_legacy_xls_and_keeps_excel_limit(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    source_path = tmp_path / "legacy.xls"
+    source_path.write_bytes(legacy_xls_bytes())
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/register-path",
+        json={"path": str(source_path), "role": "sample"},
+    )
+
+    assert response.status_code == 201
+    dataset = response.json()["datasets"][0]
+    assert dataset["content_hash"]
+    preview = client.get(
+        f"/api/tasks/{task.id}/datasets/{dataset['id']}/preview?rows=2"
+    )
+    assert preview.status_code == 200
+    assert preview.json()["columns"] == ["mobile", "bad_flag", "loan_amount"]
+
+
+def test_register_path_disguised_excel_still_uses_excel_byte_limit(tmp_path):
+    client, settings = _client(tmp_path)
+    object.__setattr__(settings, "max_excel_upload_bytes", 1024)
+    object.__setattr__(settings, "max_csv_upload_bytes", 20_000)
+    task = _create_task(settings)
+    source_path = tmp_path / "disguised.csv"
+    source_path.write_bytes(legacy_xls_bytes())
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/register-path",
+        json={"path": str(source_path), "role": "sample"},
+    )
+
+    assert response.status_code == 413
+    assert "检测为 Excel" in response.json()["detail"]
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
 
 
 def test_register_path_dataset_reuses_existing_dataset_by_content_hash(tmp_path):
@@ -626,6 +1049,41 @@ def test_register_path_rejects_oversized_file(tmp_path):
     assert response.status_code == 413
     assert "本地路径注册文件大小超过上限" in response.json()["detail"]
     assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+
+
+def test_register_path_audit_failure_rolls_back_dataset_and_all_artifacts(
+    tmp_path,
+    monkeypatch,
+):
+    client, settings = _client(tmp_path, raise_server_exceptions=False)
+    task = _create_task(settings)
+    source_path = tmp_path / "audit_failure.csv"
+    source_path.write_bytes(b"mobile,bad_flag\n13800138000,0\n")
+    audit_calls = []
+
+    def fail_audit_write(self, conn, **audit):
+        audit_calls.append(audit)
+        raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr(
+        DatasetRepository,
+        "write_audit_on_connection",
+        fail_audit_write,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/register-path",
+        json={"path": str(source_path), "role": "sample"},
+    )
+
+    assert response.status_code == 500
+    assert len(audit_calls) == 1
+    assert audit_calls[0]["kind"] == "dataset.registered_from_path"
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+    assert _task_dataset_files(settings, task.id) == []
+    task_dir = settings.datasets_dir / task.id
+    assert not (task_dir / "uploads" / ".staging").exists()
+    assert not (task_dir / ".staging").exists()
 
 
 def test_dataset_upload_raw_file_rolls_back_when_registration_fails(

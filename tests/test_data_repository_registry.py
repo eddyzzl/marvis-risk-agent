@@ -12,6 +12,7 @@ from marvis.data.contracts import (
     JoinSpec,
     KeyPair,
 )
+from marvis.data.errors import DataBackendError, DataIngestError
 from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, init_db
@@ -20,6 +21,7 @@ from marvis.repositories.audit import _list_audit_rows
 import marvis.db as db_module
 import marvis.repositories.datasets as dataset_repo_module
 from marvis.state_machine import ConflictError
+from tests.xls_fixture import legacy_xls_bytes
 
 
 def _profile(name: str, role: str = "id") -> ColumnProfile:
@@ -422,6 +424,61 @@ def test_dataset_registry_registers_csv_and_feather_as_profiled_parquet(tmp_path
     assert registry.list_for_task("task-1") == [sample, feature]
 
 
+def test_dataset_registry_recovers_legacy_xls_content_with_csv_suffix(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    registry = DatasetRegistry(repo, DataBackend(datasets_root), datasets_root)
+    disguised_path = tmp_path / "legacy.csv"
+    disguised_path.write_bytes(legacy_xls_bytes())
+
+    dataset = registry.register_from_upload(
+        "task-1",
+        disguised_path,
+        role="sample",
+        max_excel_rows=2,
+    )
+
+    assert dataset.sheet == "Sample"
+    assert dataset.row_count == 2
+    assert [column.name for column in dataset.columns] == [
+        "mobile",
+        "bad_flag",
+        "loan_amount",
+    ]
+    assert registry.consume_ingest_notices("task-1") == [
+        {
+            "code": "extension_content_mismatch",
+            "severity": "warning",
+            "file": "legacy.csv",
+            "declared_format": "csv",
+            "detected_format": "xls",
+            "message": (
+                "`legacy.csv` 扩展名是 `.csv`，但内容是 XLS Excel 工作簿；"
+                "已按 Excel 工作簿读取，原文件未修改。"
+            ),
+        }
+    ]
+
+
+def test_dataset_registry_rejects_invalid_excel_container_with_csv_suffix(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    registry = DatasetRegistry(repo, DataBackend(datasets_root), datasets_root)
+    disguised_path = tmp_path / "invalid_excel.csv"
+    disguised_path.write_bytes(b"PK\x03\x04mobile,bad_flag\n13800138000,1\n")
+
+    with pytest.raises(DataIngestError):
+        registry.register_from_upload("task-1", disguised_path, role="sample")
+
+    assert repo.list_datasets("task-1") == []
+    assert not list((datasets_root / "task-1").glob("*.parquet"))
+    assert not (datasets_root / "task-1" / ".staging").exists()
+
+
 def test_dataset_registry_register_from_upload_reuses_existing_file_by_content_hash(
     tmp_path,
 ):
@@ -441,7 +498,21 @@ def test_dataset_registry_register_from_upload_reuses_existing_file_by_content_h
     frame.to_csv(second_csv, index=False)
 
     first = registry.register_from_upload("task-a", first_csv, role="sample")
-    second = registry.register_from_upload("task-b", second_csv, role="sample")
+    second = registry.register_from_upload(
+        "task-b",
+        second_csv,
+        role="sample",
+        audit_factory=lambda dataset: {
+            "kind": "dataset.registered_from_path",
+            "target_ref": dataset.id,
+            "outcome": "succeeded",
+            "detail": {
+                "task_id": dataset.task_id,
+                "dataset_id": dataset.id,
+                "source_path": dataset.source_path,
+            },
+        },
+    )
 
     assert first.content_hash is not None
     assert first.content_hash == second.content_hash
@@ -461,6 +532,95 @@ def test_dataset_registry_register_from_upload_reuses_existing_file_by_content_h
     assert audit_rows[0]["detail"]["reused_dataset_id"] == first.id
     assert audit_rows[0]["detail"]["reused_task_id"] == "task-a"
     assert audit_rows[0]["detail"]["task_id"] == "task-b"
+
+    caller_audits = _list_audit_rows(db_path, kind="dataset.registered_from_path")
+    assert len(caller_audits) == 1
+    assert caller_audits[0]["target_ref"] == second.id
+    assert caller_audits[0]["detail"] == {
+        "task_id": "task-b",
+        "dataset_id": second.id,
+        "source_path": first.source_path,
+    }
+
+
+@pytest.mark.parametrize("deduplicated", [False, True], ids=["new-content", "dedup-reference"])
+def test_dataset_registry_register_from_upload_rolls_back_when_caller_audit_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    deduplicated: bool,
+):
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    registry = DatasetRegistry(repo, DataBackend(datasets_root), datasets_root)
+    frame = pd.DataFrame({"mobile": ["13800138000"], "bad_flag": [1]})
+
+    if deduplicated:
+        existing_csv = tmp_path / "existing.csv"
+        frame.to_csv(existing_csv, index=False)
+        existing = registry.register_from_upload("task-existing", existing_csv, role="sample")
+
+    attempted_csv = tmp_path / "attempted.csv"
+    frame.to_csv(attempted_csv, index=False)
+    original_write_audit = repo.write_audit_on_connection
+
+    def fail_caller_audit(conn, **audit):
+        if audit.get("kind") == "dataset.caller_audit":
+            raise RuntimeError("caller audit down")
+        return original_write_audit(conn, **audit)
+
+    monkeypatch.setattr(repo, "write_audit_on_connection", fail_caller_audit)
+
+    with pytest.raises(RuntimeError, match="caller audit down"):
+        registry.register_from_upload(
+            "task-failed",
+            attempted_csv,
+            role="sample",
+            audit_factory=lambda dataset: {
+                "kind": "dataset.caller_audit",
+                "target_ref": dataset.id,
+                "outcome": "succeeded",
+                "detail": {"task_id": dataset.task_id},
+            },
+        )
+
+    assert repo.list_datasets("task-failed") == []
+    assert not list((datasets_root / "task-failed").glob("*.parquet"))
+    assert not (datasets_root / "task-failed" / ".staging").exists()
+    assert _list_audit_rows(db_path, kind="dataset.caller_audit") == []
+    if deduplicated:
+        assert repo.list_datasets("task-existing") == [existing]
+        assert _list_audit_rows(db_path, kind="dataset.dedup_reference") == []
+
+
+def test_dataset_registry_register_from_upload_requires_connection_scoped_audit_writer(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    registry = DatasetRegistry(repo, DataBackend(datasets_root), datasets_root)
+    csv_path = tmp_path / "sample.csv"
+    pd.DataFrame({"mobile": ["13800138000"], "bad_flag": [1]}).to_csv(csv_path, index=False)
+    monkeypatch.setattr(repo, "write_audit_on_connection", None)
+
+    with pytest.raises(DataBackendError, match="atomic audited upload registration"):
+        registry.register_from_upload(
+            "task-1",
+            csv_path,
+            role="sample",
+            audit_factory=lambda dataset: {
+                "kind": "dataset.caller_audit",
+                "target_ref": dataset.id,
+                "outcome": "succeeded",
+            },
+        )
+
+    assert repo.list_datasets("task-1") == []
+    assert not list((datasets_root / "task-1").glob("*.parquet"))
 
 
 def test_dataset_registry_register_from_upload_profiles_again_for_different_content(
