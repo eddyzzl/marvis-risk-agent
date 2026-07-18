@@ -208,10 +208,24 @@ def test_legacy_payload_and_projection_remain_flat() -> None:
 def test_typed_backtest_id_uses_canonical_envelope_and_dataset_identity() -> None:
     result = _typed_result()
 
-    first = _backtest_id("dataset-1", result)
+    first = _backtest_id(
+        "dataset-1",
+        result,
+        source_dataset_content_hash="a" * 64,
+    )
 
     assert first == _backtest_id(
         "dataset-1",
         StrategyBacktestResult.from_dict(result.to_dict()),
+        source_dataset_content_hash="a" * 64,
     )
-    assert first != _backtest_id("dataset-2", result)
+    assert first != _backtest_id(
+        "dataset-2",
+        result,
+        source_dataset_content_hash="a" * 64,
+    )
+    assert first != _backtest_id(
+        "dataset-1",
+        result,
+        source_dataset_content_hash="b" * 64,
+    )

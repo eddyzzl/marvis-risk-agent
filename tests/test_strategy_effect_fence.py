@@ -404,7 +404,7 @@ def test_effect_receipt_commit_failure_rolls_back_strategy_and_audit(
     assert [row["target_ref"] for row in audits].count(challenger.id) == 0
 
 
-def test_tool_lifecycle_commit_survives_artifact_failure_and_cannot_replay(
+def test_tool_artifact_render_failure_leaves_adoption_replayable(
     tmp_path,
     monkeypatch,
 ):
@@ -431,6 +431,7 @@ def test_tool_lifecycle_commit_survives_artifact_failure_and_cannot_replay(
         "backtest_id": "backtest-1",
         "adoption_reason": "committee promotes challenger",
     }
+    original_decision_table_csv = strategy_tools.decision_table_csv
     monkeypatch.setattr(
         strategy_tools,
         "decision_table_csv",
@@ -440,10 +441,73 @@ def test_tool_lifecycle_commit_survives_artifact_failure_and_cannot_replay(
     with pytest.raises(OSError, match="disk full"):
         strategy_tools.tool_adopt_strategy(inputs, ctx)
 
-    assert repo.get_strategy_meta(challenger.id)["status"] == "adopted"
+    assert repo.get_strategy_meta(challenger.id)["status"] == "draft"
+    assert _ledger_states(settings.db_path) == ("dispatched", "reserved")
+    assert repo.list_strategy_artifacts(challenger.id) == []
+    assert PluginRepository(settings.db_path).list_audit(kind="strategy.adopt") == []
+
+    monkeypatch.setattr(strategy_tools, "decision_table_csv", original_decision_table_csv)
+    output = strategy_tools.tool_adopt_strategy(inputs, ctx)
+    assert output["status"] == "adopted"
     assert _ledger_states(settings.db_path) == ("committed", "consumed")
-    with pytest.raises(ConflictError, match="策略效果|授权"):
+
+
+def test_tool_second_artifact_db_failure_rolls_back_lifecycle_files_and_audits(
+    tmp_path,
+    monkeypatch,
+):
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    repo = StrategyRepository(settings.db_path)
+    challenger = _strategy("challenger", 625)
+    repo.create_strategy("task-1", challenger)
+    repo.save_backtest("backtest-1", challenger.id, "dataset-1", _backtest(challenger.id))
+    effect_id = _insert_dispatched_effect(
+        settings.db_path,
+        target=_effect_target(repo, challenger.id),
+    )
+    ctx = SimpleNamespace(
+        task_id="task-1",
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        seed=None,
+        effect_execution_id=effect_id,
+        runtime_generation="runtime-2",
+    )
+    inputs = {
+        "strategy_id": challenger.id,
+        "backtest_id": "backtest-1",
+        "adoption_reason": "committee promotes challenger",
+    }
+    repository_cls = strategy_repository_module.StrategyRepository
+    original_save = repository_cls.save_strategy_artifact_with_audit_on_connection
+    call_count = 0
+
+    def fail_second_artifact(self, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("artifact audit unavailable")
+        return original_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        repository_cls,
+        "save_strategy_artifact_with_audit_on_connection",
+        fail_second_artifact,
+    )
+
+    with pytest.raises(RuntimeError, match="artifact audit unavailable"):
         strategy_tools.tool_adopt_strategy(inputs, ctx)
+
+    assert repo.get_strategy_meta(challenger.id)["status"] == "draft"
+    assert _ledger_states(settings.db_path) == ("dispatched", "reserved")
+    assert repo.list_strategy_artifacts(challenger.id) == []
+    plugin_repo = PluginRepository(settings.db_path)
+    assert plugin_repo.list_audit(kind="strategy.adopt") == []
+    assert plugin_repo.list_audit(kind="strategy.artifact") == []
+    strategy_dir = settings.tasks_dir / "task-1" / "strategy"
+    assert not list(strategy_dir.glob("decision_table_*.csv"))
+    assert not list(strategy_dir.glob("monitoring_plan_*.json"))
 
 
 def test_tool_rejects_partial_protected_execution_metadata_before_adoption(tmp_path):

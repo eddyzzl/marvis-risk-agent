@@ -77,6 +77,7 @@ def _domain_strategy_input(
     )
     return StrategyTaskInput(
         entry_mode=contract.entry_mode,
+        strategy_type=contract.strategy_type,
         objective=contract.objective,
         max_bad_rate=contract.max_bad_rate,
         min_approval_rate=contract.min_approval_rate,
@@ -165,6 +166,8 @@ def start_agent_task(
             user_text=None,
             agent_client=agent_client,
             acceptance_mode=payload.acceptance_mode,
+            recovery_model_id=payload.model_id,
+            recovery_effort=payload.effort,
         )
     model_profile = resolve_agent_model(request, payload.model_id, payload.effort)
     return dispatch_agent_validation_job(
@@ -227,6 +230,8 @@ def post_agent_message(
             adjust_params=payload.adjust_params,
             expected_step_id=payload.expected_step_id,
             strategy_input=strategy_input,
+            recovery_model_id=payload.model_id,
+            recovery_effort=payload.effort,
         )
     if is_agent_material_reselection_intent(content):
         reject_if_task_has_active_job(repo, task_id)

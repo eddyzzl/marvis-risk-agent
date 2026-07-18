@@ -41,6 +41,9 @@ VALID_TASK_TYPES = frozenset({
 })
 
 STRATEGY_ENTRY_MODES = frozenset({"strategy_development", "strategy_analysis"})
+STRATEGY_TYPES = frozenset(
+    {"approval", "reject", "limit", "pricing", "segmentation"}
+)
 STRATEGY_OBJECTIVES = frozenset({"", "max_profit", "max_approval"})
 
 
@@ -106,6 +109,7 @@ class StrategyTaskInput:
     """
 
     entry_mode: str = "strategy_development"
+    strategy_type: str = "approval"
     objective: str = ""
     max_bad_rate: float | None = None
     min_approval_rate: float | None = None
@@ -116,6 +120,9 @@ class StrategyTaskInput:
         if self.entry_mode not in STRATEGY_ENTRY_MODES:
             allowed = ", ".join(sorted(STRATEGY_ENTRY_MODES))
             raise ValueError(f"entry_mode must be one of: {allowed}")
+        if self.strategy_type not in STRATEGY_TYPES:
+            allowed = ", ".join(sorted(STRATEGY_TYPES))
+            raise ValueError(f"strategy_type must be one of: {allowed}")
         if self.objective not in STRATEGY_OBJECTIVES:
             allowed = ", ".join(repr(item) for item in sorted(STRATEGY_OBJECTIVES))
             raise ValueError(f"objective must be one of: {allowed}")

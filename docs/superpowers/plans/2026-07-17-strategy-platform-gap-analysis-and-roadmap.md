@@ -116,13 +116,13 @@ MARVIS 已经具备较扎实的策略确定性内核和治理底座，包括策�
 
 ### 3.1 已有确定性内核
 
-`marvis/packs/strategy/manifest.json` 当前注册 17 个 Tool：
+`marvis/packs/strategy/manifest.json` 当前注册 18 个 Tool：
 
 | 能力族 | 已实现 Tool | 当前情况 |
 |---|---|---|
 | 组合风险 | `vintage_curve`、`roll_rate_matrix` | Vintage 有入口；roll-rate 无内置策略 Workflow |
 | 收益 | `profit_calc` | Tool 可用；标准策略任务的利润输入契约未完整接通 |
-| 策略构造与回测 | `build_strategy`、`backtest_strategy`、`tradeoff_view`、`design_cutoff_bands` | 确定性计算和红旗较完整 |
+| 策略构造、应用与回测 | `build_strategy`、`apply_strategy`、`backtest_strategy`、`tradeoff_view`、`design_cutoff_bands` | 五类 DSL 可确定性构造、逐行应用和回测；更完整的月度/金额/分群回测仍在 Phase 4 |
 | 版本与挑战者 | `compare_strategies`、`adopt_strategy`、`render_challenger_report`、`render_strategy_doc` | 完整模板可用；普通入口与下载消费面不足 |
 | 规则策略 | `mine_rules`、`evaluate_rule_set`、`select_rule_set` | 有独立规则策略 Workflow，包含 waterfall/overlap 和确认门 |
 | 监控 | `run_strategy_monitoring`、`render_monitoring_report` | 可人工发起一次监控；未形成调度和处置闭环 |
@@ -439,9 +439,11 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 
 ### Phase 1：现有策略闭环和统一 DSL（V2.x P1，9-14 人日）
 
-**目标**：把现有 17 个 Tool 变成真实可交付产品链路，并建立后续扩展的唯一策略语义。
+**目标**：把现有 18 个 Tool 变成真实可交付产品链路，并建立后续扩展的唯一策略语义。
 
-**当前状态（2026-07-18）**：Phase 1 尚未完成。特别是版本化监控阈值、按新阈值真实重跑和监控到新版本的 handoff 仍是本阶段待交付能力，不能因 Phase 0B 治理底座完成而标记为已实现。
+**当前状态（2026-07-18）**：Phase 1 尚未完成，但第一批可执行闭环已收口：统一 Strategy DSL 已覆盖 approval、reject、limit、pricing、segmentation；五类规则均可由平台确定性构造、回测、逐行应用和本地采纳；类型化采纳会绑定任务、策略、回测时源数据 hash、策略 effect hash、类型专属证据和经济口径，并在同一事务提交生命周期、effect receipt、decision table、monitoring plan、artifact 与 audit。自然语言编译器现可将开发、分析/回测、应用、比较、采纳、报告、监控和规则挖掘请求编译为受信任 Workflow；确认前只读预览，逐条回显规则条件/动作/默认动作，确认引用一次性消费，改写/取消/样本变化都会使旧请求失效。监控已真实消费 versioned plan：approval/reject 使用计划阈值，limit/pricing/segmentation 运行可由新鲜样本直接计算的类型指标，全指标不可用时返回 `n/a` 而不是假报绿灯。上传材料的格式错配和 CSV 坏行也进入结构化、可对话且不自动重跑的恢复链。
+
+仍未完成且继续留在 Phase 1：非审批类型在没有明确 DSL 时的自主候选设计；`profit_calc`、`roll_rate_matrix`、`limit_pricing_matrix` 标准自然语言 Workflow；额度/定价监控所需经济输入的版本化传入和真实重算；调阈值生成新版 monitoring plan 并按新版重跑；红灯确认后真正创建新策略版本；完成态策略 artifact 下载和 `adopted_local/validated/deployed` 生命周期区分。上述缺口不得因当前五类内核可运行而标记为完成，也不迁移到 V3/V4。
 
 先做逐类型 contract/design spike，分别钉死 approval、reject、limit、pricing、segmentation 的：输入、rule value、默认决策、核心回测指标、采纳产物和监控基线；未完成设计的类型不能只靠修改 `strategy_type` 字符串宣称可用。
 

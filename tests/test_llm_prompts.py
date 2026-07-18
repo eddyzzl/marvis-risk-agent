@@ -34,6 +34,7 @@ _LOCKED_HASHES = {
     "CROSS_SYS": (1, "0d13fa241b855e51"),
     "REPORT_NARRATIVE_SYS": (1, "a6ff4690f78c4fe2"),
     "SLICE_SPEC_SYS": (1, "11e47cc62475346a"),
+    "STRATEGY_REQUEST_COMPILER_SYS": (2, "98b165eea4880f52"),
 }
 
 
@@ -79,6 +80,7 @@ def test_call_site_constants_re_export_registry_text_unchanged():
     import marvis.agent.auto_drive as auto_drive
     import marvis.agent.instruction_router as instruction_router
     import marvis.agent.prompts as agent_prompts
+    import marvis.agent.strategy_request_compiler as strategy_request_compiler
     import marvis.agent_memory.distillation as distillation
     import marvis.drafts.authoring as authoring
     import marvis.drafts.learning as learning
@@ -104,6 +106,10 @@ def test_call_site_constants_re_export_registry_text_unchanged():
         (agent_prompts.AGENT_SYSTEM_PROMPT, lp.AGENT_SYSTEM_PROMPT.text),
         (agent_prompts.WORD_CONCLUSION_SYSTEM_PROMPT, lp.WORD_CONCLUSION_SYSTEM_PROMPT.text),
         (modeling_tools.REPORT_NARRATIVE_SYS, lp.REPORT_NARRATIVE_SYS.text),
+        (
+            strategy_request_compiler._SYSTEM,
+            lp.STRATEGY_REQUEST_COMPILER_SYS.text,
+        ),
     ]
     for call_site_text, registry_text in pairs:
         assert call_site_text == registry_text

@@ -1,4 +1,8 @@
 import { isStrategyClarificationMessage } from "./strategy_clarification_controller.js";
+import {
+  hasWorkflowErrorDiagnostic,
+  workflowMessageContentHtml,
+} from "./workflow_error_card.js";
 
 const emptyRenderer = () => "";
 const markdownRenderer = (value) => String(value || "");
@@ -113,13 +117,30 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
       ? ` data-driver-gate-section="${escapeAttr(stepId)}"`
       : "";
     const sectionClass = isPendingGate ? "driver-analysis-section is-gate-pending" : "driver-analysis-section";
-    if (meta.error) {
+    if (hasWorkflowErrorDiagnostic(meta)) {
+      const diagnostic = workflowMessageContentHtml(
+        message,
+        (content) => renderMarkdown(content),
+      );
       sections.push(
-        `<section class="driver-analysis-section is-error">${renderMarkdown(message.content || "")}</section>`,
+        `<section class="driver-analysis-section is-error has-workflow-error">${diagnostic}</section>`,
       );
       continue;
     }
-    const intro = renderMarkdown(stripChatInstructions(message.content || ""));
+    if (meta.error) {
+      const legacyError = workflowMessageContentHtml(
+        message,
+        (content) => renderMarkdown(content),
+      );
+      sections.push(
+        `<section class="driver-analysis-section is-error">${legacyError}</section>`,
+      );
+      continue;
+    }
+    const intro = workflowMessageContentHtml(
+      message,
+      (content) => renderMarkdown(stripChatInstructions(content)),
+    );
     if (isStrategyClarificationMessage(message)) {
       const interactive = String(message.id || "") === lastMessageId;
       const clarificationClass = interactive
@@ -159,7 +180,8 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
     // middle section. Non-gate plain sections with no text and no tables are
     // skipped as before.
     const confirm = isPendingGate ? renderGateConfirm(message) : "";
-    if (!String(message.content || "").trim() && !tables && !confirm) continue;
+    const hasIngestNotices = Array.isArray(meta.ingest_notices) && meta.ingest_notices.length > 0;
+    if (!String(message.content || "").trim() && !tables && !confirm && !hasIngestNotices) continue;
     sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${tables}${confirm}</section>`);
   }
   return sections.join("") || '<div class="plan-rail-empty">尚无分析结果，请在右侧步骤栏操作。</div>';

@@ -36,6 +36,7 @@ class FeatureProposal:
     template_id: str = "feature_analysis"
     anchor_id: str | None = None
     feature_ids: list[str] | None = None
+    ingest_notices: list[dict] | None = None
 
     def template_slots(self) -> dict:
         if self.template_id == "feature_analysis_with_join":
@@ -89,7 +90,13 @@ def build_feature_proposal(
         template_id="feature_analysis_with_join" if joined else "feature_analysis",
         anchor_id=dataset.id if joined else None,
         feature_ids=feature_ids if joined else None,
+        ingest_notices=_consume_ingest_notices(registry, task_id),
     )
+
+
+def _consume_ingest_notices(registry, task_id: str) -> list[dict]:
+    consume = getattr(registry, "consume_ingest_notices", None)
+    return list(consume(task_id)) if callable(consume) else []
 
 
 def _resolve_datasets(registry, task_id: str, source_dir):

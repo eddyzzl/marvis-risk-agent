@@ -46,6 +46,7 @@ class ErrorKind:
     SCORE_DIRECTION_CONFLICT = "score_direction_conflict"
     PERFORMANCE_FRAME_INVALID = "performance_frame_invalid"
     DATASET_TOO_LARGE = "dataset_too_large"
+    CSV_PARSE = "csv_parse"
 
     # --- Pack typed errors (marvis/packs/*/errors.py to_detail kinds) ---
     STRATEGY_NOT_ADOPTED = "strategy_not_adopted"

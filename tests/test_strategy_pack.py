@@ -106,12 +106,14 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     tool_names = {tool.name for tool in manifest.tools}
     build_tool = next(tool for tool in manifest.tools if tool.name == "build_strategy")
     backtest_tool = next(tool for tool in manifest.tools if tool.name == "backtest_strategy")
+    apply_tool = next(tool for tool in manifest.tools if tool.name == "apply_strategy")
 
     assert tool_names == {
         "vintage_curve",
         "roll_rate_matrix",
         "profit_calc",
         "build_strategy",
+        "apply_strategy",
         "backtest_strategy",
         "tradeoff_view",
         "design_cutoff_bands",
@@ -128,6 +130,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     }
     assert build_tool.determinism == "deterministic"
     assert "write:strategy" in build_tool.side_effects
+    assert "write:dataset" in apply_tool.side_effects
     assert "write:backtest" in backtest_tool.side_effects
 
     validate_against_schema(

@@ -72,6 +72,10 @@ import {
   stripChatInstructions as stripChatInstructionsController,
 } from "./js/v2/driver_manual_analysis.js";
 import {
+  hasWorkflowErrorDiagnostic,
+  workflowMessageContentHtml,
+} from "./js/v2/workflow_error_card.js";
+import {
   handleDriverConfirmClick as handleDriverConfirmClickController,
   renderDriverGateButton,
   submitDriverConfirm as submitDriverConfirmController,
@@ -4982,6 +4986,10 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
     const hideMeta = Boolean(label && label === previousAssistantLabel);
     previousAssistantLabel = label || previousAssistantLabel;
     const metadata = message?.metadata || {};
+    const hasWorkflowPresentation = role === "assistant" && (
+      hasWorkflowErrorDiagnostic(metadata)
+      || (Array.isArray(metadata.ingest_notices) && metadata.ingest_notices.length > 0)
+    );
     return {
       id: message?.id || "",
       role,
@@ -4998,6 +5006,17 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
         awaiting_next_stage: metadata.awaiting_next_stage || "",
         intent: metadata.intent || "",
         tool_call_name: metadata.tool_call?.name || "",
+        // Structured recovery/error cards must be rebuilt as a unit. The
+        // streaming fast path only patches .agent-message-content with plain
+        // Markdown, so include their content + metadata in the structural key
+        // to prevent it from replacing a card with the legacy text body.
+        workflow_presentation: hasWorkflowPresentation
+          ? {
+            content: message?.content || "",
+            error_diagnostic: metadata.error_diagnostic || null,
+            ingest_notices: metadata.ingest_notices || [],
+          }
+          : null,
         is_latest_gate: Boolean(latestGateId) && String(message?.id || "") === latestGateId,
         memory_references: Array.isArray(metadata.memory_references)
           ? metadata.memory_references.map((reference) => [
@@ -5945,23 +5964,32 @@ function agentMessageStrategyClarificationBodyHtml(message, interactive) {
 
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const role = message.role === "user" ? "user" : "assistant";
+  const hasWorkflowError = role === "assistant"
+    && hasWorkflowErrorDiagnostic(message?.metadata || {});
   const isStrategyClarification = role === "assistant"
+    && !hasWorkflowError
     && isStrategyClarificationMessageController(message);
   // join_c1 turns carry no explicit metadata.kind (backend groups them with
   // "gate" for turn-boundary purposes at turn_handlers.py:612) but are the
   // same needs_confirmation moment — the C1 role-assignment form — so they
   // get the same card treatment.
   const isGate = role === "assistant"
+    && !hasWorkflowError
     && (message?.metadata?.kind === "gate" || Boolean(message?.metadata?.join_c1));
   const hasWidget = isGate && driverGateHasWidgetController(message);
   const className = role === "user"
     ? "agent-message user"
-    : `agent-message assistant${isGate ? " has-gate-card" : ""}${isStrategyClarification ? " has-strategy-clarification" : ""}`;
+    : `agent-message assistant${isGate ? " has-gate-card" : ""}${isStrategyClarification ? " has-strategy-clarification" : ""}${hasWorkflowError ? " has-workflow-error" : ""}`;
   const streaming = agentMessageIsStreaming(message);
   const thinking = agentMessageIsThinking(message);
+  const legacyContentHtml = thinking
+    ? ""
+    : formatAgentMessageContent(agentVisibleContent(message), { markdown: role === "assistant" });
   const contentHtml = thinking
     ? agentThinkingHtml()
-    : formatAgentMessageContent(agentVisibleContent(message), { markdown: role === "assistant" });
+    : role === "assistant"
+      ? workflowMessageContentHtml(message, () => legacyContentHtml)
+      : legacyContentHtml;
   const memoryReferencesHtml = role === "assistant"
     ? agentMemoryReferencesHtml(message?.metadata?.memory_references)
     : "";

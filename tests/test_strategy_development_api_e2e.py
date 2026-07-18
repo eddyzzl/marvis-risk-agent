@@ -86,6 +86,7 @@ def test_strategy_development_product_entry_requires_evidence_bound_adoption_rea
     task_id = task["id"]
     assert task["strategy_input"] == {
         "entry_mode": "strategy_development",
+        "strategy_type": "approval",
         "objective": "max_approval",
         "max_bad_rate": 0.05,
         "min_approval_rate": None,

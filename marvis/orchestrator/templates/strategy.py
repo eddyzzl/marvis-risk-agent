@@ -75,6 +75,405 @@ STRATEGY_ANALYSIS = WorkflowTemplate(
     source="builtin",
 )
 
+
+TYPED_STRATEGY_BUILD = WorkflowTemplate(
+    id="typed_strategy_build",
+    title="类型化策略开发",
+    goal_patterns=("类型化策略开发", "typed strategy build"),
+    slots=(
+        SlotSpec("strategy_spec", True, "user", "Validated canonical Strategy DSL"),
+    ),
+    steps=(
+        StepTemplate(
+            title="构造类型化策略草案",
+            tool_ref=ToolRef("strategy", "build_strategy"),
+            inputs_template={
+                "strategy_spec": "{slot:strategy_spec}",
+                "description": "Natural-language compiled typed strategy",
+            },
+            depends_on_titles=(),
+            post_checks=(PostCheck("nonempty", {"field": "strategy_id"}),),
+        ),
+        StepTemplate(
+            title="生成类型化策略草案文档",
+            tool_ref=ToolRef("strategy", "render_strategy_doc"),
+            inputs_template={
+                "strategy_id": "$ref:构造类型化策略草案.output.strategy_id",
+            },
+            depends_on_titles=("构造类型化策略草案",),
+            post_checks=(PostCheck("nonempty", {"field": "doc_path"}),),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+TYPED_STRATEGY_EVALUATION = WorkflowTemplate(
+    # Natural-language requests compile into a canonical StrategySpec before this
+    # workflow is instantiated. The shared build/backtest/doc chain therefore
+    # evaluates all five strategy types without copying approval-only cutoff or
+    # tradeoff steps into limit, pricing or segmentation flows.
+    id="typed_strategy_evaluation",
+    title="类型化策略评估",
+    goal_patterns=(
+        "类型化策略评估",
+        "typed strategy evaluation",
+    ),
+    slots=(
+        SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
+        SlotSpec("target_col", True, "task_context", "Binary target column"),
+        SlotSpec("strategy_spec", True, "user", "Validated canonical Strategy DSL"),
+        SlotSpec("baseline_strategy_id", False, "user", "Optional baseline strategy id"),
+        SlotSpec("economics_inputs", False, "user", "Typed limit/pricing economics inputs"),
+        SlotSpec("profit_params", False, "user", "Approval/reject profit parameters"),
+        SlotSpec("ead_col", False, "user", "Approval/reject EAD column"),
+        SlotSpec("pd_col", False, "user", "Approval/reject PD column"),
+    ),
+    steps=(
+        StepTemplate(
+            title="构造类型化策略",
+            tool_ref=ToolRef("strategy", "build_strategy"),
+            inputs_template={
+                "strategy_spec": "{slot:strategy_spec}",
+                "description": "Natural-language compiled typed strategy",
+            },
+            depends_on_titles=(),
+            post_checks=(PostCheck("nonempty", {"field": "strategy_id"}),),
+        ),
+        StepTemplate(
+            title="回测类型化策略",
+            tool_ref=ToolRef("strategy", "backtest_strategy"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "strategy_id": "$ref:构造类型化策略.output.strategy_id",
+                "target_col": "{slot:target_col}",
+                "baseline_strategy_id": "{slot:baseline_strategy_id}",
+                "economics_inputs": "{slot:economics_inputs}",
+                "profit_params": "{slot:profit_params}",
+                "ead_col": "{slot:ead_col}",
+                "pd_col": "{slot:pd_col}",
+            },
+            depends_on_titles=("构造类型化策略",),
+            post_checks=(
+                PostCheck("nonempty", {"field": "backtest_id"}),
+                PostCheck("nonempty", {"field": "schema_version"}),
+                PostCheck("nonempty", {"field": "metrics"}),
+                # The shared Tool retains flat approval aliases only for
+                # approval/reject compatibility. Missing aliases on the other
+                # three typed envelopes are valid, hence ``allow_null``.
+                PostCheck(
+                    "range",
+                    {"field": "approval_rate", "min": 0.0, "max": 1.0, "allow_null": True},
+                ),
+                PostCheck(
+                    "range",
+                    {
+                        "field": "approved_bad_rate",
+                        "min": 0.0,
+                        "max": 1.0,
+                        "allow_null": True,
+                    },
+                ),
+                PostCheck(
+                    "range",
+                    {
+                        "field": "rejected_bad_rate",
+                        "min": 0.0,
+                        "max": 1.0,
+                        "allow_null": True,
+                    },
+                ),
+                PostCheck("range", {"field": "expected_profit", "allow_null": True}),
+            ),
+            decision_point=True,
+        ),
+        StepTemplate(
+            title="生成类型化策略文档",
+            tool_ref=ToolRef("strategy", "render_strategy_doc"),
+            inputs_template={
+                "strategy_id": "$ref:构造类型化策略.output.strategy_id",
+            },
+            depends_on_titles=("构造类型化策略", "回测类型化策略"),
+            post_checks=(PostCheck("nonempty", {"field": "doc_path"}),),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+TYPED_STRATEGY_APPLY = WorkflowTemplate(
+    id="typed_strategy_apply",
+    title="构造并应用类型化策略",
+    goal_patterns=("构造并应用策略", "build and apply typed strategy"),
+    slots=(
+        SlotSpec("dataset_id", True, "task_context", "Task-owned input dataset id"),
+        SlotSpec("strategy_spec", True, "user", "Validated canonical Strategy DSL"),
+    ),
+    steps=(
+        StepTemplate(
+            title="构造待应用策略",
+            tool_ref=ToolRef("strategy", "build_strategy"),
+            inputs_template={
+                "strategy_spec": "{slot:strategy_spec}",
+                "description": "Natural-language compiled strategy for application",
+            },
+            depends_on_titles=(),
+            post_checks=(PostCheck("nonempty", {"field": "strategy_id"}),),
+        ),
+        StepTemplate(
+            title="应用类型化策略并生成逐行结果",
+            tool_ref=ToolRef("strategy", "apply_strategy"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "strategy_id": "$ref:构造待应用策略.output.strategy_id",
+            },
+            depends_on_titles=("构造待应用策略",),
+            post_checks=(
+                PostCheck("nonempty", {"field": "schema_version"}),
+                PostCheck("nonempty", {"field": "result_dataset_id"}),
+                PostCheck("range", {"field": "population_count", "min": 0}),
+                PostCheck("nonempty", {"field": "evidence"}),
+            ),
+        ),
+        StepTemplate(
+            title="生成已应用策略文档",
+            tool_ref=ToolRef("strategy", "render_strategy_doc"),
+            inputs_template={
+                "strategy_id": "$ref:构造待应用策略.output.strategy_id",
+            },
+            depends_on_titles=("构造待应用策略", "应用类型化策略并生成逐行结果"),
+            post_checks=(PostCheck("nonempty", {"field": "doc_path"}),),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STORED_STRATEGY_EVALUATION = WorkflowTemplate(
+    id="stored_strategy_evaluation",
+    title="已有策略评估",
+    goal_patterns=(
+        "回测已有策略",
+        "分析已有策略",
+        "对比已有策略",
+        "stored strategy evaluation",
+    ),
+    slots=(
+        SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
+        SlotSpec("target_col", True, "task_context", "Binary target column"),
+        SlotSpec("strategy_id", True, "user", "Task-owned strategy id"),
+        SlotSpec("baseline_strategy_id", False, "user", "Optional same-type baseline id"),
+        SlotSpec("economics_inputs", False, "user", "Typed limit/pricing economics inputs"),
+        SlotSpec("profit_params", False, "user", "Approval/reject profit parameters"),
+        SlotSpec("ead_col", False, "user", "Approval/reject EAD column"),
+        SlotSpec("pd_col", False, "user", "Approval/reject PD column"),
+    ),
+    steps=(
+        StepTemplate(
+            title="回测已有策略",
+            tool_ref=ToolRef("strategy", "backtest_strategy"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "strategy_id": "{slot:strategy_id}",
+                "target_col": "{slot:target_col}",
+                "baseline_strategy_id": "{slot:baseline_strategy_id}",
+                "economics_inputs": "{slot:economics_inputs}",
+                "profit_params": "{slot:profit_params}",
+                "ead_col": "{slot:ead_col}",
+                "pd_col": "{slot:pd_col}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "backtest_id"}),
+                PostCheck("nonempty", {"field": "schema_version"}),
+                PostCheck("nonempty", {"field": "metrics"}),
+                PostCheck(
+                    "range",
+                    {
+                        "field": "approval_rate",
+                        "min": 0.0,
+                        "max": 1.0,
+                        "allow_null": True,
+                    },
+                ),
+                PostCheck(
+                    "range",
+                    {
+                        "field": "approved_bad_rate",
+                        "min": 0.0,
+                        "max": 1.0,
+                        "allow_null": True,
+                    },
+                ),
+                PostCheck(
+                    "range",
+                    {
+                        "field": "rejected_bad_rate",
+                        "min": 0.0,
+                        "max": 1.0,
+                        "allow_null": True,
+                    },
+                ),
+                PostCheck("range", {"field": "expected_profit", "allow_null": True}),
+            ),
+            decision_point=True,
+        ),
+        StepTemplate(
+            title="生成已有策略文档",
+            tool_ref=ToolRef("strategy", "render_strategy_doc"),
+            inputs_template={"strategy_id": "{slot:strategy_id}"},
+            depends_on_titles=("回测已有策略",),
+            post_checks=(PostCheck("nonempty", {"field": "doc_path"}),),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STORED_STRATEGY_REPORT = WorkflowTemplate(
+    id="stored_strategy_report",
+    title="已有策略报告",
+    goal_patterns=("生成已有策略报告", "stored strategy report"),
+    slots=(
+        SlotSpec("strategy_id", True, "user", "Task-owned strategy id"),
+    ),
+    steps=(
+        StepTemplate(
+            title="生成已有策略报告",
+            tool_ref=ToolRef("strategy", "render_strategy_doc"),
+            inputs_template={"strategy_id": "{slot:strategy_id}"},
+            depends_on_titles=(),
+            post_checks=(PostCheck("nonempty", {"field": "doc_path"}),),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STORED_STRATEGY_APPLY = WorkflowTemplate(
+    id="stored_strategy_apply",
+    title="应用已有策略",
+    goal_patterns=("应用已有策略", "执行已有策略", "apply stored strategy"),
+    slots=(
+        SlotSpec("dataset_id", True, "task_context", "Task-owned input dataset id"),
+        SlotSpec("strategy_id", True, "user", "Task-owned persisted strategy id"),
+    ),
+    steps=(
+        StepTemplate(
+            title="应用已有策略并生成逐行结果",
+            tool_ref=ToolRef("strategy", "apply_strategy"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "strategy_id": "{slot:strategy_id}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "schema_version"}),
+                PostCheck("nonempty", {"field": "result_dataset_id"}),
+                PostCheck("range", {"field": "population_count", "min": 0}),
+                PostCheck("nonempty", {"field": "output_columns"}),
+                PostCheck("nonempty", {"field": "evidence"}),
+            ),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STORED_STRATEGY_ADOPTION = WorkflowTemplate(
+    id="stored_strategy_adoption",
+    title="已有策略采纳",
+    goal_patterns=("采纳已有策略", "adopt stored strategy"),
+    slots=(
+        SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
+        SlotSpec("target_col", True, "task_context", "Binary target column"),
+        SlotSpec("strategy_id", True, "user", "Task-owned draft strategy id"),
+        SlotSpec("adoption_reason", True, "user", "Human supplied adoption reason"),
+        SlotSpec("economics_inputs", False, "user", "Typed limit/pricing economics inputs"),
+        SlotSpec("profit_params", False, "user", "Approval/reject profit parameters"),
+        SlotSpec("ead_col", False, "user", "Approval/reject EAD column"),
+        SlotSpec("pd_col", False, "user", "Approval/reject PD column"),
+    ),
+    steps=(
+        StepTemplate(
+            title="采纳前回测",
+            tool_ref=ToolRef("strategy", "backtest_strategy"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "strategy_id": "{slot:strategy_id}",
+                "target_col": "{slot:target_col}",
+                "economics_inputs": "{slot:economics_inputs}",
+                "profit_params": "{slot:profit_params}",
+                "ead_col": "{slot:ead_col}",
+                "pd_col": "{slot:pd_col}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "backtest_id"}),
+                PostCheck("nonempty", {"field": "schema_version"}),
+                PostCheck("nonempty", {"field": "metrics"}),
+                PostCheck(
+                    "range",
+                    {
+                        "field": "approval_rate",
+                        "min": 0.0,
+                        "max": 1.0,
+                        "allow_null": True,
+                    },
+                ),
+                PostCheck(
+                    "range",
+                    {
+                        "field": "approved_bad_rate",
+                        "min": 0.0,
+                        "max": 1.0,
+                        "allow_null": True,
+                    },
+                ),
+                PostCheck(
+                    "range",
+                    {
+                        "field": "rejected_bad_rate",
+                        "min": 0.0,
+                        "max": 1.0,
+                        "allow_null": True,
+                    },
+                ),
+                PostCheck("range", {"field": "expected_profit", "allow_null": True}),
+            ),
+            decision_point=True,
+        ),
+        StepTemplate(
+            title="采纳已有策略",
+            tool_ref=ToolRef("strategy", "adopt_strategy"),
+            inputs_template={
+                "strategy_id": "{slot:strategy_id}",
+                "backtest_id": "$ref:采纳前回测.output.backtest_id",
+                "adoption_reason": "{slot:adoption_reason}",
+            },
+            depends_on_titles=("采纳前回测",),
+            post_checks=(PostCheck("nonempty", {"field": "artifacts"}),),
+            needs_confirmation=True,
+        ),
+        StepTemplate(
+            title="生成采纳策略文档",
+            tool_ref=ToolRef("strategy", "render_strategy_doc"),
+            inputs_template={"strategy_id": "{slot:strategy_id}"},
+            depends_on_titles=("采纳已有策略",),
+            post_checks=(PostCheck("nonempty", {"field": "doc_path"}),),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 VINTAGE_ANALYSIS = WorkflowTemplate(
     id="vintage_analysis",
     title="Vintage 风险分析",
@@ -200,7 +599,7 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
         SlotSpec("ead_col", False, "user", "Exposure-at-default column for profit evaluation"),
         SlotSpec("pd_col", False, "user", "Probability-of-default column for profit evaluation"),
         SlotSpec("profit_params", False, "user", "Profit parameters for expected-profit"),
-        SlotSpec("strategy_type", False, "user", "Strategy type (default approval)"),
+        SlotSpec("strategy_type", True, "task_context", "Approval or reject strategy type"),
         SlotSpec("baseline_strategy_id", False, "user", "Baseline strategy id for the optional compare step"),
     ),
     steps=(
@@ -255,12 +654,7 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
             title="构造策略",
             tool_ref=ToolRef("strategy", "build_strategy"),
             inputs_template={
-                # SlotSpec has no default-value mechanism (unlike the spec's "user,
-                # default approval" phrasing implies): the strategy_type slot stays
-                # optional/informational, and this step pins the literal default the
-                # spec calls for so build_strategy's required input is always filled
-                # even when the slot is omitted.
-                "strategy_type": "approval",
+                "strategy_type": "{slot:strategy_type}",
                 "rules": "$ref:设计分数带.output.recommended_rules",
                 "score_col": "{slot:score_col}",
                 "default_decision": "approve",

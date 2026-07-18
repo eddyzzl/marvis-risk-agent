@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from fastapi import BackgroundTasks, Request
+from fastapi import BackgroundTasks, HTTPException, Request
 
 from marvis.errors import conflict, not_implemented, unprocessable
 
@@ -37,6 +37,7 @@ from marvis.agent.turn_handlers import (
     DriverTurnRuntime,
     dispatch_driver_turn as dispatch_plan_driver_turn,
 )
+from marvis.agent.workflow_recovery import answer_workflow_recovery_message
 from marvis.agent.validation_runner import (
     ValidationJobCallbacks,
     run_agent_validation_job as run_agent_validation_job_impl,
@@ -269,6 +270,8 @@ def dispatch_driver_turn(
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
     strategy_input: StrategyTaskInput | None = None,
+    recovery_model_id: str | None = None,
+    recovery_effort: str | None = None,
 ) -> dict:
     """Run one driver turn. ``acceptance_mode`` controls the agent-mode behavior at
     gates (spec §6, two 受控度): AUTO(自动审查) lets the LLM auto-drive low-risk gates;
@@ -313,6 +316,12 @@ def dispatch_driver_turn(
             tier=task_tier(request, task),
             governance_service=getattr(request.app.state, "governance_service", None),
             local_principal=getattr(request.state, "local_principal", None),
+            recovery_responder=_driver_recovery_responder(
+                request,
+                task,
+                model_id=recovery_model_id,
+                effort=recovery_effort,
+            ),
         )
         result = dispatch_plan_driver_turn(
             runtime, repo_, task, user_text=user_text, agent_client=agent_client,
@@ -320,6 +329,7 @@ def dispatch_driver_turn(
             dedup_strategies=dedup_strategies, adjust_params=adjust_params,
             expected_step_id=expected_step_id,
             confirmation_source=CONFIRMATION_SOURCE_HUMAN,
+            recovery_bypass=strategy_input is not None,
         )
     except DriverError as exc:
         repo_.finish_job(job_id, status="failed", error_name="DriverError", error_value=str(exc))
@@ -328,8 +338,50 @@ def dispatch_driver_turn(
         repo_.finish_job(job_id, status="failed", error_name=exc.__class__.__name__, error_value=str(exc))
         raise
     else:
-        repo_.finish_job(job_id, status="succeeded")
+        if result.get("status") == "error":
+            messages = result.get("messages") or []
+            metadata = (messages[-1].get("metadata") or {}) if messages else {}
+            diagnostic = metadata.get("error_diagnostic") or {}
+            repo_.finish_job(
+                job_id,
+                status="failed",
+                error_name=str(diagnostic.get("exception_type") or "DriverTurnError"),
+                error_value=str(
+                    diagnostic.get("summary")
+                    or (messages[-1].get("content") if messages else "driver turn failed")
+                ),
+            )
+        else:
+            repo_.finish_job(job_id, status="succeeded")
         return result
+
+
+def _driver_recovery_responder(
+    request: Request,
+    task: TaskRecord,
+    *,
+    model_id: str | None,
+    effort: str | None,
+):
+    """Build a lazy general-chat responder without reusing gate/router prompts."""
+
+    if task.run_mode != "agent":
+        return None
+
+    def respond(*, task: TaskRecord, user_message: str, diagnostic: dict):
+        try:
+            profile = resolve_agent_model(request, model_id, effort)
+        except HTTPException:
+            client = None
+        else:
+            client = OpenAICompatibleLLMClient(profile)
+        return answer_workflow_recovery_message(
+            user_message=user_message,
+            diagnostic=diagnostic,
+            client=client,
+        )
+
+    return respond
 
 
 def dispatch_agent_validation_job(

@@ -58,6 +58,7 @@ class JoinProposal:
     feature_ids: list[str]
     target_col: str | None
     skip: bool
+    ingest_notices: list[dict] = field(default_factory=list)
 
 
 def build_join_proposal(registry, task_id: str, source_dir) -> JoinProposal:
@@ -98,7 +99,13 @@ def build_join_proposal(registry, task_id: str, source_dir) -> JoinProposal:
         feature_ids=[d.id for d in ranked[1:]],
         target_col=getattr(anchor, "target_col", None) if anchor else None,
         skip=len(ranked) < 2,
+        ingest_notices=_consume_ingest_notices(registry, task_id),
     )
+
+
+def _consume_ingest_notices(registry, task_id: str) -> list[dict]:
+    consume = getattr(registry, "consume_ingest_notices", None)
+    return list(consume(task_id)) if callable(consume) else []
 
 
 def _dataset_name(dataset) -> str:

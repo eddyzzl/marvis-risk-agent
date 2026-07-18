@@ -80,7 +80,12 @@ _MIGRATION_TABLES = frozenset({
 # _migration_006_strategy_dsl adds the canonical, versioned Strategy DSL payload.
 # The columns are nullable on purpose: historical rules_json rows are adapted at
 # the repository boundary and are not rewritten during database migration.
-SCHEMA_VERSION = 6
+#
+# _migration_007_pending_strategy_requests moves confirmed-but-not-yet-consumed
+# natural-language strategy drafts out of agent message metadata.  The request
+# row is task-scoped, integrity-bound and one-shot so a repeated confirmation
+# cannot replay the same draft into a second plan.
+SCHEMA_VERSION = 7
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -1066,6 +1071,42 @@ def _migration_006_strategy_dsl(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE strategies ADD COLUMN {column} {definition}")
 
 
+def _migration_007_pending_strategy_requests(conn: sqlite3.Connection) -> None:
+    """Add one-shot storage for validated natural-language strategy drafts.
+
+    Only validated control-plane JSON belongs here.  Dataset identity is a
+    fingerprint/locator object; sample rows are never materialized into this
+    table.  Status is constrained at the database boundary because the
+    repository relies on a conditional ``pending -> terminal`` update for
+    replay protection.
+    """
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pending_strategy_requests (
+            id TEXT PRIMARY KEY,
+            nonce TEXT NOT NULL UNIQUE,
+            task_id TEXT NOT NULL,
+            validated_draft_json TEXT NOT NULL,
+            dataset_identity_json TEXT NOT NULL,
+            target_col TEXT,
+            payload_sha256 TEXT NOT NULL,
+            status TEXT NOT NULL
+                CHECK(status IN ('pending', 'consumed', 'cancelled', 'invalidated')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_pending_strategy_requests_task_status
+            ON pending_strategy_requests(task_id, status, created_at, id)
+        """
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -1080,6 +1121,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (4, _migration_004_strategy_task_input),
     (5, _migration_005_governance_authorization),
     (6, _migration_006_strategy_dsl),
+    (7, _migration_007_pending_strategy_requests),
 ]
 
 

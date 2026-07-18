@@ -1487,6 +1487,7 @@ def _load_strategy_input(raw: str | None) -> StrategyTaskInput | None:
         raise ValueError("strategy_input_json must be a JSON object")
     allowed_keys = {
         "entry_mode",
+        "strategy_type",
         "objective",
         "max_bad_rate",
         "min_approval_rate",
@@ -1505,6 +1506,7 @@ def _load_strategy_input(raw: str | None) -> StrategyTaskInput | None:
         profit = StrategyProfitInput(**profit_payload) if profit_payload is not None else None
         return StrategyTaskInput(
             entry_mode=value.get("entry_mode", "strategy_development"),
+            strategy_type=value.get("strategy_type", "approval"),
             objective=value.get("objective", ""),
             max_bad_rate=value.get("max_bad_rate"),
             min_approval_rate=value.get("min_approval_rate"),

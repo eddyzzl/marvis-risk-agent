@@ -146,6 +146,7 @@ def _strategy_task_input(payload: CreateTaskRequest) -> StrategyTaskInput | None
     )
     return StrategyTaskInput(
         entry_mode=contract.entry_mode,
+        strategy_type=contract.strategy_type,
         objective=contract.objective,
         max_bad_rate=contract.max_bad_rate,
         min_approval_rate=contract.min_approval_rate,

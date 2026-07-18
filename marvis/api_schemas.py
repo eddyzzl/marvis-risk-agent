@@ -39,6 +39,9 @@ class StrategyTaskInputRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     entry_mode: Literal["strategy_development", "strategy_analysis"] = "strategy_development"
+    strategy_type: Literal[
+        "approval", "reject", "limit", "pricing", "segmentation"
+    ] = "approval"
     objective: Literal["", "max_profit", "max_approval"] = ""
     max_bad_rate: StrictRatio | None = None
     min_approval_rate: StrictRatio | None = None

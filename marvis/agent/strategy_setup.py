@@ -19,7 +19,7 @@ from marvis.agent.sample_setup import detect_setup
 from marvis.data.labels import nan_label_mask
 from marvis.db import StrategyRepository
 from marvis.domain import STRATEGY_OBJECTIVES, FileRole
-from marvis.files import scan_source_dir
+from marvis.files import scan_source_dir, sha256_file
 
 _DATA_ROLES = frozenset({FileRole.SAMPLE.value, "sample", "strategy_sample"})
 _SCORE_HINTS = (
@@ -154,6 +154,21 @@ def resolve_strategy_intent(strategy_input, *texts: str | None) -> str:
 
 def strategy_development_clarification(strategy_input) -> dict | None:
     """Return a structured missing-input envelope, or ``None`` when start is safe."""
+
+    strategy_type = str(
+        _input_value(strategy_input, "strategy_type") or "approval"
+    ).strip().lower()
+    if strategy_type not in {"approval", "reject"}:
+        return {
+            "code": "strategy_typed_spec_required",
+            "entry_mode": STRATEGY_ENTRY_DEVELOPMENT,
+            "strategy_type": strategy_type,
+            "missing_fields": ["strategy_spec"],
+            "message": (
+                f"{strategy_type} 策略不能套用准入 cutoff 工作流；"
+                "需要先由自然语言请求编译并确认类型化 Strategy DSL。"
+            ),
+        }
 
     missing: list[str] = []
     objective = str(_input_value(strategy_input, "objective") or "").strip()
@@ -291,6 +306,145 @@ class StrategySetupError(ValueError):
     """Raised when a strategy task cannot infer a scored binary sample."""
 
 
+@dataclass(frozen=True)
+class StrategyDatasetContext:
+    """Task-owned dataset facts exposed to request compilation and workflows.
+
+    This is deliberately narrower than a strategy proposal: resolving context
+    must not invent a cutoff, rule, action or business objective.
+    """
+
+    dataset_id: str
+    dataset_name: str
+    target_col: str | None
+    columns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class StrategyDatasetPreview:
+    """Read-only dataset facts used before the user confirms a request."""
+
+    dataset_id: str | None
+    dataset_name: str
+    target_col: str | None
+    columns: tuple[str, ...]
+    identity: dict
+
+
+def preview_strategy_dataset_context(
+    registry,
+    backend,
+    task_id: str,
+    source_dir,
+    *,
+    target_col: str | None = None,
+) -> StrategyDatasetPreview:
+    """Inspect columns without registering, converting or persisting a dataset."""
+
+    datasets = [
+        dataset
+        for dataset in registry.list_for_task(task_id)
+        if dataset.role in _DATA_ROLES
+    ]
+    if datasets:
+        dataset = _select_dataset(datasets)
+        path = registry.resolve_path(dataset.id)
+        identity = {
+            "kind": "registered",
+            "dataset_id": dataset.id,
+            # The catalog hash describes the bytes at registration time.  The
+            # confirmation boundary must bind the bytes that are actually on
+            # disk now, otherwise an out-of-band same-schema rewrite could
+            # reuse an already-confirmed request against different rows.
+            "content_hash": sha256_file(path),
+        }
+        dataset_id = dataset.id
+        dataset_name = _dataset_name(dataset)
+    else:
+        if source_dir is None:
+            raise StrategySetupError("策略分析未找到数据文件。")
+        artifacts = [
+            artifact
+            for artifact in scan_source_dir(Path(source_dir))
+            if artifact.role == FileRole.SAMPLE
+        ]
+        if not artifacts:
+            raise StrategySetupError(f"策略分析未找到数据文件:{source_dir}")
+        if len(artifacts) != 1:
+            raise StrategySetupError(
+                "策略目录包含多个样本；请先明确选择一个策略样本，平台不会在确认前猜测。"
+            )
+        artifact = artifacts[0]
+        path = Path(artifact.path)
+        stat = path.stat()
+        identity = {
+            "kind": "source",
+            "source_path": str(path.resolve()),
+            "size_bytes": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+            "sha256": artifact.sha256,
+        }
+        dataset_id = None
+        dataset_name = path.name
+
+    columns = list(backend.column_names(path))
+    try:
+        resolved_target = _resolve_target_col(
+            backend,
+            path,
+            columns,
+            target_col,
+        )
+    except StrategySetupError:
+        resolved_target = None
+    return StrategyDatasetPreview(
+        dataset_id=dataset_id,
+        dataset_name=dataset_name,
+        target_col=resolved_target,
+        columns=tuple(columns),
+        identity=identity,
+    )
+
+
+def build_strategy_dataset_context(
+    registry,
+    backend,
+    task_id: str,
+    source_dir,
+    *,
+    target_col: str | None = None,
+    require_target: bool = True,
+) -> StrategyDatasetContext:
+    """Register the sample and resolve only the evidence required by an operation.
+
+    Evaluation needs a binary target; deterministic application to a production
+    sample does not. Keeping that distinction here prevents ``apply`` from
+    inventing or requiring a label that is unavailable at decision time.
+    """
+
+    dataset = _resolve_dataset(registry, task_id, source_dir)
+    path = registry.resolve_path(dataset.id)
+    columns = list(backend.column_names(path))
+    if require_target:
+        resolved_target = _resolve_target_col(backend, path, columns, target_col)
+    else:
+        try:
+            resolved_target = _resolve_target_col(
+                backend,
+                path,
+                columns,
+                target_col,
+            )
+        except StrategySetupError:
+            resolved_target = None
+    return StrategyDatasetContext(
+        dataset_id=dataset.id,
+        dataset_name=_dataset_name(dataset),
+        target_col=resolved_target,
+        columns=tuple(columns),
+    )
+
+
 @dataclass
 class StrategyProposal:
     dataset_id: str
@@ -325,6 +479,7 @@ class StrategyDevelopmentProposal:
     dataset_name: str
     target_col: str
     score_col: str
+    strategy_type: str
     objective: str
     max_bad_rate: float | None
     min_approval_rate: float | None
@@ -341,6 +496,7 @@ class StrategyDevelopmentProposal:
             "dataset_id": self.dataset_id,
             "target_col": self.target_col,
             "score_col": self.score_col,
+            "strategy_type": self.strategy_type,
             "objective": self.objective,
             "max_bad_rate": self.max_bad_rate,
             "min_approval_rate": self.min_approval_rate,
@@ -530,6 +686,9 @@ def build_strategy_development_proposal(
         dataset_name=_dataset_name(dataset),
         target_col=resolved_target,
         score_col=resolved_score,
+        strategy_type=str(
+            _input_value(strategy_input, "strategy_type") or "approval"
+        ),
         objective=objective,
         max_bad_rate=_optional_float_value(_input_value(strategy_input, "max_bad_rate")),
         min_approval_rate=_optional_float_value(
@@ -642,6 +801,10 @@ def _resolve_dataset(registry, task_id: str, source_dir):
         datasets = [d for d in registry.list_for_task(task_id) if d.role in _DATA_ROLES]
     if not datasets:
         raise StrategySetupError(f"策略分析未找到数据文件:{source_dir}")
+    return _select_dataset(datasets)
+
+
+def _select_dataset(datasets):
     return sorted(
         datasets,
         key=lambda d: (not bool(getattr(d, "has_target", False)), -int(getattr(d, "row_count", 0) or 0)),
@@ -745,12 +908,16 @@ __all__ = [
     "STRATEGY_INTENT_QUICK_ANALYSIS",
     "STRATEGY_INTENT_RULE_MINING",
     "StrategyDevelopmentProposal",
+    "StrategyDatasetContext",
+    "StrategyDatasetPreview",
     "StrategyProposal",
     "StrategySetupError",
     "build_monitoring_setup_proposal",
     "build_rule_strategy_proposal",
+    "build_strategy_dataset_context",
     "build_strategy_development_proposal",
     "build_strategy_proposal",
+    "preview_strategy_dataset_context",
     "is_limit_pricing_goal",
     "is_portfolio_analysis_goal",
     "is_quick_strategy_analysis_goal",

@@ -8,8 +8,9 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from marvis.agent.strategy_setup import StrategyDevelopmentProposal
 from marvis.app import create_app
-from marvis.db import TaskRepository
+from marvis.db import TaskRepository, connect
 from marvis.domain import StrategyTaskInput, TaskCreate
 
 
@@ -67,6 +68,7 @@ def test_strategy_clarification_can_resume_with_structured_business_contract(
 
     contract = {
         "entry_mode": "strategy_development",
+        "strategy_type": "approval",
         "objective": "max_approval",
         "max_bad_rate": 0.20,
     }
@@ -86,6 +88,7 @@ def test_strategy_clarification_can_resume_with_structured_business_contract(
     assert loaded.status_code == 200, loaded.text
     assert loaded.json()["strategy_input"] == {
         "entry_mode": "strategy_development",
+        "strategy_type": "approval",
         "objective": "max_approval",
         "max_bad_rate": 0.20,
         "min_approval_rate": None,
@@ -93,6 +96,144 @@ def test_strategy_clarification_can_resume_with_structured_business_contract(
         "profit": None,
     }
     assert loaded.json()["updated_at"] != created["updated_at"]
+
+
+@pytest.mark.parametrize(
+    "strategy_type",
+    ["approval", "reject", "limit", "pricing", "segmentation"],
+)
+def test_strategy_task_input_accepts_and_persists_all_v2_strategy_types(
+    tmp_path: Path,
+    strategy_type: str,
+) -> None:
+    client = _client(tmp_path)
+
+    created = _create_strategy_task(
+        client,
+        tmp_path,
+        strategy_input={
+            "strategy_type": strategy_type,
+            "objective": "max_approval",
+            "max_bad_rate": 0.20,
+        },
+    )
+
+    assert created["strategy_input"]["strategy_type"] == strategy_type
+    loaded = client.get(f"/api/tasks/{created['id']}")
+    assert loaded.status_code == 200, loaded.text
+    assert loaded.json()["strategy_input"]["strategy_type"] == strategy_type
+
+
+def test_strategy_task_input_rejects_unknown_type_at_api_boundary(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    source = _strategy_source(tmp_path)
+
+    response = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "未知策略类型",
+            "validator": "qa",
+            "source_dir": str(source),
+            "task_type": "strategy",
+            "strategy_input": {
+                "strategy_type": "unknown",
+                "objective": "max_approval",
+                "max_bad_rate": 0.20,
+            },
+        },
+    )
+
+    assert response.status_code == 422, response.text
+
+
+def test_repository_defaults_legacy_strategy_json_and_rejects_unknown_type(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    repo = TaskRepository(client.app.state.settings.db_path)
+    task = repo.create_task(
+        TaskCreate(
+            task_type="strategy",
+            model_name="历史策略任务",
+            model_version="",
+            validator="qa",
+            source_dir=str(tmp_path),
+            strategy_input=StrategyTaskInput(
+                objective="max_approval",
+                max_bad_rate=0.20,
+            ),
+        )
+    )
+    legacy_json = (
+        '{"entry_mode":"strategy_development","objective":"max_approval",'
+        '"max_bad_rate":0.2}'
+    )
+    with connect(client.app.state.settings.db_path) as conn:
+        conn.execute(
+            "UPDATE tasks SET strategy_input_json = ? WHERE id = ?",
+            (legacy_json, task.id),
+        )
+
+    assert repo.get_task(task.id).strategy_input == StrategyTaskInput(
+        strategy_type="approval",
+        objective="max_approval",
+        max_bad_rate=0.20,
+    )
+
+    with connect(client.app.state.settings.db_path) as conn:
+        conn.execute(
+            "UPDATE tasks SET strategy_input_json = ? WHERE id = ?",
+            (
+                '{"strategy_type":"unknown","objective":"max_approval",'
+                '"max_bad_rate":0.2}',
+                task.id,
+            ),
+        )
+    with pytest.raises(ValueError, match="strategy_type must be one of"):
+        repo.get_task(task.id)
+
+
+def test_strategy_clarification_snapshot_keeps_strategy_type(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    created = _create_strategy_task(
+        client,
+        tmp_path,
+        strategy_input={
+            "strategy_type": "segmentation",
+            "objective": "max_approval",
+        },
+    )
+
+    clarified = client.post(f"/api/tasks/{created['id']}/agent/start", json={})
+
+    assert clarified.status_code == 202, clarified.text
+    assert clarified.json()["status"] == "clarification_required"
+    assert clarified.json()["current_input"]["strategy_type"] == "segmentation"
+    assert (
+        clarified.json()["clarification"]["current_input"]["strategy_type"]
+        == "segmentation"
+    )
+
+
+def test_strategy_development_proposal_keeps_strategy_type_in_template_slots() -> None:
+    proposal = StrategyDevelopmentProposal(
+        dataset_id="dataset-1",
+        dataset_name="sample.csv",
+        target_col="bad",
+        score_col="score",
+        strategy_type="limit",
+        objective="max_approval",
+        max_bad_rate=0.20,
+        min_approval_rate=None,
+        baseline_strategy_id=None,
+        ead_col=None,
+        pd_col=None,
+        profit_params=None,
+        bad_rate=0.10,
+        notes=[],
+    )
+
+    assert proposal.template_slots()["strategy_type"] == "limit"
 
 
 def test_strategy_input_on_non_strategy_agent_message_is_rejected(tmp_path: Path):

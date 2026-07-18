@@ -134,6 +134,7 @@ def _adopt_strategy(driver, registry, plan_repo, tmp_path, task):
             "target_col": "bad",
             "score_col": "score",
             "score_direction": "higher_is_better",
+            "strategy_type": "approval",
             "max_bad_rate": 0.1,
         },
     )

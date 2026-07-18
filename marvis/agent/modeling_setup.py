@@ -62,6 +62,7 @@ class ModelingProposal:
     # Auto-split config for flows where the split can only happen inside the plan
     # (joined modeling: the frame does not exist until 执行拼接). {} = passthrough.
     split_config: dict[str, object] = field(default_factory=dict)
+    ingest_notices: list[dict] = field(default_factory=list)
 
     def template_slots(self) -> dict:
         selection_policy = _default_selection_policy(self.target_type)
@@ -340,7 +341,13 @@ def build_modeling_proposal(
         business_columns=business_columns,
         feature_dictionary_id=feature_dictionary_id,
         split_config=auto_split_config,
+        ingest_notices=_consume_ingest_notices(registry, task_id),
     )
+
+
+def _consume_ingest_notices(registry, task_id: str) -> list[dict]:
+    consume = getattr(registry, "consume_ingest_notices", None)
+    return list(consume(task_id)) if callable(consume) else []
 
 
 def _with_optional_business_slots(slots: dict, proposal: ModelingProposal) -> dict:

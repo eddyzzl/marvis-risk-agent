@@ -13,6 +13,30 @@ class DataIngestError(DataLayerError):
     """Raised when a source file cannot be normalized into a dataset."""
 
 
+class CsvParseError(DataIngestError):
+    """A CSV row could not be parsed, with deterministic source context."""
+
+    def __init__(
+        self,
+        *,
+        path,
+        technical_message: str,
+        line_number: int | None = None,
+        expected_fields: int | None = None,
+        actual_fields: int | None = None,
+    ) -> None:
+        self.path = path
+        self.technical_message = str(technical_message)
+        self.line_number = line_number
+        self.expected_fields = expected_fields
+        self.actual_fields = actual_fields
+        location = f" 第 {line_number} 行" if line_number is not None else ""
+        counts = ""
+        if expected_fields is not None and actual_fields is not None:
+            counts = f"（预期 {expected_fields} 列，实际 {actual_fields} 列）"
+        super().__init__(f"CSV 文件 {getattr(path, 'name', path)}{location}解析失败{counts}")
+
+
 class DedupRequiredError(DataLayerError):
     """Raised when a non-unique feature key needs a user-selected dedup strategy."""
 

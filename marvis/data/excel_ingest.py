@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,6 +21,26 @@ PREVIEW_ROWS = 25
 # best we can do is *detect* an integer-shaped float at or above this magnitude
 # and flag the column so the user knows to re-export/re-enter it as text.
 LONG_ID_FLOAT_THRESHOLD = 1e15
+
+
+def is_xlsx_workbook(path: Path) -> bool:
+    """Return whether ``path`` contains an OOXML Excel workbook.
+
+    Some upstream export/download systems preserve Excel bytes while assigning
+    a ``.csv`` filename. Checking the ZIP members lets callers select the real
+    parser from deterministic file evidence instead of trusting the suffix.
+    A generic ZIP is deliberately rejected.
+    """
+
+    path = Path(path)
+    try:
+        if not zipfile.is_zipfile(path):
+            return False
+        with zipfile.ZipFile(path) as archive:
+            members = set(archive.namelist())
+    except (OSError, zipfile.BadZipFile):
+        return False
+    return "[Content_Types].xml" in members and "xl/workbook.xml" in members
 
 
 @dataclass(frozen=True)
@@ -229,6 +250,7 @@ __all__ = [
     "detect_header_rows",
     "flatten_headers",
     "ingest_sheet",
+    "is_xlsx_workbook",
     "list_sheets",
     "probe_sheet_row_count",
 ]

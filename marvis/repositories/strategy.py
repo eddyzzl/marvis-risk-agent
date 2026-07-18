@@ -262,6 +262,9 @@ class StrategyRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
 
+    def transaction(self):
+        return connect(self.db_path)
+
     def create_strategy(
         self,
         task_id: str,
@@ -379,6 +382,33 @@ class StrategyRepository:
         adopt of the same strategy raises instead of silently double-adopting
         (the confirm_step compare-and-swap lesson, tests/test_concurrency.py).
         Returns {"version", "retired_strategy_ids"}."""
+        with connect(self.db_path) as conn:
+            return self.adopt_strategy_with_audit_on_connection(
+                conn,
+                strategy_id,
+                reason=reason,
+                audit=audit,
+                adopted_at=adopted_at,
+                effect_execution_id=effect_execution_id,
+                runtime_generation=runtime_generation,
+            )
+
+    def adopt_strategy_with_audit_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        strategy_id: str,
+        *,
+        reason: str,
+        audit: dict,
+        adopted_at: str | None = None,
+        effect_execution_id: str | None = None,
+        runtime_generation: str | None = None,
+    ) -> dict:
+        """Apply the adoption lifecycle and effect fence on a caller connection.
+
+        The caller owns commit/rollback so adoption can share one SQLite
+        transaction with its required artifact and audit writes.
+        """
         governed_effect = effect_execution_id is not None or runtime_generation is not None
         if governed_effect and (
             not str(effect_execution_id or "").strip()
@@ -394,106 +424,105 @@ class StrategyRepository:
             "adoption_reason": normalized_reason,
         }
         stamp = adopted_at or _now()
-        with connect(self.db_path) as conn:
-            # A governed side effect must validate its immutable authorization
-            # snapshot and mutate the domain under the same writer lock.  Without
-            # BEGIN IMMEDIATE a different adoption could land after the champion
-            # snapshot check but before our guarded writes, defeating the fence.
-            if governed_effect:
-                conn.execute("BEGIN IMMEDIATE")
-            head = conn.execute(
-                """
-                SELECT task_id, strategy_type, version, status, rules_json,
-                       score_col, default_decision_json, description,
-                       dsl_json, dsl_schema_version
-                  FROM strategies
-                 WHERE id = ?
-                """,
+        # A governed side effect must validate its immutable authorization
+        # snapshot and mutate the domain under the same writer lock.  Without
+        # BEGIN IMMEDIATE a different adoption could land after the champion
+        # snapshot check but before our guarded writes, defeating the fence.
+        if governed_effect and not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        head = conn.execute(
+            """
+            SELECT task_id, strategy_type, version, status, rules_json,
+                   score_col, default_decision_json, description,
+                   dsl_json, dsl_schema_version
+              FROM strategies
+             WHERE id = ?
+            """,
+            (strategy_id,),
+        ).fetchone()
+        if head is None:
+            raise KeyError(strategy_id)
+        task_id = str(head["task_id"])
+        strategy_type = str(head["strategy_type"])
+        version = int(head["version"])
+        effect_receipt = None
+        if governed_effect:
+            effect_receipt = _validate_strategy_effect_authorization(
+                conn,
+                effect_execution_id=str(effect_execution_id),
+                runtime_generation=str(runtime_generation),
+                strategy_id=strategy_id,
+                task_id=task_id,
+                strategy_type=strategy_type,
+                version=version,
+                status=str(head["status"]),
+                strategy_spec_hash=_strategy_spec_hash_from_row(head),
+            )
+        # Retire in-role siblings first, in the same transaction, so the
+        # "at most one adopted per (task, type)" invariant holds atomically.
+        retired_rows = conn.execute(
+            """
+            SELECT id FROM strategies
+             WHERE task_id = ? AND strategy_type = ? AND status = 'adopted'
+               AND id <> ?
+             ORDER BY created_at, id
+            """,
+            (task_id, strategy_type, strategy_id),
+        ).fetchall()
+        retired_ids = [str(r["id"]) for r in retired_rows]
+        for retired_id in retired_ids:
+            # rowcount guard: the sibling was 'adopted' at the SELECT above,
+            # but a concurrent adopt/retire can flip it in the window between
+            # that SELECT and this UPDATE. Without the guard a rowcount==0
+            # here silently no-ops yet still writes a retire audit row for a
+            # retirement that never happened, breaking the "at most one
+            # adopted per (task, type)" invariant. On rowcount==0 we abort
+            # the whole transaction (the main adopt UPDATE below is never
+            # reached, connect() rolls back), so adoption stays atomic:
+            # either every sibling retires and this strategy adopts, or
+            # nothing changes.
+            retire_cursor = conn.execute(
+                "UPDATE strategies SET status = 'retired' WHERE id = ? AND status = 'adopted'",
+                (retired_id,),
+            )
+            if retire_cursor.rowcount == 0:
+                raise ConflictError("并发修改，请重试")
+            _write_audit_row(
+                conn,
+                kind="strategy.retire",
+                target_ref=retired_id,
+                outcome="succeeded",
+                detail={
+                    "task_id": task_id,
+                    "strategy_type": strategy_type,
+                    "superseded_by": strategy_id,
+                },
+            )
+        cursor = conn.execute(
+            """
+            UPDATE strategies
+               SET status = 'adopted', adopted_at = ?, adoption_reason = ?
+             WHERE id = ? AND status = 'draft'
+            """,
+            (stamp, normalized_reason, strategy_id),
+        )
+        if cursor.rowcount == 0:
+            current = conn.execute(
+                "SELECT status FROM strategies WHERE id = ?",
                 (strategy_id,),
             ).fetchone()
-            if head is None:
-                raise KeyError(strategy_id)
-            task_id = str(head["task_id"])
-            strategy_type = str(head["strategy_type"])
-            version = int(head["version"])
-            effect_receipt = None
-            if governed_effect:
-                effect_receipt = _validate_strategy_effect_authorization(
-                    conn,
-                    effect_execution_id=str(effect_execution_id),
-                    runtime_generation=str(runtime_generation),
-                    strategy_id=strategy_id,
-                    task_id=task_id,
-                    strategy_type=strategy_type,
-                    version=version,
-                    status=str(head["status"]),
-                    strategy_spec_hash=_strategy_spec_hash_from_row(head),
-                )
-            # Retire in-role siblings first, in the same transaction, so the
-            # "at most one adopted per (task, type)" invariant holds atomically.
-            retired_rows = conn.execute(
-                """
-                SELECT id FROM strategies
-                 WHERE task_id = ? AND strategy_type = ? AND status = 'adopted'
-                   AND id <> ?
-                 ORDER BY created_at, id
-                """,
-                (task_id, strategy_type, strategy_id),
-            ).fetchall()
-            retired_ids = [str(r["id"]) for r in retired_rows]
-            for retired_id in retired_ids:
-                # rowcount guard: the sibling was 'adopted' at the SELECT above,
-                # but a concurrent adopt/retire can flip it in the window between
-                # that SELECT and this UPDATE. Without the guard a rowcount==0
-                # here silently no-ops yet still writes a retire audit row for a
-                # retirement that never happened, breaking the "at most one
-                # adopted per (task, type)" invariant. On rowcount==0 we abort
-                # the whole transaction (the main adopt UPDATE below is never
-                # reached, connect() rolls back), so adoption stays atomic:
-                # either every sibling retires and this strategy adopts, or
-                # nothing changes.
-                retire_cursor = conn.execute(
-                    "UPDATE strategies SET status = 'retired' WHERE id = ? AND status = 'adopted'",
-                    (retired_id,),
-                )
-                if retire_cursor.rowcount == 0:
-                    raise ConflictError("并发修改，请重试")
-                _write_audit_row(
-                    conn,
-                    kind="strategy.retire",
-                    target_ref=retired_id,
-                    outcome="succeeded",
-                    detail={
-                        "task_id": task_id,
-                        "strategy_type": strategy_type,
-                        "superseded_by": strategy_id,
-                    },
-                )
-            cursor = conn.execute(
-                """
-                UPDATE strategies
-                   SET status = 'adopted', adopted_at = ?, adoption_reason = ?
-                 WHERE id = ? AND status = 'draft'
-                """,
-                (stamp, normalized_reason, strategy_id),
+            raise ConflictError(
+                f"strategy {strategy_id} is not draft: {current['status']}"
             )
-            if cursor.rowcount == 0:
-                current = conn.execute(
-                    "SELECT status FROM strategies WHERE id = ?",
-                    (strategy_id,),
-                ).fetchone()
-                raise ConflictError(
-                    f"strategy {strategy_id} is not draft: {current['status']}"
-                )
-            _write_audit_row(conn, **adoption_audit)
-            if effect_receipt is not None:
-                _commit_strategy_effect_receipt(
-                    conn,
-                    receipt=effect_receipt,
-                    strategy_id=strategy_id,
-                    version=version,
-                    retired_strategy_ids=retired_ids,
-                )
+        _write_audit_row(conn, **adoption_audit)
+        if effect_receipt is not None:
+            _commit_strategy_effect_receipt(
+                conn,
+                receipt=effect_receipt,
+                strategy_id=strategy_id,
+                version=version,
+                retired_strategy_ids=retired_ids,
+            )
         return {"version": version, "retired_strategy_ids": retired_ids}
 
     def new_version_from(
@@ -638,15 +667,36 @@ class StrategyRepository:
         created_at: str | None = None,
         artifact_id: str | None = None,
     ) -> str:
-        new_id = artifact_id or uuid.uuid4().hex
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO strategy_artifacts(id, strategy_id, kind, path, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (new_id, strategy_id, str(kind), str(path), created_at or _now()),
+            return _insert_strategy_artifact_row(
+                conn,
+                strategy_id,
+                kind=kind,
+                path=path,
+                created_at=created_at,
+                artifact_id=artifact_id,
             )
+
+    def save_strategy_artifact_with_audit_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        strategy_id: str,
+        *,
+        kind: str,
+        path: str,
+        audit: dict,
+        created_at: str | None = None,
+        artifact_id: str | None = None,
+    ) -> str:
+        new_id = _insert_strategy_artifact_row(
+            conn,
+            strategy_id,
+            kind=kind,
+            path=path,
+            created_at=created_at,
+            artifact_id=artifact_id,
+        )
+        _write_audit_row(conn, **audit)
         return new_id
 
     def list_strategy_artifacts(self, strategy_id: str) -> list[dict]:
@@ -815,6 +865,26 @@ def _write_audit_row(
             _now(),
         ),
     )
+
+
+def _insert_strategy_artifact_row(
+    conn: sqlite3.Connection,
+    strategy_id: str,
+    *,
+    kind: str,
+    path: str,
+    created_at: str | None = None,
+    artifact_id: str | None = None,
+) -> str:
+    new_id = artifact_id or uuid.uuid4().hex
+    conn.execute(
+        """
+        INSERT INTO strategy_artifacts(id, strategy_id, kind, path, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (new_id, strategy_id, str(kind), str(path), created_at or _now()),
+    )
+    return new_id
 
 
 def _strategy_insert_values(task_id: str, strategy: Strategy, created_at: str) -> tuple:

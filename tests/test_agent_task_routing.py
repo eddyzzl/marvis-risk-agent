@@ -97,6 +97,43 @@ def test_strategy_agent_start_defaults_to_full_development_plan(client, tmp_path
     ]
 
 
+@pytest.mark.parametrize("strategy_type", ["limit", "pricing", "segmentation"])
+def test_nonapproval_typed_strategy_never_falls_into_cutoff_template(
+    client,
+    tmp_path,
+    strategy_type,
+):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": f"{strategy_type} strategy",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {
+                "strategy_type": strategy_type,
+                "objective": "max_approval",
+                "max_bad_rate": 0.20,
+            },
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    started = client.post(f"/api/tasks/{created.json()['id']}/agent/start", json={})
+
+    assert started.status_code == 202, started.text
+    payload = started.json()
+    assert payload["status"] == "clarification_required"
+    assert payload["clarification"]["code"] == "strategy_typed_spec_required"
+    assert payload["clarification"]["strategy_type"] == strategy_type
+    assert payload["clarification"]["missing_fields"] == ["strategy_spec"]
+    assert client.get(f"/api/tasks/{created.json()['id']}/plans").json()["plans"] == []
+
+
 def test_strategy_limit_pricing_intent_redirects_without_approval_plan(client, tmp_path):
     src = _strategy_source(tmp_path)
     created = client.post(
@@ -237,6 +274,7 @@ def test_strategy_clarification_preserves_partial_business_contract(client, tmp_
     assert started.json()["status"] == "clarification_required"
     expected = {
         "entry_mode": "strategy_development",
+        "strategy_type": "approval",
         "objective": "max_approval",
         "max_bad_rate": None,
         "min_approval_rate": None,

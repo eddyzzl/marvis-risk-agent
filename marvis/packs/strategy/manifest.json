@@ -2,7 +2,7 @@
   "name": "strategy",
   "version": "0.1.0",
   "display_name": "Strategy Pack",
-  "description": "Vintage, roll-rate, profitability, strategy construction, backtesting, and tradeoff analysis tools.",
+  "description": "Vintage, roll-rate, profitability, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
   "python_requires": ">=3.10,<3.14",
   "tools": [
@@ -392,7 +392,8 @@
                 "properties": {
                   "type": {"const": "approval"},
                   "value": {"const": "approve"},
-                  "reason_code": {"type": "string", "minLength": 1},
+                  "reason_code": {"type": ["string", "null"], "minLength": 1},
+                  "output_value": {},
                   "stop": {"const": true}
                 },
                 "required": ["type"],
@@ -403,7 +404,8 @@
                 "properties": {
                   "type": {"const": "reject"},
                   "value": {"const": "reject"},
-                  "reason_code": {"type": "string", "minLength": 1},
+                  "reason_code": {"type": ["string", "null"], "minLength": 1},
+                  "output_value": {},
                   "stop": {"const": true}
                 },
                 "required": ["type"],
@@ -414,7 +416,8 @@
                 "properties": {
                   "type": {"const": "review"},
                   "value": {"const": "review"},
-                  "reason_code": {"type": "string", "minLength": 1},
+                  "reason_code": {"type": ["string", "null"], "minLength": 1},
+                  "output_value": {},
                   "stop": {"const": true}
                 },
                 "required": ["type"],
@@ -425,7 +428,8 @@
                 "properties": {
                   "type": {"const": "limit"},
                   "value": {"type": "number", "minimum": 0},
-                  "reason_code": {"type": "string", "minLength": 1},
+                  "reason_code": {"type": ["string", "null"], "minLength": 1},
+                  "output_value": {},
                   "stop": {"const": true}
                 },
                 "required": ["type", "value"],
@@ -436,7 +440,8 @@
                 "properties": {
                   "type": {"const": "pricing"},
                   "value": {"type": "number", "minimum": 0, "maximum": 1},
-                  "reason_code": {"type": "string", "minLength": 1},
+                  "reason_code": {"type": ["string", "null"], "minLength": 1},
+                  "output_value": {},
                   "stop": {"const": true}
                 },
                 "required": ["type", "value"],
@@ -452,7 +457,8 @@
                       {"type": "number"}
                     ]
                   },
-                  "reason_code": {"type": "string", "minLength": 1},
+                  "reason_code": {"type": ["string", "null"], "minLength": 1},
+                  "output_value": {},
                   "stop": {"const": true}
                 },
                 "required": ["type", "value"],
@@ -663,6 +669,168 @@
       "memory_limit_mb": 2048
     },
     {
+      "name": "apply_strategy",
+      "summary": "Apply a persisted canonical strategy to a task-owned dataset and atomically register deterministic per-row actions as a derived dataset.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "output_prefix": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 48,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "output_columns": {
+            "type": "object",
+            "properties": {
+              "action": {"$ref": "#/$defs/output_column"},
+              "value": {"$ref": "#/$defs/output_column"},
+              "value_type": {"$ref": "#/$defs/output_column"},
+              "rule_id": {"$ref": "#/$defs/output_column"},
+              "reason_code": {"$ref": "#/$defs/output_column"}
+            },
+            "minProperties": 1,
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "dataset_id",
+          "strategy_id"
+        ],
+        "not": {
+          "required": [
+            "output_prefix",
+            "output_columns"
+          ]
+        },
+        "additionalProperties": false,
+        "$defs": {
+          "output_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.apply.v1"
+          },
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "strategy_type": {
+            "type": "string",
+            "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+          },
+          "source_dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "result_dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "population_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "action_counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "rule_counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "default_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "output_columns": {
+            "type": "object",
+            "properties": {
+              "action": {"$ref": "#/$defs/output_column"},
+              "value": {"$ref": "#/$defs/output_column"},
+              "value_type": {"$ref": "#/$defs/output_column"},
+              "rule_id": {"$ref": "#/$defs/output_column"},
+              "reason_code": {"$ref": "#/$defs/output_column"}
+            },
+            "required": ["action", "value", "value_type", "rule_id", "reason_code"],
+            "additionalProperties": false
+          },
+          "evidence": {
+            "type": "object",
+            "properties": {
+              "source_dataset_content_hash": {"$ref": "#/$defs/sha256"},
+              "strategy_effect_hash": {"$ref": "#/$defs/sha256"},
+              "result_dataset_content_hash": {"$ref": "#/$defs/sha256"}
+            },
+            "required": [
+              "source_dataset_content_hash",
+              "strategy_effect_hash",
+              "result_dataset_content_hash"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "schema_version",
+          "strategy_id",
+          "strategy_type",
+          "source_dataset_id",
+          "result_dataset_id",
+          "population_count",
+          "action_counts",
+          "rule_counts",
+          "default_count",
+          "output_columns",
+          "evidence"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "output_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_apply_strategy",
+      "side_effects": [
+        "read:dataset",
+        "read:strategy",
+        "write:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
       "name": "backtest_strategy",
       "summary": "Backtest a persisted strategy on a dataset and persist aggregate results.",
       "input_schema": {
@@ -855,6 +1023,10 @@
             "type": "string",
             "minLength": 1
           },
+          "source_dataset_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
           "strategy_id": {
             "type": "string",
             "minLength": 1
@@ -978,6 +1150,7 @@
         "required": [
           "schema_version",
           "backtest_id",
+          "source_dataset_content_hash",
           "strategy_id",
           "strategy_type",
           "population_count",
@@ -1564,7 +1737,7 @@
     },
     {
       "name": "adopt_strategy",
-      "summary": "Adopt a backtested strategy behind a mandatory confirmation gate and emit decision-table and monitoring-plan deliverables.",
+      "summary": "Adopt a task-bound approval, reject, limit, pricing, or segmentation strategy behind a mandatory confirmation gate; emit aggregate audit evidence, a decision table, and a type-specific monitoring plan.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1580,7 +1753,8 @@
             "type": "string"
           },
           "band_stats": {
-            "type": "object"
+            "type": "object",
+            "description": "Deprecated stored-plan compatibility input. Adoption ignores these unbound caller statistics and derives deliverables only from persisted strategy/backtest evidence."
           },
           "experiment_id": {
             "type": "string",
@@ -1598,19 +1772,32 @@
         "type": "object",
         "properties": {
           "strategy_id": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
+          },
+          "strategy_type": {
+            "type": "string",
+            "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+          },
+          "backtest_id": {
+            "type": "string",
+            "minLength": 1
           },
           "version": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 1
           },
           "status": {
-            "type": "string"
+            "const": "adopted"
           },
           "retired_strategy_ids": {
             "type": "array",
             "items": {
               "type": "string"
             }
+          },
+          "adoption_evidence": {
+            "$ref": "#/$defs/adoption_evidence"
           },
           "artifacts": {
             "type": "array",
@@ -1621,12 +1808,218 @@
         },
         "required": [
           "strategy_id",
+          "strategy_type",
+          "backtest_id",
           "version",
           "status",
           "retired_strategy_ids",
+          "adoption_evidence",
           "artifacts"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "adoption_evidence": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "const": "strategy.adoption-evidence.v1"
+              },
+              "backtest_schema_version": {
+                "type": "string",
+                "enum": ["strategy.backtest.v1", "strategy.backtest.v2"]
+              },
+              "backtest_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "strategy_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "strategy_type": {
+                "type": "string",
+                "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+              },
+              "source_dataset_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_dataset_content_hash": {
+                "anyOf": [
+                  {"$ref": "#/$defs/sha256"},
+                  {"type": "null"}
+                ]
+              },
+              "strategy_effect_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "baseline_effect_hash": {
+                "anyOf": [
+                  {"$ref": "#/$defs/sha256"},
+                  {"type": "null"}
+                ]
+              },
+              "target_col": {
+                "type": ["string", "null"]
+              },
+              "population_count": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "labeled_count": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "label_coverage": {
+                "type": ["number", "null"],
+                "minimum": 0,
+                "maximum": 1
+              },
+              "metrics": {
+                "type": "object"
+              },
+              "breakdown": {
+                "type": "array",
+                "items": {"type": "object"}
+              },
+              "transitions": {
+                "type": "array",
+                "items": {"type": "object"}
+              },
+              "economics": {
+                "type": "object",
+                "not": {"required": ["by_row"]}
+              },
+              "economics_input_evidence": {
+                "type": "object"
+              },
+              "warnings": {
+                "type": "array",
+                "items": {"type": "string"}
+              }
+            },
+            "required": [
+              "schema_version",
+              "backtest_schema_version",
+              "backtest_id",
+              "strategy_id",
+              "strategy_type",
+              "source_dataset_id",
+              "source_dataset_content_hash",
+              "strategy_effect_hash",
+              "baseline_effect_hash",
+              "target_col",
+              "population_count",
+              "labeled_count",
+              "label_coverage",
+              "metrics",
+              "breakdown",
+              "transitions",
+              "economics",
+              "economics_input_evidence",
+              "warnings"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "backtest_schema_version": {"const": "strategy.backtest.v1"}
+                  },
+                  "required": ["backtest_schema_version"]
+                },
+                "then": {
+                  "properties": {
+                    "strategy_type": {"enum": ["approval", "reject"]},
+                    "baseline_effect_hash": {"type": "null"},
+                    "target_col": {"type": "null"},
+                    "population_count": {"type": "null"},
+                    "labeled_count": {"type": "null"},
+                    "label_coverage": {"type": "null"},
+                    "transitions": {"maxItems": 0},
+                    "economics_input_evidence": {"maxProperties": 0}
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "source_dataset_content_hash": {"$ref": "#/$defs/sha256"},
+                    "target_col": {"type": "string", "minLength": 1},
+                    "population_count": {"type": "integer", "minimum": 1},
+                    "labeled_count": {"type": "integer", "minimum": 1},
+                    "label_coverage": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "maximum": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "strategy_type": {"const": "approval"},
+                    "backtest_schema_version": {"const": "strategy.backtest.v2"}
+                  },
+                  "required": ["strategy_type", "backtest_schema_version"]
+                },
+                "then": {"properties": {"metrics": {"required": ["approve_bad_rate"]}}}
+              },
+              {
+                "if": {
+                  "properties": {
+                    "strategy_type": {"const": "reject"},
+                    "backtest_schema_version": {"const": "strategy.backtest.v2"}
+                  },
+                  "required": ["strategy_type", "backtest_schema_version"]
+                },
+                "then": {
+                  "properties": {
+                    "metrics": {"required": ["bad_capture_rate", "good_reject_rate"]}
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {"strategy_type": {"const": "limit"}},
+                  "required": ["strategy_type"]
+                },
+                "then": {
+                  "properties": {
+                    "metrics": {"required": ["mean_limit"]},
+                    "economics": {"required": ["expected_ead", "expected_loss"]}
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {"strategy_type": {"const": "pricing"}},
+                  "required": ["strategy_type"]
+                },
+                "then": {
+                  "properties": {
+                    "metrics": {"required": ["mean_rate"]},
+                    "economics": {"required": ["profit", "roa", "expected_loss"]}
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {"strategy_type": {"const": "segmentation"}},
+                  "required": ["strategy_type"]
+                },
+                "then": {
+                  "properties": {
+                    "metrics": {"required": ["segment_count", "overall_bad_rate"]}
+                  }
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        }
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
@@ -1646,7 +2039,9 @@
         }
       },
       "side_effects": [
+        "read:dataset",
         "read:strategy",
+        "write:artifact",
         "write:strategy"
       ],
       "memory_limit_mb": 2048
@@ -2356,6 +2751,8 @@
   "permissions": [
     "read:dataset",
     "read:strategy",
+    "write:artifact",
+    "write:dataset",
     "write:strategy",
     "write:backtest"
   ]

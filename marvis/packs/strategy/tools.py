@@ -5,13 +5,17 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
+import uuid
 
 import pandas as pd
 
+from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.direction import check_score_direction, normalize_score_direction
 from marvis.data.errors import LabelSemanticsNotDeclaredError
 from marvis.data.labels import require_labels_confirmed, resolve_labeled_frame
 from marvis.db import StrategyRepository
+from marvis.files import sha256_file
 from marvis.packs.strategy.backtest_compat import (
     BacktestRecord,
     approval_backtest_projection,
@@ -21,13 +25,20 @@ from marvis.packs.strategy.bands import design_cutoff_bands
 from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.contracts import Strategy
 from marvis.packs.strategy.deliverables import decision_table_csv
-from marvis.packs.strategy.dsl import canonical_strategy_json, strategy_spec_hash
+from marvis.packs.strategy.dsl import (
+    canonical_strategy_json,
+    parse_strategy_spec,
+    strategy_spec_hash,
+)
+from marvis.packs.strategy.evaluator import evaluate_strategy_frame
 from marvis.packs.strategy.doc import render_strategy_doc_markdown
 from marvis.packs.strategy.monitor_tools import (  # noqa: F401
     tool_render_monitoring_report,
     tool_run_strategy_monitoring,
 )
 from marvis.packs.strategy.monitoring_plan import (
+    DEFAULT_CADENCE_DAYS,
+    PLAN_VERSION,
     build_monitoring_plan,
     save_monitoring_plan,
 )
@@ -298,6 +309,270 @@ def _same_strategy_payload(left: Strategy, right: Strategy) -> bool:
     )
 
 
+_APPLY_SCHEMA_VERSION = "strategy.apply.v1"
+_SAFE_OUTPUT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_APPLY_OUTPUT_SUFFIXES = {
+    "action": "action",
+    "value": "value",
+    "value_type": "value_type",
+    "rule_id": "rule_id",
+    "reason_code": "reason_code",
+}
+
+
+def tool_apply_strategy(inputs: dict, ctx) -> dict:
+    """Apply one persisted canonical Strategy DSL to a task-owned dataset.
+
+    Execution delegates all condition and first-match semantics to the canonical
+    vectorized evaluator.  This layer only projects its typed actions into new
+    columns, atomically registers the derived parquet, and records evidence.
+    """
+
+    runtime = _runtime(ctx)
+    task_id = str(ctx.task_id)
+    dataset_id = str(inputs["dataset_id"])
+    strategy = _strategy(runtime, str(inputs["strategy_id"]), task_id=task_id)
+    spec = parse_strategy_spec(
+        strategy.spec or legacy_strategy_to_spec(strategy)
+    )
+    dataset = _owned_dataset(runtime, dataset_id, task_id=task_id)
+    source_path = runtime.registry.resolve_path(dataset.id)
+    source_hash = sha256_file(source_path)
+    frame = runtime.backend.read_frame(source_path)
+    if sha256_file(source_path) != source_hash:
+        raise StrategyError(
+            "source dataset changed while the strategy was being applied"
+        )
+    output_columns = _strategy_apply_output_columns(inputs, frame)
+
+    evaluation = evaluate_strategy_frame(frame, spec)
+    action_values, action_value_types = _strategy_apply_values(
+        evaluation.decisions,
+        strategy_type=spec.strategy_type,
+    )
+    derived = frame.copy()
+    derived[output_columns["action"]] = evaluation.action_type
+    derived[output_columns["value"]] = action_values
+    derived[output_columns["value_type"]] = action_value_types
+    derived[output_columns["rule_id"]] = evaluation.matched_rule_id
+    derived[output_columns["reason_code"]] = evaluation.reason_code
+
+    action_counts = _string_counts(evaluation.action_type)
+    rule_counts = _rule_counts(evaluation.matched_rule_id)
+    default_count = int(evaluation.matched_rule_id.isna().sum())
+    strategy_hash = strategy_spec_hash(spec)
+    uow = ArtifactUnitOfWork()
+    staged = uow.stage_file(
+        runtime.datasets_root / task_id / "strategy_apply",
+        f"applied_{strategy_hash[:12]}_{uuid.uuid4().hex}.parquet",
+    )
+    try:
+        derived.to_parquet(staged.path, index=False)
+        result_hash = sha256_file(staged.path)
+        evidence = {
+            "source_dataset_content_hash": source_hash,
+            "strategy_effect_hash": strategy_hash,
+            "result_dataset_content_hash": result_hash,
+        }
+
+        def audit_factory(registered_dataset):
+            return {
+                "kind": "strategy.apply",
+                "target_ref": registered_dataset.id,
+                "outcome": "succeeded",
+                "detail": {
+                    "task_id": task_id,
+                    "source_dataset_id": dataset.id,
+                    "strategy_id": strategy.id,
+                    "strategy_type": spec.strategy_type,
+                    "population_count": int(len(frame)),
+                    "action_counts": action_counts,
+                    "rule_counts": rule_counts,
+                    "default_count": default_count,
+                    "output_columns": output_columns,
+                    "evidence": evidence,
+                },
+            }
+
+        registered = uow.finalize_with_connection(
+            runtime.repo.transaction,
+            lambda conn: runtime.registry.register_existing_with_audit_on_connection(
+                conn,
+                staged.final_path,
+                audit_factory=audit_factory,
+                task_id=task_id,
+                role="strategy.applied",
+                anchor_target=dataset.id,
+                seed=int(ctx.seed or 0),
+            ),
+        )
+    except Exception:
+        uow.rollback()
+        raise
+
+    return {
+        "schema_version": _APPLY_SCHEMA_VERSION,
+        "strategy_id": strategy.id,
+        "strategy_type": spec.strategy_type,
+        "source_dataset_id": dataset.id,
+        "result_dataset_id": registered.id,
+        "population_count": int(len(frame)),
+        "action_counts": action_counts,
+        "rule_counts": rule_counts,
+        "default_count": default_count,
+        "output_columns": output_columns,
+        "evidence": evidence,
+    }
+
+
+def _strategy_apply_output_columns(inputs: dict, frame: pd.DataFrame) -> dict[str, str]:
+    raw_prefix = inputs.get("output_prefix")
+    raw_columns = inputs.get("output_columns")
+    if raw_prefix is not None and raw_columns is not None:
+        raise StrategyError(
+            "apply_strategy accepts output_prefix or output_columns, not both"
+        )
+    if raw_columns is not None and not isinstance(raw_columns, dict):
+        raise StrategyError("output_columns must be an object")
+
+    if raw_columns is None:
+        if raw_prefix is not None and not isinstance(raw_prefix, str):
+            raise StrategyError("output_prefix must be a string")
+        prefix = "strategy_" if raw_prefix is None else raw_prefix
+        _require_safe_output_name(prefix, name="output_prefix", is_prefix=True)
+        columns = {
+            key: f"{prefix}{suffix}"
+            for key, suffix in _APPLY_OUTPUT_SUFFIXES.items()
+        }
+    else:
+        unsupported = sorted(set(raw_columns) - set(_APPLY_OUTPUT_SUFFIXES))
+        if unsupported:
+            raise StrategyError(
+                "output_columns has unsupported fields: " + ", ".join(unsupported)
+            )
+        columns = {}
+        for key, suffix in _APPLY_OUTPUT_SUFFIXES.items():
+            value = raw_columns.get(key)
+            if value is None:
+                columns[key] = f"strategy_{suffix}"
+            elif not isinstance(value, str):
+                raise StrategyError(f"output_columns.{key} must be a string")
+            else:
+                columns[key] = value
+
+    for key, column in columns.items():
+        _require_safe_output_name(column, name=f"output_columns.{key}")
+    normalized_outputs = [column.casefold() for column in columns.values()]
+    if len(set(normalized_outputs)) != len(normalized_outputs):
+        raise StrategyError(
+            "strategy output column names must be case-insensitively unique"
+        )
+    source_columns = {
+        str(column).casefold()
+        for column in frame.columns
+    }
+    collisions = sorted(
+        column
+        for column in columns.values()
+        if column.casefold() in source_columns
+    )
+    if collisions:
+        raise StrategyError(
+            "strategy output columns already exist (case-insensitive): "
+            + ", ".join(collisions)
+        )
+    return columns
+
+
+def _require_safe_output_name(
+    value: str,
+    *,
+    name: str,
+    is_prefix: bool = False,
+) -> None:
+    limit = 48 if is_prefix else 64
+    if not isinstance(value, str) or not value or len(value) > limit:
+        raise StrategyError(f"{name} must be a non-empty safe identifier")
+    if _SAFE_OUTPUT_NAME.fullmatch(value) is None:
+        raise StrategyError(
+            f"{name} must contain only ASCII letters, digits, and underscores "
+            "and cannot start with a digit"
+        )
+
+
+def _strategy_apply_values(
+    decisions: pd.Series,
+    *,
+    strategy_type: str,
+) -> tuple[pd.Series, pd.Series]:
+    decision_values = decisions.tolist()
+    value_types = [_strategy_value_type(value) for value in decision_values]
+    numeric_storage = strategy_type in {"limit", "pricing"} and all(
+        value_type in {"integer", "number"} for value_type in value_types
+    )
+    values: list[object] = []
+    for value, value_type in zip(decision_values, value_types, strict=True):
+        values.append(
+            _strategy_storage_value(
+                value,
+                value_type=value_type,
+                numeric_storage=numeric_storage,
+            )
+        )
+    return (
+        pd.Series(values, index=decisions.index, dtype="object"),
+        pd.Series(value_types, index=decisions.index, dtype="object"),
+    )
+
+
+def _strategy_storage_value(value, *, value_type: str, numeric_storage: bool):
+    # Segment ids and legacy approval/reject output aliases may legally mix JSON
+    # scalar types; parquet has no union column. Preserve their exact type in the
+    # adjacent value_type column and use deterministic text storage. Canonical
+    # limit/pricing decision values remain numeric for immediate downstream use.
+    if numeric_storage:
+        return value
+    if value_type == "string":
+        return value
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _strategy_value_type(value) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    raise StrategyError("strategy decision value must be JSON serializable")
+
+
+def _string_counts(values: pd.Series) -> dict[str, int]:
+    counts = values.value_counts(dropna=False).to_dict()
+    return {
+        str(key): int(counts[key])
+        for key in sorted(counts, key=lambda item: str(item))
+    }
+
+
+def _rule_counts(values: pd.Series) -> dict[str, int]:
+    return _string_counts(values.loc[values.notna()].map(str))
+
+
 def tool_backtest_strategy(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     strategy = _strategy(runtime, str(inputs["strategy_id"]), task_id=str(ctx.task_id))
@@ -307,11 +582,15 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
         if baseline_id
         else None
     )
-    frame = _dataset_frame(
-        runtime,
-        str(inputs["dataset_id"]),
-        task_id=str(ctx.task_id),
-    )
+    dataset_id = str(inputs["dataset_id"])
+    dataset = _owned_dataset(runtime, dataset_id, task_id=str(ctx.task_id))
+    source_path = runtime.registry.resolve_path(dataset.id)
+    source_dataset_content_hash = sha256_file(source_path)
+    frame = runtime.backend.read_frame(source_path)
+    if sha256_file(source_path) != source_dataset_content_hash:
+        raise StrategyError(
+            "source dataset changed while the strategy backtest was running"
+        )
     target_col = str(inputs["target_col"])
     # Keep the full population in the typed envelope while still requiring an
     # explicit confirmation before label metrics exclude missing supervision.
@@ -345,13 +624,17 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
         economics_inputs=economics_inputs,
         approval_profit_inputs=approval_profit_inputs,
     )
-    backtest_id = _backtest_id(str(inputs["dataset_id"]), result)
+    backtest_id = _backtest_id(
+        dataset_id,
+        result,
+        source_dataset_content_hash=source_dataset_content_hash,
+    )
     existing = runtime.strategies.get_backtest(backtest_id)
     if existing is None:
         runtime.strategies.save_backtest_with_audit(
             backtest_id,
             strategy.id,
-            str(inputs["dataset_id"]),
+            dataset_id,
             result,
             audit={
                 "kind": "strategy.backtest",
@@ -360,7 +643,8 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
                 "detail": {
                     "task_id": str(ctx.task_id),
                     "strategy_id": strategy.id,
-                    "dataset_id": str(inputs["dataset_id"]),
+                    "dataset_id": dataset_id,
+                    "source_dataset_content_hash": source_dataset_content_hash,
                     "schema_version": result.schema_version,
                     "strategy_type": result.strategy_type,
                     "population_count": result.population_count,
@@ -375,6 +659,7 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
         )
     payload = result.to_dict()
     payload["backtest_id"] = backtest_id
+    payload["source_dataset_content_hash"] = source_dataset_content_hash
     payload["nan_labels_dropped"] = nan_labels_dropped
     if result.strategy_type in {"approval", "reject"}:
         payload.update(approval_backtest_projection(result))
@@ -719,27 +1004,248 @@ def _csv_num(value) -> str:
     return f"{number:.6f}"
 
 
+_ADOPTION_EVIDENCE_SCHEMA_VERSION = "strategy.adoption-evidence.v1"
+_LEGACY_BACKTEST_SCHEMA_VERSION = "strategy.backtest.v1"
+
+
 def tool_adopt_strategy(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
+    task_id = str(ctx.task_id)
     strategy_id = str(inputs["strategy_id"])
-    strategy = _strategy(runtime, strategy_id, task_id=str(ctx.task_id))
-    if strategy.strategy_type not in {"approval", "reject"}:
-        raise StrategyError(
-            f"adoption requires a typed {strategy.strategy_type} backtest contract"
-        )
+    strategy = _strategy(runtime, strategy_id, task_id=task_id)
     backtest_id = str(inputs["backtest_id"])
     backtest = runtime.strategies.get_backtest(backtest_id)
     if backtest is None or backtest.strategy_id != strategy_id:
         raise StrategyError(
             f"backtest {backtest_id} does not belong to strategy {strategy_id}"
         )
-    if (
-        isinstance(backtest, StrategyBacktestResult)
-        and backtest.strategy_type != strategy.strategy_type
-    ):
+    if isinstance(backtest, StrategyBacktestResult):
+        if backtest.strategy_type != strategy.strategy_type:
+            raise StrategyError(
+                "backtest strategy_type does not match the persisted strategy"
+            )
+    elif strategy.strategy_type not in {"approval", "reject"}:
         raise StrategyError(
-            "backtest strategy_type does not match the persisted strategy"
+            f"{strategy.strategy_type} adoption requires a typed StrategyBacktestResult"
         )
+
+    adoption_evidence, approval_metrics = _strategy_adoption_evidence(
+        runtime,
+        strategy=strategy,
+        backtest=backtest,
+        backtest_id=backtest_id,
+        task_id=task_id,
+    )
+    experiment_id = _strategy_monitoring_experiment_id(
+        runtime,
+        inputs.get("experiment_id"),
+        task_id=task_id,
+    )
+    try:
+        adoption_reason = normalize_adoption_reason(inputs.get("adoption_reason"))
+    except AdoptionReasonError as exc:
+        raise StrategyError(str(exc)) from exc
+    effect_execution_id = _optional_str(getattr(ctx, "effect_execution_id", None))
+    runtime_generation = _optional_str(getattr(ctx, "runtime_generation", None))
+    if (effect_execution_id is None) != (runtime_generation is None):
+        raise StrategyError("治理执行元数据不完整，拒绝采纳策略")
+    strategy_meta = runtime.strategies.get_strategy_meta(strategy_id)
+    if strategy_meta is None:
+        raise StrategyError(f"strategy not found: {strategy_id}")
+    version = int(strategy_meta["version"])
+    strategy_dir = Path(runtime.settings.tasks_dir) / task_id / "strategy"
+    stem = f"{strategy_id}_v{version}"
+
+    # band_stats is retained in the manifest only for stored-plan compatibility.
+    # It is caller-supplied and not bound to this backtest, so adoption artifacts
+    # must not present it as verified evidence. The decision table comes only
+    # from the persisted canonical strategy and includes unmatched/default flow.
+    rules = _adoption_decision_table_rules(strategy)
+    csv_text = decision_table_csv(rules, [])
+    monitoring_plan = _build_adoption_monitoring_plan(
+        strategy_id=strategy_id,
+        strategy_type=strategy.strategy_type,
+        version=version,
+        evidence=adoption_evidence,
+        approval_metrics=approval_metrics,
+        experiment_id=experiment_id,
+    )
+
+    # Adoption is one multi-resource commit: the two required deliverables are
+    # staged first, then promoted and recorded together with lifecycle/effect
+    # state on one caller-owned SQLite transaction. Any filesystem, artifact,
+    # audit, or commit failure restores both files and every database mutation.
+    uow = ArtifactUnitOfWork()
+    staged_csv = uow.stage_file(strategy_dir, f"decision_table_{stem}.csv")
+    staged_json = uow.stage_file(strategy_dir, f"monitoring_plan_{stem}.json")
+    artifact_specs = (
+        ("decision_table_csv", staged_csv),
+        ("monitoring_plan_json", staged_json),
+    )
+    try:
+        staged_csv.path.write_text(csv_text, encoding="utf-8")
+        save_monitoring_plan(staged_json.path, monitoring_plan)
+
+        def finalize_adoption(conn):
+            adopt_result = runtime.strategies.adopt_strategy_with_audit_on_connection(
+                conn,
+                strategy_id,
+                reason=adoption_reason,
+                audit={
+                    "kind": "strategy.adopt",
+                    "target_ref": strategy_id,
+                    "outcome": "succeeded",
+                    "detail": {
+                        "task_id": task_id,
+                        "backtest_id": backtest_id,
+                        "strategy_type": strategy.strategy_type,
+                        "experiment_id": experiment_id,
+                        "adoption_reason": adoption_reason,
+                        "adoption_evidence": adoption_evidence,
+                        **_approval_adoption_audit_summary(approval_metrics),
+                    },
+                },
+                effect_execution_id=effect_execution_id,
+                runtime_generation=runtime_generation,
+            )
+            if int(adopt_result["version"]) != version:
+                raise StrategyError("strategy version changed during adoption")
+            for kind, staged in artifact_specs:
+                final_path = str(staged.final_path)
+                runtime.strategies.save_strategy_artifact_with_audit_on_connection(
+                    conn,
+                    strategy_id,
+                    kind=kind,
+                    path=final_path,
+                    audit={
+                        "kind": "strategy.artifact",
+                        "target_ref": strategy_id,
+                        "outcome": "succeeded",
+                        "detail": {
+                            "task_id": task_id,
+                            "kind": kind,
+                            "path": final_path,
+                        },
+                    },
+                )
+            return adopt_result
+
+        adopt_result = uow.finalize_with_connection(
+            runtime.strategies.transaction,
+            finalize_adoption,
+        )
+    except Exception:
+        uow.rollback()
+        raise
+
+    artifacts = [
+        {"kind": kind, "path": str(staged.final_path)}
+        for kind, staged in artifact_specs
+    ]
+
+    return {
+        "strategy_id": strategy_id,
+        "strategy_type": strategy.strategy_type,
+        "backtest_id": backtest_id,
+        "version": version,
+        "status": "adopted",
+        "retired_strategy_ids": list(adopt_result["retired_strategy_ids"]),
+        "adoption_evidence": adoption_evidence,
+        "artifacts": artifacts,
+    }
+
+
+def _strategy_adoption_evidence(
+    runtime,
+    *,
+    strategy: Strategy,
+    backtest: BacktestRecord,
+    backtest_id: str,
+    task_id: str,
+) -> tuple[dict, dict | None]:
+    if isinstance(backtest, StrategyBacktestResult):
+        _require_typed_adoption_quality(backtest)
+        expected_effect_hash = strategy_spec_hash(
+            strategy.spec or legacy_strategy_to_spec(strategy)
+        )
+        actual_effect_hash = str(
+            backtest.normalized_input.get("strategy_effect_hash") or ""
+        )
+        if actual_effect_hash != expected_effect_hash:
+            raise StrategyError(
+                "backtest strategy effect hash does not match the persisted strategy"
+            )
+        binding = _backtest_binding(runtime, backtest_id)
+        if binding["strategy_id"] != strategy.id:
+            raise StrategyError(
+                f"backtest {backtest_id} does not belong to strategy {strategy.id}"
+            )
+        if binding["dataset_task_id"] is None:
+            raise StrategyError(
+                "typed backtest source dataset is not registered; rerun the backtest"
+            )
+        if binding["dataset_task_id"] != task_id:
+            raise StrategyError(
+                "typed backtest source dataset must belong to the same task as the strategy"
+            )
+        if binding["dataset_content_hash"] is None:
+            raise StrategyError(
+                "typed backtest source dataset file is unavailable; rerun the backtest"
+            )
+        if binding["backtest_dataset_content_hash"] is None:
+            raise StrategyError(
+                "typed backtest is missing backtest-time source dataset hash evidence; "
+                "rerun the backtest"
+            )
+        if (
+            binding["dataset_content_hash"]
+            != binding["backtest_dataset_content_hash"]
+        ):
+            raise StrategyError(
+                "source dataset content hash no longer matches the backtest evidence"
+            )
+        evidence = {
+            "schema_version": _ADOPTION_EVIDENCE_SCHEMA_VERSION,
+            "backtest_schema_version": backtest.schema_version,
+            "backtest_id": backtest_id,
+            "strategy_id": strategy.id,
+            "strategy_type": strategy.strategy_type,
+            "source_dataset_id": binding["dataset_id"],
+            "source_dataset_content_hash": binding[
+                "backtest_dataset_content_hash"
+            ],
+            "strategy_effect_hash": expected_effect_hash,
+            "baseline_effect_hash": backtest.normalized_input[
+                "baseline_effect_hash"
+            ],
+            "target_col": str(backtest.normalized_input["target_col"]),
+            "population_count": int(backtest.population_count),
+            "labeled_count": int(backtest.labeled_count),
+            "label_coverage": float(backtest.label_coverage),
+            "metrics": _jsonable(dict(backtest.metrics)),
+            "breakdown": [_jsonable(dict(row)) for row in backtest.breakdown],
+            "transitions": [
+                _jsonable(dict(row)) for row in backtest.transitions
+            ],
+            # Per-row pricing economics is deliberately excluded from adoption
+            # evidence and audit. The typed envelope has already reconciled it to
+            # these aggregates, which are sufficient for governance decisions.
+            "economics": _aggregate_economics(backtest.economics),
+            "economics_input_evidence": _jsonable(
+                dict(backtest.normalized_input["economics_input_evidence"])
+            ),
+            "warnings": list(backtest.warnings),
+        }
+        approval_metrics = (
+            approval_backtest_projection(
+                backtest,
+                preserve_undefined_rates=True,
+            )
+            if strategy.strategy_type in {"approval", "reject"}
+            else None
+        )
+        return evidence, approval_metrics
+
     approval_metrics = approval_backtest_projection(
         backtest,
         preserve_undefined_rates=True,
@@ -749,70 +1255,467 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
             "cannot adopt strategy because approved bad rate is undefined; "
             "provide labeled approved observations and rerun the backtest"
         )
-    try:
-        adoption_reason = normalize_adoption_reason(inputs.get("adoption_reason"))
-    except AdoptionReasonError as exc:
-        raise StrategyError(str(exc)) from exc
-    effect_execution_id = _optional_str(getattr(ctx, "effect_execution_id", None))
-    runtime_generation = _optional_str(getattr(ctx, "runtime_generation", None))
-    if (effect_execution_id is None) != (runtime_generation is None):
-        raise StrategyError("治理执行元数据不完整，拒绝采纳策略")
-    adopt_result = runtime.strategies.adopt_strategy_with_audit(
-        strategy_id,
-        reason=adoption_reason,
-        audit={
-            "kind": "strategy.adopt",
-            "target_ref": strategy_id,
-            "outcome": "succeeded",
-            "detail": {
-                "task_id": str(ctx.task_id),
-                "backtest_id": backtest_id,
-                "adoption_reason": adoption_reason,
+    binding = _backtest_binding(runtime, backtest_id)
+    if (
+        binding["dataset_task_id"] is not None
+        and binding["dataset_task_id"] != task_id
+    ):
+        raise StrategyError(
+            "legacy backtest source dataset must belong to the same task as the strategy"
+        )
+    effect_hash = strategy_spec_hash(
+        strategy.spec or legacy_strategy_to_spec(strategy)
+    )
+    metrics = {
+        key: _jsonable(value)
+        for key, value in approval_metrics.items()
+        if key
+        not in {
+            "strategy_id",
+            "by_segment",
+            "expected_profit",
+            "profit_note",
+        }
+    }
+    return {
+        "schema_version": _ADOPTION_EVIDENCE_SCHEMA_VERSION,
+        "backtest_schema_version": _LEGACY_BACKTEST_SCHEMA_VERSION,
+        "backtest_id": backtest_id,
+        "strategy_id": strategy.id,
+        "strategy_type": strategy.strategy_type,
+        "source_dataset_id": binding["dataset_id"],
+        "source_dataset_content_hash": binding["dataset_content_hash"],
+        "strategy_effect_hash": effect_hash,
+        "baseline_effect_hash": None,
+        "target_col": None,
+        # Legacy rows never carried population/label provenance. Keep that gap
+        # explicit rather than reconstructing counts from rounded rates.
+        "population_count": None,
+        "labeled_count": None,
+        "label_coverage": None,
+        "metrics": metrics,
+        "breakdown": [
+            _jsonable(dict(row)) for row in approval_metrics.get("by_segment", [])
+        ],
+        "transitions": [],
+        "economics": {
+            "expected_profit": _jsonable(approval_metrics.get("expected_profit")),
+            "profit_note": _jsonable(approval_metrics.get("profit_note")),
+        },
+        "economics_input_evidence": {},
+        "warnings": [
+            "legacy backtest has no task-bound dataset or label-provenance contract"
+        ],
+    }, approval_metrics
+
+
+def _adoption_decision_table_rules(strategy: Strategy) -> list[dict]:
+    spec = parse_strategy_spec(
+        strategy.spec or legacy_strategy_to_spec(strategy)
+    )
+    rows = [_jsonable(rule) for rule in strategy.rules]
+    default_action = spec.default_action
+    default_decision = {
+        "approval": "approve",
+        "reject": "reject",
+        "review": "review",
+        "limit": "limit",
+        "pricing": "price",
+        "segment": "segment",
+    }[default_action.type]
+    default_value = (
+        default_action.value
+        if default_action.type in {"limit", "pricing", "segment"}
+        else default_action.output_value
+    )
+    rows.append(
+        {
+            "condition": "未命中任何规则（默认动作）",
+            "decision": default_decision,
+            "value": _jsonable(default_value),
+            "rule_id": "__default__",
+            "priority": None,
+            "reason_code": default_action.reason_code,
+        }
+    )
+    return rows
+
+
+def _require_typed_adoption_quality(result: StrategyBacktestResult) -> None:
+    if result.population_count <= 0:
+        raise StrategyError("cannot adopt strategy from an empty backtest population")
+    if result.labeled_count <= 0:
+        raise StrategyError(
+            "cannot adopt strategy without labeled backtest observations"
+        )
+
+    metrics = result.metrics
+    if result.strategy_type == "approval":
+        if metrics.get("approve_bad_rate") is None:
+            raise StrategyError(
+                "cannot adopt strategy because approved bad rate is undefined; "
+                "provide labeled approved observations and rerun the backtest"
+            )
+        return
+    if result.strategy_type == "reject":
+        if metrics.get("bad_capture_rate") is None:
+            raise StrategyError(
+                "cannot adopt reject strategy because bad capture rate is undefined"
+            )
+        if metrics.get("good_reject_rate") is None:
+            raise StrategyError(
+                "cannot adopt reject strategy because good reject rate is undefined"
+            )
+        return
+    if result.strategy_type == "limit":
+        if metrics.get("mean_limit") is None or set(result.economics) != {
+            "expected_ead",
+            "expected_loss",
+        }:
+            raise StrategyError(
+                "limit adoption requires complete limit economics evidence"
+            )
+        return
+    if result.strategy_type == "pricing":
+        required = {
+            "total_ead",
+            "ead_weighted_rate",
+            "revenue",
+            "expected_loss",
+            "funding_cost",
+            "operating_cost",
+            "profit",
+            "roa",
+            "baseline_profit",
+            "profit_delta_vs_baseline",
+            "by_row",
+        }
+        if (
+            metrics.get("mean_rate") is None
+            or set(result.economics) != required
+            or result.economics.get("total_ead") in {None, 0.0}
+            or result.economics.get("profit") is None
+            or result.economics.get("roa") is None
+        ):
+            raise StrategyError(
+                "pricing adoption requires complete pricing economics evidence"
+            )
+        return
+    if (
+        metrics.get("segment_count", 0) <= 0
+        or metrics.get("overall_bad_rate") is None
+    ):
+        raise StrategyError(
+            "segmentation adoption requires non-empty labeled segment evidence"
+        )
+
+
+def _backtest_binding(runtime, backtest_id: str) -> dict[str, str | None]:
+    from marvis.db_schema import connect
+
+    with connect(runtime.settings.db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT b.strategy_id, b.dataset_id, d.task_id AS dataset_task_id
+              FROM backtests b
+              LEFT JOIN datasets d ON d.id = b.dataset_id
+             WHERE b.id = ?
+            """,
+            (backtest_id,),
+        ).fetchone()
+        audit_row = conn.execute(
+            """
+            SELECT detail_json
+              FROM audit
+             WHERE kind = 'strategy.backtest'
+               AND target_ref = ?
+               AND outcome = 'succeeded'
+             ORDER BY at DESC, id DESC
+             LIMIT 1
+            """,
+            (backtest_id,),
+        ).fetchone()
+    if row is None:
+        raise StrategyError(f"backtest not found: {backtest_id}")
+    dataset_id = str(row["dataset_id"])
+    dataset_content_hash = None
+    if row["dataset_task_id"] is not None:
+        try:
+            dataset_content_hash = sha256_file(
+                runtime.registry.resolve_path(dataset_id)
+            )
+        except (KeyError, OSError):
+            # Typed adoption turns this into a hard failure. Legacy rows keep a
+            # nullable provenance field because historical fixtures and migrated
+            # databases may no longer have the original registered file.
+            dataset_content_hash = None
+    backtest_dataset_content_hash = None
+    if audit_row is not None:
+        try:
+            audit_detail = json.loads(str(audit_row["detail_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            audit_detail = None
+        if isinstance(audit_detail, dict):
+            candidate = audit_detail.get("source_dataset_content_hash")
+            if isinstance(candidate, str) and re.fullmatch(
+                r"[0-9a-f]{64}", candidate
+            ):
+                backtest_dataset_content_hash = candidate
+    return {
+        "strategy_id": str(row["strategy_id"]),
+        "dataset_id": dataset_id,
+        "dataset_task_id": (
+            None if row["dataset_task_id"] is None else str(row["dataset_task_id"])
+        ),
+        "dataset_content_hash": dataset_content_hash,
+        "backtest_dataset_content_hash": backtest_dataset_content_hash,
+    }
+
+
+def _strategy_monitoring_experiment_id(
+    runtime,
+    value,
+    *,
+    task_id: str,
+) -> str | None:
+    experiment_id = _optional_str(value)
+    if experiment_id is None:
+        return None
+    from marvis.db_schema import connect
+
+    with connect(runtime.settings.db_path) as conn:
+        row = conn.execute(
+            "SELECT task_id FROM experiments WHERE id = ?",
+            (experiment_id,),
+        ).fetchone()
+    if row is None or str(row["task_id"]) != task_id:
+        raise StrategyError(
+            "monitoring experiment must exist and belong to the same task as the strategy"
+        )
+    return experiment_id
+
+
+def _aggregate_economics(economics) -> dict:
+    return {
+        str(key): _jsonable(value)
+        for key, value in economics.items()
+        if key != "by_row"
+    }
+
+
+def _approval_adoption_audit_summary(approval_metrics: dict | None) -> dict:
+    if approval_metrics is None:
+        return {}
+    return {
+        "approval_rate": approval_metrics["approval_rate"],
+        "approved_bad_rate": approval_metrics["approved_bad_rate"],
+        "expected_profit": approval_metrics["expected_profit"],
+    }
+
+
+def _build_adoption_monitoring_plan(
+    *,
+    strategy_id: str,
+    strategy_type: str,
+    version: int,
+    evidence: dict,
+    approval_metrics: dict | None,
+    experiment_id: str | None,
+) -> dict:
+    baseline = {
+        "strategy_type": strategy_type,
+        "backtest_schema_version": evidence["backtest_schema_version"],
+        "strategy_effect_hash": evidence["strategy_effect_hash"],
+        "baseline_effect_hash": evidence["baseline_effect_hash"],
+        "source_dataset_id": evidence["source_dataset_id"],
+        "source_dataset_content_hash": evidence[
+            "source_dataset_content_hash"
+        ],
+        "source_backtest_id": evidence["backtest_id"],
+        "population_count": evidence["population_count"],
+        "labeled_count": evidence["labeled_count"],
+        "label_coverage": evidence["label_coverage"],
+        "metrics": dict(evidence["metrics"]),
+        "economics": dict(evidence["economics"]),
+        "breakdown": [dict(row) for row in evidence["breakdown"]],
+        "transitions": [dict(row) for row in evidence["transitions"]],
+    }
+    if (
+        strategy_type == "approval"
+        or evidence["backtest_schema_version"] == _LEGACY_BACKTEST_SCHEMA_VERSION
+    ):
+        assert approval_metrics is not None
+        plan = build_monitoring_plan(
+            strategy_id=strategy_id,
+            version=version,
+            approved_bad_rate=float(approval_metrics["approved_bad_rate"]),
+            approval_rate=float(approval_metrics["approval_rate"]),
+            experiment_id=experiment_id,
+            source_backtest_id=evidence["backtest_id"],
+        )
+        plan["expectation_baseline"].update(baseline)
+        return plan
+
+    thresholds = _typed_monitoring_thresholds(
+        strategy_type,
+        evidence=evidence,
+        approval_metrics=approval_metrics,
+    )
+    if approval_metrics is not None:
+        baseline.update(
+            {
                 "approval_rate": approval_metrics["approval_rate"],
                 "approved_bad_rate": approval_metrics["approved_bad_rate"],
-                "expected_profit": approval_metrics["expected_profit"],
-            },
-        },
-        effect_execution_id=effect_execution_id,
-        runtime_generation=runtime_generation,
-    )
-    version = int(adopt_result["version"])
-    strategy_dir = Path(runtime.settings.tasks_dir) / str(ctx.task_id) / "strategy"
-    strategy_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{strategy_id}_v{version}"
-
-    band_stats = _band_stats_from_inputs(inputs.get("band_stats"))
-    rules = [_jsonable(rule) for rule in strategy.rules]
-    csv_text = decision_table_csv(rules, band_stats)
-    csv_path = strategy_dir / f"decision_table_{stem}.csv"
-    csv_path.write_text(csv_text, encoding="utf-8")
-
-    monitoring_plan = build_monitoring_plan(
-        strategy_id=strategy_id,
-        version=version,
-        approved_bad_rate=approval_metrics["approved_bad_rate"],
-        approval_rate=approval_metrics["approval_rate"],
-        experiment_id=_optional_str(inputs.get("experiment_id")),
-        source_backtest_id=backtest_id,
-    )
-    json_path = strategy_dir / f"monitoring_plan_{stem}.json"
-    save_monitoring_plan(json_path, monitoring_plan)
-
-    artifacts = []
-    for kind, path in (
-        ("decision_table_csv", csv_path),
-        ("monitoring_plan_json", json_path),
-    ):
-        runtime.strategies.save_strategy_artifact(strategy_id, kind=kind, path=str(path))
-        _write_strategy_artifact_audit(runtime, ctx, strategy_id, kind, path)
-        artifacts.append({"kind": kind, "path": str(path)})
-
+            }
+        )
     return {
+        "plan_version": PLAN_VERSION,
         "strategy_id": strategy_id,
-        "version": version,
-        "status": "adopted",
-        "retired_strategy_ids": list(adopt_result["retired_strategy_ids"]),
-        "artifacts": artifacts,
+        "version": int(version),
+        "cadence_days": DEFAULT_CADENCE_DAYS,
+        "experiment_id": experiment_id,
+        "last_run_at": None,
+        "thresholds": thresholds,
+        "expectation_baseline": baseline,
+    }
+
+
+def _typed_monitoring_thresholds(
+    strategy_type: str,
+    *,
+    evidence: dict,
+    approval_metrics: dict | None,
+) -> dict:
+    metrics = evidence["metrics"]
+    economics = evidence["economics"]
+    if strategy_type == "reject":
+        assert approval_metrics is not None
+        approval_rate = float(approval_metrics["approval_rate"])
+        bad_capture_rate = float(metrics["bad_capture_rate"])
+        good_reject_rate = float(metrics["good_reject_rate"])
+        thresholds = {
+            "approval_rate": _monitor_threshold(
+                "审批率下滑",
+                "approval_rate",
+                "min",
+                max(0.0, approval_rate - 0.05),
+                max(0.0, approval_rate - 0.10),
+            ),
+            "bad_capture_rate": _monitor_threshold(
+                "坏客户捕获率下滑",
+                "bad_capture_rate",
+                "min",
+                max(0.0, bad_capture_rate - 0.05),
+                max(0.0, bad_capture_rate - 0.10),
+            ),
+            "good_reject_rate": _monitor_threshold(
+                "好客户误拒率上升",
+                "good_reject_rate",
+                "max",
+                min(1.0, good_reject_rate + 0.02),
+                min(1.0, good_reject_rate + 0.05),
+            ),
+        }
+        approved_bad_rate = approval_metrics["approved_bad_rate"]
+        if approved_bad_rate is not None:
+            value = float(approved_bad_rate)
+            thresholds["approved_bad_rate"] = _monitor_threshold(
+                "通过客群坏率漂移",
+                "approved_bad_rate",
+                "max",
+                min(1.0, value + 0.02),
+                min(1.0, value + 0.05),
+            )
+        return thresholds
+
+    if strategy_type == "limit":
+        mean_limit = float(metrics["mean_limit"])
+        expected_loss = float(economics["expected_loss"])
+        return {
+            "mean_limit": _monitor_threshold(
+                "户均额度上升",
+                "mean_limit",
+                "max",
+                mean_limit * 1.10,
+                mean_limit * 1.20,
+            ),
+            "expected_loss": _monitor_threshold(
+                "额度策略预期损失上升",
+                "expected_loss",
+                "max",
+                expected_loss * 1.10,
+                expected_loss * 1.20,
+            ),
+        }
+
+    if strategy_type == "pricing":
+        mean_rate = float(metrics["mean_rate"])
+        expected_loss = float(economics["expected_loss"])
+        profit = float(economics["profit"])
+        roa = float(economics["roa"])
+        return {
+            "mean_rate": _monitor_threshold(
+                "平均利率上升",
+                "mean_rate",
+                "max",
+                min(1.0, mean_rate + 0.02),
+                min(1.0, mean_rate + 0.05),
+            ),
+            "expected_loss": _monitor_threshold(
+                "定价策略预期损失上升",
+                "expected_loss",
+                "max",
+                expected_loss * 1.10,
+                expected_loss * 1.20,
+            ),
+            "profit": _monitor_threshold(
+                "利润下滑",
+                "profit",
+                "min",
+                profit - abs(profit) * 0.10,
+                profit - abs(profit) * 0.20,
+            ),
+            "roa": _monitor_threshold(
+                "ROA 下滑",
+                "roa",
+                "min",
+                roa - 0.01,
+                roa - 0.02,
+            ),
+        }
+
+    overall_bad_rate = float(metrics["overall_bad_rate"])
+    return {
+        "overall_bad_rate": _monitor_threshold(
+            "分群总体坏率上升",
+            "overall_bad_rate",
+            "max",
+            min(1.0, overall_bad_rate + 0.02),
+            min(1.0, overall_bad_rate + 0.05),
+        ),
+        "segment_share_psi": _monitor_threshold(
+            "分群占比漂移",
+            "segment_share_psi",
+            "max",
+            0.10,
+            0.25,
+        ),
+    }
+
+
+def _monitor_threshold(
+    label: str,
+    metric: str,
+    direction: str,
+    warn: float,
+    fail: float,
+) -> dict:
+    return {
+        "label": label,
+        "metric": metric,
+        "direction": direction,
+        "warn": float(warn),
+        "fail": float(fail),
     }
 
 
@@ -1264,6 +2167,16 @@ def _dataset_frame(
     return runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id), columns=columns)
 
 
+def _owned_dataset(runtime: _Runtime, dataset_id: str, *, task_id: str):
+    try:
+        dataset = runtime.registry.get(dataset_id)
+    except KeyError:
+        raise StrategyError(f"dataset not found: {dataset_id}") from None
+    if str(dataset.task_id) != str(task_id):
+        raise StrategyError(f"dataset not found: {dataset_id}")
+    return dataset
+
+
 def _strategy(runtime: _Runtime, strategy_id: str, *, task_id: str) -> Strategy:
     strategy = runtime.strategies.get_strategy(strategy_id)
     metadata = runtime.strategies.get_strategy_meta(strategy_id)
@@ -1422,7 +2335,12 @@ def _backtest_audit_summary(result: StrategyBacktestResult) -> dict[str, object]
     return {"segment_count": result.metrics.get("segment_count")}
 
 
-def _backtest_id(dataset_id: str, result: BacktestRecord) -> str:
+def _backtest_id(
+    dataset_id: str,
+    result: BacktestRecord,
+    *,
+    source_dataset_content_hash: str | None = None,
+) -> str:
     payload = {"dataset_id": dataset_id, "result": backtest_record_payload(result)}
     if not isinstance(result, StrategyBacktestResult):
         # Preserve historical legacy IDs byte-for-byte.  Typed envelopes use the
@@ -1432,6 +2350,12 @@ def _backtest_id(dataset_id: str, result: BacktestRecord) -> str:
             json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
         return f"backtest-{digest[:12]}"
+    if source_dataset_content_hash is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", source_dataset_content_hash):
+            raise StrategyError(
+                "source_dataset_content_hash must be a lowercase SHA256 digest"
+            )
+        payload["source_dataset_content_hash"] = source_dataset_content_hash
     digest = hashlib.sha256(
         json.dumps(
             payload,

@@ -516,6 +516,189 @@ def test_strategy_analysis_template_marks_backtest_decision_point(tmp_path):
     assert [step.title for step in plan.steps if step.needs_confirmation] == ["回测策略"]
 
 
+@pytest.mark.parametrize(
+    ("strategy_type", "default_action", "matched_action"),
+    [
+        ("approval", {"type": "approval"}, {"type": "reject"}),
+        ("reject", {"type": "approval"}, {"type": "reject"}),
+        ("limit", {"type": "limit", "value": 1000}, {"type": "limit", "value": 2000}),
+        ("pricing", {"type": "pricing", "value": 0.1}, {"type": "pricing", "value": 0.2}),
+        (
+            "segmentation",
+            {"type": "segment", "value": "base"},
+            {"type": "segment", "value": "high"},
+        ),
+    ],
+)
+def test_typed_strategy_evaluation_template_validates_all_five_types(
+    tmp_path,
+    strategy_type,
+    default_action,
+    matched_action,
+):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+    strategy_spec = {
+        "strategy_type": strategy_type,
+        "default_action": default_action,
+        "rules": [
+            {
+                "rule_id": "x-positive",
+                "priority": 10,
+                "condition": {
+                    "op": "compare",
+                    "field": "x",
+                    "operator": ">",
+                    "value": 0,
+                },
+                "action": matched_action,
+            }
+        ],
+    }
+
+    plan = planner.from_template(
+        get_template("typed_strategy_evaluation"),
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "bad_flag",
+            "strategy_spec": strategy_spec,
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref for step in plan.steps] == [
+        ToolRef("strategy", "build_strategy"),
+        ToolRef("strategy", "backtest_strategy"),
+        ToolRef("strategy", "render_strategy_doc"),
+    ]
+    build, backtest, doc = plan.steps
+    assert build.inputs["strategy_spec"] == strategy_spec
+    assert backtest.inputs["strategy_id"] == f"$ref:{build.id}.output.strategy_id"
+    assert backtest.decision_point is True
+    # The Tool manifest requires a human-decision gate for persisted backtest
+    # evidence; the planner strengthens the template even though the request and
+    # plan overview were already confirmed.
+    assert backtest.needs_confirmation is True
+    compatibility_checks = {
+        check.spec.get("field"): check.spec
+        for check in backtest.post_checks
+        if check.kind == "range"
+    }
+    assert set(compatibility_checks) == {
+        "approval_rate",
+        "approved_bad_rate",
+        "rejected_bad_rate",
+        "expected_profit",
+    }
+    assert all(spec.get("allow_null") is True for spec in compatibility_checks.values())
+    assert doc.depends_on == [build.id, backtest.id]
+    assert "typed_strategy_evaluation" in builtin_template_ids()
+
+
+def test_typed_strategy_build_does_not_silently_run_a_backtest(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+    strategy_spec = {
+        "strategy_type": "pricing",
+        "default_action": {"type": "pricing", "value": 0.10},
+        "rules": [],
+    }
+
+    plan = planner.from_template(
+        get_template("typed_strategy_build"),
+        {"strategy_spec": strategy_spec},
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref.tool for step in plan.steps] == [
+        "build_strategy",
+        "render_strategy_doc",
+    ]
+    assert "typed_strategy_build" in builtin_template_ids()
+
+
+def test_typed_strategy_apply_builds_then_applies_same_persisted_strategy(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+    strategy_spec = {
+        "strategy_type": "limit",
+        "default_action": {"type": "limit", "value": 1000},
+        "rules": [],
+    }
+
+    plan = planner.from_template(
+        get_template("typed_strategy_apply"),
+        {"dataset_id": "dataset-1", "strategy_spec": strategy_spec},
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref.tool for step in plan.steps] == [
+        "build_strategy",
+        "apply_strategy",
+        "render_strategy_doc",
+    ]
+    build, apply, doc = plan.steps
+    assert apply.inputs["strategy_id"] == f"$ref:{build.id}.output.strategy_id"
+    assert doc.inputs["strategy_id"] == f"$ref:{build.id}.output.strategy_id"
+    assert doc.depends_on == [build.id, apply.id]
+    assert "typed_strategy_apply" in builtin_template_ids()
+
+
+@pytest.mark.parametrize(
+    ("template_id", "expected_tools"),
+    [
+        (
+            "stored_strategy_evaluation",
+            ["backtest_strategy", "render_strategy_doc"],
+        ),
+        ("stored_strategy_report", ["render_strategy_doc"]),
+        ("stored_strategy_apply", ["apply_strategy"]),
+        (
+            "stored_strategy_adoption",
+            ["backtest_strategy", "adopt_strategy", "render_strategy_doc"],
+        ),
+    ],
+)
+def test_stored_strategy_lifecycle_templates_validate(
+    tmp_path,
+    template_id,
+    expected_tools,
+):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+    slots = {
+        "dataset_id": "dataset-1",
+        "target_col": "bad_flag",
+        "strategy_id": "strategy-1",
+        "baseline_strategy_id": "strategy-0",
+        "adoption_reason": "回测证据满足经营约束且经人工复核",
+    }
+
+    plan = planner.from_template(
+        get_template(template_id),
+        slots,
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref.tool for step in plan.steps] == expected_tools
+    assert template_id in builtin_template_ids()
+    if template_id == "stored_strategy_adoption":
+        backtest, adopt, doc = plan.steps
+        assert backtest.needs_confirmation is True
+        assert adopt.needs_confirmation is True
+        assert adopt.inputs["backtest_id"] == f"$ref:{backtest.id}.output.backtest_id"
+        assert adopt.inputs["adoption_reason"] == slots["adoption_reason"]
+        assert doc.depends_on == [adopt.id]
+
+
 def test_strategy_development_template_instantiates_and_validates(tmp_path):
     load_builtin_templates()
     tool_registry = _tool_registry(tmp_path)
@@ -527,6 +710,7 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
             "dataset_id": "dataset-1",
             "target_col": "bad_flag",
             "score_col": "score",
+            "strategy_type": "approval",
             "objective": "max_profit",
             "max_bad_rate": 0.05,
             "min_approval_rate": 0.50,
@@ -581,6 +765,7 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
         assert step.inputs["pd_col"] == "pd"
         assert step.inputs["profit_params"] == profit_params
     assert backtest_step.inputs["baseline_strategy_id"] == "strategy-baseline"
+    assert build_step.inputs["strategy_type"] == "approval"
     assert compare_step.inputs["baseline_strategy_id"] == "strategy-baseline"
     assert bands_step.needs_confirmation is True
     assert backtest_step.needs_confirmation is True
@@ -607,6 +792,29 @@ def test_strategy_development_goal_patterns_do_not_cross_strategy_analysis(tmp_p
     development = get_template("strategy_development")
     analysis = get_template("strategy_analysis")
     assert set(development.goal_patterns).isdisjoint(set(analysis.goal_patterns))
+
+
+def test_strategy_development_preserves_reject_strategy_type(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("strategy_development"),
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "bad_flag",
+            "score_col": "score",
+            "strategy_type": "reject",
+            "objective": "max_approval",
+            "max_bad_rate": 0.05,
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    build = next(step for step in plan.steps if step.title == "构造策略")
+    assert build.inputs["strategy_type"] == "reject"
 
 
 def test_rule_strategy_template_instantiates_and_validates(tmp_path):

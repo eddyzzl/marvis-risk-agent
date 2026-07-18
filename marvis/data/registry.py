@@ -14,7 +14,7 @@ from marvis.data.backend import DataBackend
 from marvis.data.contracts import Dataset
 from marvis.data.csv_ingest import CsvIngestReport, read_csv_with_fallback_encoding
 from marvis.data.errors import DataBackendError
-from marvis.data.excel_ingest import ingest_sheet, list_sheets
+from marvis.data.excel_ingest import ingest_sheet, is_xlsx_workbook, list_sheets
 from marvis.data.profiler import profile_dataset
 from marvis.data.schema_infer import detect_target_column
 from marvis.files import sha256_file
@@ -36,6 +36,22 @@ class DatasetRegistry:
         # once and reads this immediately after -- mirrors the existing
         # single-request-scoped usage pattern of this registry instance.
         self.last_csv_ingest_report: CsvIngestReport | None = None
+        self._pending_ingest_notice: dict | None = None
+        self._ingest_notices_by_task: dict[str, list[dict]] = {}
+
+    def consume_ingest_notices(self, task_id: str) -> list[dict]:
+        """Return and clear user-facing material recovery notices for a task."""
+
+        notices = self._ingest_notices_by_task.pop(str(task_id), [])
+        unique: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for notice in notices:
+            key = (str(notice.get("code") or ""), str(notice.get("file") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(dict(notice))
+        return unique
 
     def register_from_upload(
         self,
@@ -54,9 +70,14 @@ class DatasetRegistry:
         artifact = uow.stage_file(dataset_dir, final_name)
         try:
             self.last_csv_ingest_report = None
+            self._pending_ingest_notice = None
             sheet = self._write_upload_as_parquet(
                 source_path, artifact.path, max_excel_rows=max_excel_rows
             )
+            if self._pending_ingest_notice is not None:
+                self._ingest_notices_by_task.setdefault(str(task_id), []).append(
+                    dict(self._pending_ingest_notice)
+                )
             content_hash = sha256_file(artifact.path)
             find_by_hash = getattr(self._repo, "find_dataset_by_content_hash", None)
             existing = find_by_hash(content_hash) if callable(find_by_hash) else None
@@ -360,6 +381,25 @@ class DatasetRegistry:
             shutil.copy2(source_path, out_path)
             return None
         if suffix == ".csv":
+            if is_xlsx_workbook(source_path):
+                sheet = self._write_excel_upload_as_parquet(
+                    source_path,
+                    out_path,
+                    max_excel_rows=max_excel_rows,
+                    copy_to_xlsx=True,
+                )
+                self._pending_ingest_notice = {
+                    "code": "extension_content_mismatch",
+                    "severity": "warning",
+                    "file": source_path.name,
+                    "declared_format": "csv",
+                    "detected_format": "xlsx",
+                    "message": (
+                        f"`{source_path.name}` 扩展名是 `.csv`，但内容是 Excel 工作簿；"
+                        "已按 Excel 工作簿读取，原文件未修改。"
+                    ),
+                }
+                return sheet
             frame, report = read_csv_with_fallback_encoding(source_path)
             self.last_csv_ingest_report = report
             if report.encoding_used != "utf-8-sig":
@@ -383,16 +423,41 @@ class DatasetRegistry:
             frame.to_parquet(out_path, index=False)
             return None
         if suffix in {".xlsx", ".xlsm"}:
-            sheets = list_sheets(source_path)
+            return self._write_excel_upload_as_parquet(
+                source_path,
+                out_path,
+                max_excel_rows=max_excel_rows,
+                copy_to_xlsx=False,
+            )
+        raise DataBackendError(f"unsupported dataset upload format: {suffix}")
+
+    def _write_excel_upload_as_parquet(
+        self,
+        source_path: Path,
+        out_path: Path,
+        *,
+        max_excel_rows: int | None,
+        copy_to_xlsx: bool,
+    ) -> str:
+        with tempfile.TemporaryDirectory(
+            prefix=".xlsx_ingest_", dir=out_path.parent
+        ) as temp_name:
+            temp_dir = Path(temp_name)
+            workbook_path = source_path
+            if copy_to_xlsx:
+                workbook_path = temp_dir / f"{source_path.stem}.xlsx"
+                shutil.copy2(source_path, workbook_path)
+            sheets = list_sheets(workbook_path)
             if not sheets:
                 raise DataBackendError(f"workbook has no sheets: {source_path}")
-            with tempfile.TemporaryDirectory(prefix=".xlsx_ingest_", dir=out_path.parent) as temp_name:
-                parquet_path, report = ingest_sheet(
-                    source_path, sheets[0], Path(temp_name), max_rows=max_excel_rows
-                )
-                shutil.move(parquet_path, out_path)
-            return report.sheet
-        raise DataBackendError(f"unsupported dataset upload format: {suffix}")
+            parquet_path, report = ingest_sheet(
+                workbook_path,
+                sheets[0],
+                temp_dir / "normalized",
+                max_rows=max_excel_rows,
+            )
+            shutil.move(parquet_path, out_path)
+        return report.sheet
 
     def _ensure_under_root(self, parquet_path: Path, task_id: str) -> Path:
         if parquet_path.suffix.lower() != ".parquet":

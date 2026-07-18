@@ -244,6 +244,34 @@ SLICE_SPEC_SYS = PromptSpec(
 )
 
 
+# --- marvis.agent.strategy_request_compiler --------------------------------------
+STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
+    name="STRATEGY_REQUEST_COMPILER_SYS",
+    version=2,
+    text=(
+        "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
+        "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
+        "operation 与 strategy_type 是两个正交字段，必须分别判断。operation 只能是："
+        "develop/analyze/backtest/apply/compare/adopt/report/monitor/mine_rules；"
+        "strategy_type 只能是：approval/reject/limit/pricing/segmentation。\n"
+        "可选字段只能是 objective、max_bad_rate、min_approval_rate、baseline_strategy_id、"
+        "strategy_id、adoption_reason、profit、economics_inputs、strategy_spec。max_bad_rate 和 "
+        "min_approval_rate 是 0 到 1 的业务约束，不是已经算出的指标。profit 只适用于 approval/"
+        "reject，必须包含 ead_col、pd_col、annual_rate、funding_rate、lgd、"
+        "operating_cost_per_loan、term_months。economics_inputs 只适用于 limit/pricing；limit "
+        "必须包含 pd、lgd、utilization，pricing 必须包含 ead、pd、lgd、funding_rate、"
+        "term_months、operating_cost_per_loan，并且每一项都必须且只能在对应的 *_col 与 *_value "
+        "中选择一个。approval/reject/segmentation 禁止 economics_inputs，limit/pricing 禁止 profit。"
+        "strategy_spec 必须使用 strategy.dsl.v1，且其中每个条件 field、profit 和 economics_inputs "
+        "中的所有 *_col 都只能来自"
+        "用户提示中的列白名单；条件只能用 compare/between/is_null/is_not_null/and/or/n_of_k/not，"
+        "不要生成自由表达式。不要输出任何其他字段。\n"
+        "信息足够时只返回一个 JSON 草案对象；信息不足或存在歧义时只返回 "
+        "{\"clarification\":\"一句明确的中文问题\"}。禁止把任何指标结果放进 JSON。"
+    ),
+)
+
+
 ALL_PROMPTS: tuple[PromptSpec, ...] = (
     PLAN_SYS,
     REPLAN_SYS,
@@ -260,6 +288,7 @@ ALL_PROMPTS: tuple[PromptSpec, ...] = (
     CROSS_SYS,
     REPORT_NARRATIVE_SYS,
     SLICE_SPEC_SYS,
+    STRATEGY_REQUEST_COMPILER_SYS,
 )
 
 
@@ -292,4 +321,5 @@ __all__ = [
     "CROSS_SYS",
     "REPORT_NARRATIVE_SYS",
     "SLICE_SPEC_SYS",
+    "STRATEGY_REQUEST_COMPILER_SYS",
 ]
