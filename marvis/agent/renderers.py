@@ -820,11 +820,21 @@ def _render_backtest_strategy(o: dict):
     )
     if o.get("label_coverage") is not None:
         text += f" 标签覆盖率 {_pct(o.get('label_coverage'))}。"
+    if int(o.get("review_count") or 0):
+        text += (
+            f" 人工复核 {o.get('review_count')} 户"
+            f"（{_pct(o.get('review_rate'))}），"
+            f"复核客群坏率 {_pct(o.get('review_bad_rate'))}。"
+        )
     rows = [
         ["审批率", _pct(o.get("approval_rate"))],
         ["通过人数", _fmt(o.get("approved_count"))],
         ["通过坏率", _pct(o.get("approved_bad_rate"))],
+        ["拒绝人数", _fmt(o.get("rejected_count"))],
         ["拒绝坏率", _pct(o.get("rejected_bad_rate"))],
+        ["人工复核人数", _fmt(o.get("review_count"))],
+        ["人工复核率", _pct(o.get("review_rate"))],
+        ["复核客群坏率", _pct(o.get("review_bad_rate"))],
         ["预期利润", _num(o.get("expected_profit"))],
         ["swap-in", _fmt(o.get("swap_in_count"))],
         ["swap-out", _fmt(o.get("swap_out_count"))],

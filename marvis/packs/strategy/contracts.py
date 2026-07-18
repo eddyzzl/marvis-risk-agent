@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from marvis.packs.strategy.dsl import StrategySpec
 
 
 @dataclass(frozen=True)
@@ -46,6 +49,9 @@ class StrategyRule:
     condition: str
     decision: str
     value: Any
+    rule_id: str | None = None
+    priority: int | None = None
+    reason_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,10 @@ class Strategy:
     score_col: str | None
     default_decision: Any
     description: str
+    # Canonical Strategy DSL. ``compare=False`` preserves the public V1 dataclass
+    # equality contract while legacy/manual instances are upgraded lazily at the
+    # execution and repository boundaries.
+    spec: StrategySpec | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -76,6 +86,10 @@ class BacktestResult:
     swap_out_bad_rate: float | None
     by_segment: tuple[dict[str, Any], ...]
     profit_note: str | None = None
+    rejected_count: int = 0
+    review_count: int = 0
+    review_rate: float = 0.0
+    review_bad_rate: float | None = None
 
 
 @dataclass(frozen=True)

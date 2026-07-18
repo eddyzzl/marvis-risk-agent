@@ -4,11 +4,10 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from marvis.packs.strategy.backtest import backtest_strategy
+from marvis.packs.strategy.backtest import backtest_strategy, strategy_approval_mask
 from marvis.packs.strategy.contracts import Strategy
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.profit import ProfitParams
-from marvis.packs.strategy.strategy import apply_strategy
 
 
 @dataclass(frozen=True)
@@ -39,10 +38,16 @@ def compare_strategies(
     a baseline strategy, plus approval/bad-rate/profit deltas. Reuses the shared
     backtest core for the aggregate deltas so numbers match backtest_strategy
     exactly; the 2x2 cells are computed here from the two decision vectors."""
+    if strategy.strategy_type != baseline.strategy_type:
+        raise StrategyError("strategy comparison requires matching strategy types")
+    if strategy.strategy_type not in {"approval", "reject"}:
+        raise StrategyError(
+            f"typed comparison is not yet available for {strategy.strategy_type}"
+        )
     _assert_columns(df, [target_col])
     target = pd.to_numeric(df[target_col], errors="raise").astype(int)
-    new_approved = apply_strategy(df, strategy) != "reject"
-    base_approved = apply_strategy(df, baseline) != "reject"
+    new_approved = strategy_approval_mask(df, strategy)
+    base_approved = strategy_approval_mask(df, baseline)
 
     matrix = {
         "both_approve": _cell(target, new_approved & base_approved),

@@ -20,6 +20,24 @@ from marvis.packs.strategy.contracts import (
     VintageCurve,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.dsl import (
+    STRATEGY_DSL_SCHEMA_VERSION,
+    StrategyAction,
+    StrategyRuleSpec,
+    StrategySpec,
+    canonical_strategy_json,
+    parse_strategy_spec,
+    strategy_spec_hash,
+)
+from marvis.packs.strategy.evaluator import (
+    FrameEvaluation,
+    RowEvaluation,
+    evaluate_expression,
+    evaluate_expression_frame,
+    evaluate_strategy_frame,
+    evaluate_strategy_row,
+    evaluate_strategy_rows,
+)
 from marvis.packs.strategy.pricing import (
     LimitPricingResult,
     PricingCell,
@@ -29,7 +47,12 @@ from marvis.packs.strategy.pricing import (
 from marvis.packs.strategy.profit import ProfitParams, profit_calc, vintage_profit
 from marvis.packs.strategy.roll_rate import roll_rate_matrix
 from marvis.packs.strategy.rules import CandidateRule, evaluate_rule_set, mine_rules
-from marvis.packs.strategy.strategy import apply_strategy, build_strategy, evaluate_condition_mask
+from marvis.packs.strategy.strategy import (
+    apply_strategy,
+    build_strategy,
+    build_strategy_from_spec,
+    evaluate_condition_mask,
+)
 from marvis.packs.strategy.tradeoff import (
     recommend_operating_point,
     tradeoff_feasible_flags,
@@ -42,19 +65,26 @@ __all__ = [
     "CompareCell",
     "CompareResult",
     "CutoffBandsResult",
+    "FrameEvaluation",
     "ProfitParams",
     "ProfitResult",
     "RedFlag",
     "RollRateMatrix",
     "ScoreBand",
+    "STRATEGY_DSL_SCHEMA_VERSION",
     "Strategy",
+    "StrategyAction",
     "StrategyError",
     "StrategyRule",
+    "StrategyRuleSpec",
+    "StrategySpec",
     "TradeoffPoint",
     "VintageCurve",
     "apply_strategy",
     "backtest_strategy",
     "build_strategy",
+    "build_strategy_from_spec",
+    "canonical_strategy_json",
     "compare_strategies",
     "limit_pricing_matrix",
     "LimitPricingResult",
@@ -70,7 +100,15 @@ __all__ = [
     "vintage_summary",
     "CandidateRule",
     "evaluate_condition_mask",
+    "evaluate_expression",
+    "evaluate_expression_frame",
     "evaluate_rule_set",
+    "evaluate_strategy_row",
+    "evaluate_strategy_rows",
+    "evaluate_strategy_frame",
     "mine_rules",
+    "parse_strategy_spec",
+    "RowEvaluation",
+    "strategy_spec_hash",
     "vintage_profit",
 ]

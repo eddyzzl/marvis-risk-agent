@@ -1,11 +1,18 @@
 from contextlib import contextmanager
+import json
 
+import pandas as pd
 import pytest
 
 import marvis.db as db_module
 import marvis.repositories.strategy as strategy_repo_module
 from marvis.db import StrategyRepository, connect, init_db
-from marvis.packs.strategy import BacktestResult, build_strategy
+from marvis.packs.strategy import (
+    BacktestResult,
+    apply_strategy,
+    build_strategy,
+    build_strategy_from_spec,
+)
 from marvis.state_machine import ConflictError
 from marvis.strategy_adoption import AdoptionReasonError
 
@@ -59,6 +66,161 @@ def test_strategy_repository_round_trips_strategy_and_backtest(tmp_path):
     assert repo.list_for_task("task-1") == [strategy]
     assert repo.get_backtest("backtest-1") == result
     assert repo.list_backtests(strategy.id) == [result]
+
+
+def test_strategy_repository_persists_canonical_dsl_as_authoritative_spec(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+
+    repo.create_strategy("task-1", strategy)
+
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT dsl_json, dsl_schema_version FROM strategies WHERE id = ?",
+            (strategy.id,),
+        ).fetchone()
+    payload = json.loads(row["dsl_json"])
+    loaded = repo.get_strategy(strategy.id)
+
+    assert row["dsl_schema_version"] == "strategy.dsl.v1"
+    assert payload["rules"][0]["rule_id"] == strategy.rules[0].rule_id
+    assert loaded.spec.to_dict() == strategy.spec.to_dict()
+    assert apply_strategy(pd.DataFrame({"score": [599, 600]}), loaded).tolist() == [
+        "reject",
+        "approve",
+    ]
+
+
+def test_strategy_repository_adapts_legacy_null_dsl_without_rewriting_row(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO strategies(
+                id, task_id, strategy_type, rules_json, score_col,
+                default_decision_json, description, created_at,
+                dsl_json, dsl_schema_version
+            ) VALUES (
+                'legacy-1', 'task-1', 'approval',
+                '[{"condition":"score < 600","decision":"reject","value":null}]',
+                'score', '"approve"', 'legacy', '2026-07-18T00:00:00Z', NULL, NULL
+            )
+            """
+        )
+
+    strategy = repo.get_strategy("legacy-1")
+
+    assert strategy.spec.schema_version == "strategy.dsl.v1"
+    assert apply_strategy(pd.DataFrame({"score": [500, 700]}), strategy).tolist() == [
+        "reject",
+        "approve",
+    ]
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT dsl_json, dsl_schema_version FROM strategies WHERE id = 'legacy-1'"
+        ).fetchone()
+    assert row["dsl_json"] is None
+    assert row["dsl_schema_version"] is None
+
+
+def test_legacy_custom_default_decision_remains_row_equivalent(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO strategies(
+                id, task_id, strategy_type, rules_json, score_col,
+                default_decision_json, description, created_at,
+                dsl_json, dsl_schema_version
+            ) VALUES (
+                'legacy-pass', 'task-1', 'approval', '[]', 'score',
+                '"pass"', 'legacy custom token', '2026-07-18T00:00:00Z', NULL, NULL
+            )
+            """
+        )
+
+    strategy = repo.get_strategy("legacy-pass")
+
+    assert strategy is not None
+    assert strategy.spec.default_action.type == "approval"
+    assert strategy.spec.default_action.value == "approve"
+    assert strategy.spec.default_action.output_value == "pass"
+    assert apply_strategy(pd.DataFrame({"score": [500, 700]}), strategy).tolist() == [
+        "pass",
+        "pass",
+    ]
+
+
+def test_repository_fails_closed_when_compatibility_rules_drift_from_dsl(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy)
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE strategies SET rules_json = ? WHERE id = ?",
+            (
+                '[{"condition":"score < 100","decision":"reject",'
+                '"value":null,"rule_id":"tampered","priority":10,'
+                '"reason_code":null}]',
+                strategy.id,
+            ),
+        )
+
+    with pytest.raises(
+        ValueError, match="compatibility fields do not match canonical DSL"
+    ):
+        repo.get_strategy(strategy.id)
+
+
+def test_canonical_strategy_hash_ignores_display_description(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy)
+    before = repo.get_strategy_spec_hash(strategy.id)
+
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE strategies SET description = 'renamed for display' WHERE id = ?",
+            (strategy.id,),
+        )
+
+    assert repo.get_strategy_spec_hash(strategy.id) == before
+
+
+def test_backtest_repository_round_trips_unavailable_profit_and_note(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy)
+    result = BacktestResult(
+        strategy_id=strategy.id,
+        approval_rate=0.5,
+        approved_count=1,
+        approved_bad_rate=0.0,
+        rejected_bad_rate=1.0,
+        expected_profit=None,
+        swap_in_count=0,
+        swap_out_count=0,
+        swap_in_bad_rate=None,
+        swap_out_bad_rate=None,
+        by_segment=(),
+        profit_note="缺少 pd_col，未计算预期利润",
+    )
+
+    repo.save_backtest("bt-null-profit", strategy.id, "dataset-1", result)
+
+    assert repo.get_backtest("bt-null-profit") == result
 
 
 def test_strategy_repository_creates_strategy_with_audit(tmp_path):
@@ -434,6 +596,59 @@ def test_new_version_from_clones_lineage_and_bumps_version(tmp_path):
     # A third version stacks on top of the max, not the parent's version.
     grandchild = repo.new_version_from(child.id, created_at="2026-06-22T00:00:00Z")
     assert repo.get_strategy_meta(grandchild.id)["version"] == 3
+
+
+def test_new_version_from_accepts_canonical_nested_dsl_override(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    source = build_strategy_from_spec(
+        {
+            "strategy_type": "approval",
+            "default_action": {"type": "approval"},
+            "rules": [
+                {
+                    "rule_id": "two-signals",
+                    "priority": 10,
+                    "condition": {
+                        "op": "n_of_k",
+                        "n": 2,
+                        "args": [
+                            {
+                                "op": "compare",
+                                "field": "late_count",
+                                "operator": ">=",
+                                "value": 2,
+                            },
+                            {"op": "is_null", "field": "income"},
+                        ],
+                    },
+                    "action": {"type": "reject", "reason_code": "TWO_SIGNALS"},
+                }
+            ],
+        }
+    )
+    repo.create_strategy("task-1", source)
+    revised_spec = source.spec.to_dict()
+    revised_spec["rules"][0]["condition"]["args"][0]["value"] = 3
+
+    child = repo.new_version_from(
+        source.id,
+        strategy_spec=revised_spec,
+        description="raise late threshold",
+    )
+
+    assert repo.get_strategy_meta(child.id)["parent_strategy_id"] == source.id
+    assert child.spec.rules[0].condition["op"] == "n_of_k"
+    assert child.spec.rules[0].condition["args"][0]["value"] == 3
+    frame = pd.DataFrame(
+        {"late_count": [2, 3, 3], "income": [None, 1000, None]}
+    )
+    assert apply_strategy(frame, child).tolist() == [
+        "approve",
+        "approve",
+        "reject",
+    ]
 
 
 def test_strategy_artifacts_round_trip(tmp_path):

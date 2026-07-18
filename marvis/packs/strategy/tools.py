@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 import hashlib
 import json
 import math
@@ -17,6 +17,7 @@ from marvis.packs.strategy.bands import design_cutoff_bands
 from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.contracts import BacktestResult, Strategy
 from marvis.packs.strategy.deliverables import decision_table_csv
+from marvis.packs.strategy.dsl import canonical_strategy_json, strategy_spec_hash
 from marvis.packs.strategy.doc import render_strategy_doc_markdown
 from marvis.packs.strategy.monitor_tools import (  # noqa: F401
     tool_render_monitoring_report,
@@ -39,7 +40,11 @@ from marvis.packs.strategy.rules import (
     evaluate_rule_set,
     mine_rules,
 )
-from marvis.packs.strategy.strategy import build_strategy, infer_strategy_rule_direction
+from marvis.packs.strategy.strategy import (
+    build_strategy,
+    build_strategy_from_spec,
+    infer_strategy_rule_direction,
+)
 from marvis.packs.strategy.tradeoff import (
     recommend_operating_point,
     tradeoff_feasible_flags,
@@ -164,14 +169,32 @@ def tool_profit_calc(inputs: dict, ctx) -> dict:
 
 def tool_build_strategy(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    strategy = build_strategy(
-        str(inputs["strategy_type"]),
-        list(inputs["rules"]),
-        score_col=_optional_str(inputs.get("score_col")),
-        default_decision=inputs.get("default_decision"),
-        description=str(inputs.get("description") or ""),
+    has_spec = inputs.get("strategy_spec") is not None
+    has_rules = inputs.get("rules") is not None
+    if has_spec == has_rules:
+        raise StrategyError(
+            "build_strategy requires exactly one of rules or strategy_spec"
+        )
+    if has_spec:
+        strategy = build_strategy_from_spec(
+            dict(inputs["strategy_spec"]),
+            score_col=_optional_str(inputs.get("score_col")),
+            description=str(inputs.get("description") or ""),
+        )
+    else:
+        strategy = build_strategy(
+            str(inputs["strategy_type"]),
+            list(inputs["rules"]),
+            score_col=_optional_str(inputs.get("score_col")),
+            default_decision=inputs.get("default_decision"),
+            description=str(inputs.get("description") or ""),
+        )
+    strategy = replace(
+        strategy,
+        id=_strategy_instance_id(str(ctx.task_id), strategy),
     )
-    if runtime.strategies.get_strategy(strategy.id) is None:
+    persisted = runtime.strategies.get_strategy(strategy.id)
+    if persisted is None:
         runtime.strategies.create_strategy_with_audit(
             ctx.task_id,
             strategy,
@@ -186,6 +209,20 @@ def tool_build_strategy(inputs: dict, ctx) -> dict:
                 },
             },
         )
+    else:
+        metadata = runtime.strategies.get_strategy_meta(strategy.id)
+        if (
+            metadata is None
+            or str(metadata["task_id"]) != str(ctx.task_id)
+            or not _same_strategy_payload(persisted, strategy)
+        ):
+            raise StrategyError(
+                "strategy instance identity collision; refusing to reuse another "
+                "task or a different persisted payload"
+            )
+        # Idempotent retries must report the row that actually exists, not a
+        # transient object with display metadata the database never stored.
+        strategy = persisted
     return {
         "strategy_id": strategy.id,
         "strategy_type": strategy.strategy_type,
@@ -193,15 +230,62 @@ def tool_build_strategy(inputs: dict, ctx) -> dict:
         "default_decision": strategy.default_decision,
         "description": strategy.description,
         "rules": [_jsonable(rule) for rule in strategy.rules],
-        "inferred_score_direction": infer_strategy_rule_direction(list(strategy.rules), strategy.score_col),
+        "dsl_schema_version": strategy.spec.schema_version,
+        "strategy_spec": strategy.spec.to_dict(),
+        "inferred_score_direction": (
+            infer_strategy_rule_direction(list(strategy.rules), strategy.score_col)
+            if not has_spec
+            else None
+        ),
     }
+
+
+def _strategy_instance_id(task_id: str, strategy: Strategy) -> str:
+    if strategy.spec is None:
+        raise StrategyError("canonical strategy spec is required for persistence")
+    semantic_digest = strategy_spec_hash(strategy.spec)
+    payload = {
+        "task_id": str(task_id),
+        "dsl": json.loads(
+            canonical_strategy_json(strategy.spec, include_display_metadata=True)
+        ),
+        "score_col": strategy.score_col,
+        "description": strategy.description,
+    }
+    instance_digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"strategy-{semantic_digest[:12]}-{instance_digest[:12]}"
+
+
+def _same_strategy_payload(left: Strategy, right: Strategy) -> bool:
+    if left.spec is None or right.spec is None:
+        return False
+    return (
+        left.strategy_type == right.strategy_type
+        and left.score_col == right.score_col
+        and left.default_decision == right.default_decision
+        and left.description == right.description
+        and canonical_strategy_json(left.spec, include_display_metadata=True)
+        == canonical_strategy_json(right.spec, include_display_metadata=True)
+    )
 
 
 def tool_backtest_strategy(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    strategy = _strategy(runtime, str(inputs["strategy_id"]))
+    strategy = _strategy(runtime, str(inputs["strategy_id"]), task_id=str(ctx.task_id))
     baseline_id = _optional_str(inputs.get("baseline_strategy_id"))
-    baseline = _strategy(runtime, baseline_id) if baseline_id else None
+    baseline = (
+        _strategy(runtime, baseline_id, task_id=str(ctx.task_id))
+        if baseline_id
+        else None
+    )
     frame = _dataset_frame(runtime, str(inputs["dataset_id"]))
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
@@ -408,8 +492,10 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
             "nan_labels_dropped": 0,
             "label_coverage": 1.0,
         }
-    strategy = _strategy(runtime, str(inputs["strategy_id"]))
-    baseline = _strategy(runtime, baseline_id)
+    strategy = _strategy(
+        runtime, str(inputs["strategy_id"]), task_id=str(ctx.task_id)
+    )
+    baseline = _strategy(runtime, baseline_id, task_id=str(ctx.task_id))
     frame = _dataset_frame(runtime, str(inputs["dataset_id"]))
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
@@ -559,7 +645,11 @@ def _csv_num(value) -> str:
 def tool_adopt_strategy(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     strategy_id = str(inputs["strategy_id"])
-    strategy = _strategy(runtime, strategy_id)
+    strategy = _strategy(runtime, strategy_id, task_id=str(ctx.task_id))
+    if strategy.strategy_type not in {"approval", "reject"}:
+        raise StrategyError(
+            f"adoption requires a typed {strategy.strategy_type} backtest contract"
+        )
     backtest_id = str(inputs["backtest_id"])
     backtest = runtime.strategies.get_backtest(backtest_id)
     if backtest is None or backtest.strategy_id != strategy_id:
@@ -752,7 +842,7 @@ def _as_dict(value) -> dict:
 def tool_render_strategy_doc(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     strategy_id = str(inputs["strategy_id"])
-    strategy = _strategy(runtime, strategy_id)
+    strategy = _strategy(runtime, strategy_id, task_id=str(ctx.task_id))
     meta = runtime.strategies.get_strategy_meta(strategy_id)
     backtests = [_jsonable(result) for result in runtime.strategies.list_backtests(strategy_id)]
     artifacts = runtime.strategies.list_strategy_artifacts(strategy_id)
@@ -972,7 +1062,8 @@ def _evaluate_red_flags(result: dict, rules_ordered: list[dict], nan_labels_drop
                         "code": "high_overlap",
                         "level": "amber",
                         "message": (
-                            f"规则 {_rule_id_at(i)} 与 {_rule_id_at(j)} 重叠 {_fmt_pct(share)} "
+                            f"规则 {waterfall[i].get('rule_id')} 与 "
+                            f"{waterfall[j].get('rule_id')} 重叠 {_fmt_pct(share)} "
                             f"(>{_fmt_pct(_HIGH_OVERLAP_THRESHOLD)})，高度冗余。"
                         ),
                     }
@@ -986,12 +1077,6 @@ def _evaluate_red_flags(result: dict, rules_ordered: list[dict], nan_labels_drop
             }
         )
     return red_flags
-
-
-def _rule_id_at(index: int) -> str:
-    return f"rule_{index + 1}"
-
-
 def _default_feature_cols(frame: pd.DataFrame, target_col: str) -> list[str]:
     numeric = frame.select_dtypes(include="number").columns.tolist()
     return [column for column in numeric if column != target_col]
@@ -1073,9 +1158,14 @@ def _dataset_frame(runtime: _Runtime, dataset_id: str, *, columns: list[str] | N
     return runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id), columns=columns)
 
 
-def _strategy(runtime: _Runtime, strategy_id: str) -> Strategy:
+def _strategy(runtime: _Runtime, strategy_id: str, *, task_id: str) -> Strategy:
     strategy = runtime.strategies.get_strategy(strategy_id)
-    if strategy is None:
+    metadata = runtime.strategies.get_strategy_meta(strategy_id)
+    if (
+        strategy is None
+        or metadata is None
+        or str(metadata["task_id"]) != str(task_id)
+    ):
         raise StrategyError(f"strategy not found: {strategy_id}")
     return strategy
 

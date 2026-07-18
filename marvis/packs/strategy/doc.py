@@ -64,6 +64,12 @@ def render_strategy_doc_markdown(
         lines.append(f"- 审批率：{_pct(latest.get('approval_rate'))}")
         lines.append(f"- 通过客群坏率：{_pct(latest.get('approved_bad_rate'))}")
         lines.append(f"- 拒绝客群坏率：{_pct(latest.get('rejected_bad_rate'))}")
+        if int(latest.get("review_count") or 0):
+            lines.append(
+                f"- 人工复核：{latest.get('review_count')} 户，"
+                f"占比 {_pct(latest.get('review_rate'))}，"
+                f"坏率 {_pct(latest.get('review_bad_rate'))}"
+            )
         lines.append(f"- 预期利润：{_num(latest.get('expected_profit'))}")
         lines.append(
             f"- swap-in：{latest.get('swap_in_count', 0)} 户，坏率 {_pct(latest.get('swap_in_bad_rate'))}"

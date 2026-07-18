@@ -21,13 +21,17 @@ with the same inputs return byte-identical dicts.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 from sklearn.tree import DecisionTreeClassifier
 
+from marvis.packs.strategy.dsl import StrategyAction
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.legacy_adapter import legacy_condition_to_expression
 from marvis.packs.strategy.strategy import evaluate_condition_mask
 
 # Default mining seed (INV-1). Chosen once; every mine_rules run pins it unless a
@@ -125,7 +129,7 @@ def mine_rules(
         key=lambda rule: (-rule["lift"], -rule["support"], rule["condition"]),
     )
     top = ranked[: max(0, int(top_k))]
-    return [_finalize(rule, index) for index, rule in enumerate(top)]
+    return [_finalize(rule) for rule in top]
 
 
 def evaluate_rule_set(
@@ -145,7 +149,15 @@ def evaluate_rule_set(
     """
     frame, target = _prepare_eval(df, target_col)
     n = int(len(frame))
-    masks = [evaluate_condition_mask(frame, str(rule["condition"])).to_numpy(dtype=bool) for rule in rules_ordered]
+    conditions = [str(rule["condition"]).strip() for rule in rules_ordered]
+    rule_ids = [
+        _input_or_semantic_rule_id(rule, condition)
+        for rule, condition in zip(rules_ordered, conditions, strict=True)
+    ]
+    masks = [
+        evaluate_condition_mask(frame, condition).to_numpy(dtype=bool)
+        for condition in conditions
+    ]
     target_arr = target.to_numpy(dtype=float)
 
     assigned = np.zeros(n, dtype=bool)
@@ -159,7 +171,7 @@ def evaluate_rule_set(
         cum_reject = int(assigned.sum())
         waterfall.append(
             {
-                "rule_id": _rule_id(index),
+                "rule_id": rule_ids[index],
                 "incremental_hits": inc_count,
                 "incremental_bad_rate": _mean_or_zero(target_arr[incremental]),
                 "cum_reject_rate": _ratio(cum_reject, n),
@@ -387,9 +399,9 @@ def _signatures_equivalent(a: tuple, b: tuple) -> bool:
     return True
 
 
-def _finalize(rule: dict, index: int) -> CandidateRule:
+def _finalize(rule: dict) -> CandidateRule:
     return CandidateRule(
-        rule_id=_rule_id(index),
+        rule_id=_semantic_rule_id(rule["condition"]),
         clauses=tuple(dict(clause) for clause in rule["clauses"]),
         condition=rule["condition"],
         support=rule["support"],
@@ -472,8 +484,34 @@ def _assert_columns(df: pd.DataFrame, columns: list[str]) -> None:
         raise StrategyError(f"missing columns: {missing}")
 
 
-def _rule_id(index: int) -> str:
-    return f"rule_{index + 1}"
+def _semantic_rule_id(condition: str) -> str:
+    """Return the content-addressed id for one mined reject rule.
+
+    Candidate rank, observed performance statistics, source channel, and display
+    metadata are deliberately absent.  The same canonical condition therefore
+    retains its identity when a later mining run changes ranking, ``top_k``, or
+    sample-derived lift/support values.
+    """
+
+    payload = {
+        "condition": legacy_condition_to_expression(condition),
+        "action": StrategyAction(type="reject").to_dict(),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"rule-{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+
+def _input_or_semantic_rule_id(rule: dict, condition: str) -> str:
+    supplied = rule.get("rule_id")
+    if supplied is not None and str(supplied).strip():
+        return str(supplied).strip()
+    return _semantic_rule_id(condition)
 
 
 def _ratio(numerator: float, denominator: int) -> float:

@@ -264,7 +264,7 @@ def test_governed_adoption_rejects_stale_or_mismatched_target_without_mutation(
     assert _ledger_states(db_path) == ("dispatched", "reserved")
 
 
-def test_governed_adoption_rejects_rules_changed_after_approval(tmp_path):
+def test_governed_adoption_rejects_canonical_dsl_changed_after_approval(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
     repo = StrategyRepository(db_path)
@@ -276,19 +276,16 @@ def test_governed_adoption_rejects_rules_changed_after_approval(tmp_path):
     )
 
     with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT dsl_json FROM strategies WHERE id = ?",
+            (challenger.id,),
+        ).fetchone()
+        payload = json.loads(row["dsl_json"])
+        payload["rules"][0]["condition"]["value"] = 700
         conn.execute(
-            "UPDATE strategies SET rules_json = ? WHERE id = ?",
+            "UPDATE strategies SET dsl_json = ? WHERE id = ?",
             (
-                json.dumps(
-                    [
-                        {
-                            "condition": "score < 700",
-                            "decision": "reject",
-                            "value": None,
-                        }
-                    ],
-                    separators=(",", ":"),
-                ),
+                json.dumps(payload, separators=(",", ":")),
                 challenger.id,
             ),
         )

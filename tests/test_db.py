@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -1069,6 +1070,61 @@ def test_init_db_migration_004_adds_strategy_input_to_version3_database(tmp_path
     assert row["id"] == "task-1"
     assert row["model_name"] == "历史策略任务"
     assert row["strategy_input_json"] is None
+
+
+def test_init_db_migration_006_adds_canonical_strategy_dsl_to_version5_database(tmp_path):
+    """Existing V2 databases gain nullable DSL columns without rewriting legacy rules."""
+
+    db_path = tmp_path / "legacy_v5.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE strategies (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                rules_json TEXT NOT NULL,
+                score_col TEXT,
+                default_decision_json TEXT NOT NULL,
+                description TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'draft',
+                adopted_at TEXT,
+                adoption_reason TEXT,
+                parent_strategy_id TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO strategies(
+                id, task_id, strategy_type, rules_json, score_col,
+                default_decision_json, description, created_at
+            ) VALUES (
+                'legacy-strategy', 'task-1', 'approval',
+                '[{"condition":"score < 600","decision":"reject","value":null}]',
+                'score', '"approve"', 'legacy row', '2026-07-18T00:00:00Z'
+            )
+            """
+        )
+        conn.execute("PRAGMA user_version = 5")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(strategies)")}
+        row = conn.execute(
+            "SELECT rules_json, dsl_json, dsl_schema_version "
+            "FROM strategies WHERE id = 'legacy-strategy'"
+        ).fetchone()
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert {"dsl_json", "dsl_schema_version"} <= columns
+    assert json.loads(row["rules_json"])[0]["condition"] == "score < 600"
+    assert row["dsl_json"] is None
+    assert row["dsl_schema_version"] is None
 
 
 def test_init_db_is_idempotent_across_repeated_calls(tmp_path):

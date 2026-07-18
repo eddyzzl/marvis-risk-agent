@@ -306,14 +306,36 @@ def _is_deferred_input(value) -> bool:
 
 def _relax_required(input_schema: dict, step_inputs: dict) -> dict:
     relaxed = deepcopy(input_schema)
-    required = relaxed.get("required")
-    if not isinstance(required, list):
-        return relaxed
     deferred_keys = {
         key for key, value in step_inputs.items() if _is_deferred_input(value)
     }
-    relaxed["required"] = [key for key in required if key not in deferred_keys]
+    _relax_required_combinators(relaxed, deferred_keys)
     return relaxed
+
+
+def _relax_required_combinators(schema: dict, deferred_keys: set[str]) -> None:
+    """Relax deferred top-level inputs inside JSON-Schema branch combinators.
+
+    Plans may carry a ``$ref`` for one branch of a ``oneOf``. The concrete value
+    is intentionally absent from plan-time literal validation, so every required
+    list governing that same top-level branch must ignore the deferred key. Runtime
+    validation receives resolved inputs and the original manifest schema.
+    """
+
+    required = schema.get("required")
+    if isinstance(required, list):
+        schema["required"] = [
+            key for key in required if key not in deferred_keys
+        ]
+    for combinator in ("oneOf", "anyOf", "allOf"):
+        variants = schema.get(combinator)
+        if isinstance(variants, list):
+            for variant in variants:
+                if isinstance(variant, dict):
+                    _relax_required_combinators(variant, deferred_keys)
+    negated = schema.get("not")
+    if isinstance(negated, dict):
+        _relax_required_combinators(negated, deferred_keys)
 
 
 def _parse_ref(value: str) -> tuple[str, str]:

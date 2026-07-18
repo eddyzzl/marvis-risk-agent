@@ -76,7 +76,11 @@ _MIGRATION_TABLES = frozenset({
 # snapshot plus server-issued local principals, immutable human DecisionRecords,
 # one-shot ApprovalRecords, and the crash-safe effect execution ledger used by
 # ToolRunner.
-SCHEMA_VERSION = 5
+#
+# _migration_006_strategy_dsl adds the canonical, versioned Strategy DSL payload.
+# The columns are nullable on purpose: historical rules_json rows are adapted at
+# the repository boundary and are not rewritten during database migration.
+SCHEMA_VERSION = 6
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -1040,6 +1044,28 @@ def _migration_005_governance_authorization(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_006_strategy_dsl(conn: sqlite3.Connection) -> None:
+    """Add the canonical Strategy DSL without mutating historical definitions."""
+
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'strategies'"
+    ).fetchone()
+    if table is None:
+        # Some compatibility tests and repaired historical databases carry a
+        # legitimate schema version but only the task subset. There is no strategy
+        # definition to migrate in that shape, so advancing the version is safe.
+        return
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+    }
+    for column, definition in (
+        ("dsl_json", "TEXT"),
+        ("dsl_schema_version", "TEXT"),
+    ):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE strategies ADD COLUMN {column} {definition}")
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -1053,6 +1079,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (3, _migration_003_validation_input_contracts),
     (4, _migration_004_strategy_task_input),
     (5, _migration_005_governance_authorization),
+    (6, _migration_006_strategy_dsl),
 ]
 
 

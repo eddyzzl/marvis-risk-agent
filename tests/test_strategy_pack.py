@@ -7,12 +7,20 @@ import pytest
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
+from marvis.db import (
+    DatasetRepository,
+    PluginRepository,
+    StrategyRepository,
+    TaskRepository,
+    init_db,
+)
 from marvis.domain import TaskCreate
 from marvis.plugins.loader import load_builtin_packs, load_manifest
 from marvis.plugins.manifest import GovernancePolicy, ToolRef
+from marvis.plugins.errors import SchemaValidationError
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
+from marvis.plugins.schema_validation import validate_against_schema
 from marvis.settings import build_settings
 
 
@@ -122,6 +130,198 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert "write:strategy" in build_tool.side_effects
     assert "write:backtest" in backtest_tool.side_effects
 
+    validate_against_schema(
+        {
+            "strategy_type": "approval",
+            "rules": [{"condition": "score < 600", "decision": "reject"}],
+            "default_decision": "approve",
+        },
+        build_tool.input_schema,
+        label="legacy strategy input",
+    )
+    validate_against_schema(
+        {
+            "strategy_spec": {
+                "schema_version": "strategy.dsl.v1",
+                "strategy_type": "approval",
+                "match_policy": "first_match",
+                "default_action": {"type": "approval"},
+                "rules": [],
+            }
+        },
+        build_tool.input_schema,
+        label="canonical strategy input",
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {
+                "strategy_type": "approval",
+                "rules": [
+                    {
+                        "condition": "score < 600",
+                        "decision": "reject",
+                        "priority": 1.5,
+                    }
+                ],
+                "default_decision": "approve",
+            },
+            build_tool.input_schema,
+            label="fractional priority",
+        )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {
+                "strategy_spec": {
+                    "strategy_type": "approval",
+                    "default_action": {"type": "approval"},
+                    "rules": [
+                        {
+                            "rule_id": "bad-expression",
+                            "priority": 10,
+                            "condition": {"op": "python_eval", "code": "score > 1"},
+                            "action": {"type": "reject"},
+                        }
+                    ],
+                }
+            },
+            build_tool.input_schema,
+            label="unsupported canonical expression",
+        )
+
+
+def test_build_strategy_tool_accepts_and_persists_canonical_dsl(tmp_path):
+    runner, _, _, task = _runtime(tmp_path)
+    spec = {
+        "schema_version": "strategy.dsl.v1",
+        "strategy_type": "segmentation",
+        "match_policy": "first_match",
+        "default_action": {"type": "segment", "value": "other"},
+        "rules": [
+            {
+                "rule_id": "prime-vote",
+                "priority": 10,
+                "condition": {
+                    "op": "n_of_k",
+                    "n": 2,
+                    "args": [
+                        {
+                            "op": "compare",
+                            "field": "score",
+                            "operator": ">=",
+                            "value": 700,
+                        },
+                        {
+                            "op": "compare",
+                            "field": "income",
+                            "operator": ">=",
+                            "value": 10000,
+                        },
+                    ],
+                },
+                "action": {
+                    "type": "segment",
+                    "value": "prime",
+                    "reason_code": "PRIME_VOTE",
+                },
+            }
+        ],
+        "metadata": {"lineage": {"source_artifact": "rules-1"}},
+    }
+
+    built = runner.invoke(
+        ToolRef("strategy", "build_strategy"),
+        {"strategy_spec": spec, "description": "canonical candidate"},
+        task_id=task.id,
+    )
+
+    assert built.ok is True, built.error
+    assert built.output["dsl_schema_version"] == "strategy.dsl.v1"
+    assert built.output["strategy_spec"]["rules"][0]["rule_id"] == "prime-vote"
+    strategy = StrategyRepository(
+        build_settings(tmp_path / "workspace").db_path
+    ).get_strategy(built.output["strategy_id"])
+    assert strategy is not None
+    assert strategy.spec.to_dict() == built.output["strategy_spec"]
+
+
+def test_build_strategy_persistence_identity_is_task_scoped_and_payload_exact(
+    tmp_path,
+) -> None:
+    runner, _, _, task = _runtime(tmp_path)
+    settings = build_settings(tmp_path / "workspace")
+    spec = {
+        "strategy_type": "approval",
+        "default_action": {"type": "approval"},
+        "rules": [
+            {
+                "rule_id": "reject-low",
+                "priority": 10,
+                "condition": {
+                    "op": "compare",
+                    "field": "score",
+                    "operator": "<",
+                    "value": 600,
+                },
+                "action": {"type": "reject"},
+            }
+        ],
+    }
+    second_task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="另一策略任务",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "source-2"),
+            algorithm="lr",
+            run_mode="agent",
+        )
+    )
+
+    first = runner.invoke(
+        ToolRef("strategy", "build_strategy"),
+        {"strategy_spec": spec, "description": "方案 A"},
+        task_id=task.id,
+    )
+    retry = runner.invoke(
+        ToolRef("strategy", "build_strategy"),
+        {"strategy_spec": spec, "description": "方案 A"},
+        task_id=task.id,
+    )
+    renamed = runner.invoke(
+        ToolRef("strategy", "build_strategy"),
+        {"strategy_spec": spec, "description": "方案 B"},
+        task_id=task.id,
+    )
+    other_task = runner.invoke(
+        ToolRef("strategy", "build_strategy"),
+        {"strategy_spec": spec, "description": "方案 A"},
+        task_id=second_task.id,
+    )
+
+    assert all(result.ok for result in (first, retry, renamed, other_task))
+    assert retry.output["strategy_id"] == first.output["strategy_id"]
+    assert renamed.output["strategy_id"] != first.output["strategy_id"]
+    assert other_task.output["strategy_id"] != first.output["strategy_id"]
+    repository = StrategyRepository(settings.db_path)
+    assert [item.description for item in repository.list_for_task(task.id)] == [
+        "方案 A",
+        "方案 B",
+    ]
+    assert [
+        item.description for item in repository.list_for_task(second_task.id)
+    ] == ["方案 A"]
+    cross_task_backtest = runner.invoke(
+        ToolRef("strategy", "backtest_strategy"),
+        {
+            "strategy_id": other_task.output["strategy_id"],
+            "dataset_id": "not-needed-before-strategy-authorization",
+            "target_col": "bad",
+        },
+        task_id=task.id,
+    )
+    assert cross_task_backtest.ok is False
+    assert "strategy not found" in cross_task_backtest.error
+
 
 @pytest.mark.slow
 def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
@@ -190,6 +390,9 @@ def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
     assert {row["segment"] for row in profit.output["results"]} == {"A", "B"}
     assert built.ok is True, built.error
     assert built.output["strategy_id"]
+    assert built.output["dsl_schema_version"] == "strategy.dsl.v1"
+    assert built.output["strategy_spec"]["rules"][0]["rule_id"]
+    assert built.output["rules"][0]["rule_id"] == built.output["strategy_spec"]["rules"][0]["rule_id"]
 
     backtest = runner.invoke(
         ToolRef("strategy", "backtest_strategy"),

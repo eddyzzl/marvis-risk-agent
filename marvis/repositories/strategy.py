@@ -12,6 +12,13 @@ from marvis.packs.strategy.contracts import (
     Strategy,
     StrategyRule,
 )
+from marvis.packs.strategy.dsl import (
+    StrategySpec,
+    canonical_strategy_json,
+    parse_strategy_spec,
+    strategy_spec_hash,
+)
+from marvis.packs.strategy.legacy_adapter import legacy_strategy_to_spec
 from marvis.state_machine import ConflictError
 from marvis.strategy_adoption import normalize_adoption_reason
 
@@ -26,6 +33,15 @@ def _strategy_effect_conflict(reason: str) -> ConflictError:
 
 def _strategy_spec_hash_from_row(row: sqlite3.Row) -> str:
     """Hash the reviewed strategy definition, excluding lifecycle metadata."""
+
+    if "dsl_json" in row.keys() and row["dsl_json"] is not None:
+        spec = parse_strategy_spec(json.loads(str(row["dsl_json"])))
+        stored_version = _optional_str(row["dsl_schema_version"])
+        if stored_version != spec.schema_version:
+            raise ValueError(
+                "strategy dsl_schema_version does not match canonical dsl_json"
+            )
+        return strategy_spec_hash(spec)
 
     payload = {
         "strategy_type": str(row["strategy_type"]),
@@ -265,7 +281,8 @@ class StrategyRepository:
             row = conn.execute(
                 """
                 SELECT id, task_id, strategy_type, rules_json, score_col,
-                       default_decision_json, description, created_at
+                       default_decision_json, description, created_at,
+                       dsl_json, dsl_schema_version
                   FROM strategies
                  WHERE id = ?
                 """,
@@ -298,7 +315,8 @@ class StrategyRepository:
             row = conn.execute(
                 """
                 SELECT strategy_type, rules_json, score_col,
-                       default_decision_json, description
+                       default_decision_json, description,
+                       dsl_json, dsl_schema_version
                   FROM strategies
                  WHERE id = ?
                 """,
@@ -311,7 +329,8 @@ class StrategyRepository:
             rows = conn.execute(
                 """
                 SELECT id, task_id, strategy_type, rules_json, score_col,
-                       default_decision_json, description, created_at
+                       default_decision_json, description, created_at,
+                       dsl_json, dsl_schema_version
                   FROM strategies
                  WHERE task_id = ?
                  ORDER BY created_at, id
@@ -377,7 +396,8 @@ class StrategyRepository:
             head = conn.execute(
                 """
                 SELECT task_id, strategy_type, version, status, rules_json,
-                       score_col, default_decision_json, description
+                       score_col, default_decision_json, description,
+                       dsl_json, dsl_schema_version
                   FROM strategies
                  WHERE id = ?
                 """,
@@ -473,19 +493,23 @@ class StrategyRepository:
         strategy_id: str,
         *,
         rules: list | None = None,
+        strategy_spec: StrategySpec | dict | None = None,
         description: str | None = None,
         new_strategy_id: str | None = None,
         created_at: str | None = None,
     ) -> Strategy:
         """Clone a strategy into a new draft at version=max(version)+1, with
-        parent_strategy_id pointing back at the source. rules/description override
-        the clone when supplied."""
+        parent_strategy_id pointing back at the source. A canonical strategy_spec
+        or legacy rules (mutually exclusive) may override the definition."""
+        if rules is not None and strategy_spec is not None:
+            raise ValueError("rules and strategy_spec are mutually exclusive")
         stamp = created_at or _now()
         with connect(self.db_path) as conn:
             src = conn.execute(
                 """
                 SELECT id, task_id, strategy_type, rules_json, score_col,
-                       default_decision_json, description
+                       default_decision_json, description, created_at,
+                       dsl_json, dsl_schema_version
                   FROM strategies
                  WHERE id = ?
                 """,
@@ -503,42 +527,93 @@ class StrategyRepository:
             ).fetchone()
             next_version = int(max_version_row["mx"] or 0) + 1
             child_id = new_strategy_id or uuid.uuid4().hex
-            child_rules = (
-                _dump_json_any(
-                    [_strategy_rule_to_dict(_coerce_rule(rule)) for rule in rules]
-                )
-                if rules is not None
-                else str(src["rules_json"])
-            )
             child_description = (
                 str(description) if description is not None else str(src["description"])
             )
+            source_strategy = _strategy_from_row(src)
+            if strategy_spec is not None:
+                from marvis.packs.strategy.strategy import build_strategy_from_spec
+
+                base_spec = parse_strategy_spec(strategy_spec)
+                if base_spec.strategy_type != source_strategy.strategy_type:
+                    raise ValueError(
+                        "new strategy version cannot change strategy_type"
+                    )
+                built = build_strategy_from_spec(
+                    base_spec,
+                    score_col=source_strategy.score_col,
+                    description=child_description,
+                )
+                child_rules = built.rules
+            elif rules is not None:
+                # Local import avoids making repository module import order part of
+                # the pack's public surface while still using the one canonical
+                # legacy->DSL normalization path.
+                from marvis.packs.strategy.strategy import build_strategy
+
+                built = build_strategy(
+                    source_strategy.strategy_type,
+                    [
+                        _strategy_rule_to_dict(_coerce_rule(rule))
+                        for rule in rules
+                    ],
+                    score_col=source_strategy.score_col,
+                    default_decision=source_strategy.default_decision,
+                    description=child_description,
+                )
+                child_rules = built.rules
+                base_spec = built.spec
+            else:
+                base_spec = source_strategy.spec
+                child_rules = _rules_with_spec_identity(
+                    source_strategy.rules,
+                    base_spec,
+                )
+            spec_payload = base_spec.to_dict()
+            metadata = dict(spec_payload.get("metadata") or {})
+            lineage = dict(metadata.get("lineage") or {})
+            lineage.update(
+                {
+                    "source": "strategy_version",
+                    "parent_strategy_id": strategy_id,
+                }
+            )
+            metadata["lineage"] = lineage
+            metadata["description"] = child_description
+            spec_payload["metadata"] = metadata
+            child_spec = parse_strategy_spec(spec_payload)
             conn.execute(
                 """
                 INSERT INTO strategies(
                     id, task_id, strategy_type, rules_json, score_col,
                     default_decision_json, description, created_at,
-                    version, status, parent_strategy_id
+                    version, status, parent_strategy_id,
+                    dsl_json, dsl_schema_version
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
                 """,
                 (
                     child_id,
                     task_id,
-                    str(src["strategy_type"]),
-                    child_rules,
+                    child_spec.strategy_type,
+                    _dump_json_any(
+                        [_strategy_rule_to_dict(rule) for rule in child_rules]
+                    ),
                     _optional_str(src["score_col"]),
-                    str(src["default_decision_json"]),
+                    _dump_json_any(child_spec.default_action.decision_value),
                     child_description,
                     stamp,
                     next_version,
                     strategy_id,
+                    canonical_strategy_json(child_spec),
+                    child_spec.schema_version,
                 ),
             )
             row = conn.execute(
                 """
                 SELECT id, task_id, strategy_type, rules_json, score_col,
-                       default_decision_json, description, created_at
+                       default_decision_json, description, created_at,
+                       dsl_json, dsl_schema_version
                   FROM strategies
                  WHERE id = ?
                 """,
@@ -735,6 +810,8 @@ def _write_audit_row(
 
 
 def _strategy_insert_values(task_id: str, strategy: Strategy, created_at: str) -> tuple:
+    spec = strategy.spec or legacy_strategy_to_spec(strategy)
+    _assert_strategy_matches_spec(strategy, spec)
     return (
         strategy.id,
         task_id,
@@ -744,6 +821,8 @@ def _strategy_insert_values(task_id: str, strategy: Strategy, created_at: str) -
         _dump_json_any(strategy.default_decision),
         strategy.description,
         created_at,
+        canonical_strategy_json(spec),
+        spec.schema_version,
     )
 
 
@@ -757,16 +836,17 @@ def _insert_strategy_row(
         """
         INSERT INTO strategies(
             id, task_id, strategy_type, rules_json, score_col,
-            default_decision_json, description, created_at
+            default_decision_json, description, created_at,
+            dsl_json, dsl_schema_version
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         _strategy_insert_values(task_id, strategy, created_at),
     )
 
 
 def _strategy_from_row(row: sqlite3.Row) -> Strategy:
-    return Strategy(
+    strategy = Strategy(
         id=str(row["id"]),
         strategy_type=str(row["strategy_type"]),
         rules=tuple(
@@ -776,6 +856,35 @@ def _strategy_from_row(row: sqlite3.Row) -> Strategy:
         score_col=_optional_str(row["score_col"]),
         default_decision=json.loads(row["default_decision_json"]),
         description=str(row["description"]),
+    )
+    if "dsl_json" in row.keys() and row["dsl_json"] is not None:
+        spec = parse_strategy_spec(json.loads(str(row["dsl_json"])))
+        stored_version = _optional_str(row["dsl_schema_version"])
+        if stored_version != spec.schema_version:
+            raise ValueError(
+                "strategy dsl_schema_version does not match canonical dsl_json"
+            )
+        _assert_strategy_matches_spec(strategy, spec)
+        return Strategy(
+            id=strategy.id,
+            strategy_type=strategy.strategy_type,
+            rules=strategy.rules,
+            score_col=strategy.score_col,
+            default_decision=strategy.default_decision,
+            description=strategy.description,
+            spec=spec,
+        )
+    else:
+        spec = legacy_strategy_to_spec(strategy)
+    normalized_rules = _rules_with_spec_identity(strategy.rules, spec)
+    return Strategy(
+        id=strategy.id,
+        strategy_type=strategy.strategy_type,
+        rules=normalized_rules,
+        score_col=strategy.score_col,
+        default_decision=strategy.default_decision,
+        description=strategy.description,
+        spec=spec,
     )
 
 
@@ -803,11 +912,52 @@ def _strategy_rule_to_dict(rule: StrategyRule) -> dict:
     return asdict(rule)
 
 
+def _rules_with_spec_identity(
+    rules: tuple[StrategyRule, ...],
+    spec: StrategySpec,
+) -> tuple[StrategyRule, ...]:
+    if len(rules) != len(spec.rules):
+        raise ValueError("strategy compatibility rules do not match canonical DSL")
+    legacy_by_priority = {
+        (
+            rule.priority
+            if rule.priority is not None
+            else (ordinal + 1) * 10
+        ): rule
+        for ordinal, rule in enumerate(rules)
+    }
+    return tuple(
+        StrategyRule(
+            condition=legacy.condition,
+            decision=legacy.decision,
+            value=legacy.value,
+            rule_id=typed.rule_id,
+            priority=typed.priority,
+            reason_code=typed.action.reason_code,
+        )
+        for typed in spec.rules
+        for legacy in (legacy_by_priority[typed.priority],)
+    )
+
+
+def _assert_strategy_matches_spec(strategy: Strategy, spec: StrategySpec) -> None:
+    compatibility_spec = legacy_strategy_to_spec(strategy)
+    if strategy_spec_hash(compatibility_spec) != strategy_spec_hash(spec):
+        raise ValueError("strategy compatibility fields do not match canonical DSL")
+
+
 def _strategy_rule_from_dict(payload: dict) -> StrategyRule:
     return StrategyRule(
         condition=str(payload["condition"]),
         decision=str(payload["decision"]),
         value=payload.get("value"),
+        rule_id=_optional_str(payload.get("rule_id")),
+        priority=(
+            int(payload["priority"])
+            if payload.get("priority") is not None
+            else None
+        ),
+        reason_code=_optional_str(payload.get("reason_code")),
     )
 
 
@@ -869,12 +1019,17 @@ def _backtest_result_from_dict(payload: dict) -> BacktestResult:
         approved_count=int(payload["approved_count"]),
         approved_bad_rate=float(payload["approved_bad_rate"]),
         rejected_bad_rate=float(payload["rejected_bad_rate"]),
-        expected_profit=float(payload["expected_profit"]),
+        expected_profit=_optional_float_field(payload["expected_profit"]),
         swap_in_count=int(payload["swap_in_count"]),
         swap_out_count=int(payload["swap_out_count"]),
         swap_in_bad_rate=_optional_float_field(payload["swap_in_bad_rate"]),
         swap_out_bad_rate=_optional_float_field(payload["swap_out_bad_rate"]),
         by_segment=tuple(dict(item) for item in payload.get("by_segment") or ()),
+        profit_note=_optional_str(payload.get("profit_note")),
+        rejected_count=int(payload.get("rejected_count", 0)),
+        review_count=int(payload.get("review_count", 0)),
+        review_rate=float(payload.get("review_rate", 0.0)),
+        review_bad_rate=_optional_float_field(payload.get("review_bad_rate")),
     )
 
 

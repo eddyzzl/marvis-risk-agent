@@ -40,7 +40,7 @@ from marvis.packs.strategy.monitoring_plan import (
     load_monitoring_plan,
     save_monitoring_plan,
 )
-from marvis.packs.strategy.strategy import apply_strategy
+from marvis.packs.strategy.backtest import strategy_approval_mask
 from marvis.settings import build_settings
 
 #: Strategy-facing drift bands (percentage points, configurable). A metric that
@@ -57,9 +57,7 @@ def tool_run_strategy_monitoring(inputs: dict, ctx) -> dict:
     strategy_id = str(inputs["strategy_id"])
     dataset_id = str(inputs["dataset_id"])
 
-    meta = runtime.strategies.get_strategy_meta(strategy_id)
-    if meta is None:
-        raise StrategyError(f"strategy not found: {strategy_id}")
+    meta = _strategy_meta_for_task(runtime, strategy_id, str(ctx.task_id))
     if str(meta.get("status")) != "adopted":
         raise StrategyNotAdoptedError(strategy_id=strategy_id, status=meta.get("status"))
 
@@ -69,6 +67,10 @@ def tool_run_strategy_monitoring(inputs: dict, ctx) -> dict:
     strategy = runtime.strategies.get_strategy(strategy_id)
     if strategy is None:
         raise StrategyError(f"strategy not found: {strategy_id}")
+    if strategy.strategy_type not in {"approval", "reject"}:
+        raise StrategyError(
+            f"monitoring requires a typed {strategy.strategy_type} metric contract"
+        )
 
     frame = _dataset_frame(runtime, dataset_id)
     target_col = _optional_str(inputs.get("target_col"))
@@ -167,8 +169,7 @@ def _strategy_drift_checks(
     """Strategy-facing drift: approval-rate drift (always) and approved-bad-rate
     drift (labels only) vs the adoption expectation_baseline."""
     baseline = plan.expectation_baseline or {}
-    decision = apply_strategy(frame, strategy)
-    approved = decision.astype(str) != "reject"
+    approved = strategy_approval_mask(frame, strategy)
     row_count = int(len(frame))
     approval_rate = float(approved.sum() / row_count) if row_count else 0.0
 
@@ -308,9 +309,7 @@ def tool_render_monitoring_report(inputs: dict, ctx) -> dict:
     never creates a task itself (single-machine, human-in-the-loop)."""
     runtime = _Runtime(ctx)
     strategy_id = str(inputs["strategy_id"])
-    meta = runtime.strategies.get_strategy_meta(strategy_id)
-    if meta is None:
-        raise StrategyError(f"strategy not found: {strategy_id}")
+    meta = _strategy_meta_for_task(runtime, strategy_id, str(ctx.task_id))
 
     checks = [dict(c) for c in (inputs.get("checks") or []) if isinstance(c, dict)]
     overall_level = _optional_str(inputs.get("overall_level"))
@@ -473,6 +472,15 @@ class _Runtime:
 def _dataset_frame(runtime: _Runtime, dataset_id: str) -> pd.DataFrame:
     dataset = runtime.registry.get(dataset_id)
     return runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id))
+
+
+def _strategy_meta_for_task(
+    runtime: _Runtime, strategy_id: str, task_id: str
+) -> dict:
+    metadata = runtime.strategies.get_strategy_meta(strategy_id)
+    if metadata is None or str(metadata["task_id"]) != str(task_id):
+        raise StrategyError(f"strategy not found: {strategy_id}")
+    return metadata
 
 
 def _optional_str(value) -> str | None:

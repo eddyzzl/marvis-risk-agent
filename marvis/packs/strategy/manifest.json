@@ -310,9 +310,12 @@
           "rules": {
             "type": "array",
             "items": {
-              "type": "object"
+              "$ref": "#/$defs/legacy_rule"
             },
             "minItems": 1
+          },
+          "strategy_spec": {
+            "$ref": "#/$defs/strategy_spec"
           },
           "score_col": {
             "type": "string",
@@ -323,12 +326,252 @@
             "type": "string"
           }
         },
-        "required": [
-          "strategy_type",
-          "rules",
-          "default_decision"
+        "oneOf": [
+          {
+            "required": [
+              "strategy_type",
+              "rules",
+              "default_decision"
+            ],
+            "not": {
+              "required": [
+                "strategy_spec"
+              ]
+            }
+          },
+          {
+            "required": [
+              "strategy_spec"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "strategy_type"
+                  ]
+                },
+                {
+                  "required": [
+                    "rules"
+                  ]
+                },
+                {
+                  "required": [
+                    "default_decision"
+                  ]
+                }
+              ]
+            }
+          }
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "$defs": {
+          "legacy_rule": {
+            "type": "object",
+            "properties": {
+              "condition": {"type": "string", "minLength": 1},
+              "decision": {"type": "string", "minLength": 1},
+              "value": {},
+              "rule_id": {"type": "string", "minLength": 1},
+              "priority": {"type": "integer", "minimum": 0},
+              "reason_code": {"type": "string", "minLength": 1},
+              "clauses": {"type": "array", "items": {"type": "object"}},
+              "support": {"type": "number"},
+              "hit_count": {"type": "integer", "minimum": 0},
+              "hit_bad_rate": {"type": "number"},
+              "lift": {"type": "number"},
+              "source": {"type": "string"}
+            },
+            "required": ["condition", "decision"],
+            "additionalProperties": false
+          },
+          "action": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "type": {"const": "approval"},
+                  "value": {"const": "approve"},
+                  "reason_code": {"type": "string", "minLength": 1},
+                  "stop": {"const": true}
+                },
+                "required": ["type"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {"const": "reject"},
+                  "value": {"const": "reject"},
+                  "reason_code": {"type": "string", "minLength": 1},
+                  "stop": {"const": true}
+                },
+                "required": ["type"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {"const": "review"},
+                  "value": {"const": "review"},
+                  "reason_code": {"type": "string", "minLength": 1},
+                  "stop": {"const": true}
+                },
+                "required": ["type"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {"const": "limit"},
+                  "value": {"type": "number", "minimum": 0},
+                  "reason_code": {"type": "string", "minLength": 1},
+                  "stop": {"const": true}
+                },
+                "required": ["type", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {"const": "pricing"},
+                  "value": {"type": "number", "minimum": 0, "maximum": 1},
+                  "reason_code": {"type": "string", "minLength": 1},
+                  "stop": {"const": true}
+                },
+                "required": ["type", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {"const": "segment"},
+                  "value": {
+                    "oneOf": [
+                      {"type": "string", "minLength": 1},
+                      {"type": "number"}
+                    ]
+                  },
+                  "reason_code": {"type": "string", "minLength": 1},
+                  "stop": {"const": true}
+                },
+                "required": ["type", "value"],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "compare_expression": {
+            "type": "object",
+            "properties": {
+              "op": {"const": "compare"},
+              "field": {"type": "string", "minLength": 1},
+              "operator": {
+                "type": "string",
+                "enum": ["<", "<=", ">", ">=", "==", "!=", "in", "not_in"]
+              },
+              "value": {},
+              "missing": {"type": "string", "enum": ["no_match", "match", "error"]}
+            },
+            "required": ["op", "field", "operator", "value"],
+            "additionalProperties": false
+          },
+          "between_expression": {
+            "type": "object",
+            "properties": {
+              "op": {"const": "between"},
+              "field": {"type": "string", "minLength": 1},
+              "lower": {},
+              "upper": {},
+              "include_lower": {"type": "boolean"},
+              "include_upper": {"type": "boolean"},
+              "missing": {"type": "string", "enum": ["no_match", "match", "error"]}
+            },
+            "required": ["op", "field", "lower", "upper"],
+            "additionalProperties": false
+          },
+          "null_expression": {
+            "type": "object",
+            "properties": {
+              "op": {"type": "string", "enum": ["is_null", "is_not_null"]},
+              "field": {"type": "string", "minLength": 1}
+            },
+            "required": ["op", "field"],
+            "additionalProperties": false
+          },
+          "boolean_expression": {
+            "type": "object",
+            "properties": {
+              "op": {"type": "string", "enum": ["and", "or"]},
+              "args": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"$ref": "#/$defs/expression"}
+              }
+            },
+            "required": ["op", "args"],
+            "additionalProperties": false
+          },
+          "not_expression": {
+            "type": "object",
+            "properties": {
+              "op": {"const": "not"},
+              "arg": {"$ref": "#/$defs/expression"}
+            },
+            "required": ["op", "arg"],
+            "additionalProperties": false
+          },
+          "n_of_k_expression": {
+            "type": "object",
+            "properties": {
+              "op": {"const": "n_of_k"},
+              "n": {"type": "integer", "minimum": 1},
+              "args": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"$ref": "#/$defs/expression"}
+              }
+            },
+            "required": ["op", "n", "args"],
+            "additionalProperties": false
+          },
+          "expression": {
+            "oneOf": [
+              {"$ref": "#/$defs/compare_expression"},
+              {"$ref": "#/$defs/between_expression"},
+              {"$ref": "#/$defs/null_expression"},
+              {"$ref": "#/$defs/boolean_expression"},
+              {"$ref": "#/$defs/not_expression"},
+              {"$ref": "#/$defs/n_of_k_expression"}
+            ]
+          },
+          "typed_rule": {
+            "type": "object",
+            "properties": {
+              "rule_id": {"type": "string", "minLength": 1},
+              "priority": {"type": "integer", "minimum": 0},
+              "condition": {"$ref": "#/$defs/expression"},
+              "action": {"$ref": "#/$defs/action"}
+            },
+            "required": ["rule_id", "priority", "condition", "action"],
+            "additionalProperties": false
+          },
+          "strategy_spec": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"const": "strategy.dsl.v1"},
+              "strategy_type": {
+                "type": "string",
+                "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+              },
+              "match_policy": {"const": "first_match"},
+              "default_action": {"$ref": "#/$defs/action"},
+              "rules": {"type": "array", "items": {"$ref": "#/$defs/typed_rule"}},
+              "metadata": {"type": "object"}
+            },
+            "required": ["strategy_type", "default_action"],
+            "additionalProperties": false
+          }
+        }
       },
       "output_schema": {
         "type": "object",
@@ -360,14 +603,36 @@
                 "decision": {
                   "type": "string"
                 },
-                "value": {}
+                "value": {},
+                "rule_id": {
+                  "type": "string"
+                },
+                "priority": {
+                  "type": "integer"
+                },
+                "reason_code": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
               },
               "required": [
                 "condition",
-                "decision"
+                "decision",
+                "rule_id",
+                "priority",
+                "reason_code"
               ],
               "additionalProperties": false
             }
+          },
+          "dsl_schema_version": {
+            "type": "string",
+            "const": "strategy.dsl.v1"
+          },
+          "strategy_spec": {
+            "type": "object"
           },
           "inferred_score_direction": {
             "type": [
@@ -382,7 +647,9 @@
           "score_col",
           "default_decision",
           "description",
-          "rules"
+          "rules",
+          "dsl_schema_version",
+          "strategy_spec"
         ],
         "additionalProperties": false
       },
@@ -460,6 +727,22 @@
           "rejected_bad_rate": {
             "type": "number"
           },
+          "rejected_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "review_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "review_rate": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "review_bad_rate": {
+            "type": ["number", "null"]
+          },
           "expected_profit": {
             "type": ["number", "null"]
           },
@@ -507,6 +790,10 @@
           "approved_count",
           "approved_bad_rate",
           "rejected_bad_rate",
+          "rejected_count",
+          "review_count",
+          "review_rate",
+          "review_bad_rate",
           "expected_profit",
           "swap_in_count",
           "swap_out_count",
