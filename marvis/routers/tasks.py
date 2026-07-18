@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 import shutil
+import uuid
 
 from fastapi import APIRouter, Request, Response
 from marvis.errors import conflict, not_found, unprocessable
@@ -20,6 +21,7 @@ from marvis.api_task_payloads import list_task_payloads, task_payload
 from marvis.db import TaskRepository
 from marvis.domain import (
     TASK_TYPE_STRATEGY,
+    TASK_TYPE_VINTAGE,
     StrategyProfitInput,
     StrategyTaskInput,
     TaskCreate,
@@ -92,10 +94,13 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
         raise unprocessable("oot_ks_min 必须是 0 到 1 之间的数字。")
     if payload.strategy_input is not None and payload.task_type != TASK_TYPE_STRATEGY:
         raise unprocessable("strategy_input 只能用于 strategy 类型任务。")
-    # Normalize source_dir once at write time so pipeline.py and /scan agree on
-    # the canonical absolute path.
+    # Risk-analysis intake is intentionally conversation-first: an Agent task
+    # may exist before the user has uploaded any data. Give that task a safe,
+    # empty workspace-owned material directory instead of letting Path("")
+    # resolve to the server cwd. Every other flow keeps the existing material
+    # requirement.
     normalized_source_dir = str(
-        normalize_source_dir(payload.source_dir, request.app.state.settings)
+        _create_source_dir(payload, request.app.state.settings)
     )
     repo = _repo(request)
     task = repo.create_task(
@@ -133,6 +138,21 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
         task_id=task.id,
     )
     return task_payload(repo, task, request.app.state.settings.tasks_dir)
+
+
+def _create_source_dir(payload: CreateTaskRequest, settings) -> Path:
+    raw = str(payload.source_dir or "").strip()
+    if raw:
+        return normalize_source_dir(raw, settings)
+    if payload.task_type != TASK_TYPE_VINTAGE or payload.run_mode != "agent":
+        raise unprocessable("source_dir is required")
+    intake_dir = (
+        Path(settings.workspace).resolve()
+        / "material_uploads"
+        / f"risk-intake-{uuid.uuid4().hex}"
+    )
+    intake_dir.mkdir(parents=True, exist_ok=False)
+    return normalize_source_dir(str(intake_dir), settings)
 
 
 def _strategy_task_input(payload: CreateTaskRequest) -> StrategyTaskInput | None:

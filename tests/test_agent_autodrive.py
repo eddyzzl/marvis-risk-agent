@@ -149,10 +149,9 @@ def test_manual_mode_data_join_without_llm_runs(client: TestClient, tmp_path: Pa
     ("task_type", "source_factory", "extra_payload"),
     [
         ("strategy", _strategy_dir, {"target_col": "bad", "score_col": "score"}),
-        ("vintage", _vintage_dir, {"target_col": "bad", "time_col": "cohort"}),
     ],
 )
-def test_agent_mode_strategy_and_vintage_without_llm_error(
+def test_agent_mode_strategy_without_llm_errors(
     client: TestClient,
     tmp_path: Path,
     task_type: str,
@@ -173,6 +172,27 @@ def test_agent_mode_strategy_and_vintage_without_llm_error(
     resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
 
     assert resp.status_code == 409, resp.text
+
+
+def test_agent_mode_vintage_initial_intake_does_not_need_llm(
+    client: TestClient,
+    tmp_path: Path,
+):
+    src = _vintage_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "vintage agent",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "vintage",
+        "run_mode": "agent",
+        "target_col": "bad",
+        "time_col": "cohort",
+    }).json()["id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert resp.status_code == 202, resp.text
+    assert "你想分析什么" in resp.json()["messages"][-1]["content"]
 
 
 # -- invariant 2: with an LLM, agent mode auto-drives the gates ---------------
@@ -476,6 +496,19 @@ def test_agent_mode_vintage_halts_on_undeclared_label_semantics(client: TestClie
     resp = client.post(f"/api/tasks/{task_id}/agent/start", json={"acceptance_mode": "auto_accept"})
 
     assert resp.status_code == 202, resp.text
+    # Risk-analysis tasks now start with a conversation-first intake. Select
+    # the legacy curve workflow explicitly, then confirm the already-bound
+    # source material before asserting its label-semantics safety gate.
+    selected = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "标准 Vintage", "acceptance_mode": "auto_accept"},
+    )
+    assert selected.status_code == 202, selected.text
+    prepared = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "材料已上传", "acceptance_mode": "auto_accept"},
+    )
+    assert prepared.status_code == 202, prepared.text
     msgs = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
     # The curve is NOT trusted/completed; the run halts at the semantics gate instead.
     assert not any("Vintage 曲线完成" in m["content"] for m in msgs)

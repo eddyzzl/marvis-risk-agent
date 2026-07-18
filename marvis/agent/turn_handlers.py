@@ -52,6 +52,10 @@ from marvis.agent.portfolio_setup import (
     build_states_gate_state,
     parse_states_reply,
 )
+from marvis.agent.risk_analysis_setup import (
+    advance_risk_analysis_setup,
+    latest_risk_analysis_intake,
+)
 from marvis.agent.strategy_setup import (
     STRATEGY_INTENT_FULL_DEVELOPMENT,
     STRATEGY_INTENT_LIMIT_PRICING,
@@ -89,7 +93,7 @@ from marvis.agent.strategy_request_compiler import (
     utterance_targets_strategy_sample_design,
     validate_strategy_request,
 )
-from marvis.agent.vintage_setup import VintageSetupError, build_vintage_proposal
+from marvis.agent.vintage_setup import VintageSetupError
 from marvis.agent.workflow_error_diagnostics import (
     build_workflow_error_diagnostic,
     failure_envelope_for_diagnostic,
@@ -1289,27 +1293,29 @@ def _run_vintage_setup(
     user_text: str | None,
 ) -> dict | tuple:
     backend, registry = _modeling_data_runtime(runtime.settings)
-    proposal = build_vintage_proposal(
+    decision = advance_risk_analysis_setup(
         registry,
         backend,
         task.id,
         task.source_dir,
+        user_text=user_text,
+        conversation=repo.list_agent_messages(task.id),
         target_col=getattr(task, "target_col", "") or None,
         time_col=getattr(task, "time_col", "") or None,
     )
     notices = registry.consume_ingest_notices(task.id)
+    metadata = dict(decision.metadata)
+    metadata["ingest_notices"] = notices
     repo.add_agent_message(
         task.id,
         role="assistant",
         stage="chat",
-        content=(
-            f"开始 Vintage 风险分析:样本 `{proposal.dataset_name}`，"
-            f"cohort `{proposal.cohort_col}`，MOB `{proposal.mob_col}`，坏账列 `{proposal.bad_col}`。"
-            f"{_ingest_notice_text(notices)}"
-        ),
-        metadata={"intent": "vintage", "ingest_notices": notices},
+        content=f"{decision.content}{_ingest_notice_text(notices)}",
+        metadata=metadata,
     )
-    return (proposal.template_id, proposal.template_slots(), {})
+    if decision.template_id is None:
+        return join_turn_response(repo, task.id)
+    return (decision.template_id, dict(decision.slots or {}), {})
 
 
 def _portfolio_success_criteria(task: TaskRecord) -> list[dict] | None:
@@ -12691,6 +12697,14 @@ def _maybe_handle_adhoc_turn(
     """Return a turn response when this turn is an ad-hoc 问数 interaction, else
     None so the caller falls through to the normal type dispatch."""
     conversation = repo.list_agent_messages(task.id)
+    # Risk analysis owns the conversation while its ask-goal/material contract
+    # is open. A perfectly natural answer such as “可以做收益测算吗？” contains a
+    # question mark, but is an intake selection rather than an ad-hoc slice
+    # query. Let the vintage/risk setup state machine consume it.
+    if task.task_type == TASK_TYPE_VINTAGE:
+        risk_intake = latest_risk_analysis_intake(conversation)
+        if risk_intake is not None and risk_intake.get("phase") != "ready":
+            return None
     pending = _latest_adhoc_pending(conversation)
     if pending is not None:
         # Round B: a 口径确认门 is open. Only a confirm runs it; anything else

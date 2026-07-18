@@ -1,0 +1,114 @@
+{
+  "name": "risk_analysis",
+  "version": "0.1.0",
+  "display_name": "Risk Analysis Report Pack",
+  "description": "Deterministic VTG-terminal, annualized-bad-rate, and profitability calculations with a downloadable Excel report.",
+  "module": "marvis.packs.risk_analysis.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "generate_risk_analysis_report",
+      "summary": "Validate a task-owned dataset, compute VTG terminal or profitability results, and atomically write an audited Excel report.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "analysis_kind": {
+            "type": "string",
+            "enum": ["vtg_terminal", "profitability"]
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "column_map": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "required": ["analysis_kind", "dataset_id", "column_map"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "analysis_kind": {
+            "type": "string",
+            "enum": ["vtg_terminal", "profitability"]
+          },
+          "report_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "headline_metrics": {
+            "type": "object"
+          },
+          "key_points": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "assumptions": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "row_count": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "source_row_count": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "column_map": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "product_scope": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 80},
+            "minItems": 1,
+            "maxItems": 8
+          },
+          "as_of_period": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        },
+        "required": [
+          "analysis_kind",
+          "report_path",
+          "headline_metrics",
+          "key_points",
+          "red_flags",
+          "assumptions",
+          "source_row_count",
+          "row_count",
+          "column_map",
+          "product_scope",
+          "as_of_period"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_generate_risk_analysis_report",
+      "side_effects": ["read:dataset", "write:report"],
+      "memory_limit_mb": 4096
+    }
+  ],
+  "hooks": [],
+  "permissions": ["read:dataset", "write:report"]
+}

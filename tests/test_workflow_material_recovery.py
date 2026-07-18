@@ -116,7 +116,7 @@ def _task_payload(*, source: Path, task_type: str, run_mode: str) -> dict:
 
 @pytest.mark.parametrize(
     "task_type",
-    ["data_join", "feature_analysis", "modeling", "strategy", "vintage"],
+    ["data_join", "feature_analysis", "modeling", "strategy"],
 )
 @pytest.mark.e2e
 def test_workflow_recovers_xlsx_content_with_csv_suffix_and_explains_it(
@@ -155,7 +155,7 @@ def test_workflow_recovers_xlsx_content_with_csv_suffix_and_explains_it(
 
 @pytest.mark.parametrize(
     "task_type",
-    ["data_join", "feature_analysis", "modeling", "strategy", "vintage"],
+    ["data_join", "feature_analysis", "modeling", "strategy"],
 )
 @pytest.mark.e2e
 def test_workflow_csv_parse_failure_is_structured_and_marks_driver_job_failed(
@@ -216,7 +216,7 @@ class _GateLLM:
 
 @pytest.mark.parametrize(
     "task_type",
-    ["data_join", "feature_analysis", "modeling", "strategy", "vintage"],
+    ["data_join", "feature_analysis", "modeling", "strategy"],
 )
 @pytest.mark.e2e
 def test_agent_can_chat_after_material_failure_and_only_explicit_retry_reruns(

@@ -48,6 +48,7 @@ def test_driver_report_download_button_lives_in_middle_panel_with_handler():
     report_step_body = _slice_function(plan_rail_js, "function doneReportStep")
     assert "generate_model_report" in report_step_body
     assert "generate_feature_report" in report_step_body
+    assert "generate_risk_analysis_report" in report_step_body
 
     # The rail substep row no longer renders the download BUTTON — only a
     # "报告已就绪" status badge + a lightweight locate entry.

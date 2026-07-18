@@ -7867,6 +7867,58 @@ def _render_portfolio_report(o: dict):
     return text, tables
 
 
+def _render_risk_analysis_report(o: dict):
+    kind_label = {
+        "vtg_terminal": "VTG终值与年化不良",
+        "profitability": "收益测算",
+    }.get(str(o.get("analysis_kind") or ""), "风险分析")
+    key_points = [str(item) for item in (o.get("key_points") or [])]
+    red_flags = [str(item) for item in (o.get("red_flags") or [])]
+    assumptions = [str(item) for item in (o.get("assumptions") or [])]
+    metrics = o.get("headline_metrics") if isinstance(o.get("headline_metrics"), dict) else {}
+    source_row_count = o.get("source_row_count", o.get("row_count", 0))
+    text = (
+        f"**{kind_label}报告已生成**：源数据 {_fmt(source_row_count)} 行，"
+        f"形成 {_fmt(o.get('row_count', 0))} 行结果，"
+        "可通过下方“下载报告”查看完整明细、口径与数据质量检查。"
+    )
+    if key_points:
+        text += "\n\n**重要发现**\n" + "\n".join(f"- {item}" for item in key_points)
+    if red_flags:
+        text += "\n\n**需重点关注**\n" + "\n".join(f"- {item}" for item in red_flags)
+    tables = []
+    if metrics:
+        metric_labels = {
+            "annualized_bad_rate": "组合年化不良率",
+            "weighted_terminal_bad_rate": "加权VTG终值",
+            "portfolio_turnover": "组合周转次数",
+            "observed_annualized_bad_rate": "MOB14观察年化不良率",
+            "lowest_net_yield": "最低产品净收益率",
+            "highest_net_yield": "最高产品净收益率",
+            "negative_product_count": "负净收益产品数",
+            "max_cost_rate": "最大成本率",
+            "largest_scenario_net_yield_spread": "最大场景净收益差",
+        }
+        tables.append({
+            "title": "核心指标",
+            "columns": ["指标", "值"],
+            "rows": [
+                [
+                    metric_labels.get(str(name), str(name)),
+                    _pct(value) if str(name).endswith(("_rate", "_yield")) else _fmt(value),
+                ]
+                for name, value in metrics.items()
+            ],
+        })
+    if assumptions:
+        tables.append({
+            "title": "计算口径与假设",
+            "columns": ["#", "口径/假设"],
+            "rows": [[str(index), item] for index, item in enumerate(assumptions, start=1)],
+        })
+    return text, tables
+
+
 def _render_portfolio_gate_summary(o: dict):
     checklist = [str(item) for item in (o.get("checklist") or [])]
     highlights = o.get("highlights") if isinstance(o.get("highlights"), dict) else {}
@@ -8336,6 +8388,7 @@ _RENDERERS = {
     "execute_join": _render_execute_join,
     "compute_feature_metrics": _render_feature_metrics,
     "generate_feature_report": _render_feature_report,
+    "generate_risk_analysis_report": _render_risk_analysis_report,
     "build_strategy": _render_build_strategy,
     "design_strategy_candidate": _render_design_strategy_candidate,
     "analyze_univariate_candidates": _render_analyze_univariate_candidates,

@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any
 
-from marvis.agent_memory.models import MemoryCandidate
+from marvis.agent_memory.models import RISK_ANALYSIS_EXPERIENCE_FIELDS, MemoryCandidate
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,14 @@ class MemoryPolicyDecision:
 CUSTOMER_DETAIL_PATTERNS = (
     re.compile(r"(?:客户号|身份证|手机号|phone|mobile)\s*[:：=]?\s*[0-9A-Za-z_* -]{6,}"),
     re.compile(r"\b1[3-9]\d{9}\b"),
+)
+CUSTOMER_IDENTIFIER_FIELD_PATTERNS = (
+    re.compile(
+        r"\b(?:customer|cust|client|user)[ _-]?(?:id|no|number)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:mobile|phone|id[ _-]?card)\b", re.IGNORECASE),
+    re.compile(r"(?:客户号|客户编号|用户编号|手机号|身份证号?)"),
 )
 RAW_SAMPLE_ROW_PATTERNS = (
     re.compile(
@@ -80,6 +88,7 @@ PAYLOAD_FIELD_ALLOWLISTS = {
         "scope",
         "source_task_id",
     }),
+    "risk_analysis_experience": frozenset(RISK_ANALYSIS_EXPERIENCE_FIELDS),
     "skill_experience_reserved": frozenset(),
 }
 SECRET_PATTERNS = (
@@ -90,12 +99,25 @@ DB_CONNECTION_PATTERNS = (
     re.compile(r"\b(?:postgresql|mysql|oracle|sqlite|mongodb)://", re.IGNORECASE),
     re.compile(r"\b(?:jdbc|odbc):", re.IGNORECASE),
 )
+ABSOLUTE_LOCAL_PATH_PATTERNS = (
+    re.compile(
+        r"(?<![:/])/(?:Users|home|tmp|private|var|Volumes|mnt|workspace)"
+        r"(?:/[^\s\"'{}]+)+"
+    ),
+    re.compile(r"\b[A-Za-z]:\\+(?:[^\\\s\"]+\\+)*[^\\\s\"]+"),
+)
 MEMORY_CANDIDATE_TEXT_MAX_CHARS = 12000
 
 
 def classify_memory_candidate(candidate: MemoryCandidate) -> MemoryPolicyDecision:
     text = _candidate_text(candidate)
     reasons = _forbidden_text_reasons(text)
+
+    if candidate.memory_type == "risk_analysis_experience":
+        if any(pattern.search(text) for pattern in CUSTOMER_IDENTIFIER_FIELD_PATTERNS):
+            reasons.append("customer identifier field")
+        if any(pattern.search(text) for pattern in ABSOLUTE_LOCAL_PATH_PATTERNS):
+            reasons.append("absolute local path")
 
     if not reasons and _unsupported_payload_fields(candidate):
         reasons.append("unsupported payload fields")

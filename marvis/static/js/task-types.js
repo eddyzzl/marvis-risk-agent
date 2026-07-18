@@ -95,7 +95,7 @@ export const taskTypeDefinitions = {
   vintage: {
     label: "风险分析",
     dialogTitle: "创建风险分析任务",
-    dialogSubtitle: "上传资产Vintage&滚动率分析、FPD、入催回收率分析数据，Agent 会生成风险观察和结论。",
+    dialogSubtitle: "先创建任务并说明要分析什么，Agent 再按 VTG/年化不良或收益测算口径向你索要准确材料。",
     nameLabel: "分析任务名称",
     namePlaceholder: "例如：2024H2 新客风险分析",
     validatorLabel: "分析负责人",
@@ -103,11 +103,12 @@ export const taskTypeDefinitions = {
     sourceLabel: "风险分析数据目录",
     sourcePlaceholder: "/path/to/risk-analysis-data",
     reportFields: false,
+    deferredMaterials: true,
     defaultRunMode: "",
     manualEnabled: true,
     manualModeDescription: "识别 cohort、MOB 和坏账列，计算 Vintage 曲线并展示风险趋势",
-    agentModeDescription: "Agent 识别 Vintage 字段，计算曲线并解释 cohort 风险变化",
-    initialGoal: "开始风险分析",
+    agentModeDescription: "Agent 先访谈分析目标，再校验材料字段，计算并生成可下载报表与重点结论",
+    initialGoal: "",
   },
 };
 

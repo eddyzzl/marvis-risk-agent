@@ -43,6 +43,9 @@ def test_memory_types_cover_v1_1_foundation_categories():
         # S2: V2 strategy-adoption plan-completion capture (cutoff/approval/bad
         # rate/expected profit).
         "strategy_experience",
+        # Conversation-first risk/return reports retain only governed,
+        # aggregate conclusions and their confirmed column mapping.
+        "risk_analysis_experience",
         "skill_experience_reserved",
     }
 

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import PurePosixPath, PureWindowsPath
 import re
 from typing import Any
 
 from marvis.agent_memory.models import (
     JOIN_EXPERIENCE_REQUIRED_FIELDS,
     MODEL_EXPERIENCE_REQUIRED_FIELDS,
+    RISK_ANALYSIS_EXPERIENCE_REQUIRED_FIELDS,
     STRATEGY_EXPERIENCE_REQUIRED_FIELDS,
     MemoryCandidate,
 )
@@ -15,6 +17,26 @@ from marvis.agent_memory.policy import classify_memory_candidate
 
 PITFALL_KINDS = {"notebook", "pmml", "field", "execution", "report"}
 USER_PREFERENCE_MAX_CHARS = 200
+_RISK_ANALYSIS_FORBIDDEN_SOURCE_KEYS = frozenset(
+    {
+        "raw_row",
+        "raw_rows",
+        "raw_data",
+        "raw_records",
+        "customer_row",
+        "customer_rows",
+        "report_text",
+        "report_content",
+        "full_report",
+        "upload_path",
+        "source_path",
+    }
+)
+_RISK_ANALYSIS_PII_KEY_PATTERN = re.compile(
+    r"(?:customer|cust|client|user)[_-]?(?:id|no|number)$|"
+    r"(?:mobile|phone|id[_-]?card)$|(?:客户号|客户编号|用户编号|手机号|身份证号?)$",
+    re.IGNORECASE,
+)
 
 
 def extract_model_experience(result: dict[str, Any]) -> MemoryCandidate | None:
@@ -80,6 +102,33 @@ def extract_strategy_experience(result: dict[str, Any]) -> MemoryCandidate | Non
         confidence="high",
         reason="structured strategy adoption result",
     )
+    return _allow(candidate)
+
+
+def extract_risk_analysis_experience(result: dict[str, Any]) -> MemoryCandidate | None:
+    payload = _risk_analysis_experience_payload(result)
+    if payload is None:
+        return None
+    scope = payload["product_scope"]
+    scope_text = "、".join(scope) if isinstance(scope, list) else scope
+    metric_text = "，".join(
+        f"{name}={_metric_display(value)}"
+        for name, value in list(payload["headline_metrics"].items())[:4]
+    )
+    try:
+        candidate = MemoryCandidate(
+            memory_type="risk_analysis_experience",
+            summary=(
+                f"{payload['as_of_period']} {scope_text}完成"
+                f"{payload['analysis_kind']}分析，{metric_text}。"
+            ),
+            payload=payload,
+            source_task_id=str(payload["source_task_id"]),
+            confidence="high",
+            reason="structured risk analysis report result",
+        )
+    except (TypeError, ValueError):
+        return None
     return _allow(candidate)
 
 
@@ -234,6 +283,9 @@ def extract_memory_candidates(
         model_experience = extract_model_experience(task_result)
         if model_experience is not None:
             candidates.append(model_experience)
+        risk_analysis_experience = extract_risk_analysis_experience(task_result)
+        if risk_analysis_experience is not None:
+            candidates.append(risk_analysis_experience)
         candidates.extend(extract_validation_pitfall(task_result))
         task_experience = extract_task_experience(task_result)
         if task_experience is not None:
@@ -277,6 +329,210 @@ def _strategy_experience_payload(result: dict[str, Any]) -> dict[str, Any] | Non
     if any(_is_missing(payload[field]) for field in STRATEGY_EXPERIENCE_REQUIRED_FIELDS):
         return None
     return payload
+
+
+def _risk_analysis_experience_payload(result: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(result, dict) or _risk_analysis_source_has_forbidden_fields(result):
+        return None
+    report_file = _risk_analysis_report_file(result)
+    if report_file is None:
+        return None
+    product_scope = _risk_product_scope(result.get("product_scope"))
+    headline_metrics = _risk_headline_metrics(result.get("headline_metrics"))
+    assumptions = _risk_text_list(
+        result.get("assumptions"),
+        limit=12,
+        max_chars=200,
+    )
+    key_points = _risk_text_list(
+        result.get("key_points"),
+        limit=12,
+        max_chars=240,
+    )
+    red_flags = _risk_red_flags(result.get("red_flags"))
+    column_map = _risk_column_map(result.get("column_map"))
+    if any(
+        value is None
+        for value in (
+            product_scope,
+            headline_metrics,
+            assumptions,
+            key_points,
+            red_flags,
+            column_map,
+        )
+    ):
+        return None
+    payload = {
+        "analysis_kind": _clean_text(result.get("analysis_kind")),
+        "source_task_id": _first_text(result, "source_task_id", "task_id"),
+        "product_scope": product_scope,
+        "as_of_period": _clean_text(result.get("as_of_period")),
+        "headline_metrics": headline_metrics,
+        "assumptions": assumptions,
+        "key_points": key_points,
+        "red_flags": red_flags,
+        "column_map": column_map,
+        "report_file": report_file,
+    }
+    if any(_is_missing(payload[field]) for field in RISK_ANALYSIS_EXPERIENCE_REQUIRED_FIELDS):
+        return None
+    return payload
+
+
+def _risk_analysis_source_has_forbidden_fields(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            raw_key = str(key).strip()
+            normalized_key = re.sub(r"[^a-z0-9_]+", "_", raw_key.lower()).strip("_")
+            if normalized_key in _RISK_ANALYSIS_FORBIDDEN_SOURCE_KEYS:
+                return True
+            if _RISK_ANALYSIS_PII_KEY_PATTERN.search(raw_key) or _RISK_ANALYSIS_PII_KEY_PATTERN.search(
+                normalized_key
+            ):
+                return True
+            if _risk_analysis_source_has_forbidden_fields(nested):
+                return True
+        return False
+    if isinstance(value, list | tuple):
+        return any(_risk_analysis_source_has_forbidden_fields(item) for item in value)
+    return False
+
+
+def _risk_analysis_report_file(result: dict[str, Any]) -> str | None:
+    explicit = _clean_text(result.get("report_file"))
+    if explicit:
+        posix = PurePosixPath(explicit)
+        windows = PureWindowsPath(explicit)
+        if (
+            explicit in {".", ".."}
+            or posix.is_absolute()
+            or windows.is_absolute()
+            or bool(windows.drive)
+            or posix.name != explicit
+            or windows.name != explicit
+        ):
+            return None
+        return explicit
+    report_path = _clean_text(result.get("report_path"))
+    if not report_path:
+        return None
+    basename = PurePosixPath(report_path.replace("\\", "/")).name
+    return basename if basename not in {"", ".", ".."} else None
+
+
+def _risk_product_scope(value: Any) -> str | list[str] | None:
+    if isinstance(value, str):
+        return _bounded_risk_text(_clean_text(value), 120) or None
+    if not isinstance(value, list):
+        return None
+    products: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not _clean_text(item):
+            return None
+        products.append(_bounded_risk_text(_clean_text(item), 80))
+    return products[:8] or None
+
+
+def _risk_headline_metrics(value: Any) -> dict[str, Any] | None:
+    metrics: dict[str, Any] = {}
+    if isinstance(value, dict):
+        items = value.items()
+    elif isinstance(value, list):
+        normalized_items: list[tuple[Any, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                return None
+            name = _clean_text(item.get("name"))
+            unit = _clean_text(item.get("unit"))
+            if not name or "value" not in item:
+                return None
+            normalized_items.append((f"{name} [{unit}]" if unit else name, item["value"]))
+        items = normalized_items
+    else:
+        return None
+    for raw_name, raw_value in list(items)[:16]:
+        if not isinstance(raw_name, str):
+            return None
+        name = _bounded_risk_text(_clean_text(raw_name), 64)
+        if not name or isinstance(raw_value, dict | list | tuple | set):
+            return None
+        if not isinstance(raw_value, str | int | float | bool):
+            return None
+        value = (
+            _bounded_risk_text(_clean_text(raw_value), 120)
+            if isinstance(raw_value, str)
+            else raw_value
+        )
+        if value == "":
+            return None
+        metrics[name] = value
+    return metrics or None
+
+
+def _risk_text_list(
+    value: Any,
+    *,
+    limit: int,
+    max_chars: int,
+) -> list[str] | None:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return None
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not _clean_text(item):
+            return None
+        result.append(_bounded_risk_text(_clean_text(item), max_chars))
+    return result[:limit]
+
+
+def _risk_red_flags(value: Any) -> list[str] | None:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return None
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            flag = _clean_text(item)
+        elif isinstance(item, dict):
+            flag = _clean_text(
+                item.get("code") or item.get("kind") or item.get("id") or item.get("message")
+            )
+        else:
+            return None
+        if not flag:
+            return None
+        result.append(_bounded_risk_text(flag, 80))
+    return result[:12]
+
+
+def _risk_column_map(value: Any) -> dict[str, str] | None:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, str] = {}
+    for canonical, source in value.items():
+        if not isinstance(canonical, str) or not isinstance(source, str):
+            return None
+        canonical_text = _clean_text(canonical)
+        source_text = _clean_text(source)
+        if not canonical_text or not source_text:
+            return None
+        result[_bounded_risk_text(canonical_text, 80)] = _bounded_risk_text(
+            source_text,
+            120,
+        )
+    return result
+
+
+def _bounded_risk_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
 
 
 def _model_experience_payload(result: dict[str, Any]) -> dict[str, Any] | None:
