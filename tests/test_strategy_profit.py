@@ -59,6 +59,48 @@ def test_profit_calc_supports_overall_and_zero_ead():
     assert result.roa == 0.0
 
 
+@pytest.mark.parametrize(
+    ("column", "values", "message"),
+    [
+        ("ead", [100.0, -1.0], "EAD"),
+        ("ead", [100.0, float("inf")], "finite"),
+        ("pd", [0.1, 1.1], "PD"),
+        ("pd", [0.1, float("nan")], "finite"),
+    ],
+)
+def test_profit_calc_rejects_invalid_economic_inputs(column, values, message):
+    frame = pd.DataFrame({"ead": [100.0, 200.0], "pd": [0.1, 0.2]})
+    frame[column] = values
+
+    with pytest.raises(ValueError, match=message):
+        profit_calc(frame, segment_col=None, ead_col="ead", pd_col="pd", params=_params())
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        ProfitParams(-0.01, 0.03, 0.5, 10.0, 6),
+        ProfitParams(0.12, 1.01, 0.5, 10.0, 6),
+        ProfitParams(0.12, 0.03, 1.01, 10.0, 6),
+        ProfitParams(0.12, 0.03, 0.5, -1.0, 6),
+        ProfitParams(0.12, 0.03, 0.5, 10.0, 0),
+        ProfitParams(float("inf"), 0.03, 0.5, 10.0, 6),
+    ],
+)
+def test_profit_calc_rejects_invalid_bounded_parameters(params):
+    frame = pd.DataFrame({"ead": [100.0], "pd": [0.1]})
+
+    with pytest.raises(ValueError, match="profit parameter"):
+        profit_calc(frame, segment_col=None, ead_col="ead", pd_col="pd", params=params)
+
+
+def test_profit_calc_rejects_empty_dataset():
+    frame = pd.DataFrame({"ead": pd.Series(dtype=float), "pd": pd.Series(dtype=float)})
+
+    with pytest.raises(ValueError, match="non-empty"):
+        profit_calc(frame, segment_col=None, ead_col="ead", pd_col="pd", params=_params())
+
+
 def test_vintage_profit_returns_profit_result_by_cohort():
     frame = pd.DataFrame({
         "cohort": ["2026-01", "2026-01", "2026-02"],

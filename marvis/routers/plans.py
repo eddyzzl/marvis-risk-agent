@@ -32,6 +32,9 @@ _TRUSTED_GENERIC_STRATEGY_TEMPLATE_IDS = frozenset(
     {
         "strategy_analysis",
         "strategy_development",
+        "strategy_profit_analysis",
+        "strategy_roll_rate_analysis",
+        "strategy_limit_pricing_analysis",
         "rule_strategy",
         "strategy_monitoring",
     }

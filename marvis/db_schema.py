@@ -7,6 +7,17 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 
+from marvis.strategy_lifecycle import (
+    ASSET_STATUS_ADOPTED_LOCAL,
+    ASSET_STATUS_DRAFT,
+    ASSET_STATUS_RETIRED,
+    LEGACY_STATUS_ADOPTED,
+    LEGACY_STATUS_RETIRED,
+    StrategyLifecycleError,
+    asset_status_from_legacy,
+    validate_lifecycle_pair,
+)
+
 logger = logging.getLogger(__name__)
 
 _SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -21,6 +32,7 @@ _MIGRATION_TABLES = frozenset({
     "model_artifacts",
     "llm_calls",
     "datasets",
+    "strategy_artifacts",
     "validation_input_contracts",
 })
 
@@ -85,7 +97,23 @@ _MIGRATION_TABLES = frozenset({
 # natural-language strategy drafts out of agent message metadata.  The request
 # row is task-scoped, integrity-bound and one-shot so a repeated confirmation
 # cannot replay the same draft into a second plan.
-SCHEMA_VERSION = 7
+#
+# _migration_008_strategy_monitoring_ledger adds append-only monitoring plan
+# revisions and evidence-bound monitoring runs. Runtime tools are wired in a
+# later slice; this migration only establishes the durable governance boundary.
+#
+# _migration_009_strategy_asset_lifecycle adds the canonical strategy asset
+# lifecycle while preserving the legacy status field and wire token.
+#
+# _migration_010_task_artifact_registry adds one immutable, task-owned registry
+# for downloadable workflow outputs.  The registry intentionally does not
+# backfill legacy workflow-specific artifact tables because those rows do not
+# carry the content hash and provenance required by this boundary.
+#
+# _migration_011_verified_strategy_artifacts adds nullable integrity metadata to
+# historical strategy artifacts. Existing rows remain explicit legacy records;
+# new verified rows are immutable and content-addressed.
+SCHEMA_VERSION = 11
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -1107,6 +1135,273 @@ def _migration_007_pending_strategy_requests(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_008_strategy_monitoring_ledger(conn: sqlite3.Connection) -> None:
+    """Add immutable plan revisions and evidence-bound monitoring runs."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_monitoring_plans (
+            id TEXT PRIMARY KEY,
+            strategy_id TEXT NOT NULL,
+            strategy_version INTEGER NOT NULL CHECK(strategy_version >= 1),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            schema_version TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            payload_hash TEXT NOT NULL CHECK(length(payload_hash) = 64),
+            supersedes_plan_id TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(strategy_id, revision),
+            UNIQUE(id, strategy_id),
+            FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE CASCADE,
+            FOREIGN KEY(supersedes_plan_id)
+                REFERENCES strategy_monitoring_plans(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_monitoring_plans_latest
+            ON strategy_monitoring_plans(strategy_id, revision DESC, created_at DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_monitoring_plans_payload_hash
+            ON strategy_monitoring_plans(strategy_id, payload_hash)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_monitoring_plans_immutable_update
+        BEFORE UPDATE ON strategy_monitoring_plans
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_monitoring_plans are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_monitoring_runs (
+            id TEXT PRIMARY KEY,
+            strategy_id TEXT NOT NULL,
+            monitoring_plan_id TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
+            dataset_content_hash TEXT NOT NULL CHECK(length(dataset_content_hash) = 64),
+            strategy_effect_hash TEXT NOT NULL CHECK(length(strategy_effect_hash) = 64),
+            economics_binding_hash TEXT NOT NULL CHECK(length(economics_binding_hash) = 64),
+            result_json TEXT NOT NULL,
+            result_hash TEXT NOT NULL CHECK(length(result_hash) = 64),
+            overall_level TEXT NOT NULL
+                CHECK(overall_level IN ('green', 'amber', 'red', 'n/a')),
+            created_at TEXT NOT NULL,
+            UNIQUE(
+                monitoring_plan_id,
+                dataset_content_hash,
+                strategy_effect_hash,
+                economics_binding_hash
+            ),
+            FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE CASCADE,
+            FOREIGN KEY(monitoring_plan_id, strategy_id)
+                REFERENCES strategy_monitoring_plans(id, strategy_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY(dataset_id) REFERENCES datasets(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_monitoring_runs_strategy
+            ON strategy_monitoring_runs(strategy_id, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_monitoring_runs_plan
+            ON strategy_monitoring_runs(monitoring_plan_id, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_monitoring_runs_immutable_update
+        BEFORE UPDATE ON strategy_monitoring_runs
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_monitoring_runs are immutable');
+        END
+        """
+    )
+
+
+def _migration_009_strategy_asset_lifecycle(conn: sqlite3.Connection) -> None:
+    """Add and backfill canonical lifecycle state without inventing deployment."""
+
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'strategies'"
+    ).fetchone()
+    if table is None:
+        # Defensive compatibility for tests/tools that stamp a deliberately
+        # partial historical schema. A real MARVIS v8 database owns this table.
+        return
+    strategy_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+    }
+    if "status" not in strategy_columns:
+        # The migration test/repair boundary permits deliberately partial
+        # historical schemas. A real MARVIS v8 strategies table owns status.
+        return
+    rows = conn.execute("SELECT id, status FROM strategies ORDER BY id").fetchall()
+    for row in rows:
+        try:
+            asset_status_from_legacy(row["status"])
+        except StrategyLifecycleError as exc:
+            raise StrategyLifecycleError(
+                f"unknown legacy strategy status for {row['id']}: {row['status']!r}"
+            ) from exc
+
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+    }
+    if "asset_status" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE strategies ADD COLUMN asset_status
+                TEXT NOT NULL DEFAULT 'draft'
+                CHECK(asset_status IN ('draft', 'validated', 'adopted_local', 'retired'))
+            """
+        )
+
+    # The default is intentionally ``draft`` so old draft rows remain stable.
+    # The two updates also complete an idempotent, partially applied migration.
+    conn.execute(
+        "UPDATE strategies SET asset_status = ? "
+        "WHERE status = ? AND asset_status = ?",
+        (ASSET_STATUS_ADOPTED_LOCAL, LEGACY_STATUS_ADOPTED, ASSET_STATUS_DRAFT),
+    )
+    conn.execute(
+        "UPDATE strategies SET asset_status = ? "
+        "WHERE status = ? AND asset_status = ?",
+        (ASSET_STATUS_RETIRED, LEGACY_STATUS_RETIRED, ASSET_STATUS_DRAFT),
+    )
+
+    rows = conn.execute(
+        "SELECT id, status, asset_status FROM strategies ORDER BY id"
+    ).fetchall()
+    for row in rows:
+        try:
+            validate_lifecycle_pair(row["status"], row["asset_status"])
+        except StrategyLifecycleError as exc:
+            raise StrategyLifecycleError(
+                "strategy lifecycle drift for "
+                f"{row['id']}: status={row['status']!r}, "
+                f"asset_status={row['asset_status']!r}"
+            ) from exc
+
+
+def _migration_010_task_artifact_registry(conn: sqlite3.Connection) -> None:
+    """Add the immutable, task-scoped artifact provenance registry."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS task_artifacts (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            path TEXT NOT NULL,
+            content_hash TEXT NOT NULL
+                CHECK(length(content_hash) = 64)
+                CHECK(content_hash NOT GLOB '*[^0-9a-f]*'),
+            origin_tool TEXT NOT NULL,
+            provenance_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, kind, path),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_artifacts_task_created
+            ON task_artifacts(task_id, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_task_artifacts_immutable_update
+        BEFORE UPDATE ON task_artifacts
+        BEGIN
+            SELECT RAISE(ABORT, 'task_artifacts are immutable');
+        END
+        """
+    )
+
+
+def _migration_011_verified_strategy_artifacts(conn: sqlite3.Connection) -> None:
+    """Add immutable integrity metadata without fabricating legacy hashes."""
+
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'strategy_artifacts'"
+    ).fetchone()
+    if table is None:
+        # Synthetic partial-schema migration tests may not own the V2 strategy
+        # tables. A normal database always created this table in migration 2.
+        return
+    _ensure_column(
+        conn,
+        "strategy_artifacts",
+        "content_hash",
+        "TEXT CHECK(content_hash IS NULL OR "
+        "(length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'))",
+    )
+    _ensure_column(
+        conn,
+        "strategy_artifacts",
+        "content_size",
+        "INTEGER CHECK(content_size IS NULL OR content_size >= 0)",
+    )
+    _ensure_column(conn, "strategy_artifacts", "provenance_json", "TEXT")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_artifacts_verified_content
+            ON strategy_artifacts(strategy_id, kind, content_hash)
+         WHERE content_hash IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_artifacts_verified_path
+            ON strategy_artifacts(strategy_id, kind, path)
+         WHERE content_hash IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_artifacts_integrity_triplet
+        BEFORE INSERT ON strategy_artifacts
+        WHEN NOT (
+            (NEW.content_hash IS NULL
+             AND NEW.content_size IS NULL
+             AND NEW.provenance_json IS NULL)
+            OR
+            (NEW.content_hash IS NOT NULL
+             AND NEW.content_size IS NOT NULL
+             AND NEW.provenance_json IS NOT NULL)
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy artifact integrity metadata must be complete');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_artifacts_immutable_update
+        BEFORE UPDATE ON strategy_artifacts
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_artifacts are immutable');
+        END
+        """
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -1122,6 +1417,10 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (5, _migration_005_governance_authorization),
     (6, _migration_006_strategy_dsl),
     (7, _migration_007_pending_strategy_requests),
+    (8, _migration_008_strategy_monitoring_ledger),
+    (9, _migration_009_strategy_asset_lifecycle),
+    (10, _migration_010_task_artifact_registry),
+    (11, _migration_011_verified_strategy_artifacts),
 ]
 
 

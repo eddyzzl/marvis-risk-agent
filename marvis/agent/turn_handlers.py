@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Callable
 import json
 import re
@@ -39,6 +40,7 @@ from marvis.agent.strategy_setup import (
     STRATEGY_INTENT_PORTFOLIO_ANALYSIS,
     STRATEGY_INTENT_QUICK_ANALYSIS,
     STRATEGY_INTENT_RULE_MINING,
+    STRATEGY_INTENT_STANDARD_ANALYSIS,
     StrategySetupError,
     build_monitoring_setup_proposal,
     build_rule_strategy_proposal,
@@ -50,6 +52,8 @@ from marvis.agent.strategy_setup import (
     strategy_development_clarification,
 )
 from marvis.agent.strategy_request_compiler import (
+    CompiledStrategyRequestDraft,
+    StandardWorkflowRequestDraft,
     StrategyRequestDraft,
     compile_strategy_request,
     validate_strategy_request,
@@ -68,6 +72,7 @@ from marvis.agent.workflow_recovery import (
 from marvis.agent_memory.api_support import audit_agent_memory_use_from_store
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.data.backend import DataBackend
+from marvis.data.labels import nan_label_mask
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, StrategyRepository, TaskRepository
 from marvis.domain import (
@@ -81,6 +86,8 @@ from marvis.domain import (
     StrategyTaskInput,
     TaskRecord,
 )
+from marvis.strategy_lifecycle import ASSET_STATUS_ADOPTED_LOCAL
+from marvis.files import sha256_file
 from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
 from marvis.orchestrator.capability import auto_gate_budget, resolve_tier
 from marvis.orchestrator.executor import PlanExecutor
@@ -503,6 +510,7 @@ def _run_strategy_setup(
     if intent in {
         STRATEGY_INTENT_LIMIT_PRICING,
         STRATEGY_INTENT_PORTFOLIO_ANALYSIS,
+        STRATEGY_INTENT_STANDARD_ANALYSIS,
     }:
         return _strategy_intent_redirect_response(repo, task, intent)
 
@@ -566,7 +574,8 @@ def _run_strategy_setup(
                 f"开始完整策略开发:样本 `{proposal.dataset_name}`，目标列 "
                 f"`{proposal.target_col}`{bad}，评分列 `{proposal.score_col}`。"
                 f"经营目标 `{proposal.objective}`，约束 {'；'.join(constraints)}。"
-                "尚未生成 cutoff 或默认规则，确认计划后才会按这些口径扫描可行方案。"
+                "尚未生成 cutoff 或默认规则；计划启动后会自动扫描、构造和回测可行方案，"
+                "仅在采纳时交由人工决策。"
                 f"{note_text}{_ingest_notice_text(notices)}"
             ),
             metadata={
@@ -595,7 +604,7 @@ def _run_strategy_setup(
         stage="chat",
         content=(
             f"开始策略分析:样本 `{proposal.dataset_name}`，目标列 `{proposal.target_col}`{bad}，"
-            f"评分列 `{proposal.score_col}`。已生成默认审批策略候选，回测前会停下确认。"
+            f"评分列 `{proposal.score_col}`。已生成默认审批策略候选，将自动完成回测和分析。"
             f"{note_text}{_ingest_notice_text(notices)}"
         ),
         metadata={
@@ -612,11 +621,21 @@ def _strategy_intent_redirect_response(
     if intent == STRATEGY_INTENT_LIMIT_PRICING:
         detail = {
             "intent": intent,
-            "code": "strategy_limit_pricing_workflow_planned",
-            "planned_v2_workflow": "limit_pricing_matrix",
+            "code": "strategy_standard_workflow_inputs_required",
+            "available_workflow": "limit_pricing_matrix",
             "message": (
-                "已识别为额度定价/定价矩阵意图。额度定价执行 Workflow 已纳入 V2 后续"
-                "交付批次，尚未接入本阶段标准入口；当前不会把它误建为额度准入 approval plan。"
+                "已识别为额度定价矩阵。该标准 Workflow 已可执行；请用自然语言补充评分列、"
+                "PD/目标列、分箱、额度与利率网格及经济参数，Agent 会编译并回显后再运行。"
+            ),
+        }
+    elif intent == STRATEGY_INTENT_STANDARD_ANALYSIS:
+        detail = {
+            "intent": intent,
+            "code": "strategy_standard_workflow_inputs_required",
+            "available_workflows": ["profit_calc", "roll_rate_matrix"],
+            "message": (
+                "已识别为独立策略分析，不会降级成审批策略开发。请用自然语言补充分析列、"
+                "状态顺序或利润经济口径；Agent 会选择标准 Workflow、回显口径并请求确认。"
             ),
         }
     elif intent == STRATEGY_INTENT_PORTFOLIO_ANALYSIS:
@@ -635,7 +654,12 @@ def _strategy_intent_redirect_response(
     redirect_fields = {
         key: value
         for key, value in detail.items()
-        if key in {"planned_v2_workflow", "suggested_task_type"}
+        if key
+        in {
+            "available_workflow",
+            "available_workflows",
+            "suggested_task_type",
+        }
     }
     repo.add_agent_message(
         task.id,
@@ -738,7 +762,7 @@ def _run_rule_strategy_setup(
         stage="chat",
         content=(
             f"开始规则策略挖掘:样本 `{proposal.dataset_name}`，目标列 `{proposal.target_col}`{bad}。"
-            f"将挖掘候选拒绝规则，选定规则集后回测并采纳。{note_text}"
+            f"将自动挖掘、选择、评估并回测候选拒绝规则，仅在采纳时交由人工决策。{note_text}"
             f"{_ingest_notice_text(notices)}"
         ),
         metadata={
@@ -768,8 +792,8 @@ def _run_strategy_monitoring_setup(
         role="assistant",
         stage="chat",
         content=(
-            f"开始策略监控:对已采纳策略 `{proposal.strategy_id}` 跑一次监控,样本 "
-            f"`{proposal.dataset_name}`。监控完成后会在告警门停下确认。{note_text}"
+            f"开始策略监控:对本地已采纳策略 `{proposal.strategy_id}` 跑一次监控,样本 "
+            f"`{proposal.dataset_name}`。监控自动完成后会在告警处置门交由人工决策。{note_text}"
             f"{_ingest_notice_text(notices)}"
         ),
         metadata={
@@ -1186,26 +1210,47 @@ def _maybe_handle_workflow_recovery_turn(
 
 
 # Natural-language strategy request wiring --------------------------------------
-# The compiler is an intent-to-contract boundary, not an execution runtime.  A
-# validated draft is stored on the confirmation message; only the next explicit
-# confirmation may instantiate a trusted Workflow.  The last-assistant anchor
-# makes the draft single-use and prevents an older request from being replayed.
+# The compiler is an intent-to-contract boundary, not an execution runtime.
+# Strictly validated new requests auto-start their reversible Workflow steps;
+# only real human-responsibility gates pause. Opaque pending drafts remain here
+# solely for read-compatible confirm/cancel handling of older conversations.
 _STRATEGY_REQUEST_META_KEY = "strategy_request"
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
-    r"(?:开发|设计|制定|创建|生成|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
+    r"(?:开发|设计|制定|创建|生成|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
     r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|"
-    r"develop|design|create|analy[sz]e|evaluate|backtest|apply|compare|"
+    r"develop|design|create|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
     r"adopt|report|monitor|mine)",
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_SUBJECT_RE = re.compile(
-    r"(?:策略|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|cutoff|"
-    r"strategy|approval|reject|limit|pricing|segment|rule)",
+    r"(?:策略|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|cutoff|利润|收益|"
+    r"催收|滚动率|迁徙率|迁徙矩阵|定价矩阵|额度矩阵|网格|ROA|"
+    r"roll(?:\s|-|_)*rate|strategy|approval|reject|limit|pricing|segment|rule|"
+    r"profit|collection)",
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_CANCEL_RE = re.compile(
     r"(?:先别|不要|不用|不执行|先不|暂不|暂停|停止|取消|"
     r"do\s*not|don't|dont|stop|cancel|wait)",
+    re.IGNORECASE,
+)
+_STRATEGY_REQUEST_NON_EXECUTION_RE = re.compile(
+    r"(?:不要执行|不要运行|先别执行|先别运行|先不执行|先不运行|"
+    r"只预览|仅预览|只讨论|仅讨论|只聊|仅供讨论|"
+    r"do\s+not\s+(?:execute|run)|don't\s+(?:execute|run)|"
+    r"preview\s+only|discussion\s+only|discuss\s+only)",
+    re.IGNORECASE,
+)
+_STRATEGY_NAN_LABEL_META_KEY = "strategy_nan_label_confirmation"
+_STRATEGY_DROP_NAN_CONFIRM_RE = re.compile(
+    r"(?:确认|同意|允许|可以).{0,12}(?:丢弃|排除|剔除|删除).{0,12}"
+    r"(?:NaN|nan|空标签|缺失标签|无效标签)|"
+    r"(?:confirm|allow).{0,12}(?:drop|exclude).{0,12}(?:nan|missing)\s+labels?",
+    re.IGNORECASE,
+)
+_STRATEGY_DROP_NAN_CANCEL_RE = re.compile(
+    r"(?:不丢弃|不排除|不剔除|不删除|取消|停止|"
+    r"do\s+not\s+(?:drop|exclude)|don't\s+(?:drop|exclude))",
     re.IGNORECASE,
 )
 _TYPED_EVALUATION_OPERATIONS = frozenset({"analyze", "backtest"})
@@ -1219,11 +1264,12 @@ def _maybe_handle_strategy_request_turn(
     *,
     user_text: str | None,
 ) -> dict | None:
-    """Compile and confirm a natural-language strategy request when safe.
+    """Compile a natural-language strategy request and route it safely.
 
-    Structured/manual setup remains intact.  This branch is only available on a
-    strategy task with an LLM, no active plan/open driver gate, and either a
-    pending compiled draft or a clear strategy action utterance.
+    A strict compiler result plus preflight authorizes reversible execution. The
+    plan overview is auto-resumed in the same request and platform AUTO safety
+    still stops at real human-responsibility gates (adoption/disposition). Legacy
+    persisted request confirmations remain readable for compatibility only.
     """
 
     if task.task_type != TASK_TYPE_STRATEGY or runtime.llm_client is None:
@@ -1302,6 +1348,56 @@ def _maybe_handle_strategy_request_turn(
         # abandoned drafts cannot accumulate as apparently actionable state.
         _invalidate_pending_strategy_request(runtime, task, pending)
 
+    nan_confirmation = _latest_strategy_nan_label_confirmation(conversation)
+    if nan_confirmation is not None:
+        if _STRATEGY_DROP_NAN_CANCEL_RE.search(text):
+            repo.add_agent_message(
+                task.id,
+                role="user",
+                stage="chat",
+                content=text,
+                metadata={"intent": "strategy_drop_nan_labels_cancel"},
+            )
+            repo.add_agent_message(
+                task.id,
+                role="assistant",
+                stage="chat",
+                content="已取消本次策略执行；空标签行未被丢弃，也没有创建计划。",
+                metadata={
+                    "intent": "strategy_drop_nan_labels_cancelled",
+                    "kind": "clarification",
+                    "code": "strategy_drop_nan_labels_cancelled",
+                },
+            )
+            return join_turn_response(repo, task.id)
+        if _STRATEGY_DROP_NAN_CONFIRM_RE.search(text):
+            repo.add_agent_message(
+                task.id,
+                role="user",
+                stage="chat",
+                content=text,
+                metadata={"intent": "strategy_drop_nan_labels_confirm"},
+            )
+            return _resume_strategy_after_nan_label_confirmation(
+                runtime,
+                repo,
+                task,
+                nan_confirmation,
+            )
+        if is_confirm(text):
+            repo.add_agent_message(
+                task.id,
+                role="user",
+                stage="chat",
+                content=text,
+                metadata={"intent": "strategy_drop_nan_labels_ambiguous"},
+            )
+            return _repeat_strategy_nan_label_clarification(
+                repo,
+                task,
+                nan_confirmation,
+            )
+
     if not (
         _STRATEGY_REQUEST_ACTION_RE.search(text)
         and _STRATEGY_REQUEST_SUBJECT_RE.search(text)
@@ -1311,6 +1407,35 @@ def _maybe_handle_strategy_request_turn(
         return None
     if latest_open_gate(conversation) is not None:
         return None
+
+    if _STRATEGY_REQUEST_NON_EXECUTION_RE.search(text):
+        repo.add_agent_message(
+            task.id,
+            role="user",
+            stage="chat",
+            content=text,
+            metadata={"intent": "strategy_preview_only"},
+        )
+        repo.add_agent_message(
+            task.id,
+            role="assistant",
+            stage="chat",
+            content=(
+                "已按仅预览/讨论处理：本轮不会编译执行草案、创建计划或调用策略工具。"
+                "需要实际执行时，请另发一条明确的执行请求。"
+            ),
+            metadata={
+                "intent": "strategy_preview_only",
+                "kind": "clarification",
+                "code": "strategy_execution_not_authorized",
+            },
+        )
+        return {
+            "task_id": task.id,
+            "status": "preview_only",
+            "code": "strategy_execution_not_authorized",
+            "messages": repo.list_agent_messages(task.id),
+        }
 
     repo.add_agent_message(
         task.id,
@@ -1329,15 +1454,20 @@ def _maybe_handle_strategy_request_turn(
     compilation = compile_strategy_request(
         text,
         allowed_columns=_strategy_request_allowed_columns(preview),
+        target_col=None if preview is None else preview.target_col,
         llm=runtime.llm_client,
     )
     if compilation.draft is None:
         return _strategy_request_clarification_response(
             repo,
             task,
-            code="strategy_request_needs_clarification",
+            code=(
+                compilation.clarification_code
+                or "strategy_request_needs_clarification"
+            ),
             message=compilation.clarification
             or "请补充策略操作、策略类型和业务口径。",
+            fields=compilation.clarification_fields,
         )
     preflight = _strategy_request_preflight(runtime, task, compilation.draft)
     if preflight is not None:
@@ -1356,7 +1486,9 @@ def _maybe_handle_strategy_request_turn(
             code="strategy_dataset_context_required",
             message=preview_error or "当前策略操作需要一个任务内样本。",
         )
-    if _strategy_request_requires_target(compilation.draft) and not preview.target_col:
+    if _strategy_request_requires_target(compilation.draft) and (
+        preview is None or not preview.target_col
+    ):
         return _strategy_request_clarification_response(
             repo,
             task,
@@ -1364,29 +1496,269 @@ def _maybe_handle_strategy_request_turn(
             message="当前策略操作需要明确的二元目标列，请先在任务中指定 target_col。",
         )
 
-    bound_preview = preview if requires_dataset else None
-    pending_record = PendingStrategyRequestRepository(
-        runtime.settings.db_path
-    ).create(
-        task_id=task.id,
-        validated_draft=compilation.draft.to_dict(),
-        dataset_identity=(
-            None if bound_preview is None else bound_preview.identity
-        ),
-        target_col=(None if bound_preview is None else bound_preview.target_col),
+    return _prepare_and_run_validated_strategy_request(
+        runtime,
+        repo,
+        task,
+        compilation.draft,
+        preview=preview,
+        auto_start=True,
     )
-    repo.add_agent_message(
-        task.id,
-        role="assistant",
-        stage="chat",
-        content=compilation.confirmation or "请确认策略执行草案。",
-        metadata={
-            _STRATEGY_REQUEST_META_KEY: pending_record.to_metadata_reference(),
-            "intent": "strategy_request_confirmation",
-            "kind": "confirmation",
-        },
+
+
+def _prepare_and_run_validated_strategy_request(
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    draft: CompiledStrategyRequestDraft,
+    *,
+    preview,
+    auto_start: bool,
+    drop_nan_labels: bool = False,
+) -> dict:
+    """Bind current evidence, resolve the NaN policy, then instantiate once."""
+
+    requires_dataset = _strategy_request_requires_dataset(draft)
+    context = None
+    if requires_dataset:
+        try:
+            context = _strategy_dataset_context(
+                runtime,
+                task,
+                require_target=_strategy_request_requires_target(draft),
+            )
+        except StrategySetupError as exc:
+            return append_join_error(repo, task.id, str(exc))
+        if preview is None or not _strategy_dataset_binding_matches(
+            runtime,
+            task,
+            preview=preview,
+            context=context,
+        ):
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_dataset_context_changed",
+                message=(
+                    "策略样本在编译与计划创建之间发生变化；本次请求未执行，"
+                    "请基于当前数据重新描述。"
+                ),
+            )
+
+    if _strategy_request_requires_complete_labels(draft):
+        assert context is not None and context.target_col
+        try:
+            n_total, n_nan = _strategy_target_nan_stats(runtime, context)
+        except StrategySetupError as exc:
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_target_labels_invalid",
+                message=str(exc),
+                fields=("target_col",),
+            )
+        if n_nan and not drop_nan_labels:
+            return _strategy_nan_label_clarification_response(
+                runtime,
+                repo,
+                task,
+                draft=draft,
+                context=context,
+                n_total=n_total,
+                n_nan=n_nan,
+            )
+
+    try:
+        return _run_validated_strategy_request(
+            runtime,
+            repo,
+            task,
+            draft,
+            context=context,
+            auto_start=auto_start,
+            drop_nan_labels=drop_nan_labels,
+        )
+    except StrategySetupError as exc:
+        return append_join_error(repo, task.id, str(exc))
+    except DriverError:
+        raise
+    except Exception as exc:
+        return append_join_error(repo, task.id, f"策略请求执行出错：{exc}")
+
+
+def _run_validated_strategy_request(
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    draft: CompiledStrategyRequestDraft,
+    *,
+    context,
+    auto_start: bool,
+    drop_nan_labels: bool,
+) -> dict:
+    """Route one already-validated draft without another execution confirmation."""
+
+    if (
+        isinstance(draft, StrategyRequestDraft)
+        and draft.strategy_spec is None
+        and draft.operation == "report"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="stored_strategy_report",
+            slots={"strategy_id": draft.strategy_id},
+            auto_start=auto_start,
+        )
+
+    if context is None:
+        raise StrategySetupError("当前策略操作需要任务内数据上下文。")
+
+    if isinstance(draft, StandardWorkflowRequestDraft):
+        template_id = {
+            "profit_calc": "strategy_profit_analysis",
+            "roll_rate_matrix": "strategy_roll_rate_analysis",
+            "limit_pricing_matrix": "strategy_limit_pricing_analysis",
+        }[draft.workflow]
+        slots = {
+            "dataset_id": context.dataset_id,
+            **draft.to_dict()["workflow_inputs"],
+        }
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id=template_id,
+            slots=_strategy_slots_with_drop_nan(slots, drop_nan_labels),
+            auto_start=auto_start,
+        )
+
+    if _is_auto_candidate_draft(draft):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="deterministic_strategy_candidate_development",
+            slots=_strategy_slots_with_drop_nan(
+                _candidate_strategy_slots(context, draft),
+                drop_nan_labels,
+            ),
+            auto_start=auto_start,
+        )
+
+    if draft.strategy_spec is not None:
+        slots = (
+            {
+                "dataset_id": context.dataset_id,
+                "strategy_spec": draft.to_dict()["strategy_spec"],
+            }
+            if draft.operation == "apply"
+            else _typed_strategy_slots(context, draft)
+        )
+        template_id = {
+            "develop": "typed_strategy_build",
+            "apply": "typed_strategy_apply",
+            "analyze": "typed_strategy_evaluation",
+            "backtest": "typed_strategy_evaluation",
+        }[draft.operation]
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id=template_id,
+            slots=_strategy_slots_with_drop_nan(slots, drop_nan_labels),
+            success_criteria=_strategy_request_success_criteria(draft),
+            auto_start=auto_start,
+        )
+
+    if draft.operation in _STORED_EVALUATION_OPERATIONS:
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="stored_strategy_evaluation",
+            slots=_strategy_slots_with_drop_nan(
+                _stored_strategy_slots(context, draft),
+                drop_nan_labels,
+            ),
+            success_criteria=_strategy_request_success_criteria(draft),
+            auto_start=auto_start,
+        )
+    if draft.operation == "apply":
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="stored_strategy_apply",
+            slots={
+                "dataset_id": context.dataset_id,
+                "strategy_id": draft.strategy_id,
+            },
+            auto_start=auto_start,
+        )
+    if draft.operation == "adopt":
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="stored_strategy_adoption",
+            slots=_strategy_slots_with_drop_nan(
+                _stored_strategy_slots(context, draft),
+                drop_nan_labels,
+            ),
+            success_criteria=_strategy_request_success_criteria(draft),
+            auto_start=auto_start,
+        )
+
+    if draft.operation == "develop":
+        task = repo.update_strategy_input(
+            task.id,
+            _strategy_contract_from_draft(draft),
+        )
+        setup = _run_strategy_setup(
+            runtime,
+            repo,
+            task,
+            None,
+            forced_intent=STRATEGY_INTENT_FULL_DEVELOPMENT,
+        )
+    elif draft.operation == "mine_rules":
+        setup = _run_strategy_setup(
+            runtime,
+            repo,
+            task,
+            None,
+            forced_intent=STRATEGY_INTENT_RULE_MINING,
+        )
+    elif draft.operation == "monitor":
+        setup = _run_strategy_setup(
+            runtime,
+            repo,
+            task,
+            None,
+            forced_intent=STRATEGY_INTENT_MONITORING,
+        )
+    else:  # guarded by _strategy_request_preflight
+        raise StrategySetupError(
+            f"strategy operation is not wired: {draft.operation}"
+        )
+    if isinstance(setup, dict):
+        return setup
+    template_id, slots, start_kwargs = setup
+    if "success_criteria" not in start_kwargs:
+        criteria = _strategy_request_success_criteria(draft)
+        if criteria:
+            start_kwargs = {**start_kwargs, "success_criteria": criteria}
+    return _start_confirmed_strategy_plan(
+        runtime,
+        repo,
+        task,
+        template_id=template_id,
+        slots=_strategy_slots_with_drop_nan(slots, drop_nan_labels),
+        auto_start=auto_start,
+        **start_kwargs,
     )
-    return join_turn_response(repo, task.id)
 
 
 def _run_confirmed_strategy_request(
@@ -1433,6 +1805,7 @@ def _run_confirmed_strategy_request(
     compilation = validate_strategy_request(
         pending_record.validated_draft,
         allowed_columns=_strategy_request_allowed_columns(preview),
+        target_col=None if preview is None else preview.target_col,
     )
     if compilation.draft is None:
         _invalidate_pending_strategy_request(runtime, task, pending)
@@ -1462,7 +1835,9 @@ def _run_confirmed_strategy_request(
             code="strategy_dataset_context_required",
             message=preview_error or "当前策略操作需要一个任务内样本。",
         )
-    if _strategy_request_requires_target(draft) and not preview.target_col:
+    if _strategy_request_requires_target(draft) and (
+        preview is None or not preview.target_col
+    ):
         _invalidate_pending_strategy_request(runtime, task, pending)
         return _strategy_request_clarification_response(
             repo,
@@ -1471,6 +1846,65 @@ def _run_confirmed_strategy_request(
             message="当前策略操作需要明确的二元目标列，请先在任务中指定 target_col。",
         )
 
+    context = None
+    if _strategy_request_requires_dataset(draft):
+        try:
+            context = _strategy_dataset_context(
+                runtime,
+                task,
+                require_target=_strategy_request_requires_target(draft),
+            )
+        except StrategySetupError as exc:
+            _invalidate_pending_strategy_request(runtime, task, pending)
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_dataset_context_required",
+                message=str(exc),
+            )
+        if not _strategy_dataset_binding_matches(
+            runtime,
+            task,
+            preview=preview,
+            context=context,
+        ):
+            _invalidate_pending_strategy_request(runtime, task, pending)
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_dataset_context_changed",
+                message=(
+                    "策略样本在确认与计划创建之间发生变化；历史草案未消费，"
+                    "请基于当前数据重新描述。"
+                ),
+            )
+        if _strategy_request_requires_complete_labels(draft):
+            try:
+                n_total, n_nan = _strategy_target_nan_stats(runtime, context)
+            except StrategySetupError as exc:
+                _invalidate_pending_strategy_request(runtime, task, pending)
+                return _strategy_request_clarification_response(
+                    repo,
+                    task,
+                    code="strategy_target_labels_invalid",
+                    message=str(exc),
+                    fields=("target_col",),
+                )
+            if n_nan:
+                _invalidate_pending_strategy_request(runtime, task, pending)
+                return _strategy_nan_label_clarification_response(
+                    runtime,
+                    repo,
+                    task,
+                    draft=draft,
+                    context=context,
+                    n_total=n_total,
+                    n_nan=n_nan,
+                )
+
+    existing_plan_ids = frozenset(
+        plan.id for plan in runtime.plan_repo.list_plans_for_task(task.id)
+    )
     try:
         pending_repository.consume(
             task_id=task.id,
@@ -1494,139 +1928,63 @@ def _run_confirmed_strategy_request(
         stage="chat",
         content="已接收确认，正在按已校验口径创建受治理的策略计划。",
         metadata={
-            "intent": "strategy_request_consumed",
+            "intent": "strategy_request_claimed",
             "request_id": request_id,
             "payload_sha256": payload_sha256,
+            _STRATEGY_REQUEST_META_KEY: {
+                "request_id": request_id,
+                "payload_sha256": payload_sha256,
+            },
         },
     )
 
     try:
-        if draft.strategy_spec is None and draft.operation == "report":
-            return _start_confirmed_strategy_plan(
-                runtime,
-                repo,
-                task,
-                template_id="stored_strategy_report",
-                slots={"strategy_id": draft.strategy_id},
-            )
-        context = _strategy_dataset_context(
-            runtime,
-            task,
-            require_target=_strategy_request_requires_target(draft),
-        )
-        if (
-            tuple(context.columns) != tuple(preview.columns)
-            or context.target_col != preview.target_col
-        ):
-            return _strategy_request_clarification_response(
-                repo,
-                task,
-                code="strategy_dataset_context_changed",
-                message="数据注册后的列或目标口径与确认前预览不一致，请重新确认。",
-            )
-        if draft.strategy_spec is not None:
-            slots = (
-                {
-                    "dataset_id": context.dataset_id,
-                    "strategy_spec": draft.to_dict()["strategy_spec"],
-                }
-                if draft.operation == "apply"
-                else _typed_strategy_slots(context, draft)
-            )
-            template_id = {
-                "develop": "typed_strategy_build",
-                "apply": "typed_strategy_apply",
-                "analyze": "typed_strategy_evaluation",
-                "backtest": "typed_strategy_evaluation",
-            }[draft.operation]
-            return _start_confirmed_strategy_plan(
-                runtime,
-                repo,
-                task,
-                template_id=template_id,
-                slots=slots,
-                success_criteria=_strategy_request_success_criteria(draft),
-            )
-
-        if draft.operation in _STORED_EVALUATION_OPERATIONS:
-            return _start_confirmed_strategy_plan(
-                runtime,
-                repo,
-                task,
-                template_id="stored_strategy_evaluation",
-                slots=_stored_strategy_slots(context, draft),
-                success_criteria=_strategy_request_success_criteria(draft),
-            )
-        if draft.operation == "apply":
-            return _start_confirmed_strategy_plan(
-                runtime,
-                repo,
-                task,
-                template_id="stored_strategy_apply",
-                slots={
-                    "dataset_id": context.dataset_id,
-                    "strategy_id": draft.strategy_id,
-                },
-            )
-        if draft.operation == "adopt":
-            return _start_confirmed_strategy_plan(
-                runtime,
-                repo,
-                task,
-                template_id="stored_strategy_adoption",
-                slots=_stored_strategy_slots(context, draft),
-                success_criteria=_strategy_request_success_criteria(draft),
-            )
-        if draft.operation == "develop":
-            task = repo.update_strategy_input(
-                task.id,
-                _strategy_contract_from_draft(draft),
-            )
-            setup = _run_strategy_setup(
-                runtime,
-                repo,
-                task,
-                None,
-                forced_intent=STRATEGY_INTENT_FULL_DEVELOPMENT,
-            )
-        elif draft.operation == "mine_rules":
-            setup = _run_strategy_setup(
-                runtime,
-                repo,
-                task,
-                None,
-                forced_intent=STRATEGY_INTENT_RULE_MINING,
-            )
-        elif draft.operation == "monitor":
-            setup = _run_strategy_setup(
-                runtime,
-                repo,
-                task,
-                None,
-                forced_intent=STRATEGY_INTENT_MONITORING,
-            )
-        else:  # guarded by _strategy_request_preflight
-            raise StrategySetupError(
-                f"strategy operation is not wired: {draft.operation}"
-            )
-        if isinstance(setup, dict):
-            return setup
-        template_id, slots, start_kwargs = setup
-        if "success_criteria" not in start_kwargs:
-            criteria = _strategy_request_success_criteria(draft)
-            if criteria:
-                start_kwargs = {**start_kwargs, "success_criteria": criteria}
-        return _start_confirmed_strategy_plan(
+        return _run_validated_strategy_request(
             runtime,
             repo,
             task,
-            template_id=template_id,
-            slots=slots,
-            **start_kwargs,
+            draft,
+            context=context,
+            auto_start=False,
+            drop_nan_labels=False,
         )
     except StrategySetupError as exc:
         return append_join_error(repo, task.id, str(exc))
     except DriverError:
+        try:
+            pending_repository.release_after_failed_start(
+                task_id=task.id,
+                request_id=request_id,
+                expected_payload_sha256=payload_sha256,
+                existing_plan_ids=existing_plan_ids,
+            )
+        except (
+            PendingStrategyRequestConflictError,
+            PendingStrategyRequestNotFoundError,
+            ValueError,
+        ):
+            new_plans = [
+                plan
+                for plan in runtime.plan_repo.list_plans_for_task(task.id)
+                if plan.id not in existing_plan_ids
+            ]
+            if new_plans:
+                recovery_plan = new_plans[-1]
+                repo.add_agent_message(
+                    task.id,
+                    role="assistant",
+                    stage="chat",
+                    content=(
+                        "策略计划已经创建，但启动响应未完整返回；已保留现有计划，"
+                        "请从该计划继续，旧确认不会重新创建计划。"
+                    ),
+                    metadata={
+                        "intent": "strategy_request_plan_recovery",
+                        "plan_id": recovery_plan.id,
+                        "plan_status": recovery_plan.status.value,
+                    },
+                )
+                return join_turn_response(repo, task.id)
         raise
     except Exception as exc:
         return append_join_error(repo, task.id, f"策略请求执行出错：{exc}")
@@ -1640,8 +1998,9 @@ def _start_confirmed_strategy_plan(
     template_id: str,
     slots: dict,
     success_criteria: list[dict] | None = None,
+    auto_start: bool = False,
 ) -> dict:
-    """Start a compiled Workflow and show its exact overview before execution."""
+    """Start a compiled Workflow, optionally auto-accepting its overview."""
 
     start_kwargs = {}
     if success_criteria:
@@ -1661,15 +2020,73 @@ def _start_confirmed_strategy_plan(
         settings=runtime.settings,
         task=task,
     )
+    if auto_start:
+        resumed = driver.resume(
+            plan_id=start.plan_id,
+            user_text="开始",
+            confirmation_source=CONFIRMATION_SOURCE_AUTO,
+        )
+        append_driver_messages(
+            repo,
+            task.id,
+            resumed,
+            settings=runtime.settings,
+            task=task,
+        )
     return join_turn_response(repo, task.id)
 
 
 def _strategy_request_preflight(
     runtime: DriverTurnRuntime,
     task: TaskRecord,
-    draft: StrategyRequestDraft,
+    draft: CompiledStrategyRequestDraft,
 ) -> tuple[str, str] | None:
     """Reject any compiled request whose trusted Workflow is not wired yet."""
+
+    if isinstance(draft, StandardWorkflowRequestDraft):
+        return _standard_workflow_request_preflight(runtime, task, draft)
+
+    if draft.candidate_design is not None:
+        if draft.operation != "develop" or draft.strategy_type not in {
+            "limit",
+            "pricing",
+            "segmentation",
+        }:
+            return (
+                "candidate_strategy_request_invalid",
+                "确定性候选输入只允许用于额度、定价或分群策略开发。",
+            )
+        if any(
+            value is not None
+            for value in (
+                draft.objective,
+                draft.max_bad_rate,
+                draft.min_approval_rate,
+                draft.strategy_id,
+                draft.adoption_reason,
+                draft.profit,
+            )
+        ):
+            return (
+                "candidate_strategy_unused_fields",
+                "候选开发只使用候选搜索空间、类型专属经济口径和可选同类型基线；"
+                "目标、审批约束、策略 ID、预先采纳理由或审批利润口径不会被静默忽略。",
+            )
+        if draft.baseline_strategy_id:
+            baseline = StrategyRepository(
+                runtime.settings.db_path
+            ).get_strategy_meta(draft.baseline_strategy_id)
+            if baseline is None or baseline.get("task_id") != task.id:
+                return (
+                    "strategy_baseline_not_owned_by_task",
+                    "没有在当前任务中找到基线策略，不能跨任务对比。",
+                )
+            if baseline.get("strategy_type") != draft.strategy_type:
+                return (
+                    "strategy_baseline_type_mismatch",
+                    "候选策略与基线策略类型不一致，不能生成同口径对比。",
+                )
+        return None
 
     if draft.strategy_spec is not None:
         if draft.strategy_id is not None:
@@ -1825,23 +2242,26 @@ def _strategy_request_preflight(
             for meta in StrategyRepository(runtime.settings.db_path).list_meta_for_task(
                 task.id
             )
-            if meta.get("status") == "adopted"
+            if meta.get("asset_status") == ASSET_STATUS_ADOPTED_LOCAL
         ]
         if not adopted:
             return (
                 "strategy_adopted_version_required",
-                "当前任务没有已采纳策略，请先完成回测和人工采纳再启动监控。",
+                "当前任务没有本地已采纳策略，请先完成回测和人工采纳再启动监控。"
+                "本地已采纳，不代表生产上线。",
             )
         selected = adopted[-1]
         if draft.strategy_id and draft.strategy_id != selected.get("id"):
             return (
                 "strategy_monitor_target_mismatch",
-                "当前监控入口只会执行任务内最新采纳策略；请求中的策略 ID 与其不一致。",
+                "当前监控入口只会执行任务内最新的本地已采纳策略；"
+                "请求中的策略 ID 与其不一致。",
             )
         if draft.strategy_type != selected.get("strategy_type"):
             return (
                 "strategy_monitor_type_mismatch",
-                "请求中的策略类型与任务内最新采纳策略不一致，请重新确认监控对象。",
+                "请求中的策略类型与任务内最新的本地已采纳策略不一致，"
+                "请重新确认监控对象。",
             )
         return None
     return (
@@ -1849,6 +2269,32 @@ def _strategy_request_preflight(
         f"已识别 {draft.operation} 请求，但对应受信任 Workflow 尚未接线；"
         "当前不会把它降级成其他策略操作。",
     )
+
+
+def _standard_workflow_request_preflight(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> tuple[str, str] | None:
+    if draft.workflow != "limit_pricing_matrix":
+        return None
+    strategy_id = draft.workflow_inputs.get("strategy_id")
+    if strategy_id is None:
+        return None
+    meta = StrategyRepository(runtime.settings.db_path).get_strategy_meta(
+        str(strategy_id)
+    )
+    if meta is None or meta.get("task_id") != task.id:
+        return (
+            "strategy_not_owned_by_task",
+            "没有在当前任务中找到要关联的额度/定价策略，不能跨任务挂载矩阵产物。",
+        )
+    if meta.get("strategy_type") not in {"limit", "pricing"}:
+        return (
+            "strategy_type_mismatch",
+            "额度定价矩阵只能关联当前任务中的额度或定价策略。",
+        )
+    return None
 
 
 def _stored_strategy_request_preflight(
@@ -1946,7 +2392,7 @@ def _stored_strategy_request_preflight(
         if meta.get("status") != "draft":
             return (
                 "strategy_draft_required",
-                "只有 draft 状态的策略可以进入采纳流程。",
+                "只有 draft 或 validated 资产状态的策略可以进入本地采纳流程。",
             )
         if draft.baseline_strategy_id is not None:
             return (
@@ -2013,6 +2459,215 @@ def _strategy_dataset_preview(runtime: DriverTurnRuntime, task: TaskRecord):
     )
 
 
+def _strategy_dataset_binding_matches(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    *,
+    preview,
+    context,
+) -> bool:
+    """Verify the registered snapshot still represents the compiled preview."""
+
+    if (
+        tuple(context.columns) != tuple(preview.columns)
+        or context.target_col != preview.target_col
+    ):
+        return False
+    try:
+        refreshed = _strategy_dataset_preview(runtime, task)
+    except StrategySetupError:
+        return False
+    if (
+        refreshed.dataset_id != context.dataset_id
+        or tuple(refreshed.columns) != tuple(context.columns)
+        or refreshed.target_col != context.target_col
+    ):
+        return False
+
+    identity = preview.identity if isinstance(preview.identity, dict) else {}
+    if identity.get("kind") == "registered":
+        return (
+            identity.get("dataset_id") == refreshed.identity.get("dataset_id")
+            and identity.get("content_hash")
+            == refreshed.identity.get("content_hash")
+        )
+    if identity.get("kind") != "source":
+        return False
+    source_path = identity.get("source_path")
+    expected_hash = identity.get("sha256")
+    if not source_path or not expected_hash:
+        return False
+    try:
+        return sha256_file(Path(str(source_path))) == str(expected_hash)
+    except OSError:
+        return False
+
+
+def _strategy_target_nan_stats(runtime: DriverTurnRuntime, context) -> tuple[int, int]:
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    target_col = str(context.target_col or "").strip()
+    if not target_col:
+        raise StrategySetupError("当前策略操作需要明确的二元目标列。")
+    path = registry.resolve_path(context.dataset_id)
+    try:
+        frame = backend.read_frame(path, columns=[target_col])
+        mask = nan_label_mask(frame, target_col)
+    except Exception as exc:
+        raise StrategySetupError(
+            f"目标列 `{target_col}` 必须只包含 0/1 和可显式处理的空标签。"
+        ) from exc
+    return int(len(frame)), int(mask.sum())
+
+
+def _strategy_nan_label_clarification_response(
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    draft: CompiledStrategyRequestDraft,
+    context,
+    n_total: int,
+    n_nan: int,
+) -> dict:
+    refreshed = _strategy_dataset_preview(runtime, task)
+    state = {
+        "draft": draft.to_dict(),
+        "dataset_id": context.dataset_id,
+        "dataset_identity": dict(refreshed.identity),
+        "target_col": context.target_col,
+        "n_total": int(n_total),
+        "n_nan": int(n_nan),
+    }
+    return _append_strategy_nan_label_clarification(repo, task, state)
+
+
+def _append_strategy_nan_label_clarification(
+    repo: TaskRepository,
+    task: TaskRecord,
+    state: dict,
+) -> dict:
+    n_nan = int(state.get("n_nan") or 0)
+    n_total = int(state.get("n_total") or 0)
+    target_col = str(state.get("target_col") or "")
+    message = (
+        f"目标列 `{target_col}` 有 {n_nan}/{n_total} 行空或非有限标签。"
+        "本次尚未创建计划，平台不会默认丢弃。"
+        "如果确实允许，请明确回复「确认丢弃空标签并继续」；"
+        "仅回复「确认」不会执行。"
+    )
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=message,
+        metadata={
+            "intent": "strategy_drop_nan_labels_confirmation",
+            "kind": "clarification",
+            "code": "strategy_drop_nan_labels_confirmation_required",
+            "fields": ["drop_nan_labels"],
+            _STRATEGY_NAN_LABEL_META_KEY: state,
+        },
+    )
+    return {
+        "task_id": task.id,
+        "status": "clarification_required",
+        "code": "strategy_drop_nan_labels_confirmation_required",
+        "fields": ["drop_nan_labels"],
+        "label_quality": {
+            "target_col": target_col,
+            "n_total": n_total,
+            "n_nan": n_nan,
+        },
+        "messages": repo.list_agent_messages(task.id),
+    }
+
+
+def _repeat_strategy_nan_label_clarification(
+    repo: TaskRepository,
+    task: TaskRecord,
+    state: dict,
+) -> dict:
+    return _append_strategy_nan_label_clarification(repo, task, dict(state))
+
+
+def _resume_strategy_after_nan_label_confirmation(
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    state: dict,
+) -> dict:
+    if (
+        _active_plan(runtime.plan_repo, task.id) is not None
+        or latest_open_gate(repo.list_agent_messages(task.id)) is not None
+    ):
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_request_stale_confirmation",
+            message="任务状态已变化，空标签处理确认已失效；请完成当前计划后重新发起。",
+        )
+    try:
+        preview = _strategy_dataset_preview(runtime, task)
+    except StrategySetupError as exc:
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_dataset_context_required",
+            message=str(exc),
+        )
+    expected_identity = state.get("dataset_identity")
+    if (
+        not isinstance(expected_identity, dict)
+        or preview.identity != expected_identity
+        or preview.dataset_id != state.get("dataset_id")
+        or preview.target_col != state.get("target_col")
+    ):
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_dataset_context_changed",
+            message="策略样本或目标列已变化；空标签确认未执行，请重新描述策略请求。",
+        )
+    payload = state.get("draft")
+    if not isinstance(payload, dict):
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_request_invalidated",
+            message="空标签确认缺少已校验策略口径，请重新描述策略请求。",
+        )
+    compilation = validate_strategy_request(
+        payload,
+        allowed_columns=_strategy_request_allowed_columns(preview),
+        target_col=preview.target_col,
+    )
+    if compilation.draft is None:
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_request_invalidated",
+            message=compilation.clarification or "策略口径重新校验失败，请重新描述。",
+        )
+    preflight = _strategy_request_preflight(runtime, task, compilation.draft)
+    if preflight is not None:
+        code, message = preflight
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code=code,
+            message=message,
+        )
+    return _prepare_and_run_validated_strategy_request(
+        runtime,
+        repo,
+        task,
+        compilation.draft,
+        preview=preview,
+        auto_start=True,
+        drop_nan_labels=True,
+    )
+
+
 def _strategy_request_allowed_columns(preview) -> tuple[str, ...]:
     if preview is None:
         return ()
@@ -2023,12 +2678,50 @@ def _strategy_request_allowed_columns(preview) -> tuple[str, ...]:
     )
 
 
-def _strategy_request_requires_dataset(draft: StrategyRequestDraft) -> bool:
+def _strategy_request_requires_dataset(
+    draft: CompiledStrategyRequestDraft,
+) -> bool:
+    if isinstance(draft, StandardWorkflowRequestDraft):
+        return True
     return not (draft.strategy_spec is None and draft.operation == "report")
 
 
-def _strategy_request_requires_target(draft: StrategyRequestDraft) -> bool:
-    return draft.operation not in {"apply", "report"}
+def _strategy_request_requires_target(
+    draft: CompiledStrategyRequestDraft,
+) -> bool:
+    if isinstance(draft, StandardWorkflowRequestDraft):
+        return (
+            draft.workflow == "limit_pricing_matrix"
+            and "target_col" in draft.workflow_inputs
+        )
+    if draft.operation in {"apply", "report", "monitor"}:
+        return False
+    if draft.operation == "develop" and draft.strategy_spec is not None:
+        return False
+    return True
+
+
+def _strategy_request_requires_complete_labels(
+    draft: CompiledStrategyRequestDraft,
+) -> bool:
+    """Whether execution would otherwise exclude missing supervision rows."""
+
+    if isinstance(draft, StandardWorkflowRequestDraft):
+        return (
+            draft.workflow == "limit_pricing_matrix"
+            and "target_col" in draft.workflow_inputs
+        )
+    if draft.operation in {"apply", "report", "monitor"}:
+        return False
+    if draft.operation == "develop" and draft.strategy_spec is not None:
+        return False
+    return True
+
+
+def _strategy_slots_with_drop_nan(slots: dict, confirmed: bool) -> dict:
+    if not confirmed:
+        return slots
+    return {**slots, "drop_nan_labels": True}
 
 
 def _typed_strategy_slots(context, draft: StrategyRequestDraft) -> dict:
@@ -2046,6 +2739,29 @@ def _typed_strategy_slots(context, draft: StrategyRequestDraft) -> dict:
         slots["profit_params"] = profit
     if draft.economics_inputs is not None:
         slots["economics_inputs"] = dict(draft.economics_inputs)
+    return slots
+
+
+def _is_auto_candidate_draft(draft: CompiledStrategyRequestDraft) -> bool:
+    return (
+        isinstance(draft, StrategyRequestDraft)
+        and draft.operation == "develop"
+        and draft.strategy_type in {"limit", "pricing", "segmentation"}
+        and draft.candidate_design is not None
+    )
+
+
+def _candidate_strategy_slots(context, draft: StrategyRequestDraft) -> dict:
+    slots = {
+        "dataset_id": context.dataset_id,
+        "target_col": context.target_col,
+        "strategy_type": draft.strategy_type,
+        "candidate_design": dict(draft.candidate_design or {}),
+    }
+    if draft.economics_inputs is not None:
+        slots["economics_inputs"] = dict(draft.economics_inputs)
+    if draft.baseline_strategy_id:
+        slots["baseline_strategy_id"] = draft.baseline_strategy_id
     return slots
 
 
@@ -2106,24 +2822,32 @@ def _strategy_request_clarification_response(
     *,
     code: str,
     message: str,
+    fields: tuple[str, ...] | list[str] = (),
 ) -> dict:
+    normalized_fields = list(dict.fromkeys(str(field) for field in fields))
+    metadata = {
+        "intent": "strategy_request",
+        "kind": "clarification",
+        "code": code,
+    }
+    if normalized_fields:
+        metadata["fields"] = normalized_fields
     repo.add_agent_message(
         task.id,
         role="assistant",
         stage="chat",
         content=message,
-        metadata={
-            "intent": "strategy_request",
-            "kind": "clarification",
-            "code": code,
-        },
+        metadata=metadata,
     )
-    return {
+    response = {
         "task_id": task.id,
         "status": "clarification_required",
         "code": code,
         "messages": repo.list_agent_messages(task.id),
     }
+    if normalized_fields:
+        response["fields"] = normalized_fields
+    return response
 
 
 def _latest_strategy_request_pending(conversation: list[dict]) -> dict | None:
@@ -2137,6 +2861,25 @@ def _latest_strategy_request_pending(conversation: list[dict]) -> dict | None:
         _STRATEGY_REQUEST_META_KEY
     )
     return pending if isinstance(pending, dict) else None
+
+
+def _latest_strategy_nan_label_confirmation(
+    conversation: list[dict],
+) -> dict | None:
+    last_assistant = next(
+        (
+            message
+            for message in reversed(conversation)
+            if message.get("role") == "assistant"
+        ),
+        None,
+    )
+    if last_assistant is None:
+        return None
+    state = (last_assistant.get("metadata") or {}).get(
+        _STRATEGY_NAN_LABEL_META_KEY
+    )
+    return state if isinstance(state, dict) else None
 
 
 def _invalidate_pending_strategy_request(

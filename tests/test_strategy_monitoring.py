@@ -22,15 +22,21 @@ import pandas as pd
 import pytest
 
 from marvis.data.backend import DataBackend
+from marvis.data.contracts import Dataset
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
-from marvis.packs.strategy.monitoring_plan import load_monitoring_plan
+from marvis.packs.strategy.monitoring_plan import (
+    MonitoringPlan,
+    canonical_economics_bindings_hash,
+    load_monitoring_plan,
+)
 from marvis.plugins.loader import load_manifest
 from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.repositories.strategy import StrategyRepository
+from marvis.repositories.strategy_monitoring import StrategyMonitoringRepository
 from marvis.repositories.audit import _list_audit_rows
 from marvis.settings import build_settings
 
@@ -248,7 +254,7 @@ def test_monitoring_no_label_is_na(tmp_path):
 
 
 @pytest.mark.slow
-def test_monitoring_writes_back_last_run_at_and_audit(tmp_path):
+def test_monitoring_keeps_plan_immutable_and_persists_run_and_audit(tmp_path):
     runner, registry, task, settings = _runtime(tmp_path)
     strategy_id, _bt = _adopt_pure_rule_strategy(runner, registry, task, tmp_path)
 
@@ -269,13 +275,20 @@ def test_monitoring_writes_back_last_run_at_and_audit(tmp_path):
     )
     assert res.ok, res.error
 
-    # last_run_at written back (the only mutated field); rest unchanged.
+    # The adopted plan artifact is immutable. Runtime timestamps and results live
+    # in the append-only monitoring-run ledger instead of mutating the plan.
     plan = load_monitoring_plan(plan_path)
-    assert plan.last_run_at == res.output["last_run_at"]
-    assert plan.last_run_at is not None
+    assert plan.last_run_at is None
     after = json.loads(plan_path.read_text(encoding="utf-8"))
-    assert after["expectation_baseline"] == before["expectation_baseline"]
-    assert after["thresholds"] == before["thresholds"]
+    assert after == before
+
+    run = StrategyMonitoringRepository(settings.db_path).get_run(
+        res.output["monitoring_run_id"]
+    )
+    assert run is not None
+    assert run.created_at == res.output["last_run_at"]
+    assert run.overall_level == "green"
+    assert run.monitoring_plan_id == res.output["monitoring_plan_id"]
 
     # strategy.monitor audit row with overall_level.
     rows = _list_audit_rows(settings.db_path, kind="strategy.monitor", target_ref=strategy_id)
@@ -340,6 +353,226 @@ def _adopt_with_plan(db_path, tmp_path, *, cadence_days, last_run_at, adopted_at
     save_monitoring_plan(plan_path, plan)
     repo.save_strategy_artifact(strategy.id, kind="monitoring_plan_json", path=str(plan_path))
     return strategy.id
+
+
+def _add_ledger_plan(
+    db_path,
+    strategy_id,
+    *,
+    cadence_days,
+    created_at,
+    plan_id,
+):
+    ledger = StrategyMonitoringRepository(db_path)
+    latest = ledger.latest_plan(strategy_id)
+    revision = 1 if latest is None else latest.revision + 1
+    return ledger.create_plan(
+        MonitoringPlan(
+            strategy_id=strategy_id,
+            version=1,
+            cadence_days=cadence_days,
+            monitoring_plan_id=plan_id,
+            revision=revision,
+            supersedes_plan_id=None if latest is None else latest.id,
+        ),
+        expected_revision=0 if latest is None else latest.revision,
+        expected_payload_hash=None if latest is None else latest.payload_hash,
+        plan_id=plan_id,
+        created_at=created_at,
+    )
+
+
+def _add_ledger_run(
+    db_path,
+    strategy_id,
+    plan,
+    *,
+    task_id,
+    run_id,
+    created_at,
+):
+    import hashlib
+
+    dataset_hash = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+    dataset = Dataset(
+        id=f"dataset-{run_id}",
+        task_id=task_id,
+        role="strategy.monitoring",
+        source_path=f"ledger/{run_id}.parquet",
+        format="parquet",
+        sheet=None,
+        row_count=1,
+        columns=(),
+        has_target=False,
+        target_col=None,
+        created_at=created_at,
+        content_hash=dataset_hash,
+    )
+    DatasetRepository(db_path).create_dataset(dataset)
+    return StrategyMonitoringRepository(db_path).create_run(
+        strategy_id=strategy_id,
+        monitoring_plan_id=plan.id,
+        expected_plan_revision=plan.revision,
+        expected_plan_payload_hash=plan.payload_hash,
+        dataset_id=dataset.id,
+        dataset_content_hash=dataset_hash,
+        strategy_effect_hash=hashlib.sha256(b"strategy-effect").hexdigest(),
+        economics_binding_hash=canonical_economics_bindings_hash(
+            plan.plan.economics_bindings
+        ),
+        result={
+            "overall_level": "green",
+            "checks": [{"id": "approval_rate", "level": "green"}],
+        },
+        overall_level="green",
+        run_id=run_id,
+        created_at=created_at,
+    )
+
+
+def test_list_monitoring_due_prefers_fresh_ledger_plan_over_stale_artifact(tmp_path):
+    from datetime import UTC, datetime
+
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    sid = _adopt_with_plan(
+        settings.db_path,
+        tmp_path,
+        cadence_days=1,
+        last_run_at="2026-01-01T00:00:00+00:00",
+        adopted_at="2026-01-01T00:00:00+00:00",
+    )
+    _add_ledger_plan(
+        settings.db_path,
+        sid,
+        cadence_days=30,
+        created_at="2026-02-25T00:00:00+00:00",
+        plan_id="ledger-plan-fresh",
+    )
+    repo = StrategyRepository(settings.db_path)
+
+    # The old artifact is long overdue, but a newly-created immutable plan gets
+    # its own full cadence before the first ledger run is due.
+    assert repo.list_monitoring_due(now=datetime(2026, 3, 1, tzinfo=UTC)) == []
+    due = repo.list_monitoring_due(now=datetime(2026, 3, 28, tzinfo=UTC))
+
+    assert [item["strategy_id"] for item in due] == [sid]
+    assert due[0]["due_at"] == "2026-03-27T00:00:00+00:00"
+    assert due[0]["last_run_at"] is None
+    assert due[0]["cadence_days"] == 30
+
+
+def test_list_monitoring_due_no_run_anchors_at_later_of_plan_and_adoption(tmp_path):
+    from datetime import UTC, datetime
+
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    sid = _adopt_with_plan(
+        settings.db_path,
+        tmp_path,
+        cadence_days=1,
+        last_run_at=None,
+        adopted_at="2026-03-01T00:00:00+00:00",
+    )
+    _add_ledger_plan(
+        settings.db_path,
+        sid,
+        cadence_days=30,
+        created_at="2026-02-01T00:00:00+00:00",
+        plan_id="ledger-plan-backdated",
+    )
+    repo = StrategyRepository(settings.db_path)
+
+    assert repo.list_monitoring_due(now=datetime(2026, 3, 15, tzinfo=UTC)) == []
+    due = repo.list_monitoring_due(now=datetime(2026, 4, 1, tzinfo=UTC))
+    assert due[0]["due_at"] == "2026-03-31T00:00:00+00:00"
+
+
+def test_list_monitoring_due_uses_latest_run_for_current_ledger_plan(tmp_path):
+    from datetime import UTC, datetime
+
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    sid = _adopt_with_plan(
+        settings.db_path,
+        tmp_path,
+        cadence_days=365,
+        last_run_at="2026-12-31T00:00:00+00:00",
+        adopted_at="2026-01-01T00:00:00+00:00",
+    )
+    plan = _add_ledger_plan(
+        settings.db_path,
+        sid,
+        cadence_days=30,
+        created_at="2026-01-01T00:00:00+00:00",
+        plan_id="ledger-plan-runs",
+    )
+    _add_ledger_run(
+        settings.db_path,
+        sid,
+        plan,
+        task_id="task-1",
+        run_id="run-old",
+        created_at="2026-02-01T00:00:00+00:00",
+    )
+    _add_ledger_run(
+        settings.db_path,
+        sid,
+        plan,
+        task_id="task-1",
+        run_id="run-latest",
+        created_at="2026-02-10T00:00:00+00:00",
+    )
+
+    due = StrategyRepository(settings.db_path).list_monitoring_due(
+        now=datetime(2026, 3, 13, tzinfo=UTC)
+    )
+
+    assert [item["strategy_id"] for item in due] == [sid]
+    assert due[0]["last_run_at"] == "2026-02-10T00:00:00+00:00"
+    assert due[0]["due_at"] == "2026-03-12T00:00:00+00:00"
+    assert round(due[0]["overdue_days"]) == 1
+
+
+def test_list_monitoring_due_does_not_reuse_run_from_superseded_plan(tmp_path):
+    from datetime import UTC, datetime
+
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    sid = _adopt_with_plan(
+        settings.db_path,
+        tmp_path,
+        cadence_days=1,
+        last_run_at="2026-01-01T00:00:00+00:00",
+    )
+    first = _add_ledger_plan(
+        settings.db_path,
+        sid,
+        cadence_days=1,
+        created_at="2026-02-01T00:00:00+00:00",
+        plan_id="ledger-plan-1",
+    )
+    _add_ledger_run(
+        settings.db_path,
+        sid,
+        first,
+        task_id="task-1",
+        run_id="run-plan-1",
+        created_at="2026-02-10T00:00:00+00:00",
+    )
+    _add_ledger_plan(
+        settings.db_path,
+        sid,
+        cadence_days=30,
+        created_at="2026-03-01T00:00:00+00:00",
+        plan_id="ledger-plan-2",
+    )
+
+    # The newest plan has no run, so its own creation timestamp is the anchor;
+    # neither the old plan's run nor the mutable artifact can make it overdue.
+    assert StrategyRepository(settings.db_path).list_monitoring_due(
+        now=datetime(2026, 3, 15, tzinfo=UTC)
+    ) == []
 
 
 def test_list_monitoring_due_uses_adopted_at_when_no_last_run(tmp_path):
@@ -552,20 +785,6 @@ def test_parse_monitoring_disposition_rejects_non_explicit_choices(text):
     assert parse(text) is None
 
 
-def test_monitoring_next_action_new_version_points_at_development():
-    from marvis.packs.strategy.monitor_tools import monitoring_next_action
-
-    action = monitoring_next_action("new_version", strategy_id="s-1")
-    assert action is not None
-    assert action["template_id"] == "strategy_development"
-    assert action["parent_strategy_id"] == "s-1"
-    assert "s-1" in action["prompt"]
-    # observe / adjust are notes (no follow-up template); None disposition -> no action.
-    assert monitoring_next_action("observe", strategy_id="s-1")["kind"] == "note"
-    assert monitoring_next_action("adjust_threshold", strategy_id="s-1")["kind"] == "note"
-    assert monitoring_next_action(None, strategy_id="s-1") is None
-
-
 def test_render_run_strategy_monitoring_red_injects_checklist():
     from marvis.agent.renderers import render_tool_output
 
@@ -590,25 +809,29 @@ def test_render_monitoring_report_surfaces_next_action():
         "report_path": "/w/tasks/t/strategy/monitoring_report_s1_v1.md",
         "overall_level": "red",
         "timeline": [{"at": "2026-07-01T00:00:00Z", "overall_level": "red", "row_count": 100}],
-        "next_action": {"kind": "suggest_template", "prompt": "监控红灯，建议起新版本。"},
+        "next_action": {
+            "kind": "completed",
+            "action": "new_version",
+            "prompt": "新版本任务、策略和数据集均已创建。",
+        },
     })
     assert "监控报告已生成" in text
-    assert "监控红灯，建议起新版本。" in text
+    assert "新版本任务、策略和数据集均已创建。" in text
     assert tables[0]["title"] == "监控判级时间线"
 
 
-def test_monitoring_report_gate_declares_disposition_schema():
-    """LT-3 (A.3): the render_monitoring_report gate adapter declares its `disposition`
-    control as a JSON enum schema (observe/adjust_threshold/new_version), surfaced on
-    the gate payload as editable_input_schema (the LT-4 frontend key)."""
+def test_monitoring_disposition_gate_declares_real_action_schema():
+    """The evidence-bound disposition gate exposes the action, reason, and patch."""
+    from marvis.agent.gate_param_schema import gate_param_schema
     from marvis.agent.gates.adapters import gate_editable_input_schema
     from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
     from marvis.plugins.manifest import ToolRef
 
     gate = PlanStep(
-        id="rep", plan_id="p", index=0, title="监控报告",
-        tool_ref=ToolRef("strategy", "render_monitoring_report"),
-        inputs={"disposition": None}, depends_on=[], post_checks=[],
+        id="disposition", plan_id="p", index=0, title="处置监控结果",
+        tool_ref=ToolRef("strategy", "apply_monitoring_disposition"),
+        inputs={"disposition": None, "reason": None, "threshold_patch": None},
+        depends_on=[], post_checks=[],
     )
     plan = Plan(
         id="p", task_id="t", goal="g", source="template", template_id="strategy_monitoring",
@@ -618,3 +841,228 @@ def test_monitoring_report_gate_declares_disposition_schema():
     disposition = schema["properties"]["disposition"]
     assert disposition["type"] == "string"
     assert disposition["enum"] == ["observe", "adjust_threshold", "new_version"]
+    assert schema["properties"]["reason"]["type"] == "string"
+    assert schema["properties"]["threshold_patch"]["type"] == "object"
+    routed = gate_param_schema(plan, gate, editable_input_schema=schema)
+    assert [item["name"] for item in routed] == [
+        "disposition",
+        "reason",
+        "threshold_patch",
+    ]
+    assert all("expected_plan" not in item["name"] for item in routed)
+
+
+@pytest.mark.parametrize(
+    ("adjustable_ids", "expected_ids"),
+    (
+        (["approval_floor"], ["approval_floor"]),
+        (["score_psi"], ["score_psi"]),
+    ),
+)
+def test_monitoring_disposition_gate_uses_plan_threshold_ids_only(
+    adjustable_ids,
+    expected_ids,
+):
+    """Display metric aliases and non-adjustable checks cannot become patch keys."""
+    from marvis.agent.gates.adapters import gate_editable_input_schema
+    from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
+    from marvis.plugins.manifest import ToolRef
+
+    run = PlanStep(
+        id="run",
+        plan_id="p",
+        index=0,
+        title="执行策略监控",
+        tool_ref=ToolRef("strategy", "run_strategy_monitoring"),
+        inputs={},
+        depends_on=[],
+        post_checks=[],
+    )
+    gate = PlanStep(
+        id="disposition",
+        plan_id="p",
+        index=1,
+        title="处置监控结果",
+        tool_ref=ToolRef("strategy", "apply_monitoring_disposition"),
+        inputs={"disposition": None, "reason": None, "threshold_patch": None},
+        depends_on=[run.id],
+        post_checks=[],
+    )
+    plan = Plan(
+        id="p",
+        task_id="t",
+        goal="g",
+        source="template",
+        template_id="strategy_monitoring",
+        autonomy_level=1,
+        steps=[run, gate],
+        status=PlanStatus.AWAITING_CONFIRM,
+    )
+    output = {
+        "overall_level": "red",
+        "adjustable_threshold_ids": adjustable_ids,
+        "checks": [
+            {
+                "id": "approval_floor",
+                "metric": "approval_rate",
+                "level": "red",
+            },
+            {
+                "id": "feature_csi:age",
+                "metric": "feature_csi",
+                "level": "red",
+            },
+        ],
+    }
+    schema = gate_editable_input_schema(
+        plan,
+        gate,
+        lambda step_id: output if step_id == run.id else None,
+    )
+
+    patch_schema = schema["properties"]["threshold_patch"]
+    assert patch_schema["propertyNames"]["enum"] == expected_ids
+    assert "approval_rate" not in patch_schema["propertyNames"]["enum"]
+    assert "feature_csi" not in patch_schema["propertyNames"]["enum"]
+
+
+def test_monitoring_disposition_gate_fails_closed_without_threshold_receipt():
+    from marvis.agent.gates.adapters import gate_editable_input_schema
+    from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
+    from marvis.plugins.manifest import ToolRef
+
+    run = PlanStep(
+        id="run",
+        plan_id="p",
+        index=0,
+        title="执行策略监控",
+        tool_ref=ToolRef("strategy", "run_strategy_monitoring"),
+        inputs={},
+        depends_on=[],
+        post_checks=[],
+    )
+    gate = PlanStep(
+        id="disposition",
+        plan_id="p",
+        index=1,
+        title="处置监控结果",
+        tool_ref=ToolRef("strategy", "apply_monitoring_disposition"),
+        inputs={},
+        depends_on=[run.id],
+        post_checks=[],
+    )
+    plan = Plan(
+        id="p",
+        task_id="t",
+        goal="g",
+        source="template",
+        template_id="strategy_monitoring",
+        autonomy_level=1,
+        steps=[run, gate],
+        status=PlanStatus.AWAITING_CONFIRM,
+    )
+    schema = gate_editable_input_schema(
+        plan,
+        gate,
+        lambda _step_id: {"overall_level": "red", "checks": []},
+    )
+
+    assert schema["properties"]["threshold_patch"]["maxProperties"] == 0
+
+
+def test_red_monitoring_gate_rejects_plain_confirm_without_complete_disposition():
+    from marvis.agent.gates.adapters import monitoring_plain_confirm_error
+    from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
+    from marvis.plugins.manifest import ToolRef
+
+    run = PlanStep(
+        id="run",
+        plan_id="p",
+        index=0,
+        title="执行策略监控",
+        tool_ref=ToolRef("strategy", "run_strategy_monitoring"),
+        inputs={},
+        depends_on=[],
+        post_checks=[],
+    )
+    gate = PlanStep(
+        id="disposition",
+        plan_id="p",
+        index=1,
+        title="处置监控结果",
+        tool_ref=ToolRef("strategy", "apply_monitoring_disposition"),
+        inputs={"disposition": None, "threshold_patch": None},
+        depends_on=[run.id],
+        post_checks=[],
+    )
+    plan = Plan(
+        id="p",
+        task_id="t",
+        goal="g",
+        source="template",
+        template_id="strategy_monitoring",
+        autonomy_level=1,
+        steps=[run, gate],
+        status=PlanStatus.AWAITING_CONFIRM,
+    )
+    red_output = {"overall_level": "red", "checks": []}
+
+    def load_red(step_id):
+        return red_output if step_id == run.id else None
+
+    assert "不能只回复" in monitoring_plain_confirm_error(plan, gate, load_red)
+    gate.inputs["disposition"] = "adjust_threshold"
+    assert "还没有具体" in monitoring_plain_confirm_error(plan, gate, load_red)
+    gate.inputs["threshold_patch"] = {"approval_rate": {"warn": 0.6}}
+    assert monitoring_plain_confirm_error(plan, gate, load_red) is None
+    gate.inputs = {"disposition": None, "threshold_patch": None}
+
+    def load_green(step_id):
+        return {"overall_level": "green"} if step_id == run.id else None
+
+    assert monitoring_plain_confirm_error(plan, gate, load_green) is None
+
+
+def test_monitoring_structured_control_cannot_rebind_frozen_evidence():
+    from marvis.agent.gate_response_adapter import (
+        GateControlValidationError,
+        validate_gate_control,
+    )
+    from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
+    from marvis.plugins.manifest import ToolRef
+
+    gate = PlanStep(
+        id="disposition",
+        plan_id="p",
+        index=0,
+        title="处置监控结果",
+        tool_ref=ToolRef("strategy", "apply_monitoring_disposition"),
+        inputs={
+            "expected_plan_id": "plan-1",
+            "disposition": None,
+            "reason": None,
+            "threshold_patch": None,
+        },
+        depends_on=[],
+        post_checks=[],
+    )
+    plan = Plan(
+        id="p",
+        task_id="t",
+        goal="g",
+        source="template",
+        template_id="strategy_monitoring",
+        autonomy_level=1,
+        steps=[gate],
+        status=PlanStatus.AWAITING_CONFIRM,
+    )
+
+    with pytest.raises(GateControlValidationError, match="不可修改冻结"):
+        validate_gate_control(
+            plan,
+            gate,
+            expected_step_id=gate.id,
+            selection=None,
+            dedup_strategies=None,
+            adjust_params={"expected_plan_id": "attacker-plan"},
+        )

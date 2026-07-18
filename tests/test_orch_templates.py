@@ -513,7 +513,247 @@ def test_strategy_analysis_template_marks_backtest_decision_point(tmp_path):
         ToolRef("strategy", "tradeoff_view"),
     ]
     assert [step.title for step in plan.steps if step.decision_point] == ["回测策略"]
-    assert [step.title for step in plan.steps if step.needs_confirmation] == ["回测策略"]
+    assert [step.title for step in plan.steps if step.needs_confirmation] == []
+    assert plan.steps[1].policy.human_decision_gate == "none"
+    assert all("drop_nan_labels" not in step.inputs for step in plan.steps)
+
+
+def test_strategy_gate_cleanup_keeps_only_effect_and_disposition_gates(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+
+    expected_tool_gates = {
+        "design_cutoff_bands": "none",
+        "select_rule_set": "none",
+        "backtest_strategy": "none",
+        "adopt_strategy": "required",
+        "apply_monitoring_disposition": "required",
+    }
+    assert {
+        tool_name: tool_registry.resolve(
+            ToolRef("strategy", tool_name)
+        ).policy.human_decision_gate
+        for tool_name in expected_tool_gates
+    } == expected_tool_gates
+
+    expected_template_gates = {
+        "strategy_analysis": [],
+        "strategy_limit_pricing_analysis": [],
+        "strategy_development": ["采纳策略"],
+        "rule_strategy": ["采纳策略"],
+        "monitoring_run": [],
+        "strategy_monitoring": ["处置监控结果"],
+        "deterministic_strategy_candidate_development": ["采纳确定性候选策略"],
+    }
+    assert {
+        template_id: [
+            step.title
+            for step in get_template(template_id).steps
+            if step.needs_confirmation
+        ]
+        for template_id in expected_template_gates
+    } == expected_template_gates
+
+
+def test_strategy_templates_thread_explicit_nan_label_exclusion_contract():
+    load_builtin_templates()
+    expected_consumers = {
+        "strategy_analysis": {"backtest_strategy", "tradeoff_view"},
+        "deterministic_strategy_candidate_development": {"backtest_strategy"},
+        "typed_strategy_evaluation": {"backtest_strategy"},
+        "stored_strategy_evaluation": {"backtest_strategy"},
+        "stored_strategy_adoption": {"backtest_strategy"},
+        "strategy_development": {
+            "tradeoff_view",
+            "design_cutoff_bands",
+            "backtest_strategy",
+            "compare_strategies",
+        },
+        "rule_strategy": {"mine_rules", "evaluate_rule_set", "backtest_strategy"},
+    }
+
+    for template_id, consumer_tools in expected_consumers.items():
+        template = get_template(template_id)
+        assert "drop_nan_labels" in {slot.name for slot in template.slots}
+        threaded = {
+            step.tool_ref.tool
+            for step in template.steps
+            if step.inputs_template.get("drop_nan_labels")
+            == "{slot:drop_nan_labels}"
+        }
+        assert threaded == consumer_tools
+
+
+@pytest.mark.parametrize(
+    ("template_id", "slots", "expected_tools"),
+    [
+        (
+            "strategy_profit_analysis",
+            {
+                "dataset_id": "dataset-1",
+                "segment_col": "segment",
+                "ead_col": "ead",
+                "pd_col": "pd",
+                "profit_params": {
+                    "annual_rate": 0.12,
+                    "funding_rate": 0.03,
+                    "lgd": 0.5,
+                    "operating_cost_per_loan": 10,
+                    "term_months": 12,
+                },
+            },
+            [ToolRef("strategy", "profit_calc")],
+        ),
+        (
+            "strategy_roll_rate_analysis",
+            {
+                "dataset_id": "dataset-1",
+                "id_col": "customer_id",
+                "time_col": "month",
+                "status_col": "status",
+                "states": ["C", "M1"],
+            },
+            [ToolRef("strategy", "roll_rate_matrix")],
+        ),
+        (
+            "strategy_limit_pricing_analysis",
+            {
+                "dataset_id": "dataset-1",
+                "score_col": "score",
+                "pd_col": "pd",
+                "limit_grid": [1000, 2000],
+                "rate_grid": [0.1, 0.2],
+                "funding_rate": 0.03,
+                "term_months": 12,
+                "cost_per_loan": 10,
+            },
+            [
+                ToolRef("strategy", "limit_pricing_matrix"),
+                ToolRef("strategy", "limit_pricing_matrix"),
+            ],
+        ),
+    ],
+)
+def test_standard_strategy_workflow_templates_validate(
+    tmp_path, template_id, slots, expected_tools
+):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(get_template(template_id), slots, task_id="task-1")
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref for step in plan.steps] == expected_tools
+    if template_id == "strategy_limit_pricing_analysis":
+        assert plan.steps[0].inputs["confirm"] is False
+        assert plan.steps[1].inputs["confirm"] is True
+        assert plan.steps[1].inputs["expected_source_hash"].endswith(
+            ".output.source_dataset_content_hash"
+        )
+        assert plan.steps[1].needs_confirmation is False
+        assert plan.steps[0].decision_point is True
+
+
+def test_deterministic_nonapproval_candidate_template_contract_is_registered() -> None:
+    """The pending tool is registered in the next phase; lock the DAG contract now."""
+
+    load_builtin_templates()
+    template = get_template("deterministic_strategy_candidate_development")
+
+    assert template in list_templates()
+    assert template.id in builtin_template_ids()
+    assert [step.tool_ref for step in template.steps] == [
+        ToolRef("strategy", "design_strategy_candidate"),
+        ToolRef("strategy", "build_strategy"),
+        ToolRef("strategy", "backtest_strategy"),
+        ToolRef("strategy", "render_strategy_doc"),
+        ToolRef("strategy", "adopt_strategy"),
+        ToolRef("strategy", "render_strategy_doc"),
+    ]
+    design, build, backtest, doc, adopt, final_doc = template.steps
+    assert design.inputs_template["candidate_policy_version"] == (
+        "strategy.candidate_policy.v1"
+    )
+    assert design.inputs_template["target_col"] == "{slot:target_col}"
+    assert build.inputs_template["strategy_spec"] == (
+        "$ref:确定性设计策略候选.output.strategy_spec"
+    )
+    assert backtest.inputs_template["strategy_id"] == (
+        "$ref:构造确定性候选策略.output.strategy_id"
+    )
+    assert backtest.inputs_template["economics_inputs"] == (
+        "$ref:确定性设计策略候选.output.economics_inputs"
+    )
+    assert doc.inputs_template["strategy_id"] == (
+        "$ref:构造确定性候选策略.output.strategy_id"
+    )
+    assert adopt.inputs_template["backtest_id"] == (
+        "$ref:回测确定性候选策略.output.backtest_id"
+    )
+    assert adopt.inputs_template["adoption_reason"] == ""
+    assert [step.needs_confirmation for step in template.steps] == [
+        False,
+        False,
+        False,
+        False,
+        True,
+        False,
+    ]
+    assert doc.depends_on_titles == ("构造确定性候选策略", "回测确定性候选策略")
+    assert "生成确定性候选策略文档" in adopt.depends_on_titles
+    assert final_doc.depends_on_titles == ("采纳确定性候选策略",)
+    assert final_doc.inputs_template["strategy_id"] == (
+        "$ref:采纳确定性候选策略.output.strategy_id"
+    )
+
+
+def test_candidate_template_goal_patterns_do_not_cross_approval_or_matrix_flows() -> None:
+    load_builtin_templates()
+    candidate = get_template("deterministic_strategy_candidate_development")
+
+    for other_id in (
+        "strategy_development",
+        "strategy_limit_pricing_analysis",
+        "typed_strategy_evaluation",
+    ):
+        assert set(candidate.goal_patterns).isdisjoint(
+            set(get_template(other_id).goal_patterns)
+        )
+
+
+def test_segmentation_candidate_plan_validates_with_only_adoption_gate(tmp_path) -> None:
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("deterministic_strategy_candidate_development"),
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "bad_flag",
+            "drop_nan_labels": True,
+            "strategy_type": "segmentation",
+            "candidate_design": {
+                "method": "single_variable_segmentation",
+                "feature_col": "income",
+                "n_bands": 3,
+            },
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.title for step in plan.steps if step.needs_confirmation] == [
+        "采纳确定性候选策略"
+    ]
+    design, _build, backtest, pre_adoption_doc, adopt, final_doc = plan.steps
+    assert backtest.inputs["drop_nan_labels"] is True
+    assert "economics_inputs" not in design.inputs
+    assert backtest.inputs["economics_inputs"].endswith(
+        ".output.economics_inputs"
+    )
+    assert pre_adoption_doc.index < adopt.index < final_doc.index
 
 
 @pytest.mark.parametrize(
@@ -562,6 +802,7 @@ def test_typed_strategy_evaluation_template_validates_all_five_types(
         {
             "dataset_id": "dataset-1",
             "target_col": "bad_flag",
+            "drop_nan_labels": True,
             "strategy_spec": strategy_spec,
         },
         task_id="task-1",
@@ -576,11 +817,11 @@ def test_typed_strategy_evaluation_template_validates_all_five_types(
     build, backtest, doc = plan.steps
     assert build.inputs["strategy_spec"] == strategy_spec
     assert backtest.inputs["strategy_id"] == f"$ref:{build.id}.output.strategy_id"
+    assert backtest.inputs["drop_nan_labels"] is True
     assert backtest.decision_point is True
-    # The Tool manifest requires a human-decision gate for persisted backtest
-    # evidence; the planner strengthens the template even though the request and
-    # plan overview were already confirmed.
-    assert backtest.needs_confirmation is True
+    # Persisting deterministic backtest evidence is reversible; governance is
+    # attached by templates only when a workflow explicitly needs it.
+    assert backtest.needs_confirmation is False
     compatibility_checks = {
         check.spec.get("field"): check.spec
         for check in backtest.post_checks
@@ -676,6 +917,7 @@ def test_stored_strategy_lifecycle_templates_validate(
     slots = {
         "dataset_id": "dataset-1",
         "target_col": "bad_flag",
+        "drop_nan_labels": True,
         "strategy_id": "strategy-1",
         "baseline_strategy_id": "strategy-0",
         "adoption_reason": "回测证据满足经营约束且经人工复核",
@@ -690,9 +932,12 @@ def test_stored_strategy_lifecycle_templates_validate(
     assert PlanValidator(tool_registry).validate(plan) == []
     assert [step.tool_ref.tool for step in plan.steps] == expected_tools
     assert template_id in builtin_template_ids()
+    if template_id == "stored_strategy_evaluation":
+        assert plan.steps[0].inputs["drop_nan_labels"] is True
     if template_id == "stored_strategy_adoption":
         backtest, adopt, doc = plan.steps
-        assert backtest.needs_confirmation is True
+        assert backtest.inputs["drop_nan_labels"] is True
+        assert backtest.needs_confirmation is False
         assert adopt.needs_confirmation is True
         assert adopt.inputs["backtest_id"] == f"$ref:{backtest.id}.output.backtest_id"
         assert adopt.inputs["adoption_reason"] == slots["adoption_reason"]
@@ -709,6 +954,7 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
         {
             "dataset_id": "dataset-1",
             "target_col": "bad_flag",
+            "drop_nan_labels": True,
             "score_col": "score",
             "strategy_type": "approval",
             "objective": "max_profit",
@@ -754,6 +1000,7 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
         "term_months": 12,
     }
     for step in (plan.steps[0], bands_step):
+        assert step.inputs["drop_nan_labels"] is True
         assert step.inputs["objective"] == "max_profit"
         assert step.inputs["max_bad_rate"] == 0.05
         assert step.inputs["min_approval_rate"] == 0.50
@@ -761,14 +1008,17 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
         assert step.inputs["pd_col"] == "pd"
         assert step.inputs["profit_params"] == profit_params
     for step in (backtest_step, compare_step):
+        assert step.inputs["drop_nan_labels"] is True
         assert step.inputs["ead_col"] == "ead"
         assert step.inputs["pd_col"] == "pd"
         assert step.inputs["profit_params"] == profit_params
     assert backtest_step.inputs["baseline_strategy_id"] == "strategy-baseline"
     assert build_step.inputs["strategy_type"] == "approval"
     assert compare_step.inputs["baseline_strategy_id"] == "strategy-baseline"
-    assert bands_step.needs_confirmation is True
-    assert backtest_step.needs_confirmation is True
+    assert bands_step.needs_confirmation is False
+    assert bands_step.policy.human_decision_gate == "none"
+    assert backtest_step.needs_confirmation is False
+    assert backtest_step.policy.human_decision_gate == "none"
     assert backtest_step.decision_point is True
     # Mandatory adoption gate: auto-accept must not skip it (delivery-gate precedent).
     assert adopt_step.needs_confirmation is True
@@ -779,9 +1029,10 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
     assert adopt_step.inputs["backtest_id"] == f"$ref:{backtest_step.id}.output.backtest_id"
     assert adopt_step.inputs["band_stats"] == f"$ref:{bands_step.id}.output"
     assert doc_step.inputs["strategy_id"] == f"$ref:{build_step.id}.output.strategy_id"
-    # S6: the challenger report sits after compare, before adopt. Its numbers come
-    # from the compare + backtest outputs and the governed baseline is threaded to it.
-    assert report_step.inputs["compare"] == f"$ref:{compare_step.id}.output"
+    # The challenger report sits after compare, before adopt. It accepts only a
+    # persisted challenger backtest receipt and recomputes task-owned evidence;
+    # caller-provided compare metrics are intentionally not threaded into it.
+    assert "compare" not in report_step.inputs
     assert report_step.inputs["challenger_backtest"] == f"$ref:{backtest_step.id}.output"
     assert report_step.inputs["strategy_id"] == f"$ref:{build_step.id}.output.strategy_id"
     assert report_step.inputs["champion_strategy_id"] == "strategy-baseline"
@@ -827,6 +1078,7 @@ def test_rule_strategy_template_instantiates_and_validates(tmp_path):
         {
             "dataset_id": "dataset-1",
             "target_col": "bad_flag",
+            "drop_nan_labels": True,
         },
         task_id="task-1",
     )
@@ -842,11 +1094,17 @@ def test_rule_strategy_template_instantiates_and_validates(tmp_path):
         ToolRef("strategy", "render_strategy_doc"),
     ]
     mine, select, evaluate, build, backtest, adopt, doc = plan.steps
-    # rule-set selection gate + backtest + mandatory adopt are the confirm gates.
+    assert mine.inputs["drop_nan_labels"] is True
+    assert evaluate.inputs["drop_nan_labels"] is True
+    assert backtest.inputs["drop_nan_labels"] is True
+    # Selection and backtest remain evidence-bearing decision points, while only
+    # the evidence-bound adoption effect is a mandatory confirmation gate.
     assert [step.needs_confirmation for step in plan.steps] == [
-        False, True, False, False, True, True, False
+        False, False, False, False, False, True, False
     ]
     assert [step.title for step in plan.steps if step.decision_point] == ["评估规则集", "回测策略"]
+    assert select.policy.human_decision_gate == "none"
+    assert backtest.policy.human_decision_gate == "none"
     # $ref wiring: select consumes the mined candidates; evaluate + build consume
     # the SELECTED subset (same $ref, so the two never diverge from the gate).
     assert select.inputs["candidate_rules"] == f"$ref:{mine.id}.output.candidate_rules"
@@ -919,10 +1177,8 @@ def test_vintage_template_threads_label_semantics_and_drop_nan_labels(tmp_path):
     assert step.inputs["drop_nan_labels"] is False
 
 
-def test_monitoring_run_template_chains_score_then_monitor_with_alert_gate(tmp_path):
-    """(f) S1b MONITORING_RUN: score_dataset -> monitor_run, with monitor_run as
-    the sole confirmation/decision_point gate (the alert-confirmation gate whose
-    copy is rendered from tool_monitor_run's own red/amber/green output)."""
+def test_monitoring_run_template_chains_score_then_monitor_as_decision_point(tmp_path):
+    """MONITORING_RUN records deterministic alert evidence without a local gate."""
     load_builtin_templates()
     tool_registry = _tool_registry(tmp_path)
     planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
@@ -942,7 +1198,7 @@ def test_monitoring_run_template_chains_score_then_monitor_with_alert_gate(tmp_p
         ToolRef("modeling", "monitor_run"),
     ]
     assert [step.title for step in plan.steps if step.decision_point] == ["监控运行"]
-    assert [step.title for step in plan.steps if step.needs_confirmation] == ["监控运行"]
+    assert [step.title for step in plan.steps if step.needs_confirmation] == []
     score_step = next(step for step in plan.steps if step.title == "打分")
     monitor_step = next(step for step in plan.steps if step.title == "监控运行")
     assert monitor_step.inputs["scored_dataset_id"] == f"$ref:{score_step.id}.output.result_dataset_id"

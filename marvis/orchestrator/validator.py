@@ -73,12 +73,21 @@ class PlanValidator:
             tool = self._resolve_step_tool(step)
             if tool is None:
                 continue
+            gate_deferred_keys = {
+                key
+                for key, value in step.inputs.items()
+                if step.needs_confirmation and value is None
+            }
             literal_inputs = {
                 key: value
                 for key, value in step.inputs.items()
-                if not _is_deferred_input(value)
+                if not _is_deferred_input(value) and key not in gate_deferred_keys
             }
-            schema = _relax_required(tool.input_schema, step.inputs)
+            schema = _relax_required(
+                tool.input_schema,
+                step.inputs,
+                extra_deferred_keys=gate_deferred_keys,
+            )
             try:
                 validate_against_schema(literal_inputs, schema, label=f"inputs:{step.id}")
             except SchemaValidationError as exc:
@@ -304,11 +313,17 @@ def _is_deferred_input(value) -> bool:
     )
 
 
-def _relax_required(input_schema: dict, step_inputs: dict) -> dict:
+def _relax_required(
+    input_schema: dict,
+    step_inputs: dict,
+    *,
+    extra_deferred_keys: set[str] | None = None,
+) -> dict:
     relaxed = deepcopy(input_schema)
     deferred_keys = {
         key for key, value in step_inputs.items() if _is_deferred_input(value)
     }
+    deferred_keys.update(extra_deferred_keys or ())
     _relax_required_combinators(relaxed, deferred_keys)
     return relaxed
 
@@ -333,6 +348,10 @@ def _relax_required_combinators(schema: dict, deferred_keys: set[str]) -> None:
             for variant in variants:
                 if isinstance(variant, dict):
                     _relax_required_combinators(variant, deferred_keys)
+    for conditional in ("if", "then", "else"):
+        branch = schema.get(conditional)
+        if isinstance(branch, dict):
+            _relax_required_combinators(branch, deferred_keys)
     negated = schema.get("not")
     if isinstance(negated, dict):
         _relax_required_combinators(negated, deferred_keys)

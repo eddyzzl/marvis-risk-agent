@@ -1,7 +1,7 @@
 import { api } from "../api.js";
 import { escapeHtml } from "../ui-utils.js";
 import { skeletonRowsHtml, skeletonTableHtml } from "../skeleton.js";
-import { listPluginTools } from "./api_v2.js";
+import { listPluginTools, listStrategyArtifacts, listTaskArtifacts } from "./api_v2.js";
 import { attachArtifactHandlers, renderArtifact } from "./artifact_view.js";
 import { gateConfirmLabel } from "./driver_gate_confirm.js";
 
@@ -427,6 +427,11 @@ export function createPlanRailController({
   // hand the user straight into typing a steering instruction. Optional so
   // callers that don't wire the composer (tests) don't need a stub.
   fillComposer,
+  // Strategy artifacts stay off the high-frequency task payload.  They are
+  // fetched only after the latest strategy plan reaches done and then cached
+  // per task + plan revision.
+  listStrategyArtifactsClient = listStrategyArtifacts,
+  listTaskArtifactsClient = listTaskArtifacts,
 } = {}) {
   const v2PlanCache = new Map();
   const v2PlanLastFetch = new Map();
@@ -440,6 +445,8 @@ export function createPlanRailController({
   // asks for, with no behavior regression.
   const v2ToolSchemaCache = new Map();
   const v2ToolSchemaFetching = new Set();
+  const strategyArtifactsCache = new Map();
+  const strategyArtifactsFetching = new Set();
   const renderStepChecker = typeof stepCheckerHtml === "function" ? stepCheckerHtml : () => "";
   let artifactHandlersInstalled = false;
 
@@ -885,13 +892,162 @@ export function createPlanRailController({
     }) || null;
   }
 
+  function strategyArtifactPlanKey(plan) {
+    if (!plan?.id || plan?.status !== "done") return "";
+    return `${String(plan.id)}:${String(plan.revision || 1)}`;
+  }
+
+  function maybeFetchStrategyArtifacts(plan, taskId = selectedTaskId()) {
+    if (
+      selectedTask()?.task_type !== "strategy"
+      || typeof listStrategyArtifactsClient !== "function"
+      || typeof listTaskArtifactsClient !== "function"
+    ) {
+      return null;
+    }
+    const planKey = strategyArtifactPlanKey(plan);
+    if (!taskId || !planKey) return null;
+    const cached = strategyArtifactsCache.get(taskId);
+    if (cached?.planKey === planKey || strategyArtifactsFetching.has(`${taskId}:${planKey}`)) {
+      return cached || { planKey, state: "loading", artifacts: [] };
+    }
+
+    const fetchKey = `${taskId}:${planKey}`;
+    const loading = { planKey, state: "loading", artifacts: [] };
+    strategyArtifactsCache.set(taskId, loading);
+    strategyArtifactsFetching.add(fetchKey);
+    Promise.all([
+      Promise.resolve(listStrategyArtifactsClient(taskId)),
+      Promise.resolve(listTaskArtifactsClient(taskId)),
+    ])
+      .then(([strategyPayload, taskPayload]) => {
+        if (strategyArtifactsCache.get(taskId)?.planKey !== planKey) return;
+        const strategyArtifacts = Array.isArray(strategyPayload?.artifacts)
+          ? strategyPayload.artifacts.map((item) => ({ ...item, artifact_scope: "strategy" }))
+          : [];
+        const taskArtifacts = Array.isArray(taskPayload?.artifacts)
+          ? taskPayload.artifacts.map((item) => ({ ...item, artifact_scope: "task_analysis" }))
+          : [];
+        const seen = new Set(
+          strategyArtifacts.map((item) => `${String(item?.kind || "")}\u0000${String(item?.filename || "")}`),
+        );
+        const artifacts = [
+          ...strategyArtifacts,
+          ...taskArtifacts.filter((item) => {
+            const key = `${String(item?.kind || "")}\u0000${String(item?.filename || "")}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          }),
+        ];
+        strategyArtifactsCache.set(taskId, { planKey, state: "ready", artifacts });
+      })
+      .catch((error) => {
+        if (strategyArtifactsCache.get(taskId)?.planKey !== planKey) return;
+        strategyArtifactsCache.set(taskId, {
+          planKey,
+          state: "error",
+          artifacts: [],
+          error: String(error?.message || "策略产物读取失败"),
+        });
+      })
+      .finally(() => {
+        strategyArtifactsFetching.delete(fetchKey);
+        if (selectedTaskId() === taskId) renderWorkflowStepper?.({ force: true });
+      });
+    return loading;
+  }
+
+  function strategyArtifactStatusLabel(status) {
+    const labels = {
+      adopted_local: "本地采纳",
+      validated: "已验证",
+      draft: "草稿",
+      retired: "已退役",
+    };
+    return labels[String(status || "")] || "状态未标注";
+  }
+
+  function strategyArtifactRowsHtml(artifacts, taskId) {
+    if (!artifacts.length) {
+      return '<p class="strategy-artifacts-empty">计划已完成，当前没有可下载的策略产物。</p>';
+    }
+    const rows = artifacts.map((artifact) => {
+      const artifactId = String(artifact?.id || "");
+      const filename = String(artifact?.filename || "策略产物");
+      const kind = String(artifact?.kind || "artifact");
+      const version = artifact?.version == null ? "" : `v${String(artifact.version)}`;
+      const taskAnalysis = artifact?.artifact_scope === "task_analysis";
+      const status = taskAnalysis
+        ? String(artifact?.origin_tool || "任务分析产物")
+        : strategyArtifactStatusLabel(artifact?.asset_status);
+      const available = Boolean(artifact?.available && artifactId);
+      const route = taskAnalysis ? "task-artifacts" : "strategy-artifacts";
+      const action = available
+        ? `<a class="button compact secondary strategy-artifact-download" href="/api/tasks/${encodeURIComponent(taskId)}/${route}/${encodeURIComponent(artifactId)}/download" download>下载</a>`
+        : '<span class="strategy-artifact-unavailable" aria-label="文件不可用">不可用</span>';
+      return [
+        '<li class="strategy-artifact-row">',
+        '<span class="strategy-artifact-copy">',
+        `<strong>${escapeHtml(filename)}</strong>`,
+        `<small>${escapeHtml([kind, taskAnalysis ? "任务分析" : version, status].filter(Boolean).join(" · "))}</small>`,
+        "</span>",
+        action,
+        "</li>",
+      ].join("");
+    });
+    return `<ul class="strategy-artifact-list">${rows.join("")}</ul>`;
+  }
+
+  function strategyArtifactsCardHtml(state, taskId) {
+    if (!state) return "";
+    if (state.state === "loading") {
+      return [
+        '<section class="plan-driver-action-card" data-driver-action="strategy-artifacts">',
+        '<header class="plan-driver-action-head">',
+        '<span class="plan-driver-action-pill">策略产物</span>',
+        '<span class="plan-driver-action-title">正在读取本地策略产物…</span>',
+        "</header>",
+        "</section>",
+      ].join("");
+    }
+    if (state.state === "error") {
+      return [
+        '<section class="plan-driver-action-card" data-driver-action="strategy-artifacts">',
+        '<header class="plan-driver-action-head">',
+        '<span class="plan-driver-action-pill">策略产物</span>',
+        `<span class="plan-driver-action-title">${escapeHtml(state.error || "策略产物读取失败")}</span>`,
+        "</header>",
+        '<button type="button" class="button compact secondary" data-strategy-artifacts-retry="1">重新读取</button>',
+        "</section>",
+      ].join("");
+    }
+    const artifacts = Array.isArray(state.artifacts) ? state.artifacts : [];
+    const hasAdopted = artifacts.some((item) => item?.asset_status === "adopted_local");
+    const title = hasAdopted
+      ? `策略产物已在当前工作区本地采纳，共 ${artifacts.length} 个。`
+      : `策略计划已完成，共 ${artifacts.length} 个产物。`;
+    return [
+      '<section class="plan-driver-action-card strategy-artifacts-card" data-driver-action="strategy-artifacts">',
+      '<header class="plan-driver-action-head">',
+      `<span class="plan-driver-action-pill">${hasAdopted ? "本地采纳" : "策略产物"}</span>`,
+      `<span class="plan-driver-action-title">${escapeHtml(title)}</span>`,
+      "</header>",
+      hasAdopted
+        ? '<p class="strategy-artifacts-notice">本地采纳仅代表当前 MARVIS 工作区已确认，不代表生产环境已上线。</p>'
+        : '<p class="strategy-artifacts-notice">这些文件是当前任务的本地分析产物，不代表策略已采纳或生产环境已上线。</p>',
+      strategyArtifactRowsHtml(artifacts, taskId),
+      "</section>",
+    ].join("");
+  }
+
   // Builds the middle-workspace driver-actions panel body: the 开始执行 control
   // (plan built but not started, manual mode) and/or the 下载报告 control (a
   // report step has completed). Both reuse the existing document-level handlers
   // (data-driver-confirm / data-driver-report-download) — only the mount moves
   // out of the narrow rail into the roomy middle region. Returns "" when there is
   // no driver action to surface (the caller then hides the panel).
-  function planDriverActionsHtml(plan) {
+  function planDriverActionsHtml(plan, strategyArtifactState = null, taskId = selectedTaskId()) {
     const cards = [];
     const awaitingStart = plan?.status === "validated" && !isAgentMode?.();
     if (awaitingStart) {
@@ -916,17 +1072,20 @@ export function createPlanRailController({
         "</section>",
       ].join(""));
     }
+    const strategyArtifactsCard = strategyArtifactsCardHtml(strategyArtifactState, taskId);
+    if (strategyArtifactsCard) cards.push(strategyArtifactsCard);
     if (!cards.length) return "";
     return `<div class="plan-driver-actions-body">${cards.join("")}</div>`;
   }
 
   // A stable signature of the driver-actions panel state, so an unchanged panel
   // is not rebuilt on every poll tick (which would drop focus / restart flashes).
-  function planDriverActionsSignature(plan) {
+  function planDriverActionsSignature(plan, strategyArtifactState = null) {
     const report = doneReportStep(plan);
     return JSON.stringify({
       start: plan?.status === "validated" && !isAgentMode?.(),
       report: report ? String(report.id || report.output_ref || "1") : "",
+      strategy_artifacts: strategyArtifactState,
     });
   }
 
@@ -937,7 +1096,8 @@ export function createPlanRailController({
   function renderDriverActionsPanel(plan) {
     const panel = $("planDriverActions");
     if (!panel) return;
-    const html = planDriverActionsHtml(plan);
+    const strategyArtifactState = maybeFetchStrategyArtifacts(plan);
+    const html = planDriverActionsHtml(plan, strategyArtifactState);
     if (!html) {
       if (panel.dataset.driverActionsSignature !== "") {
         panel.dataset.driverActionsSignature = "";
@@ -948,7 +1108,7 @@ export function createPlanRailController({
       panel.setAttribute("aria-hidden", "true");
       return;
     }
-    const signature = planDriverActionsSignature(plan);
+    const signature = planDriverActionsSignature(plan, strategyArtifactState);
     if (panel.dataset.driverActionsSignature !== signature) {
       panel.dataset.driverActionsSignature = signature;
       panel.innerHTML = html;
@@ -1342,6 +1502,16 @@ export function createPlanRailController({
   }
 
   function handleClick(event) {
+    const strategyArtifactsRetry = event.target?.closest?.("[data-strategy-artifacts-retry]");
+    if (strategyArtifactsRetry) {
+      event.preventDefault();
+      event.stopPropagation();
+      const taskId = selectedTaskId();
+      strategyArtifactsCache.delete(taskId);
+      maybeFetchStrategyArtifacts(v2PlanCache.get(taskId), taskId);
+      renderWorkflowStepper?.({ force: true });
+      return true;
+    }
     // Rail's lightweight entry: open the middle retry panel and scroll to the
     // step's card. The heavy form itself lives in the middle workspace.
     const planRetryOpen = event.target?.closest?.("[data-plan-retry-open]");

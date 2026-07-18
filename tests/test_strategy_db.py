@@ -17,6 +17,7 @@ from marvis.packs.strategy.profit import ProfitParams
 from marvis.packs.strategy.typed_backtest import ApprovalProfitInputs, run_typed_backtest
 from marvis.state_machine import ConflictError
 from marvis.strategy_adoption import AdoptionReasonError
+from marvis.strategy_lifecycle import StrategyLifecycleError
 
 
 def _strategy():
@@ -544,6 +545,7 @@ def test_adopt_strategy_marks_adopted_with_metadata(tmp_path):
     assert result["retired_strategy_ids"] == []
     meta = repo.get_strategy_meta(strategy.id)
     assert meta["status"] == "adopted"
+    assert meta["asset_status"] == "adopted_local"
     assert meta["adopted_at"] == "2026-06-20T00:00:00Z"
     assert meta["adoption_reason"] == "approved by committee"
     assert meta["parent_strategy_id"] is None
@@ -648,7 +650,9 @@ def test_adopting_new_strategy_retires_prior_adopted_sibling(tmp_path):
 
     assert result["retired_strategy_ids"] == [strategy_a.id]
     assert repo.get_strategy_meta(strategy_a.id)["status"] == "retired"
+    assert repo.get_strategy_meta(strategy_a.id)["asset_status"] == "retired"
     assert repo.get_strategy_meta(strategy_b.id)["status"] == "adopted"
+    assert repo.get_strategy_meta(strategy_b.id)["asset_status"] == "adopted_local"
     retire_audit = db_module.PluginRepository(db_path).list_audit(kind="strategy.retire")[0]
     assert retire_audit["target_ref"] == strategy_a.id
     assert retire_audit["detail"]["superseded_by"] == strategy_b.id
@@ -749,6 +753,7 @@ def test_new_version_from_clones_lineage_and_bumps_version(tmp_path):
     child_meta = repo.get_strategy_meta(child.id)
     assert child_meta["version"] == 2
     assert child_meta["status"] == "draft"
+    assert child_meta["asset_status"] == "draft"
     assert child_meta["parent_strategy_id"] == strategy.id
     assert child.description == "tightened cutoff"
     assert child.rules[0].condition == "score < 620"
@@ -829,6 +834,33 @@ def test_strategy_artifacts_round_trip(tmp_path):
     assert artifacts[0]["path"].endswith("decision.csv")
 
 
+def test_task_scoped_artifact_queries_return_stored_canonical_asset_status(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy)
+    artifact_id = repo.save_strategy_artifact(
+        strategy.id,
+        kind="strategy_doc_md",
+        path="strategy.md",
+    )
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE strategies SET asset_status = 'validated' WHERE id = ?",
+            (strategy.id,),
+        )
+
+    listed = repo.list_strategy_artifacts_for_task("task-1")
+    loaded = repo.get_strategy_artifact_for_task("task-1", artifact_id)
+
+    assert listed[0]["status"] == "draft"
+    assert listed[0]["asset_status"] == "validated"
+    assert loaded is not None
+    assert loaded["status"] == "draft"
+    assert loaded["asset_status"] == "validated"
+
+
 def test_strategy_artifacts_cascade_when_strategy_is_deleted(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -855,6 +887,52 @@ def test_existing_strategy_defaults_to_draft_version_one(tmp_path):
     meta = repo.get_strategy_meta(strategy.id)
     assert meta["version"] == 1
     assert meta["status"] == "draft"
+    assert meta["asset_status"] == "draft"
     assert meta["adopted_at"] is None
     metas = repo.list_meta_for_task("task-1")
     assert [m["id"] for m in metas] == [strategy.id]
+    assert [m["asset_status"] for m in metas] == ["draft"]
+
+
+def test_validated_strategy_can_be_locally_adopted_with_dual_write(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy)
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE strategies SET asset_status = 'validated' WHERE id = ?",
+            (strategy.id,),
+        )
+
+    repo.adopt_strategy_with_audit(
+        strategy.id,
+        reason="validated locally",
+        audit=_adopt_audit(strategy.id),
+    )
+
+    meta = repo.get_strategy_meta(strategy.id)
+    assert meta["status"] == "adopted"
+    assert meta["asset_status"] == "adopted_local"
+
+
+def test_strategy_meta_rejects_dual_status_drift(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy)
+    with connect(db_path) as conn:
+        conn.execute("PRAGMA ignore_check_constraints = ON")
+        conn.execute(
+            """
+            UPDATE strategies
+               SET status = 'adopted', asset_status = 'draft'
+             WHERE id = ?
+            """,
+            (strategy.id,),
+        )
+
+    with pytest.raises(StrategyLifecycleError, match="lifecycle drift"):
+        repo.get_strategy_meta(strategy.id)

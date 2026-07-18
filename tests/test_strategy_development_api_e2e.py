@@ -43,18 +43,6 @@ def _latest_message(payload: dict, *, kind: str) -> dict:
     )
 
 
-def _confirm_gate(client: TestClient, task_id: str, gate: dict) -> dict:
-    response = client.post(
-        f"/api/tasks/{task_id}/agent/messages",
-        json={
-            "content": "确认",
-            "expected_step_id": gate["metadata"]["step_id"],
-        },
-    )
-    assert response.status_code == 202, response.text
-    return response.json()
-
-
 @pytest.mark.slow
 @pytest.mark.e2e
 def test_strategy_development_product_entry_requires_evidence_bound_adoption_reason(
@@ -109,15 +97,7 @@ def test_strategy_development_product_entry_requires_evidence_bound_adoption_rea
         json={"content": "开始"},
     )
     assert began.status_code == 202, began.text
-    bands_gate = _latest_message(began.json(), kind="gate")
-    assert bands_gate["metadata"]["gate_source_tool"] == "design_cutoff_bands"
-
-    backtest_payload = _confirm_gate(client, task_id, bands_gate)
-    backtest_gate = _latest_message(backtest_payload, kind="gate")
-    assert backtest_gate["metadata"]["gate_source_tool"] == "backtest_strategy"
-
-    adoption_payload = _confirm_gate(client, task_id, backtest_gate)
-    adoption_gate = _latest_message(adoption_payload, kind="gate")
+    adoption_gate = _latest_message(began.json(), kind="gate")
     assert adoption_gate["metadata"]["gate_source_tool"] == "adopt_strategy"
     adoption_step_id = adoption_gate["metadata"]["step_id"]
     editable_schema = adoption_gate["metadata"]["editable_input_schema"]

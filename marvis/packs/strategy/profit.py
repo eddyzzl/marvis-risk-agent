@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import pandas as pd
 
@@ -28,6 +29,9 @@ def profit_calc(
     if segment_col:
         required.append(segment_col)
     _assert_columns(df, required)
+    if df.empty:
+        raise ValueError("profit_calc requires a non-empty dataset")
+    _validate_profit_params(params)
 
     groups = [("all", df)] if not segment_col else df.groupby(segment_col, sort=True, dropna=False)
     return [
@@ -66,6 +70,8 @@ def _profit_result(
 ) -> ProfitResult:
     ead = pd.to_numeric(group[ead_col], errors="raise").astype(float)
     pd_values = pd.to_numeric(group[pd_col], errors="raise").astype(float)
+    _validate_economic_series(ead, name="EAD", minimum=0.0)
+    _validate_economic_series(pd_values, name="PD", minimum=0.0, maximum=1.0)
     term_factor = float(params.term_months) / 12.0
     ead_sum = float(ead.sum())
     revenue = float((ead * float(params.annual_rate) * term_factor).sum())
@@ -89,6 +95,50 @@ def _assert_columns(df: pd.DataFrame, columns: list[str]) -> None:
     missing = [column for column in columns if column not in df.columns]
     if missing:
         raise ValueError(f"missing columns: {', '.join(missing)}")
+
+
+def _validate_profit_params(params: ProfitParams) -> None:
+    bounded = {
+        "annual_rate": (params.annual_rate, 0.0, 1.0),
+        "funding_rate": (params.funding_rate, 0.0, 1.0),
+        "lgd": (params.lgd, 0.0, 1.0),
+        "operating_cost_per_loan": (
+            params.operating_cost_per_loan,
+            0.0,
+            1_000_000_000_000.0,
+        ),
+        "term_months": (params.term_months, 1.0, 1_200.0),
+    }
+    for name, (raw_value, minimum, maximum) in bounded.items():
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"profit parameter {name} must be numeric") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"profit parameter {name} must be finite")
+        if not minimum <= value <= maximum:
+            raise ValueError(
+                f"profit parameter {name} must be between {minimum:g} and {maximum:g}"
+            )
+    if isinstance(params.term_months, bool) or float(params.term_months) != int(
+        params.term_months
+    ):
+        raise ValueError("profit parameter term_months must be an integer")
+
+
+def _validate_economic_series(
+    values: pd.Series,
+    *,
+    name: str,
+    minimum: float,
+    maximum: float | None = None,
+) -> None:
+    if values.isna().any() or not values.map(math.isfinite).all():
+        raise ValueError(f"{name} values must be finite")
+    if (values < minimum).any():
+        raise ValueError(f"{name} values must be >= {minimum:g}")
+    if maximum is not None and (values > maximum).any():
+        raise ValueError(f"{name} values must be <= {maximum:g}")
 
 
 __all__ = ["ProfitParams", "profit_calc", "vintage_profit"]

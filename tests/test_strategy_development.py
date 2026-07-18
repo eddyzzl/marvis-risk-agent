@@ -684,7 +684,8 @@ def test_render_adopt_strategy_table():
             {"kind": "monitoring_plan_json", "path": "b.json"},
         ],
     })
-    assert "策略已采纳" in text
+    assert "策略已在本地采纳" in text
+    assert "不代表生产环境已上线" in text
     assert tables[0]["title"] == "交付物"
     assert len(tables[0]["rows"]) == 2
     assert tables[1]["title"] == "退役策略"

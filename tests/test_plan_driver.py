@@ -2494,6 +2494,9 @@ def test_is_confirm_accepts_task_start_shortcuts():
     assert is_confirm("开始模型开发")
     assert is_confirm("开始策略开发")
     assert is_confirm("确认采纳")
+    assert is_confirm("确认导出")
+    assert is_confirm("接受并导出")
+    assert is_confirm("导出矩阵")
     assert not is_confirm("不要开始建模")
     assert not is_confirm("开始建模吗？")
 

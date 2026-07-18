@@ -11,6 +11,7 @@ from marvis.db import PluginRepository, StrategyRepository, connect, init_db
 from marvis.packs.strategy import BacktestResult, build_strategy, run_typed_backtest
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy import tools as strategy_tools
+from marvis.repositories.strategy_monitoring import StrategyMonitoringRepository
 from marvis.settings import build_settings
 from marvis.state_machine import ConflictError
 
@@ -59,10 +60,11 @@ def _effect_target(
     strategy_id: str,
     *,
     champion_ids: list[str] | None = None,
+    canonical: bool = False,
 ) -> dict:
     meta = repo.get_strategy_meta(strategy_id)
     assert meta is not None
-    return {
+    target = {
         "kind": "strategy",
         "id": strategy_id,
         "expected_status": "draft",
@@ -73,6 +75,14 @@ def _effect_target(
         "strategy_spec_hash": repo.get_strategy_spec_hash(strategy_id),
         "current_champion_ids": sorted(champion_ids or []),
     }
+    if canonical:
+        target.update(
+            {
+                "expected_asset_status": meta["asset_status"],
+                "result_asset_status": "adopted_local",
+            }
+        )
+    return target
 
 
 def _insert_dispatched_effect(
@@ -216,6 +226,69 @@ def test_governed_adoption_commits_lifecycle_and_effect_receipt_atomically(tmp_p
     assert repo.get_strategy_meta(champion.id)["status"] == "retired"
     assert repo.get_strategy_meta(challenger.id)["status"] == "adopted"
     assert _ledger_states(db_path) == ("committed", "consumed")
+
+
+def test_governed_adoption_accepts_canonical_validated_target(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    challenger = _strategy("validated challenger", 625)
+    repo.create_strategy("task-1", challenger)
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE strategies SET asset_status = 'validated' WHERE id = ?",
+            (challenger.id,),
+        )
+    effect_id = _insert_dispatched_effect(
+        db_path,
+        target=_effect_target(repo, challenger.id, canonical=True),
+    )
+
+    repo.adopt_strategy_with_audit(
+        challenger.id,
+        reason="validated strategy approved for local use",
+        audit=_audit(challenger.id),
+        effect_execution_id=effect_id,
+        runtime_generation="runtime-2",
+    )
+
+    meta = repo.get_strategy_meta(challenger.id)
+    assert meta["status"] == "adopted"
+    assert meta["asset_status"] == "adopted_local"
+
+
+@pytest.mark.parametrize(
+    "canonical_change",
+    [
+        {"expected_asset_status": "adopted_local"},
+        {"result_asset_status": "retired"},
+    ],
+)
+def test_governed_adoption_rejects_canonical_lifecycle_drift(
+    tmp_path,
+    canonical_change,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    challenger = _strategy("challenger", 625)
+    repo.create_strategy("task-1", challenger)
+    target = _effect_target(repo, challenger.id, canonical=True)
+    target.update(canonical_change)
+    effect_id = _insert_dispatched_effect(db_path, target=target)
+
+    with pytest.raises(ConflictError, match="授权|策略效果"):
+        repo.adopt_strategy_with_audit(
+            challenger.id,
+            reason="must not use drifting target",
+            audit=_audit(challenger.id),
+            effect_execution_id=effect_id,
+            runtime_generation="runtime-2",
+        )
+
+    meta = repo.get_strategy_meta(challenger.id)
+    assert meta["status"] == "draft"
+    assert meta["asset_status"] == "draft"
 
 
 @pytest.mark.parametrize(
@@ -505,6 +578,59 @@ def test_tool_second_artifact_db_failure_rolls_back_lifecycle_files_and_audits(
     plugin_repo = PluginRepository(settings.db_path)
     assert plugin_repo.list_audit(kind="strategy.adopt") == []
     assert plugin_repo.list_audit(kind="strategy.artifact") == []
+    strategy_dir = settings.tasks_dir / "task-1" / "strategy"
+    assert not list(strategy_dir.glob("decision_table_*.csv"))
+    assert not list(strategy_dir.glob("monitoring_plan_*.json"))
+
+
+def test_tool_monitoring_plan_ledger_failure_rolls_back_effect_and_files(
+    tmp_path,
+    monkeypatch,
+):
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    repo = StrategyRepository(settings.db_path)
+    challenger = _strategy("challenger", 625)
+    repo.create_strategy("task-1", challenger)
+    repo.save_backtest("backtest-1", challenger.id, "dataset-1", _backtest(challenger.id))
+    effect_id = _insert_dispatched_effect(
+        settings.db_path,
+        target=_effect_target(repo, challenger.id),
+    )
+    ctx = SimpleNamespace(
+        task_id="task-1",
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        seed=None,
+        effect_execution_id=effect_id,
+        runtime_generation="runtime-2",
+    )
+
+    def fail_plan_ledger(*_args, **_kwargs):
+        raise RuntimeError("monitoring plan ledger unavailable")
+
+    monkeypatch.setattr(
+        StrategyMonitoringRepository,
+        "create_plan_on_connection",
+        fail_plan_ledger,
+    )
+
+    with pytest.raises(RuntimeError, match="monitoring plan ledger unavailable"):
+        strategy_tools.tool_adopt_strategy(
+            {
+                "strategy_id": challenger.id,
+                "backtest_id": "backtest-1",
+                "adoption_reason": "committee promotes challenger",
+            },
+            ctx,
+        )
+
+    assert repo.get_strategy_meta(challenger.id)["status"] == "draft"
+    assert _ledger_states(settings.db_path) == ("dispatched", "reserved")
+    assert StrategyMonitoringRepository(settings.db_path).latest_plan(challenger.id) is None
+    assert repo.list_strategy_artifacts(challenger.id) == []
+    assert PluginRepository(settings.db_path).list_audit(kind="strategy.adopt") == []
+    assert PluginRepository(settings.db_path).list_audit(kind="strategy.artifact") == []
     strategy_dir = settings.tasks_dir / "task-1" / "strategy"
     assert not list(strategy_dir.glob("decision_table_*.csv"))
     assert not list(strategy_dir.glob("monitoring_plan_*.json"))

@@ -28,7 +28,12 @@ _POSITIVE_INT_BOUNDS = {"min": 1}
 _NONNEGATIVE_INT_BOUNDS = {"min": 0}
 
 
-def gate_param_schema(plan: Plan, gate: PlanStep | None) -> list[dict]:
+def gate_param_schema(
+    plan: Plan,
+    gate: PlanStep | None,
+    *,
+    editable_input_schema: dict | None = None,
+) -> list[dict]:
     """Adjustable-parameter summary for ``gate``'s dependency step(s).
 
     Returns a list of ``{"name", "type", "current", "bounds"}`` dicts (bounds
@@ -38,6 +43,17 @@ def gate_param_schema(plan: Plan, gate: PlanStep | None) -> list[dict]:
     prompts stay stable across otherwise-identical calls."""
     if gate is None:
         return []
+    # A tool-specific gate adapter is the authoritative allowlist. In
+    # particular, monitoring disposition exposes only disposition/reason/
+    # threshold_patch; immutable run and plan receipt inputs must never be
+    # suggested to the routing LLM as adjustable parameters.
+    editable_properties = (
+        editable_input_schema.get("properties")
+        if isinstance(editable_input_schema, dict)
+        else None
+    )
+    if isinstance(editable_properties, dict) and editable_properties:
+        return _editable_schema_entries(gate, editable_properties)
     seen: set[str] = set()
     schema: list[dict] = []
     for dep_id in gate.depends_on or []:
@@ -55,6 +71,43 @@ def gate_param_schema(plan: Plan, gate: PlanStep | None) -> list[dict]:
                 entry["bounds"] = bounds
             schema.append(entry)
     return schema
+
+
+def _editable_schema_entries(
+    gate: PlanStep,
+    properties: dict,
+) -> list[dict]:
+    entries: list[dict] = []
+    for name in sorted(str(key) for key in properties):
+        raw = properties.get(name)
+        spec = raw if isinstance(raw, dict) else {}
+        declared_type = spec.get("type")
+        if isinstance(declared_type, list):
+            kind = next(
+                (str(item) for item in declared_type if str(item) != "null"),
+                "null",
+            )
+        elif isinstance(declared_type, str):
+            kind = declared_type
+        else:
+            kind = _type_name((gate.inputs or {}).get(name))
+        entry = {
+            "name": name,
+            "type": kind,
+            "current": (gate.inputs or {}).get(name),
+        }
+        bounds = {
+            key: spec[key]
+            for key in ("minimum", "maximum", "minLength", "maxLength")
+            if key in spec
+        }
+        if bounds:
+            entry["bounds"] = bounds
+        enum = spec.get("enum")
+        if isinstance(enum, list):
+            entry["enum"] = list(enum)
+        entries.append(entry)
+    return entries
 
 
 def _type_name(value) -> str:

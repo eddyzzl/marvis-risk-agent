@@ -25,6 +25,9 @@ class GateControlValidationError(Exception):
 
 _STRUCTURED_DEDUP_STRATEGIES = frozenset({"first", "last"})
 _ADOPTION_REASON_PARAM = "adoption_reason"
+_MONITORING_DISPOSITION_PARAMS = frozenset(
+    {"disposition", "reason", "threshold_patch"}
+)
 
 
 def validate_gate_control(
@@ -48,6 +51,18 @@ def validate_gate_control(
         isinstance(adjust_params, dict)
         and _ADOPTION_REASON_PARAM in adjust_params
     )
+    monitoring_adjust = bool(
+        isinstance(adjust_params, dict)
+        and adjust_params
+        and (
+            bool(set(adjust_params) & _MONITORING_DISPOSITION_PARAMS)
+            or (
+                gate is not None
+                and gate.tool_ref is not None
+                and gate.tool_ref.tool == "apply_monitoring_disposition"
+            )
+        )
+    )
     dedup_adjust = bool(dedup_strategies)
     if (
         selection is None
@@ -58,6 +73,7 @@ def validate_gate_control(
         and not tuning_adjust
         and not split_adjust
         and not adoption_reason_adjust
+        and not monitoring_adjust
     ):
         return
     if gate is None:
@@ -73,6 +89,16 @@ def validate_gate_control(
             normalize_adoption_reason((adjust_params or {}).get(_ADOPTION_REASON_PARAM))
         except AdoptionReasonError as exc:
             raise GateControlValidationError(str(exc)) from exc
+    if monitoring_adjust:
+        if gate.tool_ref is None or gate.tool_ref.tool != "apply_monitoring_disposition":
+            raise GateControlValidationError(
+                "监控处置控件只适用于监控结果处置确认步骤。"
+            )
+        unexpected = sorted(set(adjust_params or {}) - _MONITORING_DISPOSITION_PARAMS)
+        if unexpected:
+            raise GateControlValidationError(
+                "监控处置控件不可修改冻结的 plan/run/strategy 证据。"
+            )
     if (selection is not None or screen_adjust) and not gate_depends_on_tool(plan, gate, "screen_features"):
         raise GateControlValidationError("该控件只适用于特征筛选确认步骤。")
     if select_adjust and not gate_depends_on_tool(plan, gate, "select_features"):

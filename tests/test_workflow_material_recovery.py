@@ -228,10 +228,16 @@ def test_agent_can_chat_after_material_failure_and_only_explicit_retry_reruns(
     client = TestClient(create_app(app_root))
     source = _malformed_csv_source(app_root)
     gate_llm = _GateLLM()
+    router_llm = _GateLLM()
     monkeypatch.setattr(
         "marvis.routers.validation_agent.resolve_driver_agent_client",
         lambda request, task, payload: gate_llm,
     )
+    if task_type == "strategy":
+        monkeypatch.setattr(
+            "marvis.agent.validation_app_service.driver_llm_client",
+            lambda request, task: router_llm,
+        )
     created = client.post(
         "/api/tasks",
         json=_task_payload(source=source, task_type=task_type, run_mode="agent"),
@@ -284,6 +290,8 @@ def test_agent_can_chat_after_material_failure_and_only_explicit_retry_reruns(
     assert _last_recovery_intent(questioned.json()["messages"]) == (
         "workflow_recovery_chat"
     )
+    if task_type == "strategy":
+        assert router_llm.calls == []
     assert len(
         [
             item

@@ -1,7 +1,7 @@
 """S5 end-to-end: adopt a strategy -> run the strategy_monitoring template through
-the REAL PlanDriver on a drift-injected fresh sample -> pause at the red-light
-alarm gate -> reply 「起新版本」 -> monitoring report lands on disk with a
-next_action pointing at strategy_development.
+the REAL PlanDriver on a drift-injected fresh sample -> pause at the governed
+red-light disposition gate -> reply 「起新版本」 -> create a real child task,
+draft strategy, dataset reference and monitoring report.
 
 The strategy here is pure-rule (no model), so monitoring reports only the
 strategy-facing approval / approved-bad-rate drift; the fresh sample is engineered
@@ -151,16 +151,12 @@ def _adopt_strategy(driver, registry, plan_repo, tmp_path, task):
         adjust_params={"band_edges": [0, 500, 2100]},
     )
     assert turn.status == PlanStatus.AWAITING_CONFIRM.value
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=3)
-    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=4)
-    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
     plan = plan_repo.load_plan(plan_id)
     adopt_step = next(step for step in plan.steps if step.tool_ref.tool == "adopt_strategy")
     turn = driver.resume(
         plan_id=plan_id,
         user_text="确认采纳",
-        run_seq=5,
+        run_seq=3,
         adjust_params={"adoption_reason": "committee approved monitoring baseline"},
         expected_step_id=adopt_step.id,
     )
@@ -205,12 +201,11 @@ def test_strategy_monitoring_e2e_red_then_new_version_then_report(tmp_path):
     # Confirm the plan-overview 开始 gate to run the monitoring step.
     turn = driver.resume(plan_id=turn.plan_id, user_text="开始")
 
-    # The monitoring step ran; the plan paused at the report step's alarm gate,
-    # which renders its run_strategy_monitoring dependency's output (red verdict +
-    # red-light checklist).
+    # The monitoring step ran; the plan paused at the governed disposition gate,
+    # which is bound to immutable run/plan receipts rather than caller metrics.
     gate = _awaiting_step(plan_repo, turn.plan_id)
     assert gate is not None
-    assert gate.tool_ref.tool == "render_monitoring_report"
+    assert gate.tool_ref.tool == "apply_monitoring_disposition"
     monitor_step = next(s for s in plan_repo.load_plan(turn.plan_id).steps
                         if s.tool_ref.tool == "run_strategy_monitoring")
     monitor_output = plan_repo.load_step_output(monitor_step.id)
@@ -218,20 +213,63 @@ def test_strategy_monitoring_e2e_red_then_new_version_then_report(tmp_path):
     gate_text = "\n".join(m.content for m in turn.messages)
     assert "起新版本" in gate_text  # red-light checklist injected into the gate copy
 
-    # Reply 「起新版本」 -> disposition recorded on the report step, gate confirmed,
-    # report step runs.
+    # Reply 「起新版本」 -> the disposition tool creates real child records and the
+    # final report renders those execution receipts.
     turn = driver.resume(plan_id=turn.plan_id, user_text="起新版本")
 
     plan = plan_repo.load_plan(turn.plan_id)
-    assert plan.status == PlanStatus.DONE
+    assert plan.status == PlanStatus.DONE, {
+        "turn_status": turn.status,
+        "messages": [message.content for message in turn.messages],
+        "awaiting_gate": (
+            None
+            if _awaiting_step(plan_repo, turn.plan_id) is None
+            else {
+                "tool": _awaiting_step(plan_repo, turn.plan_id).tool_ref.tool,
+                "inputs": _awaiting_step(plan_repo, turn.plan_id).inputs,
+            }
+        ),
+    }
+    disposition_step = next(
+        s for s in plan.steps if s.tool_ref.tool == "apply_monitoring_disposition"
+    )
+    disposition_output = plan_repo.load_step_output(disposition_step.id)
+    assert disposition_output["disposition"] == "new_version"
+    assert disposition_output["status"] == "new_version_created"
+    assert disposition_output["source_monitoring_run_id"] == monitor_output["monitoring_run_id"]
+
+    new_task_id = disposition_output["new_task_id"]
+    new_strategy_id = disposition_output["new_strategy_id"]
+    new_dataset_id = disposition_output["new_dataset_id"]
+    assert new_task_id and new_strategy_id and new_dataset_id
+
+    child_task = TaskRepository(settings.db_path).get_task(new_task_id)
+    assert child_task.task_type == "strategy"
+    assert child_task.strategy_input is not None
+    assert child_task.strategy_input.baseline_strategy_id == strategy_id
+    child_meta = StrategyRepository(settings.db_path).get_strategy_meta(new_strategy_id)
+    assert child_meta["task_id"] == new_task_id
+    assert child_meta["status"] == "draft"
+    assert child_meta["parent_strategy_id"] == strategy_id
+    child_dataset = DatasetRepository(settings.db_path).get_dataset(new_dataset_id)
+    assert child_dataset is not None
+    assert child_dataset.task_id == new_task_id
+    assert child_dataset.role == "strategy.new_version_source"
+
     report_step = next(s for s in plan.steps if s.tool_ref.tool == "render_monitoring_report")
     report_output = plan_repo.load_step_output(report_step.id)
     report_path = Path(report_output["report_path"])
     assert report_path.exists()
     assert "策略监控报告" in report_path.read_text(encoding="utf-8")
-    # next_action surfaced, pointing at the development template for a new version.
-    assert report_output["next_action"]["template_id"] == "strategy_development"
+    # next_action reports completed execution with actual identifiers, not a
+    # suggestion that leaves the user to create another workflow manually.
+    assert report_output["next_action"]["kind"] == "completed"
+    assert report_output["next_action"]["action"] == "new_version"
     assert report_output["next_action"]["parent_strategy_id"] == strategy_id
+    assert report_output["next_action"]["new_task_id"] == new_task_id
+    assert report_output["next_action"]["new_strategy_id"] == new_strategy_id
+    assert report_output["next_action"]["new_dataset_id"] == new_dataset_id
+    assert "template_id" not in report_output["next_action"]
 
     # A monitoring_report_md artifact is registered.
     kinds = [a["kind"] for a in StrategyRepository(settings.db_path).list_strategy_artifacts(strategy_id)]

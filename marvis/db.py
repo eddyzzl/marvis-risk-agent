@@ -22,6 +22,9 @@ from marvis.repositories.modeling import ModelingRepository as ModelingRepositor
 from marvis.repositories.plans import PlanRepository as PlanRepository  # noqa: F401
 from marvis.repositories.plugins import PluginRepository as PluginRepository  # noqa: F401
 from marvis.repositories.strategy import StrategyRepository as StrategyRepository  # noqa: F401
+from marvis.repositories.task_artifacts import (
+    TaskArtifactRepository as TaskArtifactRepository,  # noqa: F401
+)
 from marvis.repositories.tasks import (
     AGENT_REPORT_CONCLUSION_KEYS as AGENT_REPORT_CONCLUSION_KEYS,
     TaskRepository as TaskRepository,  # noqa: F401

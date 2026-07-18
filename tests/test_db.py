@@ -921,7 +921,16 @@ def test_init_db_stamps_schema_version_on_fresh_database(tmp_path):
     # Spot-check a representative slice of tables from across the schema
     # (base tables, plugin tables, S1a/S1b additions all land via the same
     # baseline migration).
-    assert {"tasks", "jobs", "audit", "plugins", "tools", "model_artifacts", "agent_memory_entries"} <= tables
+    assert {
+        "tasks",
+        "jobs",
+        "audit",
+        "plugins",
+        "tools",
+        "model_artifacts",
+        "agent_memory_entries",
+        "task_artifacts",
+    } <= tables
 
 
 def test_init_db_upgrades_pre_arch10_database_losslessly(tmp_path):
@@ -1125,6 +1134,170 @@ def test_init_db_migration_006_adds_canonical_strategy_dsl_to_version5_database(
     assert json.loads(row["rules_json"])[0]["condition"] == "score < 600"
     assert row["dsl_json"] is None
     assert row["dsl_schema_version"] is None
+
+
+def test_init_db_migration_009_backfills_canonical_strategy_asset_status(tmp_path):
+    db_path = tmp_path / "legacy_v8.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE strategies (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'draft'
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO strategies(id, status) VALUES (?, ?)",
+            [
+                ("draft-strategy", "draft"),
+                ("adopted-strategy", "adopted"),
+                ("retired-strategy", "retired"),
+            ],
+        )
+        conn.execute("PRAGMA user_version = 8")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(strategies)")}
+        rows = conn.execute(
+            "SELECT id, status, asset_status FROM strategies ORDER BY id"
+        ).fetchall()
+
+    assert version == db_schema_module.SCHEMA_VERSION == 11
+    assert "asset_status" in columns
+    assert [tuple(row) for row in rows] == [
+        ("adopted-strategy", "adopted", "adopted_local"),
+        ("draft-strategy", "draft", "draft"),
+        ("retired-strategy", "retired", "retired"),
+    ]
+
+
+def test_init_db_migration_009_preserves_validated_partial_canonical_row(tmp_path):
+    db_path = tmp_path / "partial_v8.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE strategies (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                asset_status TEXT NOT NULL DEFAULT 'draft'
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO strategies(id, status, asset_status) VALUES (?, ?, ?)",
+            [
+                ("validated-strategy", "draft", "validated"),
+                ("partial-adopted", "adopted", "draft"),
+            ],
+        )
+        conn.execute("PRAGMA user_version = 8")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, status, asset_status FROM strategies ORDER BY id"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("partial-adopted", "adopted", "adopted_local"),
+        ("validated-strategy", "draft", "validated"),
+    ]
+
+
+def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_path):
+    db_path = tmp_path / "legacy_v9.sqlite"
+    with connect(db_path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
+        conn.execute("PRAGMA user_version = 9")
+
+    init_db(db_path)
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(task_artifacts)")
+        }
+        task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(task_artifacts)")
+        }
+
+    assert version == db_schema_module.SCHEMA_VERSION == 11
+    assert columns == {
+        "id",
+        "task_id",
+        "kind",
+        "path",
+        "content_hash",
+        "origin_tool",
+        "provenance_json",
+        "created_at",
+    }
+    assert task["id"] == "task-1"
+    assert "idx_task_artifacts_task_created" in indexes
+
+
+def test_init_db_migration_009_rejects_unknown_legacy_status_without_stamping(tmp_path):
+    db_path = tmp_path / "unknown_status_v8.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE strategies (id TEXT PRIMARY KEY, status TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO strategies(id, status) VALUES ('unsafe-strategy', 'deployed')"
+        )
+        conn.execute("PRAGMA user_version = 8")
+
+    with pytest.raises(ValueError, match="unknown legacy strategy status"):
+        init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(strategies)")}
+        status = conn.execute(
+            "SELECT status FROM strategies WHERE id = 'unsafe-strategy'"
+        ).fetchone()[0]
+    assert version == 8
+    assert "asset_status" not in columns
+    assert status == "deployed"
+
+
+def test_init_db_migration_009_rejects_canonical_drift_without_stamping(tmp_path):
+    db_path = tmp_path / "drifting_status_v8.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE strategies (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                asset_status TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO strategies(id, status, asset_status)
+            VALUES ('drifting-strategy', 'draft', 'adopted_local')
+            """
+        )
+        conn.execute("PRAGMA user_version = 8")
+
+    with pytest.raises(ValueError, match="strategy lifecycle drift"):
+        init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        row = conn.execute(
+            "SELECT status, asset_status FROM strategies WHERE id = 'drifting-strategy'"
+        ).fetchone()
+    assert version == 8
+    assert tuple(row) == ("draft", "adopted_local")
 
 
 def test_init_db_is_idempotent_across_repeated_calls(tmp_path):

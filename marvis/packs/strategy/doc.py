@@ -4,7 +4,17 @@ from __future__ import annotations
 # The strategy doc never recomputes metrics (INV-1): every number here comes from
 # the persisted strategy / backtests / band stats passed in, formatted for a
 # Chinese-language markdown deliverable.
-_STATUS_LABEL = {"draft": "草稿", "adopted": "已采纳", "retired": "已退役"}
+_ASSET_STATUS_LABEL = {
+    "draft": "草稿",
+    "validated": "已验证",
+    "adopted_local": "本地已采纳",
+    "retired": "已退役",
+}
+_LEGACY_ASSET_STATUS = {
+    "draft": "draft",
+    "adopted": "adopted_local",
+    "retired": "retired",
+}
 
 
 def render_strategy_doc_markdown(
@@ -35,11 +45,17 @@ def render_strategy_doc_markdown(
     # 1. Overview
     lines.append("## 策略概览")
     version = meta.get("version", 1)
-    status = _STATUS_LABEL.get(str(meta.get("status", "draft")), str(meta.get("status", "draft")))
+    legacy_status = str(meta.get("status", "draft"))
+    asset_status = str(
+        meta.get("asset_status") or _LEGACY_ASSET_STATUS.get(legacy_status, legacy_status)
+    )
+    status = _ASSET_STATUS_LABEL.get(asset_status, asset_status)
     parent = meta.get("parent_strategy_id")
     lines.append(f"- 类型：{strategy.get('strategy_type', '')}")
     lines.append(f"- 版本：v{version}")
     lines.append(f"- 状态：{status}")
+    if asset_status == "adopted_local":
+        lines.append("- 部署边界：本地已采纳不代表生产环境已上线")
     lines.append(f"- 谱系父策略：{parent if parent else '无'}")
     if meta.get("adopted_at"):
         lines.append(f"- 采纳时间：{meta.get('adopted_at')}")

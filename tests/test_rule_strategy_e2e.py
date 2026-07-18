@@ -1,16 +1,8 @@
-"""End-to-end S4 journey: mine -> rule-set selection gate (incl. one 「选 …」 text
-override round) -> evaluate -> build -> backtest gate -> mandatory adopt gate ->
-doc, through the REAL PlanDriver + PlanExecutor + ToolRunner against the strategy
-pack's real tools -- the spec's "从『给我挖拒绝规则』到『规则集采纳+文档导出』全程可跑"
-acceptance bar (agent/manual dual mode).
+"""End-to-end S4 journey with only the evidence-bound adoption gate.
 
-Gate sequence (traced with a real driver run): 挖掘规则 (no gate) runs straight
-into 规则集确认 (needs_confirmation) on the 开始 resume; the gate message renders
-挖掘规则's output. A 「选 1,3」 reply is parsed to a selection and pushed through
-apply_adjust (the band_edges precedent), re-arming the gate; confirming reruns
-select_rule_set with the override, then 评估规则集 (decision_point, no confirm) +
-构造策略 (no gate) run through to 回测策略's gate. Confirming 回测策略 runs it through
-to the mandatory 采纳策略 gate; confirming that runs 采纳策略 + 策略文档 to DONE.
+Mining, deterministic keep-all selection, evaluation, construction and
+backtesting are reversible and run after the overview is accepted. The driver
+stops only before adoption; a human reason then authorizes adoption and export.
 """
 
 from __future__ import annotations
@@ -129,7 +121,7 @@ def _register(registry, tmp_path, task_id):
 
 
 @pytest.mark.slow
-def test_rule_strategy_full_journey_with_text_selection_override(tmp_path):
+def test_rule_strategy_runs_reversible_steps_to_only_adoption_gate(tmp_path):
     driver, registry, plan_repo, settings, task = _driver(tmp_path)
     dataset = _register(registry, tmp_path, task.id)
 
@@ -143,59 +135,29 @@ def test_rule_strategy_full_journey_with_text_selection_override(tmp_path):
     assert turn.status == PlanStatus.VALIDATED.value
     plan_id = turn.plan_id
 
-    # 开始 -> runs 挖掘规则 straight into 规则集确认 gate; message renders mine output.
+    # One start confirmation runs every reversible step, then stops at adoption.
     turn = driver.resume(plan_id=plan_id, user_text="开始", run_seq=1)
     assert turn.status == PlanStatus.AWAITING_CONFIRM.value
     gate = turn.messages[-1]
-    assert "规则挖掘完成" in gate.content
+    assert gate.metadata["gate_source_tool"] == "adopt_strategy"
     plan = plan_repo.load_plan(plan_id)
     mine_step = next(s for s in plan.steps if s.title == "挖掘规则")
     assert mine_step.status.value == "done"
     mine_out = plan_repo.load_step_output(mine_step.id)
     n_candidates = len(mine_out["candidate_rules"])
     assert n_candidates >= 2
-    select_step = next(s for s in plan.steps if s.title == "规则集确认")
-    assert select_step.status.value == "awaiting_confirm"
-
-    # Text selection override: 「选 1」 keeps only the first candidate. Parsed to a
-    # selection list and pushed through apply_adjust (band_edges precedent); the
-    # gate re-arms (select_rule_set IS the reviewed step, so needs_confirmation
-    # pauses again before it reruns with the override).
-    turn = driver.resume(plan_id=plan_id, user_text="选 1", run_seq=2)
-    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
-    plan = plan_repo.load_plan(plan_id)
-    select_step = next(s for s in plan.steps if s.title == "规则集确认")
-    assert select_step.status.value == "awaiting_confirm"
-    assert select_step.inputs["selection"] == [1]
-    assert select_step.output_ref is None  # not yet recomputed with the override
-
-    # Confirm -> reruns select_rule_set with selection=[1] (1 rule), then 评估规则集
-    # (decision_point, no confirm) + 构造策略 (no gate) through to the 回测策略 gate;
-    # message renders 构造策略's output.
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=3)
-    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
-    gate = turn.messages[-1]
-    assert "策略候选已生成" in gate.content
-    plan = plan_repo.load_plan(plan_id)
-    select_step = next(s for s in plan.steps if s.title == "规则集确认")
+    select_step = next(s for s in plan.steps if s.title == "选择规则集")
     assert select_step.status.value == "done"
     selected_out = plan_repo.load_step_output(select_step.id)
-    assert selected_out["selected_count"] == 1
+    assert selected_out["selected_count"] == n_candidates
     evaluate_step = next(s for s in plan.steps if s.title == "评估规则集")
     assert evaluate_step.status.value == "done"
     evaluate_out = plan_repo.load_step_output(evaluate_step.id)
-    assert len(evaluate_out["waterfall"]) == 1
+    assert len(evaluate_out["waterfall"]) == n_candidates
     build_step = next(s for s in plan.steps if s.title == "构造策略")
     assert build_step.status.value == "done"
     backtest_step = next(s for s in plan.steps if s.title == "回测策略")
-    assert backtest_step.status.value == "awaiting_confirm"
-
-    # Confirm 回测策略 -> runs it through to the mandatory 采纳策略 gate.
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=4)
-    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
-    gate = turn.messages[-1]
-    assert "策略回测完成" in gate.content
-    plan = plan_repo.load_plan(plan_id)
+    assert backtest_step.status.value == "done"
     backtest_out = plan_repo.load_step_output(backtest_step.id)
     assert 0.0 <= backtest_out["approval_rate"] <= 1.0
     adopt_step = next(s for s in plan.steps if s.title == "采纳策略")
@@ -206,7 +168,7 @@ def test_rule_strategy_full_journey_with_text_selection_override(tmp_path):
     turn = driver.resume(
         plan_id=plan_id,
         user_text="确认采纳",
-        run_seq=5,
+        run_seq=2,
         adjust_params={"adoption_reason": "committee approved"},
         expected_step_id=adopt_step.id,
     )
@@ -240,10 +202,8 @@ def test_rule_strategy_full_journey_with_text_selection_override(tmp_path):
 
 
 @pytest.mark.slow
-def test_rule_strategy_keep_all_via_confirm(tmp_path):
-    """A plain 「确认」 at the rule-set gate (no selection) keeps every candidate
-    (selection default None -> select_rule_set keeps all), so the journey runs
-    the full mined set without a text override."""
+def test_rule_strategy_default_selection_keeps_all_candidates(tmp_path):
+    """The automatic reversible selection keeps every mined candidate by default."""
     driver, registry, plan_repo, settings, task = _driver(tmp_path)
     dataset = _register(registry, tmp_path, task.id)
     turn = driver.start(
@@ -254,11 +214,10 @@ def test_rule_strategy_keep_all_via_confirm(tmp_path):
         },
     )
     plan_id = turn.plan_id
-    driver.resume(plan_id=plan_id, user_text="开始", run_seq=1)  # -> 规则集确认 gate
-    turn = driver.resume(plan_id=plan_id, user_text="确认", run_seq=2)  # keep-all -> 回测 gate
+    turn = driver.resume(plan_id=plan_id, user_text="开始", run_seq=1)
     assert turn.status == PlanStatus.AWAITING_CONFIRM.value
     plan = plan_repo.load_plan(plan_id)
-    select_step = next(s for s in plan.steps if s.title == "规则集确认")
+    select_step = next(s for s in plan.steps if s.title == "选择规则集")
     mine_step = next(s for s in plan.steps if s.title == "挖掘规则")
     select_out = plan_repo.load_step_output(select_step.id)
     mine_out = plan_repo.load_step_output(mine_step.id)

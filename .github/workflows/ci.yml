@@ -39,6 +39,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Set up Java
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -72,6 +73,74 @@ jobs:
           else
             uv run scripts/check --fast
           fi
+
+  strategy_smoke:
+    # Manual dispatch already exercises these tests in the unfiltered full
+    # suite. PRs and main pushes keep a small end-to-end strategy product gate
+    # in parallel with fast unit feedback and the separate JVM lane.
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Run strategy product smoke tests
+        run: |
+          uv run python -m pytest -q \
+            tests/test_strategy_candidate_request_e2e.py::test_natural_language_candidate_auto_runs_to_only_adoption_gate_and_rerenders_doc \
+            tests/test_strategy_standard_workflows_e2e.py::test_natural_language_standard_workflow_executes_and_exports \
+            tests/test_strategy_monitoring_e2e.py::test_strategy_monitoring_e2e_red_then_new_version_then_report
+
+  pmml_runtime:
+    # The manual dispatch already runs the unfiltered suite in `checks`.
+    # PRs and main pushes keep this JVM-heavy coverage, but execute it in
+    # parallel with the fast feedback gate instead of extending its duration.
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Run PMML/JVM runtime tests
+        run: uv run python -m pytest -q -m pmml_runtime
 
   security:
     runs-on: ubuntu-latest

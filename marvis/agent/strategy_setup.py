@@ -20,6 +20,7 @@ from marvis.data.labels import nan_label_mask
 from marvis.db import StrategyRepository
 from marvis.domain import STRATEGY_OBJECTIVES, FileRole
 from marvis.files import scan_source_dir, sha256_file
+from marvis.strategy_lifecycle import ASSET_STATUS_ADOPTED_LOCAL
 
 _DATA_ROLES = frozenset({FileRole.SAMPLE.value, "sample", "strategy_sample"})
 _SCORE_HINTS = (
@@ -73,6 +74,32 @@ _PORTFOLIO_ANALYSIS_GOAL_PATTERNS = (
     "组合风险分析",
     "portfolio analysis",
 )
+_STANDARD_ANALYSIS_GOAL_PATTERNS = (
+    "利润分析",
+    "利润测算",
+    "收益测算",
+    "客群利润",
+    "计算利润",
+    "利润和 roa",
+    "roa",
+    "profit analysis",
+    "profit calculation",
+    "profit calc",
+    "滚动率",
+    "迁徙率",
+    "roll rate",
+    "roll-rate",
+    "roll_rate",
+)
+_LIFECYCLE_PROFIT_PATTERNS = (
+    "最大利润",
+    "最大化利润",
+    "利润目标",
+    "max profit",
+    "审批",
+    "准入",
+    "cutoff",
+)
 
 STRATEGY_INTENT_FULL_DEVELOPMENT = "full_development"
 STRATEGY_INTENT_QUICK_ANALYSIS = "quick_analysis"
@@ -80,6 +107,7 @@ STRATEGY_INTENT_RULE_MINING = "rule_mining"
 STRATEGY_INTENT_MONITORING = "monitoring"
 STRATEGY_INTENT_LIMIT_PRICING = "limit_pricing"
 STRATEGY_INTENT_PORTFOLIO_ANALYSIS = "portfolio_analysis"
+STRATEGY_INTENT_STANDARD_ANALYSIS = "standard_analysis"
 _PROFIT_PARAM_FIELDS = (
     "annual_rate",
     "funding_rate",
@@ -127,6 +155,17 @@ def is_portfolio_analysis_goal(*texts: str | None) -> bool:
     )
 
 
+def is_standard_strategy_analysis_goal(*texts: str | None) -> bool:
+    """Guard standalone deterministic analyses from approval-plan fallback."""
+
+    haystack = " ".join(text.lower() for text in texts if text)
+    if not any(pattern.lower() in haystack for pattern in _STANDARD_ANALYSIS_GOAL_PATTERNS):
+        return False
+    if any(token in haystack for token in ("滚动率", "迁徙率", "roll rate", "roll-rate", "roll_rate")):
+        return True
+    return not any(pattern.lower() in haystack for pattern in _LIFECYCLE_PROFIT_PATTERNS)
+
+
 def resolve_strategy_intent(strategy_input, *texts: str | None) -> str:
     """Return the canonical strategy intent using one explicit priority order.
 
@@ -144,6 +183,8 @@ def resolve_strategy_intent(strategy_input, *texts: str | None) -> str:
         return STRATEGY_INTENT_LIMIT_PRICING
     if is_portfolio_analysis_goal(*texts):
         return STRATEGY_INTENT_PORTFOLIO_ANALYSIS
+    if is_standard_strategy_analysis_goal(*texts):
+        return STRATEGY_INTENT_STANDARD_ANALYSIS
     if is_quick_strategy_analysis_goal(*texts):
         return STRATEGY_INTENT_QUICK_ANALYSIS
     entry_mode = str(_input_value(strategy_input, "entry_mode") or "").strip().lower()
@@ -568,7 +609,7 @@ def build_monitoring_setup_proposal(
     target_col: str | None = None,
     score_col: str | None = None,
 ) -> MonitoringSetupProposal:
-    """Resolve the adopted strategy + fresh monitoring sample for a monitoring task.
+    """Resolve the locally adopted strategy + fresh sample for a monitoring task.
 
     A monitoring task must have exactly one adopted strategy to monitor; if none is
     adopted yet, that is a setup error (nothing to monitor). The dataset is the new
@@ -577,17 +618,23 @@ def build_monitoring_setup_proposal(
     matured; score_col only matters for a model-backed strategy)."""
     adopted = [
         meta for meta in StrategyRepository(db_path).list_meta_for_task(task_id)
-        if meta.get("status") == "adopted"
+        if meta.get("asset_status") == ASSET_STATUS_ADOPTED_LOCAL
     ]
     if not adopted:
-        raise StrategySetupError("当前任务没有已采纳策略,无法执行监控;请先采纳一个策略。")
+        raise StrategySetupError(
+            "当前任务没有本地已采纳策略，无法执行监控；请先采纳一个策略。"
+            "本地已采纳，不代表生产上线。"
+        )
     strategy_id = str(adopted[-1]["id"])
     dataset = _resolve_dataset(registry, task_id, source_dir)
     path = registry.resolve_path(dataset.id)
     columns = backend.column_names(path)
     resolved_target = target_col if (target_col and target_col in columns) else None
     resolved_score = _optional_score_col(columns, score_col)
-    notes = [f"将对已采纳策略 {strategy_id} 跑一次监控,并与采纳基线对比漂移。"]
+    notes = [
+        f"将对本地已采纳策略 {strategy_id} 跑一次监控，并与采纳基线对比漂移。"
+        "本地已采纳，不代表生产上线。"
+    ]
     return MonitoringSetupProposal(
         strategy_id=strategy_id,
         dataset_id=dataset.id,
@@ -907,6 +954,7 @@ __all__ = [
     "STRATEGY_INTENT_PORTFOLIO_ANALYSIS",
     "STRATEGY_INTENT_QUICK_ANALYSIS",
     "STRATEGY_INTENT_RULE_MINING",
+    "STRATEGY_INTENT_STANDARD_ANALYSIS",
     "StrategyDevelopmentProposal",
     "StrategyDatasetContext",
     "StrategyDatasetPreview",
@@ -923,6 +971,7 @@ __all__ = [
     "is_quick_strategy_analysis_goal",
     "is_rule_strategy_goal",
     "is_strategy_monitoring_goal",
+    "is_standard_strategy_analysis_goal",
     "resolve_strategy_intent",
     "strategy_development_clarification",
     "strategy_development_slot_clarification",

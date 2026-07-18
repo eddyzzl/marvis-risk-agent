@@ -147,6 +147,12 @@
           "balance_col": {
             "type": "string",
             "minLength": 1
+          },
+          "observation_semantics": {
+            "type": "string",
+            "enum": [
+              "adjacent_observation"
+            ]
           }
         },
         "required": [
@@ -179,17 +185,69 @@
           "base_counts": {
             "type": "object"
           },
+          "period": {
+            "type": "string"
+          },
+          "observation_semantics": {
+            "type": "string",
+            "enum": [
+              "adjacent_observation"
+            ]
+          },
+          "assumptions": {
+            "type": "object"
+          },
+          "source_evidence": {
+            "type": "object"
+          },
           "data_quality_warnings": {
             "type": "array",
             "items": {
               "type": "object"
+            }
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "kind": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "filename": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "content_hash": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "artifact_id",
+                "kind",
+                "filename",
+                "content_hash"
+              ],
+              "additionalProperties": false
             }
           }
         },
         "required": [
           "states",
           "matrix",
-          "base_counts"
+          "base_counts",
+          "period",
+          "observation_semantics",
+          "assumptions",
+          "source_evidence",
+          "data_quality_warnings",
+          "artifacts"
         ],
         "additionalProperties": false
       },
@@ -198,7 +256,8 @@
       "failure_policy": "fail",
       "entrypoint": "tool_roll_rate",
       "side_effects": [
-        "read:dataset"
+        "read:dataset",
+        "write:artifact"
       ],
       "memory_limit_mb": 4096
     },
@@ -240,20 +299,29 @@
             "type": "object",
             "properties": {
               "annual_rate": {
-                "type": "number"
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
               },
               "funding_rate": {
-                "type": "number"
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
               },
               "lgd": {
-                "type": "number"
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
               },
               "operating_cost_per_loan": {
-                "type": "number"
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000000000000
               },
               "term_months": {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1,
+                "maximum": 1200
               }
             },
             "required": [
@@ -275,10 +343,57 @@
             "items": {
               "type": "object"
             }
+          },
+          "assumptions": {
+            "type": "object"
+          },
+          "source_evidence": {
+            "type": "object"
+          },
+          "quality_warnings": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "kind": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "filename": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "content_hash": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "artifact_id",
+                "kind",
+                "filename",
+                "content_hash"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
-          "results"
+          "results",
+          "assumptions",
+          "source_evidence",
+          "quality_warnings",
+          "artifacts"
         ],
         "additionalProperties": false
       },
@@ -287,8 +402,230 @@
       "failure_policy": "fail",
       "entrypoint": "tool_profit_calc",
       "side_effects": [
-        "read:dataset"
+        "read:dataset",
+        "write:artifact"
       ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "design_strategy_candidate",
+      "summary": "Deterministically design a limit, pricing, or segmentation candidate from a task-owned dataset and bounded user search inputs.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "strategy_type": {
+            "type": "string",
+            "enum": ["limit", "pricing", "segmentation"]
+          },
+          "candidate_design": {"type": "object"},
+          "economics_inputs": {"type": ["object", "null"]},
+          "candidate_policy_version": {
+            "const": "strategy.candidate_policy.v1"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "target_col",
+          "strategy_type",
+          "candidate_design",
+          "candidate_policy_version"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {"strategy_type": {"const": "limit"}},
+              "required": ["strategy_type"]
+            },
+            "then": {
+              "properties": {
+                "candidate_design": {"$ref": "#/$defs/limit_candidate"},
+                "economics_inputs": {"$ref": "#/$defs/limit_economics"}
+              },
+              "required": ["economics_inputs"]
+            }
+          },
+          {
+            "if": {
+              "properties": {"strategy_type": {"const": "pricing"}},
+              "required": ["strategy_type"]
+            },
+            "then": {
+              "properties": {
+                "candidate_design": {"$ref": "#/$defs/pricing_candidate"},
+                "economics_inputs": {"$ref": "#/$defs/pricing_economics"}
+              },
+              "required": ["economics_inputs"]
+            }
+          },
+          {
+            "if": {
+              "properties": {"strategy_type": {"const": "segmentation"}},
+              "required": ["strategy_type"]
+            },
+            "then": {
+              "properties": {
+                "candidate_design": {"$ref": "#/$defs/segmentation_candidate"},
+                "economics_inputs": {"type": "null"}
+              }
+            }
+          }
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "candidate_base_properties": {
+            "schema_version": {"const": "strategy.candidate_design.v1"},
+            "n_bands": {"type": "integer", "minimum": 2, "maximum": 20}
+          },
+          "limit_candidate": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"const": "strategy.candidate_design.v1"},
+              "method": {"const": "score_band_limit"},
+              "score_col": {"type": "string", "minLength": 1},
+              "n_bands": {"type": "integer", "minimum": 2, "maximum": 20},
+              "limit_grid": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 50,
+                "uniqueItems": true,
+                "items": {"type": "number", "exclusiveMinimum": 0}
+              },
+              "max_expected_loss_per_account": {"type": "number", "minimum": 0},
+              "missing_policy": {"const": "zero_limit"}
+            },
+            "required": [
+              "method",
+              "score_col",
+              "limit_grid",
+              "max_expected_loss_per_account"
+            ],
+            "additionalProperties": false
+          },
+          "pricing_candidate": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"const": "strategy.candidate_design.v1"},
+              "method": {"const": "score_band_pricing"},
+              "score_col": {"type": "string", "minLength": 1},
+              "n_bands": {"type": "integer", "minimum": 2, "maximum": 20},
+              "rate_grid": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 50,
+                "uniqueItems": true,
+                "items": {"type": "number", "minimum": 0, "maximum": 1}
+              },
+              "min_roa": {"type": "number", "minimum": 0, "maximum": 1},
+              "missing_policy": {"const": "highest_risk_rate"}
+            },
+            "required": ["method", "score_col", "rate_grid"],
+            "additionalProperties": false
+          },
+          "segmentation_candidate": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"const": "strategy.candidate_design.v1"},
+              "method": {"const": "single_variable_segmentation"},
+              "feature_col": {"type": "string", "minLength": 1},
+              "n_bands": {"type": "integer", "minimum": 2, "maximum": 20},
+              "missing_policy": {"const": "separate_segment"}
+            },
+            "required": ["method", "feature_col"],
+            "additionalProperties": false
+          },
+          "limit_economics": {
+            "type": "object",
+            "properties": {
+              "pd_col": {"type": "string", "minLength": 1},
+              "pd_value": {"type": "number", "minimum": 0, "maximum": 1},
+              "lgd_col": {"type": "string", "minLength": 1},
+              "lgd_value": {"type": "number", "minimum": 0, "maximum": 1},
+              "utilization_col": {"type": "string", "minLength": 1},
+              "utilization_value": {"type": "number", "minimum": 0, "maximum": 1}
+            },
+            "allOf": [
+              {"oneOf": [{"required": ["pd_col"]}, {"required": ["pd_value"]}]},
+              {"oneOf": [{"required": ["lgd_col"]}, {"required": ["lgd_value"]}]},
+              {"oneOf": [{"required": ["utilization_col"]}, {"required": ["utilization_value"]}]}
+            ],
+            "additionalProperties": false
+          },
+          "pricing_economics": {
+            "type": "object",
+            "properties": {
+              "ead_col": {"type": "string", "minLength": 1},
+              "pd_col": {"type": "string", "minLength": 1},
+              "lgd_col": {"type": "string", "minLength": 1},
+              "lgd_value": {"type": "number", "minimum": 0, "maximum": 1},
+              "funding_rate_col": {"type": "string", "minLength": 1},
+              "funding_rate_value": {"type": "number", "minimum": 0, "maximum": 1},
+              "term_months_col": {"type": "string", "minLength": 1},
+              "term_months_value": {"type": "number", "exclusiveMinimum": 0},
+              "operating_cost_per_loan_col": {"type": "string", "minLength": 1},
+              "operating_cost_per_loan_value": {"type": "number", "minimum": 0}
+            },
+            "required": ["ead_col", "pd_col"],
+            "allOf": [
+              {"oneOf": [{"required": ["lgd_col"]}, {"required": ["lgd_value"]}]},
+              {"oneOf": [{"required": ["funding_rate_col"]}, {"required": ["funding_rate_value"]}]},
+              {"oneOf": [{"required": ["term_months_col"]}, {"required": ["term_months_value"]}]},
+              {"oneOf": [{"required": ["operating_cost_per_loan_col"]}, {"required": ["operating_cost_per_loan_value"]}]}
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {"const": "strategy.candidate_tool.v1"},
+          "dataset_id": {"type": "string", "minLength": 1},
+          "source_dataset_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "source_evidence": {"type": "object"},
+          "strategy_type": {
+            "type": "string",
+            "enum": ["limit", "pricing", "segmentation"]
+          },
+          "target_col": {"type": "string", "minLength": 1},
+          "candidate_policy_version": {"const": "strategy.candidate_policy.v1"},
+          "strategy_spec": {"type": "object"},
+          "strategy_effect_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "design_evidence": {"type": "object"},
+          "economics_inputs": {"type": ["object", "null"]}
+        },
+        "required": [
+          "schema_version",
+          "dataset_id",
+          "source_dataset_content_hash",
+          "source_evidence",
+          "strategy_type",
+          "target_col",
+          "candidate_policy_version",
+          "strategy_spec",
+          "strategy_effect_hash",
+          "design_evidence",
+          "economics_inputs"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_design_strategy_candidate",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:dataset"],
       "memory_limit_mb": 4096
     },
     {
@@ -897,7 +1234,7 @@
             "minLength": 1
           },
           "economics_inputs": {
-            "type": "object",
+            "type": ["object", "null"],
             "properties": {
               "ead_col": {"type": "string", "minLength": 1},
               "ead_value": {"type": "number", "minimum": 0},
@@ -914,7 +1251,8 @@
               "operating_cost_per_loan_col": {"type": "string", "minLength": 1},
               "operating_cost_per_loan_value": {"type": "number", "minimum": 0}
             },
-            "oneOf": [
+            "anyOf": [
+              {"type": "null"},
               {
                 "allOf": [
                   {
@@ -1383,7 +1721,7 @@
       "entrypoint": "tool_backtest_strategy",
       "policy": {
         "schema_version": "tool-policy.v1",
-        "human_decision_gate": "required",
+        "human_decision_gate": "none",
         "effect_authorization": "none"
       },
       "side_effects": [
@@ -1637,7 +1975,7 @@
       "entrypoint": "tool_design_cutoff_bands",
       "policy": {
         "schema_version": "tool-policy.v1",
-        "human_decision_gate": "required",
+        "human_decision_gate": "none",
         "effect_authorization": "none"
       },
       "side_effects": [
@@ -1692,11 +2030,15 @@
       "output_schema": {
         "type": "object",
         "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["compared", "no_baseline"]
+          },
           "matrix_2x2": {
-            "type": "object"
+            "type": ["object", "null"]
           },
           "deltas": {
-            "type": "object"
+            "type": ["object", "null"]
           },
           "summary_text": {
             "type": "string"
@@ -1712,12 +2054,13 @@
             "minimum": 0
           },
           "label_coverage": {
-            "type": "number",
+            "type": ["number", "null"],
             "minimum": 0,
             "maximum": 1
           }
         },
         "required": [
+          "status",
           "matrix_2x2",
           "deltas",
           "summary_text",
@@ -1790,6 +2133,12 @@
           "status": {
             "const": "adopted"
           },
+          "asset_status": {
+            "const": "adopted_local"
+          },
+          "lifecycle_notice": {
+            "const": "本地已采纳，不代表生产上线。"
+          },
           "retired_strategy_ids": {
             "type": "array",
             "items": {
@@ -1798,6 +2147,17 @@
           },
           "adoption_evidence": {
             "$ref": "#/$defs/adoption_evidence"
+          },
+          "monitoring_plan_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "monitoring_plan_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "monitoring_plan_hash": {
+            "$ref": "#/$defs/sha256"
           },
           "artifacts": {
             "type": "array",
@@ -1812,8 +2172,13 @@
           "backtest_id",
           "version",
           "status",
+          "asset_status",
+          "lifecycle_notice",
           "retired_strategy_ids",
           "adoption_evidence",
+          "monitoring_plan_id",
+          "monitoring_plan_revision",
+          "monitoring_plan_hash",
           "artifacts"
         ],
         "additionalProperties": false,
@@ -2090,6 +2455,7 @@
       "entrypoint": "tool_render_strategy_doc",
       "side_effects": [
         "read:strategy",
+        "write:artifact",
         "write:strategy"
       ],
       "memory_limit_mb": 2048
@@ -2346,7 +2712,7 @@
       "entrypoint": "tool_select_rule_set",
       "policy": {
         "schema_version": "tool-policy.v1",
-        "human_decision_gate": "required",
+        "human_decision_gate": "none",
         "effect_authorization": "none"
       },
       "side_effects": [],
@@ -2354,7 +2720,7 @@
     },
     {
       "name": "run_strategy_monitoring",
-      "summary": "Run one monitoring pass for an adopted strategy off its monitoring plan: model PSI/CSI via the monitor_run kernel when model-backed, plus strategy-facing approval/bad-rate drift vs the adoption baseline, refreshing last_run_at.",
+      "summary": "Run one evidence-bound monitoring pass for a locally adopted strategy asset: model PSI/CSI when model-backed plus type-specific strategy and economics checks, persisted to the immutable monitoring plan/run ledger; local adoption does not imply production deployment.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2405,6 +2771,14 @@
               "type": "object"
             }
           },
+          "adjustable_threshold_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
           "top_drifted_features": {
             "type": "array",
             "items": {
@@ -2416,6 +2790,87 @@
             "items": {
               "type": "object"
             }
+          },
+          "metrics": {
+            "type": "object"
+          },
+          "economics": {
+            "type": "object"
+          },
+          "plan_source": {
+            "type": "string",
+            "enum": [
+              "ledger",
+              "compatibility_import",
+              "legacy_v1"
+            ]
+          },
+          "monitoring_plan_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "monitoring_plan_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "monitoring_plan_hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "monitoring_run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "monitoring_evidence": {
+            "type": "object",
+            "properties": {
+              "plan_source": {
+                "type": "string",
+                "enum": [
+                  "ledger",
+                  "compatibility_import",
+                  "legacy_v1"
+                ]
+              },
+              "monitoring_plan_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "monitoring_plan_revision": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "monitoring_plan_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "monitoring_run_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dataset_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "strategy_effect_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "economics_binding_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "result_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "plan_source",
+              "monitoring_plan_id",
+              "monitoring_plan_revision",
+              "monitoring_plan_hash",
+              "monitoring_run_id",
+              "dataset_content_hash",
+              "strategy_effect_hash",
+              "economics_binding_hash",
+              "result_hash"
+            ],
+            "additionalProperties": false
           },
           "plan_updated": {
             "type": "boolean"
@@ -2433,23 +2888,41 @@
           "dataset_id",
           "overall_level",
           "checks",
+          "adjustable_threshold_ids",
+          "metrics",
+          "economics",
+          "plan_source",
+          "monitoring_plan_id",
+          "monitoring_plan_revision",
+          "monitoring_plan_hash",
+          "monitoring_run_id",
+          "monitoring_evidence",
           "plan_updated"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_run_strategy_monitoring",
       "side_effects": [
+        "read:task",
+        "read:dataset",
         "read:strategy",
+        "write:dataset",
         "write:strategy"
       ],
       "memory_limit_mb": 2048
     },
     {
-      "name": "render_monitoring_report",
-      "summary": "Render a Markdown monitoring report for an adopted strategy: latest per-check table plus an overall-level timeline aggregated from strategy.monitor audit rows, registered as a monitoring_report_md artifact.",
+      "name": "apply_monitoring_disposition",
+      "summary": "Apply a human-confirmed response to the latest evidence-bound monitoring run: acknowledge a non-red run, record observe for red, atomically rerun a validated threshold revision, or create a real draft strategy task/version from red evidence.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2457,8 +2930,151 @@
             "type": "string",
             "minLength": 1
           },
+          "monitoring_run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_plan_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_plan_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expected_plan_hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "disposition": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              null,
+              "observe",
+              "adjust_threshold",
+              "new_version"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "threshold_patch": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "minProperties": 1,
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "warn": {
+                  "type": "number"
+                },
+                "fail": {
+                  "type": "number"
+                }
+              },
+              "minProperties": 1,
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "strategy_id",
+          "monitoring_run_id",
+          "expected_plan_id",
+          "expected_plan_revision",
+          "expected_plan_hash",
+          "disposition",
+          "reason"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "disposition": {
+                  "const": "adjust_threshold"
+                }
+              },
+              "required": [
+                "disposition"
+              ]
+            },
+            "then": {
+              "properties": {
+                "threshold_patch": {
+                  "type": "object",
+                  "minProperties": 1
+                }
+              },
+              "required": [
+                "threshold_patch"
+              ]
+            },
+            "else": {
+              "properties": {
+                "threshold_patch": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_monitoring_run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "disposition": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              null,
+              "observe",
+              "adjust_threshold",
+              "new_version"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "acknowledged",
+              "observed",
+              "threshold_adjusted",
+              "new_version_created"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
           "overall_level": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "green",
+              "amber",
+              "red",
+              "n/a"
+            ]
           },
           "checks": {
             "type": "array",
@@ -2466,7 +3082,40 @@
               "type": "object"
             }
           },
-          "disposition": {
+          "monitoring_plan_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "monitoring_plan_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "monitoring_plan_hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "resolved_monitoring_run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "new_task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "new_strategy_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "new_dataset_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan_artifact_path": {
             "type": [
               "string",
               "null"
@@ -2474,7 +3123,68 @@
           }
         },
         "required": [
-          "strategy_id"
+          "strategy_id",
+          "source_monitoring_run_id",
+          "disposition",
+          "status",
+          "reason",
+          "overall_level",
+          "checks",
+          "monitoring_plan_id",
+          "monitoring_plan_revision",
+          "monitoring_plan_hash",
+          "resolved_monitoring_run_id",
+          "new_task_id",
+          "new_strategy_id",
+          "new_dataset_id",
+          "plan_artifact_path"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_apply_monitoring_disposition",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "required",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:task",
+        "read:dataset",
+        "read:strategy",
+        "write:artifact",
+        "write:dataset",
+        "write:task",
+        "write:strategy"
+      ],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "render_monitoring_report",
+      "summary": "Render an immutable content-addressed Markdown report from a verified monitoring-run ledger entry and its hash-bound executed disposition receipt; caller-supplied verdicts, checks and handoff claims are not accepted.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_monitoring_run_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "strategy_id",
+          "source_monitoring_run_id"
         ],
         "additionalProperties": false
       },
@@ -2488,9 +3198,12 @@
             "type": "string"
           },
           "overall_level": {
-            "type": [
-              "string",
-              "null"
+            "type": "string",
+            "enum": [
+              "green",
+              "amber",
+              "red",
+              "n/a"
             ]
           },
           "timeline": {
@@ -2501,11 +3214,19 @@
           },
           "next_action": {
             "type": "object"
+          },
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
           "strategy_id",
-          "report_path"
+          "report_path",
+          "overall_level",
+          "timeline",
+          "next_action",
+          "artifact_id"
         ],
         "additionalProperties": false
       },
@@ -2515,18 +3236,21 @@
       "entrypoint": "tool_render_monitoring_report",
       "policy": {
         "schema_version": "tool-policy.v1",
-        "human_decision_gate": "required",
+        "human_decision_gate": "none",
         "effect_authorization": "none"
       },
       "side_effects": [
+        "read:task",
+        "read:dataset",
         "read:strategy",
+        "write:artifact",
         "write:strategy"
       ],
       "memory_limit_mb": 2048
     },
     {
       "name": "limit_pricing_matrix",
-      "summary": "Deterministic band x limit x rate expected-profit grid with an EL simulation; writes a limit_pricing_csv deliverable only after the matrix confirmation gate.",
+      "summary": "Deterministic band x limit x rate expected-profit grid with EL simulation; exports task-owned CSV and Markdown only after the matrix confirmation gate.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2546,10 +3270,6 @@
             "type": "string",
             "minLength": 1
           },
-          "ead_col": {
-            "type": "string",
-            "minLength": 1
-          },
           "band_edges": {
             "type": [
               "array",
@@ -2558,45 +3278,68 @@
             "items": {
               "type": "number"
             },
-            "minItems": 2
+            "minItems": 2,
+            "maxItems": 101
           },
           "n_bands": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 100
           },
           "limit_grid": {
             "type": "array",
             "items": {
-              "type": "number"
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1000000000000
             },
-            "minItems": 1
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": true
           },
           "rate_grid": {
             "type": "array",
             "items": {
-              "type": "number"
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
             },
-            "minItems": 1
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": true
           },
           "lgd": {
-            "type": "number"
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
           },
           "funding_rate": {
-            "type": "number"
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
           },
           "term_months": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 1200
           },
           "cost_per_loan": {
-            "type": "number"
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1000000000000
           },
           "el_ead_max": {
-            "type": "number"
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
           },
           "strategy_id": {
             "type": "string",
             "minLength": 1
+          },
+          "expected_source_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
           },
           "confirm": {
             "type": "boolean"
@@ -2640,6 +3383,13 @@
           "assumptions": {
             "type": "object"
           },
+          "source_evidence": {
+            "type": "object"
+          },
+          "source_dataset_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
           "red_flags": {
             "type": "array",
             "items": {
@@ -2653,7 +3403,36 @@
           "artifacts": {
             "type": "array",
             "items": {
-              "type": "object"
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "kind": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "filename": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "content_hash": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "strategy_artifact_id": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "artifact_id",
+                "kind",
+                "filename",
+                "content_hash"
+              ],
+              "additionalProperties": false
             }
           }
         },
@@ -2662,6 +3441,8 @@
           "recommended",
           "band_edges",
           "assumptions",
+          "source_evidence",
+          "source_dataset_content_hash",
           "red_flags",
           "artifacts"
         ],
@@ -2674,13 +3455,14 @@
       "side_effects": [
         "read:dataset",
         "read:strategy",
-        "write:strategy"
+        "write:strategy",
+        "write:artifact"
       ],
       "memory_limit_mb": 4096
     },
     {
       "name": "render_challenger_report",
-      "summary": "Assemble a challenger-vs-champion Markdown report from a compare output + both backtests + adoption status; registers challenger_report_md. No-op (no artifact) when no champion is supplied.",
+      "summary": "Assemble a challenger-vs-champion Markdown report from task-owned persisted strategies and a challenger backtest receipt; recomputes report evidence and canonical local-adoption status. No-op when no champion is supplied.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2692,21 +3474,35 @@
             "type": "string",
             "minLength": 1
           },
-          "compare": {
-            "type": "object"
-          },
           "challenger_backtest": {
-            "type": "object"
-          },
-          "champion_backtest": {
-            "type": "object"
-          },
-          "adopted": {
-            "type": "boolean"
+            "type": "object",
+            "properties": {
+              "backtest_id": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "backtest_id"
+            ]
           }
         },
         "required": [
           "strategy_id"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "champion_strategy_id"
+              ]
+            },
+            "then": {
+              "required": [
+                "challenger_backtest"
+              ]
+            }
+          }
         ],
         "additionalProperties": false
       },
@@ -2741,7 +3537,9 @@
       "failure_policy": "fail",
       "entrypoint": "tool_render_challenger_report",
       "side_effects": [
+        "read:dataset",
         "read:strategy",
+        "write:artifact",
         "write:strategy"
       ],
       "memory_limit_mb": 2048
@@ -2751,9 +3549,11 @@
   "permissions": [
     "read:dataset",
     "read:strategy",
+    "read:task",
     "write:artifact",
     "write:dataset",
     "write:strategy",
-    "write:backtest"
+    "write:backtest",
+    "write:task"
   ]
 }

@@ -25,7 +25,9 @@ from marvis.agent.gate_param_schema import gate_param_schema
 from marvis.agent.gate_response_adapter import GateControlValidationError, validate_gate_control
 from marvis.agent.gates.adapters import (
     GateReplyContext,
+    gate_editable_input_schema,
     get_gate_adapter,
+    monitoring_plain_confirm_error,
     parse_dedup_instruction as _parse_dedup_instruction,
     parse_monitoring_disposition as _parse_monitoring_disposition,
     parse_rule_selection_instruction as _parse_rule_selection_instruction,
@@ -55,6 +57,11 @@ _CONFIRM_DIRECT_COMMANDS = {
     "开始模型验证",
     "开始策略开发",
     "确认采纳",
+    "确认导出",
+    "确认并导出",
+    "接受矩阵",
+    "接受并导出",
+    "导出矩阵",
 }
 # Interrogative guard: any hard question mark/particle disqualifies a reply from
 # being read as confirmation even if it also contains an affirmative token (e.g.
@@ -298,6 +305,24 @@ class PlanDriver:
         if adjust_params and gate is not None:
             return self._gate_execution.apply_adjust(plan, gate, adjust_params, run_seq)
         if is_confirm(user_text):
+            monitoring_error = monitoring_plain_confirm_error(
+                plan,
+                gate,
+                self._safe_output,
+            )
+            if monitoring_error:
+                return DriverTurn(
+                    plan.id,
+                    plan.status.value,
+                    [
+                        self._composer.instruction_message(
+                            plan,
+                            gate,
+                            run_seq=run_seq,
+                            text=monitoring_error,
+                        )
+                    ],
+                )
             if gate is not None:
                 if selection is not None:
                     self._gate_execution.apply_screen_selection(plan, gate, selection)
@@ -312,10 +337,19 @@ class PlanDriver:
                         input_updates={"adoption_reason": adoption_reason},
                     )
                 else:
+                    monitoring_updates = None
+                    if (
+                        gate.tool_ref.tool == "apply_monitoring_disposition"
+                        and not str((gate.inputs or {}).get("reason") or "").strip()
+                    ):
+                        monitoring_updates = {
+                            "reason": str(user_text or "人工确认本次监控结果")
+                        }
                     self._confirm_gate(
                         plan,
                         gate,
                         reason=str(user_text or "人工确认当前业务决策"),
+                        input_updates=monitoring_updates,
                     )
             return self._run_and_handle(plan_id, run_seq=run_seq)
         # Manual-mode TEXT gate reply, dispatched through the per-tool gate adapter
@@ -323,7 +357,7 @@ class PlanDriver:
         # if-chain. Each adapter parses its own reply shape and applies it:
         #   * confirm_join      -- 「去重 first」/「用 last 去重」  (§6 same-key conflict)
         #   * select_rule_set   -- 「选 1,3,5」/「去掉 2」/「全选」 (§3 rule-set selection)
-        #   * render_monitoring_report -- 观察 / 调阈值 / 起新版本 (S5 red-light disposition)
+        #   * apply_monitoring_disposition -- 观察 / 调阈值 / 起新版本 (S5 red-light disposition)
         # A None from parse_reply (not this adapter's shape) or apply (a no-op, e.g.
         # a dedup instruction at a gate with no pending conflicts) falls through to
         # the generic confirm / LLM-router path unchanged.
@@ -384,7 +418,16 @@ class PlanDriver:
         # actually declare (name/type/current value/bounds) instead of leaving it
         # to blind-guess key names from free text — a wrong guess previously only
         # surfaced as "没有识别到可调整的参数" after apply_adjust already failed.
-        param_schema = gate_param_schema(plan, gate)
+        editable_schema = gate_editable_input_schema(
+            plan,
+            gate,
+            self._safe_output,
+        )
+        param_schema = gate_param_schema(
+            plan,
+            gate,
+            editable_input_schema=editable_schema,
+        )
         route = route_instruction(
             self._llm, gate_context=context, instruction=user_text, param_schema=param_schema
         )
@@ -512,15 +555,24 @@ class PlanDriver:
         candidate count off this context, so the driver stays free of it."""
         return GateReplyContext(plan=plan, gate=gate, load_output=self._safe_output)
 
-    def _apply_monitoring_disposition(self, gate: PlanStep, disposition: str) -> None:
-        """Record the parsed red-light disposition onto the report gate's own
-        `disposition` input (literal-None default in the template) so its output
-        surfaces the right next_action. Persists the input change via update_step
-        (preserving the step's AWAITING_CONFIRM status -- the apply_screen_selection
-        precedent), so the following confirm_step + run executes the report tool with
-        the chosen disposition. reset_step is deliberately NOT used here: it would
-        clear the confirmation and re-arm the gate to pause a second time."""
-        gate.inputs = {**(gate.inputs or {}), "disposition": disposition}
+    def _apply_monitoring_disposition(
+        self,
+        gate: PlanStep,
+        disposition: str,
+        *,
+        reason: str,
+    ) -> None:
+        """Bind an explicit alarm decision to the evidence-bound effect gate.
+
+        The step remains ``AWAITING_CONFIRM`` while inputs are updated. Observe
+        and new-version are immediately confirmed by the adapter; threshold
+        adjustment remains paused until a concrete patch is supplied.
+        """
+        gate.inputs = {
+            **(gate.inputs or {}),
+            "disposition": disposition,
+            "reason": reason,
+        }
         self._repo.update_step(gate)
 
     def _confirm_gate(

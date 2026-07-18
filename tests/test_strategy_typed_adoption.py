@@ -21,6 +21,7 @@ from marvis.files import sha256_file
 from marvis.packs.strategy.contracts import BacktestResult
 from marvis.packs.strategy.dsl import strategy_spec_hash
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.monitoring_plan import canonical_monitoring_plan_hash
 from marvis.packs.strategy.strategy import build_strategy_from_spec
 from marvis.packs.strategy.tools import tool_adopt_strategy, tool_backtest_strategy
 from marvis.packs.strategy.typed_backtest import (
@@ -31,6 +32,7 @@ from marvis.plugins.contracts import ToolContext
 from marvis.plugins.loader import load_manifest
 from marvis.plugins.schema_validation import validate_against_schema
 from marvis.repositories.strategy import StrategyRepository
+from marvis.repositories.strategy_monitoring import StrategyMonitoringRepository
 from marvis.settings import build_settings
 
 
@@ -313,8 +315,40 @@ def test_adopt_strategy_emits_typed_evidence_and_deliverables_for_all_types(
     adopt_tool = next(tool for tool in manifest.tools if tool.name == "adopt_strategy")
     validate_against_schema(output, adopt_tool.output_schema, label="typed adoption")
 
-    artifacts = {row["kind"]: Path(row["path"]) for row in output["artifacts"]}
+    artifact_outputs = {row["kind"]: row for row in output["artifacts"]}
+    artifacts = {
+        kind: Path(row["path"]) for kind, row in artifact_outputs.items()
+    }
     assert set(artifacts) == {"decision_table_csv", "monitoring_plan_json"}
+    registered_artifacts = {
+        row["kind"]: row
+        for row in strategy_repo.list_strategy_artifacts(strategy.id)
+    }
+    assert set(registered_artifacts) == set(artifacts)
+    expected_producers = {
+        "decision_table_csv": "strategy.adopt.decision_table.v1",
+        "monitoring_plan_json": "strategy.adopt.monitoring_plan.v1",
+    }
+    for kind, path in artifacts.items():
+        output_artifact = artifact_outputs[kind]
+        registered = registered_artifacts[kind]
+        assert output_artifact["artifact_id"] == registered["id"]
+        assert output_artifact["content_hash"] == sha256_file(path)
+        assert output_artifact["content_size"] == path.stat().st_size
+        assert registered["integrity_status"] == "verified"
+        assert registered["content_hash"] == output_artifact["content_hash"]
+        assert registered["content_size"] == output_artifact["content_size"]
+        provenance = registered["provenance"]
+        assert provenance["schema_version"] == "strategy-artifact-provenance.v1"
+        assert provenance["producer_version"] == expected_producers[kind]
+        assert provenance["task_id"] == task.id
+        assert provenance["strategy_id"] == strategy.id
+        assert provenance["kind"] == kind
+        assert provenance["evidence"]["operation"] == "strategy.adopt"
+        assert provenance["evidence"]["backtest_id"] == backtest["backtest_id"]
+        assert provenance["evidence"]["strategy_effect_hash"] == evidence[
+            "strategy_effect_hash"
+        ]
     decision_rows = list(
         csv.DictReader(artifacts["decision_table_csv"].read_text(encoding="utf-8").splitlines())
     )
@@ -331,6 +365,46 @@ def test_adopt_strategy_emits_typed_evidence_and_deliverables_for_all_types(
     plan = json.loads(
         artifacts["monitoring_plan_json"].read_text(encoding="utf-8")
     )
+    assert plan["plan_version"] == 2
+    assert plan["monitoring_plan_id"] == output["monitoring_plan_id"]
+    assert plan["revision"] == output["monitoring_plan_revision"] == 1
+    assert plan["supersedes_plan_id"] is None
+    assert plan["last_run_at"] is None
+    assert canonical_monitoring_plan_hash(plan) == output["monitoring_plan_hash"]
+    plan_provenance = registered_artifacts["monitoring_plan_json"]["provenance"]
+    assert plan_provenance["evidence"]["monitoring_plan_id"] == output[
+        "monitoring_plan_id"
+    ]
+    assert plan_provenance["evidence"]["monitoring_plan_revision"] == 1
+    assert plan_provenance["evidence"]["monitoring_plan_hash"] == output[
+        "monitoring_plan_hash"
+    ]
+    expected_bindings = {
+        "limit": {
+            "lgd": {"kind": "scalar", "value": 0.5},
+            "pd": {"kind": "column", "column": "pd"},
+            "utilization": {"kind": "scalar", "value": 0.6},
+        },
+        "pricing": {
+            "ead": {"kind": "column", "column": "ead"},
+            "funding_rate": {"kind": "scalar", "value": 0.03},
+            "lgd": {"kind": "scalar", "value": 0.5},
+            "operating_cost_per_loan": {"kind": "scalar", "value": 10.0},
+            "pd": {"kind": "column", "column": "pd"},
+            "term_months": {"kind": "scalar", "value": 12.0},
+        },
+    }.get(strategy_type, {})
+    assert plan["economics_bindings"] == expected_bindings
+    assert all(
+        "content_hash" not in binding and "row_count" not in binding
+        for binding in plan["economics_bindings"].values()
+    )
+    plan_record = StrategyMonitoringRepository(settings.db_path).get_plan(
+        output["monitoring_plan_id"]
+    )
+    assert plan_record is not None
+    assert plan_record.plan.to_dict() == plan
+    assert plan_record.payload_hash == output["monitoring_plan_hash"]
     baseline = plan["expectation_baseline"]
     assert baseline["strategy_type"] == strategy_type
     assert baseline["backtest_schema_version"] == "strategy.backtest.v2"
@@ -349,6 +423,9 @@ def test_adopt_strategy_emits_typed_evidence_and_deliverables_for_all_types(
     assert len(adopt_audits) == 1
     assert adopt_audits[0]["detail"]["strategy_type"] == strategy_type
     assert adopt_audits[0]["detail"]["adoption_evidence"] == evidence
+    assert adopt_audits[0]["detail"]["monitoring_plan_id"] == plan_record.id
+    assert adopt_audits[0]["detail"]["monitoring_plan_revision"] == 1
+    assert adopt_audits[0]["detail"]["monitoring_plan_hash"] == plan_record.payload_hash
     assert strategy_repo.get_strategy_meta(strategy.id)["status"] == "adopted"
 
 
@@ -358,7 +435,7 @@ def test_adopt_strategy_preserves_legacy_action_backtest_compatibility(
     strategy_type: str,
 ) -> None:
     (
-        _settings,
+        settings,
         _task_repo,
         _task_row,
         _registry,
@@ -391,6 +468,16 @@ def test_adopt_strategy_preserves_legacy_action_backtest_compatibility(
     assert evidence["labeled_count"] is None
     assert evidence["baseline_effect_hash"] is None
     assert evidence["transitions"] == []
+    plan_record = StrategyMonitoringRepository(settings.db_path).latest_plan(
+        strategy.id
+    )
+    assert plan_record is not None
+    assert plan_record.revision == 1
+    assert plan_record.plan.plan_version == 2
+    assert plan_record.plan.last_run_at is None
+    assert plan_record.plan.economics_bindings == {}
+    assert output["monitoring_plan_id"] == plan_record.id
+    assert output["monitoring_plan_hash"] == plan_record.payload_hash
     manifest = load_manifest(
         Path(__file__).parents[1] / "marvis" / "packs" / "strategy",
         builtin=True,
@@ -828,6 +915,208 @@ def test_adoption_rejects_a_foreign_monitoring_experiment(
         )
 
     _assert_adoption_rejected_without_mutation(settings, strategy_repo, strategy.id)
+
+
+def test_limit_adoption_ledgers_an_all_scalar_economics_binding(
+    tmp_path: Path,
+) -> None:
+    (
+        settings,
+        _task_repo,
+        _task_row,
+        _registry,
+        dataset,
+        strategy,
+        _strategy_repo,
+        ctx,
+    ) = _runtime_fixture(tmp_path, "limit")
+    backtest = tool_backtest_strategy(
+        {
+            "dataset_id": dataset.id,
+            "strategy_id": strategy.id,
+            "target_col": "bad",
+            "economics_inputs": {
+                "pd_value": 0.2,
+                "lgd_value": 0.5,
+                "utilization_value": 0.6,
+            },
+        },
+        ctx,
+    )
+
+    output = tool_adopt_strategy(
+        {
+            "strategy_id": strategy.id,
+            "backtest_id": backtest["backtest_id"],
+            "adoption_reason": "committee approved scalar economics assumptions",
+        },
+        ctx,
+    )
+
+    plan = StrategyMonitoringRepository(settings.db_path).get_plan(
+        output["monitoring_plan_id"]
+    )
+    assert plan is not None
+    assert plan.plan.economics_bindings == {
+        "lgd": {"kind": "scalar", "value": 0.5},
+        "pd": {"kind": "scalar", "value": 0.2},
+        "utilization": {"kind": "scalar", "value": 0.6},
+    }
+
+
+def test_adoption_rejects_unnamed_required_economics_series_without_mutation(
+    tmp_path: Path,
+) -> None:
+    (
+        settings,
+        _task_repo,
+        _task_row,
+        registry,
+        dataset,
+        strategy,
+        strategy_repo,
+        ctx,
+    ) = _runtime_fixture(tmp_path, "limit")
+    result = run_typed_backtest(
+        _frame(),
+        strategy.spec,
+        target_col="bad",
+        strategy_id=strategy.id,
+        economics_inputs={
+            "pd": pd.Series([0.1, 0.2, 0.15]),
+            "lgd": 0.5,
+            "utilization": 0.6,
+        },
+    )
+    assert result.normalized_input["economics_input_evidence"]["pd"]["name"] is None
+    strategy_repo.save_backtest_with_audit(
+        "unnamed-economics-series",
+        strategy.id,
+        dataset.id,
+        result,
+        audit={
+            "kind": "strategy.backtest",
+            "target_ref": "unnamed-economics-series",
+            "outcome": "succeeded",
+            "detail": {
+                "task_id": str(ctx.task_id),
+                "source_dataset_content_hash": sha256_file(
+                    registry.resolve_path(dataset.id)
+                ),
+            },
+        },
+    )
+
+    with pytest.raises(StrategyError, match="stable column name"):
+        tool_adopt_strategy(
+            {
+                "strategy_id": strategy.id,
+                "backtest_id": "unnamed-economics-series",
+                "adoption_reason": "committee requires reproducible monitoring inputs",
+            },
+            ctx,
+        )
+
+    _assert_adoption_rejected_without_mutation(settings, strategy_repo, strategy.id)
+    assert StrategyMonitoringRepository(settings.db_path).latest_plan(strategy.id) is None
+    strategy_dir = settings.tasks_dir / str(ctx.task_id) / "strategy"
+    assert not list(strategy_dir.glob("decision_table_*.csv"))
+    assert not list(strategy_dir.glob("monitoring_plan_*.json"))
+
+
+def test_adoption_rolls_back_files_lifecycle_audit_and_effect_when_plan_ledger_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        settings,
+        _task_repo,
+        _task_row,
+        _registry,
+        dataset,
+        strategy,
+        strategy_repo,
+        ctx,
+    ) = _runtime_fixture(tmp_path, "approval")
+    backtest = _backtest(dataset.id, strategy.id, "approval", ctx)
+
+    def fail_plan_write(*_args, **_kwargs):
+        raise RuntimeError("injected monitoring ledger failure")
+
+    monkeypatch.setattr(
+        StrategyMonitoringRepository,
+        "create_plan_on_connection",
+        fail_plan_write,
+    )
+
+    with pytest.raises(RuntimeError, match="injected monitoring ledger failure"):
+        tool_adopt_strategy(
+            {
+                "strategy_id": strategy.id,
+                "backtest_id": backtest["backtest_id"],
+                "adoption_reason": "committee requires one atomic adoption receipt",
+            },
+            ctx,
+        )
+
+    _assert_adoption_rejected_without_mutation(settings, strategy_repo, strategy.id)
+    assert StrategyMonitoringRepository(settings.db_path).latest_plan(strategy.id) is None
+    strategy_dir = settings.tasks_dir / str(ctx.task_id) / "strategy"
+    assert not list(strategy_dir.glob("decision_table_*.csv"))
+    assert not list(strategy_dir.glob("monitoring_plan_*.json"))
+
+
+def test_adoption_rolls_back_first_verified_artifact_when_second_registration_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        settings,
+        _task_repo,
+        _task_row,
+        _registry,
+        dataset,
+        strategy,
+        strategy_repo,
+        ctx,
+    ) = _runtime_fixture(tmp_path, "approval")
+    backtest = _backtest(dataset.id, strategy.id, "approval", ctx)
+    original_register = (
+        StrategyRepository.register_verified_strategy_artifact_with_audit_on_connection
+    )
+
+    def fail_second_registration(self, conn, strategy_id, *, kind, **kwargs):
+        if kind == "monitoring_plan_json":
+            raise RuntimeError("injected verified artifact registration failure")
+        return original_register(
+            self,
+            conn,
+            strategy_id,
+            kind=kind,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        StrategyRepository,
+        "register_verified_strategy_artifact_with_audit_on_connection",
+        fail_second_registration,
+    )
+
+    with pytest.raises(RuntimeError, match="verified artifact registration"):
+        tool_adopt_strategy(
+            {
+                "strategy_id": strategy.id,
+                "backtest_id": backtest["backtest_id"],
+                "adoption_reason": "committee requires atomic verified deliverables",
+            },
+            ctx,
+        )
+
+    _assert_adoption_rejected_without_mutation(settings, strategy_repo, strategy.id)
+    assert StrategyMonitoringRepository(settings.db_path).latest_plan(strategy.id) is None
+    strategy_dir = settings.tasks_dir / str(ctx.task_id) / "strategy"
+    assert not list(strategy_dir.glob("decision_table_*.csv"))
+    assert not list(strategy_dir.glob("monitoring_plan_*.json"))
 
 
 def _assert_adoption_rejected_without_mutation(

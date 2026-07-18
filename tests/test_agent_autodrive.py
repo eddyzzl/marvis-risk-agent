@@ -437,13 +437,12 @@ def test_agent_mode_autodrives_strategy_to_completion(client: TestClient, tmp_pa
     assert resp.status_code == 202, resp.text
     msgs = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
     done = _last_assistant(msgs)
-    # FIN-3 #1: 回测策略/backtest_strategy is a forced decision gate (approval_rate /
-    # bad_rate review before the strategy proceeds). A bare AUTO confirm halts, so the
-    # last message is the strategy_direction_approval hand-off rather than the
-    # downstream tradeoff view.
-    assert "strategy_direction_approval" in done["content"]
-    assert "已转人工确认" in done["content"]
-    assert len(fake.calls) >= 2
+    # Strategy analysis/backtesting is reversible and AUTO-operable. Only a real
+    # adoption or monitoring-disposition effect must hand off to a human gate.
+    assert "计划已全部完成" in done["content"]
+    assert "策略权衡视图完成" in done["content"]
+    assert "已转人工确认" not in done["content"]
+    assert len(fake.calls) == 1  # plan overview only; no reversible-analysis gates
     assert any(m["metadata"].get("intent") == "agent_decision" for m in msgs if m["role"] == "assistant")
 
 
@@ -1091,26 +1090,6 @@ _REAL_GATE_ENVELOPE_FIXTURES = [
         },
         id="modeling-select_experiment-champion-confirm",
     ),
-    pytest.param(
-        "strategy-tradeoff_view-confirm",
-        {
-            "plan_id": "p1",
-            "step_id": "tradeoff",
-            "run_seq": 1,
-            "kind": "gate",
-        },
-        id="strategy-tradeoff_view-confirm",
-    ),
-    pytest.param(
-        "vintage-vintage_curve-confirm",
-        {
-            "plan_id": "p1",
-            "step_id": "vintage-curve",
-            "run_seq": 1,
-            "kind": "gate",
-        },
-        id="vintage-vintage_curve-confirm",
-    ),
     # FIN-3 #1: seven forced-confirmation gates whose gate_source_tool (set by
     # plan_message_composer.gate_message from gate.tool_ref.tool in production) now
     # maps to a high-risk flag. Each carries ONLY the production gate_source_tool key
@@ -1147,16 +1126,16 @@ _REAL_GATE_ENVELOPE_FIXTURES = [
         id="modeling-generate_model_report-confirm",
     ),
     pytest.param(
-        "strategy-backtest_strategy-confirm",
-        {"plan_id": "p1", "step_id": "plan-step-2", "run_seq": 1, "kind": "gate",
-         "gate_source_tool": "backtest_strategy"},
-        id="strategy-backtest_strategy-confirm",
+        "strategy-adopt_strategy-confirm",
+        {"plan_id": "p1", "step_id": "plan-step-7", "run_seq": 1, "kind": "gate",
+         "gate_source_tool": "adopt_strategy"},
+        id="strategy-adopt_strategy-confirm",
     ),
     pytest.param(
-        "strategy-select_rule_set-confirm",
+        "strategy-apply_monitoring_disposition-confirm",
         {"plan_id": "p1", "step_id": "plan-step-2", "run_seq": 1, "kind": "gate",
-         "gate_source_tool": "select_rule_set"},
-        id="strategy-select_rule_set-confirm",
+         "gate_source_tool": "apply_monitoring_disposition"},
+        id="strategy-apply_monitoring_disposition-confirm",
     ),
 ]
 
@@ -1204,6 +1183,35 @@ def test_auto_safety_policy_keeps_modeling_funnel_gates_auto_confirmable(source_
     assert result["action"] == "confirm", (
         f"{source_tool}: AUTO over-blocked a low-risk reversible funnel gate"
     )
+
+
+@pytest.mark.parametrize(
+    "source_tool",
+    [
+        "run_strategy_monitoring",
+        "render_monitoring_report",
+        "design_cutoff_bands",
+        "backtest_strategy",
+        "select_rule_set",
+        "tradeoff_view",
+        "compare_strategies",
+        "vintage_curve",
+    ],
+)
+def test_strategy_reversible_tools_do_not_claim_a_mandatory_human_gate(source_tool):
+    envelope = extract_gate_envelope(
+        {
+            "metadata": {
+                "plan_id": "p1",
+                "step_id": "plan-step-reversible",
+                "run_seq": 1,
+                "kind": "gate",
+                "gate_source_tool": source_tool,
+            }
+        }
+    )
+
+    assert envelope.risk_flags == ()
 
 
 def test_auto_safety_policy_still_blocks_declared_risk_flags_on_model_delivery_gate():

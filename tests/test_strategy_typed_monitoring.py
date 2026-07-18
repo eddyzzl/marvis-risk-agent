@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -9,15 +10,20 @@ import pytest
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, TaskRepository, init_db
+from marvis.db_schema import connect
 from marvis.domain import TaskCreate
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.monitor_tools import tool_run_strategy_monitoring
-from marvis.packs.strategy.monitoring_plan import load_monitoring_plan
+from marvis.packs.strategy.monitoring_plan import (
+    load_monitoring_plan,
+    save_monitoring_plan,
+)
 from marvis.packs.strategy.strategy import build_strategy_from_spec
 from marvis.packs.strategy.tools import tool_adopt_strategy, tool_backtest_strategy
 from marvis.plugins.contracts import ToolContext
 from marvis.repositories.audit import _list_audit_rows
 from marvis.repositories.strategy import StrategyRepository
+from marvis.repositories.strategy_monitoring import StrategyMonitoringRepository
 from marvis.settings import build_settings
 
 
@@ -174,15 +180,36 @@ def _adopt_typed_strategy(tmp_path: Path, strategy_type: str):
     return settings, task, registry, strategy, ctx, plan_path
 
 
-def _assert_plan_updated_and_audited(
+def _assert_immutable_plan_run_and_audited(
     *,
     settings,
     strategy_id: str,
     plan_path: Path,
+    plan_bytes_before: bytes,
     output: dict,
+    expected_plan_source: str = "ledger",
 ) -> None:
-    assert output["plan_updated"] is True
-    assert load_monitoring_plan(plan_path).last_run_at == output["last_run_at"]
+    assert output["plan_updated"] is False
+    assert output["plan_source"] == expected_plan_source
+    assert plan_path.read_bytes() == plan_bytes_before
+    assert load_monitoring_plan(plan_path).last_run_at is None
+
+    ledger = StrategyMonitoringRepository(settings.db_path)
+    plan = ledger.get_plan(output["monitoring_plan_id"])
+    assert plan is not None
+    assert plan.strategy_id == strategy_id
+    assert plan.revision == output["monitoring_plan_revision"]
+    assert plan.payload_hash == output["monitoring_plan_hash"]
+    run = ledger.get_run(output["monitoring_run_id"])
+    assert run is not None
+    assert run.strategy_id == strategy_id
+    assert run.monitoring_plan_id == plan.id
+    assert run.result_hash == output["monitoring_evidence"]["result_hash"]
+    assert run.dataset_content_hash == output["monitoring_evidence"][
+        "dataset_content_hash"
+    ]
+    assert len(ledger.list_runs(strategy_id)) == 1
+
     audit = _list_audit_rows(
         settings.db_path,
         kind="strategy.monitor",
@@ -190,9 +217,11 @@ def _assert_plan_updated_and_audited(
     )
     assert len(audit) == 1
     assert audit[0]["detail"]["overall_level"] == output["overall_level"]
+    assert audit[0]["detail"]["monitoring_plan_id"] == plan.id
+    assert audit[0]["detail"]["monitoring_run_id"] == run.id
 
 
-def test_limit_monitoring_consumes_mean_limit_plan_and_marks_economics_na(
+def test_limit_monitoring_recomputes_bound_economics_from_fresh_columns(
     tmp_path: Path,
 ) -> None:
     settings, task, registry, strategy, ctx, plan_path = _adopt_typed_strategy(
@@ -200,13 +229,19 @@ def test_limit_monitoring_consumes_mean_limit_plan_and_marks_economics_na(
     )
     plan_before = json.loads(plan_path.read_text(encoding="utf-8"))
     assert set(plan_before["thresholds"]) == {"mean_limit", "expected_loss"}
+    plan_bytes_before = plan_path.read_bytes()
 
     fresh = _register(
         registry,
         tmp_path,
         task_id=task.id,
         name="limit-fresh",
-        frame=pd.DataFrame({"x": [1, 1, 1, 1]}),
+        frame=pd.DataFrame(
+            {
+                "x": [1, 1, 1, 1],
+                "pd": [0.10, 0.10, 0.10, 0.10],
+            }
+        ),
     )
     output = tool_run_strategy_monitoring(
         {"strategy_id": strategy.id, "dataset_id": fresh.id},
@@ -219,19 +254,25 @@ def test_limit_monitoring_consumes_mean_limit_plan_and_marks_economics_na(
     assert checks["mean_limit"]["fail"] == pytest.approx(
         plan_before["thresholds"]["mean_limit"]["fail"]
     )
-    assert checks["expected_loss"]["value"] is None
-    assert checks["expected_loss"]["level"] == "n/a"
-    assert "未提供" in checks["expected_loss"]["message"]
+    assert checks["expected_loss"]["value"] == pytest.approx(240.0)
+    assert checks["expected_loss"]["level"] != "n/a"
+    assert output["metrics"]["expected_ead"] == pytest.approx(4800.0)
+    assert output["metrics"]["expected_loss"] == pytest.approx(240.0)
+    assert output["economics"] == {
+        "expected_ead": pytest.approx(4800.0),
+        "expected_loss": pytest.approx(240.0),
+    }
     assert output["overall_level"] == "red"
-    _assert_plan_updated_and_audited(
+    _assert_immutable_plan_run_and_audited(
         settings=settings,
         strategy_id=strategy.id,
         plan_path=plan_path,
+        plan_bytes_before=plan_bytes_before,
         output=output,
     )
 
 
-def test_pricing_monitoring_consumes_mean_rate_plan_and_marks_economics_na(
+def test_pricing_monitoring_recomputes_bound_economics_from_fresh_columns(
     tmp_path: Path,
 ) -> None:
     settings, task, registry, strategy, ctx, plan_path = _adopt_typed_strategy(
@@ -244,13 +285,20 @@ def test_pricing_monitoring_consumes_mean_rate_plan_and_marks_economics_na(
         "profit",
         "roa",
     }
+    plan_bytes_before = plan_path.read_bytes()
 
     fresh = _register(
         registry,
         tmp_path,
         task_id=task.id,
         name="pricing-fresh",
-        frame=pd.DataFrame({"x": [1, 1, 1, 1]}),
+        frame=pd.DataFrame(
+            {
+                "x": [1, 1, 1, 1],
+                "ead": [1000.0, 1000.0, 1000.0, 1000.0],
+                "pd": [0.10, 0.10, 0.10, 0.10],
+            }
+        ),
     )
     output = tool_run_strategy_monitoring(
         {"strategy_id": strategy.id, "dataset_id": fresh.id},
@@ -263,15 +311,19 @@ def test_pricing_monitoring_consumes_mean_rate_plan_and_marks_economics_na(
     assert checks["mean_rate"]["warn"] == pytest.approx(
         plan_before["thresholds"]["mean_rate"]["warn"]
     )
-    for metric in ("expected_loss", "profit", "roa"):
-        assert checks[metric]["value"] is None
-        assert checks[metric]["level"] == "n/a"
-        assert "未提供" in checks[metric]["message"]
+    assert checks["expected_loss"]["value"] == pytest.approx(200.0)
+    assert checks["profit"]["value"] == pytest.approx(440.0)
+    assert checks["roa"]["value"] == pytest.approx(0.11)
+    assert output["economics"]["expected_loss"] == pytest.approx(200.0)
+    assert output["economics"]["profit"] == pytest.approx(440.0)
+    assert output["economics"]["roa"] == pytest.approx(0.11)
+    assert "by_row" not in output["economics"]
     assert output["overall_level"] == "red"
-    _assert_plan_updated_and_audited(
+    _assert_immutable_plan_run_and_audited(
         settings=settings,
         strategy_id=strategy.id,
         plan_path=plan_path,
+        plan_bytes_before=plan_bytes_before,
         output=output,
     )
 
@@ -291,6 +343,7 @@ def test_segmentation_monitoring_consumes_bad_rate_and_share_psi_plan(
         0.75,
         0.25,
     ]
+    plan_bytes_before = plan_path.read_bytes()
 
     fresh = _register(
         registry,
@@ -322,10 +375,11 @@ def test_segmentation_monitoring_consumes_bad_rate_and_share_psi_plan(
         plan_before["thresholds"]["segment_share_psi"]["fail"]
     )
     assert output["overall_level"] == "red"
-    _assert_plan_updated_and_audited(
+    _assert_immutable_plan_run_and_audited(
         settings=settings,
         strategy_id=strategy.id,
         plan_path=plan_path,
+        plan_bytes_before=plan_bytes_before,
         output=output,
     )
 
@@ -336,6 +390,7 @@ def test_segmentation_monitoring_without_target_keeps_bad_rate_na(
     settings, task, registry, strategy, ctx, plan_path = _adopt_typed_strategy(
         tmp_path, "segmentation"
     )
+    plan_bytes_before = plan_path.read_bytes()
     fresh = _register(
         registry,
         tmp_path,
@@ -355,10 +410,11 @@ def test_segmentation_monitoring_without_target_keeps_bad_rate_na(
     assert checks["segment_share_psi"]["value"] == pytest.approx(0.0)
     assert checks["segment_share_psi"]["level"] == "green"
     assert output["overall_level"] == "green"
-    _assert_plan_updated_and_audited(
+    _assert_immutable_plan_run_and_audited(
         settings=settings,
         strategy_id=strategy.id,
         plan_path=plan_path,
+        plan_bytes_before=plan_bytes_before,
         output=output,
     )
 
@@ -369,6 +425,7 @@ def test_typed_monitoring_rejects_a_dataset_owned_by_another_task(
     settings, _task, registry, strategy, ctx, plan_path = _adopt_typed_strategy(
         tmp_path, "limit"
     )
+    plan_bytes_before = plan_path.read_bytes()
     foreign_task = TaskRepository(settings.db_path).create_task(
         TaskCreate(
             model_name="foreign monitoring sample",
@@ -397,7 +454,9 @@ def test_typed_monitoring_rejects_a_dataset_owned_by_another_task(
             ctx,
         )
 
+    assert plan_path.read_bytes() == plan_bytes_before
     assert load_monitoring_plan(plan_path).last_run_at is None
+    assert StrategyMonitoringRepository(settings.db_path).list_runs(strategy.id) == []
     assert not _list_audit_rows(
         settings.db_path,
         kind="strategy.monitor",
@@ -411,14 +470,26 @@ def test_approval_monitoring_uses_versioned_plan_thresholds(
     settings, task, registry, strategy, ctx, plan_path = _adopt_typed_strategy(
         tmp_path, "approval"
     )
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    plan["thresholds"]["approval_rate"].update(
-        {"warn": -1.0, "fail": -2.0}
+    ledger = StrategyMonitoringRepository(settings.db_path)
+    current = ledger.latest_plan(strategy.id)
+    assert current is not None
+    thresholds = {
+        name: dict(spec) for name, spec in current.plan.thresholds.items()
+    }
+    thresholds["approval_rate"].update({"warn": -1.0, "fail": -2.0})
+    revision = ledger.create_plan(
+        replace(
+            current.plan,
+            monitoring_plan_id=None,
+            revision=2,
+            supersedes_plan_id=current.id,
+            thresholds=thresholds,
+        ),
+        expected_revision=current.revision,
+        expected_payload_hash=current.payload_hash,
     )
-    plan_path.write_text(
-        json.dumps(plan, ensure_ascii=False, sort_keys=True),
-        encoding="utf-8",
-    )
+    assert revision.revision == 2
+    plan_bytes_before = plan_path.read_bytes()
     fresh = _register(
         registry,
         tmp_path,
@@ -444,10 +515,13 @@ def test_approval_monitoring_uses_versioned_plan_thresholds(
     assert approval["level"] == "green"
     assert checks["approved_bad_rate_drift"]["level"] == "n/a"
     assert output["overall_level"] == "green"
-    _assert_plan_updated_and_audited(
+    assert output["monitoring_plan_id"] == revision.id
+    assert output["monitoring_plan_revision"] == 2
+    _assert_immutable_plan_run_and_audited(
         settings=settings,
         strategy_id=strategy.id,
         plan_path=plan_path,
+        plan_bytes_before=plan_bytes_before,
         output=output,
     )
 
@@ -458,6 +532,7 @@ def test_reject_monitoring_executes_capture_and_good_reject_thresholds(
     settings, task, registry, strategy, ctx, plan_path = _adopt_typed_strategy(
         tmp_path, "reject"
     )
+    plan_bytes_before = plan_path.read_bytes()
     fresh = _register(
         registry,
         tmp_path,
@@ -486,39 +561,112 @@ def test_reject_monitoring_executes_capture_and_good_reject_thresholds(
     assert checks["bad_capture_rate"]["level"] == "red"
     assert checks["good_reject_rate"]["level"] == "red"
     assert output["overall_level"] == "red"
-    _assert_plan_updated_and_audited(
+    _assert_immutable_plan_run_and_audited(
         settings=settings,
         strategy_id=strategy.id,
         plan_path=plan_path,
+        plan_bytes_before=plan_bytes_before,
         output=output,
     )
 
 
-def test_all_unavailable_monitoring_metrics_are_not_reported_green(
+@pytest.mark.parametrize(
+    ("strategy_type", "missing_column"),
+    (("limit", "pd"), ("pricing", "ead")),
+)
+def test_v2_typed_monitoring_missing_economics_column_fails_closed(
+    tmp_path: Path,
+    strategy_type: str,
+    missing_column: str,
+) -> None:
+    settings, task, registry, strategy, ctx, plan_path = _adopt_typed_strategy(
+        tmp_path, strategy_type
+    )
+    plan_bytes_before = plan_path.read_bytes()
+    fresh = _register(
+        registry,
+        tmp_path,
+        task_id=task.id,
+        name=f"{strategy_type}-missing-economics-column",
+        frame=pd.DataFrame({"x": [1, 1]}),
+    )
+
+    with pytest.raises(
+        StrategyError,
+        match=rf"missing economics column: {missing_column}",
+    ):
+        tool_run_strategy_monitoring(
+            {"strategy_id": strategy.id, "dataset_id": fresh.id},
+            ctx,
+        )
+
+    ledger = StrategyMonitoringRepository(settings.db_path)
+    assert len(ledger.list_plans(strategy.id)) == 1
+    assert ledger.list_runs(strategy.id) == []
+    assert plan_path.read_bytes() == plan_bytes_before
+    assert not _list_audit_rows(
+        settings.db_path,
+        kind="strategy.monitor",
+        target_ref=strategy.id,
+    )
+
+
+def test_explicit_v1_plan_without_economics_keeps_economic_metrics_na(
     tmp_path: Path,
 ) -> None:
     settings, task, registry, strategy, ctx, plan_path = _adopt_typed_strategy(
         tmp_path, "pricing"
     )
-    empty = _register(
+    ledger = StrategyMonitoringRepository(settings.db_path)
+    adopted_plan = ledger.latest_plan(strategy.id)
+    assert adopted_plan is not None
+    with connect(settings.db_path) as conn:
+        conn.execute(
+            "DELETE FROM strategy_monitoring_plans WHERE id = ?",
+            (adopted_plan.id,),
+        )
+    legacy_payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    legacy_payload.update(
+        {
+            "plan_version": 1,
+            "monitoring_plan_id": None,
+            "revision": 1,
+            "supersedes_plan_id": None,
+            "last_run_at": None,
+            "economics_bindings": {},
+        }
+    )
+    save_monitoring_plan(plan_path, legacy_payload)
+    plan_bytes_before = plan_path.read_bytes()
+
+    fresh = _register(
         registry,
         tmp_path,
         task_id=task.id,
-        name="pricing-empty",
-        frame=pd.DataFrame({"x": pd.Series(dtype="float64")}),
+        name="pricing-explicit-v1",
+        frame=pd.DataFrame({"x": [1, 1]}),
     )
 
     output = tool_run_strategy_monitoring(
-        {"strategy_id": strategy.id, "dataset_id": empty.id},
+        {"strategy_id": strategy.id, "dataset_id": fresh.id},
         ctx,
     )
 
-    assert output["checks"]
-    assert {check["level"] for check in output["checks"]} == {"n/a"}
-    assert output["overall_level"] == "n/a"
-    _assert_plan_updated_and_audited(
+    checks = {check["id"]: check for check in output["checks"]}
+    assert checks["mean_rate"]["value"] == pytest.approx(0.20)
+    for metric in ("expected_loss", "profit", "roa"):
+        assert checks[metric]["value"] is None
+        assert checks[metric]["level"] == "n/a"
+    assert output["economics"] == {}
+    assert output["plan_source"] == "legacy_v1"
+    imported = ledger.latest_plan(strategy.id)
+    assert imported is not None
+    assert imported.plan.plan_version == 1
+    _assert_immutable_plan_run_and_audited(
         settings=settings,
         strategy_id=strategy.id,
         plan_path=plan_path,
+        plan_bytes_before=plan_bytes_before,
         output=output,
+        expected_plan_source="legacy_v1",
     )

@@ -167,13 +167,51 @@ _MONITOR_STATUS_TO_LEVEL = {
 
 
 def tool_monitor_run(inputs: dict, ctx) -> dict:
-    """S1b/DOM-3: execute one monitoring run against the training-time baseline
+    """Run the model-monitoring kernel and persist its standalone audit."""
+    result = _calculate_monitor_run(inputs, ctx)
+    runtime = _runtime(ctx)
+    checks = [check for check in result["checks"] if isinstance(check, dict)]
+    runtime.repo.write_audit(
+        kind="modeling.monitor.run",
+        target_ref=str(result["experiment_id"]),
+        outcome="succeeded",
+        detail={
+            "artifact_id": result["artifact_id"],
+            "dataset_id": result["dataset_id"],
+            "row_count": result["row_count"],
+            "overall_level": result["overall_level"],
+            "score_psi": next(
+                (
+                    check.get("value")
+                    for check in checks
+                    if check.get("id") == "score_psi"
+                ),
+                None,
+            ),
+            "feature_csi_max": next(
+                (
+                    check.get("value")
+                    for check in checks
+                    if check.get("id") == "feature_csi_max"
+                ),
+                None,
+            ),
+        },
+    )
+    return result
+
+
+def _calculate_monitor_run(inputs: dict, ctx) -> dict:
+    """Calculate monitoring evidence without writing an audit record.
+
+    S1b/DOM-3: execute one monitoring run against the training-time baseline
     snapshot -- score PSI, per-feature CSI (top drifted features), and (only when
     the sample carries valid binary labels) KS/AUC compared against the model's
     own development-period reading. Judged against monitor_run's own threshold
     policy (MONITOR_RUN_THRESHOLDS, overridable via ``monitoring_policy``) into a
-    green/amber/red verdict per check plus an overall verdict, written as a
-    ``modeling.monitor.run`` audit entry.
+    green/amber/red verdict per check plus an overall verdict. The public tool
+    wrapper owns the standalone ``modeling.monitor.run`` audit; composite
+    strategy transactions reuse this pure boundary and persist their own receipt.
 
     Accepts either ``dataset_id`` (raw new data -- scored internally via
     _ModelArtifactScorer with replay_preprocessing=True, exactly like
@@ -257,19 +295,6 @@ def tool_monitor_run(inputs: dict, ctx) -> dict:
     recommendation = _monitor_run_recommendation(overall_level)
 
     row_count = int(len(frame))
-    runtime.repo.write_audit(
-        kind="modeling.monitor.run",
-        target_ref=experiment.id,
-        outcome="succeeded",
-        detail={
-            "artifact_id": artifact.id,
-            "dataset_id": dataset.id,
-            "row_count": row_count,
-            "overall_level": overall_level,
-            "score_psi": score_check.get("value"),
-            "feature_csi_max": (feature_checks[0].get("value") if feature_checks else None),
-        },
-    )
     return {
         "experiment_id": experiment.id,
         "artifact_id": artifact.id,

@@ -231,12 +231,12 @@ ruff check marvis tests --extend-exclude '*.ipynb'
 node --check marvis/static/app.js
 ```
 
-Tests are tiered with pytest markers (`slow`, `e2e`, `llm`). For fast local
+Tests are tiered with pytest markers (`slow`, `e2e`, `llm`, `pmml_runtime`). For fast local
 iteration, run only the fast tier (excludes real-training/real-subprocess
-tests, browser e2e smoke tests, and LLM evals):
+tests, browser e2e smoke tests, LLM evals, and the real PMML/JVM runtime):
 
 ```bash
-python -m pytest -m "not slow and not e2e and not llm" -q
+python -m pytest -m "not slow and not e2e and not llm and not pmml_runtime" -q
 # or
 scripts/check --fast
 ```
@@ -252,9 +252,14 @@ still use the conservative fallback.
 
 At phase close, `scripts/check --affected-full` runs every tier in the mapped
 test files. For an uncertain mapping it removes the tier filter; explicit
-pytest selectors supplied after `--` still apply. Pull-request and push CI use
-the fast tier; manual CI dispatch and the release gate run the full, untiered
-suite.
+pytest selectors supplied after `--` still apply. Pull-request and push CI run
+the fast tier and the `pmml_runtime` tier as separate parallel jobs; manual CI
+dispatch and the release gate run the full, untiered suite.
+
+Use `scripts/check --profile` with any full, fast, affected, or affected-full
+mode to print the 50 slowest pytest durations of at least 0.5 seconds. The full,
+unfiltered check still runs `pmml_runtime`; the separate CI PMML/JVM job keeps
+runtime coverage without delaying fast-test results.
 
 ## Release Push
 

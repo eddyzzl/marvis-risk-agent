@@ -319,7 +319,7 @@ def test_discover_changed_files_keeps_untracked_runtime_and_test_files(tmp_path:
     assert changed == ["marvis/new_runtime.py", "tests/test_new_runtime.py"]
 
 
-def test_check_fast_excludes_llm_tests(tmp_path: Path):
+def test_check_fast_excludes_heavy_and_pmml_runtime_tests(tmp_path: Path):
     capture = tmp_path / "python-args.txt"
     fake_python = tmp_path / "python"
     _write(
@@ -354,7 +354,7 @@ def test_check_fast_excludes_llm_tests(tmp_path: Path):
         "pytest",
         "-q",
         "-m",
-        "not slow and not e2e and not llm",
+        "not slow and not e2e and not llm and not pmml_runtime",
     ]
 
 
@@ -371,8 +371,51 @@ def test_check_help_documents_affected_mode_and_diff_range():
     assert completed.returncode == 0
     assert "--affected" in completed.stdout
     assert "--affected-full" in completed.stdout
+    assert "--profile" in completed.stdout
     assert "CHECK_DIFF_RANGE" in completed.stdout
-    assert "not slow and not e2e and not llm" in completed.stdout
+    assert "not slow and not e2e and not llm and not pmml_runtime" in completed.stdout
+
+
+def test_ci_runs_pmml_runtime_separately_from_fast_gate():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    pmml_job = workflow.split("\n  pmml_runtime:\n", maxsplit=1)[1].split(
+        "\n  security:\n", maxsplit=1
+    )[0]
+
+    assert "uv run scripts/check --fast" in workflow
+    assert "if: github.event_name != 'workflow_dispatch'" in pmml_job
+    assert "uses: actions/setup-java@v4" in pmml_job
+    assert "uv run python -m pytest -q -m pmml_runtime" in pmml_job
+
+
+def test_ci_runs_strategy_smoke_separately_without_jvm_or_manual_duplication():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    strategy_job = workflow.split("\n  strategy_smoke:\n", maxsplit=1)[1].split(
+        "\n  pmml_runtime:\n", maxsplit=1
+    )[0]
+
+    assert "if: github.event_name != 'workflow_dispatch'" in strategy_job
+    assert "uses: actions/setup-java@" not in strategy_job
+    assert "uv run python -m pytest -q" in strategy_job
+    assert (
+        "tests/test_strategy_candidate_request_e2e.py::"
+        "test_natural_language_candidate_auto_runs_to_only_adoption_gate_and_rerenders_doc"
+        in strategy_job
+    )
+    assert (
+        "tests/test_strategy_standard_workflows_e2e.py::"
+        "test_natural_language_standard_workflow_executes_and_exports"
+        in strategy_job
+    )
+    assert (
+        "tests/test_strategy_monitoring_e2e.py::"
+        "test_strategy_monitoring_e2e_red_then_new_version_then_report"
+        in strategy_job
+    )
 
 
 def test_check_fast_keeps_marker_filter_with_custom_pytest_args(tmp_path: Path):
@@ -411,7 +454,7 @@ def test_check_fast_keeps_marker_filter_with_custom_pytest_args(tmp_path: Path):
         "-m",
         "pytest",
         "-m",
-        "not slow and not e2e and not llm",
+        "not slow and not e2e and not llm and not pmml_runtime",
         "-x",
     ]
 
@@ -480,7 +523,7 @@ def test_check_affected_runs_only_mapped_test_file(tmp_path: Path):
         "tests/test_core.py",
         "-q",
         "-m",
-        "not slow and not e2e and not llm",
+        "not slow and not e2e and not llm and not pmml_runtime",
     ]
 
 
@@ -690,8 +733,93 @@ def test_check_affected_fallback_keeps_one_fast_marker_with_custom_args(tmp_path
         "-m",
         "pytest",
         "-m",
-        "not slow and not e2e and not llm",
+        "not slow and not e2e and not llm and not pmml_runtime",
         "-x",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_prefix"),
+    [
+        (
+            "--fast",
+            [
+                "-m",
+                "pytest",
+                "-q",
+                "-m",
+                "not slow and not e2e and not llm and not pmml_runtime",
+            ],
+        ),
+        ("--affected-full", ["-m", "pytest", "tests/test_core.py", "-q"]),
+    ],
+)
+def test_check_profile_appends_duration_reporting(
+    tmp_path: Path,
+    mode: str,
+    expected_prefix: list[str],
+):
+    root = _minimal_project(tmp_path / "repo")
+    shutil.copytree(ROOT / "scripts", root / "scripts", dirs_exist_ok=True)
+    _write(root / "marvis" / "core.py", "VALUE = 1\n")
+    _write(root / "tests" / "test_core.py", "import marvis.core\n")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=MARVIS Tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "commit",
+            "-qm",
+            "baseline",
+        ],
+        cwd=root,
+        check=True,
+    )
+    _write(root / "marvis" / "core.py", "VALUE = 2\n")
+
+    capture = tmp_path / f"{mode.removeprefix('--')}-profile-args.txt"
+    fake_python = tmp_path / f"{mode.removeprefix('--')}-profile-python"
+    _write(
+        fake_python,
+        "#!/bin/sh\n"
+        'if [ "$1" = "scripts/select_affected_tests.py" ]; then\n'
+        '  exec "$REAL_PYTHON" "$@"\n'
+        "fi\n"
+        'printf "%s\\n" "$@" > "$CHECK_CAPTURE"\n',
+    )
+    fake_python.chmod(0o755)
+    env = _isolated_check_env(
+        PYTHON=str(fake_python),
+        REAL_PYTHON=sys.executable,
+        CHECK_CAPTURE=str(capture),
+    )
+
+    completed = subprocess.run(
+        [
+            str(root / "scripts" / "check"),
+            mode,
+            "--profile",
+            "--skip-ruff",
+            "--skip-node",
+            "--skip-diff",
+        ],
+        cwd=root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert capture.read_text(encoding="utf-8").splitlines() == [
+        *expected_prefix,
+        "--durations=50",
+        "--durations-min=0.5",
     ]
 
 

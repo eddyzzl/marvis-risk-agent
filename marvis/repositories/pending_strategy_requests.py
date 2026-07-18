@@ -210,6 +210,104 @@ class PendingStrategyRequestRepository:
             target_status="invalidated",
         )
 
+    def release_after_failed_start(
+        self,
+        *,
+        task_id: str,
+        request_id: str,
+        expected_payload_sha256: str,
+        existing_plan_ids: set[str] | frozenset[str],
+    ) -> PendingStrategyRequestRecord:
+        """Release a consumed claim only when plan creation left no trace.
+
+        Legacy confirmations still claim before starting so concurrent callers
+        cannot create duplicate plans. If start fails before persisting a plan,
+        this guarded transition makes the same opaque request retryable. A new
+        plan of any status proves ownership transferred to the plan runtime and
+        permanently blocks release.
+        """
+
+        normalized_task_id = _required_text(task_id, field="task_id")
+        normalized_request_id = _required_text(request_id, field="request_id")
+        expected_hash = _sha256_text(
+            expected_payload_sha256, field="expected_payload_sha256"
+        )
+        if not isinstance(existing_plan_ids, (set, frozenset)):
+            raise PendingStrategyRequestDataError(
+                "existing_plan_ids must be a set or frozenset"
+            )
+        normalized_existing_plan_ids = {
+            _required_text(plan_id, field="existing_plan_ids item")
+            for plan_id in existing_plan_ids
+        }
+
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = _select_request_row(
+                conn,
+                task_id=normalized_task_id,
+                request_id=normalized_request_id,
+            )
+            if row is None:
+                raise PendingStrategyRequestNotFoundError(normalized_request_id)
+            current = _record_from_row(row)
+            if not hmac.compare_digest(current.payload_sha256, expected_hash):
+                raise PendingStrategyRequestConflictError(
+                    "pending strategy request payload hash does not match"
+                )
+            if current.status != "consumed":
+                raise PendingStrategyRequestConflictError(
+                    f"pending strategy request is {current.status}, not consumed"
+                )
+
+            plan_rows = conn.execute(
+                "SELECT id FROM plans WHERE task_id = ?",
+                (normalized_task_id,),
+            ).fetchall()
+            new_plan_ids = {
+                str(plan_row["id"])
+                for plan_row in plan_rows
+                if str(plan_row["id"]) not in normalized_existing_plan_ids
+            }
+            if new_plan_ids:
+                raise PendingStrategyRequestConflictError(
+                    "strategy request already created a plan; claim cannot be released"
+                )
+
+            updated_at = _now()
+            cursor = conn.execute(
+                """
+                UPDATE pending_strategy_requests
+                   SET status = 'pending', updated_at = ?
+                 WHERE id = ? AND task_id = ? AND status = 'consumed'
+                   AND payload_sha256 = ?
+                """,
+                (
+                    updated_at,
+                    current.id,
+                    current.task_id,
+                    current.payload_sha256,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise PendingStrategyRequestConflictError(
+                    "pending strategy request changed during release"
+                )
+            _write_audit_row(
+                conn,
+                kind="strategy.request.release",
+                target_ref=current.id,
+                inputs_hash=current.payload_sha256,
+                outcome="succeeded",
+                detail={
+                    "task_id": current.task_id,
+                    "from": current.status,
+                    "to": "pending",
+                    "reason": "plan_start_failed_before_persistence",
+                },
+            )
+        return replace(current, status="pending", updated_at=updated_at)
+
     def _transition(
         self,
         *,

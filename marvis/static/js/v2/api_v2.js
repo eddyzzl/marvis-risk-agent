@@ -49,6 +49,12 @@ export const reloadSkills = () => apiPost("/api/skills/reload", {});
 export const validateSkill = (skill) => apiPost("/api/skills/validate", { skill });
 
 export const listDatasets = (taskId) => apiGet(`/api/tasks/${pathPart(taskId)}/datasets`);
+export const listStrategyArtifacts = (taskId) => (
+  apiGet(`/api/tasks/${pathPart(taskId)}/strategy-artifacts`)
+);
+export const listTaskArtifacts = (taskId) => (
+  apiGet(`/api/tasks/${pathPart(taskId)}/task-artifacts`)
+);
 
 export function uploadDataset(taskId, file, opts = {}) {
   const formData = new FormData();

@@ -24,6 +24,12 @@ from marvis.plugins.manifest import (
     merge_governance_policies,
 )
 from marvis.strategy_adoption import normalize_adoption_reason
+from marvis.strategy_lifecycle import (
+    StrategyLifecycleError,
+    asset_status_from_legacy,
+    is_locally_adopted,
+    resolve_asset_status,
+)
 
 
 class GovernanceService:
@@ -285,13 +291,31 @@ class GovernanceService:
                 f"strategy target status is {status}, expected one of "
                 f"{list(target_policy.expected_statuses)}"
             )
+        try:
+            asset_status = resolve_asset_status(status, meta.get("asset_status"))
+            result_asset_status = asset_status_from_legacy(
+                target_policy.result_status
+            )
+        except StrategyLifecycleError as exc:
+            raise ApprovalBindingError(
+                "strategy target lifecycle state is invalid"
+            ) from exc
         strategy_type = str(meta.get("strategy_type") or "")
-        champion_ids = sorted(
-            str(item["id"])
-            for item in self._strategies.list_meta_for_task(target_task_id)
-            if str(item.get("strategy_type") or "") == strategy_type
-            and str(item.get("status") or "") == "adopted"
-        )
+        champion_ids: list[str] = []
+        for item in self._strategies.list_meta_for_task(target_task_id):
+            if str(item.get("strategy_type") or "") != strategy_type:
+                continue
+            try:
+                adopted = is_locally_adopted(
+                    item.get("status"), item.get("asset_status")
+                )
+            except StrategyLifecycleError as exc:
+                raise ApprovalBindingError(
+                    f"strategy {item.get('id')} lifecycle state is invalid"
+                ) from exc
+            if adopted:
+                champion_ids.append(str(item["id"]))
+        champion_ids.sort()
         strategy_spec_hash = self._strategies.get_strategy_spec_hash(target_id)
         if not strategy_spec_hash:
             raise ApprovalBindingError(
@@ -302,6 +326,8 @@ class GovernanceService:
             "id": target_id,
             "expected_status": status,
             "result_status": target_policy.result_status,
+            "expected_asset_status": asset_status,
+            "result_asset_status": result_asset_status,
             "version": int(meta.get("version") or 0),
             "task_id": target_task_id,
             "strategy_type": strategy_type,

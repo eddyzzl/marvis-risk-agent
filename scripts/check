@@ -15,7 +15,8 @@ RUN_AUDIT=0
 FAST=0
 AFFECTED=0
 AFFECTED_FULL=0
-FAST_MARKERS="not slow and not e2e and not llm"
+PROFILE=0
+FAST_MARKERS="not slow and not e2e and not llm and not pmml_runtime"
 
 usage() {
   cat <<'USAGE'
@@ -29,7 +30,7 @@ Options:
   --skip-node     Skip JavaScript syntax checks.
   --skip-diff     Skip git diff whitespace checks.
   --fast          Run only the fast test tier
-                  (-m "not slow and not e2e and not llm").
+                  (-m "not slow and not e2e and not llm and not pmml_runtime").
   --affected      Run tests affected by the current git diff. Uses
                   CHECK_DIFF_RANGE when set; otherwise checks local changes.
                   Runs only fast tests and falls back to the fast tier when
@@ -37,6 +38,8 @@ Options:
   --affected-full Run every tier in the affected test files. When mapping is
                   uncertain, remove the tier filter; explicit pytest selectors
                   passed after "--" still apply. Use at phase close.
+  --profile       Report the 50 slowest pytest durations (minimum 0.5s).
+                  Compatible with full, fast, affected, and affected-full modes.
   --audit         Run pip-audit against the locked dependencies (skipped
                    with a warning if pip-audit is not installed).
   -h, --help      Show this help.
@@ -85,6 +88,10 @@ while [[ $# -gt 0 ]]; do
     --affected-full)
       AFFECTED=1
       AFFECTED_FULL=1
+      shift
+      ;;
+    --profile)
+      PROFILE=1
       shift
       ;;
     --audit)
@@ -175,6 +182,10 @@ if [[ "$AFFECTED" -eq 1 && "$RUN_PYTEST" -eq 1 ]]; then
   fi
   cleanup_affected_output
   trap - EXIT
+fi
+
+if [[ "$RUN_PYTEST" -eq 1 && "$PROFILE" -eq 1 ]]; then
+  PYTEST_ARGS+=("--durations=50" "--durations-min=0.5")
 fi
 
 if [[ "$RUN_DIFF" -eq 1 ]]; then

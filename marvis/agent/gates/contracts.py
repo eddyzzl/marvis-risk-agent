@@ -313,12 +313,7 @@ _HIGH_RISK_GATE_SOURCE_TOOLS: dict[str, tuple[str, ...]] = {
     "confirm_join": ("irreversible_dedup_merge",),
     "propose_join": ("irreversible_dedup_merge",),
     "adopt_strategy": ("irreversible_strategy_approval",),
-    "run_strategy_monitoring": ("strategy_monitoring_alarm_approval",),
-    "render_monitoring_report": ("strategy_monitoring_alarm_approval",),
-    "design_cutoff_bands": ("strategy_direction_approval",),
-    "tradeoff_view": ("strategy_direction_approval",),
-    "compare_strategies": ("strategy_direction_approval",),
-    "vintage_curve": ("strategy_direction_approval",),
+    "apply_monitoring_disposition": ("strategy_monitoring_disposition_approval",),
     # FIN-3 #1: systematic sweep of every needs_confirmation=True gate step across
     # orchestrator/templates/ found seven forced-confirmation source tools with a
     # red-flag checklist or an irreversible/delivery action that were NOT mapped
@@ -335,8 +330,6 @@ _HIGH_RISK_GATE_SOURCE_TOOLS: dict[str, tuple[str, ...]] = {
     "render_reports": ("validation_report_approval",),
     "monitor_run": ("monitoring_run_alarm_approval",),
     "generate_model_report": ("model_report_approval",),
-    "backtest_strategy": ("strategy_direction_approval",),
-    "select_rule_set": ("irreversible_strategy_approval",),
 }
 
 #: step_id substrings for the same forced gates, used when meta carries only a
@@ -344,11 +337,7 @@ _HIGH_RISK_GATE_SOURCE_TOOLS: dict[str, tuple[str, ...]] = {
 #: Production step_ids are opaque "{plan}-step-N" and never match these, so this
 #: only ever fires on gates a caller explicitly named after the forced tool.
 _HIGH_RISK_STEP_ID_TOKENS: dict[str, tuple[str, ...]] = {
-    "tradeoff": ("strategy_direction_approval",),
-    "vintage": ("strategy_direction_approval",),
-    "cutoff": ("strategy_direction_approval",),
     "adopt": ("irreversible_strategy_approval",),
-    "monitor": ("strategy_monitoring_alarm_approval",),
     "post-training": ("model_delivery_handoff_champion",),
     "select-champion": ("champion_model_selection",),
 }

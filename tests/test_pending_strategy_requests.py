@@ -315,6 +315,89 @@ def test_concurrent_consumers_have_exactly_one_winner(tmp_path):
     assert sorted(outcomes) == ["conflict", "consumed"]
 
 
+def test_failed_start_release_is_retryable_and_concurrent_release_is_one_shot(
+    tmp_path,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task = _task(db_path, tmp_path, "release-race")
+    repo = PendingStrategyRequestRepository(db_path)
+    created = repo.create(
+        task_id=task.id,
+        validated_draft=_draft(),
+        dataset_identity=_identity(),
+        target_col="bad",
+    )
+    repo.consume(
+        task_id=task.id,
+        request_id=created.id,
+        expected_payload_sha256=created.payload_sha256,
+    )
+    barrier = threading.Barrier(2)
+
+    def release_once() -> str:
+        barrier.wait()
+        try:
+            return repo.release_after_failed_start(
+                task_id=task.id,
+                request_id=created.id,
+                expected_payload_sha256=created.payload_sha256,
+                existing_plan_ids=frozenset(),
+            ).status
+        except PendingStrategyRequestConflictError:
+            return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _index: release_once(), range(2)))
+
+    assert sorted(outcomes) == ["conflict", "pending"]
+    assert repo.get(task.id, created.id).status == "pending"
+
+
+def test_failed_start_release_refuses_when_request_created_a_plan(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task = _task(db_path, tmp_path, "release-plan-guard")
+    repo = PendingStrategyRequestRepository(db_path)
+    created = repo.create(
+        task_id=task.id,
+        validated_draft=_draft(),
+        dataset_identity=_identity(),
+        target_col="bad",
+    )
+    repo.consume(
+        task_id=task.id,
+        request_id=created.id,
+        expected_payload_sha256=created.payload_sha256,
+    )
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO plans(
+                id, task_id, goal, source, template_id, autonomy_level,
+                status, novel_mode, tier, replan_count, loop_events_json,
+                success_criteria_json, created_at, updated_at
+            )
+            VALUES (?, ?, 'strategy', 'template', 'strategy_analysis', 1,
+                    'validated', 'plan_ahead', 'balanced', 0, '[]', '[]', ?, ?)
+            """,
+            ("new-plan", task.id, created.created_at, created.updated_at),
+        )
+
+    with pytest.raises(
+        PendingStrategyRequestConflictError,
+        match="already created a plan",
+    ):
+        repo.release_after_failed_start(
+            task_id=task.id,
+            request_id=created.id,
+            expected_payload_sha256=created.payload_sha256,
+            existing_plan_ids=frozenset(),
+        )
+
+    assert repo.get(task.id, created.id).status == "consumed"
+
+
 def test_task_delete_cascades_pending_requests(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

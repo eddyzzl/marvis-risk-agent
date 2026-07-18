@@ -1,11 +1,13 @@
 import hashlib
+import hmac
 import json
 import sqlite3
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from marvis.db_schema import connect
 from marvis.packs.strategy.contracts import (
@@ -20,15 +22,39 @@ from marvis.packs.strategy.dsl import (
     strategy_spec_hash,
 )
 from marvis.packs.strategy.legacy_adapter import legacy_strategy_to_spec
+from marvis.packs.strategy.monitoring_plan import monitoring_plan_from_dict
+from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.typed_backtest import (
     STRATEGY_BACKTEST_SCHEMA_VERSION,
     StrategyBacktestResult,
 )
 from marvis.state_machine import ConflictError
 from marvis.strategy_adoption import normalize_adoption_reason
+from marvis.strategy_lifecycle import (
+    ASSET_STATUS_ADOPTED_LOCAL,
+    ASSET_STATUS_DRAFT,
+    ASSET_STATUS_RETIRED,
+    ASSET_STATUS_VALIDATED,
+    LEGACY_STATUS_ADOPTED,
+    LEGACY_STATUS_DRAFT,
+    LEGACY_STATUS_RETIRED,
+    StrategyLifecycleError,
+    asset_status_from_legacy,
+    is_locally_adopted,
+    resolve_asset_status,
+)
 
 
 BacktestRecord: TypeAlias = BacktestResult | StrategyBacktestResult
+_STRATEGY_ARTIFACT_IDENTITY_NAMESPACE = "marvis.strategy_artifact.v1"
+
+
+class StrategyArtifactConflictError(RuntimeError):
+    """A verified content identity already exists with different evidence."""
+
+
+class StrategyArtifactDataError(ValueError):
+    """Verified strategy artifact metadata violates its immutable contract."""
 
 
 def _now() -> str:
@@ -37,6 +63,37 @@ def _now() -> str:
 
 def _strategy_effect_conflict(reason: str) -> ConflictError:
     return ConflictError(f"策略效果授权无效：{reason}")
+
+
+def _current_local_champion_ids(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    strategy_type: str,
+    exclude_strategy_id: str,
+) -> list[str]:
+    """Return canonical local champions while rejecting any stored drift."""
+
+    rows = conn.execute(
+        """
+        SELECT id, status, asset_status
+          FROM strategies
+         WHERE task_id = ? AND strategy_type = ? AND id <> ?
+         ORDER BY id
+        """,
+        (task_id, strategy_type, exclude_strategy_id),
+    ).fetchall()
+    champions: list[str] = []
+    for row in rows:
+        try:
+            adopted = is_locally_adopted(row["status"], row["asset_status"])
+        except StrategyLifecycleError as exc:
+            raise _strategy_effect_conflict(
+                f"策略 {row['id']} 的生命周期状态漂移"
+            ) from exc
+        if adopted:
+            champions.append(str(row["id"]))
+    return champions
 
 
 def _strategy_spec_hash_from_row(row: sqlite3.Row) -> str:
@@ -79,6 +136,7 @@ def _validate_strategy_effect_authorization(
     strategy_type: str,
     version: int,
     status: str,
+    asset_status: str,
     strategy_spec_hash: str,
 ) -> dict:
     """Validate the one-shot effect receipt and its frozen strategy target.
@@ -140,11 +198,37 @@ def _validate_strategy_effect_authorization(
         expected_statuses = target.get("expected_statuses")
         if isinstance(expected_statuses, list) and len(expected_statuses) == 1:
             expected_status = expected_statuses[0]
+    try:
+        current_asset_status = resolve_asset_status(status, asset_status)
+    except StrategyLifecycleError as exc:
+        raise _strategy_effect_conflict("当前策略生命周期状态漂移") from exc
+
+    has_canonical_target = (
+        "expected_asset_status" in target or "result_asset_status" in target
+    )
+    if has_canonical_target:
+        expected_asset_status = target.get("expected_asset_status")
+        result_asset_status = target.get("result_asset_status")
+    else:
+        # Compatibility for ApprovalRecords issued before canonical lifecycle
+        # fields existed.  Only exact known legacy tokens are mapped.
+        try:
+            expected_asset_status = asset_status_from_legacy(expected_status)
+            result_asset_status = asset_status_from_legacy(
+                target.get("result_status")
+            )
+        except StrategyLifecycleError as exc:
+            raise _strategy_effect_conflict(
+                "旧 effect target 的 lifecycle 状态无法映射"
+            ) from exc
+
     expected = {
         "kind": "strategy",
         "id": strategy_id,
-        "expected_status": "draft",
-        "result_status": "adopted",
+        "expected_status": LEGACY_STATUS_DRAFT,
+        "result_status": LEGACY_STATUS_ADOPTED,
+        "expected_asset_status": current_asset_status,
+        "result_asset_status": ASSET_STATUS_ADOPTED_LOCAL,
         "version": version,
         "task_id": task_id,
         "strategy_type": strategy_type,
@@ -155,25 +239,24 @@ def _validate_strategy_effect_authorization(
         "id": target.get("id"),
         "expected_status": expected_status,
         "result_status": target.get("result_status"),
+        "expected_asset_status": expected_asset_status,
+        "result_asset_status": result_asset_status,
         "version": target.get("version"),
         "task_id": target.get("task_id"),
         "strategy_type": target.get("strategy_type"),
         "strategy_spec_hash": target.get("strategy_spec_hash"),
     }
-    if actual != expected or status != "draft":
-        raise _strategy_effect_conflict("目标 id/status/version/task/type/spec 已漂移")
+    if actual != expected or status != LEGACY_STATUS_DRAFT:
+        raise _strategy_effect_conflict(
+            "目标 id/status/asset_status/version/task/type/spec 已漂移"
+        )
 
-    champion_rows = conn.execute(
-        """
-        SELECT id
-          FROM strategies
-         WHERE task_id = ? AND strategy_type = ? AND status = 'adopted'
-           AND id <> ?
-         ORDER BY id
-        """,
-        (task_id, strategy_type, strategy_id),
-    ).fetchall()
-    current_champion_ids = sorted(str(item["id"]) for item in champion_rows)
+    current_champion_ids = _current_local_champion_ids(
+        conn,
+        task_id=task_id,
+        strategy_type=strategy_type,
+        exclude_strategy_id=strategy_id,
+    )
     bound_champions = target.get("current_champion_ids")
     if bound_champions is None and "current_champion_id" in target:
         singular = target.get("current_champion_id")
@@ -206,7 +289,8 @@ def _commit_strategy_effect_receipt(
         "kind": "strategy.adopt",
         "strategy_id": strategy_id,
         "version": version,
-        "status": "adopted",
+        "status": LEGACY_STATUS_ADOPTED,
+        "asset_status": ASSET_STATUS_ADOPTED_LOCAL,
         "retired_strategy_ids": list(retired_strategy_ids),
     }
     result_hash = hashlib.sha256(
@@ -310,8 +394,8 @@ class StrategyRepository:
         with connect(self.db_path) as conn:
             row = conn.execute(
                 """
-                SELECT id, task_id, strategy_type, version, status, adopted_at,
-                       adoption_reason, parent_strategy_id, created_at
+                SELECT id, task_id, strategy_type, version, status, asset_status,
+                       adopted_at, adoption_reason, parent_strategy_id, created_at
                   FROM strategies
                  WHERE id = ?
                 """,
@@ -354,8 +438,8 @@ class StrategyRepository:
         with connect(self.db_path) as conn:
             rows = conn.execute(
                 """
-                SELECT id, task_id, strategy_type, version, status, adopted_at,
-                       adoption_reason, parent_strategy_id, created_at
+                SELECT id, task_id, strategy_type, version, status, asset_status,
+                       adopted_at, adoption_reason, parent_strategy_id, created_at
                   FROM strategies
                  WHERE task_id = ?
                  ORDER BY created_at, id
@@ -422,6 +506,8 @@ class StrategyRepository:
             **dict(audit.get("detail") or {}),
             "strategy_id": strategy_id,
             "adoption_reason": normalized_reason,
+            "status": LEGACY_STATUS_ADOPTED,
+            "asset_status": ASSET_STATUS_ADOPTED_LOCAL,
         }
         stamp = adopted_at or _now()
         # A governed side effect must validate its immutable authorization
@@ -432,7 +518,7 @@ class StrategyRepository:
             conn.execute("BEGIN IMMEDIATE")
         head = conn.execute(
             """
-            SELECT task_id, strategy_type, version, status, rules_json,
+            SELECT task_id, strategy_type, version, status, asset_status, rules_json,
                    score_col, default_decision_json, description,
                    dsl_json, dsl_schema_version
               FROM strategies
@@ -445,6 +531,10 @@ class StrategyRepository:
         task_id = str(head["task_id"])
         strategy_type = str(head["strategy_type"])
         version = int(head["version"])
+        current_asset_status = resolve_asset_status(
+            str(head["status"]),
+            str(head["asset_status"]),
+        )
         effect_receipt = None
         if governed_effect:
             effect_receipt = _validate_strategy_effect_authorization(
@@ -456,20 +546,25 @@ class StrategyRepository:
                 strategy_type=strategy_type,
                 version=version,
                 status=str(head["status"]),
+                asset_status=current_asset_status,
                 strategy_spec_hash=_strategy_spec_hash_from_row(head),
+            )
+        if str(head["status"]) != LEGACY_STATUS_DRAFT or current_asset_status not in {
+            ASSET_STATUS_DRAFT,
+            ASSET_STATUS_VALIDATED,
+        }:
+            raise ConflictError(
+                f"strategy {strategy_id} is not adoptable: "
+                f"status={head['status']}, asset_status={current_asset_status}"
             )
         # Retire in-role siblings first, in the same transaction, so the
         # "at most one adopted per (task, type)" invariant holds atomically.
-        retired_rows = conn.execute(
-            """
-            SELECT id FROM strategies
-             WHERE task_id = ? AND strategy_type = ? AND status = 'adopted'
-               AND id <> ?
-             ORDER BY created_at, id
-            """,
-            (task_id, strategy_type, strategy_id),
-        ).fetchall()
-        retired_ids = [str(r["id"]) for r in retired_rows]
+        retired_ids = _current_local_champion_ids(
+            conn,
+            task_id=task_id,
+            strategy_type=strategy_type,
+            exclude_strategy_id=strategy_id,
+        )
         for retired_id in retired_ids:
             # rowcount guard: the sibling was 'adopted' at the SELECT above,
             # but a concurrent adopt/retire can flip it in the window between
@@ -482,7 +577,9 @@ class StrategyRepository:
             # either every sibling retires and this strategy adopts, or
             # nothing changes.
             retire_cursor = conn.execute(
-                "UPDATE strategies SET status = 'retired' WHERE id = ? AND status = 'adopted'",
+                "UPDATE strategies SET status = 'retired', asset_status = 'retired' "
+                "WHERE id = ? AND status = 'adopted' "
+                "AND asset_status = 'adopted_local'",
                 (retired_id,),
             )
             if retire_cursor.rowcount == 0:
@@ -496,23 +593,34 @@ class StrategyRepository:
                     "task_id": task_id,
                     "strategy_type": strategy_type,
                     "superseded_by": strategy_id,
+                    "status": LEGACY_STATUS_RETIRED,
+                    "asset_status": ASSET_STATUS_RETIRED,
                 },
             )
         cursor = conn.execute(
             """
             UPDATE strategies
-               SET status = 'adopted', adopted_at = ?, adoption_reason = ?
-             WHERE id = ? AND status = 'draft'
+               SET status = ?, asset_status = ?, adopted_at = ?, adoption_reason = ?
+             WHERE id = ? AND status = ? AND asset_status = ?
             """,
-            (stamp, normalized_reason, strategy_id),
+            (
+                LEGACY_STATUS_ADOPTED,
+                ASSET_STATUS_ADOPTED_LOCAL,
+                stamp,
+                normalized_reason,
+                strategy_id,
+                LEGACY_STATUS_DRAFT,
+                current_asset_status,
+            ),
         )
         if cursor.rowcount == 0:
             current = conn.execute(
-                "SELECT status FROM strategies WHERE id = ?",
+                "SELECT status, asset_status FROM strategies WHERE id = ?",
                 (strategy_id,),
             ).fetchone()
             raise ConflictError(
-                f"strategy {strategy_id} is not draft: {current['status']}"
+                f"strategy {strategy_id} is not adoptable: "
+                f"status={current['status']}, asset_status={current['asset_status']}"
             )
         _write_audit_row(conn, **adoption_audit)
         if effect_receipt is not None:
@@ -542,18 +650,7 @@ class StrategyRepository:
             raise ValueError("rules and strategy_spec are mutually exclusive")
         stamp = created_at or _now()
         with connect(self.db_path) as conn:
-            src = conn.execute(
-                """
-                SELECT id, task_id, strategy_type, rules_json, score_col,
-                       default_decision_json, description, created_at,
-                       dsl_json, dsl_schema_version
-                  FROM strategies
-                 WHERE id = ?
-                """,
-                (strategy_id,),
-            ).fetchone()
-            if src is None:
-                raise KeyError(strategy_id)
+            src = _select_strategy_version_source(conn, strategy_id)
             task_id = str(src["task_id"])
             max_version_row = conn.execute(
                 """
@@ -563,100 +660,83 @@ class StrategyRepository:
                 (task_id, str(src["strategy_type"])),
             ).fetchone()
             next_version = int(max_version_row["mx"] or 0) + 1
-            child_id = new_strategy_id or uuid.uuid4().hex
-            child_description = (
-                str(description) if description is not None else str(src["description"])
+            return _insert_strategy_version_from_source(
+                conn,
+                src,
+                target_task_id=task_id,
+                next_version=next_version,
+                rules=rules,
+                strategy_spec=strategy_spec,
+                description=description,
+                new_strategy_id=new_strategy_id,
+                created_at=stamp,
             )
-            source_strategy = _strategy_from_row(src)
-            if strategy_spec is not None:
-                from marvis.packs.strategy.strategy import build_strategy_from_spec
 
-                base_spec = parse_strategy_spec(strategy_spec)
-                if base_spec.strategy_type != source_strategy.strategy_type:
-                    raise ValueError(
-                        "new strategy version cannot change strategy_type"
-                    )
-                built = build_strategy_from_spec(
-                    base_spec,
-                    score_col=source_strategy.score_col,
-                    description=child_description,
-                )
-                child_rules = built.rules
-            elif rules is not None:
-                # Local import avoids making repository module import order part of
-                # the pack's public surface while still using the one canonical
-                # legacy->DSL normalization path.
-                from marvis.packs.strategy.strategy import build_strategy
+    def new_version_from_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        parent_strategy_id: str,
+        *,
+        target_task_id: str,
+        rules: list | None = None,
+        strategy_spec: StrategySpec | dict | None = None,
+        description: str | None = None,
+        new_strategy_id: str | None = None,
+        created_at: str | None = None,
+    ) -> Strategy:
+        """Create a governed draft version inside the caller's transaction.
 
-                built = build_strategy(
-                    source_strategy.strategy_type,
-                    [
-                        _strategy_rule_to_dict(_coerce_rule(rule))
-                        for rule in rules
-                    ],
-                    score_col=source_strategy.score_col,
-                    default_decision=source_strategy.default_decision,
-                    description=child_description,
-                )
-                child_rules = built.rules
-                base_spec = built.spec
-            else:
-                base_spec = source_strategy.spec
-                child_rules = _rules_with_spec_identity(
-                    source_strategy.rules,
-                    base_spec,
-                )
-            spec_payload = base_spec.to_dict()
-            metadata = dict(spec_payload.get("metadata") or {})
-            lineage = dict(metadata.get("lineage") or {})
-            lineage.update(
-                {
-                    "source": "strategy_version",
-                    "parent_strategy_id": strategy_id,
-                }
+        ``target_task_id`` is explicit so a red-monitoring handoff can create a
+        fresh strategy task and then attach the child to that task without a
+        second transaction. The caller must already hold a writer transaction;
+        this method never commits or adopts the child.
+        """
+
+        if not conn.in_transaction:
+            raise ValueError(
+                "new_version_from_on_connection requires a caller-owned transaction"
             )
-            metadata["lineage"] = lineage
-            metadata["description"] = child_description
-            spec_payload["metadata"] = metadata
-            child_spec = parse_strategy_spec(spec_payload)
-            conn.execute(
-                """
-                INSERT INTO strategies(
-                    id, task_id, strategy_type, rules_json, score_col,
-                    default_decision_json, description, created_at,
-                    version, status, parent_strategy_id,
-                    dsl_json, dsl_schema_version
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
-                """,
-                (
-                    child_id,
-                    task_id,
-                    child_spec.strategy_type,
-                    _dump_json_any(
-                        [_strategy_rule_to_dict(rule) for rule in child_rules]
-                    ),
-                    _optional_str(src["score_col"]),
-                    _dump_json_any(child_spec.default_action.decision_value),
-                    child_description,
-                    stamp,
-                    next_version,
-                    strategy_id,
-                    canonical_strategy_json(child_spec),
-                    child_spec.schema_version,
-                ),
-            )
-            row = conn.execute(
-                """
-                SELECT id, task_id, strategy_type, rules_json, score_col,
-                       default_decision_json, description, created_at,
-                       dsl_json, dsl_schema_version
-                  FROM strategies
-                 WHERE id = ?
-                """,
-                (child_id,),
-            ).fetchone()
-        return _strategy_from_row(row)
+        if rules is not None and strategy_spec is not None:
+            raise ValueError("rules and strategy_spec are mutually exclusive")
+        target_id = str(target_task_id).strip()
+        if not target_id:
+            raise ValueError("target_task_id must be non-empty")
+        target_task = conn.execute(
+            "SELECT id, task_type FROM tasks WHERE id = ?",
+            (target_id,),
+        ).fetchone()
+        if target_task is None:
+            raise KeyError(target_id)
+        if str(target_task["task_type"]) != "strategy":
+            raise ValueError("target_task_id must identify a strategy task")
+
+        src = _select_strategy_version_source(conn, parent_strategy_id)
+        parent_version = int(src["version"])
+        target_max_row = conn.execute(
+            """
+            SELECT MAX(version) AS mx FROM strategies
+             WHERE task_id = ? AND strategy_type = ?
+            """,
+            (target_id, str(src["strategy_type"])),
+        ).fetchone()
+        # A newly-created handoff task has no strategies, so this is exactly
+        # parent.version + 1. max(...) also keeps the method safe if a caller
+        # deliberately targets a non-empty strategy task.
+        next_version = max(
+            parent_version + 1,
+            int(target_max_row["mx"] or 0) + 1,
+        )
+        return _insert_strategy_version_from_source(
+            conn,
+            src,
+            target_task_id=target_id,
+            next_version=next_version,
+            rules=rules,
+            strategy_spec=strategy_spec,
+            description=description,
+            new_strategy_id=new_strategy_id,
+            created_at=created_at or _now(),
+        )
 
     def save_strategy_artifact(
         self,
@@ -676,6 +756,61 @@ class StrategyRepository:
                 created_at=created_at,
                 artifact_id=artifact_id,
             )
+
+    def register_verified_strategy_artifact(
+        self,
+        strategy_id: str,
+        *,
+        kind: str,
+        path: str,
+        content_hash: str,
+        content_size: int,
+        provenance: Mapping[str, Any],
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Register a content-addressed artifact or return its exact replay."""
+
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return _register_verified_strategy_artifact_row(
+                conn,
+                strategy_id,
+                kind=kind,
+                path=path,
+                content_hash=content_hash,
+                content_size=content_size,
+                provenance=provenance,
+                created_at=created_at,
+            )
+
+    def register_verified_strategy_artifact_with_audit_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        strategy_id: str,
+        *,
+        kind: str,
+        path: str,
+        content_hash: str,
+        content_size: int,
+        provenance: Mapping[str, Any],
+        audit: dict,
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Register verified bytes and their first-write audit in one transaction."""
+
+        record = _register_verified_strategy_artifact_row(
+            conn,
+            strategy_id,
+            kind=kind,
+            path=path,
+            content_hash=content_hash,
+            content_size=content_size,
+            provenance=provenance,
+            created_at=created_at,
+        )
+        if record["created"]:
+            _write_audit_row(conn, **audit)
+        return record
 
     def save_strategy_artifact_with_audit_on_connection(
         self,
@@ -703,23 +838,89 @@ class StrategyRepository:
         with connect(self.db_path) as conn:
             rows = conn.execute(
                 """
-                SELECT id, strategy_id, kind, path, created_at
+                SELECT id, strategy_id, kind, path, created_at,
+                       content_hash, content_size, provenance_json
                   FROM strategy_artifacts
                  WHERE strategy_id = ?
                  ORDER BY created_at, id
                 """,
                 (strategy_id,),
             ).fetchall()
-        return [
-            {
+        return [_strategy_artifact_record_from_row(row) for row in rows]
+
+    def list_strategy_artifacts_for_task(self, task_id: str) -> list[dict]:
+        """Return artifact rows joined to their task-owned strategy metadata."""
+
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT a.id, a.strategy_id, a.kind, a.path, a.created_at,
+                       a.content_hash, a.content_size, a.provenance_json,
+                       s.strategy_type, s.version, s.status, s.asset_status
+                  FROM strategy_artifacts a
+                  JOIN strategies s ON s.id = a.strategy_id
+                 WHERE s.task_id = ?
+                 ORDER BY a.created_at, a.id
+                """,
+                (task_id,),
+            ).fetchall()
+        records = []
+        for row in rows:
+            record = _strategy_artifact_record_from_row(row)
+            record.update(
+                {
                 "id": str(row["id"]),
                 "strategy_id": str(row["strategy_id"]),
                 "kind": str(row["kind"]),
                 "path": str(row["path"]),
                 "created_at": str(row["created_at"]),
-            }
-            for row in rows
-        ]
+                "strategy_type": str(row["strategy_type"]),
+                "version": int(row["version"]),
+                "status": str(row["status"]),
+                "asset_status": resolve_asset_status(
+                    str(row["status"]), str(row["asset_status"])
+                ),
+                }
+            )
+            records.append(record)
+        return records
+
+    def get_strategy_artifact_for_task(
+        self,
+        task_id: str,
+        artifact_id: str,
+    ) -> dict | None:
+        """Load an artifact only when its strategy belongs to ``task_id``."""
+
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT a.id, a.strategy_id, a.kind, a.path, a.created_at,
+                       a.content_hash, a.content_size, a.provenance_json,
+                       s.strategy_type, s.version, s.status, s.asset_status
+                  FROM strategy_artifacts a
+                  JOIN strategies s ON s.id = a.strategy_id
+                 WHERE s.task_id = ? AND a.id = ?
+                """,
+                (task_id, artifact_id),
+            ).fetchone()
+        if row is None:
+            return None
+        status = str(row["status"])
+        asset_status = resolve_asset_status(status, str(row["asset_status"]))
+        record = _strategy_artifact_record_from_row(row)
+        record.update({
+            "id": str(row["id"]),
+            "strategy_id": str(row["strategy_id"]),
+            "kind": str(row["kind"]),
+            "path": str(row["path"]),
+            "created_at": str(row["created_at"]),
+            "strategy_type": str(row["strategy_type"]),
+            "version": int(row["version"]),
+            "status": status,
+            "asset_status": asset_status,
+        })
+        return record
 
     def save_backtest(
         self,
@@ -787,13 +988,14 @@ class StrategyRepository:
         return [_backtest_result_from_row(row) for row in rows]
 
     def list_monitoring_due(self, now: datetime | None = None) -> list[dict]:
-        """S5: adopted strategies whose next monitoring run is due (overdue).
+        """Adopted strategies whose next monitoring run is overdue.
 
-        Due date = (last_run_at or adopted_at) + cadence_days, read from each
-        adopted strategy's latest monitoring_plan_json artifact. A strategy with
-        no monitoring plan is skipped (nothing to be due against). All the SQL and
-        the plan-JSON parsing lives here so callers get plain dicts. Returns only
-        strategies that are currently overdue, most-overdue first."""
+        V2 derives cadence from the latest immutable monitoring-plan revision and
+        anchors it at that plan's latest persisted run. A plan with no run gets a
+        full cadence from the later of plan creation and strategy adoption, so a
+        newly-created plan cannot be immediately reported as stale. Only a
+        strategy with no ledger plan at all falls back to its V1 artifact.
+        """
         reference = now or datetime.now(UTC)
         with connect(self.db_path) as conn:
             rows = conn.execute(
@@ -803,35 +1005,51 @@ class StrategyRepository:
                          WHERE a.strategy_id = s.id AND a.kind = 'monitoring_plan_json'
                          ORDER BY a.created_at DESC, a.id DESC LIMIT 1) AS plan_path
                   FROM strategies s
-                 WHERE s.status = 'adopted'
+                 WHERE s.status = 'adopted' AND s.asset_status = 'adopted_local'
                  ORDER BY s.adopted_at, s.id
                 """
             ).fetchall()
-        due: list[dict] = []
-        for row in rows:
-            plan_path = _optional_str(row["plan_path"])
-            if plan_path is None:
-                continue
-            plan = _read_monitoring_plan_fields(plan_path)
-            if plan is None:
-                continue
-            anchor_ts = _parse_iso(plan.get("last_run_at")) or _parse_iso(row["adopted_at"])
-            if anchor_ts is None:
-                continue
-            cadence_days = int(plan.get("cadence_days") or 30)
-            due_at = anchor_ts + timedelta(days=cadence_days)
-            overdue_seconds = (reference - due_at).total_seconds()
-            if overdue_seconds <= 0:
-                continue
-            due.append(
-                {
-                    "strategy_id": str(row["strategy_id"]),
-                    "due_at": due_at.isoformat(),
-                    "overdue_days": overdue_seconds / 86400.0,
-                    "last_run_at": _optional_str(plan.get("last_run_at")),
-                    "cadence_days": cadence_days,
-                }
-            )
+            due: list[dict] = []
+            for row in rows:
+                strategy_id = str(row["strategy_id"])
+                ledger_plan = conn.execute(
+                    """
+                    SELECT id, payload_json, created_at
+                      FROM strategy_monitoring_plans
+                     WHERE strategy_id = ?
+                     ORDER BY revision DESC, created_at DESC, id DESC
+                     LIMIT 1
+                    """,
+                    (strategy_id,),
+                ).fetchone()
+                if ledger_plan is not None:
+                    resolved = _ledger_monitoring_due_fields(
+                        conn,
+                        strategy_id=strategy_id,
+                        adopted_at=row["adopted_at"],
+                        plan_row=ledger_plan,
+                    )
+                else:
+                    resolved = _legacy_monitoring_due_fields(
+                        plan_path=row["plan_path"],
+                        adopted_at=row["adopted_at"],
+                    )
+                if resolved is None:
+                    continue
+                anchor_ts, last_run_at, cadence_days = resolved
+                due_at = anchor_ts + timedelta(days=cadence_days)
+                overdue_seconds = (reference - due_at).total_seconds()
+                if overdue_seconds <= 0:
+                    continue
+                due.append(
+                    {
+                        "strategy_id": strategy_id,
+                        "due_at": due_at.isoformat(),
+                        "overdue_days": overdue_seconds / 86400.0,
+                        "last_run_at": last_run_at,
+                        "cadence_days": cadence_days,
+                    }
+                )
         due.sort(key=lambda item: (-item["overdue_days"], item["strategy_id"]))
         return due
 
@@ -887,6 +1105,334 @@ def _insert_strategy_artifact_row(
     return new_id
 
 
+def _register_verified_strategy_artifact_row(
+    conn: sqlite3.Connection,
+    strategy_id: str,
+    *,
+    kind: str,
+    path: str,
+    content_hash: str,
+    content_size: int,
+    provenance: Mapping[str, Any],
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    normalized_strategy_id = _required_artifact_text(
+        strategy_id, field="strategy_id"
+    )
+    normalized_kind = _required_artifact_text(kind, field="kind")
+    normalized_path = _required_artifact_text(path, field="path")
+    normalized_hash = _required_artifact_hash(content_hash)
+    if isinstance(content_size, bool) or not isinstance(content_size, int):
+        raise StrategyArtifactDataError("content_size must be a non-negative integer")
+    if content_size < 0:
+        raise StrategyArtifactDataError("content_size must be a non-negative integer")
+    normalized_provenance, provenance_json = _canonical_artifact_provenance(
+        provenance
+    )
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    strategy = conn.execute(
+        "SELECT 1 FROM strategies WHERE id = ?", (normalized_strategy_id,)
+    ).fetchone()
+    if strategy is None:
+        raise StrategyArtifactDataError(
+            f"strategy not found: {normalized_strategy_id}"
+        )
+    existing = conn.execute(
+        """
+        SELECT id, strategy_id, kind, path, created_at,
+               content_hash, content_size, provenance_json
+          FROM strategy_artifacts
+         WHERE strategy_id = ? AND kind = ? AND content_hash = ?
+        """,
+        (normalized_strategy_id, normalized_kind, normalized_hash),
+    ).fetchone()
+    if existing is not None:
+        drifted = []
+        if str(existing["path"]) != normalized_path:
+            drifted.append("path")
+        if int(existing["content_size"]) != content_size:
+            drifted.append("content_size")
+        if str(existing["provenance_json"]) != provenance_json:
+            drifted.append("provenance")
+        if drifted:
+            raise StrategyArtifactConflictError(
+                "verified strategy artifact content already exists with drift in "
+                + ", ".join(drifted)
+            )
+        record = _strategy_artifact_record_from_row(existing)
+        record["created"] = False
+        return record
+
+    artifact_id = _verified_strategy_artifact_id(
+        strategy_id=normalized_strategy_id,
+        kind=normalized_kind,
+        content_hash=normalized_hash,
+    )
+    collision = conn.execute(
+        "SELECT 1 FROM strategy_artifacts WHERE id = ?", (artifact_id,)
+    ).fetchone()
+    if collision is not None:
+        raise StrategyArtifactConflictError(
+            "verified strategy artifact id collided with another identity"
+        )
+    timestamp = created_at or _now()
+    try:
+        conn.execute(
+            """
+            INSERT INTO strategy_artifacts(
+                id, strategy_id, kind, path, created_at,
+                content_hash, content_size, provenance_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                artifact_id,
+                normalized_strategy_id,
+                normalized_kind,
+                normalized_path,
+                timestamp,
+                normalized_hash,
+                content_size,
+                provenance_json,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise StrategyArtifactConflictError(
+            "could not register verified strategy artifact"
+        ) from exc
+    return {
+        "id": artifact_id,
+        "strategy_id": normalized_strategy_id,
+        "kind": normalized_kind,
+        "path": normalized_path,
+        "created_at": timestamp,
+        "content_hash": normalized_hash,
+        "content_size": content_size,
+        "provenance": normalized_provenance,
+        "integrity_status": "verified",
+        "created": True,
+    }
+
+
+def _strategy_artifact_record_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "id": str(row["id"]),
+        "strategy_id": str(row["strategy_id"]),
+        "kind": str(row["kind"]),
+        "path": str(row["path"]),
+        "created_at": str(row["created_at"]),
+    }
+    integrity_values = (
+        row["content_hash"],
+        row["content_size"],
+        row["provenance_json"],
+    )
+    if all(value is None for value in integrity_values):
+        return record
+    if any(value is None for value in integrity_values):
+        raise StrategyArtifactDataError(
+            f"strategy artifact {record['id']} has partial integrity metadata"
+        )
+    content_hash = _required_artifact_hash(row["content_hash"])
+    content_size = row["content_size"]
+    if isinstance(content_size, bool) or not isinstance(content_size, int):
+        raise StrategyArtifactDataError(
+            f"strategy artifact {record['id']} has invalid content_size"
+        )
+    try:
+        provenance = json.loads(str(row["provenance_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise StrategyArtifactDataError(
+            f"strategy artifact {record['id']} has invalid provenance"
+        ) from exc
+    normalized_provenance, canonical = _canonical_artifact_provenance(provenance)
+    if not hmac.compare_digest(canonical, str(row["provenance_json"])):
+        raise StrategyArtifactDataError(
+            f"strategy artifact {record['id']} provenance is not canonical"
+        )
+    record.update(
+        {
+            "content_hash": content_hash,
+            "content_size": content_size,
+            "provenance": normalized_provenance,
+            "integrity_status": "verified",
+        }
+    )
+    return record
+
+
+def _required_artifact_text(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise StrategyArtifactDataError(f"{field} must be a non-empty string")
+    return value.strip()
+
+
+def _required_artifact_hash(value: object) -> str:
+    if not isinstance(value, str) or len(value) != 64:
+        raise StrategyArtifactDataError("content_hash must be a SHA-256 digest")
+    normalized = value.lower()
+    if any(character not in "0123456789abcdef" for character in normalized):
+        raise StrategyArtifactDataError("content_hash must be a SHA-256 digest")
+    return normalized
+
+
+def _canonical_artifact_provenance(
+    value: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    if not isinstance(value, Mapping):
+        raise StrategyArtifactDataError("provenance must be a JSON object")
+    try:
+        payload = json.dumps(
+            dict(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        normalized = json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        raise StrategyArtifactDataError("provenance must be a JSON object") from exc
+    if not isinstance(normalized, dict):
+        raise StrategyArtifactDataError("provenance must be a JSON object")
+    return normalized, payload
+
+
+def _verified_strategy_artifact_id(
+    *, strategy_id: str, kind: str, content_hash: str
+) -> str:
+    identity = json.dumps(
+        [strategy_id, kind, content_hash],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(
+        f"{_STRATEGY_ARTIFACT_IDENTITY_NAMESPACE}:{identity}".encode("utf-8")
+    ).hexdigest()
+
+
+def _select_strategy_version_source(
+    conn: sqlite3.Connection,
+    strategy_id: str,
+) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        SELECT id, task_id, strategy_type, rules_json, score_col,
+               default_decision_json, description, created_at, version,
+               dsl_json, dsl_schema_version
+          FROM strategies
+         WHERE id = ?
+        """,
+        (strategy_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(strategy_id)
+    return row
+
+
+def _insert_strategy_version_from_source(
+    conn: sqlite3.Connection,
+    src: sqlite3.Row,
+    *,
+    target_task_id: str,
+    next_version: int,
+    rules: list | None,
+    strategy_spec: StrategySpec | dict | None,
+    description: str | None,
+    new_strategy_id: str | None,
+    created_at: str,
+) -> Strategy:
+    parent_strategy_id = str(src["id"])
+    child_id = new_strategy_id or uuid.uuid4().hex
+    child_description = (
+        str(description) if description is not None else str(src["description"])
+    )
+    source_strategy = _strategy_from_row(src)
+    if strategy_spec is not None:
+        from marvis.packs.strategy.strategy import build_strategy_from_spec
+
+        base_spec = parse_strategy_spec(strategy_spec)
+        if base_spec.strategy_type != source_strategy.strategy_type:
+            raise ValueError("new strategy version cannot change strategy_type")
+        built = build_strategy_from_spec(
+            base_spec,
+            score_col=source_strategy.score_col,
+            description=child_description,
+        )
+        child_rules = built.rules
+    elif rules is not None:
+        # Local import avoids making repository module import order part of the
+        # pack's public surface while still using the canonical legacy->DSL path.
+        from marvis.packs.strategy.strategy import build_strategy
+
+        built = build_strategy(
+            source_strategy.strategy_type,
+            [_strategy_rule_to_dict(_coerce_rule(rule)) for rule in rules],
+            score_col=source_strategy.score_col,
+            default_decision=source_strategy.default_decision,
+            description=child_description,
+        )
+        child_rules = built.rules
+        base_spec = built.spec
+    else:
+        base_spec = source_strategy.spec
+        if base_spec is None:  # pragma: no cover - _strategy_from_row always supplies it
+            raise ValueError("source strategy has no canonical DSL")
+        child_rules = _rules_with_spec_identity(source_strategy.rules, base_spec)
+
+    spec_payload = base_spec.to_dict()
+    metadata = dict(spec_payload.get("metadata") or {})
+    lineage = dict(metadata.get("lineage") or {})
+    lineage.update(
+        {
+            "source": "strategy_version",
+            "parent_strategy_id": parent_strategy_id,
+        }
+    )
+    metadata["lineage"] = lineage
+    metadata["description"] = child_description
+    spec_payload["metadata"] = metadata
+    child_spec = parse_strategy_spec(spec_payload)
+    conn.execute(
+        """
+        INSERT INTO strategies(
+            id, task_id, strategy_type, rules_json, score_col,
+            default_decision_json, description, created_at,
+            version, status, asset_status, parent_strategy_id,
+            dsl_json, dsl_schema_version
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            child_id,
+            target_task_id,
+            child_spec.strategy_type,
+            _dump_json_any([_strategy_rule_to_dict(rule) for rule in child_rules]),
+            _optional_str(src["score_col"]),
+            _dump_json_any(child_spec.default_action.decision_value),
+            child_description,
+            created_at,
+            next_version,
+            LEGACY_STATUS_DRAFT,
+            ASSET_STATUS_DRAFT,
+            parent_strategy_id,
+            canonical_strategy_json(child_spec),
+            child_spec.schema_version,
+        ),
+    )
+    row = conn.execute(
+        """
+        SELECT id, task_id, strategy_type, rules_json, score_col,
+               default_decision_json, description, created_at,
+               dsl_json, dsl_schema_version
+          FROM strategies
+         WHERE id = ?
+        """,
+        (child_id,),
+    ).fetchone()
+    assert row is not None
+    return _strategy_from_row(row)
+
+
 def _strategy_insert_values(task_id: str, strategy: Strategy, created_at: str) -> tuple:
     spec = strategy.spec or legacy_strategy_to_spec(strategy)
     _assert_strategy_matches_spec(strategy, spec)
@@ -910,16 +1456,20 @@ def _insert_strategy_row(
     strategy: Strategy,
     created_at: str,
 ) -> None:
+    values = _strategy_insert_values(task_id, strategy, created_at)
     conn.execute(
         """
         INSERT INTO strategies(
             id, task_id, strategy_type, rules_json, score_col,
             default_decision_json, description, created_at,
+            status, asset_status,
             dsl_json, dsl_schema_version
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        _strategy_insert_values(task_id, strategy, created_at),
+        values[:8]
+        + (LEGACY_STATUS_DRAFT, ASSET_STATUS_DRAFT)
+        + values[8:],
     )
 
 
@@ -967,12 +1517,15 @@ def _strategy_from_row(row: sqlite3.Row) -> Strategy:
 
 
 def _strategy_meta_from_row(row: sqlite3.Row) -> dict:
+    status = str(row["status"])
+    asset_status = resolve_asset_status(status, row["asset_status"])
     return {
         "id": str(row["id"]),
         "task_id": str(row["task_id"]),
         "strategy_type": str(row["strategy_type"]),
         "version": int(row["version"]),
-        "status": str(row["status"]),
+        "status": status,
+        "asset_status": asset_status,
         "adopted_at": _optional_str(row["adopted_at"]),
         "adoption_reason": _optional_str(row["adoption_reason"]),
         "parent_strategy_id": _optional_str(row["parent_strategy_id"]),
@@ -1144,6 +1697,89 @@ def _parse_iso(value) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _ledger_monitoring_due_fields(
+    conn: sqlite3.Connection,
+    *,
+    strategy_id: str,
+    adopted_at,
+    plan_row: sqlite3.Row,
+) -> tuple[datetime, str | None, int] | None:
+    """Resolve V2 cadence and anchor without consulting mutable artifacts."""
+
+    try:
+        payload = json.loads(str(plan_row["payload_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        plan = monitoring_plan_from_dict(
+            payload,
+            source=f"database:{plan_row['id']}",
+        )
+    except (TypeError, ValueError, StrategyError):
+        return None
+    if plan.strategy_id != strategy_id or plan.monitoring_plan_id != str(plan_row["id"]):
+        return None
+
+    # The ledger stores only completed monitoring results; failed executions do
+    # not create strategy_monitoring_runs rows, so the newest row is the newest
+    # successful run for this exact plan revision.
+    run = conn.execute(
+        """
+        SELECT created_at
+          FROM strategy_monitoring_runs
+         WHERE strategy_id = ? AND monitoring_plan_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1
+        """,
+        (strategy_id, str(plan_row["id"])),
+    ).fetchone()
+    if run is not None:
+        last_run_at = _optional_str(run["created_at"])
+        anchor_ts = _parse_iso(last_run_at)
+        if anchor_ts is None:
+            return None
+    else:
+        last_run_at = None
+        anchors = [
+            timestamp
+            for timestamp in (
+                _parse_iso(plan_row["created_at"]),
+                _parse_iso(adopted_at),
+            )
+            if timestamp is not None
+        ]
+        if not anchors:
+            return None
+        anchor_ts = max(anchors)
+    return anchor_ts, last_run_at, int(plan.cadence_days or 30)
+
+
+def _legacy_monitoring_due_fields(
+    *,
+    plan_path,
+    adopted_at,
+) -> tuple[datetime, str | None, int] | None:
+    """Preserve the artifact-backed V1 due calculation unchanged."""
+
+    resolved_path = _optional_str(plan_path)
+    if resolved_path is None:
+        return None
+    plan = _read_monitoring_plan_fields(resolved_path)
+    if plan is None:
+        return None
+    last_run_at = _optional_str(plan.get("last_run_at"))
+    anchor_ts = _parse_iso(last_run_at) or _parse_iso(adopted_at)
+    if anchor_ts is None:
+        return None
+    try:
+        cadence_days = int(plan.get("cadence_days") or 30)
+    except (TypeError, ValueError):
+        return None
+    return anchor_ts, last_run_at, cadence_days
 
 
 def _read_monitoring_plan_fields(plan_path: str) -> dict | None:

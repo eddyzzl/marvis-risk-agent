@@ -38,6 +38,7 @@ from marvis.memory_policy import load_memory_policy
 from marvis.packs.strategy.backtest_compat import approval_backtest_projection
 from marvis.packs.strategy.errors import StrategyError
 from marvis.repositories.strategy import StrategyRepository
+from marvis.strategy_lifecycle import ASSET_STATUS_ADOPTED_LOCAL
 
 MEMORY_ANCHOR_MAX_ENTRIES = 3
 MEMORY_ANCHOR_MAX_LINE_CHARS = 120
@@ -178,7 +179,7 @@ def _capture_strategy_experience(settings, task: TaskRecord) -> None:
     adopted = [
         meta
         for meta in strategies.list_meta_for_task(task.id)
-        if meta.get("status") == "adopted"
+        if meta.get("asset_status") == ASSET_STATUS_ADOPTED_LOCAL
     ]
     if not adopted:
         return

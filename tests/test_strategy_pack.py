@@ -1,6 +1,7 @@
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -15,12 +16,14 @@ from marvis.db import (
     init_db,
 )
 from marvis.domain import TaskCreate
+from marvis.packs.strategy import tools as strategy_tools
 from marvis.plugins.loader import load_builtin_packs, load_manifest
 from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.plugins.errors import SchemaValidationError
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.plugins.schema_validation import validate_against_schema
+from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
 
 
@@ -99,6 +102,106 @@ def _register_strategy_sample(registry, tmp_path, task_id: str):
     return registry.register_existing(path, task_id=task_id, role="strategy_sample")
 
 
+def test_task_analysis_artifact_identity_includes_producer_version(monkeypatch):
+    assumptions = {"dataset_id": "dataset-1", "segment_col": "segment"}
+    original_stem = strategy_tools._analysis_artifact_stem(
+        "profit",
+        "a" * 64,
+        assumptions,
+    )
+    original_provenance = strategy_tools._task_analysis_artifact_provenance(
+        analysis_kind="profit",
+        source_hash="a" * 64,
+        assumptions=assumptions,
+    )
+
+    assert original_provenance["schema_version"] == "task-artifact-provenance.v1"
+    assert original_provenance["producer_version"] == "strategy.profit_calc.v1"
+
+    monkeypatch.setitem(
+        strategy_tools._TASK_ANALYSIS_PRODUCER_VERSIONS,
+        "profit",
+        "strategy.profit_calc.v2",
+    )
+    upgraded_stem = strategy_tools._analysis_artifact_stem(
+        "profit",
+        "a" * 64,
+        assumptions,
+    )
+    upgraded_provenance = strategy_tools._task_analysis_artifact_provenance(
+        analysis_kind="profit",
+        source_hash="a" * 64,
+        assumptions=assumptions,
+    )
+
+    assert upgraded_stem != original_stem
+    assert upgraded_provenance["producer_version"] == "strategy.profit_calc.v2"
+
+
+def test_task_analysis_artifact_registration_failure_rolls_back_files_and_rows(
+    tmp_path,
+    monkeypatch,
+):
+    settings = build_settings(tmp_path / "artifact-workspace")
+    init_db(settings.db_path)
+    task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="任务分析产物事务测试",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path),
+            task_type="strategy",
+        )
+    )
+    repository = TaskArtifactRepository(settings.db_path)
+    runtime = SimpleNamespace(settings=settings, task_artifacts=repository)
+    assumptions = {"dataset_id": "dataset-1", "segment_col": "segment"}
+    stem = strategy_tools._analysis_artifact_stem(
+        "profit",
+        "b" * 64,
+        assumptions,
+    )
+    output_dir = settings.tasks_dir / task.id / "strategy_analysis"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = output_dir / f"{stem}.csv"
+    markdown_path = output_dir / f"{stem}.md"
+    csv_path.write_text("old csv", encoding="utf-8")
+    markdown_path.write_text("old markdown", encoding="utf-8")
+
+    original_register = repository.register_on_connection
+    call_count = 0
+
+    def fail_on_second_registration(conn, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("simulated second registry failure")
+        return original_register(conn, **kwargs)
+
+    monkeypatch.setattr(
+        repository,
+        "register_on_connection",
+        fail_on_second_registration,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated second registry failure"):
+        strategy_tools._write_task_analysis_artifacts(
+            runtime,
+            task_id=task.id,
+            analysis_kind="profit",
+            source_hash="b" * 64,
+            assumptions=assumptions,
+            files=(
+                ("profit_csv", "csv", "new csv"),
+                ("profit_markdown", "md", "new markdown"),
+            ),
+        )
+
+    assert csv_path.read_text(encoding="utf-8") == "old csv"
+    assert markdown_path.read_text(encoding="utf-8") == "old markdown"
+    assert repository.list_for_task(task.id) == []
+
+
 def test_strategy_manifest_registers_expected_tools(tmp_path):
     plugin_registry = _real_builtin_registry(tmp_path)
 
@@ -107,11 +210,24 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     build_tool = next(tool for tool in manifest.tools if tool.name == "build_strategy")
     backtest_tool = next(tool for tool in manifest.tools if tool.name == "backtest_strategy")
     apply_tool = next(tool for tool in manifest.tools if tool.name == "apply_strategy")
+    candidate_tool = next(
+        tool for tool in manifest.tools if tool.name == "design_strategy_candidate"
+    )
+    run_monitoring_tool = next(
+        tool for tool in manifest.tools if tool.name == "run_strategy_monitoring"
+    )
+    disposition_tool = next(
+        tool for tool in manifest.tools if tool.name == "apply_monitoring_disposition"
+    )
+    challenger_report_tool = next(
+        tool for tool in manifest.tools if tool.name == "render_challenger_report"
+    )
 
     assert tool_names == {
         "vintage_curve",
         "roll_rate_matrix",
         "profit_calc",
+        "design_strategy_candidate",
         "build_strategy",
         "apply_strategy",
         "backtest_strategy",
@@ -126,12 +242,119 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "limit_pricing_matrix",
         "render_challenger_report",
         "run_strategy_monitoring",
+        "apply_monitoring_disposition",
         "render_monitoring_report",
     }
     assert build_tool.determinism == "deterministic"
     assert "write:strategy" in build_tool.side_effects
     assert "write:dataset" in apply_tool.side_effects
     assert "write:backtest" in backtest_tool.side_effects
+    assert backtest_tool.policy.human_decision_gate == "none"
+    assert candidate_tool.policy.human_decision_gate == "none"
+    assert candidate_tool.side_effects == ("read:dataset",)
+    assert set(run_monitoring_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "read:strategy",
+        "write:dataset",
+        "write:strategy",
+    }
+    assert set(disposition_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "read:strategy",
+        "write:artifact",
+        "write:dataset",
+        "write:task",
+        "write:strategy",
+    }
+    assert set(challenger_report_tool.side_effects) == {
+        "read:dataset",
+        "read:strategy",
+        "write:artifact",
+        "write:strategy",
+    }
+
+    valid_disposition = {
+        "strategy_id": "strategy-1",
+        "monitoring_run_id": "run-1",
+        "expected_plan_id": "plan-1",
+        "expected_plan_revision": 1,
+        "expected_plan_hash": "a" * 64,
+        "disposition": "observe",
+        "reason": "继续观察一个周期",
+        "threshold_patch": None,
+    }
+    validate_against_schema(
+        valid_disposition,
+        disposition_tool.input_schema,
+        label="monitoring disposition input",
+    )
+    for invalid_reason in (None, ""):
+        with pytest.raises(SchemaValidationError):
+            validate_against_schema(
+                {**valid_disposition, "reason": invalid_reason},
+                disposition_tool.input_schema,
+                label="monitoring disposition requires a non-empty reason",
+            )
+
+    # A missing champion intentionally degrades to a no-baseline report. Once
+    # a champion is supplied, the persisted challenger backtest receipt is
+    # mandatory because the tool reloads and recomputes evidence from it.
+    validate_against_schema(
+        {"strategy_id": "strategy-1"},
+        challenger_report_tool.input_schema,
+        label="challenger report without baseline",
+    )
+    validate_against_schema(
+        {
+            "strategy_id": "strategy-1",
+            "champion_strategy_id": "strategy-0",
+            "challenger_backtest": {"backtest_id": "backtest-1"},
+        },
+        challenger_report_tool.input_schema,
+        label="evidence-bound challenger report",
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {
+                "strategy_id": "strategy-1",
+                "champion_strategy_id": "strategy-0",
+            },
+            challenger_report_tool.input_schema,
+            label="challenger report missing persisted backtest receipt",
+        )
+
+    validate_against_schema(
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "bad",
+            "strategy_type": "segmentation",
+            "candidate_design": {
+                "method": "single_variable_segmentation",
+                "feature_col": "score",
+            },
+            "candidate_policy_version": "strategy.candidate_policy.v1",
+        },
+        candidate_tool.input_schema,
+        label="segmentation candidate input",
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {
+                "dataset_id": "dataset-1",
+                "target_col": "bad",
+                "strategy_type": "segmentation",
+                "candidate_design": {
+                    "method": "single_variable_segmentation",
+                    "feature_col": "score",
+                },
+                "candidate_policy_version": "strategy.candidate_policy.v1",
+                "strategy_spec": {},
+            },
+            candidate_tool.input_schema,
+            label="caller-supplied candidate result",
+        )
 
     validate_against_schema(
         {
@@ -389,8 +612,40 @@ def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
     assert vintage.output["summary"]["trend"] in {"deteriorating", "stable", "improving"}
     assert roll.ok is True, roll.error
     assert roll.output["base_counts"] == {"C": 2, "M1": 0, "M3+": 1}
+    assert roll.output["observation_semantics"] == "adjacent_observation"
+    assert roll.output["period"] == "month"
+    assert {item["kind"] for item in roll.output["artifacts"]} == {
+        "roll_rate_csv",
+        "roll_rate_markdown",
+    }
+    assert all(
+        item.get("artifact_id") and "path" not in item
+        for item in roll.output["artifacts"]
+    )
     assert profit.ok is True, profit.error
     assert {row["segment"] for row in profit.output["results"]} == {"A", "B"}
+    assert profit.output["source_evidence"]["dataset_content_hash"]
+    assert {item["kind"] for item in profit.output["artifacts"]} == {
+        "profit_csv",
+        "profit_markdown",
+    }
+    assert all(
+        item.get("artifact_id") and "path" not in item
+        for item in profit.output["artifacts"]
+    )
+    task_artifacts = TaskArtifactRepository(
+        build_settings(tmp_path / "workspace").db_path
+    ).list_for_task(task.id)
+    assert {record["kind"] for record in task_artifacts} == {
+        "roll_rate_csv",
+        "roll_rate_markdown",
+        "profit_csv",
+        "profit_markdown",
+    }
+    assert {record["id"] for record in task_artifacts} == {
+        item["artifact_id"]
+        for item in [*roll.output["artifacts"], *profit.output["artifacts"]]
+    }
     assert built.ok is True, built.error
     assert built.output["strategy_id"]
     assert built.output["dsl_schema_version"] == "strategy.dsl.v1"

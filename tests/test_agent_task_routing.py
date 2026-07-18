@@ -44,6 +44,9 @@ def _strategy_source(tmp_path: Path) -> Path:
         ("额度定价", "limit_pricing"),
         ("定价矩阵", "limit_pricing"),
         ("limit pricing", "limit_pricing"),
+        ("按客群做利润测算", "standard_analysis"),
+        ("计算滚动率矩阵", "standard_analysis"),
+        ("最大利润审批策略", "full_development"),
         ("组合分析", "portfolio_analysis"),
     ],
 )
@@ -160,18 +163,63 @@ def test_strategy_limit_pricing_intent_redirects_without_approval_plan(client, t
     payload = response.json()
     assert payload["status"] == "clarification_required"
     assert payload["intent"] == "limit_pricing"
-    assert payload["code"] == "strategy_limit_pricing_workflow_planned"
-    assert payload["planned_v2_workflow"] == "limit_pricing_matrix"
+    assert payload["code"] == "strategy_standard_workflow_inputs_required"
+    assert payload["available_workflow"] == "limit_pricing_matrix"
     clarification = payload["clarification"]
     assert clarification["intent"] == "limit_pricing"
-    assert clarification["planned_v2_workflow"] == "limit_pricing_matrix"
+    assert clarification["available_workflow"] == "limit_pricing_matrix"
     metadata = payload["messages"][-1]["metadata"]
     assert metadata["intent"] == "limit_pricing"
-    assert metadata["code"] == "strategy_limit_pricing_workflow_planned"
-    assert metadata["planned_v2_workflow"] == "limit_pricing_matrix"
-    assert "V2" in payload["messages"][-1]["content"]
-    assert "V3" not in payload["messages"][-1]["content"]
-    assert "V4" not in payload["messages"][-1]["content"]
+    assert metadata["code"] == "strategy_standard_workflow_inputs_required"
+    assert metadata["available_workflow"] == "limit_pricing_matrix"
+    assert "已可执行" in payload["messages"][-1]["content"]
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "请做客群利润测算",
+        "按客群计算利润和 ROA",
+        "请做 profit analysis",
+        "请计算滚动率矩阵",
+    ],
+)
+def test_standard_analysis_without_compiler_never_falls_into_approval_plan(
+    client,
+    tmp_path,
+    content,
+):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "策略分析",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {
+                "objective": "max_approval",
+                "max_bad_rate": 0.20,
+            },
+        },
+    )
+    task_id = created.json()["id"]
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": content},
+    )
+
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["status"] == "clarification_required"
+    assert payload["intent"] == "standard_analysis"
+    assert payload["code"] == "strategy_standard_workflow_inputs_required"
+    assert set(payload["available_workflows"]) == {"profit_calc", "roll_rate_matrix"}
     assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
 
 
@@ -356,19 +404,15 @@ def test_explicit_quick_strategy_analysis_keeps_lightweight_workflow(client, tmp
 
     confirmed = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
     assert confirmed.status_code == 202, confirmed.text
-    gate = confirmed.json()["messages"][-1]
-    assert gate["metadata"]["kind"] == "gate"
-    assert "策略候选已生成" in gate["content"]
-    assert any(
-        table["title"] == "策略规则（按顺序命中）"
-        for table in gate["metadata"]["tables"]
-    )
-
-    finished = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
-    assert finished.status_code == 202, finished.text
-    done = finished.json()["messages"][-1]
+    done = confirmed.json()["messages"][-1]
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"][-1][
+        "status"
+    ] == "done"
     assert "策略权衡视图完成" in done["content"]
-    assert any(table["title"] == "cutoff 权衡点" for table in done["metadata"]["tables"])
+    assert any(
+        table["title"] == "cutoff 权衡点"
+        for table in done["metadata"]["tables"]
+    )
 
 
 def test_quick_strategy_analysis_phrase_overrides_development_default(client, tmp_path):
@@ -465,9 +509,11 @@ def test_strategy_rule_mining_goal_routes_to_rule_strategy_template(client, tmp_
     assert confirmed.status_code == 202, confirmed.text
     gate = confirmed.json()["messages"][-1]
     assert gate["metadata"]["kind"] == "gate"
-    assert "规则挖掘完成" in gate["content"]
+    assert gate["metadata"]["gate_source_tool"] == "adopt_strategy"
+    assert "策略候选已生成" in gate["content"]
+    assert "策略回测完成" in gate["content"]
     assert any(
-        table["title"] == "候选规则（按 lift 降序）"
+        table["title"] == "策略规则（按顺序命中）"
         for table in gate["metadata"]["tables"]
     )
 

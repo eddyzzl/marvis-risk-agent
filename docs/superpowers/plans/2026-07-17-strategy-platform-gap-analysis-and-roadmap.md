@@ -257,6 +257,8 @@ MARVIS 已经具备较扎实的策略确定性内核和治理底座，包括策�
 
 #### P0-2 高风险策略步骤没有运行时强制确认不变量
 
+**2026-07-18 决策覆盖（supersession）**：`human_decision_gate=required` 只保护需要自然人承担最终责任的状态选择，例如策略采纳、监控结果处置、阈值版本变更、生产 promotion/deploy/rollback 和 break-glass。分数方向诊断、候选 cutoff/分数带设计、规则集搜索/排序、回测、比较和本地 artifact 导出属于可逆、可重算的确定性分析；当自然语言目标和业务约束完整时，Agent 必须自动推进，不再设置强制人工门。缺经营目标、风险/通过率约束、经济口径、字段角色、标签处理或标签语义时仍须先澄清；Manual UI 也可提供可选审阅/调整，但不能把可选审阅伪装成 Agent 必经门。`decision_point=True` 继续用于自动复核和 replan，不等同于人工确认。本文及旧 S2/S4 spec 中与此冲突的 cutoff、规则集、回测 mandatory-gate 表述，以本决定为准。
+
 内置模板和 AUTO 风险映射会停下，但底层仍有结构性缺口：
 
 - `PlanValidator` 只对 Join 和 draft-run 强制确认；
@@ -266,7 +268,7 @@ MARVIS 已经具备较扎实的策略确定性内核和治理底座，包括策�
 
 这里需要两套正交 policy，不能把所有确认都等同于副作用授权：
 
-1. `human_decision_gate=required`：保护分数方向、cutoff、规则集、champion 选择和回测晋级等业务取舍；由 PlanValidator、GateEnvelope 和 AUTO 强制，纯计算 Tool 也可以要求此门；
+1. `human_decision_gate=required`：保护策略采纳、监控处置、生产 promotion/deploy/rollback 等自然人责任决策；由 PlanValidator、GateEnvelope 和 AUTO 强制。纯计算 Tool 只有在其结果本身触发上述责任状态转换时才可要求此门，普通候选设计、回测、比较和导出不得滥用；
 2. `effect_authorization=required`：保护策略采纳/替换、监控阈值写入、未来发布/回滚等状态转换；由 ToolRunner fail closed 校验带外执行授权。
 
 模板只能提高、不能降低 policy 规定的级别。最终采纳授权还必须绑定已审阅规则集 hash、最终 backtest id、目标策略版本和 expected current status，避免绕过前置决策门直接 build/adopt。
@@ -386,24 +388,31 @@ PlanExecutor 通过带外 `ExecutionContext(plan_id, plan_revision, step_id, dec
 
 以下全部 Phase 都属于 **V2.x 承诺范围**。Phase 只表示依赖和实施顺序，可以拆成多个 V2 minor / prerelease 交付；任何阶段都不得重新挂到 V3/V4。
 
+策略最终报告统一遵守 [`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)。实施顺序坚持 **strategy-first**：报告渲染不成为策略引擎的前置依赖；缺少可选报告资料时继续执行可逆分析，用户明确表示暂缺后在任务内持久化 `unavailable` 并将报告值留空；缺少会改变策略语义或确定性结果的信息时仍必须 fail closed。
+
 ### Phase 0A：接通真实入口和业务 contract（V2.x P0，3-5 人日）
 
 **目标**：让标准策略入口真实进入完整开发，且没有业务口径时不会静默使用技术默认值。
 
+**报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 负责缺失信息状态和 task-scoped report context，不实现报告渲染器。
+
 交付：
 
 1. 新增 StrategyTaskInput contract：`objective`、坏率/通过率约束、baseline，以及利润目标条件下的 `ead_col`、`pd_col`、成本/期限等参数；
-2. “开始策略开发”默认进入 `strategy_development`，保留显式“快速策略分析”进入 `strategy_analysis`；
-3. 为轻量分析、完整开发、规则策略、监控、额度定价和组合分析建立明确 intent taxonomy；
-4. 缺 objective 或必要约束时暂停澄清；只有用户显式选择“快速分析”才允许技术默认值；
-5. adoption reason 在最终采纳门现场必填，不从任务创建或占位文本继承；
-6. 增加真实 API E2E：创建策略任务 → `/agent/start` → 完整模板 → 逐门确认 → 本地采纳 → 文档/artifact。
+2. 新增 `MissingInformationRecord` 和 task-scoped report context，区分 `strategy/impact/validation/report_optional`；可选信息只主动询问一次，用户回答暂缺后持久化 `unavailable`，同一任务不重复询问；
+3. “开始策略开发”默认进入 `strategy_development`，保留显式“快速策略分析”进入 `strategy_analysis`；
+4. 为轻量分析、完整开发、规则策略、监控、额度定价和组合分析建立明确 intent taxonomy；
+5. 缺 objective 或必要约束时暂停澄清；只有用户显式选择“快速分析”才允许技术默认值；
+6. adoption reason 在最终采纳门现场必填，不从任务创建或占位文本继承；
+7. 增加真实 API E2E：创建策略任务 → `/agent/start` → 完整模板自动推进到采纳门 → 人工确认本地采纳 → 文档/artifact。
 
 退出标准：
 
 - 普通“开始策略开发”不再落入轻量模板；
 - 完整开发缺经营约束时返回澄清，不用 20% 分位数等默认值代替用户决策；
 - 请求利润但缺 EAD/PD/必要成本参数时返回结构化缺口，不把利润记为 0；
+- 报告可选信息缺失不阻塞策略主链；用户表示暂缺后重启/replan 不再追问，报告字段保持空白；
+- 标签语义、样本边界、动作单位等策略正确性 blocker 即使用户暂缺也不能被 `unavailable` 绕过；
 - 采纳理由为空、“待确认”或来自预填占位时不能采纳；
 - 轻量入口保持向后兼容；API E2E 不直接调用 `driver.start(template_id=...)` 绕过产品入口。
 
@@ -424,7 +433,7 @@ PlanExecutor 通过带外 `ExecutionContext(plan_id, plan_revision, step_id, dec
 
 退出标准使用策略矩阵测试证明：
 
-- `strategy_analysis` 回测、`strategy_development` cutoff/回测/采纳、`rule_strategy` 规则选择/回测/采纳和当前已有的 monitoring disposition/report gate 都遵守对应 policy；
+- `strategy_analysis` 回测、`strategy_development` cutoff/回测、`rule_strategy` 规则选择/回测和普通 monitoring run 均不要求强制人工门；`strategy_development`/`rule_strategy` 采纳、monitoring disposition 及未来生产动作遵守对应人工决策与副作用 policy；
 - template、novel plan、generic plan API、decision replan 和 failure replan 删除或降低强制门时均失败；
 - AUTO 对所有 `human_decision_gate=required` 只能 halt，且不能签发 `effect_authorization`；
 - Runner 无凭证、错 plan/step/tool、跨任务、过期、重复消费或 policy/manifest 不匹配时 fail closed；
@@ -435,15 +444,15 @@ Phase 0B 的状态机和调用链影响面大，**7-12 人日包含 1-2 人日 s
 
 **实施状态（2026-07-18）**：Phase 0B 的治理运行时基础已完成代码收口，包含统一 policy snapshot、validator/replan 防降级、AUTO 强制停机、服务端本地 session principal、不可变 DecisionRecord、一次性 ApprovalRecord、effect execution ledger、带外 ExecutionContext、Runner/Executor fail-closed、策略采纳原子 receipt、启动恢复，以及当前已有 monitoring disposition/report gate 的强制人工决策约束。专项回归覆盖治理、策略开发、规则策略、监控和 API 链路，提交前仍以全量 `scripts/check` 结果为准；本地 session 仍是 V2 单机阶段的过渡身份，真实用户、RBAC 和 maker-checker 继续按后续治理阶段实施。
 
-Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁，不把尚未实现的监控能力计为已交付。自定义阈值真实参与判级、阈值变更生成版本化 monitoring plan 并重跑，以及监控红灯到新策略版本的 handoff 仍由紧接的 Phase 1 实现；这些缺口和后续全部范围都保留在 V2.x，不迁移到 V3/V4。
+Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁。其后 Phase 1 已完成自定义阈值真实判级、阈值变更生成版本化 monitoring plan 并重跑，以及监控红灯到新策略版本的 handoff；后续范围继续保留在 V2.x，不迁移到 V3/V4。
 
 ### Phase 1：现有策略闭环和统一 DSL（V2.x P1，9-14 人日）
 
 **目标**：把现有 18 个 Tool 变成真实可交付产品链路，并建立后续扩展的唯一策略语义。
 
-**当前状态（2026-07-18）**：Phase 1 尚未完成，但第一批可执行闭环已收口：统一 Strategy DSL 已覆盖 approval、reject、limit、pricing、segmentation；五类规则均可由平台确定性构造、回测、逐行应用和本地采纳；类型化采纳会绑定任务、策略、回测时源数据 hash、策略 effect hash、类型专属证据和经济口径，并在同一事务提交生命周期、effect receipt、decision table、monitoring plan、artifact 与 audit。自然语言编译器现可将开发、分析/回测、应用、比较、采纳、报告、监控和规则挖掘请求编译为受信任 Workflow；确认前只读预览，逐条回显规则条件/动作/默认动作，确认引用一次性消费，改写/取消/样本变化都会使旧请求失效。监控已真实消费 versioned plan：approval/reject 使用计划阈值，limit/pricing/segmentation 运行可由新鲜样本直接计算的类型指标，全指标不可用时返回 `n/a` 而不是假报绿灯。上传材料的格式错配和 CSV 坏行也进入结构化、可对话且不自动重跑的恢复链。
+**实施状态（2026-07-19）：Phase 1 已完成。** 统一 Strategy DSL 覆盖 approval、reject、limit、pricing、segmentation；五类策略均可由平台确定性设计候选、构造、回测、逐行应用和本地采纳。类型化采纳绑定 task、dataset/hash、strategy effect、回测证据和经济口径，并原子提交生命周期、effect receipt、decision table、monitoring plan、artifact 与 audit。自然语言编译器可把开发、分析/回测、应用、比较、候选设计、规则挖掘、标准利润/roll-rate/额度定价分析、监控和报告请求实例化为受信任 Workflow；可逆步骤自动执行，只有本地采纳和监控处置保留人工责任门。
 
-仍未完成且继续留在 Phase 1：非审批类型在没有明确 DSL 时的自主候选设计；`profit_calc`、`roll_rate_matrix`、`limit_pricing_matrix` 标准自然语言 Workflow；额度/定价监控所需经济输入的版本化传入和真实重算；调阈值生成新版 monitoring plan 并按新版重跑；红灯确认后真正创建新策略版本；完成态策略 artifact 下载和 `adopted_local/validated/deployed` 生命周期区分。上述缺口不得因当前五类内核可运行而标记为完成，也不迁移到 V3/V4。
+版本化监控账本已真实执行计划阈值和额度/定价经济绑定；模型 PSI/CSI/KS/AUC 阈值与策略阈值分流但共同可版本化调整，调阈值会追加 plan revision 并用原 evidence 重算，红灯“起新版本”会创建 task-scoped 子版本与数据 handoff。监控 run、处置 receipt 和报告均做 hash、ownership、CAS、语义一致性和不可变 lineage 校验。完成态 UI/API 可下载 task-owned CSV/JSON/Markdown artifact，并明确区分 `draft/validated/adopted_local/retired` 与尚未发生的生产部署。上传材料格式错配和 CSV 坏行保留结构化恢复链。当前 challenger 比较保留 approval/reject 兼容指标；limit/pricing/segmentation 的类型化 champion/challenger 指标属于 Phase 4 的 report-ready 比较，不用 approval/reject 口径冒充。完整 Strategy Workbench、Candidate Lab 和七步最终报告仍按 Phase 2-6 实施，不反向算入 Phase 1。
 
 先做逐类型 contract/design spike，分别钉死 approval、reject、limit、pricing、segmentation 的：输入、rule value、默认决策、核心回测指标、采纳产物和监控基线；未完成设计的类型不能只靠修改 `strategy_type` 字符串宣称可用。
 
@@ -471,6 +480,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 
 **目标**：补齐参考平台的数据准备、语义配置和描述分析功能，并以 MARVIS 数据集、artifact 和审计体系持久化。
 
+**报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 负责 report-ready 指标、当前状况、样本和外部历史资料的结构化语义。
+
 交付：
 
 1. 策略任务创建、列表、加载、删除、显式保存、dirty 切换保护和分析状态恢复；
@@ -481,7 +492,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 6. target、loan amount、overdue amount、month、中英文名称、变量节点和大小写规则映射；
 7. 风险方向映射导入、p25/p75 确定性建议、逐变量人工覆盖和版本化保存；
 8. 描述统计、完整相关矩阵、低基数频数、高基数直方图；
-9. 修改后数据集的 CSV/Excel 导出，所有派生数据集保留 lineage。
+9. 修改后数据集的 CSV/Excel 导出，所有派生数据集保留 lineage；
+10. 新增版本化 `MetricDefinition`/`MetricObservation`，显式支持件数、金额、余额、表现窗和成熟度；生成 `CurrentProjectSnapshot`、`StrategySampleDesign`，并把外部历史版本资料映射为带来源的 artifact，而不是自由文本事实。
 
 退出标准：
 
@@ -490,10 +502,13 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 - 自定义派生无法访问未授权文件、网络或环境变量，超时/OOM 可终止并审计；
 - 字段映射、显示语言、风险方向、修改历史和页面选择随 task 保存/恢复；
 - 描述统计和导出结果与数据集版本/hash 对应，不读取自由文本状态。
+- 同名风险指标的件数/金额/余额口径不可混用；未成熟 observation 的值为空且状态为 `not_matured`，不能假报 0。
 
 ### Phase 3：完整 Candidate Lab（V2.x，18-28 人日）
 
 **目标**：完整覆盖单规则、自动树、交互树、标准评分卡、voting 和 cross 分析，而不是只提供高层搜索内核。
+
+**报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 只产出 report-ready candidate evidence，不在报告层复制算法。
 
 交付：
 
@@ -503,7 +518,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 4. **标准评分卡 Workbench**：特征选择与 KS Top-N、可复现 WOE-LR、KS/AUC/IV/系数、分值表、分布、评分列写回、Python/SQL 和 strategy bridge；
 5. **Voting**：自动候选、人工增删、自定义规则预览、2..K 受预算组合、明确 truncated、n-of-k 阈值、分数分布、命中数写回、入池和代码；
 6. **Cross**：2D/3D 自动规则；2D matrix 切点建议/人工调整/空值归属/cell 入池；规则和矩阵代码生成。3D matrix 不属于对标必需项；
-7. 所有候选输出统一 Strategy DSL fragment、稳定 artifact id、development evidence 和 lineage；Phase 5 完成独立验证后再关联 validation evidence。
+7. 所有候选输出统一 Strategy DSL fragment、稳定 artifact id、development evidence 和 lineage；Phase 5 完成独立验证后再关联 validation evidence；
+8. 单变量、模型、树、评分卡、Voting 和 Cross 统一输出 `CandidateEvidence`、`MetricObservation`、生成参数、搜索预算、截断状态和来源引用，供七步策略报告直接组装。
 
 退出标准：
 
@@ -512,10 +528,13 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 - 页面预览、DSL evaluator、写回列和生成代码逐行同义；
 - 评分卡训练指标必须代表最终 points，apply/export 不得重新训练或重新分箱；
 - 任一规则进入 draft 策略池前展示 development evidence；尚无匹配 validation evidence 时必须显式标记 `unvalidated`，不得冒充已验证或已采纳。
+- 同一 candidate 在页面、DSL evaluator、写回列和报告中的 rule id、指标及 effect stage 完全一致。
 
 ### Phase 4：Strategy Pool、回测与交付（V2.x，12-18 人日）
 
 **目标**：把候选 artifact 组合成可版本化策略，并完整覆盖级联回测、报告页面和部署交付。
+
+**报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 实现七步报告组装和主报告 artifact，但报告失败不能回滚已完成的策略 evidence。
 
 交付：
 
@@ -523,10 +542,13 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 2. first-match/priority 级联 waterfall：每条规则只消费上一条后剩余样本；
 3. 整体、单规则逐月、全策略逐月、件数、金额、分群、分群×月、标签/金额覆盖率；
 4. 分群过滤支持 AND/OR、`>`、`>=`、`=`、`<=`、`<`、`in`、`not in`；
-5. 策略、漏斗、月度、分群、Python/SQL/JSON tabs 和 artifact 下载；
-6. Phase 4 开发/回测多 sheet Excel：口径、字段映射、修改史、策略、漏斗、月度、分群、树、评分卡、voting、cross 和代码；
-7. DSL→Python/SQL/JSON codegen、逐行 equivalence report 和不支持语义的 fail-closed 清单；
-8. tree node、scorecard score、voting hit count、cross group 等列写回及修改后数据集导出。
+5. 为 approval、reject、limit、pricing、segmentation 实现类型化 champion/challenger 比较，分别输出适用的件数、金额、余额、风险和经济指标；不得把额度、定价或分群策略降格套用 approval/reject 二分类口径；
+6. 策略、漏斗、月度、分群、Python/SQL/JSON tabs 和 artifact 下载；
+7. 实现 `StrategyReportBundle`、`ReportField` 和不可变报告 revision，固化“现状 → 历史 → 样本 → 单变量/模型 → 候选组合 → 影响 → 文档”七步输出；
+8. 生成模块化多 Sheet Excel、机器可读 JSON manifest 和 Markdown 执行摘要，覆盖口径、字段映射、修改史、策略、waterfall/swap、逐月、分群、树、评分卡、Voting、Cross、数据成本和代码；`unavailable` 留空，`not_applicable` 与 `not_matured` 按契约展示；
+9. 为额度/定价报告增加临额/固额、期限、提降额人数、户均变化、总敞口、使用率、T30 行为、Cap、层级风险、年化风险和利差扩展；
+10. DSL→Python/SQL/JSON codegen、逐行 equivalence report 和不支持语义的 fail-closed 清单；
+11. tree node、scorecard score、voting hit count、cross group 等列写回及修改后数据集导出。
 
 退出标准：
 
@@ -534,10 +556,13 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 - 件数与金额 totals 和原始样本对账，级联漏斗各层与剩余样本守恒；
 - 平台 evaluator、Python、支持的 SQL dialect 和 JSON fixture 逐行一致；
 - 每个 Excel sheet 的指标和代码都能追溯到结构化 Tool output，不由 LLM 重算。
+- 相同 evidence 幂等重建同一 content hash；用户补充资料后生成新 revision，不覆盖旧报告；报告渲染失败不破坏策略、回测或验证 artifact。
 
 ### Phase 5：独立策略验证集（V2.x，10-16 人日）
 
 **目标**：完整覆盖参考平台验证集交互，同时修复其验证数据和训练 artifact 易失问题。
+
+**报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 负责 OOT、成熟度和验证 evidence，不把开发回测包装成 OOT。
 
 交付：
 
@@ -547,7 +572,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 4. 可选择并一次 apply：策略池、交互树、评分卡、voting、2D cross matrix group；MARVIS DSL 额外支持其他已登记规则 artifact；
 5. 策略逐规则/漏斗/月度/分群/分群×月、树节点分布/PSI、评分分布/PSI、voting 规则与命中分布、cross heatmap/group；
 6. 每个维度独立 Excel，并在 Phase 4 总报告上追加验证 sheet；PSI 阈值、标签覆盖率和无标签限制显式解释；
-7. validation data、训练分布、字段映射、选择维度和 artifact version 随 task/version 持久化。
+7. validation data、训练分布、字段映射、选择维度和 artifact version 随 task/version 持久化；
+8. 所有效果 observation 显式区分 `estimated`、`backtested`、`oot_validated` 和未来 `post_launch_observed`；追加验证 Sheet 时生成新报告 revision，不覆盖开发报告。
 
 退出标准：
 
@@ -556,10 +582,13 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 - 任务切换和进程重启后验证数据、训练分布和选择状态可复现；
 - 每个验证结果页和 Excel 与同一 evaluator/apply 输出一致；
 - 规则或策略只有在引用与当前 dataset/artifact/version 匹配的 validation evidence 后才能晋级 `validated`；`adopted_local` 还必须经过 Phase 0B 的人工决策和副作用授权门。
+- 缺 OOT、标签未成熟或字段缺失时相应值保持空白并保留结构化状态，不得把 `backtested` 改写为 OOT。
 
 ### Phase 6：统一 Strategy Workbench 与 Agent parity（V2.x，8-14 人日）
 
 **目标**：让策略人员在 Manual 和 Agent 模式下使用同一套完整功能、状态、证据和门禁。
+
+**报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 让 Manual 和 Agent 共用缺失信息、七步 Workflow、证据和报告 revision。
 
 信息架构：Data & Semantics → Candidate Lab → Strategy Pool → Backtest & Validation → Champion/Challenger → Adoption & Artifacts → Monitoring & Iteration。
 
@@ -569,14 +598,16 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 - 结构化 gate 控件覆盖阈值、分数带、规则、顺序、验证晋级、采纳和 production 操作；
 - evidence drawer 显示 dataset/artifact/tool/version/input hash/红旗/memory 引用；
 - 节点、切点、matrix cell、选中规则、页面位置、语言和字段别名随 task 保存；
+- `MissingInformationRecord`、`ReportField` availability、effect stage、报告完整度和 revision 在 Manual/Agent 间完全一致；可选资料只问一次，用户暂缺后任务内不重复询问；
 - 长任务进度、取消、恢复、失败重试和可访问性；
-- Manual/Agent/browser/API E2E 覆盖完整旅程。
+- Manual/Agent/browser/API E2E 覆盖完整旅程和七步策略报告。
 
 退出标准：
 
 - Manual 与 Agent 对相同输入和选择产生同一 DSL、指标、写回列和 artifact；
 - 页面不解析 LLM 自由文本作为业务事实；
 - 缺关键业务口径时 Agent 必须澄清，不用技术默认值静默替代；
+- 缺可选报告资料时策略引擎继续，报告对应字段留空；缺策略正确性信息时 Manual 和 Agent 都 fail closed；
 - 用户可在一个任务中完成“数据 → 候选 → 策略池 → 回测 → OOT → 采纳 → 监控计划”，刷新/重启后可恢复。
 
 ### Phase 7：持续监控与本地经营闭环（V2.x，10-17 人日）
@@ -643,8 +674,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 ### Phase 0A
 
 1. `test(strategy): expose failing product-route e2e`
-2. `feat(strategy): add governed strategy task inputs`
-3. `feat(strategy): require business clarification before full development`
+2. `feat(strategy): add governed strategy task and report-input contracts`
+3. `feat(strategy): persist one-shot missing-information decisions`
 4. `fix(strategy): route development intent to full workflow`
 5. `feat(strategy): capture evidence-bound adoption reason at gate`
 
@@ -681,7 +712,7 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 28. 受控填充、删列、转换、派生、过滤、重命名和历史；
 29. 隔离自定义派生 Tool 与资源/权限护栏；
 30. 字段语义、中英文/节点映射和风险方向；
-31. 描述统计、相关矩阵、分布和数据导出。
+31. 描述统计、相关矩阵、分布、当前项目快照、历史资料映射和 `MetricDefinition/MetricObservation` 数据导出。
 
 ### Phase 3：Candidate Lab
 
@@ -692,7 +723,7 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 36. 标准 WOE-LR 评分卡 Workbench；
 37. voting 候选、自定义规则、受预算组合和 n-of-k；
 38. 2D/3D 自动 cross rules 与 2D matrix/cell；
-39. Candidate artifact、代码和写回列统一到 DSL。
+39. Candidate artifact、代码、写回列和 report-ready evidence 统一到 DSL。
 
 ### Phase 4：Strategy Pool、回测与交付
 
@@ -701,7 +732,7 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 42. 单规则/策略逐月、件数和金额回测；
 43. 分群操作符与分群×月；
 44. 策略/漏斗/月度/分群/code tabs；
-45. 多 sheet Excel 与结构化 provenance；
+45. `StrategyReportBundle`、七步 Workflow、模块化 Excel/JSON/Markdown、额度定价扩展与结构化 provenance；
 46. Python/SQL/JSON codegen 和逐行 equivalence；
 47. 分析产物列写回与修改后数据导出。
 
@@ -711,15 +742,15 @@ Phase 0B 的完成结论只覆盖上述治理底座及当前已有监控门禁�
 49. label/金额/月和字段映射 contract；
 50. 多 artifact 选择与统一 apply；
 51. 逐规则/漏斗/月度/分群/PSI/voting/cross 结果页；
-52. 分维度 Excel、task 持久化和重启恢复。
+52. OOT/effect-stage observation、验证 Sheet 新 revision、task 持久化和重启恢复。
 
 ### Phase 6：Strategy Workbench parity
 
 53. Workbench shell 与七区信息架构；
 54. 完整 Manual 控件和 evidence drawer；
 55. 节点/切点/cell/页面/语言状态持久化；
-56. Agent 与 Manual 共用 Workflow/DSL/gate；
-57. 完整 browser/API E2E、进度、取消和恢复。
+56. Agent 与 Manual 共用 Workflow/DSL/gate、缺失信息状态和报告 revision；
+57. 完整七步报告 browser/API E2E、进度、取消和恢复。
 
 ### Phase 7：持续经营闭环
 

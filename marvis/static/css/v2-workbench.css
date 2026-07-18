@@ -1729,6 +1729,55 @@ body[data-theme="dark"] .plan-driver-action-card {
 .plan-driver-action-card > .button {
   justify-self: start;
 }
+.strategy-artifacts-notice,
+.strategy-artifacts-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.strategy-artifacts-notice {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 24%, transparent);
+}
+.strategy-artifact-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.strategy-artifact-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+}
+.strategy-artifact-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.strategy-artifact-copy strong,
+.strategy-artifact-copy small {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.strategy-artifact-copy small,
+.strategy-artifact-unavailable {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.strategy-artifact-download {
+  flex: 0 0 auto;
+}
 .plan-retry-card-head {
   display: flex;
   align-items: center;

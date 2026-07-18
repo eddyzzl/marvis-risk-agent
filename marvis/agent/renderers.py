@@ -865,6 +865,75 @@ def _render_backtest_strategy(o: dict):
     return _append_backtest_warnings(text, tables, o)
 
 
+def _render_design_strategy_candidate(o: dict):
+    evidence = o.get("design_evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    strategy_type = str(o.get("strategy_type") or evidence.get("strategy_type") or "")
+    bands = [
+        band for band in (evidence.get("bands") or []) if isinstance(band, dict)
+    ]
+    objective = str(evidence.get("objective") or "")
+    source_hash = str(o.get("source_dataset_content_hash") or "")
+    text = (
+        f"**{strategy_type or '非审批'}策略候选已确定性生成**:"
+        f"共 {len(bands)} 个有效分箱，目标 `{objective or '-'}`，"
+        f"policy `{o.get('candidate_policy_version') or '-'}`。"
+        "这是可复核草稿，尚未采纳；采纳仍需人工确认。"
+    )
+    if source_hash:
+        text += f" 数据证据 `{source_hash[:12]}…`。"
+    assumptions = [str(item) for item in (evidence.get("assumptions") or [])]
+    if assumptions:
+        text += "\n" + "\n".join(f"- 口径:{item}" for item in assumptions)
+    red_flags = [
+        flag for flag in (evidence.get("red_flags") or []) if isinstance(flag, dict)
+    ]
+    if red_flags:
+        text += "\n" + "\n".join(
+            f"- {str(flag.get('level') or 'warning').upper()}:"
+            f"{flag.get('message') or flag.get('kind') or flag.get('code')}"
+            for flag in red_flags
+        )
+
+    rows = []
+    for band in bands:
+        action = band.get("selected_action")
+        action = action if isinstance(action, dict) else {}
+        lower = "-∞" if band.get("lower") is None else _fmt(band.get("lower"))
+        upper = "+∞" if band.get("upper") is None else _fmt(band.get("upper"))
+        rows.append(
+            [
+                str(band.get("band_id") or ""),
+                f"{lower} ~ {upper}",
+                _fmt(band.get("count")),
+                _pct(band.get("population_share")),
+                _pct(band.get("bad_rate")),
+                _fmt(band.get("risk_estimate")),
+                str(action.get("type") or ""),
+                _fmt(action.get("value")),
+            ]
+        )
+    tables = []
+    if rows:
+        tables.append(
+            {
+                "title": "确定性候选分箱与动作",
+                "columns": [
+                    "分箱",
+                    "范围",
+                    "样本数",
+                    "占比",
+                    "观测坏率",
+                    "风险估计",
+                    "动作",
+                    "值",
+                ],
+                "rows": rows,
+            }
+        )
+    return text, tables
+
+
 def _render_decision_backtest(
     o: dict,
     *,
@@ -1375,6 +1444,11 @@ def _render_design_cutoff_bands(o: dict):
 
 
 def _render_compare_strategies(o: dict):
+    if o.get("status") == "no_baseline":
+        return (
+            "**策略对比未执行**：未提供基线策略；矩阵、差异和标签覆盖率均为 n/a。",
+            [],
+        )
     matrix = o.get("matrix_2x2") if isinstance(o.get("matrix_2x2"), dict) else {}
     deltas = o.get("deltas") if isinstance(o.get("deltas"), dict) else {}
     red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
@@ -1479,6 +1553,11 @@ def _render_limit_pricing_matrix(o: dict):
     matrix = [cell for cell in (o.get("matrix") or []) if isinstance(cell, dict)]
     recommended = [item for item in (o.get("recommended") or []) if isinstance(item, dict)]
     red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
+    registered_artifacts = [
+        item
+        for item in (o.get("artifacts") or [])
+        if isinstance(item, dict) and item.get("artifact_id")
+    ]
     reco_keys = {
         (str(item.get("band")), _num(item.get("limit")), _num(item.get("rate")))
         for item in recommended
@@ -1491,6 +1570,8 @@ def _render_limit_pricing_matrix(o: dict):
     if red_items:
         names = "、".join(str(flag.get("code")) for flag in red_items)
         text += f" 红旗：{names}。"
+    if registered_artifacts:
+        text += f" 已登记 {len(registered_artifacts)} 个文件，可在策略产物卡下载。"
 
     def _cell_row(cell: dict) -> list:
         key = (str(cell.get("band")), _num(cell.get("limit")), _num(cell.get("rate")))
@@ -1535,13 +1616,130 @@ def _render_limit_pricing_matrix(o: dict):
     return text, tables
 
 
+def _render_profit_calc(o: dict):
+    results = [row for row in (o.get("results") or []) if isinstance(row, dict)]
+    warnings = [item for item in (o.get("quality_warnings") or []) if isinstance(item, dict)]
+    artifacts = [item for item in (o.get("artifacts") or []) if isinstance(item, dict)]
+    registered_artifacts = [item for item in artifacts if item.get("artifact_id")]
+    total_profit = sum(
+        float(row.get("net_profit") or 0.0) for row in results
+    )
+    text = (
+        f"**利润分析完成**：{len(results)} 个分群，合计净利润 {_num(total_profit)}。"
+    )
+    if warnings:
+        text += f" {len(warnings)} 条数据质量提示。"
+    if registered_artifacts:
+        text += f" 已登记 {len(registered_artifacts)} 个文件，可在策略产物卡下载。"
+    elif artifacts:
+        text += f" 已生成 {len(artifacts)} 个文件，但尚未登记下载。"
+    tables = [
+        {
+            "title": "分群利润结果",
+            "columns": [
+                "分群",
+                "样本数",
+                "收入",
+                "预期损失",
+                "资金成本",
+                "运营成本",
+                "净利润",
+                "ROA",
+            ],
+            "rows": [
+                [
+                    str(row.get("segment", "")),
+                    _fmt(row.get("count")),
+                    _num(row.get("revenue")),
+                    _num(row.get("expected_loss")),
+                    _num(row.get("funding_cost")),
+                    _num(row.get("operating_cost")),
+                    _num(row.get("net_profit")),
+                    _pct(row.get("roa")),
+                ]
+                for row in results
+            ],
+        }
+    ]
+    if warnings:
+        tables.append(
+            {
+                "title": "数据质量提示",
+                "columns": ["代码", "影响行数", "说明"],
+                "rows": [
+                    [
+                        str(item.get("code", "")),
+                        _fmt(item.get("count")),
+                        str(item.get("message", "")),
+                    ]
+                    for item in warnings
+                ],
+            }
+        )
+    return text, tables
+
+
+def _render_roll_rate_matrix(o: dict):
+    states = [str(state) for state in (o.get("states") or [])]
+    matrix = o.get("matrix") or []
+    base_counts = o.get("base_counts") or {}
+    warnings = [
+        item for item in (o.get("data_quality_warnings") or []) if isinstance(item, dict)
+    ]
+    artifacts = [item for item in (o.get("artifacts") or []) if isinstance(item, dict)]
+    registered_artifacts = [item for item in artifacts if item.get("artifact_id")]
+    semantics = str(o.get("observation_semantics") or "adjacent_observation")
+    semantics_text = "相邻观测" if semantics == "adjacent_observation" else semantics
+    text = f"**Roll-rate 矩阵完成**：{len(states)} 个状态，口径为{semantics_text}。"
+    if warnings:
+        text += f" {len(warnings)} 条质量提示。"
+    if registered_artifacts:
+        text += f" 已登记 {len(registered_artifacts)} 个文件，可在策略产物卡下载。"
+    elif artifacts:
+        text += f" 已生成 {len(artifacts)} 个文件，但尚未登记下载。"
+
+    rows = []
+    for index, state in enumerate(states):
+        raw_row = matrix[index] if index < len(matrix) and isinstance(matrix[index], list) else []
+        rows.append(
+            [
+                state,
+                _fmt(base_counts.get(state)),
+                *[
+                    _pct(raw_row[to_index] if to_index < len(raw_row) else None)
+                    for to_index in range(len(states))
+                ],
+            ]
+        )
+    tables = [
+        {
+            "title": "相邻观测状态转移率",
+            "columns": ["期初状态", "基数", *states],
+            "rows": rows,
+        }
+    ]
+    if warnings:
+        tables.append(
+            {
+                "title": "数据质量提示",
+                "columns": ["代码", "说明"],
+                "rows": [
+                    [str(item.get("code", "")), str(item.get("message", ""))]
+                    for item in warnings
+                ],
+            }
+        )
+    return text, tables
+
+
 def _render_adopt_strategy(o: dict):
     retired = [str(item) for item in (o.get("retired_strategy_ids") or [])]
     artifacts = [a for a in (o.get("artifacts") or []) if isinstance(a, dict)]
     text = (
-        f"**策略已采纳**：`{o.get('strategy_id', '')}` v{o.get('version', '')}，"
-        f"状态 {o.get('status', '')}，退役 {len(retired)} 个旧版本，"
-        f"生成 {len(artifacts)} 份交付物。"
+        f"**策略已在本地采纳**：`{o.get('strategy_id', '')}` v{o.get('version', '')}，"
+        f"资产状态 {o.get('asset_status', 'adopted_local')}（兼容状态 "
+        f"{o.get('status', '')}），退役 {len(retired)} 个旧版本，"
+        f"生成 {len(artifacts)} 份交付物。本地采纳不代表生产环境已上线。"
     )
     tables = [{
         "title": "交付物",
@@ -2132,6 +2330,32 @@ def _render_run_strategy_monitoring(o: dict):
     return text, tables
 
 
+def _render_apply_monitoring_disposition(o: dict):
+    disposition = str(o.get("disposition") or "acknowledge")
+    label = {
+        "acknowledge": "确认知悉",
+        "observe": "维持并观察",
+        "adjust_threshold": "调整阈值并重跑",
+        "new_version": "创建新版本",
+    }.get(disposition, disposition)
+    level = str(o.get("overall_level") or "")
+    level_label = _MONITOR_LEVEL_LABEL.get(level, level)
+    text = f"**监控处置已执行**：{label}"
+    if level_label:
+        text += f"，处置后判级【{level_label}】"
+    resolved_run = o.get("resolved_monitoring_run_id")
+    if resolved_run:
+        text += f"，证据运行 `{resolved_run}`"
+    if disposition == "new_version" and o.get("new_task_id"):
+        text += (
+            f"。已创建策略任务 `{o['new_task_id']}` 与草案策略 "
+            f"`{o.get('new_strategy_id', '')}`"
+        )
+    if disposition == "adjust_threshold" and o.get("monitoring_plan_revision"):
+        text += f"。监控计划已追加为 revision {o['monitoring_plan_revision']}"
+    return text + "。", []
+
+
 def _render_monitoring_report(o: dict):
     timeline = [row for row in (o.get("timeline") or []) if isinstance(row, dict)]
     overall = str(o.get("overall_level") or "")
@@ -2430,10 +2654,13 @@ _RENDERERS = {
     "compute_feature_metrics": _render_feature_metrics,
     "generate_feature_report": _render_feature_report,
     "build_strategy": _render_build_strategy,
+    "design_strategy_candidate": _render_design_strategy_candidate,
     "backtest_strategy": _render_backtest_strategy,
     "tradeoff_view": _render_tradeoff_view,
     "design_cutoff_bands": _render_design_cutoff_bands,
     "compare_strategies": _render_compare_strategies,
+    "profit_calc": _render_profit_calc,
+    "roll_rate_matrix": _render_roll_rate_matrix,
     "limit_pricing_matrix": _render_limit_pricing_matrix,
     "adopt_strategy": _render_adopt_strategy,
     "render_strategy_doc": _render_strategy_doc,
@@ -2443,6 +2670,7 @@ _RENDERERS = {
     "score_dataset": _render_score_dataset,
     "monitor_run": _render_monitor_run,
     "run_strategy_monitoring": _render_run_strategy_monitoring,
+    "apply_monitoring_disposition": _render_apply_monitoring_disposition,
     "render_monitoring_report": _render_monitoring_report,
     "flow_rate": _render_flow_rate,
     "bucket_migration": _render_bucket_migration,
