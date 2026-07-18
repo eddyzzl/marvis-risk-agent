@@ -277,6 +277,12 @@ class TaskRepository:
         # CASCADE from tasks (see marvis/db_schema.py); their own children
         # (model_artifacts, backtests, plan_steps/outputs/runs) do cascade once the
         # parent row is removed. jobs/agent_messages already cascade from tasks.
+        # Data workspace and analysis rows hold dataset foreign keys. Remove
+        # them first so an analyzed task can be purged without violating the
+        # dataset evidence boundary; the surrounding transaction restores all
+        # rows if any later purge step fails.
+        conn.execute("DELETE FROM data_analysis_runs WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM data_workspaces WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM datasets WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM joins WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM plans WHERE task_id = ?", (task_id,))
@@ -758,7 +764,32 @@ class TaskRepository:
         traceback: str | None = None,
     ) -> None:
         with connect(self.db_path) as conn:
-            conn.execute(
+            self.finish_job_on_connection(
+                conn,
+                job_id,
+                status=status,
+                error_name=error_name,
+                error_value=error_value,
+                traceback=traceback,
+            )
+
+    def finish_job_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        job_id: str,
+        *,
+        status: str,
+        error_name: str | None = None,
+        error_value: str | None = None,
+        traceback: str | None = None,
+        expected_status: str | None = None,
+    ) -> bool:
+        """Finish a job inside a caller-owned artifact/domain transaction."""
+
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        if expected_status is None:
+            cursor = conn.execute(
                 """
                 UPDATE jobs
                    SET status = ?,
@@ -771,6 +802,29 @@ class TaskRepository:
                 """,
                 (status, error_name, error_value, traceback, _now(), job_id),
             )
+        else:
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                   SET status = ?,
+                       error_name = ?,
+                       error_value = ?,
+                       traceback = ?,
+                       finished_at = ?
+                 WHERE id = ?
+                   AND status = ?
+                """,
+                (
+                    status,
+                    error_name,
+                    error_value,
+                    traceback,
+                    _now(),
+                    job_id,
+                    expected_status,
+                ),
+            )
+        return cursor.rowcount == 1
 
     def task_has_active_job(self, task_id: str) -> bool:
         with connect(self.db_path) as conn:
@@ -1430,6 +1484,8 @@ def _task_purge_summary(conn: sqlite3.Connection, task_id: str) -> dict:
         "sub_agents": _count("sub_agents", "parent_task_id"),
         "draft_tools": _count("draft_tools"),
         "draft_runs": _count("draft_runs"),
+        "data_analysis_runs": _count("data_analysis_runs"),
+        "data_workspaces": _count("data_workspaces"),
         "_dataset_source_paths": removable_paths,
     }
 

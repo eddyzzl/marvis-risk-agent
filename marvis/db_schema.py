@@ -34,6 +34,7 @@ _MIGRATION_TABLES = frozenset({
     "datasets",
     "strategy_artifacts",
     "validation_input_contracts",
+    "data_analysis_runs",
 })
 
 # ARCH-10: schema_version mechanism.
@@ -117,7 +118,12 @@ _MIGRATION_TABLES = frozenset({
 # _migration_012_data_workspaces adds the task-scoped, CAS-updated data workspace
 # used by the V2 data/semantics experience. Computed analysis stays outside this
 # row and is invalidated through its server-owned analysis_generation counter.
-SCHEMA_VERSION = 12
+#
+# _migration_013_data_analysis_runs adds the task-owned, evidence-bound execution
+# ledger for deterministic data-analysis artifacts.  The row is idempotent by
+# canonical computational input and keeps the originating workspace revision as
+# immutable provenance.
+SCHEMA_VERSION = 13
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -1448,6 +1454,158 @@ def _migration_012_data_workspaces(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_013_data_analysis_runs(conn: sqlite3.Connection) -> None:
+    """Add idempotent, task-owned data-analysis execution records."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS data_analysis_runs (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'data-analysis.v1'),
+            task_id TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
+            dataset_content_hash TEXT NOT NULL
+                CHECK(length(dataset_content_hash) = 64)
+                CHECK(dataset_content_hash NOT GLOB '*[^0-9a-f]*'),
+            workspace_revision INTEGER NOT NULL CHECK(workspace_revision >= 0),
+            analysis_generation INTEGER NOT NULL CHECK(analysis_generation >= 0),
+            semantic_mapping_hash TEXT NOT NULL
+                CHECK(length(semantic_mapping_hash) = 64)
+                CHECK(semantic_mapping_hash NOT GLOB '*[^0-9a-f]*'),
+            config_json TEXT NOT NULL,
+            config_hash TEXT NOT NULL
+                CHECK(length(config_hash) = 64)
+                CHECK(config_hash NOT GLOB '*[^0-9a-f]*'),
+            producer_version TEXT NOT NULL,
+            input_hash TEXT NOT NULL
+                CHECK(length(input_hash) = 64)
+                CHECK(input_hash NOT GLOB '*[^0-9a-f]*'),
+            job_id TEXT,
+            status TEXT NOT NULL
+                CHECK(status IN (
+                    'queued', 'running', 'succeeded', 'failed', 'cancelled'
+                )),
+            result_artifact_id TEXT,
+            result_content_hash TEXT
+                CHECK(result_content_hash IS NULL OR
+                    (length(result_content_hash) = 64
+                     AND result_content_hash NOT GLOB '*[^0-9a-f]*')),
+            error_kind TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            UNIQUE(task_id, input_hash),
+            CHECK(
+                (result_artifact_id IS NULL AND result_content_hash IS NULL)
+                OR
+                (result_artifact_id IS NOT NULL AND result_content_hash IS NOT NULL)
+            ),
+            CHECK(
+                (error_kind IS NULL AND error_message IS NULL)
+                OR
+                (error_kind IS NOT NULL AND error_message IS NOT NULL)
+            ),
+            CHECK(
+                (status = 'queued'
+                 AND started_at IS NULL
+                 AND completed_at IS NULL
+                 AND result_artifact_id IS NULL
+                 AND error_kind IS NULL)
+                OR
+                (status = 'running'
+                 AND started_at IS NOT NULL
+                 AND completed_at IS NULL
+                 AND result_artifact_id IS NULL
+                 AND error_kind IS NULL)
+                OR
+                (status = 'succeeded'
+                 AND started_at IS NOT NULL
+                 AND completed_at IS NOT NULL
+                 AND result_artifact_id IS NOT NULL
+                 AND error_kind IS NULL)
+                OR
+                (status IN ('failed', 'cancelled')
+                 AND completed_at IS NOT NULL
+                 AND result_artifact_id IS NULL
+                 AND error_kind IS NOT NULL)
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+            FOREIGN KEY(result_artifact_id) REFERENCES task_artifacts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_analysis_runs_task
+            ON data_analysis_runs(task_id, created_at DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_analysis_runs_current
+            ON data_analysis_runs(
+                task_id, dataset_id, dataset_content_hash,
+                analysis_generation, semantic_mapping_hash,
+                config_hash, producer_version, status
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_analysis_runs_status
+            ON data_analysis_runs(status, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_data_analysis_runs_identity_immutable
+        BEFORE UPDATE ON data_analysis_runs
+        WHEN NEW.id IS NOT OLD.id
+          OR NEW.schema_version IS NOT OLD.schema_version
+          OR NEW.task_id IS NOT OLD.task_id
+          OR NEW.dataset_id IS NOT OLD.dataset_id
+          OR NEW.dataset_content_hash IS NOT OLD.dataset_content_hash
+          OR NEW.workspace_revision IS NOT OLD.workspace_revision
+          OR NEW.analysis_generation IS NOT OLD.analysis_generation
+          OR NEW.semantic_mapping_hash IS NOT OLD.semantic_mapping_hash
+          OR NEW.config_json IS NOT OLD.config_json
+          OR NEW.config_hash IS NOT OLD.config_hash
+          OR NEW.producer_version IS NOT OLD.producer_version
+          OR NEW.input_hash IS NOT OLD.input_hash
+          OR NEW.created_at IS NOT OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'data_analysis_runs identity is immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_data_analysis_runs_succeeded_immutable
+        BEFORE UPDATE ON data_analysis_runs
+        WHEN OLD.status = 'succeeded'
+         AND (
+             NEW.job_id IS NOT OLD.job_id
+             OR NEW.status IS NOT OLD.status
+             OR NEW.result_artifact_id IS NOT OLD.result_artifact_id
+             OR NEW.result_content_hash IS NOT OLD.result_content_hash
+             OR NEW.error_kind IS NOT OLD.error_kind
+             OR NEW.error_message IS NOT OLD.error_message
+             OR NEW.updated_at IS NOT OLD.updated_at
+             OR NEW.started_at IS NOT OLD.started_at
+             OR NEW.completed_at IS NOT OLD.completed_at
+         )
+        BEGIN
+            SELECT RAISE(ABORT, 'succeeded data_analysis_run is immutable');
+        END
+        """
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -1468,6 +1626,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (10, _migration_010_task_artifact_registry),
     (11, _migration_011_verified_strategy_artifacts),
     (12, _migration_012_data_workspaces),
+    (13, _migration_013_data_analysis_runs),
 ]
 
 

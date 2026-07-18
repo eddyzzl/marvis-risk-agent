@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from marvis.orchestrator.templates import _register_builtin_template
+from marvis.orchestrator.templates.data import DATASET_DESCRIPTIVE_ANALYSIS
 from marvis.orchestrator.templates.feature import (
     FEATURE_ANALYSIS,
     FEATURE_ANALYSIS_WITH_JOIN,
@@ -44,6 +45,7 @@ from marvis.orchestrator.templates.validation import MODEL_VALIDATION
 # them into the registry in the product display order.
 BUILTIN_TEMPLATES = (
     SAMPLE_ECHO,
+    DATASET_DESCRIPTIVE_ANALYSIS,
     MODEL_VALIDATION,
     STANDARD_MODELING,
     DATA_JOIN,

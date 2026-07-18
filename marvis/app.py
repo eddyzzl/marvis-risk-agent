@@ -76,6 +76,7 @@ from marvis.routers.artifacts import router as artifacts_router
 from marvis.routers.audit import router as audit_router
 from marvis.routers.branding import router as branding_router
 from marvis.routers.data import router as data_router
+from marvis.routers.data_analysis import router as data_analysis_router
 from marvis.routers.drafts import router as drafts_router
 from marvis.routers.evidence import router as evidence_router
 from marvis.routers.materials import router as materials_router
@@ -402,6 +403,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     app.include_router(audit_router)
     app.include_router(branding_router)
     app.include_router(data_router)
+    app.include_router(data_analysis_router)
     app.include_router(plugins_router)
     app.include_router(drafts_router)
     app.include_router(evidence_router)

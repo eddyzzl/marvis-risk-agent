@@ -1884,6 +1884,211 @@ def _render_slice_aggregate(o: dict):
     return text, tables
 
 
+_PROFILE_SECTION_LABELS = {
+    "overview": "概览",
+    "target": "Target 分布",
+    "missing": "缺失",
+    "distribution": "分布",
+    "correlation": "相关矩阵",
+}
+
+_PROFILE_CORRELATION_REASON_LABELS = {
+    "insufficient_pairs": "有效样本不足",
+    "zero_variance_left": "左侧常量",
+    "zero_variance_right": "右侧常量",
+    "zero_variance_both": "双侧常量",
+    "nonfinite_result": "结果非有限值",
+    "unsafe_numeric_precision": "数值精度不安全",
+    "unsafe_numeric_precision_left": "左侧数值精度不安全",
+    "unsafe_numeric_precision_right": "右侧数值精度不安全",
+    "unsafe_numeric_precision_both": "双侧数值精度不安全",
+}
+
+
+def _profile_tagged_value(value) -> str:
+    if not isinstance(value, dict):
+        return "n/a" if value is None else str(value)
+    if value.get("type") == "null":
+        return "NULL"
+    nonfinite = value.get("nonfinite")
+    if nonfinite:
+        return {
+            "negative_infinity": "-Infinity",
+            "positive_infinity": "+Infinity",
+            "nan": "NaN",
+        }.get(str(nonfinite), str(nonfinite))
+    raw = value.get("value")
+    return "n/a" if raw is None else str(raw)
+
+
+def _profile_semantics(o: dict) -> tuple[dict, dict]:
+    semantics = o.get("semantics") if isinstance(o.get("semantics"), dict) else {}
+    roles = semantics.get("field_roles") if isinstance(semantics.get("field_roles"), dict) else {}
+    names = semantics.get("business_names") if isinstance(semantics.get("business_names"), dict) else {}
+    return roles, names
+
+
+def _profile_field_label(name, business_names: dict) -> str:
+    raw = str(name or "")
+    business = str(business_names.get(raw) or "").strip()
+    return f"{raw}（{business}）" if business else raw
+
+
+def _profile_frequency_text(frequency: dict) -> str:
+    items = frequency.get("items") if isinstance(frequency.get("items"), list) else []
+    parts = []
+    for item in items[:8]:
+        if not isinstance(item, dict):
+            continue
+        parts.append(
+            f"{_profile_tagged_value(item.get('value'))}:"
+            f"{_fmt(item.get('count'))}({_pct(item.get('rate_all'))})"
+        )
+    other_count = frequency.get("other_count")
+    if isinstance(other_count, int) and other_count > 0:
+        parts.append(f"其他:{other_count}")
+    return "；".join(parts) if parts else "n/a"
+
+
+def _profile_correlation_cell(value, reason, pair_count) -> str:
+    if reason == "ok" and value is not None:
+        return _fmt(value)
+    label = _PROFILE_CORRELATION_REASON_LABELS.get(str(reason), str(reason or "不可用"))
+    return f"n/a（{label}，n={_fmt(pair_count)}）"
+
+
+def _render_profile_dataset(o: dict):
+    """Lay out deterministic profile evidence without calculating new metrics."""
+
+    result = o.get("result") if isinstance(o.get("result"), dict) else {}
+    dataset = result.get("dataset") if isinstance(result.get("dataset"), dict) else {}
+    fields = [field for field in (result.get("fields") or []) if isinstance(field, dict)]
+    options = o.get("options_echo") if isinstance(o.get("options_echo"), dict) else {}
+    sections = [str(item) for item in (options.get("sections") or _PROFILE_SECTION_LABELS)]
+    requested = set(sections)
+    roles, business_names = _profile_semantics(o)
+    row_count = o.get("row_count_scanned", dataset.get("row_count", 0))
+    text = (
+        f"**样本描述分析完成**：数据集 `{str(o.get('dataset_id') or '')}`，"
+        f"全量扫描 {_fmt(row_count)} 行；结果已绑定 dataset hash、分析代次和语义版本。"
+    )
+    if requested != set(_PROFILE_SECTION_LABELS):
+        labels = "、".join(
+            _PROFILE_SECTION_LABELS.get(section, section) for section in sections
+        )
+        text += f" 按请求展示：{labels}。"
+
+    tables = []
+    if "overview" in requested:
+        tables.append(
+            {
+                "title": "字段概览",
+                "columns": ["字段", "角色", "类型", "总行数", "缺失数", "缺失率", "唯一值数"],
+                "rows": [
+                    [
+                        _profile_field_label(field.get("name"), business_names),
+                        str(roles.get(str(field.get("name") or "")) or "—"),
+                        str(field.get("duckdb_type") or field.get("kind") or "—"),
+                        _fmt(field.get("row_count")),
+                        _fmt(field.get("null_count")),
+                        _pct(field.get("null_rate")),
+                        _fmt(field.get("distinct_count")),
+                    ]
+                    for field in fields
+                ],
+            }
+        )
+
+    if "missing" in requested:
+        tables.append(
+            {
+                "title": "缺失分析",
+                "columns": ["字段", "缺失数", "缺失率", "总行数"],
+                "rows": [
+                    [
+                        _profile_field_label(field.get("name"), business_names),
+                        _fmt(field.get("null_count")),
+                        _pct(field.get("null_rate")),
+                        _fmt(field.get("row_count")),
+                    ]
+                    for field in sorted(
+                        fields,
+                        key=lambda item: (
+                            -int(item.get("null_count") or 0),
+                            str(item.get("name") or ""),
+                        ),
+                    )
+                ],
+            }
+        )
+
+    target = result.get("target_distribution")
+    if "target" in requested and isinstance(target, dict):
+        frequency = target.get("frequency") if isinstance(target.get("frequency"), dict) else {}
+        items = [item for item in (frequency.get("items") or []) if isinstance(item, dict)]
+        tables.append(
+            {
+                "title": "Target 分布",
+                "columns": ["取值", "样本数", "占比"],
+                "rows": [
+                    [
+                        _profile_tagged_value(item.get("value")),
+                        _fmt(item.get("count")),
+                        _pct(item.get("rate_all")),
+                    ]
+                    for item in items
+                ],
+            }
+        )
+
+    if "distribution" in requested:
+        tables.append(
+            {
+                "title": "字段分布",
+                "columns": ["字段", "类型", "Min", "P25", "P50", "P75", "Max", "频数摘要"],
+                "rows": [
+                    [
+                        _profile_field_label(field.get("name"), business_names),
+                        str(field.get("kind") or field.get("duckdb_type") or "—"),
+                        _fmt((field.get("numeric") or {}).get("min")) if isinstance(field.get("numeric"), dict) else "n/a",
+                        _fmt((field.get("numeric") or {}).get("p25")) if isinstance(field.get("numeric"), dict) else "n/a",
+                        _fmt((field.get("numeric") or {}).get("p50")) if isinstance(field.get("numeric"), dict) else "n/a",
+                        _fmt((field.get("numeric") or {}).get("p75")) if isinstance(field.get("numeric"), dict) else "n/a",
+                        _fmt((field.get("numeric") or {}).get("max")) if isinstance(field.get("numeric"), dict) else "n/a",
+                        _profile_frequency_text(field.get("frequency") or {})
+                        if isinstance(field.get("frequency"), dict)
+                        else "n/a",
+                    ]
+                    for field in fields
+                ],
+            }
+        )
+
+    correlations = result.get("correlations")
+    if "correlation" in requested and isinstance(correlations, dict):
+        columns = [str(item) for item in (correlations.get("columns") or [])]
+        values = correlations.get("values") or []
+        counts = correlations.get("pair_counts") or []
+        reasons = correlations.get("reasons") or []
+        rows = []
+        for row_index, column in enumerate(columns):
+            row = [_profile_field_label(column, business_names)]
+            for column_index in range(len(columns)):
+                value = values[row_index][column_index]
+                reason = reasons[row_index][column_index]
+                count = counts[row_index][column_index]
+                row.append(_profile_correlation_cell(value, reason, count))
+            rows.append(row)
+        tables.append(
+            {
+                "title": "相关矩阵",
+                "columns": ["字段", *[_profile_field_label(name, business_names) for name in columns]],
+                "rows": rows,
+            }
+        )
+    return text, tables
+
+
 def _render_propose_join(o: dict):
     joins = o.get("joins") or []
     # GAP-4: business-meaning lookup for raw key-column codes (e.g. als_m3_id_nbank_orgnum),
@@ -2667,6 +2872,7 @@ _RENDERERS = {
     "render_challenger_report": _render_challenger_report,
     "vintage_curve": _render_vintage_curve,
     "slice_aggregate": _render_slice_aggregate,
+    "profile_dataset": _render_profile_dataset,
     "score_dataset": _render_score_dataset,
     "monitor_run": _render_monitor_run,
     "run_strategy_monitoring": _render_run_strategy_monitoring,

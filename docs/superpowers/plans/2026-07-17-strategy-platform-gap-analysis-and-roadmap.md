@@ -486,6 +486,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **旧版 Excel 纵切（已完成）**：HTTP 上传、本地路径注册和 Agent `data_ops.ingest_excel` 均可按真实文件内容读取 BIFF `.xls`，并与 `.xlsx/.xlsm` 共用工作表、精确数据行数和文件体积门禁；扩展名伪装不能绕过 Excel 上限，损坏或 HTML 伪装文件会显式失败且不登记半成品。测试使用固定真实 BIFF fixture，不引入过时的写入依赖。SQL connector、完整变换、统计和导出随后分提交完成，但仍全部属于本 Phase 和 V2.x。
 
+**报告级描述分析纵切（已完成）**：新增自然语言可达的 `dataset_descriptive_analysis` Workflow 和 `data_ops.profile_dataset`，对活动数据集做全量、确定性的概览、target、缺失、低基数频数/Top-K、高基数等宽直方图及完整 Pearson 相关矩阵；支持显式字段范围和资源预算，超限或不可安全表示时给出类型化原因，不静默截断或把不可用相关性伪装成 0。超出 JavaScript 安全整数范围的值以无损 `bigint` 字符串输出，高精度数值若无法安全进入 DOUBLE 指标则显式 unavailable。分析绑定 task、dataset hash、workspace revision、analysis generation 和 semantic mapping hash；敏感字段按数据集推断与用户语义的并集做稳定 token，并抑制数值分布和相关性。Agent 可用自然语言直接选择分析范围并展示确定性表格；手动 API 提供异步 job、显式 retry、page-only revision 缓存复用、不可变 JSON artifact 和 task-scoped 下载，数据/语义漂移、artifact/job 冒充、进程中断后的失联 job 均失败关闭并可审计恢复。SQL connector、数据变换/lineage、导出和 report-ready 指标语义仍是本 Phase 后续交付，不能据此把 Phase 2 整体标为完成。
+
 交付：
 
 1. 策略任务创建、列表、加载、删除、显式保存、dirty 切换保护和分析状态恢复；

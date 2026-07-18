@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict
+import hashlib
+import hmac
+import json
 import os
 from pathlib import Path
 import shutil
@@ -28,11 +32,13 @@ from marvis.data.excel_ingest import (
     new_excel_artifact_name,
 )
 from marvis.data.join_engine import JoinEngine, _key_fps
+from marvis.data.workspace import data_semantic_mapping_hash
 from marvis.provenance import NumberProvenance
 from marvis.reconcile import EXACT_ABS_TOL, EXACT_REL_TOL, ReconcileReport, reconcile
 from marvis.db_schema import connect
 from marvis.plugins.sdk import PackRuntime
 from marvis.repositories.strategy import _write_audit_row
+from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.safe_paths import assert_within
 
 
@@ -141,6 +147,343 @@ def tool_infer_schema(inputs: dict, ctx) -> dict:
         "has_target": dataset.has_target,
         "target_col": dataset.target_col,
     }
+
+
+_PROFILE_SECTIONS = (
+    "overview",
+    "target",
+    "missing",
+    "distribution",
+    "correlation",
+)
+_PROFILE_CONFIG_FIELDS = (
+    "frequency_top_k",
+    "low_cardinality_threshold",
+    "histogram_bins",
+    "correlation_batch_size",
+)
+_PROFILE_SENSITIVE_ROLES = frozenset({"phone", "idcard", "id", "name"})
+
+
+def tool_profile_dataset(inputs: dict, ctx) -> dict:
+    """Run a full deterministic profile of the exact active workspace dataset.
+
+    The five identity inputs are deliberately mandatory even though ``dataset_id``
+    alone could locate a registry row.  They bind the result to the user's active
+    data-workspace revision, physical bytes, analysis generation, and confirmed
+    semantic choices; a stale plan fails before the descriptive kernel runs.
+    """
+
+    runtime = _runtime(ctx)
+    task_id = str(ctx.task_id)
+    dataset_id = str(inputs["dataset_id"])
+    dataset = runtime.registry.get(dataset_id)
+    if str(dataset.task_id) != task_id:
+        raise PermissionError(
+            f"dataset {dataset_id} belongs to task {dataset.task_id}, not {task_id}"
+        )
+
+    expected_hash = str(inputs["expected_content_hash"])
+    registered_hash = getattr(dataset, "content_hash", None)
+    if not isinstance(registered_hash, str) or not hmac.compare_digest(
+        registered_hash,
+        expected_hash,
+    ):
+        raise ValueError("dataset content hash does not match expected content hash")
+
+    snapshot = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(task_id)
+    if snapshot.active_dataset_id != dataset_id:
+        raise ValueError("dataset is not the active data-workspace dataset")
+    active_hash = snapshot.active_dataset_content_hash
+    if not isinstance(active_hash, str) or not hmac.compare_digest(
+        active_hash,
+        expected_hash,
+    ):
+        raise ValueError("active data-workspace content hash does not match expected content hash")
+
+    workspace_revision = int(inputs["workspace_revision"])
+    if snapshot.revision != workspace_revision:
+        raise ValueError(
+            "data workspace revision mismatch: "
+            f"expected {workspace_revision}, found {snapshot.revision}"
+        )
+    analysis_generation = int(inputs["analysis_generation"])
+    if snapshot.analysis_generation != analysis_generation:
+        raise ValueError(
+            "data workspace analysis generation mismatch: "
+            f"expected {analysis_generation}, found {snapshot.analysis_generation}"
+        )
+
+    expected_semantic_hash = str(inputs["semantic_mapping_hash"])
+    actual_semantic_hash = data_semantic_mapping_hash(snapshot.semantic_mapping)
+    if not hmac.compare_digest(actual_semantic_hash, expected_semantic_hash):
+        raise ValueError("data workspace semantic mapping hash mismatch")
+
+    workspace_target = snapshot.semantic_mapping.target_col
+    if "target_col" in inputs and inputs["target_col"] != workspace_target:
+        raise ValueError("target_col must match the data workspace semantic mapping")
+
+    sections = _profile_sections(inputs.get("sections"))
+    columns = _profile_columns(inputs.get("columns"))
+    config = _build_descriptive_config(inputs)
+    verified_path = runtime.registry.resolve_verified_path(dataset_id)
+    value_sanitizers = _profile_value_sanitizers(
+        dataset,
+        snapshot.semantic_mapping,
+        dataset_content_hash=registered_hash,
+    )
+    report = _analyze_parquet(
+        verified_path,
+        temp_directory=runtime.backend._temp_directory,
+        target_column=workspace_target,
+        columns=columns,
+        config=config,
+        value_sanitizers=value_sanitizers,
+    )
+    report = _suppress_sensitive_profile_values(
+        report,
+        sensitive_columns=frozenset(value_sanitizers),
+    )
+    row_count = _profile_row_count(report)
+    registered_row_count = int(dataset.row_count)
+    if row_count != registered_row_count:
+        raise ValueError(
+            "full dataset row count does not match the registered dataset: "
+            f"scanned {row_count}, registered {registered_row_count}"
+        )
+
+    config_payload = config.to_dict()
+    semantics = _profile_semantics(report, snapshot.semantic_mapping)
+    result = _select_profile_sections(
+        report,
+        sections=sections,
+        target_column=workspace_target,
+    )
+    return {
+        "dataset_id": dataset_id,
+        "dataset_content_hash": registered_hash,
+        "expected_content_hash": expected_hash,
+        "workspace_revision": workspace_revision,
+        "analysis_generation": analysis_generation,
+        "semantic_mapping_hash": actual_semantic_hash,
+        "scan_scope": "full_dataset",
+        "row_count": row_count,
+        "row_count_scanned": row_count,
+        "options_echo": {
+            "sections": list(sections),
+            "columns": None if columns is None else list(columns),
+            "target_col": workspace_target,
+            **{name: int(config_payload[name]) for name in _PROFILE_CONFIG_FIELDS},
+        },
+        "semantics": semantics,
+        "result": result,
+    }
+
+
+def _build_descriptive_config(inputs: dict):
+    from marvis.data.descriptive import DescriptiveConfig
+
+    overrides = {
+        name: int(inputs[name])
+        for name in _PROFILE_CONFIG_FIELDS
+        if name in inputs
+    }
+    return DescriptiveConfig(**overrides)
+
+
+def _analyze_parquet(path: Path, **kwargs) -> dict:
+    from marvis.data.descriptive import analyze_parquet
+
+    return analyze_parquet(path, **kwargs)
+
+
+def _profile_sections(raw) -> tuple[str, ...]:
+    if raw is None:
+        return _PROFILE_SECTIONS
+    requested = [str(item) for item in raw]
+    unknown = sorted(set(requested) - set(_PROFILE_SECTIONS))
+    if unknown:
+        raise ValueError(f"unsupported profile section(s): {', '.join(unknown)}")
+    if not requested:
+        raise ValueError("sections must not be empty")
+    if len(requested) != len(set(requested)):
+        raise ValueError("sections must not contain duplicates")
+    requested_set = set(requested)
+    return tuple(section for section in _PROFILE_SECTIONS if section in requested_set)
+
+
+def _profile_columns(raw) -> tuple[str, ...] | None:
+    if raw is None:
+        return None
+    columns = tuple(str(item).strip() for item in raw)
+    if not columns or any(not column for column in columns):
+        raise ValueError("columns must contain at least one non-empty column name")
+    if len(columns) != len(set(columns)):
+        raise ValueError("columns must not contain duplicates")
+    return columns
+
+
+def _profile_value_sanitizers(
+    dataset,
+    semantic_mapping,
+    *,
+    dataset_content_hash: str,
+) -> dict:
+    sensitive_columns = {
+        str(column.name)
+        for column in dataset.columns
+        if str(column.semantic_role) in _PROFILE_SENSITIVE_ROLES
+    }
+    sensitive_columns.update(
+        str(name)
+        for name, role in semantic_mapping.field_roles.items()
+        if str(role) in _PROFILE_SENSITIVE_ROLES
+    )
+    return {
+        column: _profile_value_sanitizer(dataset_content_hash, column)
+        for column in sorted(sensitive_columns)
+    }
+
+
+def _profile_value_sanitizer(dataset_content_hash: str, column: str):
+    def sanitize(tagged_value: dict) -> dict:
+        canonical = json.dumps(
+            tagged_value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        token = hashlib.sha256(
+            (
+                "dataset-profile.v1\0"
+                f"{dataset_content_hash}\0{column}\0{canonical}"
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        return {"type": "string", "value": f"token:{token}"}
+
+    return sanitize
+
+
+def _profile_row_count(report: dict) -> int:
+    try:
+        value = report["dataset"]["row_count"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("descriptive result is missing dataset.row_count") from exc
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("descriptive result dataset.row_count must be a non-negative integer")
+    return value
+
+
+def _profile_semantics(report: dict, semantic_mapping) -> dict:
+    result_columns = [
+        str(field["name"])
+        for field in report.get("fields") or []
+        if isinstance(field, dict) and field.get("name") is not None
+    ]
+    return {
+        "target_col": semantic_mapping.target_col,
+        "field_roles": {
+            column: str(semantic_mapping.field_roles[column])
+            for column in result_columns
+            if column in semantic_mapping.field_roles
+        },
+        "business_names": {
+            column: str(semantic_mapping.business_names[column])
+            for column in result_columns
+            if column in semantic_mapping.business_names
+        },
+    }
+
+
+def _suppress_sensitive_profile_values(
+    report: dict,
+    *,
+    sensitive_columns: frozenset[str],
+) -> dict:
+    if not sensitive_columns:
+        return report
+
+    sanitized = deepcopy(report)
+    for field in sanitized.get("fields") or []:
+        if str(field.get("name")) not in sensitive_columns:
+            continue
+        field["numeric"] = None
+        field["histogram"] = None
+        field["sensitive_value_policy"] = (
+            "frequency_tokenized_numeric_distribution_suppressed"
+        )
+
+    correlations = sanitized.get("correlations")
+    if not isinstance(correlations, dict):
+        return sanitized
+    names = [str(name) for name in correlations.get("columns") or []]
+    kept_indices = [
+        index for index, name in enumerate(names) if name not in sensitive_columns
+    ]
+    correlations["columns"] = [names[index] for index in kept_indices]
+    for matrix_name in ("values", "pair_counts", "reasons"):
+        matrix = correlations.get(matrix_name)
+        if not isinstance(matrix, list):
+            continue
+        correlations[matrix_name] = [
+            [row[column_index] for column_index in kept_indices]
+            for row_index in kept_indices
+            if isinstance((row := matrix[row_index]), list)
+        ]
+    return sanitized
+
+
+def _select_profile_sections(
+    report: dict,
+    *,
+    sections: tuple[str, ...],
+    target_column: str | None,
+) -> dict:
+    if sections == _PROFILE_SECTIONS:
+        return report
+
+    selected = deepcopy(report)
+    requested = set(sections)
+    if "target" not in requested:
+        selected["target_distribution"] = {
+            "status": "not_requested",
+            "column": target_column,
+        }
+    if "correlation" not in requested:
+        selected["correlations"] = {
+            "status": "not_requested",
+            "columns": [],
+            "values": [],
+            "pair_counts": [],
+            "reasons": [],
+        }
+
+    field_sections = requested & {"overview", "missing", "distribution"}
+    if not field_sections:
+        selected["fields"] = []
+        return selected
+
+    base_keys = {
+        "name",
+        "duckdb_type",
+        "kind",
+        "selection_role",
+        "sensitive_value_policy",
+    }
+    section_keys = {
+        "overview": {"row_count", "distinct_count"},
+        "missing": {"row_count", "null_count", "null_rate"},
+        "distribution": {"distinct_count", "numeric", "frequency", "histogram"},
+    }
+    allowed_keys = set(base_keys)
+    for section in field_sections:
+        allowed_keys.update(section_keys[section])
+    selected["fields"] = [
+        {key: value for key, value in field.items() if key in allowed_keys}
+        for field in report.get("fields") or []
+    ]
+    return selected
 
 
 def tool_align_columns(inputs: dict, ctx) -> dict:

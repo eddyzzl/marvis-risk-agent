@@ -1,6 +1,6 @@
 {
   "name": "data_ops",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "display_name": "Data Operations Pack",
   "description": "Deterministic dataset ingestion, profiling, alignment, and guarded join tools.",
   "module": "marvis.packs.data_ops.tools",
@@ -123,6 +123,310 @@
       "side_effects": [
         "read:dataset"
       ]
+    },
+    {
+      "name": "profile_dataset",
+      "summary": "Compute a full-dataset descriptive profile bound to the active data-workspace identity.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "workspace_revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "analysis_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "semantic_mapping_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "overview",
+                "target",
+                "missing",
+                "distribution",
+                "correlation"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 5,
+            "uniqueItems": true
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 500,
+            "uniqueItems": true
+          },
+          "target_col": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "frequency_top_k": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "low_cardinality_threshold": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "histogram_bins": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 200
+          },
+          "correlation_batch_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 512
+          }
+        },
+        "required": [
+          "dataset_id",
+          "expected_content_hash",
+          "workspace_revision",
+          "analysis_generation",
+          "semantic_mapping_hash"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expected_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "workspace_revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "analysis_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "semantic_mapping_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "scan_scope": {
+            "const": "full_dataset"
+          },
+          "row_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "row_count_scanned": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "options_echo": {
+            "type": "object",
+            "properties": {
+              "sections": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "overview",
+                    "target",
+                    "missing",
+                    "distribution",
+                    "correlation"
+                  ]
+                },
+                "minItems": 1,
+                "maxItems": 5,
+                "uniqueItems": true
+              },
+              "columns": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "uniqueItems": true
+              },
+              "target_col": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "frequency_top_k": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "low_cardinality_threshold": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "histogram_bins": {
+                "type": "integer",
+                "minimum": 2
+              },
+              "correlation_batch_size": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "sections",
+              "columns",
+              "target_col",
+              "frequency_top_k",
+              "low_cardinality_threshold",
+              "histogram_bins",
+              "correlation_batch_size"
+            ],
+            "additionalProperties": false
+          },
+          "semantics": {
+            "type": "object",
+            "properties": {
+              "target_col": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "field_roles": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "enum": [
+                    "phone",
+                    "idcard",
+                    "id",
+                    "date",
+                    "target",
+                    "score",
+                    "amount",
+                    "name",
+                    "feature",
+                    "numeric",
+                    "categorical",
+                    "loan_amount",
+                    "overdue_amount",
+                    "month",
+                    "rule_node",
+                    "segment",
+                    "weight",
+                    "ignore"
+                  ]
+                }
+              },
+              "business_names": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "required": [
+              "target_col",
+              "field_roles",
+              "business_names"
+            ],
+            "additionalProperties": false
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "const": "data-analysis.v1"
+              },
+              "config": {
+                "type": "object"
+              },
+              "dataset": {
+                "type": "object"
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "target_distribution": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "correlations": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "schema_version",
+              "config",
+              "dataset",
+              "fields",
+              "target_distribution",
+              "correlations"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "dataset_id",
+          "dataset_content_hash",
+          "expected_content_hash",
+          "workspace_revision",
+          "analysis_generation",
+          "semantic_mapping_hash",
+          "scan_scope",
+          "row_count",
+          "row_count_scanned",
+          "options_echo",
+          "semantics",
+          "result"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_profile_dataset",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
     },
     {
       "name": "align_columns",

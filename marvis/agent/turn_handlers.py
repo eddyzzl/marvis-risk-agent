@@ -11,6 +11,10 @@ from marvis.agent.adhoc_analysis import (
     detect_question_intent,
 )
 from marvis.agent.auto_drive import decide_gate
+from marvis.agent.dataset_analysis import (
+    build_dataset_analysis_request,
+    detect_dataset_analysis_intent,
+)
 from marvis.agent.feature_setup import FeatureSetupError, build_feature_proposal
 from marvis.agent.join_setup import JoinSetupError, build_join_proposal
 from marvis.agent.memory_bridge import (
@@ -74,6 +78,7 @@ from marvis.agent_memory.store import AgentMemoryStore
 from marvis.data.backend import DataBackend
 from marvis.data.labels import nan_label_mask
 from marvis.data.registry import DatasetRegistry
+from marvis.data.workspace import data_semantic_mapping_hash
 from marvis.db import DatasetRepository, StrategyRepository, TaskRepository
 from marvis.domain import (
     TASK_TYPE_DATA_JOIN,
@@ -98,6 +103,11 @@ from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestConflictError,
     PendingStrategyRequestNotFoundError,
     PendingStrategyRequestRepository,
+)
+from marvis.repositories.data_workspace import (
+    DataWorkspaceDataError,
+    DataWorkspaceDatasetNotFound,
+    DataWorkspaceRepository,
 )
 from marvis.settings import Settings
 
@@ -1094,6 +1104,17 @@ def dispatch_driver_turn(
     )
     if recovery is not None:
         return recovery
+    # Explicit dataset diagnostics are narrower than the strategy compiler's
+    # generic "分析" operation. Give this branch first refusal so phrases such
+    # as "分析当前样本" cannot be mistaken for a request to design a strategy.
+    dataset_analysis = _maybe_handle_dataset_analysis_turn(
+        runtime,
+        repo,
+        task,
+        user_text=user_text,
+    )
+    if dataset_analysis is not None:
+        return dataset_analysis
     # A strategy-specific request gets first refusal only when it names both a
     # strategy subject and an operation. Raw data questions then retain the S6
     # ad-hoc path; anything else falls through to the normal task handler.
@@ -2903,6 +2924,141 @@ def _invalidate_pending_strategy_request(
         # The clarification path must remain safe under a concurrent confirm or
         # cancel. The winning transition is already audited by the repository.
         return
+
+
+# Report-ready dataset analysis -----------------------------------------------
+
+
+def _maybe_handle_dataset_analysis_turn(
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    user_text: str | None,
+) -> dict | None:
+    """Run the bound descriptive-analysis Workflow for an explicit request."""
+
+    if not detect_dataset_analysis_intent(user_text):
+        return None
+    conversation = repo.list_agent_messages(task.id)
+    if _active_plan(runtime.plan_repo, task.id) is not None:
+        return None
+    if latest_open_gate(conversation) is not None:
+        return None
+
+    repo.add_agent_message(
+        task.id,
+        role="user",
+        stage="chat",
+        content=user_text or "",
+        metadata={"intent": "dataset_analysis"},
+    )
+    try:
+        snapshot = DataWorkspaceRepository(
+            runtime.settings.db_path
+        ).get_or_default(task.id)
+    except (DataWorkspaceDataError, DataWorkspaceDatasetNotFound, KeyError) as exc:
+        return _dataset_analysis_clarification(
+            repo,
+            task.id,
+            code="workspace_unavailable",
+            message=f"数据工作区当前不可用：{exc}",
+        )
+    if snapshot.active_dataset_id is None:
+        return _dataset_analysis_clarification(
+            repo,
+            task.id,
+            code="active_dataset_required",
+            message="请先在数据工作区选择并保存本次要分析的样本，再让我开始分析。",
+        )
+
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    try:
+        dataset = registry.get(snapshot.active_dataset_id)
+        if dataset.task_id != task.id:
+            raise PermissionError("active dataset does not belong to this task")
+        path = registry.resolve_verified_path(dataset.id)
+        columns = tuple(backend.column_names(path))
+    except Exception as exc:  # noqa: BLE001 - converted to a typed user-facing boundary
+        return _dataset_analysis_clarification(
+            repo,
+            task.id,
+            code="dataset_unavailable",
+            message=f"当前活动样本无法安全读取：{exc}",
+        )
+
+    parsed = build_dataset_analysis_request(
+        user_text or "",
+        columns=columns,
+        target_col=snapshot.semantic_mapping.target_col,
+        business_names=snapshot.semantic_mapping.business_names,
+    )
+    if parsed.request is None:
+        return _dataset_analysis_clarification(
+            repo,
+            task.id,
+            code="analysis_request_clarification",
+            message=parsed.clarification or "请说明要分析哪些数据内容。",
+        )
+
+    request = parsed.request
+    slots: dict = {
+        "dataset_id": dataset.id,
+        "expected_content_hash": snapshot.active_dataset_content_hash,
+        "workspace_revision": snapshot.revision,
+        "analysis_generation": snapshot.analysis_generation,
+        "semantic_mapping_hash": data_semantic_mapping_hash(
+            snapshot.semantic_mapping
+        ),
+        "sections": list(request.sections),
+    }
+    if request.columns is not None:
+        slots["columns"] = list(request.columns)
+    if request.target_col is not None:
+        slots["target_col"] = request.target_col
+
+    driver = _driver(runtime)
+    try:
+        started = driver.start(
+            task_id=task.id,
+            template_id="dataset_descriptive_analysis",
+            slots=slots,
+            tier=runtime.tier,
+        )
+        turn = driver.resume(plan_id=started.plan_id, user_text="确认")
+    except DriverError:
+        raise
+    except Exception as exc:
+        return append_join_error(repo, task.id, f"样本描述分析出错：{exc}")
+    append_driver_messages(
+        repo,
+        task.id,
+        turn,
+        settings=runtime.settings,
+        task=task,
+    )
+    return join_turn_response(repo, task.id)
+
+
+def _dataset_analysis_clarification(
+    repo: TaskRepository,
+    task_id: str,
+    *,
+    code: str,
+    message: str,
+) -> dict:
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="chat",
+        content=message,
+        metadata={
+            "intent": "dataset_analysis",
+            "kind": "clarification",
+            "code": code,
+        },
+    )
+    return join_turn_response(repo, task_id)
 
 
 # S6 ad-hoc "问数" wiring -------------------------------------------------------

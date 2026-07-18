@@ -1166,7 +1166,7 @@ def test_init_db_migration_009_backfills_canonical_strategy_asset_status(tmp_pat
             "SELECT id, status, asset_status FROM strategies ORDER BY id"
         ).fetchall()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 12
+    assert version == db_schema_module.SCHEMA_VERSION == 13
     assert "asset_status" in columns
     assert [tuple(row) for row in rows] == [
         ("adopted-strategy", "adopted", "adopted_local"),
@@ -1228,7 +1228,7 @@ def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_pa
             row[1] for row in conn.execute("PRAGMA index_list(task_artifacts)")
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 12
+    assert version == db_schema_module.SCHEMA_VERSION == 13
     assert columns == {
         "id",
         "task_id",
@@ -1264,7 +1264,7 @@ def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
         }
         task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 12
+    assert version == db_schema_module.SCHEMA_VERSION == 13
     assert columns == {
         "task_id",
         "schema_version",
@@ -1278,6 +1278,74 @@ def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
         "updated_at",
     }
     assert "idx_data_workspaces_active_dataset" in indexes
+    assert task["id"] == "task-1"
+
+
+def test_init_db_migration_013_adds_data_analysis_runs_to_v12_database(tmp_path):
+    db_path = tmp_path / "legacy_v12.sqlite"
+    with connect(db_path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE task_artifacts (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
+        conn.execute("INSERT INTO datasets(id) VALUES ('dataset-1')")
+        conn.execute("PRAGMA user_version = 12")
+
+    init_db(db_path)
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(data_analysis_runs)")
+        }
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(data_analysis_runs)")
+        }
+        triggers = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'trigger' AND tbl_name = 'data_analysis_runs'"
+            )
+        }
+        task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
+
+    assert version == db_schema_module.SCHEMA_VERSION == 13
+    assert columns == {
+        "id",
+        "schema_version",
+        "task_id",
+        "dataset_id",
+        "dataset_content_hash",
+        "workspace_revision",
+        "analysis_generation",
+        "semantic_mapping_hash",
+        "config_json",
+        "config_hash",
+        "producer_version",
+        "input_hash",
+        "job_id",
+        "status",
+        "result_artifact_id",
+        "result_content_hash",
+        "error_kind",
+        "error_message",
+        "created_at",
+        "updated_at",
+        "started_at",
+        "completed_at",
+    }
+    assert {
+        "idx_data_analysis_runs_task",
+        "idx_data_analysis_runs_current",
+        "idx_data_analysis_runs_status",
+    } <= indexes
+    assert {
+        "trg_data_analysis_runs_identity_immutable",
+        "trg_data_analysis_runs_succeeded_immutable",
+    } <= triggers
     assert task["id"] == "task-1"
 
 

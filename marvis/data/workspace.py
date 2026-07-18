@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+import hashlib
+import json
 import re
 from types import MappingProxyType
 from typing import Any
@@ -193,6 +195,19 @@ def data_semantic_mapping_to_dict(mapping: DataSemanticMapping) -> dict[str, Any
     }
 
 
+def data_semantic_mapping_hash(mapping: DataSemanticMapping) -> str:
+    """Return the stable identity of every user-confirmed semantic choice."""
+
+    payload = json.dumps(
+        data_semantic_mapping_to_dict(mapping),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def data_semantic_mapping_from_dict(payload: object) -> DataSemanticMapping:
     value = _exact_object(
         payload,
@@ -361,6 +376,7 @@ __all__ = [
     "DataWorkspaceDraft",
     "DataWorkspaceSnapshot",
     "data_semantic_mapping_from_dict",
+    "data_semantic_mapping_hash",
     "data_semantic_mapping_to_dict",
     "data_workspace_draft_from_dict",
     "data_workspace_draft_to_dict",

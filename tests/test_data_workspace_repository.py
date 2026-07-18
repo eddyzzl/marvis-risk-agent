@@ -13,6 +13,7 @@ from marvis.data.workspace import (
     DATA_WORKSPACE_SCHEMA_VERSION,
     DataSemanticMapping,
     DataWorkspaceDraft,
+    data_semantic_mapping_hash,
 )
 from marvis.db_schema import connect, init_db
 from marvis.repositories.data_workspace import (
@@ -139,6 +140,38 @@ def test_workspace_constants_and_mapping_are_strict_and_canonical():
         DataSemanticMapping(business_names={"score": " 模型分"})
     with pytest.raises(ValueError, match="canonical non-empty text"):
         DataWorkspaceDraft(selected_field="score\x00unsafe")
+
+
+def test_semantic_mapping_hash_is_order_independent_and_covers_every_choice():
+    first = DataSemanticMapping(
+        target_col="bad",
+        field_roles={"score": "score", "bad": "target"},
+        business_names={"score": "模型分", "bad": "风险标签"},
+    )
+    reordered = DataSemanticMapping(
+        target_col="bad",
+        field_roles={"bad": "target", "score": "score"},
+        business_names={"bad": "风险标签", "score": "模型分"},
+    )
+
+    digest = data_semantic_mapping_hash(first)
+
+    assert digest == data_semantic_mapping_hash(reordered)
+    assert len(digest) == 64
+    assert digest != data_semantic_mapping_hash(
+        DataSemanticMapping(
+            target_col="bad",
+            field_roles={"bad": "target", "score": "feature"},
+            business_names={"bad": "风险标签", "score": "模型分"},
+        )
+    )
+    assert digest != data_semantic_mapping_hash(
+        DataSemanticMapping(
+            target_col="bad",
+            field_roles={"bad": "target", "score": "score"},
+            business_names={"bad": "风险标签", "score": "评分"},
+        )
+    )
 
 
 def test_get_or_default_is_stable_and_does_not_persist_or_audit(tmp_path):

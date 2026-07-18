@@ -38,9 +38,21 @@ PLANNING_EXAMPLES = (
         "step": {
             "title": "读取数据概况",
             "tool": {"plugin": "data_ops", "tool": "profile_dataset"},
-            "inputs": {"dataset_id": "dataset-1"},
+            "inputs": {
+                "dataset_id": "dataset-1",
+                "expected_content_hash": "a" * 64,
+                "workspace_revision": 1,
+                "analysis_generation": 1,
+                "semantic_mapping_hash": "b" * 64,
+            },
             "depends_on": [],
-            "post_checks": [{"kind": "nonempty", "spec": {"field": "row_count"}}],
+            "post_checks": [
+                {"kind": "rowcount", "spec": {"field": "row_count", "min": 0}},
+                {
+                    "kind": "invariant",
+                    "spec": {"rule": "dataset_content_hash==expected_content_hash"},
+                },
+            ],
         },
     },
     {
