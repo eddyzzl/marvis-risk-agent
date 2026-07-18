@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 import marvis.repositories.strategy as strategy_repository_module
 from marvis.db import PluginRepository, StrategyRepository, connect, init_db
-from marvis.packs.strategy import BacktestResult, build_strategy
+from marvis.packs.strategy import BacktestResult, build_strategy, run_typed_backtest
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy import tools as strategy_tools
 from marvis.settings import build_settings
@@ -467,6 +468,47 @@ def test_tool_rejects_partial_protected_execution_metadata_before_adoption(tmp_p
                 "strategy_id": challenger.id,
                 "backtest_id": "backtest-1",
                 "adoption_reason": "committee promotes challenger",
+            },
+            ctx,
+        )
+
+    assert repo.get_strategy_meta(challenger.id)["status"] == "draft"
+
+
+def test_tool_rejects_typed_adoption_when_approved_bad_rate_is_undefined(tmp_path):
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    repo = StrategyRepository(settings.db_path)
+    challenger = _strategy("empty approval evidence", 625)
+    repo.create_strategy("task-1", challenger)
+    result = run_typed_backtest(
+        pd.DataFrame({"score": [500, 600], "bad": [1, 0]}),
+        challenger.spec,
+        target_col="bad",
+        strategy_id=challenger.id,
+    )
+    assert result.metrics["approve_bad_rate"] is None
+    repo.save_backtest(
+        "typed-empty-approval",
+        challenger.id,
+        "dataset-1",
+        result,
+    )
+    ctx = SimpleNamespace(
+        task_id="task-1",
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        seed=None,
+        effect_execution_id=None,
+        runtime_generation=None,
+    )
+
+    with pytest.raises(StrategyError, match="approved bad rate is undefined"):
+        strategy_tools.tool_adopt_strategy(
+            {
+                "strategy_id": challenger.id,
+                "backtest_id": "typed-empty-approval",
+                "adoption_reason": "committee requires measurable approved evidence",
             },
             ctx,
         )

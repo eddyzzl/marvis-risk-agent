@@ -810,52 +810,389 @@ def _render_build_strategy(o: dict):
     return text, tables
 
 
+def _backtest_view(o: dict) -> tuple[str, dict, list[dict], list[dict], dict]:
+    """Normalize the versioned V2 envelope and legacy flat approval output.
+
+    The versioned envelope is authoritative whenever it is present.  Top-level
+    approval fields may still accompany it as a temporary Tool compatibility
+    projection, but presentation must not let those aliases override canonical
+    metrics.  Legacy plan outputs have no ``strategy_type``/``metrics`` and keep
+    their historical approval interpretation.
+    """
+
+    metrics = o.get("metrics")
+    strategy_type = o.get("strategy_type")
+    if isinstance(metrics, dict) and isinstance(strategy_type, str):
+        return (
+            strategy_type,
+            metrics,
+            [row for row in (o.get("breakdown") or []) if isinstance(row, dict)],
+            [row for row in (o.get("transitions") or []) if isinstance(row, dict)],
+            o.get("economics") if isinstance(o.get("economics"), dict) else {},
+        )
+    return (
+        "approval",
+        o,
+        [row for row in (o.get("by_segment") or []) if isinstance(row, dict)],
+        [],
+        {
+            "expected_profit": o.get("expected_profit"),
+            "profit_note": o.get("profit_note"),
+        },
+    )
+
+
 def _render_backtest_strategy(o: dict):
+    strategy_type, metrics, breakdown, transitions, economics = _backtest_view(o)
+    if strategy_type in {"approval", "reject"}:
+        text, tables = _render_decision_backtest(
+            o,
+            strategy_type=strategy_type,
+            metrics=metrics,
+            breakdown=breakdown,
+            transitions=transitions,
+            economics=economics,
+        )
+    elif strategy_type == "limit":
+        text, tables = _render_limit_backtest(o, metrics, breakdown, economics)
+    elif strategy_type == "pricing":
+        text, tables = _render_pricing_backtest(o, metrics, breakdown, economics)
+    elif strategy_type == "segmentation":
+        text, tables = _render_segmentation_backtest(o, metrics, breakdown, transitions)
+    else:
+        text = f"**策略回测完成**:未知策略类型 `{strategy_type}`，请检查结构化结果。"
+        tables = []
+    return _append_backtest_warnings(text, tables, o)
+
+
+def _render_decision_backtest(
+    o: dict,
+    *,
+    strategy_type: str,
+    metrics: dict,
+    breakdown: list[dict],
+    transitions: list[dict],
+    economics: dict,
+) -> tuple[str, list[dict]]:
+    typed = isinstance(o.get("metrics"), dict)
+    approval_rate = metrics.get("approve_rate") if typed else metrics.get("approval_rate")
+    approved_count = metrics.get("approve_count") if typed else metrics.get("approved_count")
+    approved_bad_rate = (
+        metrics.get("approve_bad_rate") if typed else metrics.get("approved_bad_rate")
+    )
+    rejected_count = metrics.get("reject_count") if typed else metrics.get("rejected_count")
+    rejected_bad_rate = (
+        metrics.get("reject_bad_rate") if typed else metrics.get("rejected_bad_rate")
+    )
+    review_count = metrics.get("review_count")
+    review_rate = metrics.get("review_rate")
+    review_bad_rate = metrics.get("review_bad_rate")
+    expected_profit = economics.get("expected_profit")
+    profit_note = economics.get("profit_note")
+    label = "拒绝策略回测完成" if strategy_type == "reject" else "策略回测完成"
     text = (
-        "**策略回测完成**:"
-        f"审批率 {_pct(o.get('approval_rate'))}，"
-        f"通过客群坏率 {_pct(o.get('approved_bad_rate'))}，"
-        f"拒绝客群坏率 {_pct(o.get('rejected_bad_rate'))}，"
-        f"预期利润 {_num(o.get('expected_profit'))}。"
+        f"**{label}**:"
+        f"审批率 {_pct(approval_rate)}，"
+        f"通过客群坏率 {_pct(approved_bad_rate)}，"
+        f"拒绝客群坏率 {_pct(rejected_bad_rate)}，"
+        f"预期利润 {_num(expected_profit)}。"
     )
     if o.get("label_coverage") is not None:
         text += f" 标签覆盖率 {_pct(o.get('label_coverage'))}。"
-    if int(o.get("review_count") or 0):
+    if int(review_count or 0):
         text += (
-            f" 人工复核 {o.get('review_count')} 户"
-            f"（{_pct(o.get('review_rate'))}），"
-            f"复核客群坏率 {_pct(o.get('review_bad_rate'))}。"
+            f" 人工复核 {review_count} 户（{_pct(review_rate)}），"
+            f"复核客群坏率 {_pct(review_bad_rate)}。"
         )
+    if strategy_type == "reject":
+        text += (
+            f" 坏客户捕获率 {_pct(metrics.get('bad_capture_rate'))}，"
+            f"好客户误拒率 {_pct(metrics.get('good_reject_rate'))}。"
+        )
+    if profit_note:
+        text += f" 利润口径提示：{profit_note}"
+
     rows = [
-        ["审批率", _pct(o.get("approval_rate"))],
-        ["通过人数", _fmt(o.get("approved_count"))],
-        ["通过坏率", _pct(o.get("approved_bad_rate"))],
-        ["拒绝人数", _fmt(o.get("rejected_count"))],
-        ["拒绝坏率", _pct(o.get("rejected_bad_rate"))],
-        ["人工复核人数", _fmt(o.get("review_count"))],
-        ["人工复核率", _pct(o.get("review_rate"))],
-        ["复核客群坏率", _pct(o.get("review_bad_rate"))],
-        ["预期利润", _num(o.get("expected_profit"))],
-        ["swap-in", _fmt(o.get("swap_in_count"))],
-        ["swap-out", _fmt(o.get("swap_out_count"))],
+        ["审批率", _pct(approval_rate)],
+        ["通过人数", _fmt(approved_count)],
+        ["通过坏率", _pct(approved_bad_rate)],
+        ["拒绝人数", _fmt(rejected_count)],
+        ["拒绝坏率", _pct(rejected_bad_rate)],
+        ["人工复核人数", _fmt(review_count)],
+        ["人工复核率", _pct(review_rate)],
+        ["复核客群坏率", _pct(review_bad_rate)],
+        ["预期利润", _num(expected_profit)],
+    ]
+    if profit_note:
+        rows.append(["利润口径提示", str(profit_note)])
+    if strategy_type == "reject":
+        rows.extend(
+            [
+                ["坏客户捕获率", _pct(metrics.get("bad_capture_rate"))],
+                ["好客户误拒率", _pct(metrics.get("good_reject_rate"))],
+            ]
+        )
+    if typed:
+        rows.append(["标签覆盖率", _pct(o.get("label_coverage"))])
+    else:
+        rows.extend(
+            [
+                ["swap-in", _fmt(metrics.get("swap_in_count"))],
+                ["swap-out", _fmt(metrics.get("swap_out_count"))],
+                ["标签覆盖率", _pct(o.get("label_coverage"))],
+            ]
+        )
+    tables: list[dict] = [
+        {"title": "策略回测摘要", "columns": ["指标", "值"], "rows": rows}
+    ]
+    if breakdown:
+        if typed:
+            tables.append(
+                {
+                    "title": "按决策分组",
+                    "columns": ["决策", "样本数", "占比", "有标签数", "坏样本", "坏率"],
+                    "rows": [
+                        [
+                            str(row.get("action", "")),
+                            _fmt(row.get("count")),
+                            _pct(row.get("rate")),
+                            _fmt(row.get("labeled_count")),
+                            _fmt(row.get("bad_count")),
+                            _pct(row.get("bad_rate")),
+                        ]
+                        for row in breakdown
+                    ],
+                }
+            )
+        else:
+            tables.append(
+                {
+                    "title": "按决策分组",
+                    "columns": ["决策", "样本数", "坏样本", "坏率"],
+                    "rows": [
+                        [
+                            str(row.get("decision", "")),
+                            _fmt(row.get("count")),
+                            _fmt(row.get("bad_count")),
+                            _pct(row.get("bad_rate")),
+                        ]
+                        for row in breakdown
+                    ],
+                }
+            )
+    transition_table = _transition_table(strategy_type, transitions)
+    if transition_table is not None:
+        tables.append(transition_table)
+    return text, tables
+
+
+def _render_limit_backtest(
+    o: dict, metrics: dict, breakdown: list[dict], economics: dict
+) -> tuple[str, list[dict]]:
+    text = (
+        "**额度策略回测完成**:"
+        f"覆盖 {_fmt(metrics.get('count', o.get('population_count')))} 户，"
+        f"总额度 {_num(metrics.get('total_limit'))}，"
+        f"户均额度 {_num(metrics.get('mean_limit'))}，"
+        f"较基线总额度变化 {_num(metrics.get('total_limit_delta'))}。"
+    )
+    if o.get("label_coverage") is not None:
+        text += f" 标签覆盖率 {_pct(o.get('label_coverage'))}。"
+    rows = [
+        ["样本数", _fmt(metrics.get("count", o.get("population_count")))],
+        ["总额度", _num(metrics.get("total_limit"))],
+        ["户均额度", _num(metrics.get("mean_limit"))],
+        ["最低额度", _num(metrics.get("min_limit"))],
+        ["最高额度", _num(metrics.get("max_limit"))],
+        ["提额人数", _num(metrics.get("up_count"))],
+        ["降额人数", _num(metrics.get("down_count"))],
+        ["额度不变人数", _num(metrics.get("unchanged_count"))],
+        ["总额度变化", _num(metrics.get("total_limit_delta"))],
+        ["预期 EAD", _num(economics.get("expected_ead"))],
+        ["预期损失", _num(economics.get("expected_loss"))],
         ["标签覆盖率", _pct(o.get("label_coverage"))],
     ]
-    tables = [{"title": "策略回测摘要", "columns": ["指标", "值"], "rows": rows}]
-    by_segment = [row for row in (o.get("by_segment") or []) if isinstance(row, dict)]
-    if by_segment:
-        tables.append({
-            "title": "按决策分组",
-            "columns": ["决策", "样本数", "坏样本", "坏率"],
+    tables: list[dict] = [
+        {"title": "额度策略回测摘要", "columns": ["指标", "值"], "rows": rows}
+    ]
+    if breakdown:
+        tables.append(
+            {
+                "title": "额度分布",
+                "columns": ["额度", "样本数", "占比", "有标签数", "坏样本", "坏率"],
+                "rows": [
+                    [
+                        _num(row.get("assigned_limit")),
+                        _fmt(row.get("count")),
+                        _pct(row.get("share")),
+                        _fmt(row.get("labeled_count")),
+                        _fmt(row.get("bad_count")),
+                        _pct(row.get("bad_rate")),
+                    ]
+                    for row in breakdown
+                ],
+            }
+        )
+    return text, tables
+
+
+def _render_pricing_backtest(
+    o: dict, metrics: dict, breakdown: list[dict], economics: dict
+) -> tuple[str, list[dict]]:
+    text = (
+        "**定价策略回测完成**:"
+        f"覆盖 {_fmt(metrics.get('count', o.get('population_count')))} 户，"
+        f"平均年化利率 {_pct(metrics.get('mean_rate'))}，"
+        f"预期利润 {_num(economics.get('profit'))}，"
+        f"ROA {_pct(economics.get('roa'))}。"
+    )
+    if o.get("label_coverage") is not None:
+        text += f" 标签覆盖率 {_pct(o.get('label_coverage'))}。"
+    rows = [
+        ["样本数", _fmt(metrics.get("count", o.get("population_count")))],
+        ["平均年化利率", _pct(metrics.get("mean_rate"))],
+        ["提价人数", _num(metrics.get("repriced_up_count"))],
+        ["降价人数", _num(metrics.get("repriced_down_count"))],
+        ["价格不变人数", _num(metrics.get("unchanged_count"))],
+        ["EAD 加权利率", _pct(economics.get("ead_weighted_rate"))],
+        ["预期收入", _num(economics.get("revenue"))],
+        ["预期损失", _num(economics.get("expected_loss"))],
+        ["资金成本", _num(economics.get("funding_cost"))],
+        ["运营成本", _num(economics.get("operating_cost"))],
+        ["预期利润", _num(economics.get("profit"))],
+        ["ROA", _pct(economics.get("roa"))],
+        ["基线利润", _num(economics.get("baseline_profit"))],
+        ["较基线利润变化", _num(economics.get("profit_delta_vs_baseline"))],
+        ["标签覆盖率", _pct(o.get("label_coverage"))],
+    ]
+    tables: list[dict] = [
+        {"title": "定价策略回测摘要", "columns": ["指标", "值"], "rows": rows}
+    ]
+    if breakdown:
+        tables.append(
+            {
+                "title": "定价分布",
+                "columns": ["年化利率", "样本数", "占比", "有标签数", "坏样本", "坏率"],
+                "rows": [
+                    [
+                        _pct(row.get("assigned_rate")),
+                        _fmt(row.get("count")),
+                        _pct(row.get("share")),
+                        _fmt(row.get("labeled_count")),
+                        _fmt(row.get("bad_count")),
+                        _pct(row.get("bad_rate")),
+                    ]
+                    for row in breakdown
+                ],
+            }
+        )
+    return text, tables
+
+
+def _render_segmentation_backtest(
+    o: dict, metrics: dict, breakdown: list[dict], transitions: list[dict]
+) -> tuple[str, list[dict]]:
+    text = (
+        "**分群策略回测完成**:"
+        f"形成 {_fmt(metrics.get('segment_count'))} 个客群，"
+        f"总体坏率 {_pct(metrics.get('overall_bad_rate'))}。"
+    )
+    if o.get("label_coverage") is not None:
+        text += f" 标签覆盖率 {_pct(o.get('label_coverage'))}。"
+    rows = [
+        [
+            str(row.get("segment", "")),
+            _fmt(row.get("count")),
+            _pct(row.get("share")),
+            _fmt(row.get("labeled_count")),
+            _fmt(row.get("bad_count")),
+            _pct(row.get("bad_rate")),
+            _fmt(row.get("lift")),
+        ]
+        for row in breakdown
+    ]
+    tables: list[dict] = [
+        {
+            "title": "客群风险分布",
+            "columns": ["客群", "样本数", "占比", "有标签数", "坏样本", "坏率", "Lift"],
+            "rows": rows,
+        }
+    ]
+    transition_table = _transition_table("segmentation", transitions)
+    if transition_table is not None:
+        tables.append(transition_table)
+    return text, tables
+
+
+def _transition_table(strategy_type: str, rows: list[dict]) -> dict | None:
+    if not rows:
+        return None
+    if strategy_type in {"approval", "reject"}:
+        return {
+            "title": "相对基线的决策迁移",
+            "columns": ["原决策", "新决策", "样本数", "原决策内占比", "总体占比"],
             "rows": [
                 [
-                    str(row.get("decision", "")),
+                    str(row.get("from_action", "")),
+                    str(row.get("to_action", "")),
                     _fmt(row.get("count")),
-                    _fmt(row.get("bad_count")),
-                    _pct(row.get("bad_rate")),
+                    _pct(row.get("rate")),
+                    _pct(row.get("population_share")),
                 ]
-                for row in by_segment
+                for row in rows
             ],
-        })
+        }
+    if strategy_type == "segmentation":
+        return {
+            "title": "相对基线的客群迁移",
+            "columns": ["原客群", "新客群", "样本数", "原客群内占比", "总体占比"],
+            "rows": [
+                [
+                    str(row.get("from_segment", "")),
+                    str(row.get("to_segment", "")),
+                    _fmt(row.get("count")),
+                    _pct(row.get("rate")),
+                    _pct(row.get("population_share")),
+                ]
+                for row in rows
+            ],
+        }
+    return None
+
+
+def _append_backtest_warnings(
+    text: str, tables: list[dict], o: dict
+) -> tuple[str, list[dict]]:
+    warnings = [str(item) for item in (o.get("warnings") or []) if str(item)]
+    if warnings:
+        text += " 警告：" + "；".join(warnings) + "。"
+        tables.append(
+            {
+                "title": "回测警告",
+                "columns": ["警告"],
+                "rows": [[warning] for warning in warnings],
+            }
+        )
+    red_flags = [
+        item
+        for item in (o.get("red_flags") or [])
+        if isinstance(item, dict) and str(item.get("message") or "")
+    ]
+    if red_flags:
+        tables.append(
+            {
+                "title": "回测风险提示",
+                "columns": ["等级", "代码", "说明"],
+                "rows": [
+                    [
+                        str(item.get("level") or ""),
+                        str(item.get("code") or ""),
+                        str(item.get("message") or ""),
+                    ]
+                    for item in red_flags
+                ],
+            }
+        )
     return text, tables
 
 

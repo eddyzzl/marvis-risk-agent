@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 
 import pandas as pd
 
@@ -9,6 +10,11 @@ from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.evaluator import FrameEvaluation, evaluate_strategy_frame
 from marvis.packs.strategy.legacy_adapter import legacy_strategy_to_spec
 from marvis.packs.strategy.profit import ProfitParams, profit_calc
+from marvis.packs.strategy.typed_backtest import (
+    StrategyBacktestResult,
+    run_typed_backtest,
+)
+from marvis.packs.strategy.economics import NumericInput
 
 
 @dataclass(frozen=True)
@@ -28,11 +34,29 @@ def backtest_strategy(
     profit_params: ProfitParams | None = None,
     ead_col: str | None = None,
     pd_col: str | None = None,
-) -> BacktestResult:
+    economics_inputs: Mapping[str, NumericInput] | None = None,
+) -> BacktestResult | StrategyBacktestResult:
     if strategy.strategy_type not in {"approval", "reject"}:
+        if profit_params is not None or ead_col is not None or pd_col is not None:
+            raise StrategyError(
+                "profit_params/ead_col/pd_col are approval compatibility inputs; "
+                "use economics_inputs for limit or pricing"
+            )
+        return run_typed_backtest(
+            df,
+            strategy.spec or legacy_strategy_to_spec(strategy),
+            target_col=target_col,
+            strategy_id=strategy.id,
+            baseline=(
+                None
+                if baseline is None
+                else baseline.spec or legacy_strategy_to_spec(baseline)
+            ),
+            economics_inputs=economics_inputs,
+        )
+    if economics_inputs is not None:
         raise StrategyError(
-            f"typed backtest is not yet available for {strategy.strategy_type}; "
-            "refusing to emit approval metrics for a non-approval strategy"
+            "economics_inputs are only valid for limit or pricing strategies"
         )
     _assert_columns(df, [target_col])
     evaluation = evaluate_strategy_frame(

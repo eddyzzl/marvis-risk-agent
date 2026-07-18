@@ -5,6 +5,7 @@ import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TypeAlias
 
 from marvis.db_schema import connect
 from marvis.packs.strategy.contracts import (
@@ -19,8 +20,15 @@ from marvis.packs.strategy.dsl import (
     strategy_spec_hash,
 )
 from marvis.packs.strategy.legacy_adapter import legacy_strategy_to_spec
+from marvis.packs.strategy.typed_backtest import (
+    STRATEGY_BACKTEST_SCHEMA_VERSION,
+    StrategyBacktestResult,
+)
 from marvis.state_machine import ConflictError
 from marvis.strategy_adoption import normalize_adoption_reason
+
+
+BacktestRecord: TypeAlias = BacktestResult | StrategyBacktestResult
 
 
 def _now() -> str:
@@ -668,7 +676,7 @@ class StrategyRepository:
         backtest_id: str,
         strategy_id: str,
         dataset_id: str,
-        result: BacktestResult,
+        result: BacktestRecord,
         *,
         created_at: str | None = None,
     ) -> None:
@@ -687,7 +695,7 @@ class StrategyRepository:
         backtest_id: str,
         strategy_id: str,
         dataset_id: str,
-        result: BacktestResult,
+        result: BacktestRecord,
         *,
         audit: dict,
         created_at: str | None = None,
@@ -703,7 +711,7 @@ class StrategyRepository:
             )
             _write_audit_row(conn, **audit)
 
-    def get_backtest(self, backtest_id: str) -> BacktestResult | None:
+    def get_backtest(self, backtest_id: str) -> BacktestRecord | None:
         with connect(self.db_path) as conn:
             row = conn.execute(
                 """
@@ -715,7 +723,7 @@ class StrategyRepository:
             ).fetchone()
         return None if row is None else _backtest_result_from_row(row)
 
-    def list_backtests(self, strategy_id: str) -> list[BacktestResult]:
+    def list_backtests(self, strategy_id: str) -> list[BacktestRecord]:
         with connect(self.db_path) as conn:
             rows = conn.execute(
                 """
@@ -965,9 +973,13 @@ def _backtest_insert_values(
     backtest_id: str,
     strategy_id: str,
     dataset_id: str,
-    result: BacktestResult,
+    result: BacktestRecord,
     created_at: str,
 ) -> tuple:
+    if str(result.strategy_id) != str(strategy_id):
+        raise ValueError(
+            "backtest result strategy_id does not match persisted strategy_id"
+        )
     return (
         backtest_id,
         strategy_id,
@@ -982,7 +994,7 @@ def _insert_backtest_row(
     backtest_id: str,
     strategy_id: str,
     dataset_id: str,
-    result: BacktestResult,
+    result: BacktestRecord,
     created_at: str,
 ) -> None:
     conn.execute(
@@ -1002,17 +1014,26 @@ def _insert_backtest_row(
     )
 
 
-def _backtest_result_to_dict(result: BacktestResult) -> dict:
+def _backtest_result_to_dict(result: BacktestRecord) -> dict:
+    if isinstance(result, StrategyBacktestResult):
+        return result.to_dict()
     payload = asdict(result)
     payload["by_segment"] = list(result.by_segment)
     return payload
 
 
-def _backtest_result_from_row(row: sqlite3.Row) -> BacktestResult:
+def _backtest_result_from_row(row: sqlite3.Row) -> BacktestRecord:
     return _backtest_result_from_dict(_load_json_object(row["result_json"]))
 
 
-def _backtest_result_from_dict(payload: dict) -> BacktestResult:
+def _backtest_result_from_dict(payload: dict) -> BacktestRecord:
+    if "schema_version" in payload:
+        schema_version = payload["schema_version"]
+        if schema_version == STRATEGY_BACKTEST_SCHEMA_VERSION:
+            return StrategyBacktestResult.from_dict(payload)
+        raise ValueError(
+            f"unsupported strategy backtest schema_version: {schema_version!r}"
+        )
     return BacktestResult(
         strategy_id=str(payload["strategy_id"]),
         approval_rate=float(payload["approval_rate"]),

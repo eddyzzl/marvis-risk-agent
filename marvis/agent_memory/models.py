@@ -40,7 +40,6 @@ STRATEGY_EXPERIENCE_REQUIRED_FIELDS = (
     "cutoff_summary",
     "approval_rate",
     "approved_bad_rate",
-    "expected_profit",
     "scope",
     "source_task_id",
 )

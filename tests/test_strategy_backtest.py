@@ -162,15 +162,15 @@ def test_legacy_output_alias_never_changes_typed_backtest_breakdown() -> None:
 
 
 @pytest.mark.parametrize(
-    ("strategy_type", "action_type", "value"),
+    ("strategy_type", "action_type", "value", "metric"),
     [
-        ("limit", "limit", 1000),
-        ("pricing", "pricing", 0.12),
-        ("segmentation", "segment", "prime"),
+        ("limit", "limit", 1000, "mean_limit"),
+        ("pricing", "pricing", 0.12, "mean_rate"),
+        ("segmentation", "segment", "prime", "segment_count"),
     ],
 )
-def test_nonapproval_backtest_fails_instead_of_emitting_fake_full_approval(
-    strategy_type: str, action_type: str, value,
+def test_nonapproval_backtest_returns_typed_metrics_without_fake_approval_fields(
+    strategy_type: str, action_type: str, value, metric: str,
 ) -> None:
     strategy = build_strategy_from_spec(
         {
@@ -180,12 +180,15 @@ def test_nonapproval_backtest_fails_instead_of_emitting_fake_full_approval(
         }
     )
 
-    with pytest.raises(StrategyError, match="refusing to emit approval metrics"):
-        backtest_strategy(
-            pd.DataFrame({"score": [500], "bad": [0]}),
-            strategy,
-            target_col="bad",
-        )
+    result = backtest_strategy(
+        pd.DataFrame({"score": [500], "bad": [0]}),
+        strategy,
+        target_col="bad",
+    )
+
+    assert result.strategy_type == strategy_type
+    assert metric in result.metrics
+    assert "approval_rate" not in result.to_dict()
 
 
 def test_strategy_conditions_coerce_numeric_literals_for_string_columns():

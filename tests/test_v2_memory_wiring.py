@@ -214,6 +214,71 @@ def test_capture_agent_memory_writes_strategy_experience_on_adoption(tmp_path: P
     assert "score < 600" in entry.payload["cutoff_summary"]
 
 
+def test_capture_agent_memory_keeps_typed_strategy_without_profit_assumptions(
+    tmp_path: Path,
+):
+    """A valid adopted strategy is still reusable memory when no economic
+    assumptions were supplied. The memory must preserve an unknown profit as
+    ``None`` instead of inventing a zero or dropping the whole experience."""
+    from marvis.packs.strategy import build_strategy
+    from marvis.packs.strategy.typed_backtest import run_typed_backtest
+    from marvis.repositories.strategy import StrategyRepository
+
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    task = _task_record(
+        id="task-strategy-no-profit",
+        task_type=TASK_TYPE_STRATEGY,
+        model_name="无利润假设策略",
+    )
+    strategies = StrategyRepository(settings.db_path)
+    strategy = build_strategy(
+        "approval",
+        [{"condition": "score < 600", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+        description="typed memory without profit assumptions",
+    )
+    strategies.create_strategy(task.id, strategy)
+    result = run_typed_backtest(
+        pd.DataFrame(
+            {
+                "score": [500, 650, 700],
+                "bad": [1, 0, 1],
+            }
+        ),
+        strategy.spec,
+        target_col="bad",
+        strategy_id=strategy.id,
+    )
+    assert result.economics == {}
+    strategies.save_backtest(
+        "backtest-no-profit",
+        strategy.id,
+        "dataset-1",
+        result,
+    )
+    strategies.adopt_strategy_with_audit(
+        strategy.id,
+        reason="test no-profit adoption",
+        audit={"kind": "strategy.adopt", "target_ref": strategy.id},
+    )
+
+    capture_agent_memory_for_driver_done(
+        settings,
+        task,
+        done_message_content="策略文档已生成",
+        done_message_metadata={},
+    )
+
+    entries = AgentMemoryStore(settings.db_path).list_entries(
+        memory_type="strategy_experience"
+    )
+    assert len(entries) == 1
+    assert entries[0].payload["expected_profit"] is None
+    assert "预期利润未计算" in entries[0].summary
+
+
 def test_capture_agent_memory_strategy_is_noop_when_nothing_adopted(tmp_path: Path):
     """A strategy task whose plan hasn't reached adoption (or used the
     lightweight strategy_analysis entry, which never calls adopt_strategy)

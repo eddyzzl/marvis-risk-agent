@@ -685,7 +685,40 @@
             "minLength": 1
           },
           "profit_params": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "annual_rate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "funding_rate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "lgd": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "operating_cost_per_loan": {
+                "type": "number",
+                "minimum": 0
+              },
+              "term_months": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "annual_rate",
+              "funding_rate",
+              "lgd",
+              "operating_cost_per_loan",
+              "term_months"
+            ],
+            "additionalProperties": false
           },
           "ead_col": {
             "type": "string",
@@ -694,6 +727,112 @@
           "pd_col": {
             "type": "string",
             "minLength": 1
+          },
+          "economics_inputs": {
+            "type": "object",
+            "properties": {
+              "ead_col": {"type": "string", "minLength": 1},
+              "ead_value": {"type": "number", "minimum": 0},
+              "pd_col": {"type": "string", "minLength": 1},
+              "pd_value": {"type": "number", "minimum": 0, "maximum": 1},
+              "lgd_col": {"type": "string", "minLength": 1},
+              "lgd_value": {"type": "number", "minimum": 0, "maximum": 1},
+              "utilization_col": {"type": "string", "minLength": 1},
+              "utilization_value": {"type": "number", "minimum": 0, "maximum": 1},
+              "funding_rate_col": {"type": "string", "minLength": 1},
+              "funding_rate_value": {"type": "number", "minimum": 0, "maximum": 1},
+              "term_months_col": {"type": "string", "minLength": 1},
+              "term_months_value": {"type": "number", "exclusiveMinimum": 0},
+              "operating_cost_per_loan_col": {"type": "string", "minLength": 1},
+              "operating_cost_per_loan_value": {"type": "number", "minimum": 0}
+            },
+            "oneOf": [
+              {
+                "allOf": [
+                  {
+                    "oneOf": [
+                      {"required": ["pd_col"]},
+                      {"required": ["pd_value"]}
+                    ]
+                  },
+                  {
+                    "oneOf": [
+                      {"required": ["lgd_col"]},
+                      {"required": ["lgd_value"]}
+                    ]
+                  },
+                  {
+                    "oneOf": [
+                      {"required": ["utilization_col"]},
+                      {"required": ["utilization_value"]}
+                    ]
+                  },
+                  {
+                    "not": {
+                      "anyOf": [
+                        {"required": ["ead_col"]},
+                        {"required": ["ead_value"]},
+                        {"required": ["funding_rate_col"]},
+                        {"required": ["funding_rate_value"]},
+                        {"required": ["term_months_col"]},
+                        {"required": ["term_months_value"]},
+                        {"required": ["operating_cost_per_loan_col"]},
+                        {"required": ["operating_cost_per_loan_value"]}
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "allOf": [
+                  {
+                    "oneOf": [
+                      {"required": ["ead_col"]},
+                      {"required": ["ead_value"]}
+                    ]
+                  },
+                  {
+                    "oneOf": [
+                      {"required": ["pd_col"]},
+                      {"required": ["pd_value"]}
+                    ]
+                  },
+                  {
+                    "oneOf": [
+                      {"required": ["lgd_col"]},
+                      {"required": ["lgd_value"]}
+                    ]
+                  },
+                  {
+                    "oneOf": [
+                      {"required": ["funding_rate_col"]},
+                      {"required": ["funding_rate_value"]}
+                    ]
+                  },
+                  {
+                    "oneOf": [
+                      {"required": ["term_months_col"]},
+                      {"required": ["term_months_value"]}
+                    ]
+                  },
+                  {
+                    "oneOf": [
+                      {"required": ["operating_cost_per_loan_col"]},
+                      {"required": ["operating_cost_per_loan_value"]}
+                    ]
+                  },
+                  {
+                    "not": {
+                      "anyOf": [
+                        {"required": ["utilization_col"]},
+                        {"required": ["utilization_value"]}
+                      ]
+                    }
+                  }
+                ]
+              }
+            ],
+            "additionalProperties": false
           },
           "drop_nan_labels": {
             "type": "boolean"
@@ -709,23 +848,68 @@
       "output_schema": {
         "type": "object",
         "properties": {
+          "schema_version": {
+            "const": "strategy.backtest.v2"
+          },
           "backtest_id": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "strategy_id": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
+          },
+          "strategy_type": {
+            "type": "string",
+            "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+          },
+          "population_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "labeled_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "metrics": {
+            "type": "object"
+          },
+          "breakdown": {
+            "type": "array",
+            "items": {"type": "object"}
+          },
+          "transitions": {
+            "type": "array",
+            "items": {"type": "object"}
+          },
+          "economics": {
+            "type": "object"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "normalized_input": {
+            "type": "object"
           },
           "approval_rate": {
-            "type": "number"
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
           },
           "approved_count": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0
           },
           "approved_bad_rate": {
-            "type": "number"
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
           },
           "rejected_bad_rate": {
-            "type": "number"
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
           },
           "rejected_count": {
             "type": "integer",
@@ -741,7 +925,9 @@
             "maximum": 1
           },
           "review_bad_rate": {
-            "type": ["number", "null"]
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 1
           },
           "expected_profit": {
             "type": ["number", "null"]
@@ -756,16 +942,22 @@
             }
           },
           "swap_in_count": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0
           },
           "swap_out_count": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0
           },
           "swap_in_bad_rate": {
-            "type": ["number", "null"]
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 1
           },
           "swap_out_bad_rate": {
-            "type": ["number", "null"]
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 1
           },
           "by_segment": {
             "type": "array",
@@ -784,22 +976,231 @@
           }
         },
         "required": [
+          "schema_version",
           "backtest_id",
           "strategy_id",
-          "approval_rate",
-          "approved_count",
-          "approved_bad_rate",
-          "rejected_bad_rate",
-          "rejected_count",
-          "review_count",
-          "review_rate",
-          "review_bad_rate",
-          "expected_profit",
-          "swap_in_count",
-          "swap_out_count",
-          "swap_in_bad_rate",
-          "swap_out_bad_rate",
-          "by_segment"
+          "strategy_type",
+          "population_count",
+          "labeled_count",
+          "label_coverage",
+          "metrics",
+          "breakdown",
+          "transitions",
+          "economics",
+          "warnings",
+          "normalized_input",
+          "nan_labels_dropped"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "strategy_type": {"enum": ["approval", "reject"]}
+              },
+              "required": ["strategy_type"]
+            },
+            "then": {
+              "required": [
+                "approval_rate",
+                "approved_count",
+                "approved_bad_rate",
+                "rejected_bad_rate",
+                "rejected_count",
+                "review_count",
+                "review_rate",
+                "review_bad_rate",
+                "expected_profit",
+                "profit_note",
+                "swap_in_count",
+                "swap_out_count",
+                "swap_in_bad_rate",
+                "swap_out_bad_rate",
+                "by_segment"
+              ],
+              "properties": {
+                "metrics": {
+                  "type": "object",
+                  "properties": {
+                    "overall_bad_count": {"type": "integer", "minimum": 0},
+                    "overall_bad_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+                    "approve_count": {"type": "integer", "minimum": 0},
+                    "approve_rate": {"type": "number", "minimum": 0, "maximum": 1},
+                    "approve_labeled_count": {"type": "integer", "minimum": 0},
+                    "approve_bad_count": {"type": "integer", "minimum": 0},
+                    "approve_bad_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+                    "reject_count": {"type": "integer", "minimum": 0},
+                    "reject_rate": {"type": "number", "minimum": 0, "maximum": 1},
+                    "reject_labeled_count": {"type": "integer", "minimum": 0},
+                    "reject_bad_count": {"type": "integer", "minimum": 0},
+                    "reject_bad_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+                    "review_count": {"type": "integer", "minimum": 0},
+                    "review_rate": {"type": "number", "minimum": 0, "maximum": 1},
+                    "review_labeled_count": {"type": "integer", "minimum": 0},
+                    "review_bad_count": {"type": "integer", "minimum": 0},
+                    "review_bad_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+                    "bad_capture_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+                    "good_reject_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+                  },
+                  "required": [
+                    "overall_bad_count",
+                    "overall_bad_rate",
+                    "approve_count",
+                    "approve_rate",
+                    "approve_labeled_count",
+                    "approve_bad_count",
+                    "approve_bad_rate",
+                    "reject_count",
+                    "reject_rate",
+                    "reject_labeled_count",
+                    "reject_bad_count",
+                    "reject_bad_rate",
+                    "review_count",
+                    "review_rate",
+                    "review_labeled_count",
+                    "review_bad_count",
+                    "review_bad_rate"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "else": {
+              "not": {
+                "anyOf": [
+                  {"required": ["approval_rate"]},
+                  {"required": ["approved_count"]},
+                  {"required": ["approved_bad_rate"]},
+                  {"required": ["rejected_bad_rate"]},
+                  {"required": ["rejected_count"]},
+                  {"required": ["review_count"]},
+                  {"required": ["review_rate"]},
+                  {"required": ["review_bad_rate"]},
+                  {"required": ["expected_profit"]},
+                  {"required": ["profit_note"]},
+                  {"required": ["swap_in_count"]},
+                  {"required": ["swap_out_count"]},
+                  {"required": ["swap_in_bad_rate"]},
+                  {"required": ["swap_out_bad_rate"]},
+                  {"required": ["by_segment"]}
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {"strategy_type": {"const": "reject"}},
+              "required": ["strategy_type"]
+            },
+            "then": {
+              "properties": {
+                "metrics": {
+                  "required": ["bad_capture_rate", "good_reject_rate"]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {"strategy_type": {"const": "approval"}},
+              "required": ["strategy_type"]
+            },
+            "then": {
+              "properties": {
+                "metrics": {
+                  "not": {
+                    "anyOf": [
+                      {"required": ["bad_capture_rate"]},
+                      {"required": ["good_reject_rate"]}
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {"strategy_type": {"const": "limit"}},
+              "required": ["strategy_type"]
+            },
+            "then": {
+              "properties": {
+                "metrics": {
+                  "type": "object",
+                  "properties": {
+                    "count": {"type": "integer", "minimum": 0},
+                    "total_limit": {"type": "number", "minimum": 0},
+                    "mean_limit": {"type": ["number", "null"], "minimum": 0},
+                    "min_limit": {"type": ["number", "null"], "minimum": 0},
+                    "max_limit": {"type": ["number", "null"], "minimum": 0},
+                    "up_count": {"type": ["integer", "null"], "minimum": 0},
+                    "down_count": {"type": ["integer", "null"], "minimum": 0},
+                    "unchanged_count": {"type": ["integer", "null"], "minimum": 0},
+                    "total_limit_delta": {"type": ["number", "null"]}
+                  },
+                  "required": [
+                    "count",
+                    "total_limit",
+                    "mean_limit",
+                    "min_limit",
+                    "max_limit",
+                    "up_count",
+                    "down_count",
+                    "unchanged_count",
+                    "total_limit_delta"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {"strategy_type": {"const": "pricing"}},
+              "required": ["strategy_type"]
+            },
+            "then": {
+              "properties": {
+                "metrics": {
+                  "type": "object",
+                  "properties": {
+                    "count": {"type": "integer", "minimum": 0},
+                    "mean_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+                    "repriced_up_count": {"type": ["integer", "null"], "minimum": 0},
+                    "repriced_down_count": {"type": ["integer", "null"], "minimum": 0},
+                    "unchanged_count": {"type": ["integer", "null"], "minimum": 0}
+                  },
+                  "required": [
+                    "count",
+                    "mean_rate",
+                    "repriced_up_count",
+                    "repriced_down_count",
+                    "unchanged_count"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {"strategy_type": {"const": "segmentation"}},
+              "required": ["strategy_type"]
+            },
+            "then": {
+              "properties": {
+                "metrics": {
+                  "type": "object",
+                  "properties": {
+                    "segment_count": {"type": "integer", "minimum": 0},
+                    "overall_bad_count": {"type": "integer", "minimum": 0},
+                    "overall_bad_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+                  },
+                  "required": ["segment_count", "overall_bad_count", "overall_bad_rate"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
         ],
         "additionalProperties": false
       },

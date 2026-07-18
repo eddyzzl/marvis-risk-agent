@@ -10,12 +10,16 @@ import pandas as pd
 
 from marvis.data.direction import check_score_direction, normalize_score_direction
 from marvis.data.errors import LabelSemanticsNotDeclaredError
-from marvis.data.labels import resolve_labeled_frame
+from marvis.data.labels import require_labels_confirmed, resolve_labeled_frame
 from marvis.db import StrategyRepository
-from marvis.packs.strategy.backtest import backtest_strategy
+from marvis.packs.strategy.backtest_compat import (
+    BacktestRecord,
+    approval_backtest_projection,
+    backtest_record_payload,
+)
 from marvis.packs.strategy.bands import design_cutoff_bands
 from marvis.packs.strategy.compare import compare_strategies
-from marvis.packs.strategy.contracts import BacktestResult, Strategy
+from marvis.packs.strategy.contracts import Strategy
 from marvis.packs.strategy.deliverables import decision_table_csv
 from marvis.packs.strategy.dsl import canonical_strategy_json, strategy_spec_hash
 from marvis.packs.strategy.doc import render_strategy_doc_markdown
@@ -40,6 +44,7 @@ from marvis.packs.strategy.rules import (
     evaluate_rule_set,
     mine_rules,
 )
+from marvis.packs.strategy.legacy_adapter import legacy_strategy_to_spec
 from marvis.packs.strategy.strategy import (
     build_strategy,
     build_strategy_from_spec,
@@ -49,6 +54,11 @@ from marvis.packs.strategy.tradeoff import (
     recommend_operating_point,
     tradeoff_feasible_flags,
     tradeoff_view,
+)
+from marvis.packs.strategy.typed_backtest import (
+    ApprovalProfitInputs,
+    StrategyBacktestResult,
+    run_typed_backtest,
 )
 from marvis.packs.strategy.vintage import vintage_curve, vintage_summary
 from marvis.plugins.sdk import PackRuntime
@@ -64,6 +74,7 @@ def tool_vintage_curve(inputs: dict, ctx) -> dict:
     frame = _dataset_frame(
         runtime,
         str(inputs["dataset_id"]),
+        task_id=str(ctx.task_id),
         columns=[cohort_col, mob_col, bad_col],
     )
     # NaN-label gate runs FIRST (an unusable label is a harder problem than an
@@ -135,7 +146,12 @@ def tool_roll_rate(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     balance_col = _optional_str(inputs.get("balance_col"))
     columns = _unique([str(inputs["id_col"]), str(inputs["time_col"]), str(inputs["status_col"]), balance_col])
-    frame = _dataset_frame(runtime, str(inputs["dataset_id"]), columns=columns)
+    frame = _dataset_frame(
+        runtime,
+        str(inputs["dataset_id"]),
+        task_id=str(ctx.task_id),
+        columns=columns,
+    )
     matrix = roll_rate_matrix(
         frame,
         id_col=str(inputs["id_col"]),
@@ -156,7 +172,12 @@ def tool_profit_calc(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     segment_col = _optional_str(inputs.get("segment_col"))
     columns = _unique([segment_col, str(inputs["ead_col"]), str(inputs["pd_col"])])
-    frame = _dataset_frame(runtime, str(inputs["dataset_id"]), columns=columns)
+    frame = _dataset_frame(
+        runtime,
+        str(inputs["dataset_id"]),
+        task_id=str(ctx.task_id),
+        columns=columns,
+    )
     results = profit_calc(
         frame,
         segment_col=segment_col,
@@ -286,21 +307,47 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
         if baseline_id
         else None
     )
-    frame = _dataset_frame(runtime, str(inputs["dataset_id"]))
-    frame, nan_labels_dropped = resolve_labeled_frame(
-        frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    frame = _dataset_frame(
+        runtime,
+        str(inputs["dataset_id"]),
+        task_id=str(ctx.task_id),
     )
-    result = backtest_strategy(
+    target_col = str(inputs["target_col"])
+    # Keep the full population in the typed envelope while still requiring an
+    # explicit confirmation before label metrics exclude missing supervision.
+    nan_labels_dropped = require_labels_confirmed(
         frame,
-        strategy,
-        target_col=str(inputs["target_col"]),
-        baseline=baseline,
-        profit_params=_optional_profit_params(inputs.get("profit_params")),
+        target_col,
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    )
+    economics_inputs = _typed_economics_inputs(
+        frame,
+        strategy_type=strategy.strategy_type,
+        payload=inputs.get("economics_inputs"),
+    )
+    precomputed_economics, approval_profit_inputs = _approval_profit_inputs(
+        strategy_type=strategy.strategy_type,
+        profit_params=inputs.get("profit_params"),
         ead_col=_optional_str(inputs.get("ead_col")),
         pd_col=_optional_str(inputs.get("pd_col")),
     )
+    result = run_typed_backtest(
+        frame,
+        strategy.spec or legacy_strategy_to_spec(strategy),
+        target_col=target_col,
+        strategy_id=strategy.id,
+        baseline=(
+            None
+            if baseline is None
+            else baseline.spec or legacy_strategy_to_spec(baseline)
+        ),
+        economics=precomputed_economics,
+        economics_inputs=economics_inputs,
+        approval_profit_inputs=approval_profit_inputs,
+    )
     backtest_id = _backtest_id(str(inputs["dataset_id"]), result)
-    if runtime.strategies.get_backtest(backtest_id) is None:
+    existing = runtime.strategies.get_backtest(backtest_id)
+    if existing is None:
         runtime.strategies.save_backtest_with_audit(
             backtest_id,
             strategy.id,
@@ -314,29 +361,46 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
                     "task_id": str(ctx.task_id),
                     "strategy_id": strategy.id,
                     "dataset_id": str(inputs["dataset_id"]),
-                    "approval_rate": result.approval_rate,
-                    "expected_profit": result.expected_profit,
+                    "schema_version": result.schema_version,
+                    "strategy_type": result.strategy_type,
+                    "population_count": result.population_count,
+                    "labeled_count": result.labeled_count,
+                    **_backtest_audit_summary(result),
                 },
             },
         )
-    payload = _jsonable(result)
+    elif backtest_record_payload(existing) != result.to_dict():
+        raise StrategyError(
+            "backtest identity collision; refusing to reuse different evidence"
+        )
+    payload = result.to_dict()
     payload["backtest_id"] = backtest_id
     payload["nan_labels_dropped"] = nan_labels_dropped
-    payload["label_coverage"] = _label_coverage(len(frame) + nan_labels_dropped, nan_labels_dropped)
-    if result.profit_note:
+    if result.strategy_type in {"approval", "reject"}:
+        payload.update(approval_backtest_projection(result))
+    profit_note = result.economics.get("profit_note")
+    if profit_note:
         # FIN-3 #4: a profit backtest was requested but the EL chain inputs
         # (pd_col/ead_col) were missing, so expected_profit is None rather than a
         # fabricated 0.0. Surface the reason as a red flag instead of failing silently.
         payload["red_flags"] = [
             *payload.get("red_flags", []),
-            {"code": "expected_profit_unavailable", "level": "amber", "message": result.profit_note},
+            {
+                "code": "expected_profit_unavailable",
+                "level": "amber",
+                "message": profit_note,
+            },
         ]
     return payload
 
 
 def tool_tradeoff_view(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    frame = _dataset_frame(runtime, str(inputs["dataset_id"]))
+    frame = _dataset_frame(
+        runtime,
+        str(inputs["dataset_id"]),
+        task_id=str(ctx.task_id),
+    )
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
@@ -400,7 +464,11 @@ def tool_tradeoff_view(inputs: dict, ctx) -> dict:
 
 def tool_design_cutoff_bands(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    frame = _dataset_frame(runtime, str(inputs["dataset_id"]))
+    frame = _dataset_frame(
+        runtime,
+        str(inputs["dataset_id"]),
+        task_id=str(ctx.task_id),
+    )
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
@@ -496,7 +564,11 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
         runtime, str(inputs["strategy_id"]), task_id=str(ctx.task_id)
     )
     baseline = _strategy(runtime, baseline_id, task_id=str(ctx.task_id))
-    frame = _dataset_frame(runtime, str(inputs["dataset_id"]))
+    frame = _dataset_frame(
+        runtime,
+        str(inputs["dataset_id"]),
+        task_id=str(ctx.task_id),
+    )
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
@@ -530,7 +602,12 @@ def tool_limit_pricing_matrix(inputs: dict, ctx) -> dict:
     target_col = _optional_str(inputs.get("target_col"))
     pd_col = _optional_str(inputs.get("pd_col"))
     columns = _unique([score_col, target_col, pd_col])
-    frame = _dataset_frame(runtime, dataset_id, columns=columns)
+    frame = _dataset_frame(
+        runtime,
+        dataset_id,
+        task_id=str(ctx.task_id),
+        columns=columns,
+    )
     if target_col:
         frame, nan_labels_dropped = resolve_labeled_frame(
             frame, target_col, drop_nan_labels=bool(inputs.get("drop_nan_labels")),
@@ -656,6 +733,22 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
         raise StrategyError(
             f"backtest {backtest_id} does not belong to strategy {strategy_id}"
         )
+    if (
+        isinstance(backtest, StrategyBacktestResult)
+        and backtest.strategy_type != strategy.strategy_type
+    ):
+        raise StrategyError(
+            "backtest strategy_type does not match the persisted strategy"
+        )
+    approval_metrics = approval_backtest_projection(
+        backtest,
+        preserve_undefined_rates=True,
+    )
+    if approval_metrics["approved_bad_rate"] is None:
+        raise StrategyError(
+            "cannot adopt strategy because approved bad rate is undefined; "
+            "provide labeled approved observations and rerun the backtest"
+        )
     try:
         adoption_reason = normalize_adoption_reason(inputs.get("adoption_reason"))
     except AdoptionReasonError as exc:
@@ -675,9 +768,9 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
                 "task_id": str(ctx.task_id),
                 "backtest_id": backtest_id,
                 "adoption_reason": adoption_reason,
-                "approval_rate": backtest.approval_rate,
-                "approved_bad_rate": backtest.approved_bad_rate,
-                "expected_profit": backtest.expected_profit,
+                "approval_rate": approval_metrics["approval_rate"],
+                "approved_bad_rate": approval_metrics["approved_bad_rate"],
+                "expected_profit": approval_metrics["expected_profit"],
             },
         },
         effect_execution_id=effect_execution_id,
@@ -697,8 +790,8 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
     monitoring_plan = build_monitoring_plan(
         strategy_id=strategy_id,
         version=version,
-        approved_bad_rate=backtest.approved_bad_rate,
-        approval_rate=backtest.approval_rate,
+        approved_bad_rate=approval_metrics["approved_bad_rate"],
+        approval_rate=approval_metrics["approval_rate"],
         experiment_id=_optional_str(inputs.get("experiment_id")),
         source_backtest_id=backtest_id,
     )
@@ -889,7 +982,12 @@ def tool_mine_rules(inputs: dict, ctx) -> dict:
     target_col = str(inputs["target_col"])
     feature_cols = _optional_str_list(inputs.get("feature_cols"))
     columns = _unique([*(feature_cols or []), target_col]) if feature_cols else None
-    frame = _dataset_frame(runtime, dataset_id, columns=columns)
+    frame = _dataset_frame(
+        runtime,
+        dataset_id,
+        task_id=str(ctx.task_id),
+        columns=columns,
+    )
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame, target_col, drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
@@ -922,7 +1020,7 @@ def tool_evaluate_rule_set(inputs: dict, ctx) -> dict:
     dataset_id = str(inputs["dataset_id"])
     target_col = str(inputs["target_col"])
     rules_ordered = [dict(rule) for rule in (inputs.get("rules") or []) if isinstance(rule, dict)]
-    frame = _dataset_frame(runtime, dataset_id)
+    frame = _dataset_frame(runtime, dataset_id, task_id=str(ctx.task_id))
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame, target_col, drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
@@ -1153,8 +1251,16 @@ def _runtime(ctx) -> _Runtime:
     return _Runtime(ctx)
 
 
-def _dataset_frame(runtime: _Runtime, dataset_id: str, *, columns: list[str] | None = None) -> pd.DataFrame:
+def _dataset_frame(
+    runtime: _Runtime,
+    dataset_id: str,
+    *,
+    task_id: str,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
     dataset = runtime.registry.get(dataset_id)
+    if str(dataset.task_id) != str(task_id):
+        raise StrategyError(f"dataset not found: {dataset_id}")
     return runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id), columns=columns)
 
 
@@ -1184,6 +1290,107 @@ def _optional_profit_params(payload) -> ProfitParams | None:
     return None if payload in (None, "") else _profit_params(dict(payload))
 
 
+def _approval_profit_inputs(
+    *,
+    strategy_type: str,
+    profit_params,
+    ead_col: str | None,
+    pd_col: str | None,
+) -> tuple[dict | None, ApprovalProfitInputs | None]:
+    if strategy_type not in {"approval", "reject"}:
+        if profit_params not in (None, "") or ead_col is not None or pd_col is not None:
+            raise StrategyError(
+                "profit_params/ead_col/pd_col are only valid for approval/reject; "
+                "use economics_inputs for limit or pricing"
+            )
+        return None, None
+    if profit_params in (None, ""):
+        # No economics was requested: the canonical envelope must stay empty.
+        # The historical flat Tool projection alone retains expected_profit=0.0.
+        return None, None
+    if not ead_col or not pd_col:
+        return {
+            "expected_profit": None,
+            "profit_note": (
+                "已请求利润回测，但缺少 pd_col/ead_col，无法计算预期损失链，"
+                "expected_profit 记为不可用（未用 0 冒充）。"
+            ),
+        }, None
+    return None, ApprovalProfitInputs(
+        params=_profit_params(dict(profit_params)),
+        ead_col=ead_col,
+        pd_col=pd_col,
+    )
+
+
+def _typed_economics_inputs(
+    frame: pd.DataFrame,
+    *,
+    strategy_type: str,
+    payload,
+) -> dict | None:
+    if payload in (None, ""):
+        return None
+    if strategy_type not in {"limit", "pricing"}:
+        raise StrategyError(
+            "economics_inputs are only valid for limit or pricing strategies"
+        )
+    values = dict(payload)
+    required = (
+        ("pd", "lgd", "utilization")
+        if strategy_type == "limit"
+        else (
+            "ead",
+            "pd",
+            "lgd",
+            "funding_rate",
+            "term_months",
+            "operating_cost_per_loan",
+        )
+    )
+    allowed = {
+        key
+        for name in required
+        for key in (f"{name}_col", f"{name}_value")
+    }
+    unsupported = sorted(set(values) - allowed)
+    if unsupported:
+        raise StrategyError(
+            f"unsupported {strategy_type} economics_inputs: "
+            + ", ".join(unsupported)
+        )
+    normalized: dict = {}
+    missing: list[str] = []
+    for name in required:
+        column_key = f"{name}_col"
+        value_key = f"{name}_value"
+        has_column = values.get(column_key) not in (None, "")
+        has_value = values.get(value_key) not in (None, "")
+        if has_column == has_value:
+            if has_column:
+                raise StrategyError(
+                    f"economics_inputs requires exactly one of {column_key} or "
+                    f"{value_key}"
+                )
+            missing.append(f"{column_key}/{value_key}")
+            continue
+        if has_column:
+            column = str(values[column_key])
+            if column not in frame.columns:
+                raise StrategyError(f"missing columns: {column}")
+            normalized[name] = frame[column]
+        else:
+            if isinstance(values[value_key], bool):
+                raise StrategyError(f"{value_key} must be numeric, not boolean")
+            normalized[name] = float(values[value_key])
+    if missing:
+        raise StrategyError(
+            f"{strategy_type} economics_inputs is incomplete; missing "
+            + ", ".join(missing)
+        )
+    return normalized
+
+
 def _label_coverage(total_rows: int, n_dropped: int) -> float:
     # drop_nan_labels semantics: coverage = labeled rows / total rows (DOM-11), so
     # callers see how much of the sample actually carried supervision signal.
@@ -1192,9 +1399,48 @@ def _label_coverage(total_rows: int, n_dropped: int) -> float:
     return float((total_rows - n_dropped) / total_rows)
 
 
-def _backtest_id(dataset_id: str, result: BacktestResult) -> str:
-    payload = {"dataset_id": dataset_id, "result": _jsonable(result)}
-    digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+def _backtest_audit_summary(result: StrategyBacktestResult) -> dict[str, object]:
+    """Keep audit rows useful without flattening typed result semantics."""
+
+    if result.strategy_type in {"approval", "reject"}:
+        return {
+            "approve_rate": result.metrics.get("approve_rate"),
+            "approve_bad_rate": result.metrics.get("approve_bad_rate"),
+            "expected_profit": result.economics.get("expected_profit"),
+        }
+    if result.strategy_type == "limit":
+        return {
+            "total_limit": result.metrics.get("total_limit"),
+            "mean_limit": result.metrics.get("mean_limit"),
+            "expected_loss": result.economics.get("expected_loss"),
+        }
+    if result.strategy_type == "pricing":
+        return {
+            "mean_rate": result.metrics.get("mean_rate"),
+            "profit": result.economics.get("profit"),
+        }
+    return {"segment_count": result.metrics.get("segment_count")}
+
+
+def _backtest_id(dataset_id: str, result: BacktestRecord) -> str:
+    payload = {"dataset_id": dataset_id, "result": backtest_record_payload(result)}
+    if not isinstance(result, StrategyBacktestResult):
+        # Preserve historical legacy IDs byte-for-byte.  Typed envelopes use the
+        # stricter canonical JSON path below; old rows and external references do
+        # not change merely because V2 introduced a versioned result contract.
+        digest = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return f"backtest-{digest[:12]}"
+    digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
     return f"backtest-{digest[:12]}"
 
 

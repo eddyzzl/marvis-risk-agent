@@ -44,6 +44,7 @@ from marvis.orchestrator.validator import PlanValidator
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
+from marvis.packs.strategy.backtest_compat import approval_backtest_projection
 from marvis.repositories.strategy import StrategyRepository
 from marvis.settings import build_settings
 
@@ -137,7 +138,7 @@ def _register_dataset(registry, tmp_path, task_id: str):
 
 def _strategy_backtest_approval_rate(strategies: StrategyRepository, strategy_id: str) -> float:
     backtests = strategies.list_backtests(strategy_id)
-    return backtests[-1].approval_rate
+    return float(approval_backtest_projection(backtests[-1])["approval_rate"])
 
 
 @pytest.mark.slow

@@ -13,6 +13,8 @@ from marvis.packs.strategy import (
     build_strategy,
     build_strategy_from_spec,
 )
+from marvis.packs.strategy.profit import ProfitParams
+from marvis.packs.strategy.typed_backtest import ApprovalProfitInputs, run_typed_backtest
 from marvis.state_machine import ConflictError
 from marvis.strategy_adoption import AdoptionReasonError
 
@@ -66,6 +68,163 @@ def test_strategy_repository_round_trips_strategy_and_backtest(tmp_path):
     assert repo.list_for_task("task-1") == [strategy]
     assert repo.get_backtest("backtest-1") == result
     assert repo.list_backtests(strategy.id) == [result]
+
+
+def test_strategy_repository_rejects_backtest_owned_by_another_strategy(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy)
+
+    with pytest.raises(ValueError, match="strategy_id does not match"):
+        repo.save_backtest(
+            "backtest-mismatched-owner",
+            strategy.id,
+            "dataset-1",
+            _backtest_result("another-strategy"),
+        )
+
+    assert repo.get_backtest("backtest-mismatched-owner") is None
+
+
+def test_strategy_repository_round_trips_typed_backtest_with_audit(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    result = run_typed_backtest(
+        pd.DataFrame(
+            {
+                "score": [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000],
+                "target": [1, 1, 0, 1, None, 0, 0, 0, 1, None],
+                "ead": [200.0] * 10,
+                "pd": [0.0] * 10,
+            }
+        ),
+        strategy.spec,
+        target_col="target",
+        strategy_id=strategy.id,
+        approval_profit_inputs=ApprovalProfitInputs(
+            params=ProfitParams(
+                annual_rate=0.125,
+                funding_rate=0.0,
+                lgd=0.5,
+                operating_cost_per_loan=0.0,
+                term_months=12,
+            ),
+            ead_col="ead",
+            pd_col="pd",
+        ),
+    )
+    repo.create_strategy("task-1", strategy)
+
+    repo.save_backtest_with_audit(
+        "typed-backtest-1",
+        strategy.id,
+        "dataset-1",
+        result,
+        audit={
+            "kind": "strategy.backtest",
+            "target_ref": "typed-backtest-1",
+            "outcome": "succeeded",
+            "detail": {
+                "strategy_id": strategy.id,
+                "schema_version": result.schema_version,
+            },
+        },
+    )
+
+    assert repo.get_backtest("typed-backtest-1") == result
+    assert repo.list_backtests(strategy.id) == [result]
+    with connect(db_path) as conn:
+        stored = json.loads(
+            conn.execute(
+                "SELECT result_json FROM backtests WHERE id = 'typed-backtest-1'"
+            ).fetchone()["result_json"]
+        )
+    assert stored == result.to_dict()
+    audit = db_module.PluginRepository(db_path).list_audit(
+        kind="strategy.backtest"
+    )[0]
+    assert audit["target_ref"] == "typed-backtest-1"
+    assert audit["detail"]["schema_version"] == "strategy.backtest.v2"
+
+
+def test_strategy_repository_reads_legacy_backtest_without_rewriting_json(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy)
+    legacy_json = json.dumps(
+        {
+            "strategy_id": strategy.id,
+            "approval_rate": 0.7,
+            "approved_count": 70,
+            "approved_bad_rate": 0.04,
+            "rejected_bad_rate": 0.22,
+            "expected_profit": 2300.0,
+            "swap_in_count": 5,
+            "swap_out_count": 8,
+            "swap_in_bad_rate": 0.12,
+            "swap_out_bad_rate": 0.01,
+            "by_segment": [],
+        },
+        separators=(", ", ": "),
+    )
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO backtests(id, strategy_id, dataset_id, result_json, created_at)
+            VALUES ('legacy-backtest-1', ?, 'dataset-1', ?, '2026-07-18T00:00:00Z')
+            """,
+            (strategy.id, legacy_json),
+        )
+
+    loaded = repo.get_backtest("legacy-backtest-1")
+
+    assert loaded == BacktestResult(
+        strategy_id=strategy.id,
+        approval_rate=0.7,
+        approved_count=70,
+        approved_bad_rate=0.04,
+        rejected_bad_rate=0.22,
+        expected_profit=2300.0,
+        swap_in_count=5,
+        swap_out_count=8,
+        swap_in_bad_rate=0.12,
+        swap_out_bad_rate=0.01,
+        by_segment=(),
+    )
+    with connect(db_path) as conn:
+        stored_json = conn.execute(
+            "SELECT result_json FROM backtests WHERE id = 'legacy-backtest-1'"
+        ).fetchone()["result_json"]
+    assert stored_json == legacy_json
+
+
+def test_strategy_repository_rejects_unknown_backtest_schema_version(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO backtests(id, strategy_id, dataset_id, result_json, created_at)
+            VALUES (
+                'future-backtest-1', ?, 'dataset-1',
+                '{"schema_version":"strategy.backtest.v999"}',
+                '2026-07-18T00:00:00Z'
+            )
+            """,
+            (strategy.id,),
+        )
+
+    with pytest.raises(ValueError, match="unsupported strategy backtest schema_version"):
+        repo.get_backtest("future-backtest-1")
 
 
 def test_strategy_repository_persists_canonical_dsl_as_authoritative_spec(tmp_path):

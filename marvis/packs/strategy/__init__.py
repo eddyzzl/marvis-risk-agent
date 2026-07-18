@@ -1,4 +1,9 @@
 from marvis.packs.strategy.backtest import backtest_strategy
+from marvis.packs.strategy.backtest_compat import (
+    BacktestRecord,
+    approval_backtest_projection,
+    backtest_record_payload,
+)
 from marvis.packs.strategy.bands import (
     CutoffBandsResult,
     RedFlag,
@@ -38,6 +43,7 @@ from marvis.packs.strategy.evaluator import (
     evaluate_strategy_row,
     evaluate_strategy_rows,
 )
+from marvis.packs.strategy.economics import limit_metrics, pricing_metrics
 from marvis.packs.strategy.pricing import (
     LimitPricingResult,
     PricingCell,
@@ -58,10 +64,17 @@ from marvis.packs.strategy.tradeoff import (
     tradeoff_feasible_flags,
     tradeoff_view,
 )
+from marvis.packs.strategy.typed_backtest import (
+    STRATEGY_BACKTEST_SCHEMA_VERSION,
+    ApprovalProfitInputs,
+    StrategyBacktestResult,
+    run_typed_backtest,
+)
 from marvis.packs.strategy.vintage import vintage_curve, vintage_summary
 
 __all__ = [
     "BacktestResult",
+    "BacktestRecord",
     "CompareCell",
     "CompareResult",
     "CutoffBandsResult",
@@ -72,29 +85,37 @@ __all__ = [
     "RollRateMatrix",
     "ScoreBand",
     "STRATEGY_DSL_SCHEMA_VERSION",
+    "STRATEGY_BACKTEST_SCHEMA_VERSION",
     "Strategy",
     "StrategyAction",
+    "StrategyBacktestResult",
     "StrategyError",
     "StrategyRule",
     "StrategyRuleSpec",
     "StrategySpec",
     "TradeoffPoint",
     "VintageCurve",
+    "ApprovalProfitInputs",
+    "approval_backtest_projection",
     "apply_strategy",
     "backtest_strategy",
+    "backtest_record_payload",
     "build_strategy",
     "build_strategy_from_spec",
     "canonical_strategy_json",
     "compare_strategies",
     "limit_pricing_matrix",
+    "limit_metrics",
     "LimitPricingResult",
     "PricingCell",
     "PricingParams",
     "design_cutoff_bands",
     "profit_calc",
+    "pricing_metrics",
     "recommend_operating_point",
     "tradeoff_feasible_flags",
     "roll_rate_matrix",
+    "run_typed_backtest",
     "tradeoff_view",
     "vintage_curve",
     "vintage_summary",
