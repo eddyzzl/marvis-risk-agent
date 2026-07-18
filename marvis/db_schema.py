@@ -113,7 +113,11 @@ _MIGRATION_TABLES = frozenset({
 # _migration_011_verified_strategy_artifacts adds nullable integrity metadata to
 # historical strategy artifacts. Existing rows remain explicit legacy records;
 # new verified rows are immutable and content-addressed.
-SCHEMA_VERSION = 11
+#
+# _migration_012_data_workspaces adds the task-scoped, CAS-updated data workspace
+# used by the V2 data/semantics experience. Computed analysis stays outside this
+# row and is invalidated through its server-owned analysis_generation counter.
+SCHEMA_VERSION = 12
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -1402,6 +1406,48 @@ def _migration_011_verified_strategy_artifacts(conn: sqlite3.Connection) -> None
     )
 
 
+def _migration_012_data_workspaces(conn: sqlite3.Connection) -> None:
+    """Add the canonical, task-scoped data-workspace snapshot."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS data_workspaces (
+            task_id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'data-workspace.v1'),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            active_dataset_id TEXT,
+            active_dataset_content_hash TEXT
+                CHECK(active_dataset_content_hash IS NULL OR
+                    (length(active_dataset_content_hash) = 64
+                     AND active_dataset_content_hash NOT GLOB '*[^0-9a-f]*')),
+            analysis_generation INTEGER NOT NULL
+                CHECK(analysis_generation >= 0),
+            page TEXT NOT NULL
+                CHECK(page IN ('overview', 'fields', 'semantics',
+                               'history', 'statistics')),
+            selected_field TEXT,
+            semantic_mapping_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK(
+                (active_dataset_id IS NULL AND active_dataset_content_hash IS NULL)
+                OR
+                (active_dataset_id IS NOT NULL
+                 AND active_dataset_content_hash IS NOT NULL)
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(active_dataset_id) REFERENCES datasets(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_workspaces_active_dataset
+            ON data_workspaces(active_dataset_id)
+        """
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -1421,6 +1467,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (9, _migration_009_strategy_asset_lifecycle),
     (10, _migration_010_task_artifact_registry),
     (11, _migration_011_verified_strategy_artifacts),
+    (12, _migration_012_data_workspaces),
 ]
 
 

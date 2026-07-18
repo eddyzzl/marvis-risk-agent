@@ -119,6 +119,16 @@ export function apiPost(endpoint, body = {}, options = {}) {
   });
 }
 
+export function apiPut(endpoint, body = {}, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  const bodyOptions = requestBodyOptions(body, headers);
+  return api(endpoint, {
+    ...options,
+    method: "PUT",
+    ...bodyOptions,
+  });
+}
+
 export function apiDelete(endpoint, options = {}) {
   return api(endpoint, {
     ...options,

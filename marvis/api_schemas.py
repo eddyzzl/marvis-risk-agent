@@ -1,6 +1,7 @@
 from typing import Annotated, Any, Literal
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -21,6 +22,62 @@ StrictNonEmptyStr = Annotated[
     StrictStr,
     StringConstraints(strip_whitespace=True, min_length=1),
 ]
+StrictSha256 = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^[0-9a-f]{64}$"),
+]
+
+
+def _canonical_non_empty_string(value: str) -> str:
+    if value == "" or value != value.strip() or "\x00" in value:
+        raise ValueError("must be canonical non-empty text")
+    return value
+
+
+StrictCanonicalNonEmptyStr = Annotated[
+    StrictStr,
+    AfterValidator(_canonical_non_empty_string),
+]
+DataWorkspacePage = Literal[
+    "overview",
+    "fields",
+    "semantics",
+    "history",
+    "statistics",
+]
+
+
+class DataSemanticMappingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    target_col: StrictCanonicalNonEmptyStr | None
+    field_roles: dict[StrictCanonicalNonEmptyStr, StrictCanonicalNonEmptyStr]
+    business_names: dict[StrictCanonicalNonEmptyStr, StrictCanonicalNonEmptyStr]
+
+
+class DataWorkspaceUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    active_dataset_id: StrictCanonicalNonEmptyStr | None
+    active_dataset_content_hash: StrictSha256 | None
+    page: DataWorkspacePage
+    selected_field: StrictCanonicalNonEmptyStr | None
+    semantic_mapping: DataSemanticMappingRequest
+
+
+class DataWorkspaceSnapshotResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal["data-workspace.v1"]
+    task_id: StrictNonEmptyStr
+    revision: StrictInt = Field(ge=0)
+    active_dataset_id: StrictNonEmptyStr | None
+    active_dataset_content_hash: StrictSha256 | None
+    analysis_generation: StrictInt = Field(ge=0)
+    page: DataWorkspacePage
+    selected_field: StrictNonEmptyStr | None
+    semantic_mapping: DataSemanticMappingRequest
+    updated_at: StrictNonEmptyStr
 
 
 class StrategyProfitInputRequest(BaseModel):

@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPost } from "../api.js";
+import { apiDelete, apiGet, apiPost, apiPut } from "../api.js";
 
 function pathPart(value) {
   return encodeURIComponent(String(value));
@@ -49,6 +49,14 @@ export const reloadSkills = () => apiPost("/api/skills/reload", {});
 export const validateSkill = (skill) => apiPost("/api/skills/validate", { skill });
 
 export const listDatasets = (taskId) => apiGet(`/api/tasks/${pathPart(taskId)}/datasets`);
+export const getDataWorkspace = (taskId) => (
+  apiGet(`/api/tasks/${pathPart(taskId)}/data-workspace`)
+);
+export const putDataWorkspace = (taskId, body, revision) => (
+  apiPut(`/api/tasks/${pathPart(taskId)}/data-workspace`, body, {
+    headers: { "If-Match": String(revision) },
+  })
+);
 export const listStrategyArtifacts = (taskId) => (
   apiGet(`/api/tasks/${pathPart(taskId)}/strategy-artifacts`)
 );
@@ -66,6 +74,11 @@ export function uploadDataset(taskId, file, opts = {}) {
 
 export const previewDataset = (datasetId, rows = 50) => (
   apiGet(`/api/datasets/${pathPart(datasetId)}/preview?rows=${queryPart(rows)}`)
+);
+export const previewTaskDataset = (taskId, datasetId, rows = 50) => (
+  apiGet(
+    `/api/tasks/${pathPart(taskId)}/datasets/${pathPart(datasetId)}/preview?rows=${queryPart(rows)}`,
+  )
 );
 export const proposeJoin = (taskId, body) => (
   apiPost(`/api/tasks/${pathPart(taskId)}/joins/propose`, body)

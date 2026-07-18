@@ -9,6 +9,18 @@ class DataBackendError(DataLayerError):
     """Raised when the tabular backend cannot complete a data operation."""
 
 
+class DatasetContentDriftError(DataBackendError):
+    """A registered dataset no longer matches its immutable content identity."""
+
+    def __init__(self, dataset_id: str, *, reason: str = "content hash mismatch") -> None:
+        self.dataset_id = str(dataset_id)
+        self.reason = str(reason)
+        super().__init__(
+            f"dataset {self.dataset_id} failed integrity verification: {self.reason}; "
+            "re-import the dataset before continuing"
+        )
+
+
 class DataIngestError(DataLayerError):
     """Raised when a source file cannot be normalized into a dataset."""
 
@@ -365,6 +377,7 @@ class PerformanceFrameError(DataLayerError):
 __all__ = [
     "CohortMaturityNotConfirmedError",
     "DataBackendError",
+    "DatasetContentDriftError",
     "DataIngestError",
     "DataLayerError",
     "DataSecurityError",

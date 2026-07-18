@@ -1166,7 +1166,7 @@ def test_init_db_migration_009_backfills_canonical_strategy_asset_status(tmp_pat
             "SELECT id, status, asset_status FROM strategies ORDER BY id"
         ).fetchall()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 11
+    assert version == db_schema_module.SCHEMA_VERSION == 12
     assert "asset_status" in columns
     assert [tuple(row) for row in rows] == [
         ("adopted-strategy", "adopted", "adopted_local"),
@@ -1228,7 +1228,7 @@ def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_pa
             row[1] for row in conn.execute("PRAGMA index_list(task_artifacts)")
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 11
+    assert version == db_schema_module.SCHEMA_VERSION == 12
     assert columns == {
         "id",
         "task_id",
@@ -1241,6 +1241,44 @@ def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_pa
     }
     assert task["id"] == "task-1"
     assert "idx_task_artifacts_task_created" in indexes
+
+
+def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
+    db_path = tmp_path / "legacy_v11.sqlite"
+    with connect(db_path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
+        conn.execute("PRAGMA user_version = 11")
+
+    init_db(db_path)
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(data_workspaces)")
+        }
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(data_workspaces)")
+        }
+        task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
+
+    assert version == db_schema_module.SCHEMA_VERSION == 12
+    assert columns == {
+        "task_id",
+        "schema_version",
+        "revision",
+        "active_dataset_id",
+        "active_dataset_content_hash",
+        "analysis_generation",
+        "page",
+        "selected_field",
+        "semantic_mapping_json",
+        "updated_at",
+    }
+    assert "idx_data_workspaces_active_dataset" in indexes
+    assert task["id"] == "task-1"
 
 
 def test_init_db_migration_009_rejects_unknown_legacy_status_without_stamping(tmp_path):

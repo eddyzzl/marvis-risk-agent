@@ -15,6 +15,7 @@ from marvis.data.contracts import (
 from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, init_db
+from marvis.files import sha256_file
 from marvis.repositories.audit import _list_audit_rows
 import marvis.db as db_module
 import marvis.repositories.datasets as dataset_repo_module
@@ -612,8 +613,11 @@ def test_dataset_registry_register_existing_copies_and_inherits_anchor_target(tm
     assert derived.role == "derived"
     assert derived.has_target is True
     assert derived.target_col == "bad_flag"
-    assert registry.resolve_path(derived.id).exists()
-    assert registry.resolve_path(derived.id).is_relative_to(datasets_root)
+    derived_path = registry.resolve_path(derived.id)
+    assert derived_path.exists()
+    assert derived_path.is_relative_to(datasets_root)
+    assert derived.content_hash == sha256_file(derived_path)
+    assert repo.get_dataset(derived.id).content_hash == derived.content_hash
 
 
 def test_dataset_registry_register_existing_with_audit_records_lineage(tmp_path):

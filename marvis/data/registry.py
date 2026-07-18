@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+import hmac
+import re
 import shutil
 import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
 from typing import Callable
 
 import pandas as pd
@@ -13,7 +17,7 @@ from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.backend import DataBackend
 from marvis.data.contracts import Dataset
 from marvis.data.csv_ingest import CsvIngestReport, read_csv_with_fallback_encoding
-from marvis.data.errors import DataBackendError
+from marvis.data.errors import DataBackendError, DatasetContentDriftError
 from marvis.data.excel_ingest import ingest_sheet, is_xlsx_workbook, list_sheets
 from marvis.data.profiler import profile_dataset
 from marvis.data.schema_infer import detect_target_column
@@ -22,6 +26,14 @@ from marvis.files import sha256_file
 import logging
 
 logger = logging.getLogger(__name__)
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_VERIFIED_FILE_CACHE_MAX = 512
+_VERIFIED_FILE_CACHE: OrderedDict[
+    tuple[str, str],
+    tuple[int, int, int, int, int],
+] = OrderedDict()
+_VERIFIED_FILE_CACHE_LOCK = Lock()
 
 
 class DatasetRegistry:
@@ -358,6 +370,44 @@ class DatasetRegistry:
     def resolve_path(self, dataset_id: str) -> Path:
         return self._root / self.get(dataset_id).source_path
 
+    def resolve_verified_path(self, dataset_id: str) -> Path:
+        """Resolve an immutable dataset and fail closed on out-of-band drift.
+
+        Dataset hashes identify the canonical parquet bytes, not merely the
+        database row.  Workspace reads use this boundary before returning any
+        preview or accepting a semantic snapshot so an in-place file change
+        cannot silently reuse the previous analysis generation.
+        """
+
+        dataset = self.get(dataset_id)
+        expected_hash = dataset.content_hash
+        if (
+            not isinstance(expected_hash, str)
+            or _SHA256_RE.fullmatch(expected_hash) is None
+        ):
+            raise DatasetContentDriftError(
+                dataset_id,
+                reason="registered content hash is missing or invalid",
+            )
+        candidate = self._root / dataset.source_path
+        try:
+            resolved_root = self._root.resolve(strict=True)
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(resolved_root)
+            if candidate.is_symlink() or not resolved.is_file():
+                raise OSError("dataset path is not a regular workspace file")
+            _verify_stable_file_hash(
+                resolved,
+                expected_hash=expected_hash,
+                dataset_id=dataset_id,
+            )
+        except (OSError, ValueError) as exc:
+            raise DatasetContentDriftError(
+                dataset_id,
+                reason="registered file is missing or outside the dataset workspace",
+            ) from exc
+        return resolved
+
     def set_role(self, dataset_id: str, role: str) -> None:
         self._repo.set_dataset_role(dataset_id, role)
 
@@ -507,11 +557,68 @@ class DatasetRegistry:
             has_target=target is not None,
             target_col=target,
             created_at=_now_iso(),
+            content_hash=sha256_file(parquet_path),
         )
 
 
 def _new_dataset_id() -> str:
     return f"ds_{uuid.uuid4().hex}"
+
+
+def _verify_stable_file_hash(
+    path: Path,
+    *,
+    expected_hash: str,
+    dataset_id: str,
+) -> None:
+    """Hash once per stable file identity and re-hash after any stat change."""
+
+    before = path.stat()
+    signature = _file_signature(before)
+    cache_key = (str(path), expected_hash)
+    with _VERIFIED_FILE_CACHE_LOCK:
+        if _VERIFIED_FILE_CACHE.get(cache_key) == signature:
+            _VERIFIED_FILE_CACHE.move_to_end(cache_key)
+            return
+
+    actual_hash = sha256_file(path)
+    after_signature = _file_signature(path.stat())
+    if after_signature != signature:
+        _forget_verified_path(path)
+        raise DatasetContentDriftError(
+            dataset_id,
+            reason="registered file changed during integrity verification",
+        )
+    if not hmac.compare_digest(actual_hash, expected_hash):
+        _forget_verified_path(path)
+        raise DatasetContentDriftError(dataset_id)
+
+    with _VERIFIED_FILE_CACHE_LOCK:
+        for key in tuple(_VERIFIED_FILE_CACHE):
+            if key[0] == str(path) and key != cache_key:
+                del _VERIFIED_FILE_CACHE[key]
+        _VERIFIED_FILE_CACHE[cache_key] = signature
+        _VERIFIED_FILE_CACHE.move_to_end(cache_key)
+        while len(_VERIFIED_FILE_CACHE) > _VERIFIED_FILE_CACHE_MAX:
+            _VERIFIED_FILE_CACHE.popitem(last=False)
+
+
+def _file_signature(stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(stat_result.st_dev),
+        int(stat_result.st_ino),
+        int(stat_result.st_size),
+        int(stat_result.st_mtime_ns),
+        int(stat_result.st_ctime_ns),
+    )
+
+
+def _forget_verified_path(path: Path) -> None:
+    path_text = str(path)
+    with _VERIFIED_FILE_CACHE_LOCK:
+        for key in tuple(_VERIFIED_FILE_CACHE):
+            if key[0] == path_text:
+                del _VERIFIED_FILE_CACHE[key]
 
 
 def _create_dataset(create_dataset, dataset: Dataset) -> Dataset:

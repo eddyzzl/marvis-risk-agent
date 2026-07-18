@@ -28,6 +28,7 @@ def test_v2_static_modules_are_packaged_and_present():
     static_v2 = Path("marvis/static/js/v2")
     for module_name in (
         "api_v2.js",
+        "data_workspace_controller.js",
         "state_v2.js",
         "governance_extensions.js",
         "plugin_manager.js",
@@ -45,7 +46,7 @@ def test_api_wrappers_keep_formdata_boundary_under_fetch_control():
     run_node(
         """
         import assert from "node:assert/strict";
-        import { apiDelete, apiGet, apiPost } from "./marvis/static/js/api.js";
+        import { apiDelete, apiGet, apiPost, apiPut } from "./marvis/static/js/api.js";
 
         const calls = [];
         globalThis.fetch = async (url, options = {}) => {
@@ -67,6 +68,14 @@ def test_api_wrappers_keep_formdata_boundary_under_fetch_control():
         assert.equal(calls.at(-1).options.method, "POST");
         assert.equal(calls.at(-1).options.headers["Content-Type"], "application/json");
         assert.deepEqual(JSON.parse(calls.at(-1).options.body), { approved: true });
+
+        await apiPut("/api/tasks/t1/data-workspace", { page: "overview" }, {
+          headers: { "If-Match": "0", "X-Caller": "kept" },
+        });
+        assert.equal(calls.at(-1).options.method, "PUT");
+        assert.equal(calls.at(-1).options.headers["If-Match"], "0");
+        assert.equal(calls.at(-1).options.headers["X-Caller"], "kept");
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), { page: "overview" });
 
         const formData = new FormData();
         formData.append("file", new Blob(["zip"]), "plugin.zip");

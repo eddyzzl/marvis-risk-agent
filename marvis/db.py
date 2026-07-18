@@ -13,6 +13,14 @@ from marvis.repositories.audit import (
     _write_audit_row as _write_audit_row,
 )
 from marvis.repositories.datasets import DatasetRepository as DatasetRepository  # noqa: F401
+from marvis.repositories.data_workspace import (  # noqa: F401
+    DataWorkspaceDataError as DataWorkspaceDataError,
+    DataWorkspaceDatasetMismatch as DataWorkspaceDatasetMismatch,
+    DataWorkspaceDatasetNotFound as DataWorkspaceDatasetNotFound,
+    DataWorkspaceRepository as DataWorkspaceRepository,
+    DataWorkspaceResetRequired as DataWorkspaceResetRequired,
+    DataWorkspaceRevisionConflict as DataWorkspaceRevisionConflict,
+)
 from marvis.repositories.llm_calls import (
     llm_usage_summary as llm_usage_summary,
     record_llm_call as record_llm_call,

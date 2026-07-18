@@ -482,6 +482,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 负责 report-ready 指标、当前状况、样本和外部历史资料的结构化语义。
 
+**首个纵切（已完成）**：已建立 task-scoped `DataWorkspaceSnapshot`，用 revision/`If-Match` 保存 active dataset、dataset hash、analysis generation、页面选择和字段语义；新增 task-owned preview，并复用现有 CSV/XLSX 导入。切换 active dataset 必须清空旧字段选择和语义，旧 dataset/artifact 仍保留为历史证据；底层 parquet 若与注册 hash 漂移，工作区读取、保存和预览均失败关闭；保存请求在途时不允许用本地 discard 冒充服务端写入已撤销。`.xls`、SQL connector、完整变换、统计和导出随后分提交完成，但仍全部属于本 Phase 和 V2.x。
+
 交付：
 
 1. 策略任务创建、列表、加载、删除、显式保存、dirty 切换保护和分析状态恢复；
