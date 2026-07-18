@@ -11,6 +11,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 from marvis.agent.renderers import render_tool_output
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
@@ -99,6 +101,7 @@ def test_challenger_report_numbers_follow_tool_output(tmp_path):
     assert len(rows) == 1
 
 
+@pytest.mark.slow
 def test_challenger_report_changes_when_compare_numbers_change(tmp_path):
     runner, _registry, _settings = _runtime(tmp_path)
     strategy_id = _build_strategy(runner)
@@ -124,6 +127,7 @@ def test_challenger_report_changes_when_compare_numbers_change(tmp_path):
     assert "99.0000" in _render(99.0)
 
 
+@pytest.mark.slow
 def test_challenger_report_no_champion_degrades_to_no_op(tmp_path):
     runner, _registry, settings = _runtime(tmp_path)
     strategy_id = _build_strategy(runner)
@@ -142,6 +146,7 @@ def test_challenger_report_no_champion_degrades_to_no_op(tmp_path):
     assert strategies.list_strategy_artifacts(strategy_id) == []
 
 
+@pytest.mark.slow
 def test_challenger_report_degrades_when_compare_itself_degraded(tmp_path):
     runner, _registry, _settings = _runtime(tmp_path)
     strategy_id = _build_strategy(runner)
