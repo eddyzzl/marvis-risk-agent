@@ -25,6 +25,7 @@ from marvis.packs.strategy.dsl import (
     StrategyAction,
     StrategyRuleSpec,
     StrategySpec,
+    semantic_expression_key,
 )
 from marvis.packs.strategy.errors import StrategyError
 from marvis.repositories.strategy_pool import (
@@ -46,9 +47,22 @@ _VALIDATION_STATUS = "unvalidated"
 _MUTATION_KINDS = frozenset(
     {
         "add_candidate",
+        "insert_candidate_before_entries",
+        "replace_entries_with_candidate",
         "remove_entry",
         "set_entry_action",
         "reorder_entries",
+    }
+)
+APPEND_PLACEMENT = "append"
+BEFORE_SELECTED_MEMBERS_PLACEMENT = "before_selected_members"
+REPLACE_SELECTED_MEMBERS_PLACEMENT = "replace_selected_members"
+_VOTING_ASSET_TYPE = "voting_n_of_k"
+_PLACEMENT_MODES = frozenset(
+    {
+        APPEND_PLACEMENT,
+        BEFORE_SELECTED_MEMBERS_PLACEMENT,
+        REPLACE_SELECTED_MEMBERS_PLACEMENT,
     }
 )
 _TOP_LEVEL_FIELDS = frozenset(
@@ -159,9 +173,17 @@ def add_verified_candidate_fragment(
     default_action: Mapping[str, Any],
     verified_candidate_fragment: Mapping[str, Any],
     action: Mapping[str, Any],
+    placement_mode: str = APPEND_PLACEMENT,
+    selected_entry_ids: Sequence[str] = (),
     reason: str | None = None,
 ) -> dict[str, Any]:
-    """Append one generic, self-authenticating candidate fragment."""
+    """Place one generic, self-authenticating candidate fragment.
+
+    Ordinary candidates retain the historical append-only behavior.  A Voting
+    candidate must be placed before every selected member, or atomically
+    replace those members, because appending it after its inputs would make it
+    unreachable under the Pool's ``first_match`` execution contract.
+    """
 
     task = _text(task_id, "task_id")
     strategy_kind = _text(strategy_type, "strategy_type")
@@ -192,6 +214,62 @@ def add_verified_candidate_fragment(
     except StrategyError as exc:
         raise CandidatePoolError(f"verified candidate fragment is invalid: {exc}") from exc
     canonical_action = _action(action, "action")
+    placement = _text(placement_mode, "placement_mode")
+    if placement not in _PLACEMENT_MODES:
+        raise CandidatePoolError(f"unsupported placement_mode: {placement}")
+    selected_ids = _placement_entry_ids(selected_entry_ids)
+    is_voting = source["asset_type"] == _VOTING_ASSET_TYPE
+    if is_voting and placement == APPEND_PLACEMENT:
+        raise CandidatePoolError(
+            "Voting candidate cannot be appended after its selected members"
+        )
+    if not is_voting and placement != APPEND_PLACEMENT:
+        raise CandidatePoolError(
+            "non-Voting candidates only support append placement"
+        )
+    if placement == APPEND_PLACEMENT:
+        if selected_ids:
+            raise CandidatePoolError(
+                "append placement must not provide selected_entry_ids"
+            )
+        insertion_index = len(entries)
+        operation_kind = "add_candidate"
+    else:
+        if pool is None:
+            raise CandidatePoolError(
+                "Voting placement requires an existing Strategy Pool"
+            )
+        if len(selected_ids) < 2:
+            raise CandidatePoolError(
+                "Voting placement requires at least two selected_entry_ids"
+            )
+        selected_set = set(selected_ids)
+        positions = {
+            item["entry_id"]: int(item["position"])
+            for item in entries
+            if item["entry_id"] in selected_set
+        }
+        missing_selected = sorted(set(selected_ids) - set(positions))
+        if missing_selected:
+            raise CandidatePoolError(
+                "Voting selected members are no longer present in the current Pool: "
+                + ", ".join(missing_selected)
+            )
+        selected_members = [
+            item for item in entries if item["entry_id"] in selected_set
+        ]
+        _assert_voting_placement_members(
+            execution["condition"],
+            selected_members,
+        )
+        insertion_index = min(positions.values())
+        if placement == REPLACE_SELECTED_MEMBERS_PLACEMENT:
+            entries = [
+                item for item in entries if item["entry_id"] not in selected_set
+            ]
+            operation_kind = "replace_entries_with_candidate"
+        else:
+            operation_kind = "insert_candidate_before_entries"
     entry_id = _stable_id(
         "pool-entry",
         {
@@ -217,6 +295,15 @@ def add_verified_candidate_fragment(
         raise CandidatePoolError(f"duplicate rule in strategy pool: {rule_id}")
     if any(item["entry_id"] == entry_id for item in entries):
         raise CandidatePoolError(f"duplicate entry in strategy pool: {entry_id}")
+    canonical_condition = semantic_expression_key(execution["condition"])
+    if any(
+        semantic_expression_key(item["execution"]["condition"])
+        == canonical_condition
+        for item in entries
+    ):
+        raise CandidatePoolError(
+            "duplicate executable condition in strategy pool would be unreachable"
+        )
     if entries and any(
         item["source"]["evidence_identity"] != source["evidence_identity"]
         for item in entries
@@ -224,17 +311,20 @@ def add_verified_candidate_fragment(
         raise CandidatePoolError(
             "candidate evidence identity does not match the existing strategy pool"
         )
-    entries.append(
+    entries.insert(
+        insertion_index,
         {
             "entry_id": entry_id,
             "rule_id": rule_id,
-            "position": len(entries),
+            "position": insertion_index,
             "source": source,
             "execution": execution,
             "action": canonical_action,
             "enabled": True,
-        }
+        },
     )
+    entries = _with_positions(entries)
+    _assert_voting_rules_are_reachable(entries)
     _assert_strategy_actions(strategy_kind, canonical_default, entries)
     return _snapshot(
         pool_id=pool_id,
@@ -242,7 +332,7 @@ def add_verified_candidate_fragment(
         strategy_type=strategy_kind,
         revision=revision,
         parent_revision_id=parent_revision_id,
-        operation_kind="add_candidate",
+        operation_kind=operation_kind,
         reason=reason,
         default_action=canonical_default,
         entries=entries,
@@ -325,6 +415,7 @@ def reorder_strategy_pool(
     entries = _with_positions(
         [_json_object(by_id[entry_id], "pool entry") for entry_id in ordered]
     )
+    _assert_voting_rules_are_reachable(entries)
     return _next_snapshot(current, "reorder_entries", entries, reason=reason)
 
 
@@ -335,6 +426,16 @@ def compile_strategy_pool(pool: Mapping[str, Any]) -> dict[str, Any]:
     entries = current["entries"]
     if not entries:
         raise CandidatePoolError("cannot compile an empty strategy pool")
+    condition_keys = [
+        semantic_expression_key(item["execution"]["condition"])
+        for item in entries
+    ]
+    if len(set(condition_keys)) != len(condition_keys):
+        raise CandidatePoolError(
+            "cannot compile a historical Pool with duplicate executable "
+            "conditions; remove the unreachable duplicate entry first"
+        )
+    _assert_voting_rules_are_reachable(entries)
     rules = tuple(
         StrategyRuleSpec(
             rule_id=item["rule_id"],
@@ -756,6 +857,80 @@ def _with_positions(entries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
         item["position"] = index
         result.append(item)
     return result
+
+
+def _placement_entry_ids(value: Sequence[str]) -> tuple[str, ...]:
+    if isinstance(value, str | bytes | bytearray) or not isinstance(value, Sequence):
+        raise CandidatePoolError("selected_entry_ids must be a list")
+    normalized = tuple(_text(item, "selected_entry_ids item") for item in value)
+    if len(set(normalized)) != len(normalized):
+        raise CandidatePoolError("selected_entry_ids must not contain duplicates")
+    return normalized
+
+
+def _assert_voting_rules_are_reachable(
+    entries: Sequence[Mapping[str, Any]],
+) -> None:
+    earlier_conditions: set[str] = set()
+    earlier_voting: list[tuple[frozenset[str], int]] = []
+    for entry in entries:
+        condition = entry["execution"]["condition"]
+        if entry["source"]["asset_type"] == _VOTING_ASSET_TYPE:
+            if condition.get("op") != "n_of_k" or not isinstance(
+                condition.get("args"), list
+            ):
+                raise CandidatePoolError(
+                    "Voting candidate must expose one canonical n_of_k condition"
+                )
+            shadowing_members = [
+                arg
+                for arg in condition["args"]
+                if semantic_expression_key(arg) in earlier_conditions
+            ]
+            if shadowing_members:
+                raise CandidatePoolError(
+                    "Voting candidate is unreachable because a selected member "
+                    "appears earlier in the first_match Pool"
+                )
+            n = condition.get("n")
+            if isinstance(n, bool) or not isinstance(n, int):
+                raise CandidatePoolError(
+                    "Voting candidate must expose an integer n threshold"
+                )
+            argument_set = frozenset(
+                semantic_expression_key(arg) for arg in condition["args"]
+            )
+            if any(
+                prior_n
+                <= max(0, n - len(argument_set - prior_arguments))
+                for prior_arguments, prior_n in earlier_voting
+            ):
+                raise CandidatePoolError(
+                    "Voting candidate is unreachable because an earlier Voting "
+                    "rule logically dominates its n-of-k condition"
+                )
+            earlier_voting.append((argument_set, n))
+        earlier_conditions.add(semantic_expression_key(condition))
+
+
+def _assert_voting_placement_members(
+    voting_condition: Mapping[str, Any],
+    selected_members: Sequence[Mapping[str, Any]],
+) -> None:
+    args = voting_condition.get("args")
+    if voting_condition.get("op") != "n_of_k" or not isinstance(args, list):
+        raise CandidatePoolError(
+            "Voting candidate must expose one canonical n_of_k condition"
+        )
+    expected = {semantic_expression_key(arg) for arg in args}
+    observed = {
+        semantic_expression_key(member["execution"]["condition"])
+        for member in selected_members
+    }
+    if len(args) != len(selected_members) or expected != observed:
+        raise CandidatePoolError(
+            "Voting placement members do not match the candidate n_of_k inputs"
+        )
 
 
 def _assert_unique(values: Sequence[str], name: str) -> None:

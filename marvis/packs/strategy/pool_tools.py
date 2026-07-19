@@ -63,12 +63,31 @@ from marvis.packs.strategy.automatic_tree_leaf_tools import (
     load_verified_automatic_tree_source_artifact,
     load_verified_automatic_tree_source_artifact_on_connection,
 )
+from marvis.packs.strategy.voting_candidate import (
+    VOTING_CANDIDATE_ASSET_TYPE,
+    verify_voting_candidate_asset_against_pool,
+)
+from marvis.packs.strategy.voting_candidate_fragment import (
+    VOTING_CANDIDATE_ARTIFACT_KIND,
+    VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+    VOTING_CANDIDATE_ORIGIN_TOOL,
+    voting_candidate_to_verified_fragment,
+)
+from marvis.packs.strategy.voting_candidate_tools import (
+    VerifiedVotingCandidateArtifact,
+    load_verified_voting_candidate_artifact,
+    load_verified_voting_candidate_artifact_on_connection,
+    require_voting_snapshot_marginal_reachability,
+)
 from marvis.packs.strategy.errors import (
     StrategyError,
     StrategyPoolLegacyDraftNeedsRebuildError,
 )
 from marvis.packs.strategy.pool import (
+    APPEND_PLACEMENT,
+    BEFORE_SELECTED_MEMBERS_PLACEMENT,
     POOL_PRODUCER_VERSION,
+    REPLACE_SELECTED_MEMBERS_PLACEMENT,
     add_verified_candidate_fragment,
     compile_strategy_pool,
     remove_pool_entry,
@@ -114,9 +133,10 @@ _ADD_INPUT_FIELDS = frozenset(
         "expected_pool_revision",
         "expected_pool_snapshot_hash",
         "reason",
+        "placement_mode",
     }
 )
-_ADD_REQUIRED_FIELDS = _ADD_INPUT_FIELDS - {"reason"}
+_ADD_REQUIRED_FIELDS = _ADD_INPUT_FIELDS - {"reason", "placement_mode"}
 _REMOVE_INPUT_FIELDS = frozenset(
     {
         "strategy_type",
@@ -179,11 +199,15 @@ _POOL_PROVENANCE_FIELDS = frozenset(
 )
 _ORIGIN_BY_OPERATION = {
     "add_candidate": "strategy.add_candidate_to_pool",
+    "insert_candidate_before_entries": "strategy.add_candidate_to_pool",
+    "replace_entries_with_candidate": "strategy.add_candidate_to_pool",
     "remove_entry": "strategy.remove_pool_entry",
     "set_entry_action": "strategy.set_pool_entry_action",
     "reorder_entries": "strategy.reorder_strategy_pool",
 }
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MAX_VOTING_ANCESTRY_DEPTH = 16
+_MAX_VOTING_ANCESTRY_NODES = 256
 _BOUNDARY_ERRORS = (
     StrategyCandidatePoolConflictError,
     StrategyCandidatePoolDataError,
@@ -226,21 +250,94 @@ class _AutomaticTreeCandidateLineage:
     source_binding: dict[str, Any]
 
 
-_CandidateLineage = _UnivariateCandidateLineage | _AutomaticTreeCandidateLineage
+@dataclass(frozen=True)
+class _VotingCandidateLineage:
+    candidate: VerifiedVotingCandidateArtifact
+    parent_pool: dict[str, Any]
+    parent_pool_artifact: Any
+    parent_lineages: tuple[_CandidateLineage, ...]
+    verified_fragment: dict[str, Any]
+    source_binding: dict[str, Any]
+
+
+_CandidateLineage = (
+    _UnivariateCandidateLineage
+    | _AutomaticTreeCandidateLineage
+    | _VotingCandidateLineage
+)
 
 
 @dataclass
 class _LineageCache:
     trees: dict[tuple[str, str], VerifiedAutomaticTreeSource]
     datasets: dict[tuple[str, str], _AutomaticTreeDatasetBinding]
+    univariate_datasets: dict[tuple[str, str], Any]
+    datasets_verified_on_connection: set[tuple[str, str]]
+    voting: dict[tuple[str, str], _VotingCandidateLineage]
+    voting_in_progress: set[tuple[str, str]]
+    voting_verified: set[tuple[str, str]]
 
     @classmethod
     def empty(cls) -> _LineageCache:
-        return cls(trees={}, datasets={})
+        return cls(
+            trees={},
+            datasets={},
+            univariate_datasets={},
+            datasets_verified_on_connection=set(),
+            voting={},
+            voting_in_progress=set(),
+            voting_verified=set(),
+        )
+
+
+def _require_snapshot_voting_marginals(
+    runtime,
+    *,
+    snapshot: Mapping[str, Any],
+    lineages: Sequence[_CandidateLineage],
+) -> None:
+    """Prove every Voting entry remains reachable after an ordering mutation."""
+
+    lineage_by_source = {
+        _canonical_json(lineage.source_binding): lineage for lineage in lineages
+    }
+    voting_candidates: dict[int, VerifiedVotingCandidateArtifact] = {}
+    anchor_lineage: _CandidateLineage | None = None
+    anchor_entry: Mapping[str, Any] | None = None
+    for position, entry in enumerate(snapshot["entries"]):
+        if entry["source"]["asset_type"] != VOTING_CANDIDATE_ASSET_TYPE:
+            continue
+        lineage = lineage_by_source.get(_canonical_json(entry["source"]))
+        if not isinstance(lineage, _VotingCandidateLineage):
+            raise StrategyError("Voting Pool entry is missing its verified lineage")
+        voting_candidates[position] = lineage.candidate
+        if anchor_lineage is None:
+            selected = lineage.candidate.asset["selected_entries"][0]
+            selected_parent_by_id = {
+                parent["entry_id"]: parent
+                for parent in lineage.parent_pool["entries"]
+            }
+            anchor_entry = selected_parent_by_id.get(selected["entry_id"])
+            if anchor_entry is None:
+                raise StrategyError(
+                    "Voting candidate selected parent entry no longer exists"
+                )
+            anchor_lineage = lineage.parent_lineages[0]
+    if not voting_candidates:
+        return
+    if anchor_lineage is None or anchor_entry is None:
+        raise StrategyError("Voting Pool replay is missing its sample anchor")
+    require_voting_snapshot_marginal_reachability(
+        runtime,
+        entries=snapshot["entries"],
+        voting_candidates=voting_candidates,
+        anchor_lineage=anchor_lineage,
+        anchor_entry=anchor_entry,
+    )
 
 
 def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
-    """Add a refined univariate asset or persisted automatic-tree leaf."""
+    """Add one allowlisted asset with governed Voting placement semantics."""
 
     try:
         normalized = _validate_add_inputs(inputs)
@@ -272,6 +369,39 @@ def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
             expected_asset_hash=normalized["expected_asset_hash"],
             cache=lineage_cache,
         )
+        if isinstance(candidate, _VotingCandidateLineage):
+            if base is None:
+                raise StrategyError(
+                    "Voting candidate requires its existing source Strategy Pool"
+                )
+            if candidate.parent_pool["strategy_type"] != normalized["strategy_type"]:
+                raise StrategyError(
+                    "Voting candidate strategy_type differs from the target Pool"
+                )
+            if candidate.parent_pool["revision"] > base["revision"]:
+                raise StrategyError(
+                    "Voting candidate parent Pool is newer than the target revision"
+                )
+            placement_mode = normalized.get("placement_mode")
+            if placement_mode not in {
+                BEFORE_SELECTED_MEMBERS_PLACEMENT,
+                REPLACE_SELECTED_MEMBERS_PLACEMENT,
+            }:
+                raise StrategyError(
+                    "Voting candidate admission requires explicit "
+                    "before_selected_members or replace_selected_members placement"
+                )
+            selected_entry_ids = [
+                str(entry["entry_id"])
+                for entry in candidate.candidate.asset["selected_entries"]
+            ]
+        else:
+            placement_mode = normalized.get("placement_mode", APPEND_PLACEMENT)
+            if placement_mode != APPEND_PLACEMENT:
+                raise StrategyError(
+                    "non-Voting candidates only support append placement"
+                )
+            selected_entry_ids = []
         snapshot = add_verified_candidate_fragment(
             base,
             task_id=task_id,
@@ -279,7 +409,31 @@ def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
             default_action=normalized["default_action"],
             verified_candidate_fragment=candidate.verified_fragment,
             action=normalized["action"],
+            placement_mode=placement_mode,
+            selected_entry_ids=selected_entry_ids,
             reason=normalized.get("reason"),
+        )
+        surviving_sources = {
+            (
+                entry["source"]["artifact_id"],
+                entry["source"]["artifact_content_hash"],
+            )
+            for entry in snapshot["entries"]
+        }
+        persisted_lineages = [
+            lineage
+            for lineage in prior_lineages
+            if (
+                lineage.source_binding["artifact_id"],
+                lineage.source_binding["artifact_content_hash"],
+            )
+            in surviving_sources
+        ]
+        mutation_lineages = [*persisted_lineages, candidate]
+        _require_snapshot_voting_marginals(
+            runtime,
+            snapshot=snapshot,
+            lineages=mutation_lineages,
         )
         return _persist_mutation(
             runtime,
@@ -287,7 +441,7 @@ def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
             snapshot=snapshot,
             expected_revision=normalized["expected_pool_revision"],
             expected_snapshot_hash=normalized["expected_pool_snapshot_hash"],
-            lineages=[*prior_lineages, candidate],
+            lineages=mutation_lineages,
             inputs=normalized,
             legacy_archive=legacy_archive,
         )
@@ -400,6 +554,11 @@ def run_reorder_strategy_pool(inputs, ctx, runtime) -> dict[str, Any]:
             reason=normalized.get("reason"),
         )
         lineages = _load_pool_lineages(runtime, task_id=task_id, pool=snapshot)
+        _require_snapshot_voting_marginals(
+            runtime,
+            snapshot=snapshot,
+            lineages=lineages,
+        )
         return _persist_mutation(
             runtime,
             repository=repository,
@@ -501,6 +660,17 @@ def _validate_add_inputs(inputs: object) -> dict[str, Any]:
         normalized[field] = _json_object(normalized[field], field)
     if "reason" in normalized:
         normalized["reason"] = _optional_text(normalized["reason"], "reason")
+    if "placement_mode" in normalized:
+        placement_mode = _required_text(
+            normalized["placement_mode"], "placement_mode"
+        )
+        if placement_mode not in {
+            APPEND_PLACEMENT,
+            BEFORE_SELECTED_MEMBERS_PLACEMENT,
+            REPLACE_SELECTED_MEMBERS_PLACEMENT,
+        }:
+            raise StrategyError("unsupported placement_mode")
+        normalized["placement_mode"] = placement_mode
     return normalized
 
 
@@ -630,6 +800,13 @@ def _load_pool_lineages(
             raise StrategyError(
                 f"pool source binding drifted for rule_id: {entry['rule_id']}"
             )
+        if (
+            isinstance(lineage, _VotingCandidateLineage)
+            and lineage.parent_pool["revision"] >= normalized["revision"]
+        ):
+            raise StrategyError(
+                "Voting candidate must originate from an earlier Pool revision"
+            )
         lineages.append(lineage)
     return lineages
 
@@ -663,6 +840,11 @@ def _load_candidate_lineage(
         AUTOMATIC_TREE_LEAF_FRAGMENT_ORIGIN_TOOL,
         AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_SCHEMA_VERSION,
     )
+    voting_triple = (
+        VOTING_CANDIDATE_ARTIFACT_KIND,
+        VOTING_CANDIDATE_ORIGIN_TOOL,
+        VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+    )
     if triple == univariate_triple:
         return _load_univariate_candidate_lineage(
             runtime,
@@ -671,9 +853,20 @@ def _load_candidate_lineage(
             expected_content_hash=expected_content_hash,
             expected_asset_id=expected_asset_id,
             expected_asset_hash=expected_asset_hash,
+            cache=cache if cache is not None else _LineageCache.empty(),
         )
     if triple == automatic_leaf_triple:
         return _load_automatic_tree_candidate_lineage(
+            runtime,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            expected_content_hash=expected_content_hash,
+            expected_asset_id=expected_asset_id,
+            expected_asset_hash=expected_asset_hash,
+            cache=cache if cache is not None else _LineageCache.empty(),
+        )
+    if triple == voting_triple:
+        return _load_voting_candidate_lineage(
             runtime,
             task_id=task_id,
             artifact_id=artifact_id,
@@ -695,6 +888,7 @@ def _load_univariate_candidate_lineage(
     expected_content_hash: str,
     expected_asset_id: str,
     expected_asset_hash: str,
+    cache: _LineageCache,
 ) -> _UnivariateCandidateLineage:
     record = runtime.task_artifacts.get_for_task(task_id, artifact_id)
     if record is None:
@@ -780,8 +974,33 @@ def _load_univariate_candidate_lineage(
         feature=asset["feature"],
         method=asset["method"],
     )
-    dataset = _load_dataset_binding(runtime, evidence=evidence, source=parent_record)
     identity = evidence["identity"]
+    dataset_key = (identity["dataset_id"], identity["dataset_content_hash"])
+    dataset = cache.univariate_datasets.get(dataset_key)
+    if dataset is None:
+        dataset = _load_dataset_binding(
+            runtime,
+            evidence=evidence,
+            source=parent_record,
+        )
+        cache.univariate_datasets[dataset_key] = dataset
+    else:
+        parameters = evidence["generation"]["parameters"]
+        expected_metadata_hash = parameters.get("registry_metadata_hash")
+        if (
+            dataset.task_id != identity["task_id"]
+            or not hmac.compare_digest(
+                dataset.registry_metadata_hash,
+                str(expected_metadata_hash or ""),
+            )
+            or not hmac.compare_digest(
+                dataset.registry_metadata_hash,
+                str(parent_record.provenance.get("registry_metadata_hash") or ""),
+            )
+        ):
+            raise StrategyError(
+                "candidate source dataset registry metadata changed"
+            )
     if identity["task_id"] != task_id:
         raise StrategyError("candidate evidence belongs to another task")
     if provenance["dataset_id"] != identity["dataset_id"] or not hmac.compare_digest(
@@ -965,6 +1184,113 @@ def _replay_automatic_tree_lineage(
         verified_fragment
     )
     return verified_fragment, source_binding
+
+
+def _load_voting_candidate_lineage(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+    expected_asset_id: str,
+    expected_asset_hash: str,
+    cache: _LineageCache,
+) -> _VotingCandidateLineage:
+    key = (artifact_id, expected_content_hash)
+    cached = cache.voting.get(key)
+    if cached is not None:
+        if (
+            cached.candidate.asset["asset_id"] != expected_asset_id
+            or not hmac.compare_digest(
+                cached.candidate.asset["asset_hash"], expected_asset_hash
+            )
+        ):
+            raise StrategyError("cached Voting candidate binding changed")
+        return cached
+    if key in cache.voting_in_progress:
+        raise StrategyError("Voting candidate Pool ancestry contains a cycle")
+    if len(cache.voting_in_progress) >= _MAX_VOTING_ANCESTRY_DEPTH:
+        raise StrategyError("Voting candidate Pool ancestry exceeds depth budget")
+    if len(cache.voting) >= _MAX_VOTING_ANCESTRY_NODES:
+        raise StrategyError("Voting candidate Pool ancestry exceeds node budget")
+    cache.voting_in_progress.add(key)
+    try:
+        candidate = load_verified_voting_candidate_artifact(
+            runtime,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            expected_content_hash=expected_content_hash,
+            expected_asset_id=expected_asset_id,
+            expected_asset_hash=expected_asset_hash,
+        )
+        pool_ref = candidate.asset["pool_ref"]
+        if pool_ref["task_id"] != task_id:
+            raise StrategyError("Voting candidate parent Pool belongs to another task")
+        repository = StrategyCandidatePoolRepository(runtime.settings.db_path)
+        parent = repository.get_revision_by_id(
+            task_id,
+            pool_ref["strategy_type"],
+            pool_ref["revision_id"],
+        )
+        if parent is None:
+            raise StrategyError("Voting candidate parent Pool revision not found")
+        parent = validate_strategy_pool(parent)
+        verify_voting_candidate_asset_against_pool(candidate.asset, parent)
+        parent_artifact = _normalize_source_record(
+            _load_pool_artifact(runtime, task_id=task_id, snapshot=parent)
+        )
+        if (
+            candidate.provenance["pool_artifact_id"]
+            != parent_artifact.artifact_id
+            or not hmac.compare_digest(
+                candidate.provenance["pool_artifact_content_hash"],
+                parent_artifact.content_hash,
+            )
+        ):
+            raise StrategyError("Voting candidate parent Pool artifact changed")
+        parent_by_id = {entry["entry_id"]: entry for entry in parent["entries"]}
+        selected_parent_lineages: list[_CandidateLineage] = []
+        for selected in candidate.asset["selected_entries"]:
+            parent_entry = parent_by_id.get(selected["entry_id"])
+            if parent_entry is None:
+                raise StrategyError(
+                    "Voting candidate selected parent entry no longer exists"
+                )
+            source = parent_entry["source"]
+            selected_lineage = _load_candidate_lineage(
+                runtime,
+                task_id=task_id,
+                artifact_id=source["artifact_id"],
+                expected_content_hash=source["artifact_content_hash"],
+                expected_asset_id=source["asset_id"],
+                expected_asset_hash=source["asset_hash"],
+                cache=cache,
+            )
+            if selected_lineage.source_binding != source:
+                raise StrategyError(
+                    "Voting selected parent source binding changed"
+                )
+            selected_parent_lineages.append(selected_lineage)
+        parent_lineages = tuple(selected_parent_lineages)
+        verified_fragment = voting_candidate_to_verified_fragment(
+            candidate.asset,
+            artifact_binding=candidate.artifact_binding(),
+        )
+        source_binding, _rule_id, _execution = verified_fragment_pool_parts(
+            verified_fragment
+        )
+        lineage = _VotingCandidateLineage(
+            candidate=candidate,
+            parent_pool=parent,
+            parent_pool_artifact=parent_artifact,
+            parent_lineages=parent_lineages,
+            verified_fragment=verified_fragment,
+            source_binding=source_binding,
+        )
+        cache.voting[key] = lineage
+        return lineage
+    finally:
+        cache.voting_in_progress.discard(key)
 
 
 def _read_canonical_asset(path: Path) -> dict[str, Any]:
@@ -1155,10 +1481,19 @@ def _require_lineage_on_connection(
             conn,
             lineage,
             tasks_root=tasks_root,
+            cache=cache if cache is not None else _LineageCache.empty(),
         )
         return
     if isinstance(lineage, _AutomaticTreeCandidateLineage):
         _require_automatic_tree_lineage_on_connection(
+            conn,
+            lineage,
+            tasks_root=tasks_root,
+            cache=cache if cache is not None else _LineageCache.empty(),
+        )
+        return
+    if isinstance(lineage, _VotingCandidateLineage):
+        _require_voting_lineage_on_connection(
             conn,
             lineage,
             tasks_root=tasks_root,
@@ -1173,10 +1508,13 @@ def _require_univariate_lineage_on_connection(
     lineage: _UnivariateCandidateLineage,
     *,
     tasks_root: Path,
+    cache: _LineageCache,
 ) -> None:
     _require_source_on_connection(conn, lineage.asset_record)
     _require_source_on_connection(conn, lineage.parent_record)
-    _require_dataset_on_connection(conn, lineage.dataset)
+    dataset_key = (lineage.dataset.dataset_id, lineage.dataset.content_hash)
+    if dataset_key not in cache.datasets_verified_on_connection:
+        _require_dataset_on_connection(conn, lineage.dataset)
     for binding, message in (
         (lineage.asset_record, "candidate asset artifact content hash drifted"),
         (lineage.parent_record, "parent candidate report content hash drifted"),
@@ -1194,11 +1532,13 @@ def _require_univariate_lineage_on_connection(
         feature=live_asset["feature"],
         method=live_asset["method"],
     )
-    _require_file_content_hash(
-        lineage.dataset.path,
-        lineage.dataset.content_hash,
-        "candidate source dataset content hash drifted",
-    )
+    if dataset_key not in cache.datasets_verified_on_connection:
+        _require_file_content_hash(
+            lineage.dataset.path,
+            lineage.dataset.content_hash,
+            "candidate source dataset content hash drifted",
+        )
+        cache.datasets_verified_on_connection.add(dataset_key)
 
 
 def _require_automatic_tree_lineage_on_connection(
@@ -1239,12 +1579,14 @@ def _require_automatic_tree_lineage_on_connection(
     dataset_key = (lineage.dataset.dataset_id, lineage.dataset.content_hash)
     dataset = cache.datasets.get(dataset_key)
     if dataset is None:
-        _require_dataset_on_connection(conn, lineage.dataset)
-        _require_file_content_hash(
-            lineage.dataset.path,
-            lineage.dataset.content_hash,
-            "automatic-tree source dataset content hash drifted",
-        )
+        if dataset_key not in cache.datasets_verified_on_connection:
+            _require_dataset_on_connection(conn, lineage.dataset)
+            _require_file_content_hash(
+                lineage.dataset.path,
+                lineage.dataset.content_hash,
+                "automatic-tree source dataset content hash drifted",
+            )
+            cache.datasets_verified_on_connection.add(dataset_key)
         dataset = lineage.dataset
         cache.datasets[dataset_key] = dataset
     verified_fragment, source_binding = _replay_automatic_tree_lineage(
@@ -1261,6 +1603,90 @@ def _require_automatic_tree_lineage_on_connection(
         raise StrategyError(
             "automatic-tree candidate lineage changed before pool persistence"
         )
+
+
+def _require_voting_lineage_on_connection(
+    conn,
+    lineage: _VotingCandidateLineage,
+    *,
+    tasks_root: Path,
+    cache: _LineageCache,
+) -> None:
+    key = (lineage.candidate.artifact_id, lineage.candidate.content_hash)
+    if key in cache.voting_verified:
+        return
+    if key in cache.voting_in_progress:
+        raise StrategyError("Voting candidate Pool ancestry contains a cycle")
+    if len(cache.voting_in_progress) >= _MAX_VOTING_ANCESTRY_DEPTH:
+        raise StrategyError("Voting candidate Pool ancestry exceeds depth budget")
+    if (
+        len(cache.voting_verified) + len(cache.voting_in_progress)
+        >= _MAX_VOTING_ANCESTRY_NODES
+    ):
+        raise StrategyError("Voting candidate Pool ancestry exceeds node budget")
+    cache.voting_in_progress.add(key)
+    try:
+        candidate = load_verified_voting_candidate_artifact_on_connection(
+            conn,
+            tasks_dir=tasks_root,
+            task_id=lineage.candidate.task_id,
+            artifact_id=lineage.candidate.artifact_id,
+            expected_content_hash=lineage.candidate.content_hash,
+            expected_asset_id=lineage.candidate.asset["asset_id"],
+            expected_asset_hash=lineage.candidate.asset["asset_hash"],
+        )
+        pool_ref = candidate.asset["pool_ref"]
+        parent = StrategyCandidatePoolRepository.get_revision_by_id_on_connection(
+            conn,
+            candidate.task_id,
+            pool_ref["strategy_type"],
+            pool_ref["revision_id"],
+        )
+        if parent is None:
+            raise StrategyError("Voting candidate parent Pool revision not found")
+        parent = validate_strategy_pool(parent)
+        verify_voting_candidate_asset_against_pool(candidate.asset, parent)
+        _require_parent_pool_artifact_on_connection(
+            conn,
+            lineage.parent_pool_artifact,
+            snapshot=parent,
+            tasks_root=tasks_root,
+        )
+        if (
+            candidate.provenance["pool_artifact_id"]
+            != lineage.parent_pool_artifact.artifact_id
+            or not hmac.compare_digest(
+                candidate.provenance["pool_artifact_content_hash"],
+                lineage.parent_pool_artifact.content_hash,
+            )
+        ):
+            raise StrategyError("Voting candidate parent Pool artifact changed")
+        for parent_lineage in lineage.parent_lineages:
+            _require_lineage_on_connection(
+                conn,
+                parent_lineage,
+                tasks_root=tasks_root,
+                cache=cache,
+            )
+        verified_fragment = voting_candidate_to_verified_fragment(
+            candidate.asset,
+            artifact_binding=candidate.artifact_binding(),
+        )
+        source_binding, _rule_id, _execution = verified_fragment_pool_parts(
+            verified_fragment
+        )
+        if (
+            candidate != lineage.candidate
+            or parent != lineage.parent_pool
+            or verified_fragment != lineage.verified_fragment
+            or source_binding != lineage.source_binding
+        ):
+            raise StrategyError(
+                "Voting candidate lineage changed before Pool persistence"
+            )
+        cache.voting_verified.add(key)
+    finally:
+        cache.voting_in_progress.discard(key)
 
 
 def _require_parent_pool_artifact_on_connection(

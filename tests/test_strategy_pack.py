@@ -231,6 +231,9 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         for tool in manifest.tools
         if tool.name == "materialize_automatic_tree_leaf_fragment"
     )
+    voting_tool = next(
+        tool for tool in manifest.tools if tool.name == "build_voting_candidate"
+    )
     refinement_tool = next(
         tool for tool in manifest.tools if tool.name == "refine_univariate_candidate"
     )
@@ -267,6 +270,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "build_automatic_tree_candidate",
         "apply_automatic_tree",
         "materialize_automatic_tree_leaf_fragment",
+        "build_voting_candidate",
         "refine_univariate_candidate",
         "add_candidate_to_pool",
         "remove_pool_entry",
@@ -437,6 +441,54 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         automatic_tree_leaf_tool.output_schema["properties"]["artifacts"]["minItems"]
         == 1
     )
+    assert voting_tool.determinism == "deterministic"
+    assert voting_tool.policy.human_decision_gate == "none"
+    assert voting_tool.policy.effect_authorization == "none"
+    assert set(voting_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+    }
+    assert voting_tool.input_schema["additionalProperties"] is False
+    assert set(voting_tool.input_schema["required"]) == {
+        "strategy_type",
+        "expected_pool_revision",
+        "expected_pool_snapshot_hash",
+        "selected_entry_ids",
+        "n",
+    }
+    assert voting_tool.input_schema["properties"]["selected_entry_ids"] == {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 50,
+        "uniqueItems": True,
+        "items": {"type": "string", "minLength": 1},
+    }
+    assert voting_tool.output_schema["additionalProperties"] is False
+    assert voting_tool.output_schema["properties"]["schema_version"] == {
+        "const": "strategy.build-voting-candidate-tool.v1"
+    }
+    assert voting_tool.output_schema["properties"]["selected_entries"][
+        "items"
+    ] == {"$ref": "#/$defs/selected_entry"}
+    assert voting_tool.output_schema["properties"]["not_admitted"] == {
+        "const": True
+    }
+    assert voting_tool.output_schema["properties"]["not_applied"] == {
+        "const": True
+    }
+    assert voting_tool.output_schema["properties"]["not_adopted"] == {
+        "const": True
+    }
+    assert voting_tool.output_schema["properties"]["not_deployed"] == {
+        "const": True
+    }
+    assert voting_tool.output_schema["properties"]["artifacts"] == {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 1,
+        "items": {"$ref": "#/$defs/artifact"},
+    }
     assert refinement_tool.policy.human_decision_gate == "none"
     assert refinement_tool.policy.effect_authorization == "none"
     assert set(refinement_tool.side_effects) == {
@@ -444,9 +496,10 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "read:dataset",
         "write:artifact",
     }
-    assert manifest.version == "0.6.0"
+    assert manifest.version == "0.7.0"
     assert "refined univariate asset" in add_pool_tool.summary
     assert "automatic-tree leaf selection" in add_pool_tool.summary
+    assert "Voting n-of-k candidate" in add_pool_tool.summary
     for pool_tool in pool_mutation_tools:
         assert pool_tool.policy.human_decision_gate == "none"
         assert pool_tool.policy.effect_authorization == "none"

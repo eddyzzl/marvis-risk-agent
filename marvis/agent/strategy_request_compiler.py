@@ -64,6 +64,7 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "univariate_candidate_refinement",
     "automatic_tree_candidate_build",
     "automatic_tree_leaf_materialization",
+    "voting_candidate_build",
     "strategy_pool_add_candidate",
     "strategy_pool_remove_entry",
     "strategy_pool_set_action",
@@ -333,6 +334,132 @@ _AUTOMATIC_TREE_LEAF_NEGATED_CLAUSE_RE = re.compile(
     re.IGNORECASE,
 )
 _POOL_ITEM_ID_RE = re.compile(r"^(?:candidate-rule|pool-entry)-[0-9a-f]{32}$")
+_VOTING_RULE_ID_RE = re.compile(r"^candidate-rule-[0-9a-f]{32}$")
+_VOTING_RULE_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])candidate-rule-[0-9a-f]{32}(?![A-Za-z0-9_-])"
+)
+_VOTING_SUBJECT_RE = re.compile(
+    r"(?:投票|(?<![A-Za-z0-9_])(?:Voting|n[-_ ]?of[-_ ]?k)"
+    r"(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_VOTING_BUILD_INTENT_RE = re.compile(
+    r"(?:构建|生成|创建|测算|分析|评估|做)"
+    r"[^，,；;。\n]{0,40}(?:投票|Voting|n[-_ ]?of[-_ ]?k)|"
+    r"(?:投票|Voting|n[-_ ]?of[-_ ]?k)"
+    r"[^，,；;。\n]{0,40}(?:构建|生成|创建|测算|分析|评估)|"
+    r"(?<![A-Za-z0-9_])(?:build|create|generate|evaluate|analy[sz]e)"
+    r"[^,;.!?\n]{0,40}(?:voting|n[-_ ]?of[-_ ]?k)"
+    r"(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])(?:voting|n[-_ ]?of[-_ ]?k)"
+    r"[^,;.!?\n]{0,40}(?:build|create|generate|evaluate|analy[sz]e)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_VOTING_NEGATED_BUILD_RE = re.compile(
+    r"(?:不要|不用|无需|不需要|先不|暂不|取消|停止)"
+    r"[^，,；;。\n]{0,24}(?:构建|生成|创建|测算|分析|评估|投票|Voting|n[-_ ]?of[-_ ]?k)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|cancel|stop)"
+    r"[^,;.!?\n]{0,24}(?:build|create|generate|evaluate|voting|n[-_ ]?of[-_ ]?k)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_VOTING_NONCOMMAND_RE = re.compile(
+    r"[?？]|"
+    r"(?:能否|可否|是否|可以吗|能不能|要不要|会不会|如何|怎么|怎样|"
+    r"假设|假如|如果|若|万一|演示|示范|测试|举例|说明一下|解释|"
+    r"介绍|描述|告诉我|展示)"
+    r"[^；;。\n]{0,220}(?:构建|生成|创建|测算|分析|评估|投票|Voting|n[-_ ]?of[-_ ]?k)|"
+    r"(?:昨天|昨日|之前|此前|过去|上次|前次|早些时候|曾经|历史上|"
+    r"文档|报告|示例|例子|原文|材料)"
+    r"[^；;。\n]{0,220}(?:构建|生成|创建|测算|投票|Voting|"
+    r"n[-_ ]?of[-_ ]?k|candidate-rule-[0-9a-f]{32})|"
+    r"(?:未来|将来|以后|稍后|晚点|回头|明天|后天|下周|下月|下个月|"
+    r"月底|届时|[一二两三四五六七八九十百0-9]+天后)"
+    r"[^；;。\n]{0,220}(?:构建|生成|创建|测算|投票|Voting|n[-_ ]?of[-_ ]?k)|"
+    r"(?:等|待)[^；;。\n]{0,100}(?:后|之后|再|才)"
+    r"[^；;。\n]{0,140}(?:构建|生成|创建|测算|投票|Voting|n[-_ ]?of[-_ ]?k)|"
+    r"(?<![A-Za-z0-9_])(?:can\s+you|could\s+you|would\s+you|"
+    r"is\s+it\s+possible|what\s+if|suppose|assuming|hypothetically|"
+    r"how\s+to|demonstrate|demo|test|example|yesterday|previously|"
+    r"earlier|last\s+time|in\s+the\s+future|later|tomorrow|"
+    r"next\s+(?:week|month)|when|once|after)"
+    r"[^;.!?\n]{0,220}(?:build|create|generate|evaluate|analy[sz]e|"
+    r"voting|n[-_ ]?of[-_ ]?k)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_VOTING_POSTPOSED_CANCELLATION_RE = re.compile(
+    r"(?:^|[，,；;。.!?？！]\s*)(?:等等|等一下|算了|作罢|反悔了|"
+    r"取消(?:吧|了)?|撤回|撤销|停止|先不做(?:了)?|暂不做(?:了)?|"
+    r"别做(?:了)?|不要做(?:了)?|不执行(?:了)?)(?:[，,。.!！?？]?\s*)$|"
+    r"(?:^|[,;.!?]\s*)(?:never\s+mind|forget\s+it|scratch\s+that|"
+    r"cancel|abort|withdraw|stop|do(?:n't|\s+not)\s+(?:do|execute)\s+it)"
+    r"(?:[,!.?]?\s*)$",
+    re.IGNORECASE,
+)
+_VOTING_HEURISTIC_SELECTION_RE = re.compile(
+    r"(?:最好|最优|最佳|最差|最坏|风险最高|坏率最高|表现最好|"
+    r"自动(?:选择|挑选|推荐)|刚才(?:那些|这些|的)?|上述|这些规则|那些规则)|"
+    r"(?<![A-Za-z0-9_])(?:best|worst|top[- ]?\d*|highest[- ]risk|"
+    r"automatically\s+(?:select|pick|recommend)|those|these|previous)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_VOTING_FOLLOW_UP_RE = re.compile(
+    r"(?:加入|放入|写入)[^，,；;。\n]{0,16}(?:策略池|规则池|Pool)|"
+    r"(?:入池|设置(?:业务)?动作|采纳|部署|上线|投产|写回|回写)|"
+    r"(?:并|并且|然后|随后|再|同时|接着|直接)"
+    r"[^，,；;。\n]{0,40}(?:拒绝|审批|通过|复核)|"
+    r"(?<![A-Za-z0-9_])(?:add\s+to\s+(?:the\s+)?(?:strategy\s+)?pool|"
+    r"set\s+action|adopt|deploy|publish|write[- ]?back)(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])(?:and(?:\s+then)?|then|also)"
+    r"[^,;.!?\n]{0,40}(?:reject|approve|review)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_VOTING_OTHER_POOL_OPERATION_RE = re.compile(
+    r"(?:删除|移除|重排|重新排序|排序|编译|预览)"
+    r"[^，,；;。\n]{0,32}(?:策略池|规则池|pool|pool-entry-|candidate-rule-)|"
+    r"(?:策略池|规则池|pool)"
+    r"[^，,；;。\n]{0,32}(?:删除|移除|重排|重新排序|排序|编译|预览)|"
+    r"(?<![A-Za-z0-9_])(?:remove|delete|reorder|sort|compile|preview)"
+    r"[^,;.!?\n]{0,32}(?:strategy\s+pool|rule\s+pool|pool-entry-|candidate-rule-)|"
+    r"(?<![A-Za-z0-9_])(?:strategy\s+pool|rule\s+pool|pool)"
+    r"[^,;.!?\n]{0,32}(?:remove|delete|reorder|sort|compile|preview)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_VOTING_NEGATED_CONTROL_RE = re.compile(
+    r"(?:不要|不用|别用|不选|别选|排除|剔除|去掉|忽略|删除|移除)"
+    r"[^，,；;。\n]{0,24}(?:candidate-rule-[0-9a-f]{32}|"
+    r"n\s*(?:=|:|：|为)?\s*\d+)|"
+    r"(?:candidate-rule-[0-9a-f]{32}|n\s*(?:=|:|：|为)?\s*\d+)"
+    r"[^，,；;。\n]{0,16}(?:不要|不用|不选|排除|剔除|去掉|忽略)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|exclude|omit|remove|delete)"
+    r"[^,;.!?\n]{0,24}(?:candidate-rule-[0-9a-f]{32}|"
+    r"n\s*(?:=|:)?\s*\d+)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_VOTING_COMMAND_CLAUSE_RE = re.compile(r"[^；;。.!！?？\n]+")
+_VOTING_COMMAND_RESET_RE = re.compile(
+    r"(?:现在|本次|这次|当前|接下来|立即|马上|请|再|然后|随后)\s*$"
+)
+_VOTING_N_PATTERNS = (
+    re.compile(
+        r"(?:n|min[_ -]?hits?|阈值|最少命中数|至少命中|命中至少)\s*"
+        r"(?:=|:|：|为)?\s*(?P<n>\d+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?P<n>\d+)\s*(?:-|/|\s)\s*(?:of|OF)\s*(?P<k>\d+)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?P<k>\d+)\s*(?:个)?\s*选\s*(?P<n>\d+)"),
+    re.compile(
+        r"(?:至少|最少)\s*(?:命中)?\s*(?P<n>\d+)\s*(?:个|条|项)?",
+        re.IGNORECASE,
+    ),
+)
 _STRATEGY_POOL_WORKFLOWS = frozenset(
     {
         "strategy_pool_add_candidate",
@@ -350,6 +477,9 @@ _POOL_ACTION_TYPES = {
     "pricing": frozenset({"pricing"}),
     "segmentation": frozenset({"segment"}),
 }
+_POOL_ADD_PLACEMENT_MODES = frozenset(
+    {"before_selected_members", "replace_selected_members"}
+)
 _POOL_ACTION_GROUNDING = {
     "approval": re.compile(
         r"(?:通过|批准|准入)|(?<![A-Za-z0-9_])(?:approve|approval)"
@@ -643,6 +773,26 @@ _POOL_ADD_HIT_OUTPUT_VALUE_LABEL_RE = re.compile(
     r"(?:规则)?命中(?:动作)?输出值|"
     r"(?<![A-Za-z0-9_])(?:hit|match(?:ed)?)(?:\s+action)?\s+"
     r"output(?:\s+|[-_])value(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_ADD_PLACEMENT_MODE_LABEL_RE = re.compile(
+    r"(?:放置方式|placement\s+mode)\s*(?:[:：=]|是|为)",
+    re.IGNORECASE,
+)
+_POOL_ADD_BEFORE_SELECTED_MEMBERS_RE = re.compile(
+    r"保留(?:原|所选|这些)?成员作为回退"
+    r"\s*(?:，|,|并且|并|且)?\s*"
+    r"(?:将|把)?\s*(?:Voting|投票(?:候选)?)?\s*"
+    r"放在(?:原|所选|这些)?成员前(?:面)?",
+    re.IGNORECASE,
+)
+_POOL_ADD_REPLACE_SELECTED_MEMBERS_RE = re.compile(
+    r"由\s*(?:Voting|投票(?:候选)?)\s*"
+    r"(?:替代|替换|取代)(?:原|所选|这些)?成员",
+    re.IGNORECASE,
+)
+_POOL_ADD_BEFORE_SELECTED_MEMBERS_EXPLANATION_RE = re.compile(
+    r"保留(?:原|所选|这些)?成员作为未达\s*n\s*时的后续规则",
     re.IGNORECASE,
 )
 _POOL_ADD_REASON_LABEL_RE = re.compile(
@@ -1854,6 +2004,8 @@ def _validate_standard_workflow_payload(
             normalized = _validate_automatic_tree_leaf_materialization_inputs(
                 raw_inputs
             )
+        elif workflow == "voting_candidate_build":
+            normalized = _validate_voting_candidate_build_inputs(raw_inputs)
         elif workflow in _STRATEGY_POOL_WORKFLOWS:
             normalized = _validate_strategy_pool_workflow_inputs(
                 workflow,
@@ -2496,6 +2648,60 @@ def _validate_automatic_tree_leaf_materialization_inputs(
     return normalized
 
 
+def _validate_voting_candidate_build_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate only the explicit human controls for one n-of-k candidate.
+
+    Pool revision/hash, entry ids, executable conditions, sample bindings and
+    every measured value remain platform-owned and are resolved after the
+    natural-language request has passed grounding.
+    """
+
+    workflow = "voting_candidate_build"
+    allowed = {"strategy_type", "rule_ids", "n"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted(allowed - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+    strategy_type = _required_text(
+        inputs["strategy_type"], name=f"{workflow} strategy_type"
+    )
+    if strategy_type not in STRATEGY_TYPES:
+        raise _DraftValidationError(
+            f"{workflow} strategy_type 只能是："
+            + "、".join(STRATEGY_TYPES)
+            + "。"
+        )
+    raw_rule_ids = inputs["rule_ids"]
+    if (
+        not isinstance(raw_rule_ids, Sequence)
+        or isinstance(raw_rule_ids, str | bytes | bytearray)
+        or not 2 <= len(raw_rule_ids) <= 50
+    ):
+        raise _DraftValidationError(
+            f"{workflow} rule_ids 必须是 2 到 50 个完整 rule_id 的数组。"
+        )
+    rule_ids: list[str] = []
+    for value in raw_rule_ids:
+        rule_id = _required_text(value, name=f"{workflow} rule_ids")
+        if _VOTING_RULE_ID_RE.fullmatch(rule_id) is None:
+            raise _DraftValidationError(
+                f"{workflow} rule_ids 必须是完整的 candidate-rule ID。"
+            )
+        rule_ids.append(rule_id)
+    if len(set(rule_ids)) != len(rule_ids):
+        raise _DraftValidationError(f"{workflow} rule_ids 不能包含重复 ID。")
+    n = inputs["n"]
+    if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= len(rule_ids):
+        raise _DraftValidationError(
+            f"{workflow} n 必须是 1 到规则数 {len(rule_ids)} 的整数。"
+        )
+    return {"strategy_type": strategy_type, "rule_ids": rule_ids, "n": n}
+
+
 def _automatic_tree_selection_reason(value: object) -> str:
     """Use the leaf-fragment contract's NFC and canonical-whitespace rules."""
 
@@ -2737,7 +2943,13 @@ def _validate_strategy_pool_workflow_inputs(
     common = {"strategy_type", "reason"}
     allowed_by_workflow = {
         "strategy_pool_add_candidate": common
-        | {"candidate_asset_id", "selection_id", "default_action", "action"},
+        | {
+            "candidate_asset_id",
+            "selection_id",
+            "default_action",
+            "action",
+            "placement_mode",
+        },
         "strategy_pool_remove_entry": common | {"rule_id", "entry_id"},
         "strategy_pool_set_action": common | {"rule_id", "entry_id", "action"},
         "strategy_pool_reorder": common | {"ordered_ids"},
@@ -2803,6 +3015,17 @@ def _validate_strategy_pool_workflow_inputs(
                 ),
             }
         )
+        if "placement_mode" in inputs:
+            placement_mode = _required_text(
+                inputs["placement_mode"],
+                name=f"{workflow} placement_mode",
+            )
+            if placement_mode not in _POOL_ADD_PLACEMENT_MODES:
+                raise _DraftValidationError(
+                    f"{workflow} placement_mode 只能是 "
+                    "before_selected_members 或 replace_selected_members。"
+                )
+            normalized["placement_mode"] = placement_mode
     elif workflow in {"strategy_pool_remove_entry", "strategy_pool_set_action"}:
         identifiers = [name for name in ("rule_id", "entry_id") if name in inputs]
         if len(identifiers) != 1:
@@ -2876,6 +3099,75 @@ def _strategy_pool_identifier(value: object, *, name: str) -> str:
     return identifier
 
 
+def _utterance_targets_voting_candidate(utterance: str) -> bool:
+    """Keep an explicit Voting request out of generic lifecycle/workflow routes."""
+
+    return (
+        _VOTING_SUBJECT_RE.search(utterance) is not None
+        and len(tuple(_VOTING_RULE_ID_TOKEN_RE.finditer(utterance))) >= 2
+    )
+
+
+def _voting_positive_command_clause_spans(
+    utterance: str,
+) -> tuple[tuple[int, int], ...]:
+    """Return one span per positive Voting command, preserving duplicates."""
+
+    spans: list[tuple[int, int]] = []
+    for clause_match in _VOTING_COMMAND_CLAUSE_RE.finditer(utterance):
+        clause = clause_match.group(0)
+        for command_match in _VOTING_BUILD_INTENT_RE.finditer(clause):
+            prefix = clause[: command_match.start()]
+            comma = max(prefix.rfind("，"), prefix.rfind(","))
+            local_start = comma + 1
+            reset = _VOTING_COMMAND_RESET_RE.search(prefix)
+            if reset is not None:
+                local_start = max(local_start, reset.start())
+            spans.append(
+                (clause_match.start() + local_start, clause_match.end())
+            )
+    return tuple(spans)
+
+
+def _voting_strategy_type_mentions(
+    utterance: str,
+) -> tuple[tuple[str, int, int], ...]:
+    return tuple(
+        (strategy_type, match.start(), match.end())
+        for strategy_type, pattern in _POOL_STRATEGY_TYPE_GROUNDING.items()
+        for match in pattern.finditer(utterance)
+    )
+
+
+def _voting_n_mentions(
+    utterance: str,
+) -> tuple[tuple[int, int | None, int, int], ...]:
+    mentions: list[tuple[int, int | None, int, int]] = []
+    for pattern in _VOTING_N_PATTERNS:
+        for match in pattern.finditer(utterance):
+            k_token = match.groupdict().get("k")
+            mentions.append(
+                (
+                    int(match.group("n")),
+                    None if k_token is None else int(k_token),
+                    match.start(),
+                    match.end(),
+                )
+            )
+    return tuple(mentions)
+
+
+def _voting_mention_is_within(
+    mention_start: int,
+    mention_end: int,
+    command_span: tuple[int, int],
+) -> bool:
+    return (
+        command_span[0] <= mention_start
+        and mention_end <= command_span[1]
+    )
+
+
 def _ground_refinement_request(
     utterance: str,
     result: StrategyRequestCompilation,
@@ -2883,6 +3175,21 @@ def _ground_refinement_request(
     whitelist: tuple[str, ...],
 ) -> StrategyRequestCompilation:
     draft = result.draft
+    if (
+        draft is not None
+        and _utterance_targets_voting_candidate(utterance)
+        and not (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow == "voting_candidate_build"
+        )
+    ):
+        return _clarification(
+            "原话明确点名 Voting / n-of-k 和多个完整 candidate-rule ID，"
+            "只能编译为 voting_candidate_build；通用策略生命周期或其他 "
+            "Workflow 不能消费这些控制。",
+            code="voting_candidate_workflow_required",
+            fields=("workflow",),
+        )
     if not isinstance(draft, StandardWorkflowRequestDraft):
         return result
     if draft.workflow in _STRATEGY_POOL_WORKFLOWS:
@@ -2895,6 +3202,8 @@ def _ground_refinement_request(
         )
     if draft.workflow == "automatic_tree_leaf_materialization":
         return _ground_automatic_tree_leaf_materialization(utterance, result)
+    if draft.workflow == "voting_candidate_build":
+        return _ground_voting_candidate_build(utterance, result)
     if draft.workflow != "univariate_candidate_refinement":
         return result
     inputs = draft.to_dict()["workflow_inputs"]
@@ -2942,6 +3251,154 @@ def _ground_refinement_request(
         code="strategy_refinement_controls_not_grounded",
         fields=tuple(dict.fromkeys(missing_controls)),
     )
+
+
+def _ground_voting_candidate_build(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Prove the exact rule set and n came from one positive user command."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if _VOTING_NEGATED_BUILD_RE.search(utterance) is not None:
+        return _clarification(
+            "原话否定了 Voting 候选构建，本轮不会生成候选。"
+            "如需继续，请重新给出一条明确的正向构建请求。",
+            code="voting_candidate_build_intent_negated",
+            fields=("build_intent",),
+        )
+    if (
+        _VOTING_NONCOMMAND_RE.search(utterance) is not None
+        or _VOTING_POSTPOSED_CANCELLATION_RE.search(utterance) is not None
+    ):
+        return _clarification(
+            "当前原话是问句、假设/未来/历史描述、演示性文本或已在句尾撤销，"
+            "不能视为立即执行 Voting 构建的唯一正向命令。请单独重述本次要构建的"
+            "策略池类型、完整 rule_id 列表和唯一 n-of-k 阈值。",
+            code="voting_candidate_positive_command_required",
+            fields=("build_intent",),
+        )
+    command_spans = _voting_positive_command_clause_spans(utterance)
+    if not command_spans:
+        return _clarification(
+            "请明确说出要构建或测算一个 Voting / n-of-k 候选，并在同一条"
+            "请求中给出策略池类型、完整 rule_id 列表和 n。",
+            code="voting_candidate_build_intent_required",
+            fields=("build_intent",),
+        )
+    if len(command_spans) != 1:
+        return _clarification(
+            "一次请求只能包含一个立即执行的 Voting 构建/评估子句；"
+            "请把每组 rule_id 与 n-of-k 控制拆成独立请求。",
+            code="voting_candidate_single_command_required",
+            fields=("build_intent",),
+        )
+    command_span = command_spans[0]
+    if _VOTING_HEURISTIC_SELECTION_RE.search(utterance) is not None:
+        return _clarification(
+            "Voting 构建必须逐字点名当前 Strategy Pool 中的完整 rule_id；"
+            "不能让模型按最好、风险最高、刚才那些等表述自动选择规则。",
+            code="voting_candidate_explicit_rules_required",
+            fields=("rule_ids",),
+        )
+    if (
+        _VOTING_FOLLOW_UP_RE.search(utterance) is not None
+        or _VOTING_OTHER_POOL_OPERATION_RE.search(utterance) is not None
+    ):
+        return _clarification(
+            "本轮只生成并测算 Voting 候选；删除、重排、编译、加入 "
+            "Strategy Pool、设置业务动作、采纳、部署或写回必须另发请求。",
+            code="voting_candidate_single_step_required",
+            fields=("next_action",),
+        )
+    if _VOTING_NEGATED_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "本轮 Voting 控制中含有被否定、排除或随后改写的 rule_id/n；"
+            "请重新给出不含历史值和否定值的一组完整 rule_id 与唯一 n。",
+            code="voting_candidate_negated_control",
+            fields=("rule_ids", "n"),
+        )
+
+    rule_matches = tuple(_VOTING_RULE_ID_TOKEN_RE.finditer(utterance))
+    strategy_type_mentions = _voting_strategy_type_mentions(utterance)
+    n_mentions = _voting_n_mentions(utterance)
+    if (
+        any(
+            not _voting_mention_is_within(match.start(), match.end(), command_span)
+            for match in rule_matches
+        )
+        or any(
+            not _voting_mention_is_within(start, end, command_span)
+            for _strategy_type, start, end in strategy_type_mentions
+        )
+        or any(
+            not _voting_mention_is_within(start, end, command_span)
+            for _n, _k, start, end in n_mentions
+        )
+    ):
+        return _clarification(
+            "Voting 的策略池类型、完整 rule_id 与 n-of-k 必须全部位于唯一"
+            "正向构建子句中；历史、引用、否定或其他子句中的控制不会被消费。",
+            code="voting_candidate_controls_outside_command",
+            fields=("strategy_type", "rule_ids", "n"),
+        )
+
+    observed_rule_ids = [match.group(0) for match in rule_matches]
+    expected_rule_ids = list(inputs["rule_ids"])
+    if (
+        len(observed_rule_ids) != len(set(observed_rule_ids))
+        or set(observed_rule_ids) != set(expected_rule_ids)
+        or len(observed_rule_ids) != len(expected_rule_ids)
+    ):
+        return _clarification(
+            "请逐字提供 2 到 50 个互不重复的完整 candidate-rule ID；"
+            "模型不能补全、替换、遗漏或从代词推断规则。",
+            code="voting_candidate_rules_not_grounded",
+            fields=("rule_ids",),
+        )
+
+    strategy_type = str(inputs["strategy_type"])
+    observed_strategy_types = {
+        candidate for candidate, _start, _end in strategy_type_mentions
+    }
+    if observed_strategy_types != {strategy_type}:
+        return _clarification(
+            "请显式且唯一标注 Voting 来源 Strategy Pool 的类型；存在缺失、多个"
+            "类型或与结构化草案不一致时，平台不会替用户选择 approval/reject/"
+            "limit/pricing/segmentation。",
+            code="voting_candidate_strategy_type_not_grounded",
+            fields=("strategy_type",),
+        )
+
+    n_bindings = _voting_n_bindings(
+        utterance[command_span[0] : command_span[1]]
+    )
+    if (
+        not n_bindings
+        or {value for value, _k in n_bindings} != {inputs["n"]}
+        or any(
+            supplied_k is not None and supplied_k != len(expected_rule_ids)
+            for _value, supplied_k in n_bindings
+        )
+    ):
+        return _clarification(
+            "请明确且唯一给出与规则数量一致的 n-of-k 命中阈值，例如“n=2”"
+            "或“3 选 2”；多个阈值、错误的 k 或草案不一致时平台不会替用户选择。",
+            code="voting_candidate_n_not_grounded",
+            fields=("n",),
+        )
+    return result
+
+
+def _voting_n_bindings(utterance: str) -> tuple[tuple[int, int | None], ...]:
+    bindings: list[tuple[int, int | None]] = []
+    for n, k, _start, _end in _voting_n_mentions(utterance):
+        binding = (n, k)
+        if binding not in bindings:
+            bindings.append(binding)
+    return tuple(bindings)
 
 
 def _automatic_tree_platform_control_clarification(
@@ -4175,11 +4632,18 @@ def _pool_add_unconsumed_text(utterance: str) -> str:
         _POOL_ADD_HIT_REASON_CODE_LABEL_RE,
         _POOL_ADD_DEFAULT_OUTPUT_VALUE_LABEL_RE,
         _POOL_ADD_HIT_OUTPUT_VALUE_LABEL_RE,
+        _POOL_ADD_PLACEMENT_MODE_LABEL_RE,
     ):
         spans.extend(
             (match.start(), _pool_add_clause_end(utterance, start=match.end()))
             for match in pattern.finditer(utterance)
         )
+    for pattern in (
+        _POOL_ADD_BEFORE_SELECTED_MEMBERS_RE,
+        _POOL_ADD_REPLACE_SELECTED_MEMBERS_RE,
+        _POOL_ADD_BEFORE_SELECTED_MEMBERS_EXPLANATION_RE,
+    ):
+        spans.extend(match.span() for match in pattern.finditer(utterance))
     spans.extend(_pool_add_negated_follow_up_spans(utterance))
     spans.extend(_pool_add_reason_spans(utterance))
     return _pool_command_residual(_pool_strip_spans(utterance, spans))
@@ -4730,6 +5194,73 @@ def _pool_add_action_payload_controls(
     return tuple(missing)
 
 
+def _pool_add_placement_modes(
+    utterance: str,
+) -> tuple[frozenset[str], bool, bool]:
+    """Read only an exact label or one of the two reviewed Chinese semantics."""
+
+    reason_spans = _pool_add_reason_spans(utterance)
+    label_bodies = _pool_add_label_bodies(
+        utterance,
+        _POOL_ADD_PLACEMENT_MODE_LABEL_RE,
+    )
+    label_count = _pool_add_label_match_count(
+        utterance,
+        _POOL_ADD_PLACEMENT_MODE_LABEL_RE,
+    )
+    observed: set[str] = set()
+    label_values_valid = label_count == len(label_bodies) and label_count <= 1
+    for body in label_bodies:
+        if body in _POOL_ADD_PLACEMENT_MODES:
+            observed.add(body)
+            continue
+        body_matches = {
+            mode
+            for mode, pattern in (
+                (
+                    "before_selected_members",
+                    _POOL_ADD_BEFORE_SELECTED_MEMBERS_RE,
+                ),
+                (
+                    "replace_selected_members",
+                    _POOL_ADD_REPLACE_SELECTED_MEMBERS_RE,
+                ),
+            )
+            if (
+                (match := pattern.fullmatch(body)) is not None
+                and match.start() == 0
+            )
+        }
+        if len(body_matches) != 1:
+            label_values_valid = False
+        observed.update(body_matches)
+
+    phrase_matches: list[tuple[str, re.Match[str]]] = []
+    for mode, pattern in (
+        ("before_selected_members", _POOL_ADD_BEFORE_SELECTED_MEMBERS_RE),
+        ("replace_selected_members", _POOL_ADD_REPLACE_SELECTED_MEMBERS_RE),
+    ):
+        phrase_matches.extend((mode, match) for match in pattern.finditer(utterance))
+    phrase_values_valid = True
+    for mode, match in phrase_matches:
+        if any(left <= match.start() < right for left, right in reason_spans):
+            continue
+        if _pool_operation_is_negated(utterance, start=match.start()):
+            phrase_values_valid = False
+            continue
+        observed.add(mode)
+
+    explicit = label_count > 0 or any(
+        not any(left <= match.start() < right for left, right in reason_spans)
+        for _mode, match in phrase_matches
+    )
+    return (
+        frozenset(observed),
+        label_values_valid and phrase_values_valid,
+        explicit,
+    )
+
+
 def _pool_add_explicit_reasons(utterance: str) -> tuple[str, ...]:
     return tuple(
         (match.group("zh") or match.group("en")).strip()
@@ -4929,6 +5460,26 @@ def _ground_strategy_pool_add_request(
             "当前无法核对：" + "、".join(dict.fromkeys(missing_controls)) + "。",
             code="strategy_pool_add_controls_not_grounded",
             fields=tuple(dict.fromkeys(missing_controls)),
+        )
+
+    observed_placement_modes, placement_values_valid, placement_is_explicit = (
+        _pool_add_placement_modes(utterance)
+    )
+    placement_mode = inputs.get("placement_mode")
+    if (
+        placement_mode is not None
+        and (
+            not placement_values_valid
+            or observed_placement_modes != {placement_mode}
+        )
+    ) or (placement_mode is None and placement_is_explicit):
+        return _clarification(
+            "可选 placement_mode 只能由“放置方式: "
+            "before_selected_members/replace_selected_members”或清晰中文"
+            "“保留成员作为回退并放在成员前/由 Voting 替代成员”落地；"
+            "缺失、模糊、冲突或与草案不一致时不会猜测。",
+            code="strategy_pool_add_placement_mode_not_grounded",
+            fields=("placement_mode",),
         )
 
     explicit_reasons = _pool_add_explicit_reasons(utterance)
@@ -5400,6 +5951,16 @@ def _standard_workflow_confirmation_text(
         ]
         if "selection_reason" in inputs:
             details.append(f"用户原话选择说明：{inputs['selection_reason']}")
+    elif draft.workflow == "voting_candidate_build":
+        details = [
+            "已识别为〔Voting / n-of-k 候选构建 Workflow〕",
+            f"来源 Strategy Pool 类型：{inputs['strategy_type']}",
+            "精确成员规则：" + "、".join(inputs["rule_ids"]),
+            f"组合条件：{len(inputs['rule_ids'])} 条规则中至少命中 {inputs['n']} 条",
+            "平台将绑定当前 Pool revision/hash 和原始样本，逐行计算命中数与风险效果",
+            "本步骤只生成 development/backtested/unvalidated 候选；"
+            "不会入池、设置业务动作、采纳或部署",
+        ]
     elif draft.workflow == "strategy_pool_add_candidate":
         source_field = (
             "selection_id" if "selection_id" in inputs else "candidate_asset_id"
@@ -5419,6 +5980,8 @@ def _standard_workflow_confirmation_text(
         ]
         if "reason" in inputs:
             details.append(f"操作说明：{inputs['reason']}")
+        if "placement_mode" in inputs:
+            details.append(f"Voting 成员放置方式：{inputs['placement_mode']}")
     elif draft.workflow in {
         "strategy_pool_remove_entry",
         "strategy_pool_set_action",
@@ -5938,11 +6501,20 @@ def _user_prompt(
         "Strategy Pool、业务动作、采纳、部署或 leaf ID 写回。selection_reason 中也"
         "不得藏入理由替换、后续动作、生命周期操作或极值/排名选叶语义；它只接受"
         "人工/业务/风险/合规/样本评审依据类短说明。"
+        "对于 voting_candidate_build，只能逐字抄录用户明确标注的 strategy_type、"
+        "2 到 50 个完整 candidate-rule ID 和整数 n；不得输出 entry_id、Pool revision/hash、"
+        "condition、指标、动作、推荐或平台数据绑定。规则集合必须全部来自同一条正向"
+        "Voting/n-of-k 构建命令；‘最好规则’‘刚才那些’等启发式引用，或同一句串联入池、"
+        "动作、采纳、部署、写回时必须澄清。问句、假设/未来/历史描述、演示文本、句尾"
+        "撤销以及多个 strategy_type/n 候选也必须澄清；显式 k 必须与 rule_ids 数量一致。"
         "对于 strategy_pool_add_candidate，candidate_asset_id 与 selection_id "
         "严格二选一且必须逐字抄录唯一完整 ID；必须分别抄录显式的策略池类型、"
         "Pool 默认动作和命中动作标签，不能对调或从动作反推 Pool 类型。reason 仅在"
         "显式标注时逐字抄录，未标注时省略；默认/命中 reason_code、output_value 和"
-        "value 也必须逐字归属各自标签，不得省略或对调。否定入池或串联采纳/部署时"
+        "value 也必须逐字归属各自标签，不得省略或对调。可选 placement_mode 只能"
+        "逐字抄录 before_selected_members/replace_selected_members，或从“保留成员"
+        "作为回退并放在成员前/由 Voting 替代成员”二选一映射；用户未提供时省略。"
+        "否定入池或串联采纳/部署时"
         "必须澄清。source ID 必须与唯一正向入池命令位于同一子句，不能从否定子句、"
         "reason、引用或代词上下文借用；未来/条件指令、问句、how-to、演示和测试也"
         "必须澄清。"

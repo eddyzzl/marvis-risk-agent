@@ -395,6 +395,69 @@ STRATEGY_AUTOMATIC_TREE_CANDIDATE_BUILD = WorkflowTemplate(
 )
 
 
+STRATEGY_VOTING_CANDIDATE_BUILD = WorkflowTemplate(
+    id="strategy_voting_candidate_build",
+    title="Voting n-of-k 策略候选构建",
+    goal_patterns=(
+        "构建 Voting 策略候选",
+        "构建投票组合候选",
+        "生成 n-of-k 策略候选",
+        "build voting strategy candidate",
+        "build n-of-k candidate",
+    ),
+    slots=(
+        SlotSpec("strategy_type", True, "user", "Explicit Strategy Pool type"),
+        SlotSpec(
+            "expected_pool_revision",
+            True,
+            "task_context",
+            "Current Strategy Pool CAS revision",
+        ),
+        SlotSpec(
+            "expected_pool_snapshot_hash",
+            True,
+            "task_context",
+            "Current Strategy Pool CAS snapshot hash",
+        ),
+        SlotSpec(
+            "selected_entry_ids",
+            True,
+            "task_context",
+            "Platform-resolved duplicate-free current Pool entry ids",
+        ),
+        SlotSpec("n", True, "user", "Required hits in the n-of-k condition"),
+    ),
+    steps=(
+        StepTemplate(
+            title="构建 Voting n-of-k 策略候选",
+            tool_ref=ToolRef("strategy", "build_voting_candidate"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "expected_pool_revision": "{slot:expected_pool_revision}",
+                "expected_pool_snapshot_hash": (
+                    "{slot:expected_pool_snapshot_hash}"
+                ),
+                "selected_entry_ids": "{slot:selected_entry_ids}",
+                "n": "{slot:n}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "asset_id"}),
+                PostCheck("nonempty", {"field": "asset_hash"}),
+                PostCheck("nonempty", {"field": "candidate_id"}),
+                PostCheck("nonempty", {"field": "evidence_hash"}),
+                PostCheck("nonempty", {"field": "fragment_id"}),
+                PostCheck("nonempty", {"field": "effect_id"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_AUTOMATIC_TREE_LEAF_MATERIALIZATION = WorkflowTemplate(
     id="strategy_automatic_tree_leaf_materialization",
     title="自动树精确叶节点物化",
@@ -630,6 +693,12 @@ STRATEGY_POOL_ADD_CANDIDATE = WorkflowTemplate(
         SlotSpec("strategy_type", True, "user", "Typed Strategy Pool kind"),
         SlotSpec("default_action", True, "user", "Explicit typed default action"),
         SlotSpec("action", True, "user", "Explicit typed action for the candidate rule"),
+        SlotSpec(
+            "placement_mode",
+            True,
+            "user",
+            "Voting placement semantics or platform-bound append for ordinary candidates",
+        ),
         # Planner's required-slot check treats the valid absent-pool revision
         # ``0`` as falsy.  Keep this Planner-optional while the template and
         # Tool schema still require and carry the platform-bound CAS value.
@@ -654,6 +723,7 @@ STRATEGY_POOL_ADD_CANDIDATE = WorkflowTemplate(
                 "strategy_type": "{slot:strategy_type}",
                 "default_action": "{slot:default_action}",
                 "action": "{slot:action}",
+                "placement_mode": "{slot:placement_mode}",
                 "expected_pool_revision": "{slot:expected_pool_revision}",
                 "expected_pool_snapshot_hash": "{slot:expected_pool_snapshot_hash}",
                 "reason": "{slot:reason}",

@@ -227,37 +227,52 @@ class StrategyCandidatePoolRepository:
         return connect(self.db_path)
 
     def get_current(self, task_id: str, strategy_type: str) -> dict[str, Any] | None:
+        with connect(self.db_path) as conn:
+            return self.get_current_on_connection(conn, task_id, strategy_type)
+
+    def get_current_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        strategy_type: str,
+    ) -> dict[str, Any] | None:
+        """Read and verify the current Pool through a caller-owned connection.
+
+        Artifact-producing tools use this form after ``BEGIN IMMEDIATE`` so the
+        head, its referenced revision, and a dependent artifact registration are
+        checked inside one writer transaction.
+        """
+
         task = _required_text(task_id, field="task_id")
         kind = _strategy_type(strategy_type)
-        with connect(self.db_path) as conn:
-            head = _select_head(conn, task_id=task, strategy_type=kind)
-            if head is None:
-                return None
-            _validate_head_row(head, task_id=task, strategy_type=kind)
-            if int(head["current_revision"]) == ABSENT_POOL_REVISION:
-                return None
-            row = conn.execute(
-                """
-                SELECT * FROM strategy_candidate_pool_revisions
-                 WHERE id = ? AND pool_id = ?
-                """,
-                (str(head["current_revision_id"]), str(head["id"])),
-            ).fetchone()
-            if row is None:
-                raise StrategyCandidatePoolDataError(
-                    "pool head references a missing revision"
-                )
-            snapshot = _snapshot_from_row(conn, row)
-            if snapshot["revision"] != int(
-                head["current_revision"]
-            ) or not hmac.compare_digest(
-                strategy_pool_snapshot_hash(snapshot),
-                str(head["current_snapshot_hash"]),
-            ):
-                raise StrategyCandidatePoolDataError(
-                    "pool head does not match its current revision"
-                )
-            return snapshot
+        head = _select_head(conn, task_id=task, strategy_type=kind)
+        if head is None:
+            return None
+        _validate_head_row(head, task_id=task, strategy_type=kind)
+        if int(head["current_revision"]) == ABSENT_POOL_REVISION:
+            return None
+        row = conn.execute(
+            """
+            SELECT * FROM strategy_candidate_pool_revisions
+             WHERE id = ? AND pool_id = ?
+            """,
+            (str(head["current_revision_id"]), str(head["id"])),
+        ).fetchone()
+        if row is None:
+            raise StrategyCandidatePoolDataError(
+                "pool head references a missing revision"
+            )
+        snapshot = _snapshot_from_row(conn, row)
+        if snapshot["revision"] != int(
+            head["current_revision"]
+        ) or not hmac.compare_digest(
+            strategy_pool_snapshot_hash(snapshot),
+            str(head["current_snapshot_hash"]),
+        ):
+            raise StrategyCandidatePoolDataError(
+                "pool head does not match its current revision"
+            )
+        return snapshot
 
     def get_archived_legacy_draft(
         self, task_id: str, strategy_type: str
@@ -385,18 +400,34 @@ class StrategyCandidatePoolRepository:
         strategy_type: str,
         revision_id: str,
     ) -> dict[str, Any] | None:
+        with connect(self.db_path) as conn:
+            return self.get_revision_by_id_on_connection(
+                conn,
+                task_id,
+                strategy_type,
+                revision_id,
+            )
+
+    @staticmethod
+    def get_revision_by_id_on_connection(
+        conn: sqlite3.Connection,
+        task_id: str,
+        strategy_type: str,
+        revision_id: str,
+    ) -> dict[str, Any] | None:
+        """Read one immutable Pool revision through a caller-owned connection."""
+
         task = _required_text(task_id, field="task_id")
         kind = _strategy_type(strategy_type)
         identity = _revision_id(revision_id, field="revision_id")
-        with connect(self.db_path) as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM strategy_candidate_pool_revisions
-                 WHERE id = ? AND task_id = ? AND strategy_type = ?
-                """,
-                (identity, task, kind),
-            ).fetchone()
-            return None if row is None else _snapshot_from_row(conn, row)
+        row = conn.execute(
+            """
+            SELECT * FROM strategy_candidate_pool_revisions
+             WHERE id = ? AND task_id = ? AND strategy_type = ?
+            """,
+            (identity, task, kind),
+        ).fetchone()
+        return None if row is None else _snapshot_from_row(conn, row)
 
     def apply_snapshot(
         self,

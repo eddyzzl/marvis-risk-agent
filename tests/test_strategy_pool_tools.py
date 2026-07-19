@@ -42,6 +42,7 @@ from marvis.packs.strategy.pool_tools import (
     run_reorder_strategy_pool,
     run_set_pool_entry_action,
 )
+from marvis.packs.strategy.voting_candidate_tools import run_build_voting_candidate
 from marvis.plugins.contracts import ToolContext
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.strategy_pool import (
@@ -221,6 +222,33 @@ def _add_inputs(
     }
 
 
+def _refine_bins(fixture: dict, indices: list[int]) -> dict:
+    source_output = fixture["source_output"]
+    candidate_report = next(
+        item
+        for item in source_output["artifacts"]
+        if item["kind"] == "strategy_candidate_json"
+    )
+    method = source_output["candidate_evidence"]["analysis"]["features"][0][
+        "methods"
+    ][0]
+    return strategy_tools.tool_refine_univariate_candidate(
+        {
+            "source_artifact_id": candidate_report["artifact_id"],
+            "expected_artifact_content_hash": candidate_report["content_hash"],
+            "expected_candidate_id": source_output["candidate_id"],
+            "expected_evidence_hash": source_output["evidence_hash"],
+            "feature": "score",
+            "method": "equal_width",
+            "merge_groups": [],
+            "selection": {
+                "source_bin_ids": [method["bins"][index]["id"] for index in indices]
+            },
+        },
+        fixture["ctx"],
+    )
+
+
 def _insert_archived_legacy_draft(fixture: dict) -> dict:
     task_id = fixture["task"].id
     pool_id = strategy_pool_id(task_id, "approval")
@@ -396,6 +424,140 @@ def test_add_and_compile_persist_governed_pool_without_building_strategy(
         "design_hash"
     ]
     assert fixture["runtime"].strategies.list_for_task(fixture["task"].id) == []
+
+
+def test_voting_admission_rejects_earlier_logically_dominating_rule(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    pool = None
+    for reason, candidate in (
+        ("UNION", _refine_bins(fixture, [0, 1, 2])),
+        ("LEFT", _refine_bins(fixture, [0, 1])),
+        ("RIGHT", _refine_bins(fixture, [1, 2])),
+    ):
+        added = run_add_candidate_to_pool(
+            _add_inputs(
+                candidate,
+                expected_revision=0 if pool is None else pool["revision"],
+                expected_hash=(
+                    ABSENT_POOL_SNAPSHOT_HASH
+                    if pool is None
+                    else pool["snapshot_hash"]
+                ),
+                action=_action("reject", reason=reason),
+            ),
+            fixture["ctx"],
+            fixture["runtime"],
+        )
+        pool = added["pool"]
+    assert pool is not None
+
+    built = run_build_voting_candidate(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": pool["revision"],
+            "expected_pool_snapshot_hash": pool["snapshot_hash"],
+            "selected_entry_ids": [
+                entry["entry_id"] for entry in pool["entries"][1:]
+            ],
+            "n": 2,
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    assert built["effect"]["matched_count"] > 0
+    request = {
+        **_add_inputs(
+            built,
+            expected_revision=pool["revision"],
+            expected_hash=pool["snapshot_hash"],
+            action=_action("review", reason="VOTE"),
+        ),
+        "placement_mode": "before_selected_members",
+    }
+
+    with pytest.raises(StrategyError, match="unreachable"):
+        run_add_candidate_to_pool(
+            request,
+            fixture["ctx"],
+            fixture["runtime"],
+        )
+    assert StrategyCandidatePoolRepository(
+        fixture["settings"].db_path
+    ).get_current(fixture["task"].id, "approval") == pool
+
+
+def test_reorder_rejects_new_prefix_that_fully_shadows_voting(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    pool = None
+    for reason, candidate in (
+        ("LEFT", _refine_bins(fixture, [0, 1])),
+        ("RIGHT", _refine_bins(fixture, [1, 2])),
+        ("UNION", _refine_bins(fixture, [0, 1, 2])),
+    ):
+        added = run_add_candidate_to_pool(
+            _add_inputs(
+                candidate,
+                expected_revision=0 if pool is None else pool["revision"],
+                expected_hash=(
+                    ABSENT_POOL_SNAPSHOT_HASH
+                    if pool is None
+                    else pool["snapshot_hash"]
+                ),
+                action=_action("reject", reason=reason),
+            ),
+            fixture["ctx"],
+            fixture["runtime"],
+        )
+        pool = added["pool"]
+    assert pool is not None
+
+    built = run_build_voting_candidate(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": pool["revision"],
+            "expected_pool_snapshot_hash": pool["snapshot_hash"],
+            "selected_entry_ids": [
+                entry["entry_id"] for entry in pool["entries"][:2]
+            ],
+            "n": 2,
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    admitted = run_add_candidate_to_pool(
+        {
+            **_add_inputs(
+                built,
+                expected_revision=pool["revision"],
+                expected_hash=pool["snapshot_hash"],
+                action=_action("review", reason="VOTE"),
+            ),
+            "placement_mode": "before_selected_members",
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    rule_ids = [entry["rule_id"] for entry in admitted["entries"]]
+    reordered = [rule_ids[3], rule_ids[0], rule_ids[1], rule_ids[2]]
+
+    with pytest.raises(StrategyError, match="earlier first_match Pool rules shadow"):
+        run_reorder_strategy_pool(
+            {
+                "strategy_type": "approval",
+                "expected_pool_revision": admitted["revision"],
+                "expected_pool_snapshot_hash": admitted["snapshot_hash"],
+                "ordered_rule_ids": reordered,
+            },
+            fixture["ctx"],
+            fixture["runtime"],
+        )
+    assert StrategyCandidatePoolRepository(
+        fixture["settings"].db_path
+    ).get_current(fixture["task"].id, "approval") == admitted["pool"]
 
 
 def test_archived_v1_draft_requires_rebuild_and_is_disclosed_by_v2_mutation(

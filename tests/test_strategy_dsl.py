@@ -12,6 +12,7 @@ from marvis.packs.strategy.dsl import (
     canonical_strategy_json,
     canonicalize_expression,
     parse_strategy_spec,
+    semantic_expression_key,
     strategy_spec_hash,
 )
 from marvis.packs.strategy.errors import StrategyError
@@ -108,6 +109,38 @@ def test_expression_canonicalizer_covers_all_v1_expression_types() -> None:
     assert [canonicalize_expression(item) for item in expressions] == [
         _with_default_missing(item) for item in expressions
     ]
+
+
+def test_semantic_expression_key_normalizes_only_safe_commutative_forms() -> None:
+    a = {"op": "compare", "field": "a", "operator": "==", "value": 1}
+    b = {"op": "compare", "field": "b", "operator": "in", "value": [2, 1, 2]}
+    left = {"op": "and", "args": [a, {"op": "and", "args": [b, a]}]}
+    right = {
+        "op": "and",
+        "args": [
+            {"op": "compare", "field": "b", "operator": "in", "value": [1, 2]},
+            a,
+        ],
+    }
+
+    assert canonicalize_expression(left) != canonicalize_expression(right)
+    assert semantic_expression_key(left) == semantic_expression_key(right)
+    assert semantic_expression_key(
+        {"op": "n_of_k", "n": 1, "args": [a, b]}
+    ) == semantic_expression_key(
+        {"op": "n_of_k", "n": 1, "args": [b, a]}
+    )
+    assert semantic_expression_key(
+        {"op": "n_of_k", "n": 1, "args": [a, b]}
+    ) == semantic_expression_key({"op": "or", "args": [b, a]})
+    assert semantic_expression_key(
+        {"op": "n_of_k", "n": 2, "args": [a, b]}
+    ) == semantic_expression_key({"op": "and", "args": [b, a]})
+    assert semantic_expression_key(
+        {"op": "n_of_k", "n": 1, "args": [a, b]}
+    ) != semantic_expression_key(
+        {"op": "n_of_k", "n": 2, "args": [a, b]}
+    )
 
 
 def test_expression_evaluator_has_explicit_boundary_null_boolean_and_n_of_k_semantics() -> None:

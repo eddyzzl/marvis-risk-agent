@@ -1501,6 +1501,161 @@ def _render_refine_univariate_candidate(o: dict):
     return text, []
 
 
+def _render_build_voting_candidate(o: dict):
+    """Render one governed n-of-k candidate without implying adoption."""
+
+    selected_entries = [
+        item for item in (o.get("selected_entries") or []) if isinstance(item, dict)
+    ]
+    distribution = [
+        item for item in (o.get("hit_distribution") or []) if isinstance(item, dict)
+    ]
+    artifacts = [
+        item for item in (o.get("artifacts") or []) if isinstance(item, dict)
+    ]
+    observations = [
+        item
+        for item in (o.get("metric_observations") or [])
+        if isinstance(item, dict)
+    ]
+    effect = o.get("effect") if isinstance(o.get("effect"), dict) else {}
+    revision = o.get("pool_revision", o.get("revision"))
+    snapshot_hash = str(
+        o.get("pool_snapshot_hash") or o.get("snapshot_hash") or ""
+    )
+    n = o.get("n")
+    k = o.get("k")
+    lifecycle = " / ".join(
+        str(o.get(field) or "unknown")
+        for field in ("candidate_stage", "observation_stage", "validation_status")
+    )
+    dataset_id = str(o.get("dataset_id") or "n/a")
+    target_col = str(o.get("target_col") or "n/a")
+    population_count = o.get("population_count", effect.get("population_count"))
+    labeled_count = o.get("labeled_count", effect.get("labeled_count"))
+    nan_labels_dropped = o.get("nan_labels_dropped")
+    drop_nan_labels = o.get("drop_nan_labels")
+    population_text = "n/a" if population_count is None else _fmt(population_count)
+    labeled_text = "n/a" if labeled_count is None else _fmt(labeled_count)
+    dropped_text = (
+        "n/a" if nan_labels_dropped is None else _fmt(nan_labels_dropped)
+    )
+    drop_text = (
+        "true"
+        if drop_nan_labels is True
+        else "false"
+        if drop_nan_labels is False
+        else "n/a"
+    )
+    text = (
+        f"**Voting n-of-k 策略候选构建完成**：资产 `{o.get('asset_id', '')}`，"
+        f"asset hash `{o.get('asset_hash', '')}`；组合为 **{n}-of-{k}**。"
+        f"来源 Pool `{o.get('pool_id', '')}` revision {revision}，"
+        f"snapshot hash `{snapshot_hash}`；状态 `{lifecycle}`。\n"
+        "**本步骤仅生成候选，尚未入池；未应用写回、未采纳、未部署。**"
+    )
+    text += (
+        "\n\n**绑定样本口径**："
+        f"dataset `{dataset_id}`，target `{target_col}`；"
+        f"population {population_text}，labeled {labeled_text}；"
+        f"drop_nan_labels `{drop_text}`，nan_labels_dropped {dropped_text}。"
+    )
+    text += (
+        "\n\n**绑定样本观测（未独立验证）**："
+        "以下数值由平台在上述绑定样本上确定性计算，不代表独立验证或上线效果。"
+        f"命中率 {_pct(effect.get('matched_rate'))}，"
+        f"命中坏率 {_pct(effect.get('matched_bad_rate'))}，"
+        f"坏样本捕获率 {_pct(effect.get('bad_capture_rate'))}，"
+        f"Lift {_num(effect.get('lift'))}。"
+    )
+
+    links = [
+        f"[{str(item.get('filename') or item.get('kind') or '下载')}]"
+        f"({str(item.get('download_url'))})"
+        for item in artifacts
+        if item.get("download_url")
+    ]
+    if links:
+        text += "\n\n**Voting 候选资产**：" + "；".join(links)
+
+    tables = []
+    if selected_entries:
+        tables.append(
+            {
+                "title": "Voting 成员规则（按 Pool position）",
+                "columns": ["Pool position", "rule_id", "entry_id"],
+                "rows": [
+                    [
+                        str(item.get("pool_position") or 0),
+                        str(item.get("rule_id") or ""),
+                        str(item.get("entry_id") or ""),
+                    ]
+                    for item in selected_entries
+                ],
+            }
+        )
+    if distribution:
+        tables.append(
+            {
+                "title": "Voting 命中数分布",
+                "columns": [
+                    "命中规则数",
+                    "样本数",
+                    "样本占比",
+                    "坏样本数",
+                    "坏率",
+                    "Lift",
+                ],
+                "rows": [
+                    [
+                        str(item.get("hit_count") or 0),
+                        _fmt(item.get("count")),
+                        _pct(item.get("share")),
+                        _fmt(item.get("bad_count")),
+                        _pct(item.get("bad_rate")),
+                        _num(item.get("lift")),
+                    ]
+                    for item in distribution
+                ],
+            }
+        )
+    observation_by_identity = {
+        (str(item.get("metric_name") or ""), str(item.get("dimension") or "")): item
+        for item in observations
+    }
+    amount_rows = []
+    for dimension, dimension_label in (
+        ("loan_amount", "放款金额"),
+        ("overdue_amount", "逾期金额"),
+    ):
+        for metric_name, metric_label in (
+            ("voting.hit_share", "Voting 命中金额占比"),
+            ("voting.bad_capture_rate", "坏样本捕获金额占比"),
+        ):
+            observation = observation_by_identity.get((metric_name, dimension))
+            if observation is None:
+                continue
+            status = str(observation.get("status") or "unavailable")
+            value = (
+                _pct(observation.get("value"))
+                if status == "observed"
+                else "n/a"
+            )
+            amount_rows.append([dimension_label, metric_label, status, value])
+    if amount_rows:
+        text += "\n\n**金额维度观测**：金额维度观测状态和值见下表。"
+        tables.append(
+            {
+                "title": "Voting 金额维度关键观测",
+                "columns": ["金额维度", "指标", "状态", "观测值"],
+                "rows": amount_rows,
+            }
+        )
+    else:
+        text += "\n\n**金额维度观测**：本次输出未提供可展示的金额维度观测。"
+    return text, tables
+
+
 def _render_strategy_pool_mutation(o: dict):
     entries = [entry for entry in (o.get("entries") or []) if isinstance(entry, dict)]
     artifacts = [item for item in (o.get("artifacts") or []) if isinstance(item, dict)]
@@ -1513,6 +1668,10 @@ def _render_strategy_pool_mutation(o: dict):
         f"当前完整有序条目 **{len(entries)}** 条；所有候选证据保持 "
         "`development / unvalidated`。这是 task 内 draft Pool，**未采纳、未部署**。"
     )
+    if operation == "insert_candidate_before_entries":
+        text += " Voting 已放在所选成员中最早位置之前，原成员保留为后续规则。"
+    elif operation == "replace_entries_with_candidate":
+        text += " Voting 已在一个原子 revision 中替代所选成员。"
     links = [
         f"[{str(item.get('filename') or item.get('kind') or '下载')}]"
         f"({str(item.get('download_url'))})"
@@ -4210,6 +4369,7 @@ _RENDERERS = {
     "materialize_automatic_tree_leaf_fragment": (
         _render_materialize_automatic_tree_leaf_fragment
     ),
+    "build_voting_candidate": _render_build_voting_candidate,
     "refine_univariate_candidate": _render_refine_univariate_candidate,
     "add_candidate_to_pool": _render_strategy_pool_mutation,
     "remove_pool_entry": _render_strategy_pool_mutation,

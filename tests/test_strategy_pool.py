@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from marvis.feature.univariate import analyze_univariate
+from marvis.packs.strategy import pool as pool_module
 from marvis.packs.strategy.candidate_asset import refine_univariate_candidate
 from marvis.packs.strategy.candidate_fragment import (
     build_verified_candidate_fragment,
@@ -442,6 +443,61 @@ def test_generic_pool_accepts_two_fragments_from_same_asset_and_rejects_pair() -
             verified_candidate_fragment=same_pair_different_rule,
             action=_reject(),
         )
+
+
+def test_v2_snapshot_reader_keeps_preexisting_duplicate_conditions_compatible() -> None:
+    asset = _asset(0)
+    first_fragment = univariate_asset_to_verified_fragment(
+        asset,
+        source_binding=_binding(asset, suffix="1"),
+    )
+    second_fragment = build_verified_candidate_fragment(
+        artifact=first_fragment["artifact"],
+        asset=first_fragment["asset"],
+        fragment_type="strategy_rule",
+        rule_id="candidate-rule-legacy-duplicate-condition",
+        condition=first_fragment["fragment"]["condition"],
+        requirements=[],
+        effect_id="candidate-effect-legacy-duplicate-condition",
+        evidence_id=first_fragment["evidence"]["evidence_id"],
+        evidence_hash=first_fragment["evidence"]["evidence_hash"],
+        evidence_identity=first_fragment["evidence"]["identity"],
+    )
+    first_pool = add_verified_candidate_fragment(
+        None,
+        task_id="task-1",
+        strategy_type="approval",
+        default_action=_approval(),
+        verified_candidate_fragment=first_fragment,
+        action=_reject(),
+    )
+    second_pool = add_verified_candidate_fragment(
+        None,
+        task_id="task-1",
+        strategy_type="approval",
+        default_action=_approval(),
+        verified_candidate_fragment=second_fragment,
+        action=_review(),
+    )
+    second_entry = {**second_pool["entries"][0], "position": 1}
+
+    historical = pool_module._snapshot(
+        pool_id=first_pool["pool_id"],
+        task_id="task-1",
+        strategy_type="approval",
+        revision=2,
+        parent_revision_id=first_pool["revision_id"],
+        operation_kind="add_candidate",
+        reason=None,
+        default_action=_approval(),
+        entries=[first_pool["entries"][0], second_entry],
+    )
+
+    assert validate_strategy_pool(historical) == historical
+    with pytest.raises(CandidatePoolError, match="historical Pool.*remove"):
+        compile_strategy_pool(historical)
+    repaired = remove_pool_entry(historical, second_entry["entry_id"])
+    assert len(compile_strategy_pool(repaired)["strategy_spec"]["rules"]) == 1
 
 
 def test_generic_pool_rejects_mixed_sample_context_without_changing_revision() -> None:

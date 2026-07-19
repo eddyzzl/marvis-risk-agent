@@ -122,6 +122,13 @@ from marvis.packs.strategy.automatic_tree_leaf_tools import (
     load_verified_automatic_tree_leaf_selection_artifact_on_connection,
     load_verified_automatic_tree_source_artifact_on_connection,
 )
+from marvis.packs.strategy.voting_candidate_fragment import (
+    VOTING_CANDIDATE_ARTIFACT_KIND,
+    VOTING_CANDIDATE_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.voting_candidate_tools import (
+    load_verified_voting_candidate_artifact_on_connection,
+)
 from marvis.repositories.plans import PlanRepository
 from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestConflictError,
@@ -1351,7 +1358,7 @@ _STRATEGY_REQUEST_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_SUBJECT_RE = re.compile(
-    r"(?:策略|策略池|规则池|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|自动树|决策树|叶子|叶节点|cutoff|利润|收益|"
+    r"(?:策略|策略池|规则池|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|自动树|决策树|叶子|叶节点|投票|Voting|n[-_ ]?of[-_ ]?k|cutoff|利润|收益|"
     r"催收|滚动率|迁徙率|迁徙矩阵|定价矩阵|额度矩阵|网格|ROA|"
     r"roll(?:\s|-|_)*rate|strategy(?:\s|-|_)*pool|pool|strategy|approval|reject|limit|pricing|segment|rule|candidate|automatic(?:\s|-|_)*tree|decision(?:\s|-|_)*tree|leaf|"
     r"candidate\s+bins?|\bbins?\b|univariate|binning|profit|collection)",
@@ -1803,6 +1810,19 @@ def _run_validated_strategy_request(
                 task_id=task.id,
                 draft=draft,
             ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "voting_candidate_build"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_voting_candidate_build",
+            slots=_strategy_voting_candidate_plan_slots(runtime, task, draft),
             auto_start=auto_start,
         )
 
@@ -2544,6 +2564,12 @@ def _standard_workflow_request_preflight(
         except StrategySetupError as exc:
             return ("automatic_tree_leaf_source_required", str(exc))
         return None
+    if draft.workflow == "voting_candidate_build":
+        try:
+            _strategy_voting_candidate_plan_slots(runtime, task, draft)
+        except StrategySetupError as exc:
+            return ("strategy_voting_pool_binding_required", str(exc))
+        return None
     if draft.workflow in _STRATEGY_POOL_WORKFLOWS:
         try:
             _strategy_pool_plan_slots(runtime, task, draft)
@@ -2749,6 +2775,78 @@ def _automatic_tree_leaf_materialization_slots(
     return slots
 
 
+def _strategy_voting_candidate_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Bind explicit user rule ids to one exact current Pool snapshot."""
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    strategy_type = inputs.get("strategy_type")
+    rule_ids = inputs.get("rule_ids")
+    n = inputs.get("n")
+    if (
+        not isinstance(strategy_type, str)
+        or not isinstance(rule_ids, Sequence)
+        or isinstance(rule_ids, str | bytes | bytearray)
+        or isinstance(n, bool)
+        or not isinstance(n, int)
+    ):
+        raise StrategySetupError(
+            "Voting 候选需要明确的策略池类型、完整 rule_id 列表和整数 n。"
+        )
+    try:
+        current = StrategyCandidatePoolRepository(
+            runtime.settings.db_path
+        ).get_current(task.id, strategy_type)
+    except Exception as exc:
+        raise StrategySetupError(
+            "当前 Strategy Pool 状态无法通过完整性校验，不能构建 Voting 候选。"
+        ) from exc
+    if current is None:
+        raise StrategySetupError(
+            f"当前任务没有 {strategy_type} Strategy Pool；请先把至少两条候选规则加入池中。"
+        )
+    try:
+        entries = _strategy_pool_entries(current)
+        revision = int(current["revision"])
+        snapshot_hash = strategy_pool_snapshot_hash(current)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "当前 Strategy Pool revision、entries 或 hash 绑定不完整。"
+        ) from exc
+
+    selected: list[Mapping] = []
+    for rule_id in rule_ids:
+        matches = [entry for entry in entries if entry.get("rule_id") == rule_id]
+        if len(matches) != 1:
+            raise StrategySetupError(
+                f"当前 Strategy Pool 中没有唯一匹配的规则 {rule_id}；"
+                "请从最新 Pool 结果复制完整 rule_id。"
+            )
+        entry = matches[0]
+        if entry.get("enabled") is not True:
+            raise StrategySetupError(f"规则 {rule_id} 当前未启用，不能参与 Voting。")
+        source = entry.get("source")
+        if isinstance(source, Mapping) and source.get("asset_type") == "voting_n_of_k":
+            raise StrategySetupError(
+                "当前版本先拒绝嵌套 Voting 候选，以避免递归 lineage 或循环依赖；"
+                "请选择原始单变量或自动树叶规则。"
+            )
+        selected.append(entry)
+    selected.sort(key=lambda item: int(item.get("position", -1)))
+    if not 2 <= len(selected) <= 50 or not 1 <= n <= len(selected):
+        raise StrategySetupError("Voting 候选要求 2 到 50 条规则，且 n 必须位于 1 到 K。")
+    return {
+        "strategy_type": strategy_type,
+        "expected_pool_revision": revision,
+        "expected_pool_snapshot_hash": snapshot_hash,
+        "selected_entry_ids": [str(entry["entry_id"]) for entry in selected],
+        "n": n,
+    }
+
+
 def _strategy_pool_plan_slots(
     runtime: DriverTurnRuntime,
     task: TaskRecord,
@@ -2796,6 +2894,7 @@ def _strategy_pool_plan_slots(
                 "或 automatic-tree leaf selection ID。"
             )
         fragment_id: str | None = None
+        is_voting_candidate = False
         if selection_id is not None:
             selection_slots, fragment_id = (
                 _automatic_tree_leaf_selection_artifact_slots(
@@ -2806,13 +2905,33 @@ def _strategy_pool_plan_slots(
             )
             slots.update(selection_slots)
         else:
-            slots.update(
-                _candidate_asset_artifact_slots(
-                    runtime,
-                    task_id=task.id,
-                    asset_id=str(candidate_asset_id),
-                )
+            candidate_slots = _candidate_asset_artifact_slots(
+                runtime,
+                task_id=task.id,
+                asset_id=str(candidate_asset_id),
             )
+            is_voting_candidate = (
+                candidate_slots.pop("_candidate_asset_type", None) == "voting_n_of_k"
+            )
+            slots.update(candidate_slots)
+        requested_placement = inputs.get("placement_mode")
+        if is_voting_candidate:
+            if requested_placement not in {
+                "before_selected_members",
+                "replace_selected_members",
+            }:
+                raise StrategySetupError(
+                    "Voting 候选入池前必须明确选择：保留成员作为未达 n 时的"
+                    "后续规则（before_selected_members），或由 Voting 原子替代"
+                    "这些成员（replace_selected_members）。"
+                )
+            slots["placement_mode"] = requested_placement
+        else:
+            if requested_placement is not None:
+                raise StrategySetupError(
+                    "placement_mode 仅适用于 Voting 候选；普通候选保持追加语义。"
+                )
+            slots["placement_mode"] = "append"
         slots["default_action"] = inputs["default_action"]
         slots["action"] = inputs["action"]
         if current is not None and current.get("default_action") != inputs["default_action"]:
@@ -2881,10 +3000,9 @@ def _candidate_asset_artifact_slots(
     asset_id: str,
 ) -> dict[str, str]:
     matches = []
+    repository = TaskArtifactRepository(runtime.settings.db_path)
     try:
-        artifacts = TaskArtifactRepository(runtime.settings.db_path).list_for_task(
-            task_id
-        )
+        artifacts = repository.list_for_task(task_id)
     except Exception as exc:
         raise StrategySetupError(
             "当前任务的候选资产 artifact registry 无法读取，不能安全绑定来源。"
@@ -2893,10 +3011,17 @@ def _candidate_asset_artifact_slots(
         if not isinstance(artifact, Mapping):
             raise StrategySetupError("当前任务的候选资产 artifact 记录结构无效。")
         provenance = artifact.get("provenance")
+        artifact_triple = (artifact.get("kind"), artifact.get("origin_tool"))
+        supported_triples = {
+            (
+                "strategy_candidate_asset_json",
+                "strategy.refine_univariate_candidate",
+            ),
+            (VOTING_CANDIDATE_ARTIFACT_KIND, VOTING_CANDIDATE_ORIGIN_TOOL),
+        }
         if (
-            artifact.get("kind") == "strategy_candidate_asset_json"
-            and artifact.get("origin_tool") == "strategy.refine_univariate_candidate"
-            and isinstance(provenance, dict)
+            artifact_triple in supported_triples
+            and isinstance(provenance, Mapping)
             and provenance.get("asset_id") == asset_id
         ):
             matches.append(artifact)
@@ -2927,6 +3052,33 @@ def _candidate_asset_artifact_slots(
         raise StrategySetupError(
             f"候选资产 {asset_id} 的 artifact 完整性绑定不完整，请重新生成。"
         )
+    if (
+        artifact.get("kind") == VOTING_CANDIDATE_ARTIFACT_KIND
+        and artifact.get("origin_tool") == VOTING_CANDIDATE_ORIGIN_TOOL
+    ):
+        try:
+            with repository.transaction() as conn:
+                verified = load_verified_voting_candidate_artifact_on_connection(
+                    conn,
+                    tasks_dir=runtime.settings.tasks_dir,
+                    task_id=task_id,
+                    artifact_id=artifact_id,
+                    expected_content_hash=content_hash,
+                    expected_asset_id=asset_id,
+                    expected_asset_hash=asset_hash,
+                )
+        except Exception as exc:
+            raise StrategySetupError(
+                f"Voting 候选资产 {asset_id} 无法通过 artifact 完整性校验，"
+                "请重新生成。"
+            ) from exc
+        return {
+            "source_artifact_id": verified.artifact_id,
+            "expected_artifact_content_hash": verified.content_hash,
+            "expected_asset_id": verified.asset["asset_id"],
+            "expected_asset_hash": verified.asset["asset_hash"],
+            "_candidate_asset_type": "voting_n_of_k",
+        }
     path = Path(path_value)
     try:
         content = path.read_bytes()
@@ -2958,6 +3110,7 @@ def _candidate_asset_artifact_slots(
         "expected_artifact_content_hash": content_hash,
         "expected_asset_id": asset_id,
         "expected_asset_hash": asset_hash,
+        "_candidate_asset_type": "univariate_refinement",
     }
 
 
@@ -3524,6 +3677,7 @@ def _strategy_request_requires_dataset(
         if draft.workflow in {
             *_STRATEGY_POOL_WORKFLOWS,
             "automatic_tree_leaf_materialization",
+            "voting_candidate_build",
         }:
             return False
         return True

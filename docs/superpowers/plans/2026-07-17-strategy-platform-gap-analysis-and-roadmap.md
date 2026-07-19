@@ -522,6 +522,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **候选选择与合并纵切（已完成，2026-07-19）**：新增自然语言可达的 `strategy_univariate_candidate_refinement` Workflow、已有证据专用的 `strategy_univariate_candidate_refinement_existing` Workflow 和 `strategy.refine_univariate_candidate`。Agent 只提取用户明确给出的 source bin id、合并组、观测坏率门槛和选择理由；平台还会把门槛、比较符、bin id 和操作词与用户原话确定性核对，未给定可执行标准的“选最好”会先澄清，不能由 LLM 生成指标、边界或规则。只使用坏率门槛时可在同一两步 Workflow 中先分析再筛选；一旦点名 source bin id 或合并组，用户必须同时引用其实际查看结果中的完整 candidate ID，平台直接解析同 task 的不可变 `strategy_candidate_json`，不允许重新分箱后用 `regular:n` 序号重绑。Tool 校验预期 artifact/candidate/evidence hash，从父证据恢复 dataset/workspace/target/金额口径，投影读取所需字段，使用同一 DSL evaluator 逐行重放父箱并核对分区；数值普通箱只允许相邻合并，类别值保持严格 JSON 类型，missing/sentinel 不会静默并入普通箱。合并后全部 WOE/IV/KS/AUC/Lift、件数和金额指标从绑定行重新计算，不聚合旧摘要；结果固化为 `strategy.candidate-asset.v1`，带稳定 candidate-rule/candidate-effect/candidate-asset id、父级 lineage、`development/unvalidated` 状态和 task-owned 内容寻址 JSON 下载。该资产尚未等于 Strategy Pool 条目，入池、逐月稳定性及其他 Candidate Lab 能力继续按本 Phase 交付。
 
+**显式 Voting 首纵切（已完成，2026-07-19）**：新增自然语言可达的 `strategy_voting_candidate_build` Workflow 和 `strategy.build_voting_candidate`。用户必须点名当前 Pool 中 2 至 50 个完整 rule id、唯一 Pool 类型和 n；平台按 Pool 顺序绑定 entry，拒绝嵌套 Voting、重复条件、模糊推荐和复合操作，只加载所选 K 条 lineage，并在共享绑定样本上逐行重放 canonical `n_of_k`。结果包含完整 0..K 命中数分布、件数与可用金额 `MetricObservation`、样本/标签口径、稳定 rule/fragment/effect/asset id、父 Pool artifact lineage 和 task-owned canonical JSON，状态保持 `development/backtested/unvalidated`。入池必须另发请求并明确选择 `before_selected_members`（保留成员作为后续回退）或 `replace_selected_members`（一个 CAS revision 内原子替代成员）；普通 append、无授权全局置顶、重复等价条件和 first-match 遮蔽均 fail closed。当前仍未完成自动组合搜索、人工自定义成员编辑、预算截断、命中数列写回与 Python/SQL 代码，因此不能把 Voting 整项标记为完成。
+
 交付：
 
 1. **单规则**：tree/quantile/equal-width/chi 四类分箱、类别等值箱、3-20 箱、最小样本、KS/IV/AUC/WOE/LIFT、件数+金额、批量排序、人工选箱/合并入池和 Excel；

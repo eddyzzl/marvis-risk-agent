@@ -80,6 +80,20 @@ def test_all_pool_mutations_share_the_governed_renderer() -> None:
         assert tables
 
 
+def test_voting_pool_placement_operation_is_explained() -> None:
+    before = _mutation_output()
+    before["operation"] = "insert_candidate_before_entries"
+    text, _ = render_tool_output("add_candidate_to_pool", before)
+    assert "最早位置之前" in text
+    assert "原成员保留" in text
+
+    replaced = _mutation_output()
+    replaced["operation"] = "replace_entries_with_candidate"
+    text, _ = render_tool_output("add_candidate_to_pool", replaced)
+    assert "原子 revision" in text
+    assert "替代所选成员" in text
+
+
 def test_mutation_renderer_reads_governance_fields_from_canonical_source() -> None:
     output = _mutation_output()
     output["entries"] = [

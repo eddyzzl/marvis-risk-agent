@@ -57,6 +57,9 @@ from marvis.packs.strategy.automatic_tree_apply_tools import (
 from marvis.packs.strategy.automatic_tree_leaf_tools import (
     run_materialize_automatic_tree_leaf_fragment,
 )
+from marvis.packs.strategy.voting_candidate_tools import (
+    run_build_voting_candidate,
+)
 from marvis.packs.strategy.pool_tools import (
     run_add_candidate_to_pool,
     run_compile_strategy_pool,
@@ -731,8 +734,14 @@ def tool_materialize_automatic_tree_leaf_fragment(inputs: dict, ctx) -> dict:
     return run_materialize_automatic_tree_leaf_fragment(inputs, ctx, _runtime(ctx))
 
 
+def tool_build_voting_candidate(inputs: dict, ctx) -> dict:
+    """Build one immutable n-of-k candidate from an exact Pool revision."""
+
+    return run_build_voting_candidate(inputs, ctx, _runtime(ctx))
+
+
 def tool_add_candidate_to_pool(inputs: dict, ctx) -> dict:
-    """Add a refined univariate asset or persisted automatic-tree leaf."""
+    """Add a verified univariate asset, automatic-tree leaf, or Voting candidate."""
 
     return run_add_candidate_to_pool(inputs, ctx, _runtime(ctx))
 

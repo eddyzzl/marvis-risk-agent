@@ -97,6 +97,7 @@ def test_pool_templates_instantiate_against_the_real_tool_manifests(
             "expected_asset_hash": "d" * 64,
             "default_action": {"type": "approval", "value": "approve"},
             "action": {"type": "reject", "value": "reject"},
+            "placement_mode": "append",
         },
         "strategy_pool_remove_entry": {
             **common,

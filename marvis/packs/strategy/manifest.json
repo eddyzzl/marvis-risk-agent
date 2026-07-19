@@ -1,8 +1,8 @@
 {
   "name": "strategy",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "display_name": "Strategy Pack",
-  "description": "Vintage, roll-rate, profitability, governed univariate and automatic-tree candidate development with explicit leaf materialization, Strategy Pool assembly, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
+  "description": "Vintage, roll-rate, profitability, governed univariate, automatic-tree, and Voting n-of-k candidate development with explicit leaf materialization, Strategy Pool assembly, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
   "python_requires": ">=3.10,<3.14",
   "tools": [
@@ -1601,6 +1601,329 @@
       "memory_limit_mb": 1024
     },
     {
+      "name": "build_voting_candidate",
+      "summary": "Build one deterministic development-only n-of-k Voting candidate from an exact current Strategy Pool revision, replay its immutable member conditions on their shared labelled sample, and publish one canonical JSON artifact without changing the Pool or applying, adopting, or deploying the candidate.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_type": {
+            "type": "string",
+            "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+          },
+          "expected_pool_revision": {"type": "integer", "minimum": 1},
+          "expected_pool_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "selected_entry_ids": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 50,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "n": {"type": "integer", "minimum": 1, "maximum": 50}
+        },
+        "required": [
+          "strategy_type",
+          "expected_pool_revision",
+          "expected_pool_snapshot_hash",
+          "selected_entry_ids",
+          "n"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.build-voting-candidate-tool.v1"
+          },
+          "asset_id": {
+            "type": "string",
+            "pattern": "^candidate-asset-[0-9a-f]{32}$"
+          },
+          "asset_hash": {"$ref": "#/$defs/sha256"},
+          "candidate_id": {
+            "type": "string",
+            "pattern": "^candidate-[0-9a-f]{32}$"
+          },
+          "evidence_hash": {"$ref": "#/$defs/sha256"},
+          "rule_id": {
+            "type": "string",
+            "pattern": "^candidate-rule-[0-9a-f]{32}$"
+          },
+          "rule_hash": {"$ref": "#/$defs/sha256"},
+          "fragment_id": {
+            "type": "string",
+            "pattern": "^candidate-fragment-[0-9a-f]{32}$"
+          },
+          "fragment_hash": {"$ref": "#/$defs/sha256"},
+          "effect_id": {
+            "type": "string",
+            "pattern": "^candidate-effect-[0-9a-f]{32}$"
+          },
+          "effect_hash": {"$ref": "#/$defs/sha256"},
+          "pool_id": {"type": "string", "minLength": 1},
+          "revision": {"type": "integer", "minimum": 1},
+          "snapshot_hash": {"$ref": "#/$defs/sha256"},
+          "selected_entries": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 50,
+            "items": {"$ref": "#/$defs/selected_entry"}
+          },
+          "n": {"type": "integer", "minimum": 1, "maximum": 50},
+          "k": {"type": "integer", "minimum": 2, "maximum": 50},
+          "dataset_id": {"type": "string", "minLength": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "drop_nan_labels": {"type": "boolean"},
+          "nan_labels_dropped": {"type": "integer", "minimum": 0},
+          "population_count": {"type": "integer", "minimum": 1},
+          "labeled_count": {"type": "integer", "minimum": 0},
+          "candidate_stage": {"const": "development"},
+          "observation_stage": {"const": "backtested"},
+          "validation_status": {"const": "unvalidated"},
+          "effect": {"$ref": "#/$defs/effect"},
+          "metrics": {"$ref": "#/$defs/metrics"},
+          "hit_distribution": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 51,
+            "items": {"$ref": "#/$defs/hit_distribution_row"}
+          },
+          "metric_observations": {
+            "type": "array",
+            "minItems": 27,
+            "maxItems": 315,
+            "items": {"$ref": "#/$defs/metric_observation"}
+          },
+          "not_admitted": {"const": true},
+          "not_applied": {"const": true},
+          "not_adopted": {"const": true},
+          "not_deployed": {"const": true},
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"$ref": "#/$defs/artifact"}
+          }
+        },
+        "required": [
+          "schema_version",
+          "asset_id",
+          "asset_hash",
+          "candidate_id",
+          "evidence_hash",
+          "rule_id",
+          "rule_hash",
+          "fragment_id",
+          "fragment_hash",
+          "effect_id",
+          "effect_hash",
+          "pool_id",
+          "revision",
+          "snapshot_hash",
+          "selected_entries",
+          "n",
+          "k",
+          "dataset_id",
+          "target_col",
+          "drop_nan_labels",
+          "nan_labels_dropped",
+          "population_count",
+          "labeled_count",
+          "candidate_stage",
+          "observation_stage",
+          "validation_status",
+          "effect",
+          "metrics",
+          "hit_distribution",
+          "metric_observations",
+          "not_admitted",
+          "not_applied",
+          "not_adopted",
+          "not_deployed",
+          "artifacts"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "nullable_rate": {
+            "anyOf": [
+              {"type": "number", "minimum": 0, "maximum": 1},
+              {"type": "null"}
+            ]
+          },
+          "nullable_nonnegative": {
+            "anyOf": [
+              {"type": "number", "minimum": 0},
+              {"type": "null"}
+            ]
+          },
+          "selected_entry": {
+            "type": "object",
+            "properties": {
+              "pool_position": {"type": "integer", "minimum": 0},
+              "entry_id": {"type": "string", "minLength": 1},
+              "rule_id": {"type": "string", "minLength": 1}
+            },
+            "required": ["pool_position", "entry_id", "rule_id"],
+            "additionalProperties": false
+          },
+          "effect": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"const": "strategy.voting-effect.v1"},
+              "effect_id": {
+                "type": "string",
+                "pattern": "^candidate-effect-[0-9a-f]{32}$"
+              },
+              "effect_hash": {"$ref": "#/$defs/sha256"},
+              "population_count": {"type": "integer", "minimum": 1},
+              "labeled_count": {"type": "integer", "minimum": 0},
+              "matched_count": {"type": "integer", "minimum": 0},
+              "matched_rate": {"$ref": "#/$defs/nullable_rate"},
+              "matched_bad_count": {"type": "integer", "minimum": 0},
+              "matched_bad_rate": {"$ref": "#/$defs/nullable_rate"},
+              "unmatched_count": {"type": "integer", "minimum": 0},
+              "unmatched_bad_count": {"type": "integer", "minimum": 0},
+              "unmatched_bad_rate": {"$ref": "#/$defs/nullable_rate"},
+              "bad_capture_rate": {"$ref": "#/$defs/nullable_rate"},
+              "lift": {"$ref": "#/$defs/nullable_nonnegative"}
+            },
+            "required": [
+              "schema_version",
+              "effect_id",
+              "effect_hash",
+              "population_count",
+              "labeled_count",
+              "matched_count",
+              "matched_rate",
+              "matched_bad_count",
+              "matched_bad_rate",
+              "unmatched_count",
+              "unmatched_bad_count",
+              "unmatched_bad_rate",
+              "bad_capture_rate",
+              "lift"
+            ],
+            "additionalProperties": false
+          },
+          "metrics": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"const": "strategy.voting-metrics.v1"},
+              "metrics_hash": {"$ref": "#/$defs/sha256"},
+              "population_count": {"type": "integer", "minimum": 1},
+              "labeled_count": {"type": "integer", "minimum": 0},
+              "matched_count": {"type": "integer", "minimum": 0},
+              "matched_rate": {"$ref": "#/$defs/nullable_rate"},
+              "matched_bad_count": {"type": "integer", "minimum": 0},
+              "matched_bad_rate": {"$ref": "#/$defs/nullable_rate"},
+              "unmatched_count": {"type": "integer", "minimum": 0},
+              "unmatched_bad_count": {"type": "integer", "minimum": 0},
+              "unmatched_bad_rate": {"$ref": "#/$defs/nullable_rate"},
+              "bad_capture_rate": {"$ref": "#/$defs/nullable_rate"},
+              "lift": {"$ref": "#/$defs/nullable_nonnegative"}
+            },
+            "required": [
+              "schema_version",
+              "metrics_hash",
+              "population_count",
+              "labeled_count",
+              "matched_count",
+              "matched_rate",
+              "matched_bad_count",
+              "matched_bad_rate",
+              "unmatched_count",
+              "unmatched_bad_count",
+              "unmatched_bad_rate",
+              "bad_capture_rate",
+              "lift"
+            ],
+            "additionalProperties": false
+          },
+          "hit_distribution_row": {
+            "type": "object",
+            "properties": {
+              "hit_count": {"type": "integer", "minimum": 0, "maximum": 50},
+              "count": {"type": "integer", "minimum": 0},
+              "share": {"$ref": "#/$defs/nullable_rate"},
+              "bad_count": {"type": "integer", "minimum": 0},
+              "bad_rate": {"$ref": "#/$defs/nullable_rate"},
+              "lift": {"$ref": "#/$defs/nullable_nonnegative"}
+            },
+            "required": [
+              "hit_count",
+              "count",
+              "share",
+              "bad_count",
+              "bad_rate",
+              "lift"
+            ],
+            "additionalProperties": false
+          },
+          "metric_observation": {
+            "type": "object",
+            "properties": {
+              "metric_name": {"type": "string", "minLength": 1},
+              "dimension": {
+                "type": "string",
+                "enum": ["count", "loan_amount", "overdue_amount"]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "observed",
+                  "unavailable",
+                  "insufficient_data",
+                  "not_applicable"
+                ]
+              },
+              "value": {"type": ["number", "null"]}
+            },
+            "required": ["metric_name", "dimension", "status", "value"],
+            "additionalProperties": false
+          },
+          "artifact": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "minLength": 1},
+              "kind": {"const": "strategy_voting_candidate_json"},
+              "format": {"const": "json"},
+              "filename": {"type": "string", "minLength": 1},
+              "content_hash": {"$ref": "#/$defs/sha256"},
+              "download_url": {"type": "string", "minLength": 1}
+            },
+            "required": [
+              "artifact_id",
+              "kind",
+              "format",
+              "filename",
+              "content_hash",
+              "download_url"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_build_voting_candidate",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:artifact"],
+      "memory_limit_mb": 4096
+    },
+    {
       "name": "refine_univariate_candidate",
       "summary": "Replay task-owned univariate evidence, apply explicit bin merges and deterministic selection, and emit an immutable development-only candidate asset.",
       "input_schema": {
@@ -1794,7 +2117,7 @@
     },
     {
       "name": "add_candidate_to_pool",
-      "summary": "Add one immutable task-owned refined univariate asset or persisted automatic-tree leaf selection to a draft Strategy Pool revision after strict evidence, dataset, and optimistic-lock validation.",
+      "summary": "Add one immutable task-owned refined univariate asset, persisted automatic-tree leaf selection, or verified Voting n-of-k candidate to a draft Strategy Pool revision after strict evidence, dataset, ancestry, and optimistic-lock validation; Voting requires explicit before-selected-members insertion or atomic member replacement and can never use ordinary append.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1822,6 +2145,14 @@
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
           },
+          "placement_mode": {
+            "type": "string",
+            "enum": [
+              "append",
+              "before_selected_members",
+              "replace_selected_members"
+            ]
+          },
           "reason": {"type": "string", "minLength": 1, "maxLength": 500}
         },
         "required": [
@@ -1843,7 +2174,13 @@
           "schema_version": {
             "const": "strategy.candidate-pool-mutation-tool.v2"
           },
-          "operation": {"const": "add_candidate"},
+          "operation": {
+            "enum": [
+              "add_candidate",
+              "insert_candidate_before_entries",
+              "replace_entries_with_candidate"
+            ]
+          },
           "pool_id": {"type": "string", "minLength": 1},
           "revision": {"type": "integer", "minimum": 1},
           "snapshot_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},

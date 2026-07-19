@@ -1053,7 +1053,8 @@ def test_tree_dataset_registry_metadata_drift_fails_closed(tmp_path: Path) -> No
         )
 
 
-def test_add_wrapper_documents_both_supported_candidate_sources() -> None:
+def test_add_wrapper_documents_all_supported_candidate_sources() -> None:
     doc = strategy_tools.tool_add_candidate_to_pool.__doc__ or ""
     assert "univariate asset" in doc
     assert "automatic-tree leaf" in doc
+    assert "Voting candidate" in doc

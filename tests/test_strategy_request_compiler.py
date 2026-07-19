@@ -177,7 +177,7 @@ def test_compile_uses_deterministic_json_schema_call_and_returns_confirmation() 
     assert call["stream"] is False
     assert call["caller"] == "strategy_request_compiler"
     assert call["prompt_name"] == "STRATEGY_REQUEST_COMPILER_SYS"
-    assert call["prompt_version"] == 17
+    assert call["prompt_version"] == 18
     assert set(result.to_dict()) == {"draft", "clarification", "confirmation"}
 
 

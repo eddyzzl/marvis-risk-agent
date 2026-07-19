@@ -229,6 +229,75 @@ def canonicalize_expression(expression: Mapping[str, Any]) -> dict[str, Any]:
     raise StrategyError(f"unsupported expression op: {op}")
 
 
+def semantic_expression_key(expression: Mapping[str, Any]) -> str:
+    """Return a stable key for the DSL's safe commutative equivalences.
+
+    Persisted canonical DSL deliberately preserves author order for backwards
+    compatible hashes.  Reachability and duplicate-vote checks need a narrower
+    semantic identity: ``and``/``or`` and ``n_of_k`` argument order is
+    irrelevant, nested ``and``/``or`` is associative, boundary cardinalities
+    are their exact Boolean forms (``1-of-k`` is OR and ``k-of-k`` is AND), and
+    membership value order is irrelevant.  This helper normalizes only those
+    proven identities; it does not attempt general symbolic theorem proving.
+    """
+
+    normalized = _semantic_expression(canonicalize_expression(expression))
+    return json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _semantic_expression(expression: Mapping[str, Any]) -> dict[str, Any]:
+    op = str(expression["op"])
+    if op in {"and", "or"}:
+        flattened: list[dict[str, Any]] = []
+        for raw in expression["args"]:
+            child = _semantic_expression(raw)
+            if child.get("op") == op:
+                flattened.extend(child["args"])
+            else:
+                flattened.append(child)
+        by_key = {_semantic_json(child): child for child in flattened}
+        ordered = [by_key[key] for key in sorted(by_key)]
+        if len(ordered) == 1:
+            return ordered[0]
+        return {"op": op, "args": ordered}
+    if op == "n_of_k":
+        args = [_semantic_expression(raw) for raw in expression["args"]]
+        args.sort(key=_semantic_json)
+        if expression["n"] == 1:
+            return _semantic_expression({"op": "or", "args": args})
+        if expression["n"] == len(args):
+            return _semantic_expression({"op": "and", "args": args})
+        return {"op": op, "n": expression["n"], "args": args}
+    if op == "not":
+        return {"op": op, "arg": _semantic_expression(expression["arg"])}
+    if op == "compare" and expression["operator"] in {"in", "not_in"}:
+        values = {
+            _semantic_json(value): value
+            for value in expression["value"]
+        }
+        return {
+            **expression,
+            "value": [values[key] for key in sorted(values)],
+        }
+    return dict(expression)
+
+
+def _semantic_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
 @dataclass(frozen=True)
 class StrategyAction:
     type: str
@@ -540,6 +609,7 @@ __all__ = [
     "StrategySpec",
     "canonical_strategy_json",
     "canonicalize_expression",
+    "semantic_expression_key",
     "parse_strategy_spec",
     "strategy_spec_hash",
 ]

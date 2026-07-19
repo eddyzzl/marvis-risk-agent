@@ -247,7 +247,7 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=17,
+    version=18,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
@@ -256,7 +256,8 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "standard_workflow 只能输出 request_kind=standard_workflow、workflow、workflow_inputs。workflow "
         "只能是 profit_calc/roll_rate_matrix/limit_pricing_matrix/univariate_candidate_analysis/"
         "univariate_candidate_refinement/automatic_tree_candidate_build/"
-        "automatic_tree_leaf_materialization/strategy_pool_add_candidate/strategy_pool_remove_entry/"
+        "automatic_tree_leaf_materialization/voting_candidate_build/"
+        "strategy_pool_add_candidate/strategy_pool_remove_entry/"
         "strategy_pool_set_action/strategy_pool_reorder/strategy_pool_compile。"
         "profit_calc 需要 ead_col、pd_col、"
         "可选 segment_col 及完整 profit_params。roll_rate_matrix 需要 id_col、time_col、status_col、"
@@ -305,6 +306,17 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "fragment/rule/effect id、condition、metrics、action、数据集字段和其他平台绑定字段全部禁止"
         "输出或猜测。不能在同一请求中串联 Strategy Pool、拒绝/审批/复核动作、采纳、部署或 leaf ID"
         "写回；遇到这些请求必须 clarification。"
+        "voting_candidate_build 表示从当前 Strategy Pool 的明确规则集合构建一个 n-of-k 候选。"
+        "workflow_inputs 只允许 strategy_type、rule_ids 和 n；rule_ids 必须逐字抄录用户原话中"
+        "2 到 50 个互不重复的完整 candidate-rule- 后接 32 位小写十六进制 ID，n 必须是用户"
+        "明确给出的 1 到规则数之间整数。不得使用‘最好规则’‘刚才那些’等启发式引用，也不得"
+        "输出 entry_id、Pool revision/hash、dataset/target、condition、metrics、action、推荐或"
+        "任何计算结果。该 Workflow 只生成 development/backtested/unvalidated 候选；同一句"
+        "串联入池、设置动作、采纳、部署或写回时必须 clarification。问句、假设/未来/历史"
+        "描述、演示文本或句尾撤销也必须 clarification；strategy_type 和 n 必须各自唯一，"
+        "显式 k 必须等于 rule_ids 数量，不能让模型在多个候选值之间选择。"
+        "只要原话明确出现 Voting/n-of-k 和完整 candidate-rule ID，就只能输出 "
+        "voting_candidate_build 或 clarification，禁止改路由到 strategy_lifecycle 或其他 workflow。"
         "Strategy Pool 请求只抽取用户拥有的控制字段，禁止输出 artifact hash、asset hash、pool revision、"
         "pool snapshot hash、entry/rule 指标或推荐顺序；这些字段全部由平台从当前 task 绑定。"
         "strategy_pool_add_candidate 只允许 candidate_asset_id 与 selection_id 严格二选一。"
@@ -326,6 +338,9 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "完整抄录；用户明确标注时不得省略、改写或对调。limit/pricing/segment 的 value 及 output_value"
         "必须按对应标签的完整值绑定，保留小数、千分位、完整字符串或结构化 JSON，不能取数值/字符串/"
         "数组子串，也不能从重复标签中任选一个。入池与采纳、部署、执行、投入使用、删除、"
+        "Voting 候选入池还允许可选 placement_mode，但只能逐字抄录 "
+        "before_selected_members/replace_selected_members，或从用户明确二选一的‘保留成员作为"
+        "回退并放在成员前’/‘由 Voting 替代成员’映射；用户未选择时必须省略，不能猜位置或置顶。"
         "改动作、重排、编译预览等"
         "回测、样本应用、生成报告、提交审批或任何其他后续操作必须拆成后续请求；同一请求"
         "串联第二个操作时必须 clarification。"

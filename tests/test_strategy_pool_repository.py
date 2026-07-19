@@ -808,6 +808,18 @@ def test_cas_revision_lineage_and_exact_retry_only_while_head(
     )
     assert repo.get_current(task.id, "approval") == second
     assert repo.get_revision_by_id(task.id, "approval", first["revision_id"]) == first
+    with repo.transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        assert repo.get_current_on_connection(conn, task.id, "approval") == second
+        assert (
+            repo.get_revision_by_id_on_connection(
+                conn,
+                task.id,
+                "approval",
+                first["revision_id"],
+            )
+            == first
+        )
 
     with pytest.raises(
         StrategyCandidatePoolConflictError, match="no longer the current head"
