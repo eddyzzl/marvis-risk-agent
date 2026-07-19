@@ -9,6 +9,7 @@ from marvis.domain import TaskCreate
 from marvis.files import sha256_file
 from marvis.packs.strategy.contracts import Strategy, StrategyRule
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.routers import artifacts as artifact_routes
 from marvis.routers.artifacts import router as artifacts_router
 
 
@@ -291,9 +292,9 @@ def test_strategy_artifact_download_rejects_outside_missing_and_forbidden_files(
         path=secret,
         artifact_id="outside",
     )
-    forbidden = app.state.settings.tasks_dir / task_id / "outputs" / "report.xlsx"
+    forbidden = app.state.settings.tasks_dir / task_id / "outputs" / "report.exe"
     forbidden.parent.mkdir(parents=True, exist_ok=True)
-    forbidden.write_bytes(b"xlsx")
+    forbidden.write_bytes(b"executable")
     _seed_strategy_artifact(
         app,
         task_id=task_id,
@@ -722,6 +723,76 @@ def test_task_artifact_list_is_path_free_and_downloads_by_owned_id(tmp_path):
     assert downloaded.headers["content-type"].startswith("text/csv")
     assert generic_download.status_code == 200
     assert generic_download.text == "segment,net_profit\nA,12.5\n"
+
+
+def test_owned_and_generic_download_send_the_verified_snapshot_when_path_changes(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id, record, artifact = _seed_task_artifact(app)
+    verified_bytes = artifact.read_bytes()
+    drifted_bytes = b"x" * len(verified_bytes)
+    original_check = artifact_routes._artifact_path_integrity_failure
+    checks = 0
+
+    def replace_path_after_check(*args, **kwargs):
+        nonlocal checks
+        failure = original_check(*args, **kwargs)
+        artifact.write_bytes(drifted_bytes)
+        checks += 1
+        return failure
+
+    monkeypatch.setattr(
+        artifact_routes,
+        "_artifact_path_integrity_failure",
+        replace_path_after_check,
+    )
+
+    owned = client.get(f"/api/tasks/{task_id}/task-artifacts/{record['id']}/download")
+    artifact.write_bytes(verified_bytes)
+    relative_path = artifact.relative_to(app.state.settings.workspace).as_posix()
+    generic = client.get(f"/api/artifacts/{quote(relative_path, safe='')}")
+
+    assert checks == 2
+    for response in (owned, generic):
+        assert response.status_code == 200
+        assert response.content == verified_bytes
+        assert response.content != drifted_bytes
+        assert response.headers["content-length"] == str(len(verified_bytes))
+
+
+def test_legacy_owned_download_sends_one_frozen_snapshot_when_path_changes(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id, _, artifact_id, artifact = _seed_strategy_artifact(app)
+    legacy_bytes = artifact.read_bytes()
+    drifted_bytes = b"z" * len(legacy_bytes)
+    original_check = artifact_routes._artifact_path_integrity_failure
+
+    def replace_path_after_check(*args, **kwargs):
+        failure = original_check(*args, **kwargs)
+        artifact.write_bytes(drifted_bytes)
+        return failure
+
+    monkeypatch.setattr(
+        artifact_routes,
+        "_artifact_path_integrity_failure",
+        replace_path_after_check,
+    )
+
+    response = client.get(
+        f"/api/tasks/{task_id}/strategy-artifacts/{artifact_id}/download"
+    )
+
+    assert response.status_code == 200
+    assert response.content == legacy_bytes
+    assert response.content != drifted_bytes
+    assert response.headers["content-length"] == str(len(legacy_bytes))
 
 
 def test_task_artifact_download_supports_xlsx_exports(tmp_path):

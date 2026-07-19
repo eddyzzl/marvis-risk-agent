@@ -10,6 +10,7 @@ Strategy Pool.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 import hashlib
 import hmac
@@ -1232,6 +1233,10 @@ def _tool_output(
     tree = tree_result["tree"]
     identity = asset["identity"]
     lifecycle = asset["lifecycle"]
+    sample_weight = tree_result["training"]["sample_weight"]
+    primary_metric_basis = (
+        "weighted" if sample_weight["status"] == "available" else "unweighted"
+    )
     return {
         "schema_version": TOOL_SCHEMA_VERSION,
         "summary": {
@@ -1265,13 +1270,49 @@ def _tool_output(
                 "fragment_hash": fragment["fragment_hash"],
                 "rule_id": fragment["rule_id"],
                 "effect_id": fragment["effect_id"],
+                "condition": deepcopy(fragment["condition"]),
+                "requirements": deepcopy(fragment["requirements"]),
+                "metric_basis": {
+                    "primary": primary_metric_basis,
+                    "sample_weight": deepcopy(sample_weight),
+                },
+                "measurements": deepcopy(fragment["metrics"]),
             }
             for fragment in asset["fragments"]
         ],
+        "report_info_gaps": _report_info_gaps(tree_result),
         "red_flags": [dict(flag) for flag in asset["diagnostics"]["red_flags"]],
         "equivalence": dict(equivalence),
         "artifacts": [dict(artifact) for artifact in artifacts],
     }
+
+
+def _report_info_gaps(tree_result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Project only deterministic, nonblocking optional reporting gaps."""
+
+    training = tree_result["training"]
+    absent_contexts = (
+        (
+            training["sample_weight"]["status"] == "not_applicable",
+            "sample_weight_not_provided",
+            "sample_weight",
+        ),
+        (
+            training["loan_amount_col"] is None,
+            "loan_amount_not_provided",
+            "loan_amount",
+        ),
+        (
+            training["overdue_amount_col"] is None,
+            "overdue_amount_not_provided",
+            "overdue_amount",
+        ),
+    )
+    return [
+        {"code": code, "context": context, "blocking": False}
+        for absent, code, context in absent_contexts
+        if absent
+    ]
 
 
 def _canonical_sha256(value: object) -> str:

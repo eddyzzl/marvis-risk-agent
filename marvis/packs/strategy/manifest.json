@@ -769,6 +769,100 @@
       },
       "output_schema": {
         "type": "object",
+        "$defs": {
+          "automatic_tree_compare_condition": {
+            "type": "object",
+            "properties": {
+              "op": {"const": "compare"},
+              "field": {"type": "string", "minLength": 1},
+              "operator": {"type": "string", "enum": ["<=", ">"]},
+              "value": {"type": "number"},
+              "missing": {"type": "string", "enum": ["match", "no_match"]}
+            },
+            "required": ["op", "field", "operator", "value", "missing"],
+            "additionalProperties": false
+          },
+          "automatic_tree_condition": {
+            "oneOf": [
+              {"$ref": "#/$defs/automatic_tree_compare_condition"},
+              {
+                "type": "object",
+                "properties": {
+                  "op": {"const": "and"},
+                  "args": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 8,
+                    "items": {
+                      "$ref": "#/$defs/automatic_tree_compare_condition"
+                    }
+                  }
+                },
+                "required": ["op", "args"],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "automatic_tree_metric_values": {
+            "type": "object",
+            "properties": {
+              "status": {"const": "available"},
+              "total": {"type": "number", "exclusiveMinimum": 0},
+              "good": {"type": "number", "minimum": 0},
+              "bad": {"type": "number", "minimum": 0},
+              "bad_rate": {"type": "number", "minimum": 0, "maximum": 1},
+              "share": {"type": "number", "minimum": 0, "maximum": 1},
+              "bad_capture": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "lift": {"type": "number", "minimum": 0},
+              "loan_amount_total": {"type": "number", "minimum": 0},
+              "loan_amount_coverage_count": {"type": "integer", "minimum": 0},
+              "loan_amount_coverage": {"type": "number", "minimum": 0},
+              "loan_amount_coverage_rate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "overdue_amount_total": {"type": "number", "minimum": 0},
+              "overdue_amount_coverage_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "overdue_amount_coverage": {"type": "number", "minimum": 0},
+              "overdue_amount_coverage_rate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "amount_pair_coverage_count": {"type": "integer", "minimum": 0},
+              "amount_pair_coverage": {"type": "number", "minimum": 0},
+              "amount_pair_coverage_rate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "paired_loan_amount_total": {"type": "number", "minimum": 0},
+              "paired_overdue_amount_total": {"type": "number", "minimum": 0},
+              "overdue_rate": {
+                "type": ["number", "null"],
+                "minimum": 0
+              }
+            },
+            "required": [
+              "total",
+              "good",
+              "bad",
+              "bad_rate",
+              "share",
+              "bad_capture",
+              "lift"
+            ],
+            "additionalProperties": false
+          }
+        },
         "properties": {
           "schema_version": {
             "const": "strategy.automatic-tree-candidate-tool.v1"
@@ -865,16 +959,132 @@
                 "fragment_id": {"type": "string", "minLength": 1},
                 "fragment_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                 "rule_id": {"type": "string", "minLength": 1},
-                "effect_id": {"type": "string", "minLength": 1}
+                "effect_id": {"type": "string", "minLength": 1},
+                "condition": {"$ref": "#/$defs/automatic_tree_condition"},
+                "requirements": {
+                  "type": "array",
+                  "maxItems": 0
+                },
+                "metric_basis": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "primary": {"const": "unweighted"},
+                        "sample_weight": {
+                          "type": "object",
+                          "properties": {
+                            "status": {"const": "not_applicable"}
+                          },
+                          "required": ["status"],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": ["primary", "sample_weight"],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "primary": {"const": "weighted"},
+                        "sample_weight": {
+                          "type": "object",
+                          "properties": {
+                            "status": {"const": "available"},
+                            "column": {"type": "string", "minLength": 1}
+                          },
+                          "required": ["status", "column"],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": ["primary", "sample_weight"],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "measurements": {
+                  "type": "object",
+                  "properties": {
+                    "unweighted": {
+                      "allOf": [
+                        {"$ref": "#/$defs/automatic_tree_metric_values"},
+                        {"not": {"required": ["status"]}}
+                      ]
+                    },
+                    "weighted": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "status": {"const": "not_applicable"}
+                          },
+                          "required": ["status"],
+                          "additionalProperties": false
+                        },
+                        {
+                          "allOf": [
+                            {"$ref": "#/$defs/automatic_tree_metric_values"},
+                            {"required": ["status"]}
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "required": ["unweighted", "weighted"],
+                  "additionalProperties": false
+                }
               },
               "required": [
                 "leaf_id",
                 "fragment_id",
                 "fragment_hash",
                 "rule_id",
-                "effect_id"
+                "effect_id",
+                "condition",
+                "requirements",
+                "metric_basis",
+                "measurements"
               ],
               "additionalProperties": false
+            }
+          },
+          "report_info_gaps": {
+            "type": "array",
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {"const": "sample_weight_not_provided"},
+                    "context": {"const": "sample_weight"},
+                    "blocking": {"const": false}
+                  },
+                  "required": ["code", "context", "blocking"],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {"const": "loan_amount_not_provided"},
+                    "context": {"const": "loan_amount"},
+                    "blocking": {"const": false}
+                  },
+                  "required": ["code", "context", "blocking"],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {"const": "overdue_amount_not_provided"},
+                    "context": {"const": "overdue_amount"},
+                    "blocking": {"const": false}
+                  },
+                  "required": ["code", "context", "blocking"],
+                  "additionalProperties": false
+                }
+              ]
             }
           },
           "red_flags": {
@@ -974,6 +1184,7 @@
           "schema_version",
           "summary",
           "leaf_index",
+          "report_info_gaps",
           "red_flags",
           "equivalence",
           "artifacts"

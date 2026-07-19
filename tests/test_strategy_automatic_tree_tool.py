@@ -10,7 +10,9 @@ import threading
 
 import pandas as pd
 import pytest
+from fastapi.testclient import TestClient
 
+from marvis.app import create_app
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.backend import DataBackend
 from marvis.data.errors import NanLabelNotConfirmedError
@@ -260,6 +262,7 @@ def test_automatic_tree_tool_happy_path_is_six_artifact_idempotent(
         "schema_version",
         "summary",
         "leaf_index",
+        "report_info_gaps",
         "red_flags",
         "equivalence",
         "artifacts",
@@ -281,6 +284,7 @@ def test_automatic_tree_tool_happy_path_is_six_artifact_idempotent(
         == 1
     )
     assert len(first["leaf_index"]) == first["summary"]["leaf_count"]
+    assert first["report_info_gaps"] == []
     assert len(first["artifacts"]) == 6
     assert all("path" not in artifact for artifact in first["artifacts"])
     assert all(
@@ -308,6 +312,23 @@ def test_automatic_tree_tool_happy_path_is_six_artifact_idempotent(
     asset = validate_automatic_tree_asset(
         json.loads(Path(json_record["path"]).read_text(encoding="utf-8"))
     )
+    assert first["leaf_index"] == [
+        {
+            "leaf_id": fragment["leaf_id"],
+            "fragment_id": fragment["fragment_id"],
+            "fragment_hash": fragment["fragment_hash"],
+            "rule_id": fragment["rule_id"],
+            "effect_id": fragment["effect_id"],
+            "condition": fragment["condition"],
+            "requirements": fragment["requirements"],
+            "metric_basis": {
+                "primary": "weighted",
+                "sample_weight": {"status": "available", "column": "weight"},
+            },
+            "measurements": fragment["metrics"],
+        }
+        for fragment in asset["fragments"]
+    ]
     expected_bytes = {
         AUTOMATIC_TREE_ASSET_ARTIFACT_KIND: canonical_automatic_tree_asset_json(
             asset
@@ -368,8 +389,124 @@ def test_automatic_tree_tool_happy_path_is_six_artifact_idempotent(
         )
         assert provenance["equivalence_sample_count"] == 24
 
-    forbidden = {"action", "adoption", "pool", "rules", "tree", "result", "metrics"}
+    client = TestClient(create_app(settings))
+    expected_media_types = {
+        AUTOMATIC_TREE_ASSET_ARTIFACT_KIND: "application/json",
+        "strategy_automatic_tree_python": "text/x-python",
+        "strategy_automatic_tree_duckdb_sql": "application/sql",
+        "strategy_automatic_tree_svg": "image/svg+xml",
+        "strategy_automatic_tree_png": "image/png",
+        "strategy_automatic_tree_xlsx": (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+    }
+    for kind, record in by_kind.items():
+        downloaded = client.get(
+            f"/api/tasks/{task.id}/task-artifacts/{record['id']}/download"
+        )
+        foreign = client.get(
+            f"/api/tasks/{_other.id}/task-artifacts/{record['id']}/download"
+        )
+
+        assert downloaded.status_code == 200
+        assert downloaded.content == expected_bytes[kind]
+        assert (
+            downloaded.headers["content-type"].split(";", 1)[0]
+            == (expected_media_types[kind])
+        )
+        assert downloaded.headers["content-length"] == str(len(expected_bytes[kind]))
+        assert downloaded.headers["content-disposition"].startswith("attachment;")
+        assert Path(record["path"]).name in downloaded.headers["content-disposition"]
+        if kind == "strategy_automatic_tree_svg":
+            assert downloaded.headers["x-content-type-options"] == "nosniff"
+            relative_path = Path(record["path"]).relative_to(settings.workspace)
+            generic_download = client.get(f"/api/artifacts/{relative_path.as_posix()}")
+            assert generic_download.status_code == 200
+            assert generic_download.content == expected_bytes[kind]
+            assert generic_download.headers["content-disposition"].startswith(
+                "attachment;"
+            )
+            assert generic_download.headers["x-content-type-options"] == "nosniff"
+        assert foreign.status_code == 404
+
+    for record in by_kind.values():
+        path = Path(record["path"])
+        path.write_bytes(path.read_bytes() + b"drift")
+    for record in by_kind.values():
+        drifted = client.get(
+            f"/api/tasks/{task.id}/task-artifacts/{record['id']}/download"
+        )
+        assert drifted.status_code == 409
+        assert drifted.json()["detail"] == "task artifact integrity check failed"
+
+    forbidden = {
+        "action",
+        "adoption",
+        "pool",
+        "recommendation",
+        "rank",
+        "rules",
+        "tree",
+        "result",
+        "metrics",
+        "path",
+    }
     assert not (_all_mapping_keys(first) & forbidden)
+
+
+def test_automatic_tree_tool_reports_only_nonblocking_optional_context_gaps(
+    tmp_path: Path,
+) -> None:
+    _settings, runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    inputs = {
+        **_inputs(dataset, workspace, mapping),
+        "sample_weight_col": None,
+        "loan_amount_col": None,
+        "overdue_amount_col": None,
+    }
+
+    result = runner.invoke(
+        ToolRef("strategy", "build_automatic_tree_candidate"),
+        inputs,
+        task_id=task.id,
+    )
+    assert result.ok, result.error
+    output = result.output
+
+    assert output["report_info_gaps"] == [
+        {
+            "code": "sample_weight_not_provided",
+            "context": "sample_weight",
+            "blocking": False,
+        },
+        {
+            "code": "loan_amount_not_provided",
+            "context": "loan_amount",
+            "blocking": False,
+        },
+        {
+            "code": "overdue_amount_not_provided",
+            "context": "overdue_amount",
+            "blocking": False,
+        },
+    ]
+    for leaf in output["leaf_index"]:
+        assert leaf["metric_basis"] == {
+            "primary": "unweighted",
+            "sample_weight": {"status": "not_applicable"},
+        }
+        assert leaf["measurements"]["weighted"] == {"status": "not_applicable"}
+        assert set(leaf["measurements"]["unweighted"]) == {
+            "total",
+            "good",
+            "bad",
+            "bad_rate",
+            "share",
+            "bad_capture",
+            "lift",
+        }
 
 
 def test_automatic_tree_tool_projects_only_required_columns(

@@ -318,6 +318,47 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     }
     assert automatic_tree_tool.output_schema["additionalProperties"] is False
     assert automatic_tree_tool.output_schema["properties"]["artifacts"]["minItems"] == 6
+    automatic_leaf_schema = automatic_tree_tool.output_schema["properties"][
+        "leaf_index"
+    ]["items"]
+    assert set(automatic_leaf_schema["required"]) == {
+        "leaf_id",
+        "fragment_id",
+        "fragment_hash",
+        "rule_id",
+        "effect_id",
+        "condition",
+        "requirements",
+        "metric_basis",
+        "measurements",
+    }
+    assert automatic_leaf_schema["additionalProperties"] is False
+    assert automatic_leaf_schema["properties"]["requirements"] == {
+        "type": "array",
+        "maxItems": 0,
+    }
+    report_gap_schema = automatic_tree_tool.output_schema["properties"][
+        "report_info_gaps"
+    ]
+    assert report_gap_schema["maxItems"] == 3
+    assert {
+        (
+            branch["properties"]["code"]["const"],
+            branch["properties"]["context"]["const"],
+        )
+        for branch in report_gap_schema["items"]["oneOf"]
+    } == {
+        ("sample_weight_not_provided", "sample_weight"),
+        ("loan_amount_not_provided", "loan_amount"),
+        ("overdue_amount_not_provided", "overdue_amount"),
+    }
+    assert all(
+        branch["properties"]["blocking"] == {"const": False}
+        and set(branch["required"]) == {"code", "context", "blocking"}
+        and branch["additionalProperties"] is False
+        for branch in report_gap_schema["items"]["oneOf"]
+    )
+    assert "report_info_gaps" in automatic_tree_tool.output_schema["required"]
     assert automatic_tree_leaf_tool.determinism == "deterministic"
     assert automatic_tree_leaf_tool.policy.human_decision_gate == "none"
     assert automatic_tree_leaf_tool.policy.effect_authorization == "none"

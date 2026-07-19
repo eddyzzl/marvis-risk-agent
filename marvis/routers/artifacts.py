@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+import hashlib
 import hmac
 import json
+import mimetypes
+import os
 from pathlib import Path
+import stat
+from tempfile import SpooledTemporaryFile
+from typing import BinaryIO
 from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from marvis.api_task_helpers import get_task_or_404
 from marvis.db import StrategyRepository, TaskRepository, connect
@@ -18,12 +26,19 @@ from marvis.repositories.task_artifacts import TaskArtifactRepository
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
 
+_SNAPSHOT_CHUNK_BYTES = 64 * 1024
+_SNAPSHOT_MEMORY_LIMIT_BYTES = 1024 * 1024
+
 _STRATEGY_ARTIFACT_MEDIA_TYPES = {
     ".csv": "text/csv",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".json": "application/json",
     ".md": "text/markdown",
     ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".py": "text/x-python",
+    ".sql": "application/sql",
+    ".svg": "image/svg+xml",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
@@ -95,7 +110,7 @@ def download_strategy_artifact(
     task_id: str,
     artifact_id: str,
     request: Request,
-) -> FileResponse:
+) -> StreamingResponse:
     settings = request.app.state.settings
     get_task_or_404(TaskRepository(settings.db_path), task_id)
     row = StrategyRepository(settings.db_path).get_strategy_artifact_for_task(
@@ -111,16 +126,21 @@ def download_strategy_artifact(
     )
     if path is None:
         raise not_found("strategy artifact not found")
-    if _artifact_path_integrity_failure(
-        settings=settings,
-        task_id=task_id,
-        candidate=path,
-    ) is not None:
-        raise conflict("strategy artifact integrity check failed")
-    return FileResponse(
-        path,
-        media_type=_STRATEGY_ARTIFACT_MEDIA_TYPES[path.suffix.lower()],
+    try:
+        snapshot, content_length = _verified_artifact_snapshot(
+            settings=settings,
+            task_id=task_id,
+            candidate=path,
+            required_content_hash=row.get("content_hash"),
+            required_content_size=row.get("content_size"),
+        )
+    except _ArtifactSnapshotFailure as exc:
+        raise conflict("strategy artifact integrity check failed") from exc
+    return _attachment_response(
+        snapshot,
         filename=path.name,
+        media_type=_STRATEGY_ARTIFACT_MEDIA_TYPES[path.suffix.lower()],
+        content_length=content_length,
     )
 
 
@@ -175,7 +195,7 @@ def download_task_artifact(
     task_id: str,
     artifact_id: str,
     request: Request,
-) -> FileResponse:
+) -> StreamingResponse:
     settings = request.app.state.settings
     get_task_or_404(TaskRepository(settings.db_path), task_id)
     row = TaskArtifactRepository(settings.db_path).get_for_task(task_id, artifact_id)
@@ -188,16 +208,20 @@ def download_task_artifact(
     )
     if path is None:
         raise not_found("task artifact not found")
-    if _artifact_path_integrity_failure(
-        settings=settings,
-        task_id=task_id,
-        candidate=path,
-    ) is not None:
-        raise conflict("task artifact integrity check failed")
-    return FileResponse(
-        path,
-        media_type=_STRATEGY_ARTIFACT_MEDIA_TYPES[path.suffix.lower()],
+    try:
+        snapshot, content_length = _verified_artifact_snapshot(
+            settings=settings,
+            task_id=task_id,
+            candidate=path,
+            required_content_hash=row.get("content_hash"),
+        )
+    except _ArtifactSnapshotFailure as exc:
+        raise conflict("task artifact integrity check failed") from exc
+    return _attachment_response(
+        snapshot,
         filename=path.name,
+        media_type=_STRATEGY_ARTIFACT_MEDIA_TYPES[path.suffix.lower()],
+        content_length=content_length,
     )
 
 
@@ -215,12 +239,143 @@ def preview_artifact(artifact_path: str, request: Request):
 
 
 @router.get("/artifacts/{artifact_path:path}")
-def download_artifact(artifact_path: str, request: Request) -> FileResponse:
-    path = _resolve_task_artifact_path(request, artifact_path)
-    return FileResponse(path, filename=path.name)
+def download_artifact(artifact_path: str, request: Request) -> StreamingResponse:
+    path = _resolve_task_artifact_path(
+        request,
+        artifact_path,
+        enforce_integrity=False,
+    )
+    task_id = path.relative_to(request.app.state.settings.tasks_dir).parts[0]
+    try:
+        snapshot, content_length = _verified_artifact_snapshot(
+            settings=request.app.state.settings,
+            task_id=task_id,
+            candidate=path,
+        )
+    except _ArtifactSnapshotFailure as exc:
+        raise conflict(exc.failure) from exc
+    media_type = mimetypes.guess_type(path.name)[0] or "text/plain"
+    return _attachment_response(
+        snapshot,
+        filename=path.name,
+        media_type=media_type,
+        content_length=content_length,
+    )
 
 
-def _resolve_task_artifact_path(request: Request, artifact_path: str) -> Path:
+def _attachment_response(
+    snapshot: BinaryIO,
+    *,
+    filename: str,
+    media_type: str,
+    content_length: int,
+) -> StreamingResponse:
+    encoded_filename = quote(filename, safe="")
+    disposition = (
+        f'attachment; filename="{filename}"'
+        if encoded_filename == filename
+        else f"attachment; filename*=utf-8''{encoded_filename}"
+    )
+    headers = {
+        "Content-Disposition": disposition,
+        "Content-Length": str(content_length),
+    }
+    if Path(filename).suffix.lower() == ".svg":
+        headers["X-Content-Type-Options"] = "nosniff"
+    try:
+        return StreamingResponse(
+            _snapshot_chunks(snapshot),
+            media_type=media_type,
+            headers=headers,
+            background=BackgroundTask(snapshot.close),
+        )
+    except Exception:
+        snapshot.close()
+        raise
+
+
+def _snapshot_chunks(snapshot: BinaryIO) -> Iterator[bytes]:
+    try:
+        while chunk := snapshot.read(_SNAPSHOT_CHUNK_BYTES):
+            yield chunk
+    finally:
+        snapshot.close()
+
+
+class _ArtifactSnapshotFailure(RuntimeError):
+    def __init__(self, failure: str) -> None:
+        self.failure = failure
+        super().__init__(failure)
+
+
+def _verified_artifact_snapshot(
+    *,
+    settings,
+    task_id: str,
+    candidate: Path,
+    required_content_hash: object = None,
+    required_content_size: object = None,
+) -> tuple[BinaryIO, int]:
+    registry_records = _registered_artifact_records(settings=settings)
+    snapshot: BinaryIO = SpooledTemporaryFile(
+        max_size=_SNAPSHOT_MEMORY_LIMIT_BYTES,
+        mode="w+b",
+    )
+    digest = hashlib.sha256()
+    content_length = 0
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(candidate, flags)
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("artifact snapshot source is not a regular file")
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = -1
+            while chunk := source.read(_SNAPSHOT_CHUNK_BYTES):
+                snapshot.write(chunk)
+                digest.update(chunk)
+                content_length += len(chunk)
+        content_hash = digest.hexdigest()
+        if (
+            required_content_size is not None
+            and required_content_size != content_length
+        ):
+            raise _ArtifactSnapshotFailure("artifact integrity check failed")
+        if required_content_hash is not None and (
+            not isinstance(required_content_hash, str)
+            or not hmac.compare_digest(content_hash, required_content_hash)
+        ):
+            raise _ArtifactSnapshotFailure("artifact integrity check failed")
+        failure = _artifact_path_integrity_failure(
+            settings=settings,
+            task_id=task_id,
+            candidate=candidate,
+            records=registry_records,
+            actual_size=content_length,
+            actual_hash=content_hash,
+        )
+        if failure is not None:
+            raise _ArtifactSnapshotFailure(failure)
+        snapshot.seek(0)
+        return snapshot, content_length
+    except _ArtifactSnapshotFailure:
+        snapshot.close()
+        raise
+    except OSError as exc:
+        snapshot.close()
+        raise _ArtifactSnapshotFailure("artifact integrity check failed") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _resolve_task_artifact_path(
+    request: Request,
+    artifact_path: str,
+    *,
+    enforce_integrity: bool = True,
+) -> Path:
     raw = unquote(str(artifact_path or ""))
     if not raw or raw.startswith(("/", "\\")):
         raise not_found("artifact not found")
@@ -249,11 +404,12 @@ def _resolve_task_artifact_path(request: Request, artifact_path: str) -> Path:
         raise not_found("artifact not found") from exc
     if not candidate.is_file():
         raise not_found("artifact not found")
-    _enforce_registered_artifact_integrity(
-        settings=settings,
-        task_id=task_id,
-        candidate=candidate,
-    )
+    if enforce_integrity:
+        _enforce_registered_artifact_integrity(
+            settings=settings,
+            task_id=task_id,
+            candidate=candidate,
+        )
     return candidate
 
 
@@ -280,6 +436,8 @@ def _artifact_path_integrity_failure(
     task_id: str,
     candidate: Path,
     records: list[dict[str, object]] | None = None,
+    actual_size: int | None = None,
+    actual_hash: str | None = None,
 ) -> str | None:
     """Return a path-level registry failure, or ``None`` when safe to serve.
 
@@ -330,16 +488,20 @@ def _artifact_path_integrity_failure(
 
     if not expected:
         return None
-    try:
-        actual_size = candidate.stat().st_size
-    except OSError:
+    if (actual_size is None) != (actual_hash is None):
         return "artifact integrity check failed"
+    if actual_size is None:
+        try:
+            actual_size = candidate.stat().st_size
+        except OSError:
+            return "artifact integrity check failed"
     if any(size is not None and size != actual_size for _, size in expected):
         return "artifact integrity check failed"
-    try:
-        actual_hash = sha256_file(candidate)
-    except OSError:
-        return "artifact integrity check failed"
+    if actual_hash is None:
+        try:
+            actual_hash = sha256_file(candidate)
+        except OSError:
+            return "artifact integrity check failed"
     if any(
         not hmac.compare_digest(actual_hash, content_hash)
         for content_hash, _ in expected
@@ -381,14 +543,10 @@ def _registered_artifact_records_for_path(
     """
 
     available_records = (
-        _registered_artifact_records(settings=settings)
-        if records is None
-        else records
+        _registered_artifact_records(settings=settings) if records is None else records
     )
     return [
-        record
-        for record in available_records
-        if record["resolved_path"] == candidate
+        record for record in available_records if record["resolved_path"] == candidate
     ]
 
 
