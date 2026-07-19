@@ -48,6 +48,9 @@ from marvis.packs.strategy.candidate_evidence import (
 from marvis.packs.strategy.candidate_asset_tools import (
     run_refine_univariate_candidate,
 )
+from marvis.packs.strategy.automatic_tree_tools import (
+    run_build_automatic_tree_candidate,
+)
 from marvis.packs.strategy.pool_tools import (
     run_add_candidate_to_pool,
     run_compile_strategy_pool,
@@ -701,6 +704,12 @@ def tool_refine_univariate_candidate(inputs: dict, ctx) -> dict:
     """Refine task-owned evidence into an immutable development candidate asset."""
 
     return run_refine_univariate_candidate(inputs, ctx, _runtime(ctx))
+
+
+def tool_build_automatic_tree_candidate(inputs: dict, ctx) -> dict:
+    """Build one complete governed automatic weighted rule-tree candidate."""
+
+    return run_build_automatic_tree_candidate(inputs, ctx, _runtime(ctx))
 
 
 def tool_add_candidate_to_pool(inputs: dict, ctx) -> dict:

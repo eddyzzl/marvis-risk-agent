@@ -220,6 +220,9 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     univariate_tool = next(
         tool for tool in manifest.tools if tool.name == "analyze_univariate_candidates"
     )
+    automatic_tree_tool = next(
+        tool for tool in manifest.tools if tool.name == "build_automatic_tree_candidate"
+    )
     refinement_tool = next(
         tool for tool in manifest.tools if tool.name == "refine_univariate_candidate"
     )
@@ -250,6 +253,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "roll_rate_matrix",
         "profit_calc",
         "analyze_univariate_candidates",
+        "build_automatic_tree_candidate",
         "refine_univariate_candidate",
         "add_candidate_to_pool",
         "remove_pool_entry",
@@ -287,6 +291,24 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "read:dataset",
         "write:artifact",
     }
+    assert automatic_tree_tool.determinism == "deterministic"
+    assert automatic_tree_tool.policy.human_decision_gate == "none"
+    assert automatic_tree_tool.policy.effect_authorization == "none"
+    assert set(automatic_tree_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+    }
+    assert automatic_tree_tool.input_schema["additionalProperties"] is False
+    assert automatic_tree_tool.input_schema["properties"]["features"]["maxItems"] == 50
+    assert automatic_tree_tool.input_schema["properties"]["max_depth"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 8,
+        "default": 4,
+    }
+    assert automatic_tree_tool.output_schema["additionalProperties"] is False
+    assert automatic_tree_tool.output_schema["properties"]["artifacts"]["minItems"] == 6
     assert refinement_tool.policy.human_decision_gate == "none"
     assert refinement_tool.policy.effect_authorization == "none"
     assert set(refinement_tool.side_effects) == {
@@ -294,7 +316,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "read:dataset",
         "write:artifact",
     }
-    assert manifest.version == "0.4.0"
+    assert manifest.version == "0.5.0"
     for pool_tool in pool_mutation_tools:
         assert pool_tool.policy.human_decision_gate == "none"
         assert pool_tool.policy.effect_authorization == "none"

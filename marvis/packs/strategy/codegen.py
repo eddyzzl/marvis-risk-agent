@@ -332,11 +332,16 @@ def generate_automatic_tree_duckdb_sql_source(
 def validate_automatic_tree_duckdb_input_frame(
     frame: pd.DataFrame,
     tree_or_asset: Mapping[str, Any],
+    *,
+    additional_feature_fields: Sequence[str] | None = None,
 ) -> pd.DataFrame:
-    """Enforce the mandatory schema preflight for generated DuckDB delivery.
+    """Enforce the mandatory schema and value-domain DuckDB preflight.
 
     Call this immediately before registering the same, unmodified ``frame`` as
-    ``input_rows``. The returned object is the original frame, not a copy.
+    ``input_rows``. The returned object is the original frame, not a copy. Tools
+    may supply ``additional_feature_fields`` to validate selected training
+    features that a fitted tree did not ultimately reference; expression fields
+    are always included and cannot be removed.
     """
 
     rules = _validated_leaf_rules(tree_or_asset)
@@ -359,11 +364,33 @@ def validate_automatic_tree_duckdb_input_frame(
             f"DuckDB input column names must all be text: {names}"
         )
 
-    required_fields = sorted(
-        {field for rule in rules for field in _expression_fields(rule["condition"])}
-    )
+    required_fields = {
+        field for rule in rules for field in _expression_fields(rule["condition"])
+    }
+    if additional_feature_fields is not None:
+        if isinstance(
+            additional_feature_fields, str | bytes | bytearray
+        ) or not isinstance(additional_feature_fields, Sequence):
+            raise AutomaticTreeCodegenError(
+                "additional_feature_fields must be a list of column names"
+            )
+        normalized_additional: list[str] = []
+        for field in additional_feature_fields:
+            if not isinstance(field, str) or not field or field != field.strip():
+                raise AutomaticTreeCodegenError(
+                    "additional_feature_fields must contain canonical column names"
+                )
+            normalized_additional.append(field)
+        if len(normalized_additional) != len(set(normalized_additional)):
+            raise AutomaticTreeCodegenError(
+                "additional_feature_fields must not contain duplicates"
+            )
+        required_fields.update(normalized_additional)
+    ordered_required_fields = sorted(required_fields)
     original_names = set(original_columns)
-    missing_fields = [field for field in required_fields if field not in original_names]
+    missing_fields = [
+        field for field in ordered_required_fields if field not in original_names
+    ]
     if missing_fields:
         raise AutomaticTreeCodegenError(
             "DuckDB input frame is missing exact required fields: "
@@ -385,17 +412,63 @@ def validate_automatic_tree_duckdb_input_frame(
     try:
         with duckdb.connect() as connection:
             connection.register(relation_name, frame)
-            registered_columns = connection.table(relation_name).columns
+            relation = connection.table(relation_name)
+            registered_columns = relation.columns
+            if registered_columns != original_columns:
+                raise AutomaticTreeCodegenError(
+                    "DuckDB registration changed input column names; the registered "
+                    "schema must be byte-identical to the original frame"
+                )
+            registered_types = [str(value).upper() for value in relation.types]
+            _validate_duckdb_weighted_tree_domain(
+                connection,
+                relation_name=relation_name,
+                fields=ordered_required_fields,
+                registered_columns=registered_columns,
+                registered_types=registered_types,
+            )
+    except AutomaticTreeCodegenError:
+        raise
     except Exception as exc:
         raise AutomaticTreeCodegenError(
             f"DuckDB input schema registration failed: {exc}"
         ) from exc
-    if registered_columns != original_columns:
-        raise AutomaticTreeCodegenError(
-            "DuckDB registration changed input column names; the registered schema "
-            "must be byte-identical to the original frame"
-        )
     return frame
+
+
+def _validate_duckdb_weighted_tree_domain(
+    connection,
+    *,
+    relation_name: str,
+    fields: Sequence[str],
+    registered_columns: Sequence[str],
+    registered_types: Sequence[str],
+) -> None:
+    type_by_field = dict(zip(registered_columns, registered_types, strict=True))
+    projections: list[str] = []
+    for field in fields:
+        physical_type = type_by_field[field]
+        if physical_type not in (*_DUCKDB_INTEGER_TYPES, *_DUCKDB_FLOAT_TYPES):
+            raise AutomaticTreeCodegenError(
+                "weighted-tree feature requires an integer/float physical type: "
+                + field
+            )
+        projections.append(
+            "COUNT("
+            + _sql_validated_weighted_tree_value(_quote_identifier(field))
+            + ") AS "
+            + _quote_identifier(f"__marvis_validated_{len(projections)}")
+        )
+    if projections:
+        try:
+            connection.execute(
+                "SELECT "
+                + ", ".join(projections)
+                + " FROM "
+                + _quote_identifier(relation_name)
+            ).fetchone()
+        except duckdb.Error as exc:
+            raise AutomaticTreeCodegenError(str(exc)) from exc
 
 
 def _validated_leaf_rules(

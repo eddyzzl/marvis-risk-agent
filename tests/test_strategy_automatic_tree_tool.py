@@ -1,0 +1,1342 @@
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import replace
+import hashlib
+import json
+from pathlib import Path
+import sys
+import threading
+
+import pandas as pd
+import pytest
+
+from marvis.artifacts import ArtifactUnitOfWork
+from marvis.data.backend import DataBackend
+from marvis.data.errors import NanLabelNotConfirmedError
+from marvis.data.registry import DatasetRegistry
+from marvis.data.workspace import (
+    DataSemanticMapping,
+    DataWorkspaceDraft,
+    data_semantic_mapping_hash,
+)
+from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
+from marvis.domain import TaskCreate
+from marvis.files import sha256_file
+from marvis.output.automatic_tree_report import render_automatic_tree_report_xlsx
+from marvis.output.automatic_tree_visual import (
+    render_automatic_tree_png,
+    render_automatic_tree_svg,
+)
+from marvis.packs.strategy import automatic_tree_tools as auto_tools
+from marvis.packs.strategy import tools as strategy_tools
+from marvis.packs.strategy.automatic_tree_asset import (
+    canonical_automatic_tree_asset_json,
+    validate_automatic_tree_asset,
+)
+from marvis.packs.strategy.automatic_tree_leaf_fragment import (
+    AUTOMATIC_TREE_ASSET_ARTIFACT_KIND,
+    AUTOMATIC_TREE_ASSET_ARTIFACT_SCHEMA_VERSION,
+    build_automatic_tree_leaf_fragment,
+)
+from marvis.packs.strategy.candidate_fragment import (
+    sample_context_hash_from_candidate_evidence,
+)
+from marvis.packs.strategy.codegen import (
+    generate_automatic_tree_duckdb_sql_source,
+    generate_automatic_tree_python_source,
+)
+from marvis.packs.strategy.errors import StrategyError
+from marvis.plugins.contracts import ToolContext
+from marvis.plugins.loader import load_builtin_packs
+from marvis.plugins.manifest import ToolRef
+from marvis.plugins.registry import PluginRegistry, ToolRegistry
+from marvis.plugins.runner import ToolRunner
+from marvis.repositories.data_workspace import DataWorkspaceRepository
+from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.settings import build_settings
+
+
+def _runtime(tmp_path: Path):
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    plugin_repo = PluginRepository(settings.db_path)
+    plugin_registry = PluginRegistry(plugin_repo)
+    load_builtin_packs(
+        plugin_registry,
+        Path(__file__).parents[1] / "marvis" / "packs",
+    )
+    runner = ToolRunner(
+        ToolRegistry(plugin_registry),
+        plugin_repo,
+        python_executable=sys.executable,
+        datasets_root=settings.datasets_dir,
+        workspace=settings.workspace,
+    )
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    task_repo = TaskRepository(settings.db_path)
+    task = task_repo.create_task(
+        TaskCreate(
+            model_name="automatic-tree-candidate",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "source"),
+            task_type="strategy",
+            target_col="bad",
+        )
+    )
+    other_task = task_repo.create_task(
+        TaskCreate(
+            model_name="foreign-automatic-tree",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "foreign"),
+            task_type="strategy",
+            target_col="bad",
+        )
+    )
+    frame = pd.DataFrame(
+        {
+            "customer_id": [f"C{index:03d}" for index in range(24)],
+            "phone": [f"1380000{index:04d}" for index in range(24)],
+            "score": [360 + index * 20 for index in range(24)],
+            "income": [3000 + (index % 8) * 800 for index in range(24)],
+            "weight": [1.0 + (index % 3) * 0.25 for index in range(24)],
+            "loan_amount": [1000.0 + index * 50 for index in range(24)],
+            "overdue_amount": [
+                0.0 if index >= 12 else 50.0 + index for index in range(24)
+            ],
+            "ignore_me": [index for index in range(24)],
+            "unused_text": [f"unused-{index}" for index in range(24)],
+            "bad": [1 if index < 12 else 0 for index in range(24)],
+        }
+    )
+    source = tmp_path / "automatic-tree.parquet"
+    frame.to_parquet(source, index=False)
+    dataset = registry.register_existing(source, task_id=task.id, role="derived")
+    workspace_repo = DataWorkspaceRepository(settings.db_path)
+    activated = workspace_repo.save(
+        task.id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+        ),
+        expected_revision=0,
+    )
+    mapping = DataSemanticMapping(
+        target_col="bad",
+        field_roles={
+            "customer_id": "id",
+            "phone": "phone",
+            "score": "score",
+            "income": "numeric",
+            "weight": "weight",
+            "loan_amount": "loan_amount",
+            "overdue_amount": "overdue_amount",
+            "ignore_me": "ignore",
+            "bad": "target",
+        },
+    )
+    workspace = workspace_repo.save(
+        task.id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+            semantic_mapping=mapping,
+        ),
+        expected_revision=activated.revision,
+    )
+    return settings, runner, registry, task, other_task, dataset, workspace, mapping
+
+
+def _inputs(dataset, workspace, mapping) -> dict:
+    return {
+        "dataset_id": dataset.id,
+        "expected_content_hash": dataset.content_hash,
+        "workspace_revision": workspace.revision,
+        "analysis_generation": workspace.analysis_generation,
+        "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+        "target_col": "bad",
+        "features": ["score", "income"],
+        "drop_nan_labels": False,
+        "sample_weight_col": "weight",
+        "directions": {"score": "decreasing", "income": "decreasing"},
+        "max_depth": 2,
+        "min_leaf_count": 2,
+        "min_weight_fraction_leaf": 0.0,
+        "seed": 20260719,
+        "loan_amount_col": "loan_amount",
+        "overdue_amount_col": "overdue_amount",
+        "budgets": {
+            "max_rows": 100,
+            "max_features": 5,
+            "max_cells": 500,
+            "max_nodes": 31,
+            "max_cutpoint_evaluations": 1000,
+        },
+    }
+
+
+def _tool_context(settings, task) -> ToolContext:
+    return ToolContext(
+        task_id=task.id,
+        seed=0,
+        datasets_root=settings.datasets_dir,
+        workspace=settings.workspace,
+    )
+
+
+def _activate_frame(
+    tmp_path: Path,
+    *,
+    settings,
+    registry: DatasetRegistry,
+    task,
+    current_workspace,
+    frame: pd.DataFrame,
+    mapping: DataSemanticMapping,
+):
+    source = tmp_path / f"replacement-{current_workspace.revision}.parquet"
+    frame.to_parquet(source, index=False)
+    dataset = registry.register_existing(source, task_id=task.id, role="derived")
+    repository = DataWorkspaceRepository(settings.db_path)
+    reset = repository.save(
+        task.id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+        ),
+        expected_revision=current_workspace.revision,
+    )
+    workspace = repository.save(
+        task.id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+            semantic_mapping=mapping,
+        ),
+        expected_revision=reset.revision,
+    )
+    return dataset, workspace
+
+
+def _record_by_kind(settings, task) -> dict[str, dict]:
+    return {
+        record["kind"]: record
+        for record in TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+    }
+
+
+def _all_mapping_keys(value: object) -> set[str]:
+    keys: set[str] = set()
+    if isinstance(value, dict):
+        keys.update(str(key).lower() for key in value)
+        for child in value.values():
+            keys.update(_all_mapping_keys(child))
+    elif isinstance(value, list):
+        for child in value:
+            keys.update(_all_mapping_keys(child))
+    return keys
+
+
+def test_automatic_tree_tool_happy_path_is_six_artifact_idempotent(
+    tmp_path: Path,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    inputs = _inputs(dataset, workspace, mapping)
+    ctx = _tool_context(settings, task)
+
+    first = strategy_tools.tool_build_automatic_tree_candidate(inputs, ctx)
+    repeated = strategy_tools.tool_build_automatic_tree_candidate(inputs, ctx)
+
+    assert first == repeated
+    assert set(first) == {
+        "schema_version",
+        "summary",
+        "leaf_index",
+        "red_flags",
+        "equivalence",
+        "artifacts",
+    }
+    assert first["schema_version"] == "strategy.automatic-tree-candidate-tool.v1"
+    assert first["summary"]["candidate_stage"] == "development"
+    assert first["summary"]["observation_stage"] == "backtested"
+    assert first["summary"]["validation_status"] == "unvalidated"
+    assert first["equivalence"]["matched"] is True
+    assert first["equivalence"]["sample_count"] == 24
+    assert (
+        len(
+            {
+                first["equivalence"]["reference_result_hash"],
+                first["equivalence"]["python_result_hash"],
+                first["equivalence"]["duckdb_sql_result_hash"],
+            }
+        )
+        == 1
+    )
+    assert len(first["leaf_index"]) == first["summary"]["leaf_count"]
+    assert len(first["artifacts"]) == 6
+    assert all("path" not in artifact for artifact in first["artifacts"])
+    assert all(
+        set(artifact)
+        == {
+            "artifact_id",
+            "kind",
+            "format",
+            "filename",
+            "content_hash",
+            "download_url",
+        }
+        for artifact in first["artifacts"]
+    )
+    records = TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+    assert len(records) == 6
+    assert {record["id"] for record in records} == {
+        artifact["artifact_id"] for artifact in first["artifacts"]
+    }
+    for record in records:
+        assert Path(record["path"]).is_file()
+
+    by_kind = _record_by_kind(settings, task)
+    json_record = by_kind[AUTOMATIC_TREE_ASSET_ARTIFACT_KIND]
+    asset = validate_automatic_tree_asset(
+        json.loads(Path(json_record["path"]).read_text(encoding="utf-8"))
+    )
+    expected_bytes = {
+        AUTOMATIC_TREE_ASSET_ARTIFACT_KIND: canonical_automatic_tree_asset_json(
+            asset
+        ).encode("utf-8"),
+        "strategy_automatic_tree_python": generate_automatic_tree_python_source(
+            asset
+        ).encode("utf-8"),
+        "strategy_automatic_tree_duckdb_sql": (
+            generate_automatic_tree_duckdb_sql_source(asset).encode("utf-8")
+        ),
+        "strategy_automatic_tree_svg": render_automatic_tree_svg(asset),
+        "strategy_automatic_tree_png": render_automatic_tree_png(asset),
+        "strategy_automatic_tree_xlsx": render_automatic_tree_report_xlsx(asset),
+    }
+    assert set(by_kind) == set(expected_bytes)
+    for kind, expected in expected_bytes.items():
+        record = by_kind[kind]
+        persisted = Path(record["path"]).read_bytes()
+        assert persisted == expected
+        assert hashlib.sha256(persisted).hexdigest() == record["content_hash"]
+        assert record["origin_tool"] == "strategy.build_automatic_tree_candidate"
+
+    assert set(json_record["provenance"]) == auto_tools.FULL_TREE_PROVENANCE_FIELDS
+    assert json_record["provenance"]["schema_version"] == (
+        AUTOMATIC_TREE_ASSET_ARTIFACT_SCHEMA_VERSION
+    )
+    assert json_record["provenance"]["asset_hash"] == asset["asset_hash"]
+    selected_leaf = build_automatic_tree_leaf_fragment(
+        asset,
+        tree_artifact_binding={
+            "artifact_id": json_record["id"],
+            "task_id": task.id,
+            "kind": json_record["kind"],
+            "artifact_schema_version": AUTOMATIC_TREE_ASSET_ARTIFACT_SCHEMA_VERSION,
+            "content_hash": json_record["content_hash"],
+            "origin_tool": json_record["origin_tool"],
+            "path": json_record["path"],
+            "provenance": json_record["provenance"],
+            "canonical_bytes": expected_bytes[AUTOMATIC_TREE_ASSET_ARTIFACT_KIND],
+        },
+        leaf_id=asset["fragments"][0]["leaf_id"],
+    )
+    assert selected_leaf["leaf"]["fragment_id"] == asset["fragments"][0]["fragment_id"]
+    canonical_hash = hashlib.sha256(
+        expected_bytes[AUTOMATIC_TREE_ASSET_ARTIFACT_KIND]
+    ).hexdigest()
+    for kind, record in by_kind.items():
+        if kind == AUTOMATIC_TREE_ASSET_ARTIFACT_KIND:
+            continue
+        provenance = record["provenance"]
+        assert set(provenance) == auto_tools.DELIVERY_PROVENANCE_FIELDS
+        assert provenance["asset_id"] == asset["asset_id"]
+        assert provenance["asset_hash"] == asset["asset_hash"]
+        assert provenance["tree_result_hash"] == asset["tree_result"]["result_hash"]
+        assert provenance["canonical_asset_content_hash"] == canonical_hash
+        assert (
+            provenance["equivalence_sample_hash"] == first["equivalence"]["sample_hash"]
+        )
+        assert provenance["equivalence_sample_count"] == 24
+
+    forbidden = {"action", "adoption", "pool", "rules", "tree", "result", "metrics"}
+    assert not (_all_mapping_keys(first) & forbidden)
+
+
+def test_automatic_tree_tool_projects_only_required_columns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    original = DataBackend.read_frame
+    projections: list[list[str] | None] = []
+
+    def tracked_read(self, path, *, columns=None, nrows=None):
+        projections.append(None if columns is None else list(columns))
+        return original(self, path, columns=columns, nrows=nrows)
+
+    monkeypatch.setattr(DataBackend, "read_frame", tracked_read)
+
+    strategy_tools.tool_build_automatic_tree_candidate(
+        _inputs(dataset, workspace, mapping),
+        _tool_context(settings, task),
+    )
+
+    assert projections == [
+        ["income", "score", "weight", "loan_amount", "overdue_amount", "bad"]
+    ]
+
+
+def test_manifest_runner_accepts_the_exact_automatic_tree_contract(
+    tmp_path: Path,
+) -> None:
+    _settings, runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+
+    result = runner.invoke(
+        ToolRef("strategy", "build_automatic_tree_candidate"),
+        _inputs(dataset, workspace, mapping),
+        task_id=task.id,
+    )
+
+    assert result.ok, result.error
+    assert result.output["schema_version"] == auto_tools.TOOL_SCHEMA_VERSION
+    assert len(result.output["artifacts"]) == 6
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("expected_content_hash", "f" * 64),
+        ("workspace_revision", -1),
+        ("analysis_generation", 99),
+        ("semantic_mapping_hash", "e" * 64),
+    ],
+)
+def test_automatic_tree_tool_rejects_stale_confirmed_binding(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    inputs = {**_inputs(dataset, workspace, mapping), field: replacement}
+
+    with pytest.raises(StrategyError, match="binding changed|non-negative"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            inputs,
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+
+
+def test_automatic_tree_tool_rejects_foreign_and_nonactive_datasets(
+    tmp_path: Path,
+) -> None:
+    settings, _runner, registry, task, other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    inputs = _inputs(dataset, workspace, mapping)
+
+    with pytest.raises(StrategyError, match="dataset not found"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            inputs,
+            _tool_context(settings, other),
+        )
+
+    replacement_frame = pd.read_parquet(registry.resolve_path(dataset.id)).assign(
+        score=lambda frame: frame["score"] + 1
+    )
+    replacement, _replacement_workspace = _activate_frame(
+        tmp_path,
+        settings=settings,
+        registry=registry,
+        task=task,
+        current_workspace=workspace,
+        frame=replacement_frame,
+        mapping=mapping,
+    )
+    assert replacement.id != dataset.id
+    with pytest.raises(StrategyError, match="current active"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            inputs,
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+
+
+def test_automatic_tree_tool_rejects_physical_content_drift(
+    tmp_path: Path,
+) -> None:
+    settings, _runner, registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    registry.resolve_path(dataset.id).write_bytes(b"out-of-band drift")
+
+    with pytest.raises(StrategyError, match="immutable hash verification"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            _inputs(dataset, workspace, mapping),
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+
+
+def test_automatic_tree_tool_enforces_nan_label_confirmation(
+    tmp_path: Path,
+) -> None:
+    settings, _runner, registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    frame = pd.read_parquet(registry.resolve_path(dataset.id))
+    frame.loc[3, "bad"] = float("nan")
+    nan_dataset, nan_workspace = _activate_frame(
+        tmp_path,
+        settings=settings,
+        registry=registry,
+        task=task,
+        current_workspace=workspace,
+        frame=frame,
+        mapping=mapping,
+    )
+    inputs = _inputs(nan_dataset, nan_workspace, mapping)
+
+    with pytest.raises(NanLabelNotConfirmedError):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            inputs,
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+
+    output = strategy_tools.tool_build_automatic_tree_candidate(
+        {**inputs, "drop_nan_labels": True},
+        _tool_context(settings, task),
+    )
+    assert output["summary"]["nan_labels_dropped"] == 1
+    assert output["summary"]["training_row_count"] == 23
+
+
+@pytest.mark.parametrize("feature", ["customer_id", "phone", "ignore_me"])
+def test_automatic_tree_tool_rejects_sensitive_or_ignored_features(
+    tmp_path: Path,
+    feature: str,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+
+    with pytest.raises(StrategyError, match="personal-data|ignored"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            {
+                **_inputs(dataset, workspace, mapping),
+                "features": [feature],
+                "directions": {feature: "unordered"},
+            },
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+
+
+def test_registry_sensitive_role_cannot_be_downgraded_by_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    original_get = DatasetRegistry.get
+
+    def registry_marks_customer_id_sensitive(self, dataset_id):
+        loaded = original_get(self, dataset_id)
+        return replace(
+            loaded,
+            columns=tuple(
+                replace(profile, semantic_role="id")
+                if profile.name == "customer_id"
+                else profile
+                for profile in loaded.columns
+            ),
+        )
+
+    monkeypatch.setattr(DatasetRegistry, "get", registry_marks_customer_id_sensitive)
+    downgraded_roles = dict(mapping.field_roles)
+    downgraded_roles["customer_id"] = "numeric"
+    downgraded = DataSemanticMapping(
+        target_col="bad",
+        field_roles=downgraded_roles,
+    )
+    changed = DataWorkspaceRepository(settings.db_path).save(
+        task.id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+            semantic_mapping=downgraded,
+        ),
+        expected_revision=workspace.revision,
+    )
+
+    with pytest.raises(StrategyError, match="personal-data"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            {
+                **_inputs(dataset, changed, downgraded),
+                "features": ["customer_id"],
+                "directions": {"customer_id": "unordered"},
+            },
+            _tool_context(settings, task),
+        )
+
+
+def test_automatic_tree_tool_requires_workspace_target_match(
+    tmp_path: Path,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    inputs = {**_inputs(dataset, workspace, mapping), "target_col": "score"}
+
+    with pytest.raises(StrategyError, match="semantic target"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            inputs,
+            _tool_context(settings, task),
+        )
+
+
+@pytest.mark.parametrize(
+    "injected",
+    ["metrics", "rules", "tree", "result", "action", "adoption", "pool"],
+)
+def test_automatic_tree_tool_rejects_caller_supplied_results_and_actions(
+    tmp_path: Path,
+    injected: str,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+
+    with pytest.raises(StrategyError, match="caller cannot supply"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            {**_inputs(dataset, workspace, mapping), injected: {}},
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+
+
+def test_duckdb_preflight_is_immediately_before_same_frame_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    original_connect = auto_tools.duckdb.connect
+    event: dict[str, object] = {}
+
+    def tracked_preflight(frame, asset, *, additional_feature_fields=None):
+        assert isinstance(frame, pd.DataFrame)
+        if additional_feature_fields is not None:
+            assert additional_feature_fields == ["income", "score"]
+            assert len(frame) == 24
+            assert frame.columns.tolist() == ["income", "score"]
+            event["full_frame_validated"] = True
+            return frame
+        assert event.get("full_frame_validated") is True
+        event["frame"] = frame
+        event["columns"] = frame.columns.tolist()
+        event["event"] = "preflight"
+        return frame
+
+    class TrackedConnection:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __enter__(self):
+            self.inner.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.inner.__exit__(*args)
+
+        def register(self, name, frame):
+            if name == "input_rows":
+                assert event.get("event") == "preflight"
+                assert frame is event["frame"]
+                assert frame.columns.tolist() == event["columns"]
+                event["event"] = "registered"
+            return self.inner.register(name, frame)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    def tracked_connect(*args, **kwargs):
+        return TrackedConnection(original_connect(*args, **kwargs))
+
+    monkeypatch.setattr(
+        auto_tools,
+        "validate_automatic_tree_duckdb_input_frame",
+        tracked_preflight,
+    )
+    monkeypatch.setattr(auto_tools.duckdb, "connect", tracked_connect)
+
+    output = strategy_tools.tool_build_automatic_tree_candidate(
+        _inputs(dataset, workspace, mapping),
+        _tool_context(settings, task),
+    )
+
+    assert output["equivalence"]["matched"] is True
+    assert event["event"] == "registered"
+
+
+def test_generated_python_mismatch_fails_before_any_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    original = auto_tools.generate_automatic_tree_python_source
+
+    def mismatched_source(asset):
+        return original(asset) + (
+            "\n_marvis_original_apply_rows = apply_rows\n"
+            "def apply_rows(rows):\n"
+            "    result = _marvis_original_apply_rows(rows)\n"
+            "    if result:\n"
+            "        result[0] = {'leaf_id': 'leaf-mismatch', "
+            "'rule_id': 'rule-mismatch'}\n"
+            "    return result\n"
+        )
+
+    monkeypatch.setattr(
+        auto_tools,
+        "generate_automatic_tree_python_source",
+        mismatched_source,
+    )
+
+    with pytest.raises(StrategyError, match="Python does not match"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            _inputs(dataset, workspace, mapping),
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    output_dir = settings.tasks_dir / task.id / "strategy_automatic_trees"
+    assert not output_dir.exists() or not any(output_dir.rglob("*"))
+
+
+def test_generated_sql_mismatch_fails_before_any_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    original = auto_tools.generate_automatic_tree_duckdb_sql_source
+
+    def mismatched_source(asset):
+        source = original(asset)
+        first_rule_id = asset["tree_result"]["rules"][0]["rule_id"]
+        return source.replace(first_rule_id, "rule-mismatch", 1)
+
+    monkeypatch.setattr(
+        auto_tools,
+        "generate_automatic_tree_duckdb_sql_source",
+        mismatched_source,
+    )
+
+    with pytest.raises(StrategyError, match="DuckDB SQL does not match"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            _inputs(dataset, workspace, mapping),
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+
+
+def test_render_failure_occurs_before_staging_or_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+
+    def fail_render(_asset):
+        raise RuntimeError("injected PNG render failure")
+
+    monkeypatch.setattr(auto_tools, "render_automatic_tree_png", fail_render)
+
+    with pytest.raises(RuntimeError, match="injected PNG render failure"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            _inputs(dataset, workspace, mapping),
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    output_dir = settings.tasks_dir / task.id / "strategy_automatic_trees"
+    assert not output_dir.exists()
+
+
+def test_automatic_tree_artifact_directory_rejects_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    task_root = settings.tasks_dir / task.id
+    task_root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside-artifacts"
+    outside.mkdir()
+    (task_root / "strategy_automatic_trees").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+
+    with pytest.raises(StrategyError, match="must not be a symlink"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            _inputs(dataset, workspace, mapping),
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert list(outside.iterdir()) == []
+
+
+def test_source_drift_after_compute_is_rejected_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    original = auto_tools.render_automatic_tree_report_xlsx
+
+    def mutate_after_render(asset):
+        rendered = original(asset)
+        registry.resolve_path(dataset.id).write_bytes(b"post-compute drift")
+        return rendered
+
+    monkeypatch.setattr(
+        auto_tools,
+        "render_automatic_tree_report_xlsx",
+        mutate_after_render,
+    )
+
+    with pytest.raises(StrategyError, match="source dataset changed"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            _inputs(dataset, workspace, mapping),
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+
+
+def test_workspace_change_after_compute_is_preserved_and_blocks_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    original = auto_tools.render_automatic_tree_report_xlsx
+    repository = DataWorkspaceRepository(settings.db_path)
+    changed = None
+
+    def mutate_after_render(asset):
+        nonlocal changed
+        rendered = original(asset)
+        changed_mapping = DataSemanticMapping(
+            target_col="bad",
+            field_roles=dict(mapping.field_roles),
+            business_names={"score": "updated score semantics"},
+        )
+        changed = repository.save(
+            task.id,
+            DataWorkspaceDraft(
+                active_dataset_id=dataset.id,
+                active_dataset_content_hash=dataset.content_hash,
+                semantic_mapping=changed_mapping,
+            ),
+            expected_revision=workspace.revision,
+        )
+        return rendered
+
+    monkeypatch.setattr(
+        auto_tools,
+        "render_automatic_tree_report_xlsx",
+        mutate_after_render,
+    )
+
+    with pytest.raises(StrategyError, match="workspace changed"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            _inputs(dataset, workspace, mapping),
+            _tool_context(settings, task),
+        )
+    assert changed is not None
+    assert repository.get_or_default(task.id).revision == changed.revision
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+
+
+@pytest.mark.parametrize("failed_registration", [2, 3, 4, 5, 6])
+def test_any_late_registration_failure_rolls_back_all_six_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_registration: int,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    original = TaskArtifactRepository.register_on_connection
+    calls = 0
+
+    def fail_selected(self, conn, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == failed_registration:
+            raise RuntimeError(f"injected registration {failed_registration} failure")
+        return original(self, conn, **kwargs)
+
+    monkeypatch.setattr(
+        TaskArtifactRepository,
+        "register_on_connection",
+        fail_selected,
+    )
+
+    with pytest.raises(RuntimeError, match="injected registration"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            _inputs(dataset, workspace, mapping),
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    output_dir = settings.tasks_dir / task.id / "strategy_automatic_trees"
+    assert not output_dir.exists() or not any(output_dir.rglob("*"))
+
+
+def test_concurrent_identical_writers_leave_exactly_six_intact_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    inputs = _inputs(dataset, workspace, mapping)
+    original = auto_tools.render_automatic_tree_report_xlsx
+    render_barrier = threading.Barrier(2)
+
+    def synchronized_render(asset):
+        rendered = original(asset)
+        render_barrier.wait(timeout=15)
+        return rendered
+
+    monkeypatch.setattr(
+        auto_tools,
+        "render_automatic_tree_report_xlsx",
+        synchronized_render,
+    )
+    outputs: dict[str, dict] = {}
+    failures: dict[str, BaseException] = {}
+
+    def invoke(name: str) -> None:
+        try:
+            outputs[name] = strategy_tools.tool_build_automatic_tree_candidate(
+                inputs,
+                _tool_context(settings, task),
+            )
+        except BaseException as exc:  # captured for main-thread assertions
+            failures[name] = exc
+
+    writers = [
+        threading.Thread(target=invoke, args=(name,), name=f"writer-{name}")
+        for name in ("a", "b")
+    ]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join(timeout=30)
+
+    assert all(not writer.is_alive() for writer in writers)
+    assert failures == {}
+    assert outputs["a"] == outputs["b"]
+    records = TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+    assert len(records) == 6
+    assert len({record["path"] for record in records}) == 6
+    for record in records:
+        assert sha256_file(Path(record["path"])) == record["content_hash"]
+
+
+def test_failed_writer_rolls_back_before_identical_peer_can_promote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    inputs = _inputs(dataset, workspace, mapping)
+    failed_writer_exited_db = threading.Event()
+    release_failed_writer = threading.Event()
+    original_register = TaskArtifactRepository.register_on_connection
+    original_transaction = TaskArtifactRepository.transaction
+    failing_calls = 0
+
+    def fail_fourth_for_first_writer(self, conn, **kwargs):
+        nonlocal failing_calls
+        if threading.current_thread().name == "failing-writer":
+            failing_calls += 1
+            if failing_calls == 4:
+                raise RuntimeError("injected post-promotion registration failure")
+        return original_register(self, conn, **kwargs)
+
+    @contextmanager
+    def pause_failed_writer_after_db_exit(self):
+        try:
+            with original_transaction(self) as conn:
+                yield conn
+        finally:
+            if threading.current_thread().name == "failing-writer":
+                failed_writer_exited_db.set()
+                if not release_failed_writer.wait(timeout=15):
+                    raise RuntimeError("timed out waiting to release failed writer")
+
+    monkeypatch.setattr(
+        TaskArtifactRepository,
+        "register_on_connection",
+        fail_fourth_for_first_writer,
+    )
+    monkeypatch.setattr(
+        TaskArtifactRepository,
+        "transaction",
+        pause_failed_writer_after_db_exit,
+    )
+    outputs: dict[str, dict] = {}
+    failures: dict[str, BaseException] = {}
+
+    def invoke(name: str) -> None:
+        try:
+            outputs[name] = strategy_tools.tool_build_automatic_tree_candidate(
+                inputs,
+                _tool_context(settings, task),
+            )
+        except BaseException as exc:  # captured for main-thread assertions
+            failures[name] = exc
+
+    failing = threading.Thread(
+        target=invoke,
+        args=("failing",),
+        name="failing-writer",
+    )
+    peer = threading.Thread(target=invoke, args=("peer",), name="peer-writer")
+    failing.start()
+    assert failed_writer_exited_db.wait(timeout=20)
+    peer.start()
+    peer.join(timeout=30)
+    assert not peer.is_alive()
+    assert "peer" not in failures
+    release_failed_writer.set()
+    failing.join(timeout=30)
+
+    assert not failing.is_alive()
+    assert isinstance(failures.get("failing"), RuntimeError)
+    assert outputs["peer"]["summary"]["validation_status"] == "unvalidated"
+    records = TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+    assert len(records) == 6
+    for record in records:
+        path = Path(record["path"])
+        assert path.is_file()
+        assert sha256_file(path) == record["content_hash"]
+
+
+def test_writer_lock_precedes_promotion_for_identical_final_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    inputs = _inputs(dataset, workspace, mapping)
+    late_writer_holds_lock = threading.Event()
+    release_late_writer = threading.Event()
+    peer_promoted = threading.Event()
+    original_require = auto_tools._require_binding_on_connection
+    original_promote = ArtifactUnitOfWork.promote_all
+
+    def gated_require(conn, **kwargs):
+        if threading.current_thread().name == "late-writer" and conn.in_transaction:
+            late_writer_holds_lock.set()
+            if not release_late_writer.wait(timeout=15):
+                raise RuntimeError("timed out waiting to release late writer")
+            raise StrategyError("injected late binding failure")
+        return original_require(conn, **kwargs)
+
+    def tracked_promote(self):
+        if threading.current_thread().name == "peer-writer":
+            peer_promoted.set()
+        return original_promote(self)
+
+    monkeypatch.setattr(auto_tools, "_require_binding_on_connection", gated_require)
+    monkeypatch.setattr(ArtifactUnitOfWork, "promote_all", tracked_promote)
+    failures: dict[str, BaseException] = {}
+    outputs: dict[str, dict] = {}
+
+    def invoke(name: str) -> None:
+        try:
+            outputs[name] = strategy_tools.tool_build_automatic_tree_candidate(
+                inputs,
+                _tool_context(settings, task),
+            )
+        except BaseException as exc:  # captured for main-thread assertions
+            failures[name] = exc
+
+    late = threading.Thread(target=invoke, args=("late",), name="late-writer")
+    peer = threading.Thread(target=invoke, args=("peer",), name="peer-writer")
+    late.start()
+    assert late_writer_holds_lock.wait(timeout=15)
+    peer.start()
+    assert not peer_promoted.wait(timeout=1)
+    release_late_writer.set()
+    late.join(timeout=30)
+    peer.join(timeout=30)
+
+    assert not late.is_alive()
+    assert not peer.is_alive()
+    assert isinstance(failures.get("late"), StrategyError)
+    assert "peer" not in failures
+    assert outputs["peer"]["summary"]["validation_status"] == "unvalidated"
+    assert len(TaskArtifactRepository(settings.db_path).list_for_task(task.id)) == 6
+
+
+def test_sample_context_hash_matches_actual_univariate_candidate_same_sample(
+    tmp_path: Path,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    ctx = _tool_context(settings, task)
+    automatic = strategy_tools.tool_build_automatic_tree_candidate(
+        _inputs(dataset, workspace, mapping),
+        ctx,
+    )
+    univariate = strategy_tools.tool_analyze_univariate_candidates(
+        {
+            "dataset_id": dataset.id,
+            "expected_content_hash": dataset.content_hash,
+            "workspace_revision": workspace.revision,
+            "analysis_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+            "target_col": "bad",
+            "drop_nan_labels": False,
+            "features": ["score"],
+            "methods": ["equal_width"],
+            "bin_count": 3,
+            "min_bin_pct": 0.02,
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+            "sentinel_values": [],
+        },
+        ctx,
+    )
+
+    assert automatic["summary"]["sample_context_hash"] == (
+        sample_context_hash_from_candidate_evidence(univariate["candidate_evidence"])
+    )
+
+
+def test_sample_context_hash_excludes_tree_generation_choices(
+    tmp_path: Path,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    ctx = _tool_context(settings, task)
+    first = strategy_tools.tool_build_automatic_tree_candidate(
+        _inputs(dataset, workspace, mapping),
+        ctx,
+    )
+    second = strategy_tools.tool_build_automatic_tree_candidate(
+        {
+            **_inputs(dataset, workspace, mapping),
+            "features": ["score"],
+            "directions": {"score": "unordered"},
+            "max_depth": 1,
+            "seed": 7,
+            "budgets": {
+                "max_rows": 50,
+                "max_features": 2,
+                "max_cells": 100,
+                "max_nodes": 7,
+                "max_cutpoint_evaluations": 100,
+            },
+        },
+        ctx,
+    )
+
+    assert first["summary"]["asset_id"] != second["summary"]["asset_id"]
+    assert (
+        first["summary"]["sample_context_hash"]
+        == second["summary"]["sample_context_hash"]
+    )
+
+
+def test_equivalence_sample_is_deterministic_and_bounded() -> None:
+    frame = pd.DataFrame(
+        {
+            "x": [float(index) for index in range(10_005)],
+            "unused": [index % 3 for index in range(10_005)],
+        }
+    )
+
+    first, first_evidence = auto_tools._equivalence_sample(frame, features=["x"])
+    second, second_evidence = auto_tools._equivalence_sample(frame, features=["x"])
+
+    assert first_evidence == second_evidence
+    assert first.equals(second)
+    assert first.columns.tolist() == ["x"]
+    assert len(first) == auto_tools.MAX_EQUIVALENCE_SAMPLE_ROWS
+    assert first.iloc[0, 0] == 0.0
+    assert first.iloc[-1, 0] == 10_004.0
+    assert first_evidence["selection_rule"] == (
+        "evenly_spaced_source_positions_including_endpoints"
+    )
+
+
+def test_full_duckdb_domain_validation_catches_value_omitted_by_sample(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, registry, task, _other, _dataset, workspace, _mapping = _runtime(
+        tmp_path
+    )
+    row_count = auto_tools.MAX_EQUIVALENCE_SAMPLE_ROWS + 1
+    sampled_positions = {
+        (index * (row_count - 1)) // (auto_tools.MAX_EQUIVALENCE_SAMPLE_ROWS - 1)
+        for index in range(auto_tools.MAX_EQUIVALENCE_SAMPLE_ROWS)
+    }
+    omitted_position = next(
+        index for index in range(row_count) if index not in sampled_positions
+    )
+    scores = list(range(row_count))
+    offending_value = 2**53 + 1
+    scores[omitted_position] = offending_value
+    frame = pd.DataFrame(
+        {
+            "score": scores,
+            "bad": [1 if index < row_count // 2 else 0 for index in range(row_count)],
+        }
+    )
+    bounded_sample, _evidence = auto_tools._equivalence_sample(
+        frame,
+        features=["score"],
+    )
+    assert offending_value not in bounded_sample["score"].tolist()
+    mapping = DataSemanticMapping(
+        target_col="bad",
+        field_roles={"score": "numeric", "bad": "target"},
+    )
+    dataset, active = _activate_frame(
+        tmp_path,
+        settings=settings,
+        registry=registry,
+        task=task,
+        current_workspace=workspace,
+        frame=frame,
+        mapping=mapping,
+    )
+
+    def bounded_sampling_must_not_start(*_args, **_kwargs):
+        pytest.fail("bounded equivalence sampling must follow full-frame validation")
+
+    monkeypatch.setattr(
+        auto_tools,
+        "_equivalence_sample",
+        bounded_sampling_must_not_start,
+    )
+    inputs = {
+        "dataset_id": dataset.id,
+        "expected_content_hash": dataset.content_hash,
+        "workspace_revision": active.revision,
+        "analysis_generation": active.analysis_generation,
+        "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+        "target_col": "bad",
+        "features": ["score"],
+        "directions": {"score": "unordered"},
+        "max_depth": 2,
+        "min_leaf_count": 100,
+        "budgets": {
+            "max_rows": 20_000,
+            "max_features": 1,
+            "max_cells": 20_000,
+            "max_nodes": 31,
+            "max_cutpoint_evaluations": 30_000,
+        },
+    }
+
+    with pytest.raises(StrategyError, match="exact DOUBLE range"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            inputs,
+            _tool_context(settings, task),
+        )
+    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    output_dir = settings.tasks_dir / task.id / "strategy_automatic_trees"
+    assert not output_dir.exists()
+
+
+def test_valid_large_frame_keeps_equivalence_bounded(
+    tmp_path: Path,
+) -> None:
+    settings, _runner, registry, task, _other, _dataset, workspace, _mapping = _runtime(
+        tmp_path
+    )
+    row_count = auto_tools.MAX_EQUIVALENCE_SAMPLE_ROWS + 1
+    frame = pd.DataFrame(
+        {
+            "score": list(range(row_count)),
+            "bad": [1 if index < row_count // 2 else 0 for index in range(row_count)],
+        }
+    )
+    mapping = DataSemanticMapping(
+        target_col="bad",
+        field_roles={"score": "numeric", "bad": "target"},
+    )
+    dataset, active = _activate_frame(
+        tmp_path,
+        settings=settings,
+        registry=registry,
+        task=task,
+        current_workspace=workspace,
+        frame=frame,
+        mapping=mapping,
+    )
+
+    output = strategy_tools.tool_build_automatic_tree_candidate(
+        {
+            "dataset_id": dataset.id,
+            "expected_content_hash": dataset.content_hash,
+            "workspace_revision": active.revision,
+            "analysis_generation": active.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+            "target_col": "bad",
+            "features": ["score"],
+            "directions": {"score": "unordered"},
+            "max_depth": 2,
+            "min_leaf_count": 100,
+            "budgets": {
+                "max_rows": 20_000,
+                "max_features": 1,
+                "max_cells": 20_000,
+                "max_nodes": 31,
+                "max_cutpoint_evaluations": 30_000,
+            },
+        },
+        _tool_context(settings, task),
+    )
+
+    assert output["equivalence"]["source_row_count"] == row_count
+    assert output["equivalence"]["sample_count"] == (
+        auto_tools.MAX_EQUIVALENCE_SAMPLE_ROWS
+    )
+    assert len(output["artifacts"]) == 6

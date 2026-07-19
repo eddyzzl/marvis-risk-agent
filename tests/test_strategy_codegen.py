@@ -318,6 +318,8 @@ def test_duckdb_rejects_non_integer_float_physical_types(values: list[object]) -
     tree = _tree(feature="x")
     frame = pd.DataFrame({"x": pd.Series(values, dtype=object)})
 
+    with pytest.raises(AutomaticTreeCodegenError, match="integer/float physical type"):
+        validate_automatic_tree_duckdb_input_frame(frame, tree)
     with pytest.raises(duckdb.Error, match="integer/float physical type"):
         _duckdb_results(frame, generate_automatic_tree_duckdb_sql_source(tree))
 
@@ -338,6 +340,8 @@ def test_duckdb_rejects_lossy_integer_or_infinite_float(
     tree = _tree(feature="x")
     frame = pd.DataFrame({"x": [invalid_value]})
 
+    with pytest.raises(AutomaticTreeCodegenError, match="finite|exact DOUBLE range"):
+        validate_automatic_tree_duckdb_input_frame(frame, tree)
     with pytest.raises(duckdb.Error, match="finite|exact DOUBLE range"):
         _duckdb_results(frame, generate_automatic_tree_duckdb_sql_source(tree))
 
@@ -348,6 +352,7 @@ def test_duckdb_accepts_exact_double_integer_boundaries() -> None:
     leaf_ids = apply_weighted_rule_tree(frame, tree).tolist()
     rule_ids = _leaf_rule_pairs(tree)
 
+    assert validate_automatic_tree_duckdb_input_frame(frame, tree) is frame
     assert _duckdb_results(frame, generate_automatic_tree_duckdb_sql_source(tree)) == [
         {
             "__marvis_row_ordinal": index,
@@ -356,6 +361,19 @@ def test_duckdb_accepts_exact_double_integer_boundaries() -> None:
         }
         for index, leaf_id in enumerate(leaf_ids)
     ]
+
+
+def test_duckdb_preflight_can_cover_selected_but_unreferenced_features() -> None:
+    tree = _tree(feature="x")
+    frame = pd.DataFrame({"x": [0, 1], "unused_selected": [0, 2**53 + 1]})
+
+    assert validate_automatic_tree_duckdb_input_frame(frame, tree) is frame
+    with pytest.raises(AutomaticTreeCodegenError, match="exact DOUBLE range"):
+        validate_automatic_tree_duckdb_input_frame(
+            frame,
+            tree,
+            additional_feature_fields=["x", "unused_selected"],
+        )
 
 
 def test_duckdb_projection_is_exact_case_and_python_preflight_matches(
