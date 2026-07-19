@@ -182,11 +182,17 @@ MetricObservation
   label_coverage?
   amount_coverage?
   matured_count?
+  scenario_ref?
+  assumption_refs[]
+  component_observation_refs[]
+  calculation_definition_ref?
   tool_run_ref
   inputs_hash
 ```
 
 同一个观察模型支持整体、逐月、分群、渠道、分群×月、waterfall、swap、树叶、评分带、Voting 命中数和 Cross group，避免每张表定义一套不可复用 payload。
+
+派生指标不得只留下最终值：年化风险、利差、利润、加权风险和预计放款影响等 observation 必须引用场景、原始假设、组件 observation 和平台注册的确定性计算定义。`calculation_definition_ref` 只能指向版本化 Tool/公式定义，不能保存或执行 LLM 生成的自由公式。
 
 ### 4.5 `MissingInformationRecord`
 
@@ -215,6 +221,101 @@ MissingInformationRecord
 5. `strategy` blocker 即使用户回答暂缺也不能静默继续完整策略开发；只能保持阻塞，或由用户明确选择降级为不作业务结论的探索性分析。
 6. `impact` blocker 只阻塞依赖该参数的影响表。例如缺单位数据成本不阻塞规则搜索，但数据成本测算留空。
 7. `validation` blocker 不阻塞 development evidence，但禁止把策略标成 OOT validated。
+
+### 4.6 七步核心对象公共契约
+
+七步 Workflow 中的对象不能只作为文档名称存在。以下对象均必须有独立 `schema_version`、稳定 id、自认证内容 hash、task/dataset/strategy/tool refs、`producer_version`、availability/red flags 和生成状态；各 Tool 不得自行发明同名但不同义的 payload。
+
+```text
+CurrentProjectSnapshot
+  schema_version / snapshot_id / content_hash
+  task_id / as_of / scope
+  dataset_refs[] / workspace_ref / champion_strategy_ref?
+  metric_definition_refs[] / metric_observation_refs[]
+  monthly_observation_refs[] / segment_observation_refs[]
+  maturity_summary / user_context_fields[] / red_flags[]
+  tool_run_refs[] / producer_version
+
+HistoricalStrategyReview
+  schema_version / review_id / content_hash
+  strategy_ref / version / effective_period / asset_status
+  scope / traffic_allocation?
+  change_set: added_rule_refs[] / modified_rule_refs[] / removed_rule_refs[]
+  observation_refs_by_effect_stage
+  external_source_refs[] / decision_context_fields[]
+  availability / red_flags[] / tool_run_refs[] / producer_version
+
+StrategySampleDesign
+  schema_version / sample_design_id / content_hash
+  task_id / dataset_refs[] / workspace_ref
+  risk_sample_definition / approval_sample_definition
+  target_definition_ref? / performance_window? / observation_window?
+  inclusion_rules[] / exclusion_rules[] / time_range / scope
+  split_definition? / weight_definition? / month_field?
+  amount_field_refs[] / maturity_rule?
+  sample_metric_observation_refs[] / red_flags[]
+  tool_run_refs[] / producer_version
+
+CandidateEvidence
+  schema_version / candidate_id / evidence_hash / candidate_type
+  sample_design_ref / dataset_refs[] / workspace_ref
+  generation_parameters / seed / search_budget / tie_break / truncated
+  fragment_refs[] / metric_observation_refs[] / requirement_refs[]
+  candidate_stage / observation_stage / validation_status
+  artifact_refs[] / red_flags[] / tool_run_refs[] / producer_version
+
+SelectedStrategyDesign
+  schema_version / design_id / design_hash / strategy_type
+  pool_ref / source_fragment_refs[] / ordered_rule_refs[]
+  default_action / requirements[] / scope / traffic_allocation?
+  candidate_stage / validation_status / producer_version
+
+StrategyImpactAssessment
+  schema_version / assessment_id / content_hash
+  baseline_strategy_ref? / challenger_strategy_ref / scenario_refs[]
+  sample_design_ref / metric_observation_refs[]
+  waterfall_ref? / swap_ref? / monthly_refs[] / segment_refs[]
+  conservation_checks[] / maturity_summary / red_flags[]
+  tool_run_refs[] / producer_version
+```
+
+`CandidateEvidence` 是公共 envelope；单变量、自动树、交互树、评分卡、Voting 和 Cross 仍各自拥有严格的类型专属 asset/validator，不能把公共 envelope 变成允许任意 JSON 的宽松候选格式。
+
+### 4.7 场景、实验和数据成本契约
+
+```text
+ScenarioDefinition
+  schema_version / scenario_id / content_hash
+  name / purpose / effect_stage: estimated
+  baseline_strategy_ref? / challenger_strategy_ref?
+  assumptions[]: ReportField[typed value + unit + valid range]
+  component_observation_refs[]
+  calculation_definition_refs[]
+  producer_version
+
+ExperimentDesign
+  schema_version / experiment_id / content_hash
+  eligibility_definition_ref / randomization_unit
+  allocation: treatment_ratio / control_ratio
+  seed / assignment_artifact_ref
+  treatment_policy_refs[] / control_policy_refs[]
+  analysis_window / effect_estimator / guardrail_metric_refs[]
+  status / producer_version
+
+DataCostAssessment
+  schema_version / assessment_id / content_hash
+  scenario_ref? / currency / effective_period
+  nodes[]
+    node_id / provider / tool_or_data_source
+    trigger_condition_ref / eligible_count / query_count / query_rate
+    hit_or_funnel_rate? / unit_cost / cache_or_reuse_policy?
+    total_cost / cost_per_application / cost_per_approval?
+    cost_per_drawdown? / cost_per_loan_amount_unit?
+    source_refs[]
+  total_cost / conservation_checks[] / producer_version
+```
+
+实验分组必须由确定性 Tool 生成 assignment artifact；报告不能只写“实验组/对照组人数”而不记录随机单元、比例、seed 和分配证据。数据成本必须能表达“节点漏斗率 × 条件调用 × 数据源单价”，单价及有效期作为输入，不能隐藏在 Excel 公式或代码常量中。
 
 ## 五、策略正确性阻塞矩阵
 
@@ -348,16 +449,21 @@ Excel 中的数值可以用公式链接同工作簿内的结构化明细，但�
 
 ```text
 LimitPricingReportExtension
-  action_type: temporary_limit | permanent_limit | decrease_limit | price
-  effective_days?
+  action_policies[]
+    policy_id
+    segment_or_rule_refs[]
+    action_type: temporary_limit | permanent_limit | decrease_limit | price
+    effective_days?
+    calculation_definition_ref
+    cap_definition_refs[]
+    minimum_change? / maximum_change? / rounding_rule?
   current_limit_col
   proposed_limit_col
   price_col?
   cap_definition_refs[]
   segment_or_grade_refs[]
   eligible_count
-  experiment_count?
-  control_count?
+  experiment_ref?
   average_change
   total_exposure_change
   utilization_observations[]
@@ -368,7 +474,7 @@ LimitPricingReportExtension
   spread_or_margin_observations[]
 ```
 
-必须支持：临时/固定额度、有效期、提降额人数、户均变化、总敞口、T30 等申请/通过/支用表现、额度使用率、职业或资质 Cap、层级风险、年化风险和利差。没有 EAD、期限或成本口径时，相应经济表留空，不影响风险分层和规则候选生成。
+必须支持：同一策略按不同客群同时使用临额和固额、有效期、提降额人数、户均变化、总敞口、T30 等申请/通过/支用表现、额度使用率、职业或资质 Cap、层级风险、年化风险和利差。没有 EAD、期限或成本口径时，相应经济表留空，不影响风险分层和规则候选生成。年化风险、利差和放款影响必须通过 `ScenarioDefinition`、组件 observation 和确定性计算定义保留完整依赖链。
 
 ## 十、Agent 追问和报告生成行为
 
@@ -453,4 +559,6 @@ LimitPricingReportExtension
 2. `/Users/eddyz/Downloads/业务学习/云闪付&存量经营复借策略调整-20260422(1).xlsx`
    - 参考内容：当前项目逐月表现、件数/金额风险口径、多头变量分箱占比、均值/分位数趋势、长表现分箱和规则效果。
 3. `/Users/eddyz/Downloads/业务学习/20260609-自营中信借钱贷中提额方案.xlsx`
-   - 参考内容：额度策略目标、当前规模和 T30 行为、分层、策略瀑布、临额/固额方案、额度 Cap、年化风险、利差和放款影响。
+   - 参考内容：额度策略目标、当前规模和 T30 行为、分层、策略瀑布、同一方案内的临额/固额组合、随机实验/对照分配、额度 Cap、年化风险、利差和放款影响。
+
+参考工作簿中不得照抄的做法：示例数字或权重写死在公式中、把多项数据费用合并成不可追溯常量、用 `#/$` 前缀猜件数/金额口径、混列 estimated/backtested/OOT/post-launch、超宽千行附件、重复总结入口，以及把 Excel serial date 直接作为图表横轴。MARVIS 应以结构化明细附件、稳定 Sheet key、`YYYY-MM` 时间标签、业务名+原字段双标签和 evidence drill-down 替代这些设计。
