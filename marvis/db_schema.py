@@ -44,6 +44,7 @@ _MIGRATION_TABLES = frozenset({
     "strategy_candidate_pools_v1_archive",
     "strategy_candidate_pool_revisions_v1_archive",
     "strategy_candidate_pool_items_v1_archive",
+    "strategy_automatic_tree_apply_runs",
 })
 
 # ARCH-10: schema_version mechanism.
@@ -146,7 +147,12 @@ _MIGRATION_TABLES = frozenset({
 # ledger byte-for-byte and creates the generic VerifiedCandidateFragment v2
 # ledger.  Old task-artifact rows and files remain immutable and downloadable;
 # v2 starts a fresh revision chain instead of relabelling incompatible JSON.
-SCHEMA_VERSION = 16
+#
+# _migration_017_automatic_tree_apply_runs adds the immutable, idempotent
+# committed-facts registry used by full automatic-tree dataset writeback.  The
+# repository remains deliberately narrower than transform lineage: callers own
+# file promotion, dataset/artifact registration, workspace activation and audit.
+SCHEMA_VERSION = 17
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -2503,6 +2509,104 @@ def _create_strategy_candidate_pool_v2_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_017_automatic_tree_apply_runs(conn: sqlite3.Connection) -> None:
+    """Add immutable committed facts for full automatic-tree writeback."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_automatic_tree_apply_runs (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.automatic-tree-apply-run.v1'),
+            task_id TEXT NOT NULL,
+            input_hash TEXT NOT NULL
+                CHECK(length(input_hash) = 64)
+                CHECK(input_hash NOT GLOB '*[^0-9a-f]*'),
+            source_tree_artifact_id TEXT NOT NULL,
+            source_tree_artifact_hash TEXT NOT NULL
+                CHECK(length(source_tree_artifact_hash) = 64)
+                CHECK(source_tree_artifact_hash NOT GLOB '*[^0-9a-f]*'),
+            asset_id TEXT NOT NULL,
+            asset_hash TEXT NOT NULL
+                CHECK(length(asset_hash) = 64)
+                CHECK(asset_hash NOT GLOB '*[^0-9a-f]*'),
+            tree_result_hash TEXT NOT NULL
+                CHECK(length(tree_result_hash) = 64)
+                CHECK(tree_result_hash NOT GLOB '*[^0-9a-f]*'),
+            source_dataset_id TEXT NOT NULL,
+            source_dataset_hash TEXT NOT NULL
+                CHECK(length(source_dataset_hash) = 64)
+                CHECK(source_dataset_hash NOT GLOB '*[^0-9a-f]*'),
+            output_leaf_column TEXT NOT NULL
+                CHECK(length(output_leaf_column) BETWEEN 1 AND 64)
+                CHECK(substr(output_leaf_column, 1, 1) GLOB '[A-Za-z_]')
+                CHECK(output_leaf_column NOT GLOB '*[^A-Za-z0-9_]*'),
+            output_rule_column TEXT NOT NULL
+                CHECK(length(output_rule_column) BETWEEN 1 AND 64)
+                CHECK(substr(output_rule_column, 1, 1) GLOB '[A-Za-z_]')
+                CHECK(output_rule_column NOT GLOB '*[^A-Za-z0-9_]*'),
+            writer_contract TEXT NOT NULL CHECK(length(writer_contract) > 0),
+            writer_version TEXT NOT NULL CHECK(length(writer_version) > 0),
+            result_dataset_id TEXT NOT NULL,
+            result_dataset_hash TEXT NOT NULL
+                CHECK(length(result_dataset_hash) = 64)
+                CHECK(result_dataset_hash NOT GLOB '*[^0-9a-f]*'),
+            result_dataset_path TEXT NOT NULL CHECK(length(result_dataset_path) > 0),
+            evidence_artifact_id TEXT NOT NULL,
+            evidence_artifact_hash TEXT NOT NULL
+                CHECK(length(evidence_artifact_hash) = 64)
+                CHECK(evidence_artifact_hash NOT GLOB '*[^0-9a-f]*'),
+            evidence_artifact_path TEXT NOT NULL
+                CHECK(length(evidence_artifact_path) > 0),
+            result_json TEXT NOT NULL,
+            result_hash TEXT NOT NULL
+                CHECK(length(result_hash) = 64)
+                CHECK(result_hash NOT GLOB '*[^0-9a-f]*'),
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, input_hash),
+            CHECK(source_dataset_id <> result_dataset_id),
+            CHECK(source_tree_artifact_id <> evidence_artifact_id),
+            CHECK(lower(output_leaf_column) <> lower(output_rule_column)),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(result_dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(source_tree_artifact_id) REFERENCES task_artifacts(id),
+            FOREIGN KEY(evidence_artifact_id) REFERENCES task_artifacts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_automatic_tree_apply_runs_task
+            ON strategy_automatic_tree_apply_runs(task_id, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_automatic_tree_apply_runs_source
+            ON strategy_automatic_tree_apply_runs(
+                task_id, source_dataset_id, source_tree_artifact_id, created_at, id
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_automatic_tree_apply_runs_result
+            ON strategy_automatic_tree_apply_runs(task_id, result_dataset_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_automatic_tree_apply_runs_immutable_update
+        BEFORE UPDATE ON strategy_automatic_tree_apply_runs
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_automatic_tree_apply_runs are immutable');
+        END
+        """
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -2527,6 +2631,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (14, _migration_014_data_transform_lineage),
     (15, _migration_015_strategy_candidate_pools),
     (16, _migration_016_strategy_candidate_pool_v2),
+    (17, _migration_017_automatic_tree_apply_runs),
 ]
 
 
