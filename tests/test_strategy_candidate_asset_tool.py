@@ -14,7 +14,7 @@ from marvis.data.workspace import (
     DataWorkspaceDraft,
     data_semantic_mapping_hash,
 )
-from marvis.db import DatasetRepository, TaskRepository, init_db
+from marvis.db import DatasetRepository, TaskRepository, connect, init_db
 from marvis.domain import TaskCreate
 from marvis.files import sha256_file
 from marvis.packs.strategy import candidate_asset_tools
@@ -358,6 +358,48 @@ def test_refine_tool_rejects_bound_dataset_byte_drift(tmp_path: Path) -> None:
         fixture["task"].id
     )
     assert all(row["kind"] != ASSET_ARTIFACT_KIND for row in records)
+
+
+def test_refine_tool_rejects_under_lock_dataset_registry_path_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    original_source_path = fixture["dataset"].source_path
+    original_require = candidate_asset_tools._require_dataset_on_connection
+    changed = False
+
+    def drift_then_require(conn, dataset):
+        nonlocal changed
+        if not changed:
+            changed = True
+            conn.execute(
+                "UPDATE datasets SET source_path = ? WHERE id = ?",
+                ("forged/path.parquet", fixture["dataset"].id),
+            )
+        return original_require(conn, dataset)
+
+    monkeypatch.setattr(
+        candidate_asset_tools,
+        "_require_dataset_on_connection",
+        drift_then_require,
+    )
+    with pytest.raises(StrategyError, match="registry path changed"):
+        run_refine_univariate_candidate(
+            fixture["inputs"], fixture["ctx"], fixture["runtime"]
+        )
+
+    records = TaskArtifactRepository(fixture["settings"].db_path).list_for_task(
+        fixture["task"].id
+    )
+    assert all(row["kind"] != ASSET_ARTIFACT_KIND for row in records)
+    with connect(fixture["settings"].db_path) as conn:
+        row = conn.execute(
+            "SELECT source_path FROM datasets WHERE id = ?",
+            (fixture["dataset"].id,),
+        ).fetchone()
+    assert row is not None
+    assert str(row["source_path"]) == original_source_path
 
 
 def test_identical_refine_writers_lock_before_artifact_promotion(

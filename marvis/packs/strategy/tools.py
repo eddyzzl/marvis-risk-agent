@@ -722,7 +722,7 @@ def tool_materialize_automatic_tree_leaf_fragment(inputs: dict, ctx) -> dict:
 
 
 def tool_add_candidate_to_pool(inputs: dict, ctx) -> dict:
-    """Add one immutable Candidate Asset to a governed draft pool revision."""
+    """Add a refined univariate asset or persisted automatic-tree leaf."""
 
     return run_add_candidate_to_pool(inputs, ctx, _runtime(ctx))
 

@@ -20,6 +20,7 @@ from typing import Any
 from urllib.parse import quote
 
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.data.errors import DatasetContentDriftError
 from marvis.output.strategy_candidate_report import (
     canonical_strategy_candidate_report_json,
     strategy_candidate_report_from_json,
@@ -40,15 +41,27 @@ from marvis.packs.strategy.candidate_asset_tools import (
     _require_file_content_hash,
     _require_regular_artifact_path,
     _require_report_binding,
+    _registry_metadata_hash_on_connection,
     _require_source_on_connection,
 )
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
 from marvis.packs.strategy.candidate_fragment import (
-    UNIVARIATE_ASSET_ARTIFACT_SCHEMA_VERSION,
-    UNIVARIATE_ASSET_ORIGIN_TOOL,
-    UNIVARIATE_ASSET_SCHEMA_VERSION,
     univariate_asset_to_verified_fragment,
     verified_fragment_pool_parts,
+)
+from marvis.packs.strategy.automatic_tree_leaf_fragment import (
+    AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_KIND,
+    AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_SCHEMA_VERSION,
+    AUTOMATIC_TREE_LEAF_FRAGMENT_ORIGIN_TOOL,
+    automatic_tree_leaf_fragment_to_verified_candidate_fragment,
+)
+from marvis.packs.strategy.automatic_tree_leaf_tools import (
+    VerifiedAutomaticTreeLeafSelection,
+    VerifiedAutomaticTreeSource,
+    load_verified_automatic_tree_leaf_selection_artifact,
+    load_verified_automatic_tree_leaf_selection_artifact_on_connection,
+    load_verified_automatic_tree_source_artifact,
+    load_verified_automatic_tree_source_artifact_on_connection,
 )
 from marvis.packs.strategy.errors import (
     StrategyError,
@@ -182,7 +195,7 @@ _BOUNDARY_ERRORS = (
 
 
 @dataclass(frozen=True)
-class _CandidateLineage:
+class _UnivariateCandidateLineage:
     asset_record: Any
     asset: dict[str, Any]
     parent_record: Any
@@ -192,8 +205,42 @@ class _CandidateLineage:
     source_binding: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _AutomaticTreeDatasetBinding:
+    dataset_id: str
+    task_id: str
+    source_path: str
+    path: Path
+    content_hash: str
+    registry_metadata_hash: str
+    columns: tuple[str, ...]
+    row_count: int
+
+
+@dataclass(frozen=True)
+class _AutomaticTreeCandidateLineage:
+    selection: VerifiedAutomaticTreeLeafSelection
+    tree: VerifiedAutomaticTreeSource
+    dataset: _AutomaticTreeDatasetBinding
+    verified_fragment: dict[str, Any]
+    source_binding: dict[str, Any]
+
+
+_CandidateLineage = _UnivariateCandidateLineage | _AutomaticTreeCandidateLineage
+
+
+@dataclass
+class _LineageCache:
+    trees: dict[tuple[str, str], VerifiedAutomaticTreeSource]
+    datasets: dict[tuple[str, str], _AutomaticTreeDatasetBinding]
+
+    @classmethod
+    def empty(cls) -> _LineageCache:
+        return cls(trees={}, datasets={})
+
+
 def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
-    """Add one strictly verified task-owned Candidate Asset to a draft pool."""
+    """Add a refined univariate asset or persisted automatic-tree leaf."""
 
     try:
         normalized = _validate_add_inputs(inputs)
@@ -209,7 +256,13 @@ def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
             expected_revision=normalized["expected_pool_revision"],
             expected_snapshot_hash=normalized["expected_pool_snapshot_hash"],
         )
-        prior_lineages = _load_pool_lineages(runtime, task_id=task_id, pool=base)
+        lineage_cache = _LineageCache.empty()
+        prior_lineages = _load_pool_lineages(
+            runtime,
+            task_id=task_id,
+            pool=base,
+            cache=lineage_cache,
+        )
         candidate = _load_candidate_lineage(
             runtime,
             task_id=task_id,
@@ -217,6 +270,7 @@ def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
             expected_content_hash=normalized["expected_artifact_content_hash"],
             expected_asset_id=normalized["expected_asset_id"],
             expected_asset_hash=normalized["expected_asset_hash"],
+            cache=lineage_cache,
         )
         snapshot = add_verified_candidate_fragment(
             base,
@@ -257,13 +311,13 @@ def run_remove_pool_entry(inputs, ctx, runtime) -> dict[str, Any]:
         task_id, repository, base, legacy_archive = _mutation_base(
             runtime, ctx, normalized
         )
+        lineages = _load_pool_lineages(runtime, task_id=task_id, pool=base)
         entry_id = _entry_id_for_rule(base, normalized["rule_id"])
         snapshot = remove_pool_entry(
             base,
             entry_id,
             reason=normalized.get("reason"),
         )
-        lineages = _load_pool_lineages(runtime, task_id=task_id, pool=snapshot)
         return _persist_mutation(
             runtime,
             repository=repository,
@@ -384,14 +438,15 @@ def run_compile_strategy_pool(inputs, ctx, runtime) -> dict[str, Any]:
                 raise StrategyPoolLegacyDraftNeedsRebuildError(legacy_archive)
             raise StrategyError("strategy candidate pool not found")
         pool = validate_strategy_pool(current)
-        if (
-            pool["revision"] != normalized["expected_pool_revision"]
-            or not hmac.compare_digest(
-                pool["snapshot_hash"],
-                normalized["expected_pool_snapshot_hash"],
-            )
+        if pool["revision"] != normalized[
+            "expected_pool_revision"
+        ] or not hmac.compare_digest(
+            pool["snapshot_hash"],
+            normalized["expected_pool_snapshot_hash"],
         ):
-            raise StrategyError("stale strategy candidate pool revision or snapshot hash")
+            raise StrategyError(
+                "stale strategy candidate pool revision or snapshot hash"
+            )
         _load_pool_lineages(runtime, task_id=task_id, pool=pool)
         artifact = _load_pool_artifact(runtime, task_id=task_id, snapshot=pool)
         selected = compile_strategy_pool(pool)
@@ -407,9 +462,7 @@ def run_compile_strategy_pool(inputs, ctx, runtime) -> dict[str, Any]:
             "selected_strategy_design": selected,
             "artifacts": [_artifact_output(artifact, task_id=task_id)],
             "archived_legacy_draft": legacy_archive,
-            "warnings": (
-                [] if legacy_archive is None else [_LEGACY_ARCHIVE_WARNING]
-            ),
+            "warnings": ([] if legacy_archive is None else [_LEGACY_ARCHIVE_WARNING]),
         }
     except StrategyError:
         raise
@@ -529,9 +582,7 @@ def _expected_base_pool(
     expected_snapshot_hash: str,
 ) -> dict[str, Any] | None:
     if expected_revision == ABSENT_POOL_REVISION:
-        if not hmac.compare_digest(
-            expected_snapshot_hash, ABSENT_POOL_SNAPSHOT_HASH
-        ):
+        if not hmac.compare_digest(expected_snapshot_hash, ABSENT_POOL_SNAPSHOT_HASH):
             raise StrategyError(
                 "pool revision 0 requires the canonical absent snapshot hash"
             )
@@ -553,25 +604,19 @@ def _entry_id_for_rule(pool: Mapping[str, Any], rule_id: str) -> str:
 
 
 def _load_pool_lineages(
-    runtime, *, task_id: str, pool: Mapping[str, Any] | None
+    runtime,
+    *,
+    task_id: str,
+    pool: Mapping[str, Any] | None,
+    cache: _LineageCache | None = None,
 ) -> list[_CandidateLineage]:
     if pool is None:
         return []
     normalized = validate_strategy_pool(pool)
+    lineage_cache = cache if cache is not None else _LineageCache.empty()
     lineages: list[_CandidateLineage] = []
     for entry in normalized["entries"]:
         source = entry["source"]
-        if (
-            source["artifact_kind"] != ASSET_ARTIFACT_KIND
-            or source["artifact_schema_version"]
-            != UNIVARIATE_ASSET_ARTIFACT_SCHEMA_VERSION
-            or source["origin_tool"] != UNIVARIATE_ASSET_ORIGIN_TOOL
-            or source["asset_schema_version"] != UNIVARIATE_ASSET_SCHEMA_VERSION
-            or source["asset_type"] != "univariate_refinement"
-        ):
-            raise StrategyError(
-                "strategy pool contains an unsupported candidate fragment adapter"
-            )
         lineage = _load_candidate_lineage(
             runtime,
             task_id=task_id,
@@ -579,6 +624,7 @@ def _load_pool_lineages(
             expected_content_hash=source["artifact_content_hash"],
             expected_asset_id=source["asset_id"],
             expected_asset_hash=source["asset_hash"],
+            cache=lineage_cache,
         )
         if lineage.source_binding != source:
             raise StrategyError(
@@ -596,7 +642,60 @@ def _load_candidate_lineage(
     expected_content_hash: str,
     expected_asset_id: str,
     expected_asset_hash: str,
+    cache: _LineageCache | None = None,
 ) -> _CandidateLineage:
+    record = runtime.task_artifacts.get_for_task(task_id, artifact_id)
+    if record is None:
+        raise StrategyError(f"candidate source artifact not found: {artifact_id}")
+    live = _normalize_source_record(record)
+    triple = (
+        live.kind,
+        live.origin_tool,
+        live.provenance.get("schema_version"),
+    )
+    univariate_triple = (
+        ASSET_ARTIFACT_KIND,
+        ASSET_ORIGIN_TOOL,
+        ASSET_ARTIFACT_SCHEMA_VERSION,
+    )
+    automatic_leaf_triple = (
+        AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_KIND,
+        AUTOMATIC_TREE_LEAF_FRAGMENT_ORIGIN_TOOL,
+        AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_SCHEMA_VERSION,
+    )
+    if triple == univariate_triple:
+        return _load_univariate_candidate_lineage(
+            runtime,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            expected_content_hash=expected_content_hash,
+            expected_asset_id=expected_asset_id,
+            expected_asset_hash=expected_asset_hash,
+        )
+    if triple == automatic_leaf_triple:
+        return _load_automatic_tree_candidate_lineage(
+            runtime,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            expected_content_hash=expected_content_hash,
+            expected_asset_id=expected_asset_id,
+            expected_asset_hash=expected_asset_hash,
+            cache=cache if cache is not None else _LineageCache.empty(),
+        )
+    raise StrategyError(
+        "strategy pool contains an unsupported candidate fragment adapter triple"
+    )
+
+
+def _load_univariate_candidate_lineage(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+    expected_asset_id: str,
+    expected_asset_hash: str,
+) -> _UnivariateCandidateLineage:
     record = runtime.task_artifacts.get_for_task(task_id, artifact_id)
     if record is None:
         raise StrategyError(f"candidate asset artifact not found: {artifact_id}")
@@ -685,12 +784,9 @@ def _load_candidate_lineage(
     identity = evidence["identity"]
     if identity["task_id"] != task_id:
         raise StrategyError("candidate evidence belongs to another task")
-    if (
-        provenance["dataset_id"] != identity["dataset_id"]
-        or not hmac.compare_digest(
-            provenance["dataset_content_hash"],
-            identity["dataset_content_hash"],
-        )
+    if provenance["dataset_id"] != identity["dataset_id"] or not hmac.compare_digest(
+        provenance["dataset_content_hash"],
+        identity["dataset_content_hash"],
     ):
         raise StrategyError(
             "candidate asset artifact dataset provenance does not match evidence"
@@ -727,7 +823,7 @@ def _load_candidate_lineage(
     generic_source, _rule_id, _execution = verified_fragment_pool_parts(
         verified_fragment
     )
-    return _CandidateLineage(
+    return _UnivariateCandidateLineage(
         asset_record=asset_record,
         asset=asset,
         parent_record=parent_record,
@@ -738,13 +834,154 @@ def _load_candidate_lineage(
     )
 
 
+def _load_automatic_tree_candidate_lineage(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+    expected_asset_id: str,
+    expected_asset_hash: str,
+    cache: _LineageCache,
+) -> _AutomaticTreeCandidateLineage:
+    selection = load_verified_automatic_tree_leaf_selection_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_content_hash=expected_content_hash,
+        expected_asset_id=expected_asset_id,
+        expected_asset_hash=expected_asset_hash,
+    )
+    tree_pointer = selection.selection["tree_artifact"]
+    tree_key = (
+        tree_pointer["artifact_id"],
+        tree_pointer["content_hash"],
+    )
+    tree = cache.trees.get(tree_key)
+    if tree is None:
+        tree_asset = selection.selection["tree_asset"]
+        tree = load_verified_automatic_tree_source_artifact(
+            runtime,
+            task_id=task_id,
+            artifact_id=tree_pointer["artifact_id"],
+            expected_content_hash=tree_pointer["content_hash"],
+            expected_asset_id=tree_asset["asset_id"],
+            expected_asset_hash=tree_asset["asset_hash"],
+            expected_tree_result_hash=tree_asset["tree_result_hash"],
+        )
+        cache.trees[tree_key] = tree
+    dataset = _load_automatic_tree_dataset(
+        runtime,
+        task_id=task_id,
+        tree=tree,
+        cache=cache,
+    )
+    verified_fragment, source_binding = _replay_automatic_tree_lineage(
+        selection,
+        tree,
+    )
+    return _AutomaticTreeCandidateLineage(
+        selection=selection,
+        tree=tree,
+        dataset=dataset,
+        verified_fragment=verified_fragment,
+        source_binding=source_binding,
+    )
+
+
+def _load_automatic_tree_dataset(
+    runtime,
+    *,
+    task_id: str,
+    tree: VerifiedAutomaticTreeSource,
+    cache: _LineageCache,
+) -> _AutomaticTreeDatasetBinding:
+    identity = tree.asset["identity"]
+    dataset_id = str(identity["dataset_id"])
+    content_hash = str(identity["dataset_content_hash"])
+    cache_key = (dataset_id, content_hash)
+    cached = cache.datasets.get(cache_key)
+    if cached is not None:
+        if cached.task_id != task_id or not hmac.compare_digest(
+            cached.registry_metadata_hash,
+            str(identity["registry_metadata_hash"]),
+        ):
+            raise StrategyError("automatic-tree source dataset identity changed")
+        return cached
+    try:
+        dataset = runtime.registry.get(dataset_id)
+        path = Path(runtime.registry.resolve_verified_path(dataset_id))
+    except (DatasetContentDriftError, KeyError, OSError, TypeError, ValueError) as exc:
+        raise StrategyError(
+            f"automatic-tree source dataset not found or drifted: {dataset_id}"
+        ) from exc
+    if str(dataset.task_id) != task_id:
+        raise StrategyError("automatic-tree source dataset belongs to another task")
+    registered_hash = str(dataset.content_hash or "")
+    if not hmac.compare_digest(registered_hash, content_hash):
+        raise StrategyError("automatic-tree source dataset content hash changed")
+    _require_file_content_hash(
+        path,
+        content_hash,
+        "automatic-tree source dataset content hash drifted",
+    )
+    with runtime.task_artifacts.transaction() as conn:
+        metadata_hash = _registry_metadata_hash_on_connection(
+            conn,
+            task_id=task_id,
+            dataset_id=dataset_id,
+            expected_content_hash=content_hash,
+        )
+    if not hmac.compare_digest(
+        metadata_hash,
+        str(identity["registry_metadata_hash"]),
+    ):
+        raise StrategyError("automatic-tree source dataset registry metadata changed")
+    binding = _AutomaticTreeDatasetBinding(
+        dataset_id=dataset_id,
+        task_id=task_id,
+        source_path=str(dataset.source_path),
+        path=path,
+        content_hash=content_hash,
+        registry_metadata_hash=metadata_hash,
+        columns=tuple(str(profile.name) for profile in dataset.columns),
+        row_count=int(dataset.row_count),
+    )
+    cache.datasets[cache_key] = binding
+    return binding
+
+
+def _replay_automatic_tree_lineage(
+    selection: VerifiedAutomaticTreeLeafSelection,
+    tree: VerifiedAutomaticTreeSource,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    verified_fragment = automatic_tree_leaf_fragment_to_verified_candidate_fragment(
+        selection.selection,
+        tree.asset,
+        selection_artifact_binding=selection.replay_binding(),
+        tree_artifact_binding=tree.builder_binding(),
+    )
+    source_binding, _rule_id, _execution = verified_fragment_pool_parts(
+        verified_fragment
+    )
+    return verified_fragment, source_binding
+
+
 def _read_canonical_asset(path: Path) -> dict[str, Any]:
     try:
         raw = path.read_bytes()
         parsed = json.loads(raw, object_pairs_hook=_object_without_duplicate_keys)
         asset = validate_candidate_asset(parsed)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise StrategyError("candidate asset artifact failed strict validation") from exc
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise StrategyError(
+            "candidate asset artifact failed strict validation"
+        ) from exc
     canonical = canonical_candidate_asset_json(asset).encode("utf-8")
     if canonical != raw:
         raise StrategyError("candidate asset artifact is not canonical JSON")
@@ -830,11 +1067,13 @@ def _persist_mutation(
                         snapshot=parent_snapshot,
                         tasks_root=Path(runtime.settings.tasks_dir),
                     )
+                lineage_cache = _LineageCache.empty()
                 for lineage in lineages:
                     _require_lineage_on_connection(
                         conn,
                         lineage,
                         tasks_root=Path(runtime.settings.tasks_dir),
+                        cache=lineage_cache,
                     )
                 uow.promote_all()
                 _require_file_content_hash(
@@ -862,9 +1101,7 @@ def _persist_mutation(
                         "kind": f"strategy.pool.{normalized['operation']['kind']}",
                         "target_ref": normalized["revision_id"],
                         "actor": "system",
-                        "inputs_hash": _sha256(
-                            _canonical_json(inputs).encode("utf-8")
-                        ),
+                        "inputs_hash": _sha256(_canonical_json(inputs).encode("utf-8")),
                         "outcome": "succeeded",
                         "detail": {
                             "entry_count": len(normalized["entries"]),
@@ -906,7 +1143,37 @@ def _persist_mutation(
     }
 
 
-def _require_lineage_on_connection(conn, lineage, *, tasks_root: Path) -> None:
+def _require_lineage_on_connection(
+    conn,
+    lineage: _CandidateLineage,
+    *,
+    tasks_root: Path,
+    cache: _LineageCache | None = None,
+) -> None:
+    if isinstance(lineage, _UnivariateCandidateLineage):
+        _require_univariate_lineage_on_connection(
+            conn,
+            lineage,
+            tasks_root=tasks_root,
+        )
+        return
+    if isinstance(lineage, _AutomaticTreeCandidateLineage):
+        _require_automatic_tree_lineage_on_connection(
+            conn,
+            lineage,
+            tasks_root=tasks_root,
+            cache=cache if cache is not None else _LineageCache.empty(),
+        )
+        return
+    raise StrategyError("unsupported candidate lineage type")
+
+
+def _require_univariate_lineage_on_connection(
+    conn,
+    lineage: _UnivariateCandidateLineage,
+    *,
+    tasks_root: Path,
+) -> None:
     _require_source_on_connection(conn, lineage.asset_record)
     _require_source_on_connection(conn, lineage.parent_record)
     _require_dataset_on_connection(conn, lineage.dataset)
@@ -934,6 +1201,68 @@ def _require_lineage_on_connection(conn, lineage, *, tasks_root: Path) -> None:
     )
 
 
+def _require_automatic_tree_lineage_on_connection(
+    conn,
+    lineage: _AutomaticTreeCandidateLineage,
+    *,
+    tasks_root: Path,
+    cache: _LineageCache,
+) -> None:
+    selection = load_verified_automatic_tree_leaf_selection_artifact_on_connection(
+        conn,
+        tasks_dir=tasks_root,
+        task_id=lineage.selection.task_id,
+        artifact_id=lineage.selection.artifact_id,
+        expected_content_hash=lineage.selection.content_hash,
+        expected_asset_id=lineage.tree.asset["asset_id"],
+        expected_asset_hash=lineage.tree.asset["asset_hash"],
+    )
+    tree_pointer = selection.selection["tree_artifact"]
+    tree_key = (
+        tree_pointer["artifact_id"],
+        tree_pointer["content_hash"],
+    )
+    tree = cache.trees.get(tree_key)
+    if tree is None:
+        tree_asset = selection.selection["tree_asset"]
+        tree = load_verified_automatic_tree_source_artifact_on_connection(
+            conn,
+            tasks_dir=tasks_root,
+            task_id=selection.task_id,
+            artifact_id=tree_pointer["artifact_id"],
+            expected_content_hash=tree_pointer["content_hash"],
+            expected_asset_id=tree_asset["asset_id"],
+            expected_asset_hash=tree_asset["asset_hash"],
+            expected_tree_result_hash=tree_asset["tree_result_hash"],
+        )
+        cache.trees[tree_key] = tree
+    dataset_key = (lineage.dataset.dataset_id, lineage.dataset.content_hash)
+    dataset = cache.datasets.get(dataset_key)
+    if dataset is None:
+        _require_dataset_on_connection(conn, lineage.dataset)
+        _require_file_content_hash(
+            lineage.dataset.path,
+            lineage.dataset.content_hash,
+            "automatic-tree source dataset content hash drifted",
+        )
+        dataset = lineage.dataset
+        cache.datasets[dataset_key] = dataset
+    verified_fragment, source_binding = _replay_automatic_tree_lineage(
+        selection,
+        tree,
+    )
+    if (
+        selection != lineage.selection
+        or tree != lineage.tree
+        or dataset != lineage.dataset
+        or verified_fragment != lineage.verified_fragment
+        or source_binding != lineage.source_binding
+    ):
+        raise StrategyError(
+            "automatic-tree candidate lineage changed before pool persistence"
+        )
+
+
 def _require_parent_pool_artifact_on_connection(
     conn,
     binding,
@@ -955,7 +1284,13 @@ def _require_parent_pool_artifact_on_connection(
         persisted = validate_strategy_pool(
             json.loads(raw, object_pairs_hook=_object_without_duplicate_keys)
         )
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise StrategyError("parent strategy pool artifact is invalid") from exc
     if canonical_strategy_pool_snapshot_json(persisted) != raw or persisted != snapshot:
         raise StrategyError("parent strategy pool artifact is not canonical")
@@ -1002,7 +1337,13 @@ def _load_pool_artifact(runtime, *, task_id: str, snapshot: Mapping[str, Any]):
         persisted = validate_strategy_pool(
             json.loads(raw, object_pairs_hook=_object_without_duplicate_keys)
         )
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise StrategyError("current strategy pool artifact is invalid") from exc
     if canonical_strategy_pool_snapshot_json(persisted) != raw or persisted != snapshot:
         raise StrategyError("current strategy pool artifact is not canonical")
@@ -1022,9 +1363,7 @@ def _pool_provenance(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "parent_revision_id": snapshot["parent_revision_id"],
         "snapshot_hash": snapshot["snapshot_hash"],
         "operation_kind": snapshot["operation"]["kind"],
-        "source_artifact_ids": [
-            entry["source"]["artifact_id"] for entry in entries
-        ],
+        "source_artifact_ids": [entry["source"]["artifact_id"] for entry in entries],
         "evidence_identity": identity,
     }
 

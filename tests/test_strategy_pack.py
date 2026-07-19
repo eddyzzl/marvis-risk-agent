@@ -240,6 +240,9 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
             "reorder_strategy_pool",
         )
     ]
+    add_pool_tool = next(
+        tool for tool in manifest.tools if tool.name == "add_candidate_to_pool"
+    )
     compile_pool_tool = next(
         tool for tool in manifest.tools if tool.name == "compile_strategy_pool"
     )
@@ -353,6 +356,8 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "write:artifact",
     }
     assert manifest.version == "0.6.0"
+    assert "refined univariate asset" in add_pool_tool.summary
+    assert "automatic-tree leaf selection" in add_pool_tool.summary
     for pool_tool in pool_mutation_tools:
         assert pool_tool.policy.human_decision_gate == "none"
         assert pool_tool.policy.effect_authorization == "none"

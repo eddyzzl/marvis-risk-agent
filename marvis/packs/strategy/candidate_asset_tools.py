@@ -94,6 +94,7 @@ class _SourceArtifactBinding:
 class _DatasetBinding:
     dataset_id: str
     task_id: str
+    source_path: str
     path: Path
     content_hash: str
     registry_metadata_hash: str
@@ -489,6 +490,7 @@ def _load_dataset_binding(
     return _DatasetBinding(
         dataset_id=dataset_id,
         task_id=identity["task_id"],
+        source_path=str(dataset.source_path),
         path=path,
         content_hash=content_hash,
         registry_metadata_hash=metadata_hash,
@@ -731,6 +733,12 @@ def _require_dataset_on_connection(conn, dataset: _DatasetBinding) -> None:
     )
     if not hmac.compare_digest(metadata_hash, dataset.registry_metadata_hash):
         raise StrategyError("candidate source dataset registry metadata changed")
+    row = conn.execute(
+        "SELECT source_path FROM datasets WHERE task_id = ? AND id = ?",
+        (dataset.task_id, dataset.dataset_id),
+    ).fetchone()
+    if row is None or str(row["source_path"]) != dataset.source_path:
+        raise StrategyError("candidate source dataset registry path changed")
 
 
 def _registry_metadata_hash_on_connection(

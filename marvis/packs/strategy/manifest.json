@@ -1331,7 +1331,7 @@
     },
     {
       "name": "add_candidate_to_pool",
-      "summary": "Add one immutable task-owned Candidate Asset to a draft Strategy Pool revision after strict parent-evidence, dataset, and optimistic-lock validation.",
+      "summary": "Add one immutable task-owned refined univariate asset or persisted automatic-tree leaf selection to a draft Strategy Pool revision after strict evidence, dataset, and optimistic-lock validation.",
       "input_schema": {
         "type": "object",
         "properties": {

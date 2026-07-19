@@ -152,6 +152,53 @@ class VerifiedAutomaticTreeSource:
         }
 
 
+@dataclass(frozen=True)
+class VerifiedAutomaticTreeLeafSelection:
+    """One fully verified live leaf-selection row and canonical pointer."""
+
+    artifact_id: str
+    task_id: str
+    kind: str
+    path: Path
+    content_hash: str
+    origin_tool: str
+    provenance: dict[str, Any]
+    canonical_bytes: bytes
+    selection: dict[str, Any]
+
+    def replay_binding(self) -> dict[str, Any]:
+        """Project only live row facts required by the pure replay seam."""
+
+        provenance = self.provenance
+        return {
+            "artifact_id": self.artifact_id,
+            "task_id": self.task_id,
+            "kind": self.kind,
+            "content_hash": self.content_hash,
+            "origin_tool": self.origin_tool,
+            "artifact_schema_version": provenance["schema_version"],
+            "producer_version": provenance["producer_version"],
+            "selection_id": provenance["selection_id"],
+            "selection_hash": provenance["selection_hash"],
+            "tree_artifact_id": provenance["tree_artifact_id"],
+            "tree_artifact_kind": provenance["tree_artifact_kind"],
+            "tree_artifact_schema_version": provenance["tree_artifact_schema_version"],
+            "tree_artifact_content_hash": provenance["tree_artifact_content_hash"],
+            "tree_artifact_origin_tool": provenance["tree_artifact_origin_tool"],
+            "tree_artifact_path": provenance["tree_artifact_path"],
+            "tree_artifact_provenance": provenance["tree_artifact_provenance"],
+            "tree_asset_schema_version": provenance["tree_asset_schema_version"],
+            "tree_asset_id": provenance["tree_asset_id"],
+            "tree_asset_hash": provenance["tree_asset_hash"],
+            "tree_result_hash": provenance["tree_result_hash"],
+            "leaf_id": provenance["leaf_id"],
+            "fragment_id": provenance["fragment_id"],
+            "fragment_hash": provenance["fragment_hash"],
+            "rule_id": provenance["rule_id"],
+            "effect_id": provenance["effect_id"],
+        }
+
+
 def run_materialize_automatic_tree_leaf_fragment(
     inputs: object,
     ctx,
@@ -382,6 +429,186 @@ def load_verified_automatic_tree_source_artifact(
             expected_asset_hash=expected_asset_hash,
             expected_tree_result_hash=expected_tree_result_hash,
         )
+
+
+def load_verified_automatic_tree_leaf_selection_artifact(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+    expected_asset_id: str,
+    expected_asset_hash: str,
+) -> VerifiedAutomaticTreeLeafSelection:
+    """Load and fully verify one current-task persisted leaf selection."""
+
+    with runtime.task_artifacts.transaction() as conn:
+        return load_verified_automatic_tree_leaf_selection_artifact_on_connection(
+            conn,
+            tasks_dir=runtime.settings.tasks_dir,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            expected_content_hash=expected_content_hash,
+            expected_asset_id=expected_asset_id,
+            expected_asset_hash=expected_asset_hash,
+        )
+
+
+def load_verified_automatic_tree_leaf_selection_artifact_on_connection(
+    conn,
+    *,
+    tasks_dir: Path | str,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+    expected_asset_id: str,
+    expected_asset_hash: str,
+) -> VerifiedAutomaticTreeLeafSelection:
+    """Connection-scoped strict verifier for a leaf-selection TaskArtifact."""
+
+    normalized_task = _required_text(task_id, "task_id")
+    normalized_artifact = _required_text(artifact_id, "source_artifact_id")
+    normalized_content_hash = _required_sha256(
+        expected_content_hash,
+        "expected_artifact_content_hash",
+    )
+    normalized_asset_id = _required_asset_id(expected_asset_id)
+    normalized_asset_hash = _required_sha256(
+        expected_asset_hash,
+        "expected_asset_hash",
+    )
+    row = conn.execute(
+        """
+        SELECT id, task_id, kind, path, content_hash, origin_tool,
+               provenance_json, created_at
+          FROM task_artifacts
+         WHERE task_id = ? AND id = ?
+        """,
+        (normalized_task, normalized_artifact),
+    ).fetchone()
+    if row is None:
+        raise StrategyError(
+            f"automatic-tree leaf selection artifact not found: {normalized_artifact}"
+        )
+    record = {field: row[field] for field in _TASK_ARTIFACT_ROW_FIELDS}
+    _require_exact_fields(
+        record,
+        _TASK_ARTIFACT_ROW_FIELDS,
+        "automatic-tree leaf selection artifact row",
+    )
+    if _required_text(record["id"], "selection artifact id") != normalized_artifact:
+        raise StrategyError("automatic-tree leaf selection artifact id changed")
+    if (
+        _required_text(record["task_id"], "selection artifact task_id")
+        != normalized_task
+    ):
+        raise StrategyError(
+            "automatic-tree leaf selection artifact belongs to another task"
+        )
+    kind = _required_text(record["kind"], "selection artifact kind")
+    if kind != AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_KIND:
+        raise StrategyError("automatic-tree leaf selection artifact kind is invalid")
+    origin = _required_text(record["origin_tool"], "selection artifact origin_tool")
+    if origin != AUTOMATIC_TREE_LEAF_FRAGMENT_ORIGIN_TOOL:
+        raise StrategyError(
+            "automatic-tree leaf selection artifact origin_tool is invalid"
+        )
+    registered_hash = _required_sha256(
+        record["content_hash"],
+        "selection artifact content_hash",
+    )
+    if not hmac.compare_digest(registered_hash, normalized_content_hash):
+        raise StrategyError(
+            "automatic-tree leaf selection artifact content hash changed"
+        )
+    provenance_json = record["provenance_json"]
+    if not isinstance(provenance_json, str):
+        raise StrategyError("automatic-tree leaf selection provenance_json is invalid")
+    unverified_provenance = _strict_json_object_from_text(
+        provenance_json,
+        "automatic-tree leaf selection provenance_json",
+    )
+    _require_exact_fields(
+        unverified_provenance,
+        SELECTION_PROVENANCE_FIELDS,
+        "automatic-tree leaf selection provenance",
+    )
+    fixed = {
+        "schema_version": AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_SCHEMA_VERSION,
+        "task_id": normalized_task,
+        "kind": AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_KIND,
+        "format": "json",
+        "tree_asset_id": normalized_asset_id,
+        "tree_asset_hash": normalized_asset_hash,
+    }
+    for field, expected in fixed.items():
+        actual = unverified_provenance[field]
+        matches = (
+            hmac.compare_digest(str(actual), expected)
+            if field.endswith("hash")
+            else actual == expected
+        )
+        if not matches:
+            raise StrategyError(
+                f"automatic-tree leaf selection provenance {field} changed"
+            )
+    selection_id = _required_text(
+        unverified_provenance["selection_id"],
+        "selection provenance selection_id",
+    )
+    path = Path(_required_text(record["path"], "selection artifact path"))
+    expected_path = canonical_automatic_tree_leaf_selection_path(
+        tasks_dir,
+        task_id=normalized_task,
+        selection_id=selection_id,
+    )
+    if not path.is_absolute() or path != expected_path:
+        raise StrategyError(
+            "automatic-tree leaf selection artifact path is not canonical"
+        )
+    _require_regular_path(path, root=Path(tasks_dir).absolute())
+    before = path.lstat()
+    try:
+        canonical_bytes = path.read_bytes()
+    except OSError as exc:
+        raise StrategyError(
+            "automatic-tree leaf selection artifact could not be read"
+        ) from exc
+    _require_regular_path(path, root=Path(tasks_dir).absolute())
+    after = path.lstat()
+    if _stat_identity(before) != _stat_identity(after):
+        raise StrategyError("automatic-tree leaf selection artifact changed while read")
+    if not hmac.compare_digest(_sha256_bytes(canonical_bytes), registered_hash):
+        raise StrategyError(
+            "automatic-tree leaf selection artifact content hash drifted"
+        )
+    selection = _strict_leaf_selection_from_bytes(canonical_bytes)
+    canonical = canonical_automatic_tree_leaf_fragment_json(selection).encode("utf-8")
+    if not hmac.compare_digest(canonical_bytes, canonical):
+        raise StrategyError(
+            "automatic-tree leaf selection artifact is not canonical JSON"
+        )
+    provenance = verify_automatic_tree_leaf_selection_provenance(
+        unverified_provenance,
+        selection,
+    )
+    tree_asset = selection["tree_asset"]
+    if tree_asset["asset_id"] != normalized_asset_id or not hmac.compare_digest(
+        tree_asset["asset_hash"],
+        normalized_asset_hash,
+    ):
+        raise StrategyError("automatic-tree leaf selection asset binding changed")
+    return VerifiedAutomaticTreeLeafSelection(
+        artifact_id=normalized_artifact,
+        task_id=normalized_task,
+        kind=kind,
+        path=path,
+        content_hash=registered_hash,
+        origin_tool=origin,
+        provenance=provenance,
+        canonical_bytes=canonical_bytes,
+        selection=selection,
+    )
 
 
 def load_verified_automatic_tree_source_artifact_on_connection(
@@ -1056,11 +1283,14 @@ __all__ = [
     "SELECTION_PROVENANCE_FIELDS",
     "SOURCE_PROVENANCE_FIELDS",
     "TOOL_SCHEMA_VERSION",
+    "VerifiedAutomaticTreeLeafSelection",
     "VerifiedAutomaticTreeSource",
     "automatic_tree_leaf_selection_provenance",
     "automatic_tree_source_provenance_from_asset",
     "canonical_automatic_tree_leaf_selection_path",
     "canonical_automatic_tree_source_path",
+    "load_verified_automatic_tree_leaf_selection_artifact",
+    "load_verified_automatic_tree_leaf_selection_artifact_on_connection",
     "load_verified_automatic_tree_source_artifact",
     "load_verified_automatic_tree_source_artifact_on_connection",
     "run_materialize_automatic_tree_leaf_fragment",
