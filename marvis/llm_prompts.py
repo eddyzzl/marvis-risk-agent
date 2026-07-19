@@ -247,7 +247,7 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=19,
+    version=20,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
@@ -257,6 +257,7 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "只能是 profit_calc/roll_rate_matrix/limit_pricing_matrix/univariate_candidate_analysis/"
         "univariate_candidate_refinement/automatic_tree_candidate_build/"
         "automatic_tree_leaf_materialization/voting_candidate_build/cross_matrix_analysis/"
+        "cross_matrix_cell_selection/"
         "strategy_pool_add_candidate/strategy_pool_remove_entry/"
         "strategy_pool_set_action/strategy_pool_reorder/strategy_pool_compile。"
         "profit_calc 需要 ead_col、pd_col、"
@@ -325,12 +326,26 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "cell condition、指标、预算、artifact/asset/effect/rule id、动作或推荐。该 Workflow 只"
         "生成 development/backtested/unvalidated 矩阵证据；选格、入池、代码、写回、采纳或部署"
         "必须拆成后续请求。明确的二维 Cross Matrix 请求只能路由到本 Workflow 或 clarification。"
+        "cross_matrix_cell_selection 表示从一个完整 Cross Matrix 候选中创建精确 cell pointer。"
+        "workflow_inputs 只允许 cross_asset_id、cell_ids 和可选 selection_reason。cross_asset_id 必须"
+        "逐字抄录用户原话中唯一完整 candidate-asset- 后接 32 位小写十六进制；cell_ids 必须是"
+        "用户逐字点名的 1 到 400 个互不重复 cross-cell- 后接 32 位小写十六进制 ID。不得使用"
+        "‘刚才那些’‘这些格子’等代词，也不得按最好/最差、风险、坏账率、Lift、WOE、IV、排名、"
+        "Top N 或任何阈值替用户选格。cell_ids 是集合语义，由平台按源矩阵顺序规范化；多个 cell"
+        "确定性 OR，模型不得输出 condition、rule、effect、metrics 或 action。selection_reason 仅在"
+        "用户以‘选择理由/理由/原因/说明’显式标注时逐字抄录，未标注时省略；理由不能藏入排名、"
+        "阈值或后续操作。artifact id/hash、asset hash、candidate/evidence hash、fragment/rule/effect id"
+        "和其他平台绑定字段全部禁止输出或猜测。本 Workflow 只创建 pointer；同一句串联 Strategy Pool、"
+        "拒绝/审批/复核动作、采纳、部署、投产或写回时必须 clarification。明确要求 Cross Matrix 精确"
+        "选格的请求只能路由到本 Workflow 或 clarification。"
         "Strategy Pool 请求只抽取用户拥有的控制字段，禁止输出 artifact hash、asset hash、pool revision、"
         "pool snapshot hash、entry/rule 指标或推荐顺序；这些字段全部由平台从当前 task 绑定。"
         "strategy_pool_add_candidate 只允许 candidate_asset_id 与 selection_id 严格二选一。"
         "candidate_asset_id 必须是用户原话中唯一的完整 candidate-asset- 后接 32 位小写十六进制；"
-        "selection_id 必须是用户原话中唯一的完整 automatic-tree-leaf-selection- 后接 32 位"
-        "小写十六进制。草案来源 ID 必须与原话逐字一致，不能补全、替换或猜测。用户还必须明确"
+        "selection_id 必须是用户原话中唯一的完整 automatic-tree-leaf-selection- 或"
+        "cross-matrix-cell-selection- 后接 32 位小写十六进制。完整 Cross Matrix asset 本身不能"
+        "直接入池，必须先由用户精确选择 cell 并引用 selection_id。草案来源 ID 必须与原话逐字"
+        "一致，不能补全、替换或猜测。用户还必须明确"
         "正向要求加入 Strategy Pool；唯一 source ID 必须与该正向入池命令位于同一授权子句，"
         "不得从否定/撤销子句、reason、引用示例或‘刚才那个’等代词上下文借用。否定、"
         "后置撤销、未来或审批通过后的条件指令、问句、how-to、演示、测试、引用说明、"

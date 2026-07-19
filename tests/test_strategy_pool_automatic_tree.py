@@ -1057,4 +1057,5 @@ def test_add_wrapper_documents_all_supported_candidate_sources() -> None:
     doc = strategy_tools.tool_add_candidate_to_pool.__doc__ or ""
     assert "univariate asset" in doc
     assert "automatic-tree leaf" in doc
+    assert "Cross Matrix cell selection" in doc
     assert "Voting candidate" in doc

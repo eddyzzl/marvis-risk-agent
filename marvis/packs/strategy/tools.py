@@ -63,6 +63,9 @@ from marvis.packs.strategy.voting_candidate_tools import (
 from marvis.packs.strategy.cross_matrix_candidate_tools import (
     run_build_cross_matrix_candidate,
 )
+from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
+    run_materialize_cross_matrix_cell_selection,
+)
 from marvis.packs.strategy.pool_tools import (
     run_add_candidate_to_pool,
     run_compile_strategy_pool,
@@ -749,8 +752,18 @@ def tool_build_cross_matrix_candidate(inputs: dict, ctx) -> dict:
     return run_build_cross_matrix_candidate(inputs, ctx, _runtime(ctx))
 
 
+def tool_materialize_cross_matrix_cell_selection(inputs: dict, ctx) -> dict:
+    """Persist one explicit pointer to a verified Cross Matrix cell group."""
+
+    return run_materialize_cross_matrix_cell_selection(inputs, ctx, _runtime(ctx))
+
+
 def tool_add_candidate_to_pool(inputs: dict, ctx) -> dict:
-    """Add a verified univariate asset, automatic-tree leaf, or Voting candidate."""
+    """Add one verified candidate source.
+
+    Supports a univariate asset, automatic-tree leaf, Cross Matrix cell selection,
+    or Voting candidate.
+    """
 
     return run_add_candidate_to_pool(inputs, ctx, _runtime(ctx))
 

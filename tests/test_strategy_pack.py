@@ -237,6 +237,11 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     cross_matrix_tool = next(
         tool for tool in manifest.tools if tool.name == "build_cross_matrix_candidate"
     )
+    cross_matrix_cell_selection_tool = next(
+        tool
+        for tool in manifest.tools
+        if tool.name == "materialize_cross_matrix_cell_selection"
+    )
     refinement_tool = next(
         tool for tool in manifest.tools if tool.name == "refine_univariate_candidate"
     )
@@ -275,6 +280,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "materialize_automatic_tree_leaf_fragment",
         "build_voting_candidate",
         "build_cross_matrix_candidate",
+        "materialize_cross_matrix_cell_selection",
         "refine_univariate_candidate",
         "add_candidate_to_pool",
         "remove_pool_entry",
@@ -574,6 +580,55 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "maxItems": 1,
         "items": {"$ref": "#/$defs/artifact"},
     }
+    assert cross_matrix_cell_selection_tool.determinism == "deterministic"
+    assert cross_matrix_cell_selection_tool.policy.human_decision_gate == "none"
+    assert (
+        cross_matrix_cell_selection_tool.policy.effect_authorization == "none"
+    )
+    assert set(cross_matrix_cell_selection_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+    }
+    assert cross_matrix_cell_selection_tool.input_schema["additionalProperties"] is False
+    assert set(cross_matrix_cell_selection_tool.input_schema["required"]) == {
+        "source_artifact_id",
+        "expected_artifact_content_hash",
+        "expected_asset_id",
+        "expected_asset_hash",
+        "expected_candidate_id",
+        "expected_evidence_hash",
+        "cell_ids",
+    }
+    assert cross_matrix_cell_selection_tool.input_schema["properties"]["cell_ids"] == {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 400,
+        "uniqueItems": True,
+        "items": {
+            "type": "string",
+            "pattern": "^cross-cell-[0-9a-f]{32}$",
+        },
+    }
+    assert cross_matrix_cell_selection_tool.output_schema["additionalProperties"] is False
+    assert cross_matrix_cell_selection_tool.output_schema["properties"][
+        "schema_version"
+    ] == {"const": "strategy.materialize-cross-matrix-cell-selection-tool.v1"}
+    assert cross_matrix_cell_selection_tool.output_schema["properties"][
+        "fragment_id"
+    ] == {
+        "type": "string",
+        "pattern": "^cross-matrix-cell-group-[0-9a-f]{32}$",
+    }
+    for boundary in (
+        "not_admitted",
+        "not_applied",
+        "not_adopted",
+        "not_deployed",
+    ):
+        assert cross_matrix_cell_selection_tool.output_schema["properties"][
+            boundary
+        ] == {"const": True}
     assert refinement_tool.policy.human_decision_gate == "none"
     assert refinement_tool.policy.effect_authorization == "none"
     assert set(refinement_tool.side_effects) == {
@@ -581,10 +636,11 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "read:dataset",
         "write:artifact",
     }
-    assert manifest.version == "0.8.0"
+    assert manifest.version == "0.9.0"
     assert "refined univariate asset" in add_pool_tool.summary
     assert "automatic-tree leaf selection" in add_pool_tool.summary
     assert "Voting n-of-k candidate" in add_pool_tool.summary
+    assert "Cross Matrix cell selection" in add_pool_tool.summary
     for pool_tool in pool_mutation_tools:
         assert pool_tool.policy.human_decision_gate == "none"
         assert pool_tool.policy.effect_authorization == "none"

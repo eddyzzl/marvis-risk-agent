@@ -1851,6 +1851,80 @@ def _render_build_cross_matrix_candidate(o: dict):
     return text, tables
 
 
+def _render_materialize_cross_matrix_cell_selection(o: dict):
+    """Render pointer-only Cross cells in the tool's canonical source order."""
+
+    artifacts = [
+        item for item in (o.get("artifacts") or []) if isinstance(item, dict)
+    ]
+    artifact = next(
+        (
+            item
+            for item in artifacts
+            if item.get("format") == "json" and item.get("download_url")
+        ),
+        None,
+    )
+    cell_ids = [str(value) for value in (o.get("cell_ids") or []) if value]
+    lifecycle = " / ".join(
+        str(o.get(field) or "unknown")
+        for field in ("candidate_stage", "observation_stage", "validation_status")
+    )
+    text = (
+        "**Cross Matrix 精确单元格选择已物化。**"
+        f"已按源矩阵顺序固化 **{len(cell_ids)}** 个 cell pointer；多个 cell "
+        "采用确定性 OR 语义。该产物仅保存对完整矩阵的不可变引用，不复制观测"
+        "指标，不执行排名或推荐，也不生成业务动作；未入池、未应用、未采纳、未部署。"
+        f"当前状态 `{lifecycle}`。"
+    )
+    if artifact is not None:
+        label = str(
+            artifact.get("filename")
+            or artifact.get("kind")
+            or "cross-matrix-cell-selection.json"
+        )
+        text += f"\n\n**Cross Matrix 单元格选择 JSON**：[{label}]({artifact['download_url']})"
+
+    reason = o.get("selection_reason")
+    details = [
+        ["Selection ID", str(o.get("selection_id") or "")],
+        ["Selection Hash", str(o.get("selection_hash") or "")],
+        ["Group ID", str(o.get("group_id") or "")],
+        ["Source Asset ID", str(o.get("source_asset_id") or "")],
+        ["Source Asset Hash", str(o.get("source_asset_hash") or "")],
+        ["Source Candidate ID", str(o.get("source_candidate_id") or "")],
+        ["Source Evidence Hash", str(o.get("source_evidence_hash") or "")],
+        ["Fragment ID", str(o.get("fragment_id") or "")],
+        ["Fragment Type", str(o.get("fragment_type") or "")],
+        ["Rule ID", str(o.get("rule_id") or "")],
+        ["Effect ID", str(o.get("effect_id") or "")],
+        ["Selection Reason", str(reason) if reason is not None else "未提供"],
+        ["Not Admitted", str(o.get("not_admitted"))],
+        ["Not Applied", str(o.get("not_applied"))],
+        ["Not Adopted", str(o.get("not_adopted"))],
+        ["Not Deployed", str(o.get("not_deployed"))],
+    ]
+    tables = [
+        {
+            "title": "Cross Matrix 精确单元格选择引用",
+            "columns": ["字段", "值"],
+            "rows": details,
+        }
+    ]
+    if cell_ids:
+        tables.append(
+            {
+                "title": "已选择 Cell IDs（源矩阵顺序）",
+                "columns": ["顺序", "Cell ID"],
+                "rows": [
+                    [str(index), cell_id]
+                    for index, cell_id in enumerate(cell_ids, start=1)
+                ],
+            }
+        )
+    return text, tables
+
+
 def _render_strategy_pool_mutation(o: dict):
     entries = [entry for entry in (o.get("entries") or []) if isinstance(entry, dict)]
     artifacts = [item for item in (o.get("artifacts") or []) if isinstance(item, dict)]
@@ -4566,6 +4640,9 @@ _RENDERERS = {
     ),
     "build_voting_candidate": _render_build_voting_candidate,
     "build_cross_matrix_candidate": _render_build_cross_matrix_candidate,
+    "materialize_cross_matrix_cell_selection": (
+        _render_materialize_cross_matrix_cell_selection
+    ),
     "refine_univariate_candidate": _render_refine_univariate_candidate,
     "add_candidate_to_pool": _render_strategy_pool_mutation,
     "remove_pool_entry": _render_strategy_pool_mutation,

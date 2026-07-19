@@ -63,6 +63,28 @@ from marvis.packs.strategy.automatic_tree_leaf_tools import (
     load_verified_automatic_tree_source_artifact,
     load_verified_automatic_tree_source_artifact_on_connection,
 )
+from marvis.packs.strategy.cross_matrix_candidate import (
+    rebuild_cross_matrix_candidate_asset,
+)
+from marvis.packs.strategy.cross_matrix_candidate_tools import (
+    ASSET_ARTIFACT_KIND as CROSS_MATRIX_ASSET_ARTIFACT_KIND,
+    ASSET_ARTIFACT_SCHEMA_VERSION as CROSS_MATRIX_ASSET_ARTIFACT_SCHEMA_VERSION,
+    ORIGIN_TOOL as CROSS_MATRIX_ASSET_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.cross_matrix_cell_selection import (
+    CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND,
+    CROSS_MATRIX_CELL_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    CROSS_MATRIX_CELL_SELECTION_ORIGIN_TOOL,
+    cross_matrix_cell_selection_to_verified_candidate_fragment,
+)
+from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
+    VerifiedCrossMatrixCellSelection,
+    VerifiedCrossMatrixSource,
+    load_verified_cross_matrix_cell_selection_artifact,
+    load_verified_cross_matrix_cell_selection_artifact_on_connection,
+    load_verified_cross_matrix_source_artifact,
+    load_verified_cross_matrix_source_artifact_on_connection,
+)
 from marvis.packs.strategy.voting_candidate import (
     VOTING_CANDIDATE_ASSET_TYPE,
     verify_voting_candidate_asset_against_pool,
@@ -251,6 +273,17 @@ class _AutomaticTreeCandidateLineage:
 
 
 @dataclass(frozen=True)
+class _CrossMatrixCandidateLineage:
+    selection: VerifiedCrossMatrixCellSelection
+    matrix: VerifiedCrossMatrixSource
+    parent_record: Any
+    evidence: dict[str, Any]
+    dataset: Any
+    verified_fragment: dict[str, Any]
+    source_binding: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class _VotingCandidateLineage:
     candidate: VerifiedVotingCandidateArtifact
     parent_pool: dict[str, Any]
@@ -263,6 +296,7 @@ class _VotingCandidateLineage:
 _CandidateLineage = (
     _UnivariateCandidateLineage
     | _AutomaticTreeCandidateLineage
+    | _CrossMatrixCandidateLineage
     | _VotingCandidateLineage
 )
 
@@ -270,6 +304,7 @@ _CandidateLineage = (
 @dataclass
 class _LineageCache:
     trees: dict[tuple[str, str], VerifiedAutomaticTreeSource]
+    matrices: dict[tuple[str, str], VerifiedCrossMatrixSource]
     datasets: dict[tuple[str, str], _AutomaticTreeDatasetBinding]
     univariate_datasets: dict[tuple[str, str], Any]
     datasets_verified_on_connection: set[tuple[str, str]]
@@ -281,6 +316,7 @@ class _LineageCache:
     def empty(cls) -> _LineageCache:
         return cls(
             trees={},
+            matrices={},
             datasets={},
             univariate_datasets={},
             datasets_verified_on_connection=set(),
@@ -337,7 +373,7 @@ def _require_snapshot_voting_marginals(
 
 
 def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
-    """Add one allowlisted asset with governed Voting placement semantics."""
+    """Add a verified univariate, tree-leaf, Cross group, or Voting candidate."""
 
     try:
         normalized = _validate_add_inputs(inputs)
@@ -430,6 +466,7 @@ def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
             in surviving_sources
         ]
         mutation_lineages = [*persisted_lineages, candidate]
+        _require_cross_matrix_groups_disjoint(mutation_lineages)
         _require_snapshot_voting_marginals(
             runtime,
             snapshot=snapshot,
@@ -808,6 +845,7 @@ def _load_pool_lineages(
                 "Voting candidate must originate from an earlier Pool revision"
             )
         lineages.append(lineage)
+    _require_cross_matrix_groups_disjoint(lineages)
     return lineages
 
 
@@ -845,6 +883,16 @@ def _load_candidate_lineage(
         VOTING_CANDIDATE_ORIGIN_TOOL,
         VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
     )
+    cross_matrix_selection_triple = (
+        CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND,
+        CROSS_MATRIX_CELL_SELECTION_ORIGIN_TOOL,
+        CROSS_MATRIX_CELL_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    )
+    cross_matrix_asset_triple = (
+        CROSS_MATRIX_ASSET_ARTIFACT_KIND,
+        CROSS_MATRIX_ASSET_ORIGIN_TOOL,
+        CROSS_MATRIX_ASSET_ARTIFACT_SCHEMA_VERSION,
+    )
     if triple == univariate_triple:
         return _load_univariate_candidate_lineage(
             runtime,
@@ -864,6 +912,21 @@ def _load_candidate_lineage(
             expected_asset_id=expected_asset_id,
             expected_asset_hash=expected_asset_hash,
             cache=cache if cache is not None else _LineageCache.empty(),
+        )
+    if triple == cross_matrix_selection_triple:
+        return _load_cross_matrix_candidate_lineage(
+            runtime,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            expected_content_hash=expected_content_hash,
+            expected_asset_id=expected_asset_id,
+            expected_asset_hash=expected_asset_hash,
+            cache=cache if cache is not None else _LineageCache.empty(),
+        )
+    if triple == cross_matrix_asset_triple:
+        raise StrategyError(
+            "complete Cross Matrix assets cannot be admitted directly; "
+            "materialize a cell selection first"
         )
     if triple == voting_triple:
         return _load_voting_candidate_lineage(
@@ -1186,6 +1249,143 @@ def _replay_automatic_tree_lineage(
     return verified_fragment, source_binding
 
 
+def _load_cross_matrix_candidate_lineage(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+    expected_asset_id: str,
+    expected_asset_hash: str,
+    cache: _LineageCache,
+) -> _CrossMatrixCandidateLineage:
+    selection = load_verified_cross_matrix_cell_selection_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_content_hash=expected_content_hash,
+        expected_asset_id=expected_asset_id,
+        expected_asset_hash=expected_asset_hash,
+    )
+    source_pointer = selection.selection["source_artifact"]
+    source_asset = selection.selection["source_asset"]
+    source_candidate = selection.selection["source_candidate"]
+    matrix_key = (
+        source_pointer["artifact_id"],
+        source_pointer["content_hash"],
+    )
+    matrix = cache.matrices.get(matrix_key)
+    if matrix is None:
+        matrix = load_verified_cross_matrix_source_artifact(
+            runtime,
+            task_id=task_id,
+            artifact_id=source_pointer["artifact_id"],
+            expected_content_hash=source_pointer["content_hash"],
+            expected_asset_id=source_asset["asset_id"],
+            expected_asset_hash=source_asset["asset_hash"],
+            expected_candidate_id=source_candidate["candidate_id"],
+            expected_evidence_hash=source_candidate["evidence_hash"],
+        )
+        cache.matrices[matrix_key] = matrix
+    elif (
+        matrix.asset["asset_id"] != source_asset["asset_id"]
+        or not hmac.compare_digest(
+            matrix.asset["asset_hash"], source_asset["asset_hash"]
+        )
+        or matrix.asset["candidate_evidence"]["candidate_id"]
+        != source_candidate["candidate_id"]
+        or not hmac.compare_digest(
+            matrix.asset["candidate_evidence"]["evidence_hash"],
+            source_candidate["evidence_hash"],
+        )
+    ):
+        raise StrategyError("cached Cross Matrix source binding changed")
+
+    parent = matrix.asset["parent"]
+    provenance = matrix.provenance
+    parent_record = _load_source_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=provenance["source_artifact_id"],
+        expected_content_hash=provenance["source_artifact_content_hash"],
+        expected_candidate_id=parent["candidate_id"],
+        expected_evidence_hash=parent["evidence_hash"],
+    )
+    evidence = _read_canonical_parent_evidence(parent_record.path)
+    _require_report_binding(
+        evidence,
+        source=parent_record,
+        task_id=task_id,
+        expected_candidate_id=parent["candidate_id"],
+        expected_evidence_hash=parent["evidence_hash"],
+    )
+    if rebuild_cross_matrix_candidate_asset(matrix.asset, evidence) != matrix.asset:
+        raise StrategyError("Cross Matrix source does not replay its parent evidence")
+    identity = evidence["identity"]
+    dataset_key = (identity["dataset_id"], identity["dataset_content_hash"])
+    dataset = cache.univariate_datasets.get(dataset_key)
+    if dataset is None:
+        dataset = _load_dataset_binding(
+            runtime,
+            evidence=evidence,
+            source=parent_record,
+        )
+        cache.univariate_datasets[dataset_key] = dataset
+    else:
+        parameters = evidence["generation"]["parameters"]
+        expected_metadata_hash = parameters.get("registry_metadata_hash")
+        if (
+            dataset.task_id != identity["task_id"]
+            or not hmac.compare_digest(
+                dataset.registry_metadata_hash,
+                str(expected_metadata_hash or ""),
+            )
+            or not hmac.compare_digest(
+                dataset.registry_metadata_hash,
+                str(parent_record.provenance.get("registry_metadata_hash") or ""),
+            )
+        ):
+            raise StrategyError("Cross Matrix source dataset identity changed")
+    verified_fragment = cross_matrix_cell_selection_to_verified_candidate_fragment(
+        selection.selection,
+        matrix.asset,
+        selection_artifact_binding=selection.replay_binding(),
+        source_artifact_binding=matrix.source_binding(),
+    )
+    source_binding, _rule_id, _execution = verified_fragment_pool_parts(
+        verified_fragment
+    )
+    return _CrossMatrixCandidateLineage(
+        selection=selection,
+        matrix=matrix,
+        parent_record=parent_record,
+        evidence=evidence,
+        dataset=dataset,
+        verified_fragment=verified_fragment,
+        source_binding=source_binding,
+    )
+
+
+def _require_cross_matrix_groups_disjoint(
+    lineages: Sequence[_CandidateLineage],
+) -> None:
+    seen_by_matrix: dict[tuple[str, str], set[str]] = {}
+    overlaps: set[str] = set()
+    for lineage in lineages:
+        if not isinstance(lineage, _CrossMatrixCandidateLineage):
+            continue
+        key = (lineage.matrix.asset["asset_id"], lineage.matrix.asset["asset_hash"])
+        seen = seen_by_matrix.setdefault(key, set())
+        selected = set(lineage.selection.selection["cell_ids"])
+        overlaps.update(seen & selected)
+        seen.update(selected)
+    if overlaps:
+        raise StrategyError(
+            "Cross Matrix cell groups from the same matrix must be disjoint; "
+            "overlapping cell_ids: " + ", ".join(sorted(overlaps))
+        )
+
+
 def _load_voting_candidate_lineage(
     runtime,
     *,
@@ -1492,6 +1692,14 @@ def _require_lineage_on_connection(
             cache=cache if cache is not None else _LineageCache.empty(),
         )
         return
+    if isinstance(lineage, _CrossMatrixCandidateLineage):
+        _require_cross_matrix_lineage_on_connection(
+            conn,
+            lineage,
+            tasks_root=tasks_root,
+            cache=cache if cache is not None else _LineageCache.empty(),
+        )
+        return
     if isinstance(lineage, _VotingCandidateLineage):
         _require_voting_lineage_on_connection(
             conn,
@@ -1602,6 +1810,113 @@ def _require_automatic_tree_lineage_on_connection(
     ):
         raise StrategyError(
             "automatic-tree candidate lineage changed before pool persistence"
+        )
+
+
+def _require_cross_matrix_lineage_on_connection(
+    conn,
+    lineage: _CrossMatrixCandidateLineage,
+    *,
+    tasks_root: Path,
+    cache: _LineageCache,
+) -> None:
+    """Replay one persisted cell group from live rows while holding the Pool lock."""
+
+    selection = load_verified_cross_matrix_cell_selection_artifact_on_connection(
+        conn,
+        tasks_dir=tasks_root,
+        task_id=lineage.selection.task_id,
+        artifact_id=lineage.selection.artifact_id,
+        expected_content_hash=lineage.selection.content_hash,
+        expected_asset_id=lineage.matrix.asset["asset_id"],
+        expected_asset_hash=lineage.matrix.asset["asset_hash"],
+    )
+    source_pointer = selection.selection["source_artifact"]
+    source_asset = selection.selection["source_asset"]
+    source_candidate = selection.selection["source_candidate"]
+    matrix_key = (
+        source_pointer["artifact_id"],
+        source_pointer["content_hash"],
+    )
+    matrix = cache.matrices.get(matrix_key)
+    if matrix is None:
+        matrix = load_verified_cross_matrix_source_artifact_on_connection(
+            conn,
+            tasks_dir=tasks_root,
+            task_id=selection.task_id,
+            artifact_id=source_pointer["artifact_id"],
+            expected_content_hash=source_pointer["content_hash"],
+            expected_asset_id=source_asset["asset_id"],
+            expected_asset_hash=source_asset["asset_hash"],
+            expected_candidate_id=source_candidate["candidate_id"],
+            expected_evidence_hash=source_candidate["evidence_hash"],
+        )
+        cache.matrices[matrix_key] = matrix
+    elif (
+        matrix.asset["asset_id"] != source_asset["asset_id"]
+        or not hmac.compare_digest(
+            matrix.asset["asset_hash"], source_asset["asset_hash"]
+        )
+        or matrix.asset["candidate_evidence"]["candidate_id"]
+        != source_candidate["candidate_id"]
+        or not hmac.compare_digest(
+            matrix.asset["candidate_evidence"]["evidence_hash"],
+            source_candidate["evidence_hash"],
+        )
+    ):
+        raise StrategyError("cached Cross Matrix source binding changed")
+
+    _require_source_on_connection(conn, lineage.parent_record)
+    _require_regular_artifact_path(lineage.parent_record.path, root=tasks_root)
+    _require_file_content_hash(
+        lineage.parent_record.path,
+        lineage.parent_record.content_hash,
+        "Cross Matrix parent candidate report content hash drifted",
+    )
+    evidence = _read_canonical_parent_evidence(lineage.parent_record.path)
+    parent = matrix.asset["parent"]
+    _require_report_binding(
+        evidence,
+        source=lineage.parent_record,
+        task_id=selection.task_id,
+        expected_candidate_id=parent["candidate_id"],
+        expected_evidence_hash=parent["evidence_hash"],
+    )
+    if rebuild_cross_matrix_candidate_asset(matrix.asset, evidence) != matrix.asset:
+        raise StrategyError("Cross Matrix source does not replay its parent evidence")
+
+    dataset_key = (lineage.dataset.dataset_id, lineage.dataset.content_hash)
+    dataset = cache.univariate_datasets.get(dataset_key)
+    if dataset is None:
+        _require_dataset_on_connection(conn, lineage.dataset)
+        _require_file_content_hash(
+            lineage.dataset.path,
+            lineage.dataset.content_hash,
+            "Cross Matrix source dataset content hash drifted",
+        )
+        cache.datasets_verified_on_connection.add(dataset_key)
+        dataset = lineage.dataset
+        cache.univariate_datasets[dataset_key] = dataset
+
+    verified_fragment = cross_matrix_cell_selection_to_verified_candidate_fragment(
+        selection.selection,
+        matrix.asset,
+        selection_artifact_binding=selection.replay_binding(),
+        source_artifact_binding=matrix.source_binding(),
+    )
+    source_binding, _rule_id, _execution = verified_fragment_pool_parts(
+        verified_fragment
+    )
+    if (
+        selection != lineage.selection
+        or matrix != lineage.matrix
+        or evidence != lineage.evidence
+        or dataset != lineage.dataset
+        or verified_fragment != lineage.verified_fragment
+        or source_binding != lineage.source_binding
+    ):
+        raise StrategyError(
+            "Cross Matrix candidate lineage changed before pool persistence"
         )
 
 

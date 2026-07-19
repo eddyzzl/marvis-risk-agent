@@ -129,6 +129,20 @@ from marvis.packs.strategy.voting_candidate_fragment import (
 from marvis.packs.strategy.voting_candidate_tools import (
     load_verified_voting_candidate_artifact_on_connection,
 )
+from marvis.packs.strategy.cross_matrix_candidate_tools import (
+    ASSET_ARTIFACT_KIND as CROSS_MATRIX_SOURCE_ARTIFACT_KIND,
+    ASSET_ARTIFACT_SCHEMA_VERSION as CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION,
+    ORIGIN_TOOL as CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.cross_matrix_cell_selection import (
+    CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND,
+    CROSS_MATRIX_CELL_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    CROSS_MATRIX_CELL_SELECTION_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
+    load_verified_cross_matrix_cell_selection_artifact_on_connection,
+    load_verified_cross_matrix_source_artifact_on_connection,
+)
 from marvis.repositories.plans import PlanRepository
 from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestConflictError,
@@ -1815,6 +1829,23 @@ def _run_validated_strategy_request(
 
     if (
         isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "cross_matrix_cell_selection"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_cross_matrix_cell_selection",
+            slots=_cross_matrix_cell_selection_slots(
+                runtime,
+                task_id=task.id,
+                draft=draft,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "voting_candidate_build"
     ):
         return _start_confirmed_strategy_plan(
@@ -2566,6 +2597,16 @@ def _standard_workflow_request_preflight(
         except StrategySetupError as exc:
             return ("automatic_tree_leaf_source_required", str(exc))
         return None
+    if draft.workflow == "cross_matrix_cell_selection":
+        try:
+            _cross_matrix_cell_selection_slots(
+                runtime,
+                task_id=task.id,
+                draft=draft,
+            )
+        except StrategySetupError as exc:
+            return ("cross_matrix_cell_source_required", str(exc))
+        return None
     if draft.workflow == "voting_candidate_build":
         try:
             _strategy_voting_candidate_plan_slots(runtime, task, draft)
@@ -2777,6 +2818,145 @@ def _automatic_tree_leaf_materialization_slots(
     return slots
 
 
+def _cross_matrix_cell_selection_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Bind exact user cell ids to one verified task-owned full matrix."""
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    asset_id = inputs.get("cross_asset_id")
+    cell_ids = inputs.get("cell_ids")
+    if (
+        not isinstance(asset_id, str)
+        or not isinstance(cell_ids, Sequence)
+        or isinstance(cell_ids, str | bytes | bytearray)
+        or any(not isinstance(cell_id, str) for cell_id in cell_ids)
+    ):
+        raise StrategySetupError(
+            "Cross Matrix 单元格选择必须提供完整 cross asset ID 和 cell ID 列表。"
+        )
+
+    repository = TaskArtifactRepository(runtime.settings.db_path)
+    try:
+        artifacts = repository.list_for_task(task_id)
+    except Exception as exc:
+        raise StrategySetupError(
+            "当前任务的 Cross Matrix artifact registry 无法读取，不能安全绑定来源。"
+        ) from exc
+    matches = []
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            raise StrategySetupError("当前任务的 Cross Matrix artifact 记录结构无效。")
+        provenance = artifact.get("provenance")
+        if (
+            artifact.get("kind") == CROSS_MATRIX_SOURCE_ARTIFACT_KIND
+            and artifact.get("origin_tool")
+            == CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL
+            and isinstance(provenance, Mapping)
+            and provenance.get("schema_version")
+            == CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION
+            and provenance.get("asset_id") == asset_id
+        ):
+            matches.append(artifact)
+    if not matches:
+        raise StrategySetupError(
+            f"当前任务没有完整 Cross Matrix 资产 {asset_id}；请使用构建结果中"
+            "展示的完整 candidate-asset ID。"
+        )
+    if len(matches) != 1:
+        raise StrategySetupError(
+            f"Cross Matrix 资产 {asset_id} 对应多个 full-matrix JSON artifact，"
+            "当前不能安全选择来源。"
+        )
+
+    artifact = matches[0]
+    provenance = artifact.get("provenance")
+    assert isinstance(provenance, Mapping)
+    artifact_id = artifact.get("id")
+    content_hash = artifact.get("content_hash")
+    asset_hash = provenance.get("asset_hash")
+    candidate_id = provenance.get("candidate_id")
+    evidence_hash = provenance.get("evidence_hash")
+    if not all(
+        isinstance(value, str) and value
+        for value in (
+            artifact_id,
+            content_hash,
+            asset_hash,
+            candidate_id,
+            evidence_hash,
+        )
+    ):
+        raise StrategySetupError(
+            f"Cross Matrix 资产 {asset_id} 的 artifact 完整性绑定不完整，请重新构建。"
+        )
+
+    try:
+        with repository.transaction() as conn:
+            verified = load_verified_cross_matrix_source_artifact_on_connection(
+                conn,
+                tasks_dir=runtime.settings.tasks_dir,
+                task_id=task_id,
+                artifact_id=artifact_id,
+                expected_content_hash=content_hash,
+                expected_asset_id=asset_id,
+                expected_asset_hash=asset_hash,
+                expected_candidate_id=candidate_id,
+                expected_evidence_hash=evidence_hash,
+            )
+    except Exception as exc:
+        raise StrategySetupError(
+            f"Cross Matrix 资产 {asset_id} 未通过 artifact 完整性校验，请重新构建。"
+        ) from exc
+
+    matrix = verified.asset.get("matrix")
+    cells = matrix.get("cells") if isinstance(matrix, Mapping) else None
+    if not isinstance(cells, Sequence) or isinstance(cells, str | bytes | bytearray):
+        raise StrategySetupError(
+            f"Cross Matrix 资产 {asset_id} 缺少完整 cell 清单，请重新构建。"
+        )
+    source_cell_ids = [
+        cell.get("cell_id") for cell in cells if isinstance(cell, Mapping)
+    ]
+    if (
+        len(source_cell_ids) != len(cells)
+        or len(set(source_cell_ids)) != len(source_cell_ids)
+        or any(source_cell_ids.count(cell_id) != 1 for cell_id in cell_ids)
+    ):
+        raise StrategySetupError(
+            f"Cross Matrix 资产 {asset_id} 中无法唯一匹配全部 cell ID；"
+            "请从完整单元格清单中复制准确 ID。"
+        )
+    requested = set(cell_ids)
+    ordered_cell_ids = [cell_id for cell_id in source_cell_ids if cell_id in requested]
+    if len(ordered_cell_ids) != len(cell_ids):
+        raise StrategySetupError(
+            f"Cross Matrix 资产 {asset_id} 中无法唯一匹配全部 cell ID；"
+            "请从完整单元格清单中复制准确 ID。"
+        )
+
+    evidence = verified.asset.get("candidate_evidence")
+    if not isinstance(evidence, Mapping):
+        raise StrategySetupError(
+            f"Cross Matrix 资产 {asset_id} 缺少候选证据绑定，请重新构建。"
+        )
+    slots: dict[str, object] = {
+        "source_artifact_id": verified.artifact_id,
+        "expected_artifact_content_hash": verified.content_hash,
+        "expected_asset_id": verified.asset["asset_id"],
+        "expected_asset_hash": verified.asset["asset_hash"],
+        "expected_candidate_id": evidence["candidate_id"],
+        "expected_evidence_hash": evidence["evidence_hash"],
+        "cell_ids": ordered_cell_ids,
+    }
+    if "selection_reason" in inputs:
+        slots["selection_reason"] = inputs["selection_reason"]
+    return slots
+
+
 def _strategy_voting_candidate_plan_slots(
     runtime: DriverTurnRuntime,
     task: TaskRecord,
@@ -2893,17 +3073,15 @@ def _strategy_pool_plan_slots(
         if (selection_id is None) == (candidate_asset_id is None):
             raise StrategySetupError(
                 "加入 Strategy Pool 必须且只能指定一个 candidate asset ID "
-                "或 automatic-tree leaf selection ID。"
+                "或受支持的精确 selection ID。"
             )
         fragment_id: str | None = None
         is_voting_candidate = False
         if selection_id is not None:
-            selection_slots, fragment_id = (
-                _automatic_tree_leaf_selection_artifact_slots(
-                    runtime,
-                    task_id=task.id,
-                    selection_id=str(selection_id),
-                )
+            selection_slots, fragment_id = _candidate_selection_artifact_slots(
+                runtime,
+                task_id=task.id,
+                selection_id=str(selection_id),
             )
             slots.update(selection_slots)
         else:
@@ -3014,6 +3192,21 @@ def _candidate_asset_artifact_slots(
             raise StrategySetupError("当前任务的候选资产 artifact 记录结构无效。")
         provenance = artifact.get("provenance")
         artifact_triple = (artifact.get("kind"), artifact.get("origin_tool"))
+        if (
+            artifact_triple
+            == (
+                CROSS_MATRIX_SOURCE_ARTIFACT_KIND,
+                CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL,
+            )
+            and isinstance(provenance, Mapping)
+            and provenance.get("schema_version")
+            == CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION
+            and provenance.get("asset_id") == asset_id
+        ):
+            raise StrategySetupError(
+                "完整 Cross Matrix asset 不能直接加入 Strategy Pool；请先在"
+                "单独一轮精确选择 cell，再使用 cross-matrix-cell-selection ID 入池。"
+            )
         supported_triples = {
             (
                 "strategy_candidate_asset_json",
@@ -3222,6 +3415,140 @@ def _automatic_tree_leaf_selection_artifact_slots(
             "expected_asset_hash": asset_hash,
         },
         fragment_id,
+    )
+
+
+def _candidate_selection_artifact_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    selection_id: str,
+) -> tuple[dict[str, str], str]:
+    """Dispatch only between explicitly versioned governed selection types."""
+
+    if re.fullmatch(
+        r"automatic-tree-leaf-selection-[0-9a-f]{32}", selection_id
+    ) is not None:
+        return _automatic_tree_leaf_selection_artifact_slots(
+            runtime,
+            task_id=task_id,
+            selection_id=selection_id,
+        )
+    if re.fullmatch(
+        r"cross-matrix-cell-selection-[0-9a-f]{32}", selection_id
+    ) is not None:
+        return _cross_matrix_cell_selection_artifact_slots(
+            runtime,
+            task_id=task_id,
+            selection_id=selection_id,
+        )
+    raise StrategySetupError(
+        "selection ID 格式无效；只支持完整 automatic-tree leaf selection 或 "
+        "Cross Matrix cell selection ID。"
+    )
+
+
+def _cross_matrix_cell_selection_artifact_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    selection_id: str,
+) -> tuple[dict[str, str], str]:
+    """Bind one exact Cross cell selection to verified Pool Tool inputs."""
+
+    repository = TaskArtifactRepository(runtime.settings.db_path)
+    try:
+        artifacts = repository.list_for_task(task_id)
+    except Exception as exc:
+        raise StrategySetupError(
+            "当前任务的 Cross Matrix cell selection registry 无法读取。"
+        ) from exc
+    matches = []
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            raise StrategySetupError(
+                "当前任务的 Cross Matrix cell selection artifact 记录结构无效。"
+            )
+        provenance = artifact.get("provenance")
+        if (
+            artifact.get("kind") == CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND
+            and artifact.get("origin_tool")
+            == CROSS_MATRIX_CELL_SELECTION_ORIGIN_TOOL
+            and isinstance(provenance, Mapping)
+            and provenance.get("schema_version")
+            == CROSS_MATRIX_CELL_SELECTION_ARTIFACT_SCHEMA_VERSION
+            and provenance.get("selection_id") == selection_id
+        ):
+            matches.append(artifact)
+    if not matches:
+        raise StrategySetupError(
+            f"当前任务没有 Cross Matrix cell selection {selection_id}。"
+        )
+    if len(matches) != 1:
+        raise StrategySetupError(
+            f"Cross Matrix cell selection {selection_id} 对应多个 artifact，"
+            "当前不能安全绑定来源。"
+        )
+
+    artifact = matches[0]
+    provenance = artifact.get("provenance")
+    assert isinstance(provenance, Mapping)
+    artifact_id = artifact.get("id")
+    content_hash = artifact.get("content_hash")
+    asset_id = provenance.get("source_asset_id")
+    asset_hash = provenance.get("source_asset_hash")
+    if not all(
+        isinstance(value, str) and value
+        for value in (artifact_id, content_hash, asset_id, asset_hash)
+    ):
+        raise StrategySetupError(
+            f"Cross Matrix cell selection {selection_id} 的完整性绑定不完整。"
+        )
+    try:
+        with repository.transaction() as conn:
+            verified = (
+                load_verified_cross_matrix_cell_selection_artifact_on_connection(
+                    conn,
+                    tasks_dir=runtime.settings.tasks_dir,
+                    task_id=task_id,
+                    artifact_id=artifact_id,
+                    expected_content_hash=content_hash,
+                    expected_asset_id=asset_id,
+                    expected_asset_hash=asset_hash,
+                )
+            )
+    except Exception as exc:
+        raise StrategySetupError(
+            f"Cross Matrix cell selection {selection_id} 未通过 artifact 完整性"
+            "校验，不能加入 Strategy Pool。"
+        ) from exc
+
+    selection = verified.selection
+    if selection.get("selection_id") != selection_id:
+        raise StrategySetupError(
+            "Cross Matrix cell selection artifact 的 selection ID 与请求不一致。"
+        )
+    source_asset = selection.get("source_asset")
+    group_id = selection.get("group_id")
+    if not isinstance(source_asset, Mapping) or not all(
+        isinstance(value, str) and value
+        for value in (
+            source_asset.get("asset_id"),
+            source_asset.get("asset_hash"),
+            group_id,
+        )
+    ):
+        raise StrategySetupError(
+            "Cross Matrix cell selection artifact 缺少完整 asset/group 绑定。"
+        )
+    return (
+        {
+            "source_artifact_id": verified.artifact_id,
+            "expected_artifact_content_hash": verified.content_hash,
+            "expected_asset_id": str(source_asset["asset_id"]),
+            "expected_asset_hash": str(source_asset["asset_hash"]),
+        },
+        str(group_id),
     )
 
 
@@ -3679,6 +4006,7 @@ def _strategy_request_requires_dataset(
         if draft.workflow in {
             *_STRATEGY_POOL_WORKFLOWS,
             "automatic_tree_leaf_materialization",
+            "cross_matrix_cell_selection",
             "voting_candidate_build",
         }:
             return False

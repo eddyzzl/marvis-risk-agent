@@ -66,6 +66,7 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "automatic_tree_leaf_materialization",
     "voting_candidate_build",
     "cross_matrix_analysis",
+    "cross_matrix_cell_selection",
     "strategy_pool_add_candidate",
     "strategy_pool_remove_entry",
     "strategy_pool_set_action",
@@ -196,13 +197,22 @@ _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])automatic-tree-leaf-selection-[0-9a-f]{32}"
     r"(?![A-Za-z0-9_-])"
 )
+_CROSS_MATRIX_CELL_SELECTION_ID_RE = re.compile(
+    r"^cross-matrix-cell-selection-[0-9a-f]{32}$"
+)
+_CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])cross-matrix-cell-selection-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])"
+)
 _POOL_SOURCE_LIKE_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:candidate-asset|automatic-tree-leaf-selection)-"
+    r"(?<![A-Za-z0-9_-])(?:candidate-asset|automatic-tree-leaf-selection|"
+    r"cross-matrix-cell-selection)-"
     r"[A-Za-z0-9_-]+(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
 _POOL_SOURCE_PREFIX_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:candidate-asset|automatic-tree-leaf-selection)-",
+    r"(?<![A-Za-z0-9_-])(?:candidate-asset|automatic-tree-leaf-selection|"
+    r"cross-matrix-cell-selection)-",
     re.IGNORECASE,
 )
 _POOL_SOURCE_CONFUSABLE_TRANSLATION = str.maketrans(
@@ -231,6 +241,10 @@ _STRATEGY_REPLY_MAX_CHARS = 100_000
 _STRATEGY_REPLY_MAX_DEPTH = 64
 _STRATEGY_REPLY_MAX_NODES = 10_000
 _AUTOMATIC_TREE_LEAF_ID_RE = re.compile(r"^leaf-[0-9a-f]{20}$")
+_CROSS_MATRIX_CELL_ID_RE = re.compile(r"^cross-cell-[0-9a-f]{32}$")
+_CROSS_MATRIX_CELL_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])cross-cell-[0-9a-f]{32}(?![A-Za-z0-9_-])"
+)
 _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])candidate-asset-[0-9a-f]{32}(?![A-Za-z0-9_-])"
 )
@@ -435,6 +449,71 @@ _AUTOMATIC_TREE_LEAF_NEGATED_CLAUSE_RE = re.compile(
     r")(?![A-Za-z0-9_])|"
     r"(?<![A-Za-z0-9_])without\s+adding\s+(?:it\s+)?to\s+"
     r"(?:the\s+)?(?:strategy\s+)?pool(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_CELL_SELECTION_ACTION_RE = re.compile(
+    r"(?:物化|固化|选中|选择|提取|引用)"
+    r"[^，,；;。\n]{0,24}(?:格子|单元格|cell)|"
+    r"(?:格子|单元格|cell)"
+    r"[^，,；;。\n]{0,24}(?:物化|固化|选中|选择|提取|引用)|"
+    r"(?<![A-Za-z0-9_])(?:materialize|select|pick|extract|reference)"
+    r"(?:\s+the)?\s+(?:exact\s+)?cells?(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_CELL_SELECTION_VERB_RE = re.compile(
+    r"(?:物化|固化|选中|选择|提取|引用)|"
+    r"(?<![A-Za-z0-9_])(?:materialize|select|pick|extract|reference)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_CELL_SELECTION_NEGATED_RE = re.compile(
+    r"(?:不要|不再|无需|不用|别|禁止|未|没有)\s*"
+    r"[^，,；;。\n]{0,160}(?:物化|固化|选中|选择|提取|引用)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never)\s+"
+    r"(?:materialize|select|pick|extract|reference)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_CELL_AMBIGUOUS_SELECTION_RE = re.compile(
+    r"(?:最好|最优|最佳|最差|最坏|高风险|低风险|风险最高|风险最低|"
+    r"坏账率最高|坏率最高|lift最高|woe最高|iv最高|前\s*\d+|排名|排行|"
+    r"(?<![A-Za-z0-9_])(?:best|worst|top[-\s]*\d+|highest|lowest|"
+    r"riskiest|safest|rank(?:ed|ing)?)(?![A-Za-z0-9_]))"
+    r"[^，,；;。\n]{0,32}(?:格子|单元格|cells?)|"
+    r"(?:格子|单元格|cells?)[^，,；;。\n]{0,32}"
+    r"(?:最好|最优|最佳|最差|最坏|高风险|低风险|最高|最低|排名|排行|"
+    r"(?<![A-Za-z0-9_])(?:best|worst|top|highest|lowest|riskiest|safest|"
+    r"rank(?:ed|ing)?)(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_CELL_HEURISTIC_CONTROL_RE = re.compile(
+    r"(?:坏账率|坏率|风险|lift|woe|iv|占比|样本量|count|share|bad[-_\s]*rate)"
+    r"[^，,；;。\n]{0,24}(?:>=|<=|>|<|高于|低于|大于|小于|不少于|不超过|阈值|门槛)|"
+    r"(?:>=|<=|>|<|高于|低于|大于|小于|不少于|不超过|阈值|门槛)"
+    r"[^，,；;。\n]{0,24}(?:坏账率|坏率|风险|lift|woe|iv|占比|样本量|count|"
+    r"share|bad[-_\s]*rate)",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_CELL_NEGATED_FOLLOW_UP_RE = re.compile(
+    r"(?:也\s*)?(?:不要|不再|无需|不需要|不|别|禁止)\s*(?:"
+    r"(?:加入|写入|放入|加到)\s*(?:策略池|规则池|pool)|入池|"
+    r"设置?[^，,；;。\n]{0,12}(?:动作|action)|"
+    r"(?:采纳|部署|上线|投产|写回|回写)"
+    r"(?:(?:也|或|、|和)(?:不|不要)?(?:采纳|部署|上线|投产|写回|回写))*)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never)\s+(?:"
+    r"add\s+(?:them?\s+)?to\s+(?:the\s+)?(?:strategy\s+)?pool|"
+    r"set\s+(?:the\s+)?action|adopt|deploy|write[-\s]*back)"
+    r"(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])without\s+(?:adding|adopting|deploying)"
+    r"[^，,；;。\n]*(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_CELL_ALLOWED_REQUEST_TOKEN_RE = re.compile(
+    r"(?:请|帮我|麻烦|从|在|把|将|只|仅|也|和|以及|但(?:是)?|不过|"
+    r"一个|这些|以下|指定|精确|完整|二维|交叉|矩阵|候选|资产|结果|中|里的|"
+    r"格子|单元格|格|物化|固化|选中|选择|提取|引用|指针|是|ID|id|"
+    r"(?<![A-Za-z0-9_])(?:please|from|in|the|a|an|these|following|exact|"
+    r"specified|cross|matrix|candidate|asset|result|cell|cells|materialize|"
+    r"select|pick|extract|reference|pointer|only|and|but)(?![A-Za-z0-9_]))",
     re.IGNORECASE,
 )
 _POOL_ITEM_ID_RE = re.compile(r"^(?:candidate-rule|pool-entry)-[0-9a-f]{32}$")
@@ -2116,6 +2195,8 @@ def _validate_standard_workflow_payload(
                 whitelist,
                 target_col=target_col,
             )
+        elif workflow == "cross_matrix_cell_selection":
+            normalized = _validate_cross_matrix_cell_selection_inputs(raw_inputs)
         elif workflow in _STRATEGY_POOL_WORKFLOWS:
             normalized = _validate_strategy_pool_workflow_inputs(
                 workflow,
@@ -2848,6 +2929,60 @@ def _validate_automatic_tree_leaf_materialization_inputs(
     return normalized
 
 
+def _validate_cross_matrix_cell_selection_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate only exact user-owned Cross asset and cell pointers."""
+
+    workflow = "cross_matrix_cell_selection"
+    allowed = {"cross_asset_id", "cell_ids", "selection_reason"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted({"cross_asset_id", "cell_ids"} - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+
+    cross_asset_id = _required_text(
+        inputs["cross_asset_id"],
+        name=f"{workflow} cross_asset_id",
+    )
+    if _CANDIDATE_ASSET_ID_RE.fullmatch(cross_asset_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} cross_asset_id 必须是完整的 Cross candidate asset id。"
+        )
+
+    raw_cell_ids = inputs["cell_ids"]
+    if (
+        not isinstance(raw_cell_ids, Sequence)
+        or isinstance(raw_cell_ids, str | bytes | bytearray)
+        or not 1 <= len(raw_cell_ids) <= 400
+    ):
+        raise _DraftValidationError(
+            f"{workflow} cell_ids 必须是 1 到 400 个完整 cross-cell ID 的数组。"
+        )
+    cell_ids: list[str] = []
+    for value in raw_cell_ids:
+        cell_id = _required_text(value, name=f"{workflow} cell_ids")
+        if _CROSS_MATRIX_CELL_ID_RE.fullmatch(cell_id) is None:
+            raise _DraftValidationError(
+                f"{workflow} cell_ids 必须是 cross-cell- 后接 32 位小写十六进制字符。"
+            )
+        cell_ids.append(cell_id)
+    if len(set(cell_ids)) != len(cell_ids):
+        raise _DraftValidationError(f"{workflow} cell_ids 不能包含重复 ID。")
+
+    normalized: dict[str, Any] = {
+        "cross_asset_id": cross_asset_id,
+        "cell_ids": cell_ids,
+    }
+    if "selection_reason" in inputs:
+        normalized["selection_reason"] = _cross_matrix_cell_selection_reason(
+            inputs["selection_reason"]
+        )
+    return normalized
+
+
 def _validate_voting_candidate_build_inputs(
     inputs: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -2918,6 +3053,27 @@ def _automatic_tree_selection_reason(value: object) -> str:
     if not canonical:
         raise _DraftValidationError(
             "automatic_tree_leaf_materialization selection_reason 必须是非空文本。"
+        )
+    return canonical
+
+
+def _cross_matrix_cell_selection_reason(value: object) -> str:
+    if not isinstance(value, str):
+        raise _DraftValidationError(
+            "cross_matrix_cell_selection selection_reason 必须是文本。"
+        )
+    if "\x00" in value:
+        raise _DraftValidationError(
+            "cross_matrix_cell_selection selection_reason 不能包含 NUL。"
+        )
+    canonical = " ".join(unicodedata.normalize("NFC", value).split())
+    if not canonical:
+        raise _DraftValidationError(
+            "cross_matrix_cell_selection selection_reason 必须是非空文本。"
+        )
+    if len(canonical) > 500:
+        raise _DraftValidationError(
+            "cross_matrix_cell_selection selection_reason 最多 500 个字符。"
         )
     return canonical
 
@@ -3195,10 +3351,11 @@ def _validate_strategy_pool_workflow_inputs(
         if (
             source_field == "selection_id"
             and _AUTOMATIC_TREE_LEAF_SELECTION_ID_RE.fullmatch(source_id) is None
+            and _CROSS_MATRIX_CELL_SELECTION_ID_RE.fullmatch(source_id) is None
         ):
             raise _DraftValidationError(
                 f"{workflow} selection_id 必须是 automatic-tree-leaf-selection- "
-                "后接 32 位小写十六进制字符。"
+                "或 cross-matrix-cell-selection- 后接 32 位小写十六进制字符。"
             )
         normalized.update(
             {
@@ -3330,7 +3487,29 @@ def _voting_positive_command_clause_spans(
 
 
 def _utterance_targets_cross_matrix(utterance: str) -> bool:
-    return _CROSS_MATRIX_TARGET_RE.search(utterance) is not None
+    without_selection_ids = _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE.sub(
+        " ", utterance
+    )
+    return _CROSS_MATRIX_TARGET_RE.search(without_selection_ids) is not None
+
+
+def _utterance_targets_cross_matrix_cell_selection(utterance: str) -> bool:
+    has_pointer_ids = (
+        _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.search(utterance) is not None
+        and _CROSS_MATRIX_CELL_ID_TOKEN_RE.search(utterance) is not None
+    )
+    if (
+        _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE.search(utterance) is not None
+        and not has_pointer_ids
+    ):
+        return False
+    explicit_cell_action = (
+        _CROSS_MATRIX_CELL_SELECTION_ACTION_RE.search(utterance) is not None
+    )
+    return (explicit_cell_action and _utterance_targets_cross_matrix(utterance)) or (
+        has_pointer_ids
+        and _CROSS_MATRIX_CELL_SELECTION_VERB_RE.search(utterance) is not None
+    )
 
 
 def _cross_positive_command_clause_spans(
@@ -3926,10 +4105,25 @@ def _ground_refinement_request(
 ) -> StrategyRequestCompilation:
     draft = result.draft
     if (
+        _utterance_targets_cross_matrix_cell_selection(utterance)
+        and not (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow == "cross_matrix_cell_selection"
+        )
+    ):
+        return _clarification(
+            "原话明确要求从 Cross Matrix 精确选择单元格，只能编译为 "
+            "cross_matrix_cell_selection；不能改路由到矩阵构建、通用策略生命周期"
+            "或其他 Workflow。",
+            code="cross_matrix_cell_selection_workflow_required",
+            fields=("workflow",),
+        )
+    if (
         _utterance_targets_cross_matrix(utterance)
         and not (
             isinstance(draft, StandardWorkflowRequestDraft)
-            and draft.workflow == "cross_matrix_analysis"
+            and draft.workflow
+            in {"cross_matrix_analysis", "cross_matrix_cell_selection"}
         )
     ):
         return _clarification(
@@ -3967,6 +4161,8 @@ def _ground_refinement_request(
         return _ground_automatic_tree_leaf_materialization(utterance, result)
     if draft.workflow == "voting_candidate_build":
         return _ground_voting_candidate_build(utterance, result)
+    if draft.workflow == "cross_matrix_cell_selection":
+        return _ground_cross_matrix_cell_selection(utterance, result)
     if draft.workflow == "cross_matrix_analysis":
         return _ground_cross_matrix_analysis(
             utterance,
@@ -4264,6 +4460,17 @@ def _automatic_tree_leaf_rationale_is_allowed(reason: str) -> bool:
     return not remaining.strip()
 
 
+def _cross_matrix_cell_rationale_is_allowed(reason: str) -> bool:
+    without_cell_terms = re.sub(
+        r"(?:二维|交叉|Cross\s+Matrix|matrix|这(?:些|两个)?|这些|两个|多个|"
+        r"格子|单元格|cells?)",
+        " ",
+        reason,
+        flags=re.IGNORECASE,
+    )
+    return _automatic_tree_leaf_rationale_is_allowed(without_cell_terms)
+
+
 def _automatic_tree_leaf_unconsumed_request_text(utterance: str) -> str:
     """Remove the one allowed pointer operation and return every other demand.
 
@@ -4281,6 +4488,199 @@ def _automatic_tree_leaf_unconsumed_request_text(utterance: str) -> str:
     remaining = _AUTOMATIC_TREE_LEAF_ALLOWED_REQUEST_TOKEN_RE.sub(" ", remaining)
     remaining = _AUTOMATIC_TREE_LEAF_REQUEST_PUNCTUATION_RE.sub(" ", remaining)
     return " ".join(remaining.split())
+
+
+def _cross_matrix_cell_has_positive_selection_intent(utterance: str) -> bool:
+    operation_text = _AUTOMATIC_TREE_LEAF_REASON_RE.sub(" ", utterance)
+    operation_text = _CROSS_MATRIX_CELL_NEGATED_FOLLOW_UP_RE.sub(" ", operation_text)
+    for clause in _automatic_tree_follow_up_clauses(operation_text):
+        for match in _CROSS_MATRIX_CELL_SELECTION_VERB_RE.finditer(clause):
+            prefix = clause[: match.start()]
+            if re.search(r"(?:不|未|没(?:有)?)\s*$", prefix):
+                continue
+            if not _automatic_tree_follow_up_action_is_negated(
+                clause,
+                action_start=match.start(),
+            ):
+                return True
+    return False
+
+
+def _cross_matrix_cell_unconsumed_request_text(utterance: str) -> str:
+    remaining = unicodedata.normalize("NFC", utterance)
+    remaining = _AUTOMATIC_TREE_LEAF_NEGATED_REASON_CLAUSE_RE.sub(" ", remaining)
+    remaining = _AUTOMATIC_TREE_LEAF_REASON_RE.sub(" ", remaining)
+    remaining = _CROSS_MATRIX_CELL_NEGATED_FOLLOW_UP_RE.sub(" ", remaining)
+    remaining = _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.sub(" ", remaining)
+    remaining = _CROSS_MATRIX_CELL_ID_TOKEN_RE.sub(" ", remaining)
+    remaining = _CROSS_MATRIX_CELL_ALLOWED_REQUEST_TOKEN_RE.sub(" ", remaining)
+    remaining = _AUTOMATIC_TREE_LEAF_REQUEST_PUNCTUATION_RE.sub(" ", remaining)
+    return " ".join(remaining.split())
+
+
+def _ground_cross_matrix_cell_selection(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Bind an exact Cross asset and explicit cell set to one pointer operation."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    positive_operation_text = _CROSS_MATRIX_CELL_NEGATED_FOLLOW_UP_RE.sub(
+        " ", utterance
+    )
+    positive_operation_text = _AUTOMATIC_TREE_LEAF_REASON_RE.sub(
+        " ", positive_operation_text
+    )
+
+    if (
+        _CROSS_MATRIX_CELL_AMBIGUOUS_SELECTION_RE.search(positive_operation_text)
+        is not None
+        or _CROSS_MATRIX_CELL_HEURISTIC_CONTROL_RE.search(positive_operation_text)
+        is not None
+    ):
+        return _clarification(
+            "请从完整 Cross Matrix 结果中复制明确的 cell ID；不能按排名、"
+            "极值、风险描述或指标阈值替你选择格子。",
+            code="cross_matrix_cell_selection_ambiguous",
+            fields=("cell_ids",),
+        )
+    if (
+        _CROSS_MATRIX_CELL_SELECTION_NEGATED_RE.search(positive_operation_text)
+        is not None
+        or not _cross_matrix_cell_has_positive_selection_intent(utterance)
+    ):
+        return _clarification(
+            "原话没有明确授权一次正向的 Cross Matrix 单元格选择；否定式或仅"
+            "描述 ID 的请求不会创建 pointer。请明确说出完整 Cross asset ID 和"
+            "要选择的全部 cell ID。",
+            code="cross_matrix_cell_intent_negated",
+            fields=("selection_intent",),
+        )
+
+    reason_values = _automatic_tree_leaf_all_reason_values(utterance)
+    explicit_reasons = _automatic_tree_leaf_explicit_reasons(utterance)
+    if any(
+        _AUTOMATIC_TREE_LEAF_REASON_REPLACEMENT_RE.search(reason) is not None
+        for reason in reason_values
+    ):
+        return _clarification(
+            "一条请求只能给出一个最终 selection_reason；理由中不能嵌套理由"
+            "字段或替换指令。",
+            code="cross_matrix_cell_reason_not_grounded",
+            fields=("selection_reason",),
+        )
+    if any(
+        _AUTOMATIC_TREE_LEAF_REASON_EXTREME_RE.search(reason) is not None
+        or _CROSS_MATRIX_CELL_HEURISTIC_CONTROL_RE.search(reason) is not None
+        for reason in reason_values
+    ):
+        return _clarification(
+            "selection_reason 不能包含指标极值、排名或阈值选格语义。请只保留"
+            "人工明确选择依据。",
+            code="cross_matrix_cell_selection_ambiguous",
+            fields=("cell_ids", "selection_reason"),
+        )
+    if any(
+        _AUTOMATIC_TREE_LEAF_REASON_FORBIDDEN_OPERATION_RE.search(reason) is not None
+        for reason in reason_values
+    ):
+        return _clarification(
+            "selection_reason 不能藏入 Strategy Pool、业务动作、采纳、部署或"
+            "写回请求；这些操作必须拆成后续请求。",
+            code="cross_matrix_cell_single_step_required",
+            fields=("selection_reason", "next_action"),
+        )
+    if any(
+        not _cross_matrix_cell_rationale_is_allowed(reason)
+        or _AUTOMATIC_TREE_LEAF_RATIONALE_DECISION_SUBJECT_RE.search(reason)
+        is not None
+        for reason in explicit_reasons
+    ):
+        return _clarification(
+            "selection_reason 必须是人工/业务/风险/合规/样本评审依据类短说明，"
+            "不能包含命中客户、业务动作、策略池或生产操作。",
+            code="cross_matrix_cell_reason_not_grounded",
+            fields=("selection_reason",),
+        )
+
+    active_follow_up_text = _CROSS_MATRIX_CELL_NEGATED_FOLLOW_UP_RE.sub(
+        " ", positive_operation_text
+    )
+    if any(
+        pattern.search(active_follow_up_text) is not None
+        for pattern in (
+            _AUTOMATIC_TREE_LEAF_POOL_CHAIN_RE,
+            _AUTOMATIC_TREE_LEAF_ACTION_CHAIN_RE,
+            _AUTOMATIC_TREE_LEAF_LIFECYCLE_CHAIN_RE,
+            _AUTOMATIC_TREE_LEAF_WRITEBACK_CHAIN_RE,
+        )
+    ):
+        return _clarification(
+            "本轮只创建 Cross Matrix 单元格选择 pointer；加入 Strategy Pool、"
+            "设置业务动作、采纳、部署或写回必须分别发起后续请求。",
+            code="cross_matrix_cell_single_step_required",
+            fields=("next_action",),
+        )
+
+    asset_matches = tuple(_AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance))
+    cell_matches = tuple(_CROSS_MATRIX_CELL_ID_TOKEN_RE.finditer(utterance))
+    asset_ids = frozenset(match.group(0) for match in asset_matches)
+    cell_ids = frozenset(match.group(0) for match in cell_matches)
+    ambiguous_fields: list[str] = []
+    if len(asset_matches) != 1 or len(asset_ids) != 1:
+        ambiguous_fields.append("cross_asset_id")
+    if (
+        not 1 <= len(cell_matches) <= 400
+        or len(cell_matches) != len(cell_ids)
+    ):
+        ambiguous_fields.append("cell_ids")
+    if ambiguous_fields:
+        return _clarification(
+            "请在同一条请求中逐字提供且只提供一个完整 Cross candidate asset ID"
+            "（candidate-asset- 后接 32 位小写十六进制），以及 1 到 400 个"
+            "互不重复的完整 cell ID（cross-cell- 后接 32 位小写十六进制）；"
+            "不能使用‘刚才那些’‘这些格子’等代词。",
+            code="cross_matrix_cell_explicit_ids_required",
+            fields=tuple(ambiguous_fields),
+        )
+
+    ungrounded: list[str] = []
+    if asset_ids != {inputs["cross_asset_id"]}:
+        ungrounded.append("cross_asset_id")
+    if cell_ids != set(inputs["cell_ids"]):
+        ungrounded.append("cell_ids")
+    if ungrounded:
+        return _clarification(
+            "模型草案中的 Cross asset 或 cell ID 与用户原话不一致。平台不会"
+            "替换、补全、排序选择或猜测 ID。",
+            code="cross_matrix_cell_controls_not_grounded",
+            fields=tuple(ungrounded),
+        )
+
+    selection_reason = inputs.get("selection_reason")
+    if bool(explicit_reasons or selection_reason is not None) and (
+        len(explicit_reasons) != 1
+        or not isinstance(selection_reason, str)
+        or selection_reason != explicit_reasons[0]
+    ):
+        return _clarification(
+            "selection_reason 必须与用户以‘选择理由/理由/原因/说明’显式给出的"
+            "唯一理由完全一致；未给理由时模型必须省略。",
+            code="cross_matrix_cell_reason_not_grounded",
+            fields=("selection_reason",),
+        )
+
+    if _cross_matrix_cell_unconsumed_request_text(utterance):
+        return _clarification(
+            "本轮只接受一次明确的 Cross Matrix 单元格 pointer 选择；请求中还有"
+            "无法按该单步契约解释的内容。请把入池、动作、采纳、部署或写回拆成"
+            "后续请求。",
+            code="cross_matrix_cell_single_step_required",
+            fields=("next_action",),
+        )
+    return result
 
 
 def _ground_automatic_tree_leaf_materialization(
@@ -5390,6 +5790,7 @@ def _pool_add_unconsumed_text(utterance: str) -> str:
         for pattern in (
             _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE,
             _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE,
+            _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE,
         )
         for match in pattern.finditer(utterance)
     )
@@ -6078,7 +6479,12 @@ def _ground_strategy_pool_add_request(
 
     candidate_matches = tuple(_AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance))
     selection_matches = tuple(
-        _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE.finditer(utterance)
+        match
+        for pattern in (
+            _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE,
+            _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE,
+        )
+        for match in pattern.finditer(utterance)
     )
     candidate_ids = frozenset(match.group(0) for match in candidate_matches)
     selection_ids = frozenset(match.group(0) for match in selection_matches)
@@ -6692,6 +7098,16 @@ def _standard_workflow_confirmation_text(
                 "独立哨兵值："
                 + "、".join(str(value) for value in inputs["sentinel_values"])
             )
+    elif draft.workflow == "cross_matrix_cell_selection":
+        details = [
+            "已识别为〔Cross Matrix 精确单元格选择 Workflow〕",
+            f"完整 Cross 候选资产 pointer：{inputs['cross_asset_id']}",
+            "精确 cell pointers：" + "、".join(inputs["cell_ids"]),
+            "多个 cell 按确定性 OR 语义组成一个不可变选择；平台按源矩阵顺序归一化",
+            "本步骤不排名、不推荐、不生成业务动作，也不会入池、采纳或部署",
+        ]
+        if "selection_reason" in inputs:
+            details.append(f"用户原话选择说明：{inputs['selection_reason']}")
     elif draft.workflow == "automatic_tree_candidate_build":
         direction_labels = {
             "increasing": "递增",
@@ -6759,7 +7175,7 @@ def _standard_workflow_confirmation_text(
             "selection_id" if "selection_id" in inputs else "candidate_asset_id"
         )
         source_label = (
-            "叶节点选择结果" if source_field == "selection_id" else "候选资产"
+            "精确选择结果" if source_field == "selection_id" else "候选资产"
         )
         details = [
             "已识别为〔Strategy Pool 添加候选 Workflow〕",
@@ -7305,6 +7721,12 @@ def _user_prompt(
         "指标、artifact/asset/effect/rule id、动作或推荐。它只构建二维矩阵证据，不能"
         "串联选格、入池、代码、写回、采纳或部署；明确的二维 Cross Matrix 请求不能"
         "改路由到其他 Workflow。"
+        "对于 cross_matrix_cell_selection，只能逐字抄录用户原话中唯一完整的"
+        "cross_asset_id、1 到 400 个互不重复的完整 cross-cell ID，以及显式标注时"
+        "逐字一致的 selection_reason。禁止代词、排名、Top N、风险/指标极值或阈值"
+        "选格。多个 cell 是集合语义并由平台按源矩阵顺序归一化为确定性 OR；不得输出"
+        "condition、rule、effect、metrics、action 或任何 artifact/hash 平台绑定。它只"
+        "创建 pointer，不得串联 Strategy Pool、业务动作、采纳、部署、投产或写回。"
         "对于 strategy_pool_add_candidate，candidate_asset_id 与 selection_id "
         "严格二选一且必须逐字抄录唯一完整 ID；必须分别抄录显式的策略池类型、"
         "Pool 默认动作和命中动作标签，不能对调或从动作反推 Pool 类型。reason 仅在"
@@ -7313,7 +7735,9 @@ def _user_prompt(
         "逐字抄录 before_selected_members/replace_selected_members，或从“保留成员"
         "作为回退并放在成员前/由 Voting 替代成员”二选一映射；用户未提供时省略。"
         "否定入池或串联采纳/部署时"
-        "必须澄清。source ID 必须与唯一正向入池命令位于同一子句，不能从否定子句、"
+        "必须澄清。selection_id 只允许 automatic-tree-leaf-selection- 或"
+        "cross-matrix-cell-selection- 后接 32 位小写十六进制；完整 Cross Matrix asset"
+        "不能直接入池。source ID 必须与唯一正向入池命令位于同一子句，不能从否定子句、"
         "reason、引用或代词上下文借用；未来/条件指令、问句、how-to、演示和测试也"
         "必须澄清。"
     )

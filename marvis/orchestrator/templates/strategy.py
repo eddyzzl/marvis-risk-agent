@@ -328,6 +328,104 @@ STRATEGY_CROSS_MATRIX_ANALYSIS = WorkflowTemplate(
 )
 
 
+STRATEGY_CROSS_MATRIX_CELL_SELECTION = WorkflowTemplate(
+    id="strategy_cross_matrix_cell_selection",
+    title="Cross Matrix 精确单元格选择",
+    goal_patterns=(
+        "选择 Cross Matrix 精确单元格",
+        "物化 Cross Matrix 指定格子",
+        "select exact cross matrix cells",
+        "materialize cross matrix cell selection",
+    ),
+    slots=(
+        SlotSpec(
+            "source_artifact_id",
+            True,
+            "task_context",
+            "Verified task-owned Cross Matrix artifact id",
+        ),
+        SlotSpec(
+            "expected_artifact_content_hash",
+            True,
+            "task_context",
+            "Verified Cross Matrix artifact content hash",
+        ),
+        SlotSpec(
+            "expected_asset_id",
+            True,
+            "task_context",
+            "Verified Cross Matrix asset id",
+        ),
+        SlotSpec(
+            "expected_asset_hash",
+            True,
+            "task_context",
+            "Verified Cross Matrix asset hash",
+        ),
+        SlotSpec(
+            "expected_candidate_id",
+            True,
+            "task_context",
+            "Verified source candidate id",
+        ),
+        SlotSpec(
+            "expected_evidence_hash",
+            True,
+            "task_context",
+            "Verified source candidate evidence hash",
+        ),
+        SlotSpec(
+            "cell_ids",
+            True,
+            "user",
+            "Explicit Cross Matrix cell ids; normalized in source order",
+        ),
+        SlotSpec(
+            "selection_reason",
+            False,
+            "user",
+            "Optional user-owned exact-cell selection rationale",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="物化 Cross Matrix 精确单元格选择",
+            tool_ref=ToolRef("strategy", "materialize_cross_matrix_cell_selection"),
+            inputs_template={
+                "source_artifact_id": "{slot:source_artifact_id}",
+                "expected_artifact_content_hash": (
+                    "{slot:expected_artifact_content_hash}"
+                ),
+                "expected_asset_id": "{slot:expected_asset_id}",
+                "expected_asset_hash": "{slot:expected_asset_hash}",
+                "expected_candidate_id": "{slot:expected_candidate_id}",
+                "expected_evidence_hash": "{slot:expected_evidence_hash}",
+                "cell_ids": "{slot:cell_ids}",
+                "selection_reason": "{slot:selection_reason}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "selection_id"}),
+                PostCheck("nonempty", {"field": "selection_hash"}),
+                PostCheck("nonempty", {"field": "group_id"}),
+                PostCheck("nonempty", {"field": "cell_ids"}),
+                PostCheck("nonempty", {"field": "source_asset_id"}),
+                PostCheck("nonempty", {"field": "source_asset_hash"}),
+                PostCheck("nonempty", {"field": "source_candidate_id"}),
+                PostCheck("nonempty", {"field": "source_evidence_hash"}),
+                PostCheck("nonempty", {"field": "fragment_id"}),
+                PostCheck("nonempty", {"field": "rule_id"}),
+                PostCheck("nonempty", {"field": "effect_id"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_AUTOMATIC_TREE_CANDIDATE_BUILD = WorkflowTemplate(
     id="strategy_automatic_tree_candidate_build",
     title="自动决策树候选构建",
