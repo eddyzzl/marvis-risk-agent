@@ -223,6 +223,11 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     automatic_tree_tool = next(
         tool for tool in manifest.tools if tool.name == "build_automatic_tree_candidate"
     )
+    automatic_tree_leaf_tool = next(
+        tool
+        for tool in manifest.tools
+        if tool.name == "materialize_automatic_tree_leaf_fragment"
+    )
     refinement_tool = next(
         tool for tool in manifest.tools if tool.name == "refine_univariate_candidate"
     )
@@ -254,6 +259,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "profit_calc",
         "analyze_univariate_candidates",
         "build_automatic_tree_candidate",
+        "materialize_automatic_tree_leaf_fragment",
         "refine_univariate_candidate",
         "add_candidate_to_pool",
         "remove_pool_entry",
@@ -309,6 +315,36 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     }
     assert automatic_tree_tool.output_schema["additionalProperties"] is False
     assert automatic_tree_tool.output_schema["properties"]["artifacts"]["minItems"] == 6
+    assert automatic_tree_leaf_tool.determinism == "deterministic"
+    assert automatic_tree_leaf_tool.policy.human_decision_gate == "none"
+    assert automatic_tree_leaf_tool.policy.effect_authorization == "none"
+    assert set(automatic_tree_leaf_tool.side_effects) == {
+        "read:task",
+        "write:artifact",
+    }
+    assert automatic_tree_leaf_tool.input_schema["additionalProperties"] is False
+    assert set(automatic_tree_leaf_tool.input_schema["required"]) == {
+        "source_artifact_id",
+        "expected_artifact_content_hash",
+        "expected_asset_id",
+        "expected_asset_hash",
+        "expected_tree_result_hash",
+        "leaf_id",
+    }
+    assert automatic_tree_leaf_tool.input_schema["properties"]["selection_reason"] == {
+        "type": ["string", "null"],
+        "minLength": 1,
+        "maxLength": 500,
+        "default": None,
+    }
+    assert automatic_tree_leaf_tool.output_schema["additionalProperties"] is False
+    assert automatic_tree_leaf_tool.output_schema["properties"]["schema_version"] == {
+        "const": "strategy.materialize-automatic-tree-leaf-fragment-tool.v1"
+    }
+    assert (
+        automatic_tree_leaf_tool.output_schema["properties"]["artifacts"]["minItems"]
+        == 1
+    )
     assert refinement_tool.policy.human_decision_gate == "none"
     assert refinement_tool.policy.effect_authorization == "none"
     assert set(refinement_tool.side_effects) == {
@@ -316,7 +352,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "read:dataset",
         "write:artifact",
     }
-    assert manifest.version == "0.5.0"
+    assert manifest.version == "0.6.0"
     for pool_tool in pool_mutation_tools:
         assert pool_tool.policy.human_decision_gate == "none"
         assert pool_tool.policy.effect_authorization == "none"

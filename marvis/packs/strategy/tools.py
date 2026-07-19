@@ -51,6 +51,9 @@ from marvis.packs.strategy.candidate_asset_tools import (
 from marvis.packs.strategy.automatic_tree_tools import (
     run_build_automatic_tree_candidate,
 )
+from marvis.packs.strategy.automatic_tree_leaf_tools import (
+    run_materialize_automatic_tree_leaf_fragment,
+)
 from marvis.packs.strategy.pool_tools import (
     run_add_candidate_to_pool,
     run_compile_strategy_pool,
@@ -710,6 +713,12 @@ def tool_build_automatic_tree_candidate(inputs: dict, ctx) -> dict:
     """Build one complete governed automatic weighted rule-tree candidate."""
 
     return run_build_automatic_tree_candidate(inputs, ctx, _runtime(ctx))
+
+
+def tool_materialize_automatic_tree_leaf_fragment(inputs: dict, ctx) -> dict:
+    """Persist one explicit pointer to a verified automatic-tree leaf."""
+
+    return run_materialize_automatic_tree_leaf_fragment(inputs, ctx, _runtime(ctx))
 
 
 def tool_add_candidate_to_pool(inputs: dict, ctx) -> dict:
