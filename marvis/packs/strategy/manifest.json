@@ -1204,6 +1204,258 @@
       "memory_limit_mb": 4096
     },
     {
+      "name": "apply_automatic_tree",
+      "summary": "Verify a current-task canonical automatic-tree asset and its original active dataset/workspace, deterministically append complete leaf/rule assignments, then atomically register governed dataset and evidence facts with explicit optional workspace activation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source_artifact_id": {"type": "string", "minLength": 1},
+          "expected_artifact_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expected_asset_id": {
+            "type": "string",
+            "pattern": "^candidate-asset-[0-9a-f]{32}$"
+          },
+          "expected_asset_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expected_tree_result_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "dataset_id": {"type": "string", "minLength": 1},
+          "expected_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "workspace_revision": {"type": "integer", "minimum": 0},
+          "analysis_generation": {"type": "integer", "minimum": 0},
+          "semantic_mapping_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "leaf_id_column": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$",
+            "default": "automatic_tree_leaf_id"
+          },
+          "rule_id_column": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$",
+            "default": "automatic_tree_rule_id"
+          },
+          "activate_result": {"type": "boolean"}
+        },
+        "required": [
+          "source_artifact_id",
+          "expected_artifact_content_hash",
+          "expected_asset_id",
+          "expected_asset_hash",
+          "expected_tree_result_hash",
+          "dataset_id",
+          "expected_content_hash",
+          "workspace_revision",
+          "analysis_generation",
+          "semantic_mapping_hash",
+          "activate_result"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.apply-automatic-tree-tool.v1"
+          },
+          "run_id": {
+            "type": "string",
+            "pattern": "^atar_[0-9a-f]{32}$"
+          },
+          "input_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "cached": {"type": "boolean"},
+          "activated": {"type": "boolean"},
+          "source": {
+            "type": "object",
+            "properties": {
+              "tree_artifact_id": {"type": "string", "minLength": 1},
+              "tree_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "asset_id": {
+                "type": "string",
+                "pattern": "^candidate-asset-[0-9a-f]{32}$"
+              },
+              "asset_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "tree_result_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "dataset_id": {"type": "string", "minLength": 1},
+              "dataset_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "row_count": {"type": "integer", "minimum": 0}
+            },
+            "required": [
+              "tree_artifact_id",
+              "tree_artifact_content_hash",
+              "asset_id",
+              "asset_hash",
+              "tree_result_hash",
+              "dataset_id",
+              "dataset_content_hash",
+              "row_count"
+            ],
+            "additionalProperties": false
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "dataset_id": {"type": "string", "minLength": 1},
+              "dataset_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "row_count": {"type": "integer", "minimum": 0},
+              "result_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "dataset_id",
+              "dataset_content_hash",
+              "row_count",
+              "result_hash"
+            ],
+            "additionalProperties": false
+          },
+          "columns": {
+            "type": "object",
+            "properties": {
+              "leaf_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+              },
+              "rule_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+              }
+            },
+            "required": ["leaf_id", "rule_id"],
+            "additionalProperties": false
+          },
+          "leaf_distribution": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "items": {
+              "type": "object",
+              "properties": {
+                "leaf_id": {"type": "string", "minLength": 1},
+                "rule_id": {"type": "string", "minLength": 1},
+                "row_count": {"type": "integer", "minimum": 0}
+              },
+              "required": ["leaf_id", "rule_id", "row_count"],
+              "additionalProperties": false
+            }
+          },
+          "workspace": {
+            "type": "object",
+            "properties": {
+              "source_revision": {"type": "integer", "minimum": 0},
+              "source_analysis_generation": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "source_semantic_mapping_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "result_revision": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "result_analysis_generation": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "result_semantic_mapping_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "active_dataset_id": {"type": "string", "minLength": 1}
+            },
+            "required": [
+              "source_revision",
+              "source_analysis_generation",
+              "source_semantic_mapping_hash",
+              "result_revision",
+              "result_analysis_generation",
+              "result_semantic_mapping_hash",
+              "active_dataset_id"
+            ],
+            "additionalProperties": false
+          },
+          "evidence": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "minLength": 1},
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "download_url": {"type": "string", "minLength": 1}
+            },
+            "required": ["artifact_id", "content_hash", "download_url"],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "schema_version",
+          "run_id",
+          "input_hash",
+          "cached",
+          "activated",
+          "source",
+          "result",
+          "columns",
+          "leaf_distribution",
+          "workspace",
+          "evidence"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_apply_automatic_tree",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+        "write:dataset",
+        "write:task"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
       "name": "materialize_automatic_tree_leaf_fragment",
       "summary": "Verify one live task-owned canonical automatic-tree artifact and persist an explicit pointer-only leaf selection without copying rules, metrics, actions, or admitting it to a Strategy Pool.",
       "input_schema": {

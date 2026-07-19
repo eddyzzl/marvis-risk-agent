@@ -51,6 +51,9 @@ from marvis.packs.strategy.candidate_asset_tools import (
 from marvis.packs.strategy.automatic_tree_tools import (
     run_build_automatic_tree_candidate,
 )
+from marvis.packs.strategy.automatic_tree_apply_tools import (
+    run_apply_automatic_tree,
+)
 from marvis.packs.strategy.automatic_tree_leaf_tools import (
     run_materialize_automatic_tree_leaf_fragment,
 )
@@ -124,6 +127,7 @@ from marvis.repositories.strategy_monitoring import (
     validate_monitoring_run_result,
 )
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.repositories.automatic_tree_apply import AutomaticTreeApplyRepository
 from marvis.repositories.data_workspace import (
     DataWorkspaceDataError,
     DataWorkspaceRepository,
@@ -713,6 +717,12 @@ def tool_build_automatic_tree_candidate(inputs: dict, ctx) -> dict:
     """Build one complete governed automatic weighted rule-tree candidate."""
 
     return run_build_automatic_tree_candidate(inputs, ctx, _runtime(ctx))
+
+
+def tool_apply_automatic_tree(inputs: dict, ctx) -> dict:
+    """Apply one canonical automatic tree to its original governed dataset."""
+
+    return run_apply_automatic_tree(inputs, ctx, _runtime(ctx))
 
 
 def tool_materialize_automatic_tree_leaf_fragment(inputs: dict, ctx) -> dict:
@@ -5037,6 +5047,10 @@ class _Runtime(PackRuntime):
     def _extend(self, ctx) -> None:
         self.strategies = StrategyRepository(self.settings.db_path)
         self.task_artifacts = TaskArtifactRepository(self.settings.db_path)
+        self.automatic_tree_apply_runs = AutomaticTreeApplyRepository(
+            self.settings.db_path
+        )
+        self.data_workspaces = DataWorkspaceRepository(self.settings.db_path)
 
 
 def _runtime(ctx) -> _Runtime:

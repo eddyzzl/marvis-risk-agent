@@ -223,6 +223,9 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     automatic_tree_tool = next(
         tool for tool in manifest.tools if tool.name == "build_automatic_tree_candidate"
     )
+    automatic_tree_apply_tool = next(
+        tool for tool in manifest.tools if tool.name == "apply_automatic_tree"
+    )
     automatic_tree_leaf_tool = next(
         tool
         for tool in manifest.tools
@@ -262,6 +265,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "profit_calc",
         "analyze_univariate_candidates",
         "build_automatic_tree_candidate",
+        "apply_automatic_tree",
         "materialize_automatic_tree_leaf_fragment",
         "refine_univariate_candidate",
         "add_candidate_to_pool",
@@ -359,6 +363,50 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         for branch in report_gap_schema["items"]["oneOf"]
     )
     assert "report_info_gaps" in automatic_tree_tool.output_schema["required"]
+    assert automatic_tree_apply_tool.determinism == "deterministic"
+    assert automatic_tree_apply_tool.policy.human_decision_gate == "none"
+    assert automatic_tree_apply_tool.policy.effect_authorization == "none"
+    assert set(automatic_tree_apply_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+        "write:dataset",
+        "write:task",
+    }
+    assert automatic_tree_apply_tool.input_schema["additionalProperties"] is False
+    assert set(automatic_tree_apply_tool.input_schema["required"]) == {
+        "source_artifact_id",
+        "expected_artifact_content_hash",
+        "expected_asset_id",
+        "expected_asset_hash",
+        "expected_tree_result_hash",
+        "dataset_id",
+        "expected_content_hash",
+        "workspace_revision",
+        "analysis_generation",
+        "semantic_mapping_hash",
+        "activate_result",
+    }
+    assert (
+        automatic_tree_apply_tool.input_schema["properties"]["leaf_id_column"][
+            "default"
+        ]
+        == "automatic_tree_leaf_id"
+    )
+    assert (
+        automatic_tree_apply_tool.input_schema["properties"]["rule_id_column"][
+            "default"
+        ]
+        == "automatic_tree_rule_id"
+    )
+    assert automatic_tree_apply_tool.output_schema["additionalProperties"] is False
+    assert automatic_tree_apply_tool.output_schema["properties"]["schema_version"] == {
+        "const": "strategy.apply-automatic-tree-tool.v1"
+    }
+    assert not (
+        {"rank", "action", "path"}
+        & set(automatic_tree_apply_tool.output_schema["properties"])
+    )
     assert automatic_tree_leaf_tool.determinism == "deterministic"
     assert automatic_tree_leaf_tool.policy.human_decision_gate == "none"
     assert automatic_tree_leaf_tool.policy.effect_authorization == "none"
