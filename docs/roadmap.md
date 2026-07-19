@@ -12,7 +12,7 @@
 - Portfolio / 组合分析能力已有后端工具、模板和测试覆盖；具体是否作为首屏入口或 Agent start allowlist 暴露，以当前代码和 UI 为准。
 - 策略平台改造的 Phase 0A（真实完整开发入口与业务 contract）、Phase 0B（运行时门禁、人工决策证明和一次性副作用授权）和 Phase 1（五类统一 DSL、自然语言可逆执行、标准分析 Workflow、版本化监控/处置、新版本 handoff、生命周期与可下载 artifact）已完成。策略采纳和监控处置仍是人工责任门，本地采纳不等于生产部署。Phase 2 及全部后续范围继续在 V2.x 内交付，不得推到 V3/V4。
 - Phase 2 的 task-scoped 数据工作区、CSV/XLS/XLSX 导入、报告级描述分析、自然语言受限数据变换、不可变派生 lineage，以及安全 CSV/XLSX 导出已经完成纵向闭环。SQL connector、隔离自定义派生、风险方向、版本化指标语义、当前项目快照和历史资料映射仍在 Phase 2 内继续交付；Phase 2 尚未整体完成。
-- Phase 3 Candidate Lab 已完成首个单变量纵切：Agent 可通过自然语言对活动或兼容任务数据集执行数值四类分箱和类别等值箱，确定性产出 IV/KS/AUC/WOE/Lift、件数及可用金额口径、typed DSL 条件和 `development/unvalidated` 候选证据，并下载字节稳定的 JSON/XLSX。选箱/合并入池、逐月稳定性、树、评分卡、Voting、Cross、代码生成和列写回仍在 V2.x Phase 3 内继续交付，不能据此宣称完整 Candidate Lab 已完成。
+- Phase 3 Candidate Lab 已完成单变量分析及候选选择/合并两个纵切：Agent 可通过自然语言对活动或兼容任务数据集执行数值四类分箱和类别等值箱，确定性产出 IV/KS/AUC/WOE/Lift、件数及可用金额口径、typed DSL 条件和 `development/unvalidated` 候选证据；随后可按用户明确的 source bin id 或观测坏率门槛合并、选择候选，平台会从绑定样本逐行重放并重算指标，生成带稳定 rule/effect/asset id 和父级 lineage 的不可变 JSON 候选资产。模糊的“选最好”仍须澄清；门槛和 bin id 必须能从用户原话确定性核对，已有 bin 的选择/合并还必须引用用户实际查看的完整 candidate ID，并直接消费该不可变证据，不能重新分箱后按序号重绑。LLM 不参与指标或条件计算。入 Strategy Pool、逐月稳定性、树、评分卡、Voting、Cross、代码生成和列写回仍在 V2.x Phase 3 内继续交付，不能据此宣称完整 Candidate Lab 已完成。
 
 ## 术语
 

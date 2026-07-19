@@ -727,6 +727,46 @@ def test_strategy_templates_thread_explicit_nan_label_exclusion_contract():
             [ToolRef("strategy", "analyze_univariate_candidates")],
         ),
         (
+            "strategy_univariate_candidate_refinement",
+            {
+                "dataset_id": "dataset-1",
+                "expected_content_hash": "a" * 64,
+                "workspace_revision": 1,
+                "analysis_generation": 1,
+                "semantic_mapping_hash": "b" * 64,
+                "target_col": "bad",
+                "features": ["score"],
+                "methods": ["equal_width"],
+                "bin_count": 5,
+                "min_bin_pct": 0.02,
+                "sentinel_values": [],
+                "feature": "score",
+                "method": "equal_width",
+                "merge_groups": [],
+                "selection": {
+                    "risk_threshold": {"operator": ">=", "value": 0.2}
+                },
+            },
+            [
+                ToolRef("strategy", "analyze_univariate_candidates"),
+                ToolRef("strategy", "refine_univariate_candidate"),
+            ],
+        ),
+        (
+            "strategy_univariate_candidate_refinement_existing",
+            {
+                "source_artifact_id": "artifact-1",
+                "expected_artifact_content_hash": "a" * 64,
+                "expected_candidate_id": "candidate-" + "b" * 32,
+                "expected_evidence_hash": "c" * 64,
+                "feature": "score",
+                "method": "equal_width",
+                "merge_groups": [["regular:1", "regular:2"]],
+                "selection": {"source_bin_ids": ["regular:1", "regular:2"]},
+            },
+            [ToolRef("strategy", "refine_univariate_candidate")],
+        ),
+        (
             "strategy_limit_pricing_analysis",
             {
                 "dataset_id": "dataset-1",

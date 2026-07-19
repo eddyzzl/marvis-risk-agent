@@ -220,6 +220,9 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     univariate_tool = next(
         tool for tool in manifest.tools if tool.name == "analyze_univariate_candidates"
     )
+    refinement_tool = next(
+        tool for tool in manifest.tools if tool.name == "refine_univariate_candidate"
+    )
     run_monitoring_tool = next(
         tool for tool in manifest.tools if tool.name == "run_strategy_monitoring"
     )
@@ -235,6 +238,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "roll_rate_matrix",
         "profit_calc",
         "analyze_univariate_candidates",
+        "refine_univariate_candidate",
         "design_strategy_candidate",
         "build_strategy",
         "apply_strategy",
@@ -262,6 +266,13 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert candidate_tool.side_effects == ("read:dataset",)
     assert univariate_tool.policy.human_decision_gate == "none"
     assert set(univariate_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+    }
+    assert refinement_tool.policy.human_decision_gate == "none"
+    assert refinement_tool.policy.effect_authorization == "none"
+    assert set(refinement_tool.side_effects) == {
         "read:task",
         "read:dataset",
         "write:artifact",

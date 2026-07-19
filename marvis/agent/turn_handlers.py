@@ -113,6 +113,7 @@ from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestNotFoundError,
     PendingStrategyRequestRepository,
 )
+from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.repositories.data_workspace import (
     DataWorkspaceDataError,
     DataWorkspaceDatasetNotFound,
@@ -1308,16 +1309,16 @@ def _maybe_handle_workflow_recovery_turn(
 _STRATEGY_REQUEST_META_KEY = "strategy_request"
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
     r"(?:开发|设计|制定|创建|生成|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
-    r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|"
+    r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
     r"develop|design|create|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
-    r"adopt|report|monitor|mine)",
+    r"adopt|report|monitor|mine|refine|select|merge)",
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_SUBJECT_RE = re.compile(
-    r"(?:策略|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|单变量|分箱|cutoff|利润|收益|"
+    r"(?:策略|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|cutoff|利润|收益|"
     r"催收|滚动率|迁徙率|迁徙矩阵|定价矩阵|额度矩阵|网格|ROA|"
-    r"roll(?:\s|-|_)*rate|strategy|approval|reject|limit|pricing|segment|rule|"
-    r"univariate|binning|profit|collection)",
+    r"roll(?:\s|-|_)*rate|strategy|approval|reject|limit|pricing|segment|rule|candidate|"
+    r"candidate\s+bins?|\bbins?\b|univariate|binning|profit|collection)",
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_CANCEL_RE = re.compile(
@@ -1703,17 +1704,36 @@ def _run_validated_strategy_request(
         raise StrategySetupError("当前策略操作需要任务内数据上下文。")
 
     if isinstance(draft, StandardWorkflowRequestDraft):
+        workflow_inputs = draft.to_dict()["workflow_inputs"]
+        source_candidate_id = workflow_inputs.get("source_candidate_id")
         template_id = {
             "profit_calc": "strategy_profit_analysis",
             "roll_rate_matrix": "strategy_roll_rate_analysis",
             "limit_pricing_matrix": "strategy_limit_pricing_analysis",
             "univariate_candidate_analysis": ("strategy_univariate_candidate_analysis"),
+            "univariate_candidate_refinement": (
+                "strategy_univariate_candidate_refinement_existing"
+                if source_candidate_id is not None
+                else "strategy_univariate_candidate_refinement"
+            ),
         }[draft.workflow]
         slots = {
             "dataset_id": context.dataset_id,
-            **draft.to_dict()["workflow_inputs"],
+            **workflow_inputs,
         }
-        if draft.workflow == "univariate_candidate_analysis":
+        slots.pop("source_candidate_id", None)
+        if source_candidate_id is not None:
+            slots.update(
+                _candidate_source_artifact_slots(
+                    runtime,
+                    task_id=task.id,
+                    candidate_id=str(source_candidate_id),
+                )
+            )
+        elif draft.workflow in {
+            "univariate_candidate_analysis",
+            "univariate_candidate_refinement",
+        }:
             binding = {
                 "expected_content_hash": getattr(context, "dataset_content_hash", None),
                 "workspace_revision": getattr(context, "workspace_revision", None),
@@ -2384,6 +2404,18 @@ def _standard_workflow_request_preflight(
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> tuple[str, str] | None:
+    if draft.workflow == "univariate_candidate_refinement":
+        source_candidate_id = draft.workflow_inputs.get("source_candidate_id")
+        if source_candidate_id is not None:
+            try:
+                _candidate_source_artifact_slots(
+                    runtime,
+                    task_id=task.id,
+                    candidate_id=str(source_candidate_id),
+                )
+            except StrategySetupError as exc:
+                return ("strategy_candidate_source_required", str(exc))
+        return None
     if draft.workflow != "limit_pricing_matrix":
         return None
     strategy_id = draft.workflow_inputs.get("strategy_id")
@@ -2403,6 +2435,58 @@ def _standard_workflow_request_preflight(
             "额度定价矩阵只能关联当前任务中的额度或定价策略。",
         )
     return None
+
+
+def _candidate_source_artifact_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    candidate_id: str,
+) -> dict[str, str]:
+    matches = []
+    for artifact in TaskArtifactRepository(runtime.settings.db_path).list_for_task(
+        task_id
+    ):
+        provenance = artifact.get("provenance")
+        if (
+            artifact.get("kind") == "strategy_candidate_json"
+            and artifact.get("origin_tool") == "strategy.analyze_univariate_candidates"
+            and isinstance(provenance, dict)
+            and provenance.get("candidate_id") == candidate_id
+        ):
+            matches.append(artifact)
+    if not matches:
+        raise StrategySetupError(
+            f"当前任务没有候选证据 {candidate_id}；请先运行单变量分析，"
+            "再使用结果中展示的 candidate ID 和 source bin id。"
+        )
+    if len(matches) > 1:
+        raise StrategySetupError(
+            f"候选证据 {candidate_id} 对应多个不可变 JSON artifact，"
+            "当前不能安全选择来源。"
+        )
+    artifact = matches[0]
+    provenance = artifact["provenance"]
+    content_hash = artifact.get("content_hash")
+    evidence_hash = provenance.get("evidence_hash")
+    artifact_id = artifact.get("id")
+    if (
+        not isinstance(artifact_id, str)
+        or not artifact_id
+        or not isinstance(content_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", content_hash) is None
+        or not isinstance(evidence_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", evidence_hash) is None
+    ):
+        raise StrategySetupError(
+            f"候选证据 {candidate_id} 的 artifact 绑定不完整，请重新生成单变量分析。"
+        )
+    return {
+        "source_artifact_id": artifact_id,
+        "expected_artifact_content_hash": content_hash,
+        "expected_candidate_id": candidate_id,
+        "expected_evidence_hash": evidence_hash,
+    }
 
 
 def _stored_strategy_request_preflight(
@@ -2814,9 +2898,17 @@ def _strategy_request_requires_target(
     draft: CompiledStrategyRequestDraft,
 ) -> bool:
     if isinstance(draft, StandardWorkflowRequestDraft):
-        return draft.workflow == "univariate_candidate_analysis" or (
-            draft.workflow == "limit_pricing_matrix"
-            and "target_col" in draft.workflow_inputs
+        refinement_needs_current_target = (
+            draft.workflow == "univariate_candidate_refinement"
+            and "source_candidate_id" not in draft.workflow_inputs
+        )
+        return (
+            draft.workflow == "univariate_candidate_analysis"
+            or refinement_needs_current_target
+            or (
+                draft.workflow == "limit_pricing_matrix"
+                and "target_col" in draft.workflow_inputs
+            )
         )
     if draft.operation in {"apply", "report", "monitor"}:
         return False
@@ -2831,9 +2923,17 @@ def _strategy_request_requires_complete_labels(
     """Whether execution would otherwise exclude missing supervision rows."""
 
     if isinstance(draft, StandardWorkflowRequestDraft):
-        return draft.workflow == "univariate_candidate_analysis" or (
-            draft.workflow == "limit_pricing_matrix"
-            and "target_col" in draft.workflow_inputs
+        refinement_needs_current_labels = (
+            draft.workflow == "univariate_candidate_refinement"
+            and "source_candidate_id" not in draft.workflow_inputs
+        )
+        return (
+            draft.workflow == "univariate_candidate_analysis"
+            or refinement_needs_current_labels
+            or (
+                draft.workflow == "limit_pricing_matrix"
+                and "target_col" in draft.workflow_inputs
+            )
         )
     if draft.operation in {"apply", "report", "monitor"}:
         return False

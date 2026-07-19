@@ -45,6 +45,9 @@ from marvis.packs.strategy.candidate_evidence import (
     MetricObservation,
     build_candidate_evidence,
 )
+from marvis.packs.strategy.candidate_asset_tools import (
+    run_refine_univariate_candidate,
+)
 from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.contracts import Strategy
 from marvis.packs.strategy.deliverables import decision_table_csv
@@ -685,6 +688,12 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
         "candidate_evidence": candidate_evidence,
         "artifacts": artifacts,
     }
+
+
+def tool_refine_univariate_candidate(inputs: dict, ctx) -> dict:
+    """Refine task-owned evidence into an immutable development candidate asset."""
+
+    return run_refine_univariate_candidate(inputs, ctx, _runtime(ctx))
 
 
 def tool_design_strategy_candidate(inputs: dict, ctx) -> dict:

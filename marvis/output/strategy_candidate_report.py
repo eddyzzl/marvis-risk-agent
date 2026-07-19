@@ -156,6 +156,50 @@ def canonical_strategy_candidate_report_json(
     return _canonical_json_bytes(_validated_report_payload(evidence, analysis))
 
 
+def validate_strategy_candidate_report(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a persisted JSON report through the original strict contracts."""
+
+    if not isinstance(payload, Mapping):
+        raise StrategyCandidateReportError(
+            "strategy candidate report must be an object"
+        )
+    _require_exact_fields(
+        payload,
+        frozenset({"schema_version", "candidate_evidence", "univariate_analysis"}),
+        "strategy candidate report",
+    )
+    if payload["schema_version"] != REPORT_SCHEMA_VERSION:
+        raise StrategyCandidateReportError(
+            f"strategy candidate report schema_version must be {REPORT_SCHEMA_VERSION}"
+        )
+    return _validated_report_payload(
+        payload["candidate_evidence"],
+        payload["univariate_analysis"],
+    )
+
+
+def strategy_candidate_report_from_json(
+    raw: str | bytes | bytearray,
+) -> dict[str, Any]:
+    """Parse and strictly validate one persisted candidate report JSON."""
+
+    if not isinstance(raw, (str, bytes, bytearray)):
+        raise StrategyCandidateReportError(
+            "strategy candidate report JSON must be text or bytes"
+        )
+    try:
+        payload = json.loads(raw, object_pairs_hook=_object_without_duplicate_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StrategyCandidateReportError(
+            f"strategy candidate report is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise StrategyCandidateReportError(
+            "strategy candidate report JSON must contain an object"
+        )
+    return validate_strategy_candidate_report(payload)
+
+
 def render_strategy_candidate_report_xlsx(
     evidence: Mapping[str, Any], analysis: Mapping[str, Any]
 ) -> bytes:
@@ -183,6 +227,17 @@ def _validated_report_payload(
         "candidate_evidence": normalized_evidence,
         "univariate_analysis": normalized_analysis,
     }
+
+
+def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise StrategyCandidateReportError(
+                f"strategy candidate report JSON has duplicate key: {key}"
+            )
+        payload[key] = value
+    return payload
 
 
 def _validate_univariate_analysis(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1327,4 +1382,6 @@ __all__ = [
     "canonical_strategy_candidate_report_json",
     "render_strategy_candidate_bundle",
     "render_strategy_candidate_report_xlsx",
+    "strategy_candidate_report_from_json",
+    "validate_strategy_candidate_report",
 ]

@@ -59,12 +59,33 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "roll_rate_matrix",
     "limit_pricing_matrix",
     "univariate_candidate_analysis",
+    "univariate_candidate_refinement",
 )
 UNIVARIATE_BINNING_METHODS = (
     "equal_frequency",
     "equal_width",
     "chimerge",
     "tree",
+)
+UNIVARIATE_REFINEMENT_METHODS = (*UNIVARIATE_BINNING_METHODS, "categorical")
+_CANDIDATE_ID_RE = re.compile(r"^candidate-[0-9a-f]{32}$")
+_REFINEMENT_SELECTION_ACTION_RE = re.compile(
+    r"(?:选择|选中|保留|筛选|作为|select|keep|retain)", re.IGNORECASE
+)
+_REFINEMENT_MERGE_ACTION_RE = re.compile(r"(?:合并|并箱|merge|combine)", re.IGNORECASE)
+_RISK_THRESHOLD_EXPRESSION_RE = re.compile(
+    r"(?:观测)?(?:坏率|坏账率|风险率|bad\s*rate|risk\s*rate)"
+    r"\s*(?:为|是|需|需要|应|must\s+be|is)?\s*"
+    r"(?P<operator>大于等于|不低于|至少|不少于|达到|>=|≥|"
+    r"小于等于|不高于|至多|最多|<=|≤|"
+    r"大于|高于|超过|>|小于|低于|少于|<|"
+    r"greater\s+than\s+or\s+equal(?:\s+to)?|at\s+least|"
+    r"less\s+than\s+or\s+equal(?:\s+to)?|at\s+most|"
+    r"more\s+than|greater\s+than|less\s+than)"
+    r"\s*(?P<value>百分之\s*[0-9]+(?:\.[0-9]+)?|"
+    r"[0-9]+(?:\.[0-9]+)?\s*%|"
+    r"(?:0(?:\.\d+)?|1(?:\.0+)?))",
+    re.IGNORECASE,
 )
 
 _OPTIONAL_DRAFT_FIELDS = {
@@ -591,7 +612,7 @@ def compile_strategy_request(
         )
     outcome = _validate_reply(raw, whitelist, target_col=observed_target)
     if outcome.accepted:
-        return outcome.result
+        return _ground_refinement_request(normalized_utterance, outcome.result)
     if outcome.result.clarification_code in _NON_REPAIRABLE_CLARIFICATION_CODES:
         # These are platform-derived business-contract gaps, not JSON-format
         # mistakes. A second LLM pass cannot supply missing economics safely and
@@ -607,11 +628,17 @@ def compile_strategy_request(
         repaired = _complete(llm, prompt=repair_prompt, caller=caller)
     except Exception:
         return outcome.result
-    return _validate_reply(
+    repaired_outcome = _validate_reply(
         repaired,
         whitelist,
         target_col=observed_target,
-    ).result
+    )
+    if repaired_outcome.accepted:
+        return _ground_refinement_request(
+            normalized_utterance,
+            repaired_outcome.result,
+        )
+    return repaired_outcome.result
 
 
 def validate_strategy_request(
@@ -906,12 +933,20 @@ def _validate_standard_workflow_payload(
                 whitelist,
                 target_col=target_col,
             )
-        else:
+        elif workflow == "univariate_candidate_analysis":
             normalized = _validate_univariate_workflow_inputs(
                 raw_inputs,
                 whitelist,
                 target_col=target_col,
             )
+        elif workflow == "univariate_candidate_refinement":
+            normalized = _validate_univariate_refinement_workflow_inputs(
+                raw_inputs,
+                whitelist,
+                target_col=target_col,
+            )
+        else:  # pragma: no cover - guarded by STANDARD_STRATEGY_WORKFLOWS
+            raise _DraftValidationError(f"不支持的标准 Workflow：{workflow}。")
     except _DraftValidationError as exc:
         return _invalid(str(exc))
 
@@ -1350,6 +1385,342 @@ def _sentinel_sequence(value: object, *, name: str) -> list[str | int | float]:
     return normalized
 
 
+def _validate_univariate_refinement_workflow_inputs(
+    inputs: Mapping[str, Any],
+    whitelist: tuple[str, ...],
+    *,
+    target_col: str | None,
+) -> dict[str, Any]:
+    workflow = "univariate_candidate_refinement"
+    analysis_fields = {
+        "features",
+        "methods",
+        "bin_count",
+        "min_bin_pct",
+        "loan_amount_col",
+        "overdue_amount_col",
+        "sentinel_values",
+    }
+    allowed = analysis_fields | {
+        "feature",
+        "method",
+        "merge_groups",
+        "selection",
+        "selection_reason",
+        "source_candidate_id",
+    }
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted({"feature", "method", "selection"} - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+
+    feature = _workflow_column(
+        inputs["feature"],
+        name=f"{workflow} feature",
+        whitelist=whitelist,
+    )
+    if target_col is not None and feature == target_col:
+        raise _DraftValidationError(f"{workflow} feature 不能使用目标列。")
+    method = _required_text(inputs["method"], name=f"{workflow} method")
+    if method not in UNIVARIATE_REFINEMENT_METHODS:
+        raise _DraftValidationError(
+            f"{workflow} 不支持分箱方法 {method}；可选值为："
+            + "、".join(UNIVARIATE_REFINEMENT_METHODS)
+            + "。"
+        )
+
+    source_candidate_id = None
+    if "source_candidate_id" in inputs:
+        source_candidate_id = _required_text(
+            inputs["source_candidate_id"],
+            name=f"{workflow} source_candidate_id",
+        )
+        if _CANDIDATE_ID_RE.fullmatch(source_candidate_id) is None:
+            raise _DraftValidationError(
+                f"{workflow} source_candidate_id 必须是完整 candidate id。"
+            )
+        ignored_analysis_fields = sorted(set(inputs) & analysis_fields)
+        if ignored_analysis_fields:
+            raise _DraftValidationError(
+                f"{workflow} 已绑定已有 candidate 时不能重设分析参数："
+                + "、".join(ignored_analysis_fields)
+                + "。"
+            )
+
+    analysis: dict[str, Any] = {}
+    if source_candidate_id is None:
+        analysis_inputs = {
+            field: inputs[field] for field in analysis_fields if field in inputs
+        }
+        if "features" not in analysis_inputs:
+            analysis_inputs["features"] = [feature]
+        if "methods" not in analysis_inputs and method != "categorical":
+            analysis_inputs["methods"] = [method]
+        analysis = _validate_univariate_workflow_inputs(
+            analysis_inputs,
+            whitelist,
+            target_col=target_col,
+        )
+        if feature not in analysis["features"]:
+            raise _DraftValidationError(
+                f"{workflow} feature 必须包含在本次候选字段 features 中。"
+            )
+        if method != "categorical" and method not in analysis["methods"]:
+            raise _DraftValidationError(
+                f"{workflow} method 必须包含在本次数值分箱方法 methods 中。"
+            )
+
+    merge_groups = _candidate_merge_groups(
+        inputs.get("merge_groups", []),
+        name=f"{workflow} merge_groups",
+    )
+    selection = _candidate_selection(
+        inputs["selection"],
+        name=f"{workflow} selection",
+    )
+    uses_source_bin_ids = "source_bin_ids" in selection or bool(merge_groups)
+    if uses_source_bin_ids and source_candidate_id is None:
+        raise _DraftValidationError(
+            f"{workflow} 使用 source bin id 时必须提供用户已查看证据的 "
+            "source_candidate_id，不能重新分析后猜测绑定。"
+        )
+    normalized = {
+        **analysis,
+        "feature": feature,
+        "method": method,
+        "merge_groups": merge_groups,
+        "selection": selection,
+    }
+    if source_candidate_id is not None:
+        normalized["source_candidate_id"] = source_candidate_id
+    if "selection_reason" in inputs:
+        reason = _required_text(
+            inputs["selection_reason"],
+            name=f"{workflow} selection_reason",
+        )
+        if len(reason) > 500:
+            raise _DraftValidationError(
+                f"{workflow} selection_reason 最多 500 个字符。"
+            )
+        normalized["selection_reason"] = reason
+    return normalized
+
+
+def _candidate_merge_groups(value: object, *, name: str) -> list[list[str]]:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, str | bytes | bytearray)
+        or len(value) > 20
+    ):
+        raise _DraftValidationError(f"{name} 必须是最多 20 个合并组的数组。")
+    normalized: list[list[str]] = []
+    seen: set[str] = set()
+    for group_index, raw_group in enumerate(value):
+        if (
+            not isinstance(raw_group, Sequence)
+            or isinstance(raw_group, str | bytes | bytearray)
+            or not 2 <= len(raw_group) <= 20
+        ):
+            raise _DraftValidationError(
+                f"{name}[{group_index}] 必须包含 2 到 20 个 source bin id。"
+            )
+        group: list[str] = []
+        for raw_bin_id in raw_group:
+            bin_id = _required_text(raw_bin_id, name=f"{name}[{group_index}]")
+            if len(bin_id) > 128:
+                raise _DraftValidationError(f"{name} 中的 bin id 最多 128 个字符。")
+            if bin_id in seen:
+                raise _DraftValidationError(f"{name} 不能重复使用 bin id {bin_id}。")
+            seen.add(bin_id)
+            group.append(bin_id)
+        normalized.append(group)
+    return normalized
+
+
+def _candidate_selection(value: object, *, name: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+        raise _DraftValidationError(f"{name} 必须是对象。")
+    keys = set(value)
+    if keys not in ({"source_bin_ids"}, {"risk_threshold"}):
+        raise _DraftValidationError(
+            f"{name} 必须在 source_bin_ids 与 risk_threshold 中严格二选一。"
+        )
+    if "source_bin_ids" in value:
+        raw_ids = value["source_bin_ids"]
+        if (
+            not isinstance(raw_ids, Sequence)
+            or isinstance(raw_ids, str | bytes | bytearray)
+            or not 1 <= len(raw_ids) <= 50
+        ):
+            raise _DraftValidationError(
+                f"{name}.source_bin_ids 必须包含 1 到 50 个 source bin id。"
+            )
+        bin_ids = [
+            _required_text(item, name=f"{name}.source_bin_ids") for item in raw_ids
+        ]
+        if any(len(bin_id) > 128 for bin_id in bin_ids):
+            raise _DraftValidationError(
+                f"{name}.source_bin_ids 中每个值最多 128 个字符。"
+            )
+        if len(bin_ids) != len(set(bin_ids)):
+            raise _DraftValidationError(f"{name}.source_bin_ids 不能包含重复值。")
+        return {"source_bin_ids": bin_ids}
+
+    threshold = value["risk_threshold"]
+    if not isinstance(threshold, Mapping) or any(
+        not isinstance(key, str) for key in threshold
+    ):
+        raise _DraftValidationError(f"{name}.risk_threshold 必须是对象。")
+    if set(threshold) != {"operator", "value"}:
+        raise _DraftValidationError(
+            f"{name}.risk_threshold 只能包含 operator 和 value。"
+        )
+    operator = _required_text(
+        threshold["operator"], name=f"{name}.risk_threshold.operator"
+    )
+    if operator not in {">=", ">", "<=", "<"}:
+        raise _DraftValidationError(
+            f"{name}.risk_threshold.operator 只能是 >=、>、<=、<。"
+        )
+    risk_value = _bounded_number(
+        threshold["value"],
+        name=f"{name}.risk_threshold.value",
+        maximum=1.0,
+    )
+    return {"risk_threshold": {"operator": operator, "value": risk_value}}
+
+
+def _ground_refinement_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    draft = result.draft
+    if not isinstance(draft, StandardWorkflowRequestDraft) or (
+        draft.workflow != "univariate_candidate_refinement"
+    ):
+        return result
+    inputs = draft.to_dict()["workflow_inputs"]
+    missing_controls: list[str] = []
+    source_candidate_id = inputs.get("source_candidate_id")
+    if source_candidate_id is not None and not _utterance_contains_token(
+        utterance, source_candidate_id
+    ):
+        missing_controls.append("source_candidate_id")
+
+    selection = inputs["selection"]
+    if "source_bin_ids" in selection:
+        if not _REFINEMENT_SELECTION_ACTION_RE.search(utterance):
+            missing_controls.append("选择动作")
+        missing_controls.extend(
+            bin_id
+            for bin_id in selection["source_bin_ids"]
+            if not _utterance_contains_token(utterance, bin_id)
+        )
+    else:
+        threshold = selection["risk_threshold"]
+        if not _utterance_supports_risk_threshold(
+            utterance,
+            operator=threshold["operator"],
+            value=threshold["value"],
+        ):
+            missing_controls.append("明确的观测坏率门槛")
+
+    merge_groups = inputs["merge_groups"]
+    if merge_groups:
+        if not _REFINEMENT_MERGE_ACTION_RE.search(utterance):
+            missing_controls.append("合并动作")
+        missing_controls.extend(
+            bin_id
+            for group in merge_groups
+            for bin_id in group
+            if not _utterance_contains_token(utterance, bin_id)
+        )
+    if not missing_controls:
+        return result
+    return _clarification(
+        "请明确提供要选择的 source bin id，或给出可核对的观测坏率门槛；"
+        "合并/选择已有箱时还需引用分析结果中展示的完整 candidate ID。"
+        "我不会根据“最好”等模糊表述自行生成门槛或重绑分箱。",
+        code="strategy_refinement_controls_not_grounded",
+        fields=tuple(dict.fromkeys(missing_controls)),
+    )
+
+
+def _utterance_supports_risk_threshold(
+    utterance: str,
+    *,
+    operator: str,
+    value: float,
+) -> bool:
+    return any(
+        candidate_operator == operator
+        and math.isclose(candidate_value, value, rel_tol=0.0, abs_tol=1e-12)
+        for candidate_operator, candidate_value in _risk_threshold_expressions(
+            utterance
+        )
+    )
+
+
+def _utterance_contains_token(utterance: str, token: str) -> bool:
+    pattern = rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])"
+    return re.search(pattern, utterance) is not None
+
+
+def _risk_threshold_expressions(utterance: str) -> tuple[tuple[str, float], ...]:
+    expressions: list[tuple[str, float]] = []
+    for match in _RISK_THRESHOLD_EXPRESSION_RE.finditer(utterance):
+        expressions.append(
+            (
+                _normalized_threshold_operator(match.group("operator")),
+                _ratio_token_value(match.group("value")),
+            )
+        )
+    return tuple(expressions)
+
+
+def _normalized_threshold_operator(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value.strip().lower())
+    if normalized in {
+        "大于等于",
+        "不低于",
+        "至少",
+        "不少于",
+        "达到",
+        ">=",
+        "≥",
+        "greater than or equal",
+        "greater than or equal to",
+        "at least",
+    }:
+        return ">="
+    if normalized in {
+        "小于等于",
+        "不高于",
+        "至多",
+        "最多",
+        "<=",
+        "≤",
+        "less than or equal",
+        "less than or equal to",
+        "at most",
+    }:
+        return "<="
+    if normalized in {"大于", "高于", "超过", ">", "more than", "greater than"}:
+        return ">"
+    return "<"
+
+
+def _ratio_token_value(value: str) -> float:
+    normalized = re.sub(r"\s+", "", value)
+    if normalized.startswith("百分之"):
+        return float(normalized[len("百分之") :]) / 100.0
+    if normalized.endswith("%"):
+        return float(normalized[:-1]) / 100.0
+    return float(normalized)
+
+
 def _reject_workflow_fields(
     inputs: Mapping[str, Any],
     allowed: set[str],
@@ -1485,7 +1856,7 @@ def _standard_workflow_confirmation_text(
         if "strategy_id" in inputs:
             details.append(f"关联策略 ID：{inputs['strategy_id']}")
         details.append("平台先计算完整矩阵；接受或导出矩阵仍需第二次明确确认")
-    else:
+    elif draft.workflow == "univariate_candidate_analysis":
         feature_text = (
             "、".join(inputs["features"])
             if inputs["features"]
@@ -1512,6 +1883,31 @@ def _standard_workflow_confirmation_text(
                 + "、".join(str(value) for value in inputs["sentinel_values"])
             )
         details.append("只生成 development/unvalidated 候选证据，不冒充独立验证结果")
+    elif draft.workflow == "univariate_candidate_refinement":
+        merge_text = (
+            "；".join(" + ".join(group) for group in inputs["merge_groups"])
+            if inputs["merge_groups"]
+            else "不合并，保留原分箱"
+        )
+        if "source_bin_ids" in inputs["selection"]:
+            selection_text = "显式选择 " + "、".join(
+                inputs["selection"]["source_bin_ids"]
+            )
+        else:
+            threshold = inputs["selection"]["risk_threshold"]
+            selection_text = f"按观测坏率 {threshold['operator']} {threshold['value']:.2%} 确定性选择"
+        details = [
+            "已识别为〔单变量候选选择与合并 Workflow〕",
+            f"候选字段与方法：{inputs['feature']} / {inputs['method']}",
+            f"分箱合并：{merge_text}",
+            f"候选选择：{selection_text}",
+            "平台会从任务自有证据重放样本并重新计算全部指标",
+            "只生成 development/unvalidated 候选资产，不代表独立验证、采纳或上线",
+        ]
+        if "selection_reason" in inputs:
+            details.append(f"选择说明：{inputs['selection_reason']}")
+    else:  # pragma: no cover - validated workflow exhaustiveness
+        raise ValueError(f"unsupported standard workflow {draft.workflow}")
     details.append(
         "请确认以上口径。确认后 Agent 只编排受信任工具；所有数字由平台确定性计算。"
     )
@@ -2061,6 +2457,7 @@ __all__ = [
     "CompiledStrategyRequestDraft",
     "STANDARD_STRATEGY_WORKFLOWS",
     "UNIVARIATE_BINNING_METHODS",
+    "UNIVARIATE_REFINEMENT_METHODS",
     "STRATEGY_REQUEST_KINDS",
     "STRATEGY_OPERATIONS",
     "STRATEGY_REQUEST_JSON_SCHEMA",

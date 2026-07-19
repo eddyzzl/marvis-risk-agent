@@ -16,6 +16,8 @@ from marvis.output.strategy_candidate_report import (
     canonical_strategy_candidate_report_json,
     render_strategy_candidate_bundle,
     render_strategy_candidate_report_xlsx,
+    strategy_candidate_report_from_json,
+    validate_strategy_candidate_report,
 )
 from marvis.packs.strategy.candidate_evidence import (
     CandidateEvidenceError,
@@ -137,6 +139,26 @@ def test_bundle_is_canonical_and_byte_deterministic() -> None:
             for name in archive.namelist()
             if name.startswith("xl/worksheets/")
         )
+
+
+def test_persisted_report_parser_reuses_strict_contracts() -> None:
+    evidence, analysis = _inputs()
+    raw = canonical_strategy_candidate_report_json(evidence, analysis)
+
+    parsed = strategy_candidate_report_from_json(raw)
+
+    assert parsed == validate_strategy_candidate_report(json.loads(raw))
+    assert parsed["candidate_evidence"] == evidence
+
+    with pytest.raises(StrategyCandidateReportError, match="duplicate key"):
+        strategy_candidate_report_from_json(
+            raw[:-1] + b',"schema_version":"strategy.candidate-report.v1"}'
+        )
+
+    invalid = json.loads(raw)
+    invalid["caller_metrics"] = []
+    with pytest.raises(StrategyCandidateReportError, match="unknown"):
+        validate_strategy_candidate_report(invalid)
 
 
 def test_xlsx_contains_report_ready_evidence_without_recomputing_metrics() -> None:

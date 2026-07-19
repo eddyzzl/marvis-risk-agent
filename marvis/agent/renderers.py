@@ -1259,6 +1259,37 @@ def _render_analyze_univariate_candidates(o: dict):
     return text, tables
 
 
+def _render_refine_univariate_candidate(o: dict):
+    rule = o.get("rule") if isinstance(o.get("rule"), dict) else {}
+    effect = o.get("effect") if isinstance(o.get("effect"), dict) else {}
+    artifacts = [
+        item for item in (o.get("artifacts") or []) if isinstance(item, dict)
+    ]
+    text = (
+        f"**候选选择与合并完成**：`{o.get('feature', '')}` / "
+        f"`{o.get('method', '')}` 已生成候选资产 `{o.get('asset_id', '')}`。"
+        "该资产仅处于 `development / unvalidated`，不代表独立验证、采纳或上线。"
+    )
+    if o.get("parent_candidate_id"):
+        text += f" 来源候选证据为 `{o['parent_candidate_id']}`。"
+    rule_id = rule.get("rule_id")
+    effect_id = o.get("effect_id") or effect.get("effect_id")
+    if rule_id or effect_id:
+        text += (
+            f" 规则 ID `{rule_id or '-'}`，效果 ID `{effect_id or '-'}`；"
+            "条件与指标均由平台从绑定样本确定性重放和计算。"
+        )
+    links = [
+        f"[{str(item.get('filename') or item.get('kind') or '下载')}]"
+        f"({str(item.get('download_url'))})"
+        for item in artifacts
+        if item.get("download_url")
+    ]
+    if links:
+        text += "\n\n**候选资产**：" + "；".join(links)
+    return text, []
+
+
 def _render_decision_backtest(
     o: dict,
     *,
@@ -3836,6 +3867,7 @@ _RENDERERS = {
     "build_strategy": _render_build_strategy,
     "design_strategy_candidate": _render_design_strategy_candidate,
     "analyze_univariate_candidates": _render_analyze_univariate_candidates,
+    "refine_univariate_candidate": _render_refine_univariate_candidate,
     "backtest_strategy": _render_backtest_strategy,
     "tradeoff_view": _render_tradeoff_view,
     "design_cutoff_bands": _render_design_cutoff_bands,

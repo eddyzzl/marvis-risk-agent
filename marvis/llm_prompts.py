@@ -247,14 +247,15 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=5,
+    version=7,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
         "先判断 request_kind。策略开发、规则、已有策略的分析/回测/应用/采纳/报告/监控属于 "
         "strategy_lifecycle；独立的利润测算、滚动率矩阵、额度利率网格测算和单变量候选分析属于 standard_workflow。\n"
         "standard_workflow 只能输出 request_kind=standard_workflow、workflow、workflow_inputs。workflow "
-        "只能是 profit_calc/roll_rate_matrix/limit_pricing_matrix/univariate_candidate_analysis。"
+        "只能是 profit_calc/roll_rate_matrix/limit_pricing_matrix/univariate_candidate_analysis/"
+        "univariate_candidate_refinement。"
         "profit_calc 需要 ead_col、pd_col、"
         "可选 segment_col 及完整 profit_params。roll_rate_matrix 需要 id_col、time_col、status_col、"
         "有序且不重复的 states，可选 balance_col，observation_semantics 固定为 adjacent_observation；"
@@ -267,6 +268,16 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "bin_count、min_bin_pct、loan_amount_col、overdue_amount_col、sentinel_values。methods 只能从 "
         "equal_frequency/equal_width/chimerge/tree 中选择；不得输出 target_col、分箱边界、WOE、IV、"
         "KS、AUC、Lift、规则、推荐或任何计算结果。金额字段只能来自列白名单；用户未提供时不要猜。"
+        "univariate_candidate_refinement 表示先确定性生成单变量证据，再选择或合并其中一个字段/方法。"
+        "它需要 feature、method、selection，可同时包含单变量分析的 inputs；methods 仍只允许上述四种，"
+        "method 额外允许 categorical。merge_groups 只能抄录用户明确提供的 source bin id 二维数组；"
+        "只要出现 merge_groups 或 source_bin_ids，就必须同时抄录用户原话中的完整 "
+        "source_candidate_id（candidate- 后接 32 位十六进制），以绑定用户实际查看的证据，不能重新分析后重绑。"
+        "selection 必须严格二选一：用户明确点名箱时输出 {source_bin_ids:[...]}；用户明确给出观测坏率"
+        "门槛时输出 {risk_threshold:{operator,value}}，operator 只能是 >=/>/<=/<，value 为 0 到 1。"
+        "可选 selection_reason 只能复述用户理由。除上述用户明确提供的 source_candidate_id 外，不得输出或猜测 "
+        "artifact id、candidate/evidence/rule/effect id、"
+        "指标、箱边界、condition 或推荐。用户只说“选最好的”但没有箱 id 或坏率门槛时必须 clarification。"
         "最大化利润开发审批 cutoff 属于 strategy_lifecycle，不是独立 profit_calc；定价规则开发、应用或采纳"
         "也属于 strategy_lifecycle，不是 limit_pricing_matrix。\n"
         "operation 与 strategy_type 是两个正交字段，必须分别判断。operation 只能是："

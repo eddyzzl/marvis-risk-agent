@@ -279,6 +279,139 @@ STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS = WorkflowTemplate(
 )
 
 
+STRATEGY_UNIVARIATE_CANDIDATE_REFINEMENT = WorkflowTemplate(
+    id="strategy_univariate_candidate_refinement",
+    title="单变量候选选择与合并",
+    goal_patterns=(
+        "单变量候选选择",
+        "合并候选分箱",
+        "筛选策略规则",
+        "univariate candidate refinement",
+    ),
+    slots=(
+        *STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS.slots,
+        SlotSpec("feature", True, "user", "Feature to refine from candidate evidence"),
+        SlotSpec("method", True, "user", "Binning method to refine"),
+        SlotSpec(
+            "merge_groups",
+            False,
+            "user",
+            "Explicit groups of source bin ids; [] keeps source bins unchanged",
+        ),
+        SlotSpec(
+            "selection",
+            True,
+            "user",
+            "Explicit source bin ids or an observed-risk threshold",
+        ),
+        SlotSpec(
+            "selection_reason",
+            False,
+            "user",
+            "Optional user-owned rationale, never a calculated result",
+        ),
+    ),
+    steps=(
+        STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS.steps[0],
+        StepTemplate(
+            title="选择并合并单变量候选",
+            tool_ref=ToolRef("strategy", "refine_univariate_candidate"),
+            inputs_template={
+                "source_artifact_id": (
+                    "$ref:分析单变量候选.output.artifacts.0.artifact_id"
+                ),
+                "expected_artifact_content_hash": (
+                    "$ref:分析单变量候选.output.artifacts.0.content_hash"
+                ),
+                "expected_candidate_id": ("$ref:分析单变量候选.output.candidate_id"),
+                "expected_evidence_hash": ("$ref:分析单变量候选.output.evidence_hash"),
+                "feature": "{slot:feature}",
+                "method": "{slot:method}",
+                "merge_groups": "{slot:merge_groups}",
+                "selection": "{slot:selection}",
+                "selection_reason": "{slot:selection_reason}",
+            },
+            depends_on_titles=("分析单变量候选",),
+            post_checks=(
+                PostCheck("nonempty", {"field": "asset_id"}),
+                PostCheck("nonempty", {"field": "asset_hash"}),
+                PostCheck("nonempty", {"field": "effect_id"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STRATEGY_UNIVARIATE_CANDIDATE_REFINEMENT_EXISTING = WorkflowTemplate(
+    id="strategy_univariate_candidate_refinement_existing",
+    title="已有单变量证据候选选择与合并",
+    goal_patterns=(
+        "选择已有候选箱",
+        "合并已有候选箱",
+        "refine existing univariate candidate",
+    ),
+    slots=(
+        SlotSpec(
+            "source_artifact_id", True, "task_context", "Bound source JSON artifact"
+        ),
+        SlotSpec(
+            "expected_artifact_content_hash",
+            True,
+            "task_context",
+            "Bound source artifact content hash",
+        ),
+        SlotSpec(
+            "expected_candidate_id",
+            True,
+            "user",
+            "Candidate id explicitly copied from the user's request",
+        ),
+        SlotSpec(
+            "expected_evidence_hash",
+            True,
+            "task_context",
+            "Bound parent evidence hash",
+        ),
+        SlotSpec("feature", True, "user", "Feature to refine from candidate evidence"),
+        SlotSpec("method", True, "user", "Binning method to refine"),
+        SlotSpec("merge_groups", False, "user", "Explicit source bin id merge groups"),
+        SlotSpec("selection", True, "user", "Explicit bins or risk threshold"),
+        SlotSpec("selection_reason", False, "user", "Optional user-owned rationale"),
+    ),
+    steps=(
+        StepTemplate(
+            title="选择并合并已有单变量候选",
+            tool_ref=ToolRef("strategy", "refine_univariate_candidate"),
+            inputs_template={
+                "source_artifact_id": "{slot:source_artifact_id}",
+                "expected_artifact_content_hash": (
+                    "{slot:expected_artifact_content_hash}"
+                ),
+                "expected_candidate_id": "{slot:expected_candidate_id}",
+                "expected_evidence_hash": "{slot:expected_evidence_hash}",
+                "feature": "{slot:feature}",
+                "method": "{slot:method}",
+                "merge_groups": "{slot:merge_groups}",
+                "selection": "{slot:selection}",
+                "selection_reason": "{slot:selection_reason}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "asset_id"}),
+                PostCheck("nonempty", {"field": "asset_hash"}),
+                PostCheck("nonempty", {"field": "effect_id"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 _LIMIT_PRICING_INPUTS = {
     "dataset_id": "{slot:dataset_id}",
     "score_col": "{slot:score_col}",
