@@ -8,16 +8,26 @@ import math
 from pathlib import Path
 import re
 from typing import Any, Mapping
+from urllib.parse import quote
 import uuid
 
 import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.direction import check_score_direction, normalize_score_direction
-from marvis.data.errors import LabelSemanticsNotDeclaredError
+from marvis.data.errors import DatasetContentDriftError, LabelSemanticsNotDeclaredError
 from marvis.data.labels import require_labels_confirmed, resolve_labeled_frame
+from marvis.data.workspace import (
+    DataSemanticMapping,
+    data_semantic_mapping_from_dict,
+    data_semantic_mapping_hash,
+)
 from marvis.db import StrategyRepository
 from marvis.db_schema import connect
+from marvis.feature.univariate import (
+    SCHEMA_VERSION as UNIVARIATE_ANALYSIS_SCHEMA_VERSION,
+    analyze_univariate,
+)
 from marvis.files import sha256_file
 from marvis.packs.strategy.backtest_compat import (
     BacktestRecord,
@@ -30,6 +40,10 @@ from marvis.packs.strategy.candidate_design import (
     design_strategy_candidate,
     normalize_candidate_design,
     normalize_candidate_economics_inputs,
+)
+from marvis.packs.strategy.candidate_evidence import (
+    MetricObservation,
+    build_candidate_evidence,
 )
 from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.contracts import Strategy
@@ -84,6 +98,7 @@ from marvis.packs.strategy.typed_backtest import (
     run_typed_backtest,
 )
 from marvis.packs.strategy.vintage import vintage_curve, vintage_summary
+from marvis.output.strategy_candidate_report import render_strategy_candidate_bundle
 from marvis.plugins.sdk import PackRuntime
 from marvis.repositories.audit import _write_audit_row
 from marvis.repositories.strategy_handoff import StrategyHandoffRepository
@@ -93,6 +108,10 @@ from marvis.repositories.strategy_monitoring import (
     validate_monitoring_run_result,
 )
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.repositories.data_workspace import (
+    DataWorkspaceDataError,
+    DataWorkspaceRepository,
+)
 from marvis.strategy_adoption import AdoptionReasonError, normalize_adoption_reason
 from marvis.strategy_lifecycle import is_locally_adopted
 from marvis.validation.vintage import compute_vintage_curve
@@ -144,6 +163,56 @@ _CALLER_RESULT_FIELDS = frozenset(
         "strategy_spec",
     }
 )
+_UNIVARIATE_TOOL_INPUT_FIELDS = frozenset(
+    {
+        "dataset_id",
+        "expected_content_hash",
+        "workspace_revision",
+        "analysis_generation",
+        "semantic_mapping_hash",
+        "target_col",
+        "drop_nan_labels",
+        "features",
+        "methods",
+        "bin_count",
+        "min_bin_pct",
+        "loan_amount_col",
+        "overdue_amount_col",
+        "sentinel_values",
+    }
+)
+_UNIVARIATE_AUTO_EXCLUDED_ROLES = frozenset(
+    {
+        "target",
+        "id",
+        "phone",
+        "idcard",
+        "name",
+        "date",
+        "month",
+        "weight",
+        "loan_amount",
+        "overdue_amount",
+        "ignore",
+    }
+)
+_UNIVARIATE_FORBIDDEN_EXPLICIT_ROLES = frozenset(
+    {"id", "phone", "idcard", "name", "ignore"}
+)
+_UNIVARIATE_NUMERIC_ROLES = frozenset(
+    {"numeric", "score", "amount", "loan_amount", "overdue_amount", "weight"}
+)
+_UNIVARIATE_CATEGORICAL_ROLES = frozenset({"categorical", "segment", "rule_node"})
+_UNIVARIATE_CANDIDATE_TOOL_SCHEMA_VERSION = "strategy.univariate-candidate-tool.v1"
+_UNIVARIATE_CANDIDATE_PRODUCER_VERSION = "strategy.univariate-candidate/1"
+_UNIVARIATE_CANDIDATE_ARTIFACT_SCHEMA_VERSION = (
+    "strategy.univariate-candidate-artifact.v1"
+)
+_UNIVARIATE_MAX_ROWS = 1_000_000
+_UNIVARIATE_MAX_FEATURES = 50
+_UNIVARIATE_MAX_BINS = 20
+_UNIVARIATE_MAX_CATEGORIES = 100
+_UNIVARIATE_MAX_EVALUATED_CELLS = 50_000_000
 
 
 def tool_vintage_curve(inputs: dict, ctx) -> dict:
@@ -173,7 +242,9 @@ def tool_vintage_curve(inputs: dict, ctx) -> dict:
         raise LabelSemanticsNotDeclaredError(
             target_col=bad_col,
             n_cohorts=_vintage_cohort_count(frame, cohort_col),
-            monotone_heuristic=_vintage_looks_like_snapshot(frame, cohort_col, mob_col, bad_col),
+            monotone_heuristic=_vintage_looks_like_snapshot(
+                frame, cohort_col, mob_col, bad_col
+            ),
         )
     curve = vintage_curve(
         frame,
@@ -201,7 +272,9 @@ def _vintage_cohort_count(frame, cohort_col: str) -> int:
         return 0
 
 
-def _vintage_looks_like_snapshot(frame, cohort_col: str, mob_col: str, bad_col: str) -> bool:
+def _vintage_looks_like_snapshot(
+    frame, cohort_col: str, mob_col: str, bad_col: str
+) -> bool:
     """Reuse the kernel's own conservative snapshot heuristic (single source of truth):
     the incremental path attaches a snapshot red flag exactly when the data looks
     cumulative. If any point carries it, the data looks snapshot-shaped."""
@@ -235,7 +308,14 @@ def tool_roll_rate(inputs: dict, ctx) -> dict:
             "'adjacent_observation'; use bucket_migration for month-end snapshots"
         )
     balance_col = _optional_str(inputs.get("balance_col"))
-    columns = _unique([str(inputs["id_col"]), str(inputs["time_col"]), str(inputs["status_col"]), balance_col])
+    columns = _unique(
+        [
+            str(inputs["id_col"]),
+            str(inputs["time_col"]),
+            str(inputs["status_col"]),
+            balance_col,
+        ]
+    )
     frame, source_evidence, source_path = _task_dataset_frame_with_evidence(
         runtime,
         dataset_id,
@@ -275,7 +355,10 @@ def tool_roll_rate(inputs: dict, ctx) -> dict:
         analysis_kind="roll_rate",
         source_hash=str(source_evidence["dataset_content_hash"]),
         assumptions=assumptions,
-        files=(("roll_rate_csv", "csv", csv_text), ("roll_rate_markdown", "md", markdown_text)),
+        files=(
+            ("roll_rate_csv", "csv", csv_text),
+            ("roll_rate_markdown", "md", markdown_text),
+        ),
     )
     return {
         "states": list(matrix.states),
@@ -341,13 +424,265 @@ def tool_profit_calc(inputs: dict, ctx) -> dict:
         analysis_kind="profit",
         source_hash=str(source_evidence["dataset_content_hash"]),
         assumptions=assumptions,
-        files=(("profit_csv", "csv", csv_text), ("profit_markdown", "md", markdown_text)),
+        files=(
+            ("profit_csv", "csv", csv_text),
+            ("profit_markdown", "md", markdown_text),
+        ),
     )
     return {
         "results": result_rows,
         "assumptions": assumptions,
         "source_evidence": source_evidence,
         "quality_warnings": warnings,
+        "artifacts": artifacts,
+    }
+
+
+@dataclass(frozen=True)
+class _UnivariateWorkspaceBinding:
+    persisted: bool
+    revision: int
+    generation: int
+    active_dataset_id: str | None
+    active_dataset_content_hash: str | None
+    semantic_mapping: DataSemanticMapping
+    semantic_mapping_hash: str
+
+
+@dataclass(frozen=True)
+class _UnivariateDatasetBinding:
+    dataset: Any
+    path: Path
+    content_hash: str
+    registry_metadata_hash: str
+    workspace: _UnivariateWorkspaceBinding
+
+
+def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
+    """Generate task-owned, development-only single-variable candidate evidence."""
+
+    unexpected = sorted(set(inputs) - _UNIVARIATE_TOOL_INPUT_FIELDS)
+    caller_results = sorted(set(inputs) & _CALLER_RESULT_FIELDS)
+    if caller_results:
+        raise StrategyError(
+            "caller cannot supply univariate candidate results: "
+            + ", ".join(caller_results)
+        )
+    if unexpected:
+        raise StrategyError(
+            "unsupported analyze_univariate_candidates inputs: " + ", ".join(unexpected)
+        )
+
+    runtime = _runtime(ctx)
+    task_id = str(ctx.task_id)
+    dataset_id = str(inputs["dataset_id"])
+    target_col = str(inputs["target_col"])
+    binding = _univariate_dataset_binding(
+        runtime,
+        task_id=task_id,
+        dataset_id=dataset_id,
+    )
+    _require_expected_univariate_binding(inputs, binding)
+    methods = _univariate_methods(inputs.get("methods"))
+    requested_sentinels = _normalize_univariate_sentinel_values(
+        inputs.get("sentinel_values")
+    )
+    _preflight_univariate_work_budget(
+        inputs,
+        binding=binding,
+        target_col=target_col,
+        methods=methods,
+        sentinel_count=len(requested_sentinels),
+    )
+    dataset_columns = [str(profile.name) for profile in binding.dataset.columns]
+    if target_col not in dataset_columns:
+        raise StrategyError(f"unknown target column: {target_col}")
+    resolved_roles = _univariate_field_roles(
+        binding.dataset,
+        binding.workspace.semantic_mapping,
+        target_col=target_col,
+    )
+    loan_amount_col = _resolve_univariate_amount_column(
+        inputs.get("loan_amount_col"),
+        role="loan_amount",
+        columns=dataset_columns,
+        field_roles=resolved_roles,
+    )
+    overdue_amount_col = _resolve_univariate_amount_column(
+        inputs.get("overdue_amount_col"),
+        role="overdue_amount",
+        columns=dataset_columns,
+        field_roles=resolved_roles,
+    )
+    if target_col in {loan_amount_col, overdue_amount_col}:
+        raise StrategyError("amount columns cannot use the target column")
+    if loan_amount_col is not None and loan_amount_col == overdue_amount_col:
+        raise StrategyError(
+            "loan_amount_col and overdue_amount_col must be different columns"
+        )
+    features = _resolve_univariate_features(
+        inputs.get("features"),
+        columns=dataset_columns,
+        target_col=target_col,
+        loan_amount_col=loan_amount_col,
+        overdue_amount_col=overdue_amount_col,
+        field_roles=resolved_roles,
+    )
+    required_columns = {
+        target_col,
+        *features,
+        *(
+            column
+            for column in (loan_amount_col, overdue_amount_col)
+            if column is not None
+        ),
+    }
+    projected_columns = [
+        column for column in dataset_columns if column in required_columns
+    ]
+    frame = runtime.backend.read_frame(
+        binding.path,
+        columns=projected_columns,
+    )
+    if sha256_file(binding.path) != binding.content_hash:
+        raise StrategyError(
+            "source dataset changed while univariate analysis was loading"
+        )
+    frame, nan_labels_dropped = resolve_labeled_frame(
+        frame,
+        target_col,
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    )
+    feature_types = _univariate_feature_types(
+        features,
+        frame=frame,
+        field_roles=resolved_roles,
+    )
+    sentinel_mapping, sentinel_red_flags = _univariate_sentinel_mapping(
+        requested_sentinels,
+        features=features,
+        frame=frame,
+        feature_types=feature_types,
+    )
+    estimated_evaluated_cells = _univariate_estimated_evaluated_cells(
+        frame,
+        features=features,
+        feature_types=feature_types,
+        methods=methods,
+        bin_count=int(inputs.get("bin_count", 10)),
+        sentinel_mapping=sentinel_mapping,
+        sentinel_value_count=len(requested_sentinels),
+    )
+    if estimated_evaluated_cells > _UNIVARIATE_MAX_EVALUATED_CELLS:
+        raise StrategyError(
+            "univariate candidate analysis exceeds the combined row/bin work "
+            f"budget ({estimated_evaluated_cells} > "
+            f"{_UNIVARIATE_MAX_EVALUATED_CELLS}); select fewer features or bins"
+        )
+    seed = int(ctx.seed or 0)
+    analysis = analyze_univariate(
+        frame,
+        features=features,
+        target=target_col,
+        methods=(None if not methods else methods),
+        feature_types=feature_types,
+        bin_count=int(inputs.get("bin_count", 10)),
+        sentinel_values=sentinel_mapping,
+        loan_amount=loan_amount_col,
+        overdue_amount=overdue_amount_col,
+        max_rows=_UNIVARIATE_MAX_ROWS,
+        max_features=_UNIVARIATE_MAX_FEATURES,
+        max_bins=_UNIVARIATE_MAX_BINS,
+        max_categories=_UNIVARIATE_MAX_CATEGORIES,
+        min_bin_pct=float(inputs.get("min_bin_pct", 0.02)),
+        seed=seed,
+    )
+    available_method_count = sum(
+        method["status"] == "available"
+        for feature in analysis["features"]
+        for method in feature["methods"]
+    )
+    if available_method_count == 0:
+        raise StrategyError(
+            "univariate analysis produced no available candidate method; "
+            "review feature types, values, and requested methods"
+        )
+    red_flags = _univariate_red_flags(
+        analysis,
+        initial=sentinel_red_flags,
+        loan_amount_col=loan_amount_col,
+        overdue_amount_col=overdue_amount_col,
+    )
+    generation_parameters = {
+        "analysis_schema_version": UNIVARIATE_ANALYSIS_SCHEMA_VERSION,
+        "target_col": target_col,
+        "drop_nan_labels": bool(inputs.get("drop_nan_labels")),
+        "nan_labels_dropped": int(nan_labels_dropped),
+        "features": list(features),
+        "feature_types": dict(feature_types),
+        "methods": list(methods),
+        "method_mode": "type_aware_auto" if not methods else "explicit",
+        "bin_count": int(inputs.get("bin_count", 10)),
+        "min_bin_pct": float(inputs.get("min_bin_pct", 0.02)),
+        "loan_amount_col": loan_amount_col,
+        "overdue_amount_col": overdue_amount_col,
+        "sentinel_values": {
+            feature: list(values) for feature, values in sentinel_mapping.items()
+        },
+        "registry_metadata_hash": binding.registry_metadata_hash,
+        "estimated_evaluated_cells": int(estimated_evaluated_cells),
+        "budget_unit": "row_bin_evaluations",
+    }
+    candidate_evidence = build_candidate_evidence(
+        task_id=task_id,
+        dataset_id=dataset_id,
+        dataset_content_hash=binding.content_hash,
+        workspace_revision=binding.workspace.revision,
+        workspace_generation=binding.workspace.generation,
+        semantic_mapping_hash=binding.workspace.semantic_mapping_hash,
+        generation_parameters=generation_parameters,
+        seed=seed,
+        budget=_UNIVARIATE_MAX_EVALUATED_CELLS,
+        truncated=bool(analysis["resource_budget"]["truncated"]),
+        analysis=analysis,
+        metrics=_univariate_candidate_metrics(analysis),
+        source_refs=(
+            f"dataset:{dataset_id}@sha256:{binding.content_hash}",
+            (
+                f"data-workspace:{task_id}@revision:{binding.workspace.revision}"
+                f":generation:{binding.workspace.generation}"
+            ),
+        ),
+        red_flags=red_flags,
+        producer_version=_UNIVARIATE_CANDIDATE_PRODUCER_VERSION,
+    )
+    bundle = render_strategy_candidate_bundle(candidate_evidence, analysis)
+    _assert_source_unchanged(binding.path, binding.content_hash)
+    artifacts = _write_univariate_candidate_artifacts(
+        runtime,
+        task_id=task_id,
+        binding=binding,
+        candidate_evidence=candidate_evidence,
+        generation_parameters=generation_parameters,
+        bundle=bundle,
+    )
+    return {
+        "schema_version": _UNIVARIATE_CANDIDATE_TOOL_SCHEMA_VERSION,
+        "candidate_id": candidate_evidence["candidate_id"],
+        "evidence_hash": candidate_evidence["evidence_hash"],
+        "validation_status": candidate_evidence["validation_status"],
+        "dataset_id": dataset_id,
+        "dataset_content_hash": binding.content_hash,
+        "workspace_revision": binding.workspace.revision,
+        "workspace_generation": binding.workspace.generation,
+        "semantic_mapping_hash": binding.workspace.semantic_mapping_hash,
+        "target_col": target_col,
+        "nan_labels_dropped": int(nan_labels_dropped),
+        "feature_count": len(features),
+        "available_method_count": int(available_method_count),
+        "rankings": list(analysis["rankings"]),
+        "red_flags": list(candidate_evidence["red_flags"]),
+        "candidate_evidence": candidate_evidence,
         "artifacts": artifacts,
     }
 
@@ -363,8 +698,7 @@ def tool_design_strategy_candidate(inputs: dict, ctx) -> dict:
         )
     if unexpected:
         raise StrategyError(
-            "unsupported design_strategy_candidate inputs: "
-            + ", ".join(unexpected)
+            "unsupported design_strategy_candidate inputs: " + ", ".join(unexpected)
         )
 
     runtime = _runtime(ctx)
@@ -559,9 +893,7 @@ def tool_apply_strategy(inputs: dict, ctx) -> dict:
     task_id = str(ctx.task_id)
     dataset_id = str(inputs["dataset_id"])
     strategy = _strategy(runtime, str(inputs["strategy_id"]), task_id=task_id)
-    spec = parse_strategy_spec(
-        strategy.spec or legacy_strategy_to_spec(strategy)
-    )
+    spec = parse_strategy_spec(strategy.spec or legacy_strategy_to_spec(strategy))
     dataset = _owned_dataset(runtime, dataset_id, task_id=task_id)
     source_path = runtime.registry.resolve_path(dataset.id)
     source_hash = sha256_file(source_path)
@@ -668,8 +1000,7 @@ def _strategy_apply_output_columns(inputs: dict, frame: pd.DataFrame) -> dict[st
         prefix = "strategy_" if raw_prefix is None else raw_prefix
         _require_safe_output_name(prefix, name="output_prefix", is_prefix=True)
         columns = {
-            key: f"{prefix}{suffix}"
-            for key, suffix in _APPLY_OUTPUT_SUFFIXES.items()
+            key: f"{prefix}{suffix}" for key, suffix in _APPLY_OUTPUT_SUFFIXES.items()
         }
     else:
         unsupported = sorted(set(raw_columns) - set(_APPLY_OUTPUT_SUFFIXES))
@@ -694,14 +1025,9 @@ def _strategy_apply_output_columns(inputs: dict, frame: pd.DataFrame) -> dict[st
         raise StrategyError(
             "strategy output column names must be case-insensitively unique"
         )
-    source_columns = {
-        str(column).casefold()
-        for column in frame.columns
-    }
+    source_columns = {str(column).casefold() for column in frame.columns}
     collisions = sorted(
-        column
-        for column in columns.values()
-        if column.casefold() in source_columns
+        column for column in columns.values() if column.casefold() in source_columns
     )
     if collisions:
         raise StrategyError(
@@ -791,8 +1117,7 @@ def _strategy_value_type(value) -> str:
 def _string_counts(values: pd.Series) -> dict[str, int]:
     counts = values.value_counts(dropna=False).to_dict()
     return {
-        str(key): int(counts[key])
-        for key in sorted(counts, key=lambda item: str(item))
+        str(key): int(counts[key]) for key in sorted(counts, key=lambda item: str(item))
     }
 
 
@@ -914,17 +1239,23 @@ def tool_tradeoff_view(inputs: dict, ctx) -> dict:
         task_id=str(ctx.task_id),
     )
     frame, nan_labels_dropped = resolve_labeled_frame(
-        frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+        frame,
+        str(inputs["target_col"]),
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     score_col = str(inputs["score_col"])
     target_col = str(inputs["target_col"])
-    score_direction = normalize_score_direction(_optional_str(inputs.get("score_direction")))
+    score_direction = normalize_score_direction(
+        _optional_str(inputs.get("score_direction"))
+    )
     effective_direction = score_direction or "higher_is_better"
     points = tradeoff_view(
         frame,
         score_col=score_col,
         target_col=target_col,
-        cutoffs=[float(item) for item in inputs["cutoffs"]] if inputs.get("cutoffs") is not None else None,
+        cutoffs=[float(item) for item in inputs["cutoffs"]]
+        if inputs.get("cutoffs") is not None
+        else None,
         profit_params=_optional_profit_params(inputs.get("profit_params")),
         ead_col=_optional_str(inputs.get("ead_col")),
         pd_col=_optional_str(inputs.get("pd_col")),
@@ -982,11 +1313,15 @@ def tool_design_cutoff_bands(inputs: dict, ctx) -> dict:
         task_id=str(ctx.task_id),
     )
     frame, nan_labels_dropped = resolve_labeled_frame(
-        frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+        frame,
+        str(inputs["target_col"]),
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     score_col = str(inputs["score_col"])
     target_col = str(inputs["target_col"])
-    score_direction = normalize_score_direction(_optional_str(inputs.get("score_direction")))
+    score_direction = normalize_score_direction(
+        _optional_str(inputs.get("score_direction"))
+    )
     effective_direction = score_direction or "higher_is_better"
     red_flags: list[dict] = []
     # Direction self-check (S1a): a conflict is a red flag and blocks unless the
@@ -996,7 +1331,9 @@ def tool_design_cutoff_bands(inputs: dict, ctx) -> dict:
         pd.to_numeric(frame[target_col], errors="raise").to_numpy(dtype=float),
         declared_direction=effective_direction,
     )
-    if direction_check.status == "conflict" and not bool(inputs.get("confirm_direction_conflict")):
+    if direction_check.status == "conflict" and not bool(
+        inputs.get("confirm_direction_conflict")
+    ):
         from marvis.data.errors import ScoreDirectionConflictError
 
         raise ScoreDirectionConflictError(
@@ -1070,9 +1407,7 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
             "nan_labels_dropped": 0,
             "label_coverage": None,
         }
-    strategy = _strategy(
-        runtime, str(inputs["strategy_id"]), task_id=str(ctx.task_id)
-    )
+    strategy = _strategy(runtime, str(inputs["strategy_id"]), task_id=str(ctx.task_id))
     baseline = _strategy(runtime, baseline_id, task_id=str(ctx.task_id))
     frame = _dataset_frame(
         runtime,
@@ -1080,7 +1415,9 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
         task_id=str(ctx.task_id),
     )
     frame, nan_labels_dropped = resolve_labeled_frame(
-        frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+        frame,
+        str(inputs["target_col"]),
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     result = compare_strategies(
         frame,
@@ -1094,7 +1431,9 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
     payload = _jsonable(result)
     payload["status"] = "compared"
     payload["nan_labels_dropped"] = nan_labels_dropped
-    payload["label_coverage"] = _label_coverage(len(frame) + nan_labels_dropped, nan_labels_dropped)
+    payload["label_coverage"] = _label_coverage(
+        len(frame) + nan_labels_dropped, nan_labels_dropped
+    )
     return payload
 
 
@@ -1124,7 +1463,9 @@ def tool_limit_pricing_matrix(inputs: dict, ctx) -> dict:
             raise StrategyError(
                 "limit_pricing_matrix artifacts may attach only to a limit or pricing strategy"
             )
-    limit_grid, rate_grid, params, band_edges, n_bands = _validated_pricing_inputs(inputs)
+    limit_grid, rate_grid, params, band_edges, n_bands = _validated_pricing_inputs(
+        inputs
+    )
     columns = _unique([score_col, target_col, pd_col])
     frame, source_evidence, source_path = _task_dataset_frame_with_evidence(
         runtime,
@@ -1142,7 +1483,9 @@ def tool_limit_pricing_matrix(inputs: dict, ctx) -> dict:
         )
     if target_col:
         frame, nan_labels_dropped = resolve_labeled_frame(
-            frame, target_col, drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+            frame,
+            target_col,
+            drop_nan_labels=bool(inputs.get("drop_nan_labels")),
         )
     else:
         nan_labels_dropped = 0
@@ -1165,11 +1508,13 @@ def tool_limit_pricing_matrix(inputs: dict, ctx) -> dict:
     )
     red_flags = [dict(flag) for flag in result.red_flags]
     if nan_labels_dropped:
-        red_flags.append({
-            "code": "nan_labels_dropped",
-            "level": "amber",
-            "message": f"已按确认丢弃 {nan_labels_dropped} 行 NaN 标签样本。",
-        })
+        red_flags.append(
+            {
+                "code": "nan_labels_dropped",
+                "level": "amber",
+                "message": f"已按确认丢弃 {nan_labels_dropped} 行 NaN 标签样本。",
+            }
+        )
 
     assumptions = {
         "dataset_id": dataset_id,
@@ -1221,7 +1566,8 @@ def tool_limit_pricing_matrix(inputs: dict, ctx) -> dict:
 
 def _limit_pricing_csv(result: LimitPricingResult) -> str:
     recommended = {
-        (item["band"], float(item["limit"]), float(item["rate"])) for item in result.recommended
+        (item["band"], float(item["limit"]), float(item["rate"]))
+        for item in result.recommended
     }
     rows = []
     for cell in result.matrix:
@@ -1239,11 +1585,17 @@ def _validated_pricing_inputs(
     inputs: dict,
 ) -> tuple[list[float], list[float], PricingParams, list[float] | None, int]:
     limit_grid = _bounded_numeric_grid(
-        inputs["limit_grid"], name="limit_grid", minimum=0.0, maximum=1_000_000_000_000.0,
+        inputs["limit_grid"],
+        name="limit_grid",
+        minimum=0.0,
+        maximum=1_000_000_000_000.0,
         strictly_greater_than_minimum=True,
     )
     rate_grid = _bounded_numeric_grid(
-        inputs["rate_grid"], name="rate_grid", minimum=0.0, maximum=1.0,
+        inputs["rate_grid"],
+        name="rate_grid",
+        minimum=0.0,
+        maximum=1.0,
     )
     n_bands = int(inputs.get("n_bands", 5))
     if not 1 <= n_bands <= 100:
@@ -1262,7 +1614,9 @@ def _validated_pricing_inputs(
         if len(band_edges) < 2 or any(
             right <= left for left, right in zip(band_edges, band_edges[1:])
         ):
-            raise StrategyError("band_edges must contain at least two strictly increasing values")
+            raise StrategyError(
+                "band_edges must contain at least two strictly increasing values"
+            )
     band_count = len(band_edges) - 1 if band_edges is not None else n_bands
     cell_count = band_count * len(limit_grid) * len(rate_grid)
     if cell_count > 10_000:
@@ -1441,26 +1795,24 @@ def _write_limit_pricing_artifacts(
                     if existing is not None:
                         strategy_artifact_id = str(existing["id"])
                     else:
-                        strategy_artifact_id = (
-                            runtime.strategies.save_strategy_artifact_with_audit_on_connection(
-                                conn,
-                                strategy_id,
-                                kind=kind,
-                                path=path,
-                                audit={
-                                    "kind": "strategy.artifact",
-                                    "target_ref": strategy_id,
-                                    "outcome": "succeeded",
-                                    "detail": {
-                                        "task_id": task_id,
-                                        "kind": kind,
-                                        "path": path,
-                                        "source_dataset_content_hash": source_evidence[
-                                            "dataset_content_hash"
-                                        ],
-                                    },
+                        strategy_artifact_id = runtime.strategies.save_strategy_artifact_with_audit_on_connection(
+                            conn,
+                            strategy_id,
+                            kind=kind,
+                            path=path,
+                            audit={
+                                "kind": "strategy.artifact",
+                                "target_ref": strategy_id,
+                                "outcome": "succeeded",
+                                "detail": {
+                                    "task_id": task_id,
+                                    "kind": kind,
+                                    "path": path,
+                                    "source_dataset_content_hash": source_evidence[
+                                        "dataset_content_hash"
+                                    ],
                                 },
-                            )
+                            },
                         )
                 registered.append(
                     {
@@ -1662,9 +2014,7 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
                 final_path = str(staged.final_path)
                 content_hash = sha256_file(staged.final_path)
                 content_size = staged.final_path.stat().st_size
-                producer_version = _STRATEGY_ADOPTION_ARTIFACT_PRODUCER_VERSIONS[
-                    kind
-                ]
+                producer_version = _STRATEGY_ADOPTION_ARTIFACT_PRODUCER_VERSIONS[kind]
                 provenance = _adoption_artifact_provenance(
                     task_id=task_id,
                     strategy_id=strategy_id,
@@ -1823,10 +2173,7 @@ def _strategy_adoption_evidence(
                 "typed backtest is missing backtest-time source dataset hash evidence; "
                 "rerun the backtest"
             )
-        if (
-            binding["dataset_content_hash"]
-            != binding["backtest_dataset_content_hash"]
-        ):
+        if binding["dataset_content_hash"] != binding["backtest_dataset_content_hash"]:
             raise StrategyError(
                 "source dataset content hash no longer matches the backtest evidence"
             )
@@ -1837,22 +2184,16 @@ def _strategy_adoption_evidence(
             "strategy_id": strategy.id,
             "strategy_type": strategy.strategy_type,
             "source_dataset_id": binding["dataset_id"],
-            "source_dataset_content_hash": binding[
-                "backtest_dataset_content_hash"
-            ],
+            "source_dataset_content_hash": binding["backtest_dataset_content_hash"],
             "strategy_effect_hash": expected_effect_hash,
-            "baseline_effect_hash": backtest.normalized_input[
-                "baseline_effect_hash"
-            ],
+            "baseline_effect_hash": backtest.normalized_input["baseline_effect_hash"],
             "target_col": str(backtest.normalized_input["target_col"]),
             "population_count": int(backtest.population_count),
             "labeled_count": int(backtest.labeled_count),
             "label_coverage": float(backtest.label_coverage),
             "metrics": _jsonable(dict(backtest.metrics)),
             "breakdown": [_jsonable(dict(row)) for row in backtest.breakdown],
-            "transitions": [
-                _jsonable(dict(row)) for row in backtest.transitions
-            ],
+            "transitions": [_jsonable(dict(row)) for row in backtest.transitions],
             # Per-row pricing economics is deliberately excluded from adoption
             # evidence and audit. The typed envelope has already reconciled it to
             # these aggregates, which are sufficient for governance decisions.
@@ -1882,16 +2223,11 @@ def _strategy_adoption_evidence(
             "provide labeled approved observations and rerun the backtest"
         )
     binding = _backtest_binding(runtime, backtest_id)
-    if (
-        binding["dataset_task_id"] is not None
-        and binding["dataset_task_id"] != task_id
-    ):
+    if binding["dataset_task_id"] is not None and binding["dataset_task_id"] != task_id:
         raise StrategyError(
             "legacy backtest source dataset must belong to the same task as the strategy"
         )
-    effect_hash = strategy_spec_hash(
-        strategy.spec or legacy_strategy_to_spec(strategy)
-    )
+    effect_hash = strategy_spec_hash(strategy.spec or legacy_strategy_to_spec(strategy))
     metrics = {
         key: _jsonable(value)
         for key, value in approval_metrics.items()
@@ -1936,9 +2272,7 @@ def _strategy_adoption_evidence(
 
 
 def _adoption_decision_table_rules(strategy: Strategy) -> list[dict]:
-    spec = parse_strategy_spec(
-        strategy.spec or legacy_strategy_to_spec(strategy)
-    )
+    spec = parse_strategy_spec(strategy.spec or legacy_strategy_to_spec(strategy))
     rows = [_jsonable(rule) for rule in strategy.rules]
     default_action = spec.default_action
     default_decision = {
@@ -2027,10 +2361,7 @@ def _require_typed_adoption_quality(result: StrategyBacktestResult) -> None:
                 "pricing adoption requires complete pricing economics evidence"
             )
         return
-    if (
-        metrics.get("segment_count", 0) <= 0
-        or metrics.get("overall_bad_rate") is None
-    ):
+    if metrics.get("segment_count", 0) <= 0 or metrics.get("overall_bad_rate") is None:
         raise StrategyError(
             "segmentation adoption requires non-empty labeled segment evidence"
         )
@@ -2083,9 +2414,7 @@ def _backtest_binding(runtime, backtest_id: str) -> dict[str, str | None]:
             audit_detail = None
         if isinstance(audit_detail, dict):
             candidate = audit_detail.get("source_dataset_content_hash")
-            if isinstance(candidate, str) and re.fullmatch(
-                r"[0-9a-f]{64}", candidate
-            ):
+            if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f]{64}", candidate):
                 backtest_dataset_content_hash = candidate
     return {
         "strategy_id": str(row["strategy_id"]),
@@ -2159,9 +2488,7 @@ def _build_adoption_monitoring_plan(
         "strategy_effect_hash": evidence["strategy_effect_hash"],
         "baseline_effect_hash": evidence["baseline_effect_hash"],
         "source_dataset_id": evidence["source_dataset_id"],
-        "source_dataset_content_hash": evidence[
-            "source_dataset_content_hash"
-        ],
+        "source_dataset_content_hash": evidence["source_dataset_content_hash"],
         "source_backtest_id": evidence["backtest_id"],
         "population_count": evidence["population_count"],
         "labeled_count": evidence["labeled_count"],
@@ -2207,23 +2534,26 @@ def _build_adoption_monitoring_plan(
                 "approved_bad_rate": approval_metrics["approved_bad_rate"],
             }
         )
-    return monitoring_plan_from_dict({
-        "plan_version": PLAN_VERSION,
-        "monitoring_plan_id": monitoring_plan_id,
-        "strategy_id": strategy_id,
-        "version": int(version),
-        "revision": 1,
-        "supersedes_plan_id": None,
-        "cadence_days": DEFAULT_CADENCE_DAYS,
-        "experiment_id": experiment_id,
-        "last_run_at": None,
-        "thresholds": _with_model_monitoring_thresholds(
-            thresholds,
-            experiment_id=experiment_id,
-        ),
-        "expectation_baseline": baseline,
-        "economics_bindings": economics_bindings,
-    }, source="adoption")
+    return monitoring_plan_from_dict(
+        {
+            "plan_version": PLAN_VERSION,
+            "monitoring_plan_id": monitoring_plan_id,
+            "strategy_id": strategy_id,
+            "version": int(version),
+            "revision": 1,
+            "supersedes_plan_id": None,
+            "cadence_days": DEFAULT_CADENCE_DAYS,
+            "experiment_id": experiment_id,
+            "last_run_at": None,
+            "thresholds": _with_model_monitoring_thresholds(
+                thresholds,
+                experiment_id=experiment_id,
+            ),
+            "expectation_baseline": baseline,
+            "economics_bindings": economics_bindings,
+        },
+        source="adoption",
+    )
 
 
 def _with_model_monitoring_thresholds(
@@ -2232,8 +2562,7 @@ def _with_model_monitoring_thresholds(
     experiment_id: str | None,
 ) -> dict[str, dict]:
     combined = {
-        str(check_id): dict(spec)
-        for check_id, spec in strategy_thresholds.items()
+        str(check_id): dict(spec) for check_id, spec in strategy_thresholds.items()
     }
     if experiment_id is None:
         return combined
@@ -2246,10 +2575,7 @@ def _with_model_monitoring_thresholds(
             + ", ".join(collisions)
         )
     combined.update(
-        {
-            str(check_id): dict(spec)
-            for check_id, spec in MONITOR_RUN_THRESHOLDS.items()
-        }
+        {str(check_id): dict(spec) for check_id, spec in MONITOR_RUN_THRESHOLDS.items()}
     )
     return combined
 
@@ -2523,7 +2849,9 @@ def _monitoring_disposition_context_on_connection(
         (str(run_row["dataset_id"]),),
     ).fetchone()
     if dataset_row is None or str(dataset_row["task_id"]) != task_id:
-        raise StrategyError("monitoring run dataset does not belong to the strategy task")
+        raise StrategyError(
+            "monitoring run dataset does not belong to the strategy task"
+        )
     result, result_hash = _validated_monitoring_run_result(run_row)
     level = str(run_row["overall_level"])
     if result.get("overall_level") != level:
@@ -2594,7 +2922,9 @@ def _validated_monitoring_run_result(row) -> tuple[dict, str]:
             allow_nan=False,
         )
     except (TypeError, ValueError) as exc:
-        raise StrategyError("stored monitoring run result is not canonical JSON") from exc
+        raise StrategyError(
+            "stored monitoring run result is not canonical JSON"
+        ) from exc
     calculated_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     stored_hash = _required_disposition_sha256(
         row["result_hash"], field="stored monitoring run result hash"
@@ -2662,7 +2992,9 @@ def _monitoring_threshold_candidate(
     for raw_check_id, raw_changes in raw_patch.items():
         check_id = str(raw_check_id)
         if check_id not in thresholds:
-            raise StrategyError(f"unknown monitoring check in threshold_patch: {check_id}")
+            raise StrategyError(
+                f"unknown monitoring check in threshold_patch: {check_id}"
+            )
         if not isinstance(raw_changes, dict) or not raw_changes:
             raise StrategyError(
                 f"threshold_patch.{check_id} must be a non-empty object"
@@ -2711,9 +3043,7 @@ def _monitoring_threshold_candidate(
             normalized_patch[check_id] = effective_changes
 
     if not normalized_patch:
-        raise StrategyError(
-            "threshold_patch must change at least one warn/fail value"
-        )
+        raise StrategyError("threshold_patch must change at least one warn/fail value")
 
     candidate = replace(
         disposition_context.monitoring_plan,
@@ -2868,10 +3198,7 @@ def _positive_disposition_integer(value, *, field: str) -> int:
 
 
 def _required_disposition_sha256(value, *, field: str) -> str:
-    if (
-        not isinstance(value, str)
-        or re.fullmatch(r"[0-9a-fA-F]{64}", value) is None
-    ):
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-fA-F]{64}", value) is None:
         raise StrategyError(f"{field} must be a sha256 hash")
     return value.lower()
 
@@ -3055,9 +3382,7 @@ def tool_render_challenger_report(inputs: dict, ctx) -> dict:
         champion=champion,
         challenger_backtest_carrier=inputs.get("challenger_backtest"),
     )
-    adopted = is_locally_adopted(
-        strategy_meta["status"], strategy_meta["asset_status"]
-    )
+    adopted = is_locally_adopted(strategy_meta["status"], strategy_meta["asset_status"])
     markdown = _challenger_report_markdown(
         strategy_id=strategy_id,
         champion_id=champion_id,
@@ -3102,9 +3427,13 @@ def _trusted_challenger_report_evidence(
         raise StrategyError(f"typed backtest not found: {backtest_id}")
     binding = _backtest_binding(runtime, backtest_id)
     if binding["strategy_id"] != strategy.id:
-        raise StrategyError("challenger backtest does not belong to challenger strategy")
+        raise StrategyError(
+            "challenger backtest does not belong to challenger strategy"
+        )
     if binding["dataset_task_id"] != task_id:
-        raise StrategyError("challenger backtest dataset does not belong to strategy task")
+        raise StrategyError(
+            "challenger backtest dataset does not belong to strategy task"
+        )
     current_hash = binding["dataset_content_hash"]
     evidence_hash = binding["backtest_dataset_content_hash"]
     if (
@@ -3112,7 +3441,9 @@ def _trusted_challenger_report_evidence(
         or evidence_hash is None
         or not hmac.compare_digest(current_hash, evidence_hash)
     ):
-        raise StrategyError("challenger backtest dataset evidence is missing or changed")
+        raise StrategyError(
+            "challenger backtest dataset evidence is missing or changed"
+        )
     normalized = dict(persisted.normalized_input)
     challenger_effect_hash = runtime.strategies.get_strategy_spec_hash(strategy.id)
     champion_effect_hash = runtime.strategies.get_strategy_spec_hash(champion.id)
@@ -3145,7 +3476,9 @@ def _trusted_challenger_report_evidence(
         approval_profit_inputs=approval_profit_inputs,
     )
     if challenger_result.to_dict() != persisted.to_dict():
-        raise StrategyError("persisted challenger backtest no longer recomputes exactly")
+        raise StrategyError(
+            "persisted challenger backtest no longer recomputes exactly"
+        )
     champion_result = run_typed_backtest(
         frame,
         champion.spec or legacy_strategy_to_spec(champion),
@@ -3220,13 +3553,15 @@ def _trusted_approval_comparison(
     red_flags: list[dict] = []
     swap_in = _approval_transition_group(
         challenger.transitions,
-        lambda row: row.get("from_action") != "approve"
-        and row.get("to_action") == "approve",
+        lambda row: (
+            row.get("from_action") != "approve" and row.get("to_action") == "approve"
+        ),
     )
     swap_out = _approval_transition_group(
         challenger.transitions,
-        lambda row: row.get("from_action") == "approve"
-        and row.get("to_action") != "approve",
+        lambda row: (
+            row.get("from_action") == "approve" and row.get("to_action") != "approve"
+        ),
     )
     if (
         swap_in["count"]
@@ -3343,19 +3678,25 @@ def _challenger_report_markdown(
             f"| {label} | {_report_num(challenger_backtest.get(key))} | "
             f"{_report_num(champion_backtest.get(key))} | {_report_num(deltas.get(key))} |"
         )
-    lines.extend([
-        "",
-        "## 结论",
-        "",
-        str(compare.get("summary_text") or ""),
-        "",
-    ])
-    red_flags = [flag for flag in (compare.get("red_flags") or []) if isinstance(flag, dict)]
+    lines.extend(
+        [
+            "",
+            "## 结论",
+            "",
+            str(compare.get("summary_text") or ""),
+            "",
+        ]
+    )
+    red_flags = [
+        flag for flag in (compare.get("red_flags") or []) if isinstance(flag, dict)
+    ]
     if red_flags:
         lines.append("## 红旗")
         lines.append("")
         for flag in red_flags:
-            lines.append(f"- [{flag.get('level', '')}] {flag.get('code', '')}: {flag.get('message', '')}")
+            lines.append(
+                f"- [{flag.get('level', '')}] {flag.get('code', '')}: {flag.get('message', '')}"
+            )
         lines.append("")
     return "\n".join(lines)
 
@@ -3378,7 +3719,9 @@ def tool_render_strategy_doc(inputs: dict, ctx) -> dict:
     strategy_id = str(inputs["strategy_id"])
     strategy = _strategy(runtime, strategy_id, task_id=str(ctx.task_id))
     meta = runtime.strategies.get_strategy_meta(strategy_id)
-    backtests = [_jsonable(result) for result in runtime.strategies.list_backtests(strategy_id)]
+    backtests = [
+        _jsonable(result) for result in runtime.strategies.list_backtests(strategy_id)
+    ]
     artifacts = [
         artifact
         for artifact in runtime.strategies.list_strategy_artifacts(strategy_id)
@@ -3443,7 +3786,9 @@ def tool_mine_rules(inputs: dict, ctx) -> dict:
         columns=columns,
     )
     frame, nan_labels_dropped = resolve_labeled_frame(
-        frame, target_col, drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+        frame,
+        target_col,
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     resolved_features = feature_cols or _default_feature_cols(frame, target_col)
     min_support = _float_or(inputs.get("min_support"), 0.02)
@@ -3473,10 +3818,14 @@ def tool_evaluate_rule_set(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset_id = str(inputs["dataset_id"])
     target_col = str(inputs["target_col"])
-    rules_ordered = [dict(rule) for rule in (inputs.get("rules") or []) if isinstance(rule, dict)]
+    rules_ordered = [
+        dict(rule) for rule in (inputs.get("rules") or []) if isinstance(rule, dict)
+    ]
     frame = _dataset_frame(runtime, dataset_id, task_id=str(ctx.task_id))
     frame, nan_labels_dropped = resolve_labeled_frame(
-        frame, target_col, drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+        frame,
+        target_col,
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     result = evaluate_rule_set(
         frame,
@@ -3500,10 +3849,17 @@ def tool_select_rule_set(inputs: dict, ctx) -> dict:
     the parsed 「选 1,3,5」/「全选」/「去掉 2」 instruction -- exactly the band_edges
     precedent. A ``None`` selection means "keep all candidates" (no filter yet).
     """
-    candidate_rules = [dict(rule) for rule in (inputs.get("candidate_rules") or []) if isinstance(rule, dict)]
+    candidate_rules = [
+        dict(rule)
+        for rule in (inputs.get("candidate_rules") or [])
+        if isinstance(rule, dict)
+    ]
     selection = inputs.get("selection")
     decision = str(inputs.get("decision") or "reject")
-    selected = [_build_ready_rule(rule, decision) for rule in _apply_rule_selection(candidate_rules, selection)]
+    selected = [
+        _build_ready_rule(rule, decision)
+        for rule in _apply_rule_selection(candidate_rules, selection)
+    ]
     return {
         "selected_rules": selected,
         "selected_count": len(selected),
@@ -3590,7 +3946,9 @@ def _mine_red_flags(candidate_rules: list[dict], nan_labels_dropped: int) -> lis
     return red_flags
 
 
-def _evaluate_red_flags(result: dict, rules_ordered: list[dict], nan_labels_dropped: int) -> list[dict]:
+def _evaluate_red_flags(
+    result: dict, rules_ordered: list[dict], nan_labels_dropped: int
+) -> list[dict]:
     red_flags: list[dict] = []
     waterfall = result.get("waterfall") or []
     for row in waterfall:
@@ -3629,6 +3987,8 @@ def _evaluate_red_flags(result: dict, rules_ordered: list[dict], nan_labels_drop
             }
         )
     return red_flags
+
+
 def _default_feature_cols(frame: pd.DataFrame, target_col: str) -> list[str]:
     numeric = frame.select_dtypes(include="number").columns.tolist()
     return [column for column in numeric if column != target_col]
@@ -3781,6 +4141,834 @@ def _band_stats_from_inputs(value) -> list[dict]:
     return []
 
 
+def _univariate_dataset_binding(
+    runtime: "_Runtime",
+    *,
+    task_id: str,
+    dataset_id: str,
+) -> _UnivariateDatasetBinding:
+    dataset = _owned_dataset(runtime, dataset_id, task_id=task_id)
+    try:
+        path = runtime.registry.resolve_verified_path(dataset_id)
+    except (DatasetContentDriftError, KeyError, OSError, ValueError) as exc:
+        raise StrategyError(
+            "univariate candidate source dataset failed immutable hash verification"
+        ) from exc
+    content_hash = str(dataset.content_hash or "")
+    if sha256_file(path) != content_hash:
+        raise StrategyError(
+            "univariate candidate source dataset content hash is invalid"
+        )
+    try:
+        snapshot = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
+            task_id
+        )
+    except (DataWorkspaceDataError, KeyError, TypeError, ValueError) as exc:
+        raise StrategyError(
+            "univariate candidate data workspace binding is invalid"
+        ) from exc
+    if snapshot.active_dataset_id is not None:
+        if snapshot.active_dataset_id != dataset_id:
+            raise StrategyError(
+                "univariate candidate dataset is not the active task workspace dataset"
+            )
+        if snapshot.active_dataset_content_hash != content_hash:
+            raise StrategyError(
+                "univariate candidate workspace content hash does not match the dataset"
+            )
+    semantic_hash = data_semantic_mapping_hash(snapshot.semantic_mapping)
+    with connect(runtime.settings.db_path) as conn:
+        persisted = (
+            conn.execute(
+                "SELECT 1 FROM data_workspaces WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            is not None
+        )
+        registry_metadata_hash = _univariate_registry_metadata_hash_on_connection(
+            conn,
+            task_id=task_id,
+            dataset_id=dataset_id,
+            expected_content_hash=content_hash,
+        )
+    workspace = _UnivariateWorkspaceBinding(
+        persisted=persisted,
+        revision=snapshot.revision,
+        generation=snapshot.analysis_generation,
+        active_dataset_id=snapshot.active_dataset_id,
+        active_dataset_content_hash=snapshot.active_dataset_content_hash,
+        semantic_mapping=snapshot.semantic_mapping,
+        semantic_mapping_hash=semantic_hash,
+    )
+    return _UnivariateDatasetBinding(
+        dataset=dataset,
+        path=Path(path),
+        content_hash=content_hash,
+        registry_metadata_hash=registry_metadata_hash,
+        workspace=workspace,
+    )
+
+
+def _require_expected_univariate_binding(
+    inputs: Mapping[str, Any],
+    binding: _UnivariateDatasetBinding,
+) -> None:
+    expected_hash = inputs.get("expected_content_hash")
+    expected_revision = inputs.get("workspace_revision")
+    expected_generation = inputs.get("analysis_generation")
+    expected_semantic_hash = inputs.get("semantic_mapping_hash")
+    if (
+        not isinstance(expected_hash, str)
+        or not hmac.compare_digest(expected_hash, binding.content_hash)
+        or isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision != binding.workspace.revision
+        or isinstance(expected_generation, bool)
+        or not isinstance(expected_generation, int)
+        or expected_generation != binding.workspace.generation
+        or not isinstance(expected_semantic_hash, str)
+        or not hmac.compare_digest(
+            expected_semantic_hash,
+            binding.workspace.semantic_mapping_hash,
+        )
+    ):
+        raise StrategyError(
+            "univariate candidate data binding changed after user confirmation"
+        )
+
+
+def _univariate_registry_metadata_hash_on_connection(
+    conn,
+    *,
+    task_id: str,
+    dataset_id: str,
+    expected_content_hash: str,
+) -> str:
+    row = conn.execute(
+        """
+        SELECT task_id, role, row_count, columns_json, has_target, target_col,
+               content_hash
+          FROM datasets
+         WHERE id = ?
+        """,
+        (dataset_id,),
+    ).fetchone()
+    if row is None or str(row["task_id"]) != task_id:
+        raise StrategyError(f"dataset not found: {dataset_id}")
+    registered_hash = row["content_hash"]
+    if not isinstance(registered_hash, str) or not hmac.compare_digest(
+        registered_hash,
+        expected_content_hash,
+    ):
+        raise StrategyError("univariate candidate registered dataset hash changed")
+    columns_json = row["columns_json"]
+    if not isinstance(columns_json, str):
+        raise StrategyError("univariate candidate dataset schema is invalid")
+    try:
+        json.loads(columns_json)
+    except json.JSONDecodeError as exc:
+        raise StrategyError("univariate candidate dataset schema is invalid") from exc
+    payload = {
+        "role": str(row["role"]),
+        "row_count": int(row["row_count"]),
+        "columns_json": columns_json,
+        "has_target": int(row["has_target"]),
+        "target_col": row["target_col"],
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _univariate_field_roles(
+    dataset,
+    semantic_mapping: DataSemanticMapping,
+    *,
+    target_col: str,
+) -> dict[str, str]:
+    roles = {
+        str(column): str(role) for column, role in semantic_mapping.field_roles.items()
+    }
+    inferred_sensitive: dict[str, str] = {}
+    for profile in getattr(dataset, "columns", ()):
+        column = str(getattr(profile, "name", ""))
+        role = str(getattr(profile, "semantic_role", "") or "")
+        if (
+            column
+            and column != target_col
+            and role in _UNIVARIATE_FORBIDDEN_EXPLICIT_ROLES
+        ):
+            inferred_sensitive[column] = role
+        if role == "target" and column != target_col:
+            continue
+        if column and role:
+            roles.setdefault(column, role)
+    # A user mapping may refine ordinary business semantics, but it cannot
+    # downgrade registry-inferred identifiers or personal data into a reportable
+    # categorical feature.
+    roles.update(inferred_sensitive)
+    for column in [column for column, role in roles.items() if role == "target"]:
+        if column != target_col:
+            del roles[column]
+    roles[target_col] = "target"
+    return roles
+
+
+def _resolve_univariate_amount_column(
+    raw_value,
+    *,
+    role: str,
+    columns: list[str],
+    field_roles: Mapping[str, str],
+) -> str | None:
+    if raw_value not in (None, ""):
+        if not isinstance(raw_value, str):
+            raise StrategyError(f"{role}_col must be a column name")
+        if raw_value not in columns:
+            raise StrategyError(f"unknown {role} column: {raw_value}")
+        return raw_value
+    candidates = sorted(
+        column
+        for column, assigned_role in field_roles.items()
+        if assigned_role == role and column in columns
+    )
+    if len(candidates) > 1:
+        raise StrategyError(
+            f"multiple {role} columns are mapped; choose one explicitly: "
+            + ", ".join(candidates)
+        )
+    return candidates[0] if candidates else None
+
+
+def _resolve_univariate_features(
+    raw_features,
+    *,
+    columns: list[str],
+    target_col: str,
+    loan_amount_col: str | None,
+    overdue_amount_col: str | None,
+    field_roles: Mapping[str, str],
+) -> list[str]:
+    if raw_features is None:
+        requested: list[str] = []
+    elif isinstance(raw_features, (str, bytes, bytearray)) or not isinstance(
+        raw_features,
+        (list, tuple),
+    ):
+        raise StrategyError("features must be an ordered array")
+    else:
+        requested = list(raw_features)
+    if any(not isinstance(feature, str) or not feature for feature in requested):
+        raise StrategyError("features must contain non-empty column names")
+    if len(requested) != len(set(requested)):
+        raise StrategyError("features must not contain duplicates")
+    missing = sorted(set(requested) - set(columns))
+    if missing:
+        raise StrategyError("unknown feature columns: " + ", ".join(missing))
+    if target_col in requested:
+        raise StrategyError("target cannot also be a univariate feature")
+    forbidden = sorted(
+        feature
+        for feature in requested
+        if field_roles.get(feature) in _UNIVARIATE_FORBIDDEN_EXPLICIT_ROLES
+    )
+    if forbidden:
+        raise StrategyError(
+            "identifier, personal-data, or ignored fields cannot be univariate "
+            "strategy candidates: " + ", ".join(forbidden)
+        )
+    if requested:
+        features = requested
+    else:
+        excluded_columns = {
+            target_col,
+            *(
+                column
+                for column in (loan_amount_col, overdue_amount_col)
+                if column is not None
+            ),
+        }
+        features = [
+            str(column)
+            for column in columns
+            if str(column) not in excluded_columns
+            and field_roles.get(str(column)) not in _UNIVARIATE_AUTO_EXCLUDED_ROLES
+        ]
+    if not features:
+        raise StrategyError(
+            "no eligible univariate features remain; provide an explicit feature list"
+        )
+    if len(features) > _UNIVARIATE_MAX_FEATURES:
+        raise StrategyError(
+            "univariate candidate analysis accepts at most "
+            f"{_UNIVARIATE_MAX_FEATURES} features per bounded run; "
+            "select a smaller explicit feature set"
+        )
+    return features
+
+
+def _univariate_feature_types(
+    features: list[str],
+    *,
+    frame: pd.DataFrame,
+    field_roles: Mapping[str, str],
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for feature in features:
+        role = field_roles.get(feature)
+        if role in _UNIVARIATE_NUMERIC_ROLES:
+            result[feature] = "numeric"
+        elif role in _UNIVARIATE_CATEGORICAL_ROLES:
+            result[feature] = "categorical"
+        else:
+            result[feature] = (
+                "numeric"
+                if pd.api.types.is_numeric_dtype(frame[feature].dtype)
+                and not pd.api.types.is_bool_dtype(frame[feature].dtype)
+                else "categorical"
+            )
+    return result
+
+
+def _univariate_methods(raw_methods) -> tuple[str, ...]:
+    if raw_methods is None:
+        return ()
+    if isinstance(raw_methods, (str, bytes, bytearray)) or not isinstance(
+        raw_methods,
+        (list, tuple),
+    ):
+        raise StrategyError("methods must be an ordered array")
+    methods = tuple(raw_methods)
+    supported = {"equal_frequency", "equal_width", "chimerge", "tree"}
+    if len(methods) != len(set(methods)) or any(
+        not isinstance(method, str) or method not in supported for method in methods
+    ):
+        raise StrategyError(
+            "methods must be unique and selected from equal_frequency, "
+            "equal_width, chimerge, tree"
+        )
+    order = {
+        "equal_frequency": 0,
+        "equal_width": 1,
+        "chimerge": 2,
+        "tree": 3,
+    }
+    return tuple(sorted(methods, key=order.__getitem__))
+
+
+def _preflight_univariate_work_budget(
+    inputs: Mapping[str, Any],
+    *,
+    binding: _UnivariateDatasetBinding,
+    target_col: str,
+    methods: tuple[str, ...],
+    sentinel_count: int,
+) -> None:
+    row_count = int(binding.dataset.row_count)
+    if not 1 <= row_count <= _UNIVARIATE_MAX_ROWS:
+        raise StrategyError(
+            "univariate candidate source row count exceeds the configured budget"
+        )
+    raw_features = inputs.get("features")
+    if isinstance(raw_features, (list, tuple)) and raw_features:
+        feature_count = len(raw_features)
+    else:
+        roles = _univariate_field_roles(
+            binding.dataset,
+            binding.workspace.semantic_mapping,
+            target_col=target_col,
+        )
+        explicitly_excluded = {
+            target_col,
+            *(
+                value
+                for value in (
+                    inputs.get("loan_amount_col"),
+                    inputs.get("overdue_amount_col"),
+                )
+                if isinstance(value, str) and value
+            ),
+        }
+        feature_count = sum(
+            str(profile.name) not in explicitly_excluded
+            and roles.get(str(profile.name)) not in _UNIVARIATE_AUTO_EXCLUDED_ROLES
+            for profile in binding.dataset.columns
+        )
+    if feature_count > _UNIVARIATE_MAX_FEATURES:
+        raise StrategyError(
+            "univariate candidate analysis accepts at most "
+            f"{_UNIVARIATE_MAX_FEATURES} features per bounded run; "
+            "select a smaller explicit feature set"
+        )
+    method_count = len(methods) if methods else 4
+    bin_count = int(inputs.get("bin_count", 10))
+    estimated = (
+        row_count
+        * feature_count
+        * (method_count * (bin_count + sentinel_count + 1) + sentinel_count)
+    )
+    if estimated > _UNIVARIATE_MAX_EVALUATED_CELLS:
+        raise StrategyError(
+            "univariate candidate analysis exceeds the combined row/bin work "
+            f"budget ({estimated} > {_UNIVARIATE_MAX_EVALUATED_CELLS}); "
+            "select fewer features, bins, or sentinel values"
+        )
+
+
+def _univariate_estimated_evaluated_cells(
+    frame: pd.DataFrame,
+    *,
+    features: list[str],
+    feature_types: Mapping[str, str],
+    methods: tuple[str, ...],
+    bin_count: int,
+    sentinel_mapping: Mapping[str, list[str | int | float]],
+    sentinel_value_count: int,
+) -> int:
+    groups = 0
+    for feature in features:
+        sentinel_count = len(sentinel_mapping.get(feature, ()))
+        if feature_types[feature] == "numeric":
+            method_count = len(methods) if methods else 4
+            groups += method_count * (bin_count + sentinel_count + 1)
+            continue
+        category_count = int(frame[feature].nunique(dropna=True))
+        missing_count = int(bool(frame[feature].isna().any()))
+        groups += max(1, category_count + sentinel_count + missing_count)
+    sentinel_discovery = len(features) * sentinel_value_count
+    return int(len(frame) * (groups + sentinel_discovery))
+
+
+def _normalize_univariate_sentinel_values(
+    raw_values,
+) -> list[str | int | float]:
+    if raw_values is None:
+        values: list[str | int | float] = []
+    elif isinstance(raw_values, (str, bytes, bytearray)) or not isinstance(
+        raw_values,
+        (list, tuple),
+    ):
+        raise StrategyError("sentinel_values must be an ordered array")
+    else:
+        values = list(raw_values)
+    if len(values) > 20:
+        raise StrategyError("sentinel_values accepts at most 20 values")
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (str, int, float))
+        or (isinstance(value, float) and not math.isfinite(value))
+        for value in values
+    ):
+        raise StrategyError("sentinel_values must contain finite numbers or text")
+    identities = [
+        json.dumps(
+            [type(value).__name__, value],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        for value in values
+    ]
+    if len(identities) != len(set(identities)):
+        raise StrategyError("sentinel_values must not contain duplicates")
+    return values
+
+
+def _univariate_sentinel_mapping(
+    raw_values,
+    *,
+    features: list[str],
+    frame: pd.DataFrame,
+    feature_types: Mapping[str, str],
+) -> tuple[dict[str, list[str | int | float]], list[str]]:
+    values = _normalize_univariate_sentinel_values(raw_values)
+    mapping: dict[str, list[str | int | float]] = {}
+    red_flags: list[str] = []
+    for feature in features:
+        compatible: list[str | int | float] = []
+        compatible_keys: set[tuple[str, str]] = set()
+        ignored: list[str] = []
+        for value in values:
+            if feature_types[feature] == "numeric" and isinstance(value, str):
+                ignored.append(repr(value))
+                continue
+            if _univariate_sentinel_observed(
+                frame[feature],
+                value,
+                feature_type=feature_types[feature],
+            ):
+                identity = _univariate_sentinel_identity(value)
+                if identity in compatible_keys:
+                    red_flags.append(
+                        f"sentinel_equivalent_duplicate:{feature}:{value!r}"
+                    )
+                    continue
+                compatible_keys.add(identity)
+                compatible.append(value)
+        if compatible:
+            mapping[feature] = compatible
+        if ignored:
+            red_flags.append(f"sentinel_incompatible:{feature}:" + ",".join(ignored))
+    return mapping, red_flags
+
+
+def _univariate_sentinel_identity(
+    value: str | int | float,
+) -> tuple[str, str]:
+    if isinstance(value, (int, float)):
+        return ("number", repr(float(value)))
+    return ("string", value)
+
+
+def _univariate_sentinel_observed(
+    series: pd.Series,
+    value: str | int | float,
+    *,
+    feature_type: str,
+) -> bool:
+    if feature_type == "numeric":
+        numeric = pd.to_numeric(series, errors="coerce")
+        return bool((numeric == float(value)).fillna(False).any())
+    try:
+        return bool((series == value).fillna(False).any())
+    except (TypeError, ValueError):
+        return False
+
+
+def _univariate_candidate_metrics(
+    analysis: Mapping[str, Any],
+) -> list[MetricObservation]:
+    observations: list[MetricObservation] = []
+    for feature in analysis["features"]:
+        feature_name = str(feature["feature"])
+        for method in feature["methods"]:
+            method_name = str(method["method"])
+            prefix = f"{feature_name}.{method_name}"
+            metrics = method.get("metrics")
+            available = method.get("status") == "available" and isinstance(
+                metrics,
+                Mapping,
+            )
+            for metric_key in ("iv", "ks", "auc"):
+                observations.extend(
+                    _metric_observations(
+                        f"{prefix}.{metric_key}",
+                        count=(
+                            ("observed", metrics[metric_key])
+                            if available
+                            else ("unavailable", None)
+                        ),
+                        loan_amount=("unavailable", None),
+                        overdue_amount=("unavailable", None),
+                    )
+                )
+            if not available:
+                continue
+            total_amounts = metrics["amount_metrics"]
+            for bin_row in method["bins"]:
+                bin_prefix = f"{prefix}.bin.{bin_row['id']}"
+                observations.extend(
+                    _metric_observations(
+                        f"{bin_prefix}.hit_rate",
+                        count=("observed", bin_row["share"]),
+                        loan_amount=_amount_share_observation(
+                            bin_row["amount_metrics"]["loan_amount"],
+                            total_amounts["loan_amount"],
+                        ),
+                        overdue_amount=_amount_share_observation(
+                            bin_row["amount_metrics"]["overdue_amount"],
+                            total_amounts["overdue_amount"],
+                        ),
+                    )
+                )
+                observations.extend(
+                    _metric_observations(
+                        f"{bin_prefix}.overdue_rate",
+                        count=("not_applicable", None),
+                        loan_amount=_kernel_rate_observation(
+                            bin_row["amount_metrics"]["overdue_rate"]
+                        ),
+                        overdue_amount=("not_applicable", None),
+                    )
+                )
+    return observations
+
+
+def _metric_observations(
+    metric_name: str,
+    *,
+    count: tuple[str, int | float | None],
+    loan_amount: tuple[str, int | float | None],
+    overdue_amount: tuple[str, int | float | None],
+) -> list[MetricObservation]:
+    return [
+        MetricObservation(metric_name, "count", *count),
+        MetricObservation(metric_name, "loan_amount", *loan_amount),
+        MetricObservation(metric_name, "overdue_amount", *overdue_amount),
+    ]
+
+
+def _amount_share_observation(
+    selected: Mapping[str, Any],
+    total: Mapping[str, Any],
+) -> tuple[str, float | None]:
+    if selected.get("status") != "available" or total.get("status") != "available":
+        return ("unavailable", None)
+    denominator = float(total["sum"])
+    if denominator == 0:
+        return ("not_applicable", None)
+    return ("observed", float(selected["sum"]) / denominator)
+
+
+def _kernel_rate_observation(
+    rate: Mapping[str, Any],
+) -> tuple[str, float | None]:
+    status = rate.get("status")
+    if status == "available":
+        return ("observed", float(rate["value"]))
+    if status == "not_applicable":
+        return ("not_applicable", None)
+    return ("unavailable", None)
+
+
+def _univariate_red_flags(
+    analysis: Mapping[str, Any],
+    *,
+    initial: list[str],
+    loan_amount_col: str | None,
+    overdue_amount_col: str | None,
+) -> list[str]:
+    red_flags = list(initial)
+    if loan_amount_col is None:
+        red_flags.append("loan_amount_metrics_unavailable:column_not_configured")
+    if overdue_amount_col is None:
+        red_flags.append("overdue_amount_metrics_unavailable:column_not_configured")
+    available_count = 0
+    for feature in analysis["features"]:
+        for method in feature["methods"]:
+            prefix = f"{feature['feature']}.{method['method']}"
+            if method["status"] != "available":
+                evidence = method.get("evidence") or {}
+                kind = (
+                    evidence.get("kind", "unknown")
+                    if isinstance(evidence, dict)
+                    else "unknown"
+                )
+                red_flags.append(f"{prefix}:unavailable:{kind}")
+                continue
+            available_count += 1
+            method_metrics = method.get("metrics") or {}
+            amount_metrics = method_metrics.get("amount_metrics") or {}
+            for dimension in ("loan_amount", "overdue_amount"):
+                measure = amount_metrics.get(dimension) or {}
+                if (
+                    measure.get("status") == "available"
+                    and float(measure.get("coverage_rate", 0.0)) < 1.0
+                ):
+                    red_flags.append(f"{prefix}:{dimension}_partial_coverage")
+            for evidence in method.get("evidence") or []:
+                if isinstance(evidence, Mapping):
+                    kind = str(evidence.get("kind") or "diagnostic")
+                    severity = str(evidence.get("severity") or "warning")
+                    red_flags.append(f"{prefix}:{severity}:{kind}")
+    if available_count == 0:
+        red_flags.append("no_available_univariate_methods")
+    return sorted(set(red_flags))
+
+
+def _write_univariate_candidate_artifacts(
+    runtime: "_Runtime",
+    *,
+    task_id: str,
+    binding: _UnivariateDatasetBinding,
+    candidate_evidence: Mapping[str, Any],
+    generation_parameters: Mapping[str, Any],
+    bundle: Mapping[str, bytes],
+) -> list[dict[str, Any]]:
+    if set(bundle) != {"json", "xlsx"} or any(
+        not isinstance(content, bytes) or not content for content in bundle.values()
+    ):
+        raise StrategyError(
+            "strategy candidate report bundle must contain non-empty JSON and XLSX bytes"
+        )
+    candidate_id = str(candidate_evidence["candidate_id"])
+    evidence_hash = str(candidate_evidence["evidence_hash"])
+    out_dir = Path(runtime.settings.tasks_dir) / task_id / "strategy_candidates"
+    kinds = {
+        "json": "strategy_candidate_json",
+        "xlsx": "strategy_candidate_xlsx",
+    }
+    uow = ArtifactUnitOfWork()
+    staged_specs = []
+    db_committed = False
+    rollback_attempted_under_lock = False
+    try:
+        for report_format in ("json", "xlsx"):
+            content = bundle[report_format]
+            content_hash = hashlib.sha256(content).hexdigest()
+            staged = uow.stage_file(
+                out_dir,
+                f"{candidate_id}_{content_hash[:12]}.{report_format}",
+            )
+            staged.path.write_bytes(content)
+            staged_specs.append(
+                (report_format, kinds[report_format], staged, content_hash)
+            )
+
+        # Acquire the SQLite writer lock before promoting deterministic final
+        # paths.  Otherwise two identical invocations can promote over one
+        # another and a late rollback can delete the peer's committed file.
+        with runtime.task_artifacts.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                _require_univariate_candidate_binding_on_connection(
+                    conn,
+                    task_id=task_id,
+                    binding=binding,
+                )
+                _assert_source_unchanged(binding.path, binding.content_hash)
+                uow.promote_all()
+                records = []
+                for report_format, kind, staged, content_hash in staged_specs:
+                    if sha256_file(staged.final_path) != content_hash:
+                        raise StrategyError(
+                            "strategy candidate report changed before registration"
+                        )
+                    provenance = {
+                        "schema_version": _UNIVARIATE_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+                        "producer_version": _UNIVARIATE_CANDIDATE_PRODUCER_VERSION,
+                        "candidate_id": candidate_id,
+                        "evidence_hash": evidence_hash,
+                        "dataset_id": str(binding.dataset.id),
+                        "dataset_content_hash": binding.content_hash,
+                        "registry_metadata_hash": binding.registry_metadata_hash,
+                        "workspace_revision": binding.workspace.revision,
+                        "workspace_generation": binding.workspace.generation,
+                        "semantic_mapping_hash": binding.workspace.semantic_mapping_hash,
+                        "generation_parameters": dict(generation_parameters),
+                        "format": report_format,
+                    }
+                    records.append(
+                        runtime.task_artifacts.register_on_connection(
+                            conn,
+                            task_id=task_id,
+                            kind=kind,
+                            path=str(staged.final_path),
+                            content_hash=content_hash,
+                            origin_tool="strategy.analyze_univariate_candidates",
+                            provenance=provenance,
+                        )
+                    )
+                # Commit explicitly while the connection is still in this try
+                # block.  Any registration/commit failure can therefore restore
+                # promoted files before the SQLite writer lock is released.
+                conn.commit()
+                db_committed = True
+            except Exception:
+                # Do not retry a partially failed promoted-file rollback after
+                # this transaction releases its cross-process writer lock.
+                rollback_attempted_under_lock = True
+                uow.rollback()
+                raise
+        uow.commit()
+    except Exception:
+        # Once the DB commit succeeds the registered final paths are durable.
+        # Never let a later backup-cleanup error delete a peer's identical file.
+        if not db_committed and not rollback_attempted_under_lock:
+            uow.rollback()
+        raise
+    return [
+        {
+            "artifact_id": str(record["id"]),
+            "kind": kind,
+            "filename": staged.final_path.name,
+            "content_hash": content_hash,
+            "download_url": (
+                f"/api/tasks/{quote(task_id, safe='')}"
+                f"/task-artifacts/{quote(str(record['id']), safe='')}/download"
+            ),
+        }
+        for (_report_format, kind, staged, content_hash), record in zip(
+            staged_specs,
+            records,
+            strict=True,
+        )
+    ]
+
+
+def _require_univariate_candidate_binding_on_connection(
+    conn,
+    *,
+    task_id: str,
+    binding: _UnivariateDatasetBinding,
+) -> None:
+    live_metadata_hash = _univariate_registry_metadata_hash_on_connection(
+        conn,
+        task_id=task_id,
+        dataset_id=str(binding.dataset.id),
+        expected_content_hash=binding.content_hash,
+    )
+    if not hmac.compare_digest(
+        live_metadata_hash,
+        binding.registry_metadata_hash,
+    ):
+        raise StrategyError(
+            "univariate candidate dataset metadata changed during analysis"
+        )
+    row = conn.execute(
+        """
+        SELECT revision, active_dataset_id, active_dataset_content_hash,
+               analysis_generation, semantic_mapping_json
+          FROM data_workspaces
+         WHERE task_id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    expected = binding.workspace
+    if not expected.persisted:
+        if row is not None:
+            raise StrategyError(
+                "univariate candidate data workspace changed during analysis"
+            )
+        return
+    if row is None:
+        raise StrategyError(
+            "univariate candidate data workspace disappeared during analysis"
+        )
+    mapping_json = row["semantic_mapping_json"]
+    if not isinstance(mapping_json, str):
+        raise StrategyError("univariate candidate semantic mapping is invalid")
+    try:
+        mapping = data_semantic_mapping_from_dict(json.loads(mapping_json))
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise StrategyError("univariate candidate semantic mapping is invalid") from exc
+    live_semantic_hash = data_semantic_mapping_hash(mapping)
+    active_hash = row["active_dataset_content_hash"]
+    if (
+        int(row["revision"]) != expected.revision
+        or int(row["analysis_generation"]) != expected.generation
+        or row["active_dataset_id"] != expected.active_dataset_id
+        or row["active_dataset_content_hash"] != expected.active_dataset_content_hash
+        or not hmac.compare_digest(
+            live_semantic_hash,
+            expected.semantic_mapping_hash,
+        )
+        or (
+            active_hash is not None
+            and not hmac.compare_digest(str(active_hash), binding.content_hash)
+        )
+    ):
+        raise StrategyError(
+            "univariate candidate data workspace changed during analysis"
+        )
+
+
 class _Runtime(PackRuntime):
     def _extend(self, ctx) -> None:
         self.strategies = StrategyRepository(self.settings.db_path)
@@ -3801,7 +4989,9 @@ def _dataset_frame(
     dataset = runtime.registry.get(dataset_id)
     if str(dataset.task_id) != str(task_id):
         raise StrategyError(f"dataset not found: {dataset_id}")
-    return runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id), columns=columns)
+    return runtime.backend.read_frame(
+        runtime.registry.resolve_path(dataset.id), columns=columns
+    )
 
 
 def _task_dataset_frame_with_evidence(
@@ -3850,11 +5040,7 @@ def _owned_dataset(runtime: _Runtime, dataset_id: str, *, task_id: str):
 def _strategy(runtime: _Runtime, strategy_id: str, *, task_id: str) -> Strategy:
     strategy = runtime.strategies.get_strategy(strategy_id)
     metadata = runtime.strategies.get_strategy_meta(strategy_id)
-    if (
-        strategy is None
-        or metadata is None
-        or str(metadata["task_id"]) != str(task_id)
-    ):
+    if strategy is None or metadata is None or str(metadata["task_id"]) != str(task_id):
         raise StrategyError(f"strategy not found: {strategy_id}")
     return strategy
 
@@ -4055,7 +5241,9 @@ def _profit_markdown(
         "",
         "## 结果",
         "",
-        _markdown_table(columns, [[row.get(column) for column in columns] for row in result_rows]),
+        _markdown_table(
+            columns, [[row.get(column) for column in columns] for row in result_rows]
+        ),
     ]
     if warnings:
         lines.extend(
@@ -4124,7 +5312,10 @@ def _roll_rate_markdown(
                 "",
                 "## 数据质量提示",
                 "",
-                *[f"- {warning.get('message') or warning.get('code')}" for warning in warnings],
+                *[
+                    f"- {warning.get('message') or warning.get('code')}"
+                    for warning in warnings
+                ],
             ]
         )
     return "\n".join(lines).rstrip() + "\n"
@@ -4132,20 +5323,23 @@ def _roll_rate_markdown(
 
 def _markdown_table(columns: list, rows: list[list]) -> str:
     def cell(value) -> str:
-        return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ")
+        return (
+            str(value if value is not None else "")
+            .replace("|", "\\|")
+            .replace("\n", " ")
+        )
 
     header = "| " + " | ".join(cell(column) for column in columns) + " |"
     separator = "| " + " | ".join("---" for _ in columns) + " |"
     if not rows:
-        return "\n".join((header, separator, "| " + " | ".join("" for _ in columns) + " |"))
+        return "\n".join(
+            (header, separator, "| " + " | ".join("" for _ in columns) + " |")
+        )
     return "\n".join(
         [
             header,
             separator,
-            *[
-                "| " + " | ".join(cell(value) for value in row) + " |"
-                for row in rows
-            ],
+            *["| " + " | ".join(cell(value) for value in row) + " |" for row in rows],
         ]
     )
 
@@ -4212,16 +5406,11 @@ def _typed_economics_inputs(
             "operating_cost_per_loan",
         )
     )
-    allowed = {
-        key
-        for name in required
-        for key in (f"{name}_col", f"{name}_value")
-    }
+    allowed = {key for name in required for key in (f"{name}_col", f"{name}_value")}
     unsupported = sorted(set(values) - allowed)
     if unsupported:
         raise StrategyError(
-            f"unsupported {strategy_type} economics_inputs: "
-            + ", ".join(unsupported)
+            f"unsupported {strategy_type} economics_inputs: " + ", ".join(unsupported)
         )
     normalized: dict = {}
     missing: list[str] = []

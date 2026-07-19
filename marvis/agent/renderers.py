@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+
 # ---------------------------------------------------------------------------
 # tool -> table registry (decision #4 in the driver spec)
 # Each renderer turns a tool's raw output into (markdown text, [table dicts]).
@@ -75,8 +76,12 @@ def _render_screen(o: dict):
     n = o.get("n_screened") or o.get("n") or (len(selected) + len(leak) + len(susp))
     text = (
         f"**特征筛选完成**:从 {n} 个候选中提议保留 **{len(selected)}** 个特征。\n"
-        f"- 剔除疑似**泄漏** {len(leak_names)} 个" + (f"（如 {leak_names[:3]}）" if leak_names else "") + "\n"
-        f"- 疑似**模型输出/评分**列 {len(susp_names)} 个" + (f"（如 {susp_names[:5]}）" if susp_names else "") + "\n"
+        f"- 剔除疑似**泄漏** {len(leak_names)} 个"
+        + (f"（如 {leak_names[:3]}）" if leak_names else "")
+        + "\n"
+        f"- 疑似**模型输出/评分**列 {len(susp_names)} 个"
+        + (f"（如 {susp_names[:5]}）" if susp_names else "")
+        + "\n"
         f"- 剔除**不可用**（常量/稀疏） {len(unusable)} 个"
     )
     if excluded_categorical:
@@ -85,7 +90,11 @@ def _render_screen(o: dict):
             for item in excluded_categorical[:8]
             if isinstance(item, dict)
         )
-        more = f" 等共 {len(excluded_categorical)} 个" if len(excluded_categorical) > 8 else ""
+        more = (
+            f" 等共 {len(excluded_categorical)} 个"
+            if len(excluded_categorical) > 8
+            else ""
+        )
         text += (
             f"\n- **{len(excluded_categorical)} 个类别列未入模**:{preview}{more}；"
             "如需使用，请先用 woe_encode_categorical 编码，或改用 catboost（原生支持类别列）。"
@@ -101,28 +110,60 @@ def _render_screen(o: dict):
         rows = []
         for feat in selected[:20]:
             s = scores.get(feat) if isinstance(scores.get(feat), dict) else {}
-            rows.append([feat, _num(s.get("ks")), _num(s.get("iv")), _pct(s.get("missing_rate"))])
-        tables.append({"title": "入选特征（前20）", "columns": ["特征", "KS", "IV", "缺失率"], "rows": rows})
+            rows.append(
+                [
+                    feat,
+                    _num(s.get("ks")),
+                    _num(s.get("iv")),
+                    _pct(s.get("missing_rate")),
+                ]
+            )
+        tables.append(
+            {
+                "title": "入选特征（前20）",
+                "columns": ["特征", "KS", "IV", "缺失率"],
+                "rows": rows,
+            }
+        )
     if leak:
-        tables.append({
-            "title": f"疑似泄漏（KS≥阈值，共{len(leak)}）",
-            "columns": ["特征", "KS", "原因"],
-            "rows": [[f, _num(k), r] for f, k, r in (_triple(i) for i in leak[:20])],
-        })
+        tables.append(
+            {
+                "title": f"疑似泄漏（KS≥阈值，共{len(leak)}）",
+                "columns": ["特征", "KS", "原因"],
+                "rows": [
+                    [f, _num(k), r] for f, k, r in (_triple(i) for i in leak[:20])
+                ],
+            }
+        )
     if susp:
-        tables.append({
-            "title": f"疑似模型输出/评分列（共{len(susp)}）",
-            "columns": ["特征", "KS", "原因"],
-            "rows": [[f, _num(k), r] for f, k, r in (_triple(i) for i in susp[:20])],
-        })
+        tables.append(
+            {
+                "title": f"疑似模型输出/评分列（共{len(susp)}）",
+                "columns": ["特征", "KS", "原因"],
+                "rows": [
+                    [f, _num(k), r] for f, k, r in (_triple(i) for i in susp[:20])
+                ],
+            }
+        )
     if unusable:
         rows = []
         for item in unusable[:20]:
             if isinstance(item, (list, tuple)):
-                rows.append([str(item[0]) if item else "", str(item[1]) if len(item) > 1 else ""])
+                rows.append(
+                    [
+                        str(item[0]) if item else "",
+                        str(item[1]) if len(item) > 1 else "",
+                    ]
+                )
             else:
                 rows.append([str(item), ""])
-        tables.append({"title": f"剔除·不可用（常量/稀疏，共{len(unusable)}）", "columns": ["特征", "原因"], "rows": rows})
+        tables.append(
+            {
+                "title": f"剔除·不可用（常量/稀疏，共{len(unusable)}）",
+                "columns": ["特征", "原因"],
+                "rows": rows,
+            }
+        )
     return text, tables
 
 
@@ -134,11 +175,39 @@ def _render_select(o: dict):
     dropped = o.get("dropped") or []
     scores = o.get("scores") if isinstance(o.get("scores"), dict) else {}
     n_in = len(selected) + len(dropped)
-    low_iv = [item for item in dropped if isinstance(item, (list, tuple)) and len(item) > 1 and "low" in str(item[1]) and "IV" in str(item[1])]
-    collinear = [item for item in dropped if isinstance(item, (list, tuple)) and len(item) > 1 and "collinear" in str(item[1])]
-    high_vif = [item for item in dropped if isinstance(item, (list, tuple)) and len(item) > 1 and "VIF" in str(item[1])]
-    top_k_dropped = [item for item in dropped if isinstance(item, (list, tuple)) and len(item) > 1 and "top_k" in str(item[1])]
-    other = [item for item in dropped if item not in low_iv and item not in collinear and item not in high_vif and item not in top_k_dropped]
+    low_iv = [
+        item
+        for item in dropped
+        if isinstance(item, (list, tuple))
+        and len(item) > 1
+        and "low" in str(item[1])
+        and "IV" in str(item[1])
+    ]
+    collinear = [
+        item
+        for item in dropped
+        if isinstance(item, (list, tuple))
+        and len(item) > 1
+        and "collinear" in str(item[1])
+    ]
+    high_vif = [
+        item
+        for item in dropped
+        if isinstance(item, (list, tuple)) and len(item) > 1 and "VIF" in str(item[1])
+    ]
+    top_k_dropped = [
+        item
+        for item in dropped
+        if isinstance(item, (list, tuple)) and len(item) > 1 and "top_k" in str(item[1])
+    ]
+    other = [
+        item
+        for item in dropped
+        if item not in low_iv
+        and item not in collinear
+        and item not in high_vif
+        and item not in top_k_dropped
+    ]
     text = (
         f"**精选特征完成**:从 {n_in} 个候选中精选出 **{len(selected)}** 个特征"
         f"（淘汰 {len(dropped)} 个）。\n"
@@ -159,7 +228,13 @@ def _render_select(o: dict):
         for feat in selected[:20]:
             s = scores.get(feat) if isinstance(scores.get(feat), dict) else {}
             rows.append([feat, _num(s.get("iv")), _num(s.get("ks"))])
-        tables.append({"title": f"最终清单（前20，共{len(selected)}）", "columns": ["特征", "IV", "KS"], "rows": rows})
+        tables.append(
+            {
+                "title": f"最终清单（前20，共{len(selected)}）",
+                "columns": ["特征", "IV", "KS"],
+                "rows": rows,
+            }
+        )
     if dropped:
         rows = []
         for item in dropped[:30]:
@@ -169,7 +244,13 @@ def _render_select(o: dict):
             else:
                 feat, reason = str(item), ""
             rows.append([feat, reason])
-        tables.append({"title": f"淘汰清单（前30，共{len(dropped)}）", "columns": ["特征", "原因"], "rows": rows})
+        tables.append(
+            {
+                "title": f"淘汰清单（前30，共{len(dropped)}）",
+                "columns": ["特征", "原因"],
+                "rows": rows,
+            }
+        )
     return text, tables
 
 
@@ -182,47 +263,66 @@ def _render_choose_modeling_spec(o: dict):
         f"**建模规格已生成**:目标类型 `{target_type}`，"
         f"算法 {'/'.join(recipes) or '-'}，选择策略 `{metric_policy}`。"
     )
-    tables = [{
-        "title": "建模规格",
-        "columns": ["项目", "值"],
-        "rows": [
-            ["目标类型", target_type],
-            ["主调参算法", str(o.get("recipe") or "")],
-            ["训练算法", "/".join(recipes)],
-            ["样本权重列", sample_weight_col or "不使用"],
-            ["候选特征数", _fmt(o.get("feature_count", ""))],
-            ["调参轮数", _fmt(o.get("n_trials", ""))],
-            ["选择指标", metric_policy],
-        ],
-    }]
-    eligible = o.get("eligible_algorithms") or []
-    disabled = [item for item in (o.get("disabled_algorithms") or []) if isinstance(item, dict)]
-    if eligible or disabled:
-        tables.append({
-            "title": "算法可用性",
-            "columns": ["算法", "状态", "说明"],
-            "rows": (
-                [[str(recipe), "可用", ""] for recipe in eligible]
-                + [[str(item.get("recipe", "")), "不可用", str(item.get("reason", ""))] for item in disabled]
-            ),
-        })
-    diagnostics = [item for item in (o.get("sample_weight_diagnostics") or []) if isinstance(item, dict)]
-    if diagnostics:
-        tables.append({
-            "title": "样本权重候选诊断",
-            "columns": ["列", "状态", "缺失率", "范围", "均值", "说明"],
+    tables = [
+        {
+            "title": "建模规格",
+            "columns": ["项目", "值"],
             "rows": [
-                [
-                    str(item.get("column") or ""),
-                    "可用" if item.get("valid") else "需检查",
-                    _pct(item.get("missing_rate")),
-                    _range_text(item.get("min"), item.get("max")),
-                    _fmt(item.get("mean")),
-                    str(item.get("reason") or "已排除出入模特征"),
-                ]
-                for item in diagnostics
+                ["目标类型", target_type],
+                ["主调参算法", str(o.get("recipe") or "")],
+                ["训练算法", "/".join(recipes)],
+                ["样本权重列", sample_weight_col or "不使用"],
+                ["候选特征数", _fmt(o.get("feature_count", ""))],
+                ["调参轮数", _fmt(o.get("n_trials", ""))],
+                ["选择指标", metric_policy],
             ],
-        })
+        }
+    ]
+    eligible = o.get("eligible_algorithms") or []
+    disabled = [
+        item for item in (o.get("disabled_algorithms") or []) if isinstance(item, dict)
+    ]
+    if eligible or disabled:
+        tables.append(
+            {
+                "title": "算法可用性",
+                "columns": ["算法", "状态", "说明"],
+                "rows": (
+                    [[str(recipe), "可用", ""] for recipe in eligible]
+                    + [
+                        [
+                            str(item.get("recipe", "")),
+                            "不可用",
+                            str(item.get("reason", "")),
+                        ]
+                        for item in disabled
+                    ]
+                ),
+            }
+        )
+    diagnostics = [
+        item
+        for item in (o.get("sample_weight_diagnostics") or [])
+        if isinstance(item, dict)
+    ]
+    if diagnostics:
+        tables.append(
+            {
+                "title": "样本权重候选诊断",
+                "columns": ["列", "状态", "缺失率", "范围", "均值", "说明"],
+                "rows": [
+                    [
+                        str(item.get("column") or ""),
+                        "可用" if item.get("valid") else "需检查",
+                        _pct(item.get("missing_rate")),
+                        _range_text(item.get("min"), item.get("max")),
+                        _fmt(item.get("mean")),
+                        str(item.get("reason") or "已排除出入模特征"),
+                    ]
+                    for item in diagnostics
+                ],
+            }
+        )
     warnings = [str(item) for item in (o.get("warnings") or [])]
     if warnings:
         text += "\n" + "\n".join(f"- {warning}" for warning in warnings)
@@ -232,12 +332,18 @@ def _render_choose_modeling_spec(o: dict):
 def _render_configure_tuning(o: dict):
     tune_enabled = bool(o.get("tune_enabled"))
     sample_weight_col = str(o.get("sample_weight_col") or "")
-    budgets = o.get("n_trials_by_recipe") if isinstance(o.get("n_trials_by_recipe"), dict) else {}
+    budgets = (
+        o.get("n_trials_by_recipe")
+        if isinstance(o.get("n_trials_by_recipe"), dict)
+        else {}
+    )
     recipes = [str(item) for item in (o.get("recipes") or []) if str(item)]
     total_n_trials = o.get("total_n_trials")
     multi = len(budgets) > 1
     if multi:
-        budget_note = "、".join(f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets)
+        budget_note = "、".join(
+            f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets
+        )
         text = (
             f"**调参配置已生成**:候选算法 {'/'.join(recipes)}，"
             f"{'每个算法各自执行' if tune_enabled else '跳过'}两阶段随机搜索"
@@ -255,24 +361,37 @@ def _render_configure_tuning(o: dict):
         ["随机搜索", "是" if tune_enabled else "否"],
     ]
     if multi:
-        rows.append(["按算法调参预算（轮数，总预算=Σ各配方预算）", "、".join(f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets)])
+        rows.append(
+            [
+                "按算法调参预算（轮数，总预算=Σ各配方预算）",
+                "、".join(
+                    f"{recipe}={budgets[recipe]}"
+                    for recipe in recipes
+                    if recipe in budgets
+                ),
+            ]
+        )
         rows.append(["总预算", _fmt(total_n_trials)])
     else:
         rows.append(["调参轮数", _fmt(o.get("n_trials", ""))])
     rows.append(["样本权重列", sample_weight_col or "不使用"])
     rows.append(["说明", str(o.get("reason") or "")])
-    tables = [{
-        "title": "调参配置",
-        "columns": ["项目", "值"],
-        "rows": rows,
-    }]
+    tables = [
+        {
+            "title": "调参配置",
+            "columns": ["项目", "值"],
+            "rows": rows,
+        }
+    ]
     params = o.get("params") if isinstance(o.get("params"), dict) else {}
     if params:
-        tables.append({
-            "title": "固定/控制参数",
-            "columns": ["参数", "值"],
-            "rows": [[str(key), _fmt(value)] for key, value in params.items()],
-        })
+        tables.append(
+            {
+                "title": "固定/控制参数",
+                "columns": ["参数", "值"],
+                "rows": [[str(key), _fmt(value)] for key, value in params.items()],
+            }
+        )
     return text, tables
 
 
@@ -287,7 +406,11 @@ def _render_tune(o: dict):
         # ranked by the in-time selection score (OOT is the unbiased final metric).
         ranked = sorted(
             trials,
-            key=lambda t: t.get("score") if isinstance(t.get("score"), (int, float)) else float("-inf"),
+            key=lambda t: (
+                t.get("score")
+                if isinstance(t.get("score"), (int, float))
+                else float("-inf")
+            ),
             reverse=True,
         )
         rows = []
@@ -295,28 +418,64 @@ def _render_tune(o: dict):
             train_ks, test_ks = trial.get("train_ks"), trial.get("test_ks")
             # overfit gaps: prefer stored values, fall back to deriving train-test.
             gap_tt = trial.get("overfit_gap_tt")
-            if gap_tt is None and isinstance(train_ks, (int, float)) and isinstance(test_ks, (int, float)):
+            if (
+                gap_tt is None
+                and isinstance(train_ks, (int, float))
+                and isinstance(test_ks, (int, float))
+            ):
                 gap_tt = train_ks - test_ks
-            rows.append([
-                str(rank), _num(train_ks), _num(test_ks), _num(trial.get("oot_ks")),
-                _num(trial.get("test_auc")), _num(trial.get("oot_auc")),
-                _num(trial.get("lift_head_5")), _num(trial.get("lift_head_10")),
-                _num(trial.get("lift_tail_5")), _num(trial.get("lift_tail_10")),
-                _num(gap_tt), _num(trial.get("overfit_gap_to")),
-            ])
-        tables.append({
-            "title": "trials 排行（按 in-time 选优；前15）",
-            "columns": [
-                "#", "train_ks", "test_ks", "oot_ks", "test_auc", "oot_auc",
-                "头部lift5%", "头部lift10%", "尾部lift5%", "尾部lift10%",
-                "过拟合gap（tt）", "过拟合gap（to）",
-            ],
-            "rows": rows,
-        })
+            rows.append(
+                [
+                    str(rank),
+                    _num(train_ks),
+                    _num(test_ks),
+                    _num(trial.get("oot_ks")),
+                    _num(trial.get("test_auc")),
+                    _num(trial.get("oot_auc")),
+                    _num(trial.get("lift_head_5")),
+                    _num(trial.get("lift_head_10")),
+                    _num(trial.get("lift_tail_5")),
+                    _num(trial.get("lift_tail_10")),
+                    _num(gap_tt),
+                    _num(trial.get("overfit_gap_to")),
+                ]
+            )
+        tables.append(
+            {
+                "title": "trials 排行（按 in-time 选优；前15）",
+                "columns": [
+                    "#",
+                    "train_ks",
+                    "test_ks",
+                    "oot_ks",
+                    "test_auc",
+                    "oot_auc",
+                    "头部lift5%",
+                    "头部lift10%",
+                    "尾部lift5%",
+                    "尾部lift10%",
+                    "过拟合gap（tt）",
+                    "过拟合gap（to）",
+                ],
+                "rows": rows,
+            }
+        )
     if best_metrics:
-        tables.append({"title": "最优 trial 指标", "columns": ["指标", "值"], "rows": [[k, _fmt(v)] for k, v in best_metrics.items()]})
+        tables.append(
+            {
+                "title": "最优 trial 指标",
+                "columns": ["指标", "值"],
+                "rows": [[k, _fmt(v)] for k, v in best_metrics.items()],
+            }
+        )
     if best_params:
-        tables.append({"title": "最优超参", "columns": ["参数", "值"], "rows": [[k, _fmt(v)] for k, v in best_params.items()]})
+        tables.append(
+            {
+                "title": "最优超参",
+                "columns": ["参数", "值"],
+                "rows": [[k, _fmt(v)] for k, v in best_params.items()],
+            }
+        )
     return text, tables
 
 
@@ -325,16 +484,26 @@ def _render_train(o: dict):
     text = "**训练完成**。"
     tables = []
     if metrics:
-        scalar = {k: v for k, v in metrics.items() if isinstance(v, (int, float, str, bool))}
+        scalar = {
+            k: v for k, v in metrics.items() if isinstance(v, (int, float, str, bool))
+        }
         if scalar:
-            tables.append({"title": "模型指标", "columns": ["指标", "值"], "rows": [[k, _fmt(v)] for k, v in scalar.items()]})
+            tables.append(
+                {
+                    "title": "模型指标",
+                    "columns": ["指标", "值"],
+                    "rows": [[k, _fmt(v)] for k, v in scalar.items()],
+                }
+            )
     importance = o.get("feature_importance") or []
     rows = []
     for item in importance[:15]:
         if isinstance(item, (list, tuple)) and item:
             rows.append([str(item[0]), _fmt(item[1]) if len(item) > 1 else ""])
     if rows:
-        tables.append({"title": "特征重要性（前15）", "columns": ["特征", "重要性"], "rows": rows})
+        tables.append(
+            {"title": "特征重要性（前15）", "columns": ["特征", "重要性"], "rows": rows}
+        )
     return text, tables
 
 
@@ -362,15 +531,19 @@ def _penalized_test_ks(metrics: dict):
     train_ks = metrics.get("weighted_train_ks")
     if not isinstance(train_ks, (int, float)):
         train_ks = metrics.get("train_ks")
-    gap = float(train_ks) - float(test_ks) if isinstance(train_ks, (int, float)) else 0.0
+    gap = (
+        float(train_ks) - float(test_ks) if isinstance(train_ks, (int, float)) else 0.0
+    )
     return float(test_ks) - _CHAMPION_OVERFIT_PENALTY * max(0.0, gap)
 
 
 def _key_value(key: str):
     """Per-experiment value extractor that reads a plain metrics dict key."""
+
     def _extract(metrics: dict):
         value = metrics.get(key)
         return float(value) if isinstance(value, (int, float)) else None
+
     return _extract
 
 
@@ -404,7 +577,9 @@ def _selection_axis(o: dict):
     return ("按 OOT KS", _key_value("oot_ks"), True)
 
 
-def _champion_evidence_text(experiments, best_id, value_of, selector_label, higher_is_better) -> str:
+def _champion_evidence_text(
+    experiments, best_id, value_of, selector_label, higher_is_better
+) -> str:
     """LT-11 (B.1/B.2) + C9: champion evidence -- the SELECTION metric's champion
     value and the gap to the runner-up algorithm on that SAME axis, both read from
     the experiments' own metrics via ``value_of`` (INV-1: presentation only, the gap
@@ -413,6 +588,7 @@ def _champion_evidence_text(experiments, best_id, value_of, selector_label, high
     construction; a defensive guard emits neutral phrasing if the champion is
     somehow not the extreme. Empty when the champion or a runner-up value is
     unavailable."""
+
     def _val(exp):
         return value_of(exp.get("metrics") or {})
 
@@ -421,12 +597,17 @@ def _champion_evidence_text(experiments, best_id, value_of, selector_label, high
     if champion_value is None:
         return ""
     others = [
-        (e, _val(e)) for e in experiments
+        (e, _val(e))
+        for e in experiments
         if e.get("experiment_id") != best_id and _val(e) is not None
     ]
     if not others:
         return f"（依据：{selector_label}={champion_value:.4f}，为唯一可比算法）"
-    runner_up, runner_value = max(others, key=lambda item: item[1]) if higher_is_better else min(others, key=lambda item: item[1])
+    runner_up, runner_value = (
+        max(others, key=lambda item: item[1])
+        if higher_is_better
+        else min(others, key=lambda item: item[1])
+    )
     gap = champion_value - runner_value
     champion_leads = gap >= 0 if higher_is_better else gap <= 0
     if not champion_leads:
@@ -453,9 +634,25 @@ def _render_train_models(o: dict):
     rows = []
     best_metrics: dict = {}
     if target_type == "continuous":
-        metric_columns = ["train_rmse", "test_rmse", "oot_rmse", "test_mae", "oot_mae", "test_r2", "oot_r2"]
+        metric_columns = [
+            "train_rmse",
+            "test_rmse",
+            "oot_rmse",
+            "test_mae",
+            "oot_mae",
+            "test_r2",
+            "oot_r2",
+        ]
     elif target_type == "multiclass":
-        metric_columns = ["train_macro_auc", "test_macro_auc", "oot_macro_auc", "test_logloss", "oot_logloss", "test_accuracy", "oot_accuracy"]
+        metric_columns = [
+            "train_macro_auc",
+            "test_macro_auc",
+            "oot_macro_auc",
+            "test_logloss",
+            "oot_logloss",
+            "test_accuracy",
+            "oot_accuracy",
+        ]
     else:
         metric_columns = ["train_ks", "test_ks", "oot_ks", "test_auc", "oot_auc"]
     # C9: the evidence SENTENCE metric comes from the tool's emitted selection_metric
@@ -486,17 +683,27 @@ def _render_train_models(o: dict):
             f"**训练完成**:对比 {len(experiments)} 个算法，"
             f"最优 **{best_recipe}**（★；{selector_label}）{evidence}。"
         )
-        tables.append({
-            "title": "候选模型对比",
-            "columns": ["算法", *metric_columns],
-            "rows": rows,
-        })
+        tables.append(
+            {
+                "title": "候选模型对比",
+                "columns": ["算法", *metric_columns],
+                "rows": rows,
+            }
+        )
     else:
         text = "**训练完成**。"
     # the best model's full metrics (mirrors the single-model 模型指标 table)
-    scalar = {k: v for k, v in best_metrics.items() if isinstance(v, (int, float, str, bool))}
+    scalar = {
+        k: v for k, v in best_metrics.items() if isinstance(v, (int, float, str, bool))
+    }
     if scalar:
-        tables.append({"title": "模型指标", "columns": ["指标", "值"], "rows": [[k, _fmt(v)] for k, v in scalar.items()]})
+        tables.append(
+            {
+                "title": "模型指标",
+                "columns": ["指标", "值"],
+                "rows": [[k, _fmt(v)] for k, v in scalar.items()],
+            }
+        )
     return text, tables
 
 
@@ -507,20 +714,24 @@ def _render_compare(o: dict):
         if not isinstance(exp, dict):
             continue
         caps = exp.get("capabilities") or {}
-        rows.append([
-            exp.get("recipe") or "?",
-            "是" if caps.get("pmml_supported") else "否",
-            "是" if caps.get("handoff_supported") else "否",
-            "是" if caps.get("native_model_supported") else "否",
-            caps.get("reason") or "",
-        ])
+        rows.append(
+            [
+                exp.get("recipe") or "?",
+                "是" if caps.get("pmml_supported") else "否",
+                "是" if caps.get("handoff_supported") else "否",
+                "是" if caps.get("native_model_supported") else "否",
+                caps.get("reason") or "",
+            ]
+        )
     tables = []
     if rows:
-        tables.append({
-            "title": "训练后动作能力",
-            "columns": ["算法", "PMML", "移交验证", "原生模型", "说明"],
-            "rows": rows,
-        })
+        tables.append(
+            {
+                "title": "训练后动作能力",
+                "columns": ["算法", "PMML", "移交验证", "原生模型", "说明"],
+                "rows": rows,
+            }
+        )
     return f"**实验对比完成**:共 {len(experiments)} 个实验候选。", tables
 
 
@@ -538,7 +749,9 @@ def _render_select_experiment(o: dict):
     ]
     if caps.get("reason"):
         rows.append(["说明", caps.get("reason")])
-    policy = o.get("policy_decision") if isinstance(o.get("policy_decision"), dict) else {}
+    policy = (
+        o.get("policy_decision") if isinstance(o.get("policy_decision"), dict) else {}
+    )
     if policy:
         rows.append(["策略门控", policy.get("status") or "not_requested"])
         violations = [
@@ -550,24 +763,32 @@ def _render_select_experiment(o: dict):
             rows.append(["策略说明", "; ".join(item for item in violations if item)])
         if policy.get("override_reason"):
             rows.append(["Override", policy.get("override_reason")])
-    tables = [{
-        "title": f"最终模型交付能力（{metric}）",
-        "columns": ["能力", "状态"],
-        "rows": rows,
-    }]
+    tables = [
+        {
+            "title": f"最终模型交付能力（{metric}）",
+            "columns": ["能力", "状态"],
+            "rows": rows,
+        }
+    ]
     metrics = o.get("metrics") or {}
     if metrics:
-        tables.append({
-            "title": "最终模型指标",
-            "columns": ["指标", "值"],
-            "rows": [[key, _fmt(value)] for key, value in metrics.items()],
-        })
+        tables.append(
+            {
+                "title": "最终模型指标",
+                "columns": ["指标", "值"],
+                "rows": [[key, _fmt(value)] for key, value in metrics.items()],
+            }
+        )
     return text, tables
 
 
 def _render_report(o: dict):
     path = o.get("report_path") or ""
-    sections = [section for section in (o.get("section_status") or []) if isinstance(section, dict)]
+    sections = [
+        section
+        for section in (o.get("section_status") or [])
+        if isinstance(section, dict)
+    ]
     available = sum(1 for section in sections if section.get("available"))
     skipped = len(sections) - available
     text = (
@@ -578,18 +799,20 @@ def _render_report(o: dict):
     )
     tables = []
     if sections:
-        tables.append({
-            "title": "报告章节状态",
-            "columns": ["章节", "状态", "说明"],
-            "rows": [
-                [
-                    str(section.get("section", "")),
-                    "可生成" if section.get("available") else "缺输入/跳过",
-                    str(section.get("reason") or ""),
-                ]
-                for section in sections
-            ],
-        })
+        tables.append(
+            {
+                "title": "报告章节状态",
+                "columns": ["章节", "状态", "说明"],
+                "rows": [
+                    [
+                        str(section.get("section", "")),
+                        "可生成" if section.get("available") else "缺输入/跳过",
+                        str(section.get("reason") or ""),
+                    ]
+                    for section in sections
+                ],
+            }
+        )
     calibration_table = _calibration_table(o.get("calibration"))
     if calibration_table:
         tables.append(calibration_table)
@@ -611,7 +834,8 @@ def _calibration_table(rows) -> dict | None:
         return None
     summary = next((row for row in rows if row.get("score_type") == "summary"), {})
     points = [
-        row for row in rows
+        row
+        for row in rows
         if row.get("score_type") == "raw" and row.get("avg_predicted_pd") is not None
     ]
     chart = {
@@ -634,7 +858,15 @@ def _calibration_table(rows) -> dict | None:
     table_rows = [row for row in rows if row.get("score_type") in ("raw", "calibrated")]
     return {
         "title": "概率校准（可靠性曲线）",
-        "columns": ["类型", "分箱", "预测概率区间", "样本量", "预测均值", "实际坏率", "偏差"],
+        "columns": [
+            "类型",
+            "分箱",
+            "预测概率区间",
+            "样本量",
+            "预测均值",
+            "实际坏率",
+            "偏差",
+        ],
         "rows": [
             [
                 "原始" if row.get("score_type") == "raw" else "校准后",
@@ -659,7 +891,9 @@ def _score_band_table(rows) -> dict | None:
     # split present) mirrors what a risk reviewer checks first for cutoff work.
     preferred_order = ["oot", "test", "train"]
     available_splits = {row.get("split") for row in rows}
-    split = next((s for s in preferred_order if s in available_splits), rows[0].get("split"))
+    split = next(
+        (s for s in preferred_order if s in available_splits), rows[0].get("split")
+    )
     split_rows = [row for row in rows if row.get("split") == split]
     split_rows.sort(key=lambda row: row.get("bin") if row.get("bin") is not None else 0)
     has_unscored = any(int(row.get("unscored_count") or 0) > 0 for row in split_rows)
@@ -677,7 +911,15 @@ def _score_band_table(rows) -> dict | None:
             for row in split_rows
         ],
     }
-    columns = ["分箱", "分数区间", "样本量", "坏率", "累计拒绝率", "拒绝人群坏率", "lift"]
+    columns = [
+        "分箱",
+        "分数区间",
+        "样本量",
+        "坏率",
+        "累计拒绝率",
+        "拒绝人群坏率",
+        "lift",
+    ]
     if has_unscored:
         columns.extend(["评分覆盖率", "未评分数"])
     table_rows = []
@@ -712,7 +954,9 @@ def _num(value):
 
 
 def _render_feature_metrics(o: dict):
-    metrics = [metric for metric in (o.get("metrics") or []) if isinstance(metric, dict)]
+    metrics = [
+        metric for metric in (o.get("metrics") or []) if isinstance(metric, dict)
+    ]
     # The risk-aware head/tail lift columns show only when that metric was selected
     # (absent keys → not computed); base columns are always present.
     has_head_tail = any("lift_head_5" in metric for metric in metrics)
@@ -749,28 +993,38 @@ def _render_feature_metrics(o: dict):
     )
     tables = []
     if rows:
-        tables.append({
-            "title": "特征指标",
-            "columns": columns,
-            "rows": rows,
-        })
+        tables.append(
+            {
+                "title": "特征指标",
+                "columns": columns,
+                "rows": rows,
+            }
+        )
     # Optional collinear / VIF section (computed only when the metric was selected).
     collinear = o.get("collinear")
     if isinstance(collinear, dict):
         vif = collinear.get("vif") or {}
         if vif:
-            tables.append({
-                "title": "VIF（共线性）",
-                "columns": ["特征", "VIF"],
-                "rows": [[str(feat), _num(value)] for feat, value in vif.items()],
-            })
-        pairs = [p for p in (collinear.get("collinear_pairs") or []) if isinstance(p, (list, tuple)) and len(p) >= 3]
+            tables.append(
+                {
+                    "title": "VIF（共线性）",
+                    "columns": ["特征", "VIF"],
+                    "rows": [[str(feat), _num(value)] for feat, value in vif.items()],
+                }
+            )
+        pairs = [
+            p
+            for p in (collinear.get("collinear_pairs") or [])
+            if isinstance(p, (list, tuple)) and len(p) >= 3
+        ]
         if pairs:
-            tables.append({
-                "title": "高相关特征对",
-                "columns": ["特征A", "特征B", "相关系数"],
-                "rows": [[str(p[0]), str(p[1]), _num(p[2])] for p in pairs],
-            })
+            tables.append(
+                {
+                    "title": "高相关特征对",
+                    "columns": ["特征A", "特征B", "相关系数"],
+                    "rows": [[str(p[0]), str(p[1]), _num(p[2])] for p in pairs],
+                }
+            )
     return text, tables
 
 
@@ -794,19 +1048,23 @@ def _render_build_strategy(o: dict):
     )
     tables = []
     if rules:
-        tables.append({
-            "title": "策略规则（按顺序命中）",
-            "columns": ["#", "条件", "动作", "取值"],
-            "rows": [
-                [
-                    str(index),
-                    str(rule.get("condition", "")),
-                    str(rule.get("decision", "")),
-                    _fmt(rule.get("value")) if rule.get("value") is not None else "-",
-                ]
-                for index, rule in enumerate(rules, start=1)
-            ],
-        })
+        tables.append(
+            {
+                "title": "策略规则（按顺序命中）",
+                "columns": ["#", "条件", "动作", "取值"],
+                "rows": [
+                    [
+                        str(index),
+                        str(rule.get("condition", "")),
+                        str(rule.get("decision", "")),
+                        _fmt(rule.get("value"))
+                        if rule.get("value") is not None
+                        else "-",
+                    ]
+                    for index, rule in enumerate(rules, start=1)
+                ],
+            }
+        )
     return text, tables
 
 
@@ -869,9 +1127,7 @@ def _render_design_strategy_candidate(o: dict):
     evidence = o.get("design_evidence")
     evidence = evidence if isinstance(evidence, dict) else {}
     strategy_type = str(o.get("strategy_type") or evidence.get("strategy_type") or "")
-    bands = [
-        band for band in (evidence.get("bands") or []) if isinstance(band, dict)
-    ]
+    bands = [band for band in (evidence.get("bands") or []) if isinstance(band, dict)]
     objective = str(evidence.get("objective") or "")
     source_hash = str(o.get("source_dataset_content_hash") or "")
     text = (
@@ -934,6 +1190,75 @@ def _render_design_strategy_candidate(o: dict):
     return text, tables
 
 
+def _render_analyze_univariate_candidates(o: dict):
+    rankings = [item for item in (o.get("rankings") or []) if isinstance(item, dict)]
+    red_flags = [str(item) for item in (o.get("red_flags") or [])]
+    artifacts = [item for item in (o.get("artifacts") or []) if isinstance(item, dict)]
+    text = (
+        f"**单变量候选分析完成**：已分析 {o.get('feature_count', 0)} 个字段，"
+        f"得到 {o.get('available_method_count', 0)} 个可用字段/分箱方法组合。"
+        f"候选证据 `{o.get('candidate_id', '')}` 仅处于 "
+        "`development / unvalidated`，不代表独立验证、采纳或上线。"
+    )
+    if rankings:
+        top = rankings[0]
+        text += (
+            f" 当前 IV 排名首位是 `{top.get('feature', '')}` / "
+            f"`{top.get('method', '')}`；指标均由平台确定性计算。"
+        )
+    if o.get("nan_labels_dropped"):
+        text += (
+            f"\n- 已按你的确认排除 {o['nan_labels_dropped']} 行空标签；"
+            "候选证据记录了这一口径。"
+        )
+    if any(flag.startswith("loan_amount_metrics_unavailable") for flag in red_flags):
+        text += "\n- 尚未配置放款金额列；如能提供，我可以补做金额口径影响分析。"
+    if any(flag.startswith("overdue_amount_metrics_unavailable") for flag in red_flags):
+        text += "\n- 尚未配置逾期金额列；如能提供，我可以补做逾期金额口径分析。"
+    links = [
+        f"[{str(item.get('filename') or item.get('kind') or '下载')}]"
+        f"({str(item.get('download_url'))})"
+        for item in artifacts
+        if item.get("download_url")
+    ]
+    if links:
+        text += "\n\n**候选报告**：" + "；".join(links)
+
+    tables = []
+    if rankings:
+        tables.append(
+            {
+                "title": "单变量候选排名（前20）",
+                "columns": ["特征", "分箱方法", "IV", "KS", "AUC"],
+                "rows": [
+                    [
+                        str(item.get("feature") or ""),
+                        str(item.get("method") or ""),
+                        _num(item.get("iv")),
+                        _num(item.get("ks")),
+                        _num(item.get("auc")),
+                    ]
+                    for item in rankings[:20]
+                ],
+            }
+        )
+    material_flags = [
+        flag
+        for flag in red_flags
+        if not flag.startswith("loan_amount_metrics_unavailable")
+        and not flag.startswith("overdue_amount_metrics_unavailable")
+    ]
+    if material_flags:
+        tables.append(
+            {
+                "title": "候选分析提示",
+                "columns": ["提示"],
+                "rows": [[flag] for flag in material_flags[:30]],
+            }
+        )
+    return text, tables
+
+
 def _render_decision_backtest(
     o: dict,
     *,
@@ -944,12 +1269,18 @@ def _render_decision_backtest(
     economics: dict,
 ) -> tuple[str, list[dict]]:
     typed = isinstance(o.get("metrics"), dict)
-    approval_rate = metrics.get("approve_rate") if typed else metrics.get("approval_rate")
-    approved_count = metrics.get("approve_count") if typed else metrics.get("approved_count")
+    approval_rate = (
+        metrics.get("approve_rate") if typed else metrics.get("approval_rate")
+    )
+    approved_count = (
+        metrics.get("approve_count") if typed else metrics.get("approved_count")
+    )
     approved_bad_rate = (
         metrics.get("approve_bad_rate") if typed else metrics.get("approved_bad_rate")
     )
-    rejected_count = metrics.get("reject_count") if typed else metrics.get("rejected_count")
+    rejected_count = (
+        metrics.get("reject_count") if typed else metrics.get("rejected_count")
+    )
     rejected_bad_rate = (
         metrics.get("reject_bad_rate") if typed else metrics.get("rejected_bad_rate")
     )
@@ -1276,7 +1607,9 @@ def _profit_delta_text(value, other) -> str:
     return f"{sign}{diff:.4f}"
 
 
-def _tradeoff_alternatives(points: list, recommended: dict | None) -> tuple[list[list], dict | None]:
+def _tradeoff_alternatives(
+    points: list, recommended: dict | None
+) -> tuple[list[list], dict | None]:
     """LT-11 (B.2): the top-2 feasible cutoff alternatives *other than* the
     recommended one (each with its 预期利润 gap vs the recommended point) plus the
     single best alternative point itself, so the caller can also state the
@@ -1286,13 +1619,18 @@ def _tradeoff_alternatives(points: list, recommended: dict | None) -> tuple[list
         return [], None
     reco_cutoff = recommended.get("cutoff")
     feasible = [
-        point for point in points
+        point
+        for point in points
         if point.get("feasible", True) and point.get("cutoff") != reco_cutoff
     ]
     # Order by expected_profit desc (the same objective the recommend picked on), so
     # "备选" reads as the runner-up feasible operating points.
     feasible.sort(
-        key=lambda p: p.get("expected_profit") if isinstance(p.get("expected_profit"), (int, float)) else float("-inf"),
+        key=lambda p: (
+            p.get("expected_profit")
+            if isinstance(p.get("expected_profit"), (int, float))
+            else float("-inf")
+        ),
         reverse=True,
     )
     rows = [
@@ -1301,7 +1639,9 @@ def _tradeoff_alternatives(points: list, recommended: dict | None) -> tuple[list
             _pct(point.get("approval_rate")),
             _pct(point.get("bad_rate")),
             _num(point.get("expected_profit")),
-            _profit_delta_text(point.get("expected_profit"), recommended.get("expected_profit")),
+            _profit_delta_text(
+                point.get("expected_profit"), recommended.get("expected_profit")
+            ),
         ]
         for point in feasible[:2]
     ]
@@ -1310,8 +1650,14 @@ def _tradeoff_alternatives(points: list, recommended: dict | None) -> tuple[list
 
 def _render_tradeoff_view(o: dict):
     points = [point for point in (o.get("points") or []) if isinstance(point, dict)]
-    recommended = o.get("recommended") if isinstance(o.get("recommended"), dict) else None
-    direction_label = "分数越高风险越低" if o.get("score_direction") == "higher_is_better" else "分数越高风险越高"
+    recommended = (
+        o.get("recommended") if isinstance(o.get("recommended"), dict) else None
+    )
+    direction_label = (
+        "分数越高风险越低"
+        if o.get("score_direction") == "higher_is_better"
+        else "分数越高风险越高"
+    )
     feasible_points = [point for point in points if point.get("feasible", True)]
     alt_rows, best_alt = _tradeoff_alternatives(points, recommended)
     if recommended:
@@ -1345,29 +1691,35 @@ def _render_tradeoff_view(o: dict):
     tables = []
     reco_cutoff = recommended.get("cutoff") if recommended else None
     if points:
-        tables.append({
-            "title": "cutoff 权衡点",
-            "columns": ["推荐", "cutoff", "审批率", "坏率", "预期利润", "可行"],
-            "rows": [
-                [
-                    "★" if point.get("cutoff") == reco_cutoff and recommended else "",
-                    _fmt(point.get("cutoff")),
-                    _pct(point.get("approval_rate")),
-                    _pct(point.get("bad_rate")),
-                    _num(point.get("expected_profit")),
-                    "是" if point.get("feasible", True) else "否",
-                ]
-                for point in points[:20]
-            ],
-        })
+        tables.append(
+            {
+                "title": "cutoff 权衡点",
+                "columns": ["推荐", "cutoff", "审批率", "坏率", "预期利润", "可行"],
+                "rows": [
+                    [
+                        "★"
+                        if point.get("cutoff") == reco_cutoff and recommended
+                        else "",
+                        _fmt(point.get("cutoff")),
+                        _pct(point.get("approval_rate")),
+                        _pct(point.get("bad_rate")),
+                        _num(point.get("expected_profit")),
+                        "是" if point.get("feasible", True) else "否",
+                    ]
+                    for point in points[:20]
+                ],
+            }
+        )
     # LT-11 (B.2): top-2 feasible备选 with the预期利润 gap to推荐, so the user sees
     # what the recommendation gives up relative to the runner-up operating points.
     if alt_rows:
-        tables.append({
-            "title": "次优可行 cutoff（备选，含与推荐的预期利润差）",
-            "columns": ["cutoff", "审批率", "坏率", "预期利润", "与推荐预期利润差"],
-            "rows": alt_rows,
-        })
+        tables.append(
+            {
+                "title": "次优可行 cutoff（备选，含与推荐的预期利润差）",
+                "columns": ["cutoff", "审批率", "坏率", "预期利润", "与推荐预期利润差"],
+                "rows": alt_rows,
+            }
+        )
     if red_flags:
         tables.append(_red_flag_table(red_flags))
     return text, tables
@@ -1397,7 +1749,9 @@ def _render_design_cutoff_bands(o: dict):
     red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
     red_items = [flag for flag in red_flags if flag.get("level") == "red"]
     approved = [band for band in bands if band.get("decision") == "approve"]
-    rules = [rule for rule in (o.get("recommended_rules") or []) if isinstance(rule, dict)]
+    rules = [
+        rule for rule in (o.get("recommended_rules") or []) if isinstance(rule, dict)
+    ]
     rule_text = rules[0].get("condition") if rules else "无"
     # LT-11 (B.1): the recommended cut carries its evidence -- the cumulative bad
     # rate and approval rate *at the approved frontier* (the最后一个 approve 带's own
@@ -1407,7 +1761,11 @@ def _render_design_cutoff_bands(o: dict):
     # approval (the boundary the cut lands on).
     frontier = max(
         approved,
-        key=lambda b: b.get("cum_approval_rate") if isinstance(b.get("cum_approval_rate"), (int, float)) else -1.0,
+        key=lambda b: (
+            b.get("cum_approval_rate")
+            if isinstance(b.get("cum_approval_rate"), (int, float))
+            else -1.0
+        ),
         default=None,
     )
     evidence = ""
@@ -1423,21 +1781,32 @@ def _render_design_cutoff_bands(o: dict):
     if red_items:
         names = "、".join(str(flag.get("code")) for flag in red_items)
         text += f" 红项：{names}。"
-    tables = [{
-        "title": "分数带",
-        "columns": ["band 区间", "样本占比", "坏率", "累计审批率", "累计坏率", "决策"],
-        "rows": [
-            [
-                f"[{_fmt(band.get('lo'))},{_fmt(band.get('hi'))})",
-                _pct(band.get("pop_pct")),
-                _pct(band.get("bad_rate")),
-                _pct(band.get("cum_approval_rate")),
-                _pct(band.get("cum_bad_rate")),
-                _STRATEGY_DECISION_LABEL.get(str(band.get("decision")), str(band.get("decision", ""))),
-            ]
-            for band in bands
-        ],
-    }]
+    tables = [
+        {
+            "title": "分数带",
+            "columns": [
+                "band 区间",
+                "样本占比",
+                "坏率",
+                "累计审批率",
+                "累计坏率",
+                "决策",
+            ],
+            "rows": [
+                [
+                    f"[{_fmt(band.get('lo'))},{_fmt(band.get('hi'))})",
+                    _pct(band.get("pop_pct")),
+                    _pct(band.get("bad_rate")),
+                    _pct(band.get("cum_approval_rate")),
+                    _pct(band.get("cum_bad_rate")),
+                    _STRATEGY_DECISION_LABEL.get(
+                        str(band.get("decision")), str(band.get("decision", ""))
+                    ),
+                ]
+                for band in bands
+            ],
+        }
+    ]
     if red_flags:
         tables.append(_red_flag_table(red_flags))
     return text, tables
@@ -1466,8 +1835,12 @@ def _render_compare_strategies(o: dict):
     def _cell(key: str) -> dict:
         return matrix.get(key) if isinstance(matrix.get(key), dict) else {}
 
-    ba, on, ob, bd = (_cell("both_approve"), _cell("only_new"),
-                      _cell("only_baseline"), _cell("both_decline"))
+    ba, on, ob, bd = (
+        _cell("both_approve"),
+        _cell("only_new"),
+        _cell("only_baseline"),
+        _cell("both_decline"),
+    )
     # S6: the swap 2×2 is a matrix-heat card — each cell's own approved bad rate (0..1)
     # colors the heat chip (S3 matrix-heat kind reused); the count rides along as text.
     heat_columns = ["", "基线通过", "基线拒绝"]
@@ -1480,15 +1853,31 @@ def _render_compare_strategies(o: dict):
             "title": "swap 2×2 坏率热力（含样本数）",
             "columns": heat_columns,
             "rows": heat_rows,
-            "column_specs": [{"kind": "text"}, {"kind": "matrix-heat"}, {"kind": "matrix-heat"}],
+            "column_specs": [
+                {"kind": "text"},
+                {"kind": "matrix-heat"},
+                {"kind": "matrix-heat"},
+            ],
         },
         {
             "title": "关键指标并排（挑战者 vs 基线）",
             "columns": ["指标", "挑战者−基线", "方向"],
             "rows": [
-                ["审批率", _pct(deltas.get("approval_rate")), _delta_arrow(deltas.get("approval_rate"))],
-                ["通过坏率", _pct(deltas.get("approved_bad_rate")), _delta_arrow(deltas.get("approved_bad_rate"), lower_is_better=True)],
-                ["预期利润", _num(deltas.get("expected_profit")), _delta_arrow(deltas.get("expected_profit"))],
+                [
+                    "审批率",
+                    _pct(deltas.get("approval_rate")),
+                    _delta_arrow(deltas.get("approval_rate")),
+                ],
+                [
+                    "通过坏率",
+                    _pct(deltas.get("approved_bad_rate")),
+                    _delta_arrow(deltas.get("approved_bad_rate"), lower_is_better=True),
+                ],
+                [
+                    "预期利润",
+                    _num(deltas.get("expected_profit")),
+                    _delta_arrow(deltas.get("expected_profit")),
+                ],
             ],
         },
     ]
@@ -1551,7 +1940,9 @@ def _compare_conclusion_line(deltas: dict) -> str:
 
 def _render_limit_pricing_matrix(o: dict):
     matrix = [cell for cell in (o.get("matrix") or []) if isinstance(cell, dict)]
-    recommended = [item for item in (o.get("recommended") or []) if isinstance(item, dict)]
+    recommended = [
+        item for item in (o.get("recommended") or []) if isinstance(item, dict)
+    ]
     red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
     registered_artifacts = [
         item
@@ -1599,18 +1990,34 @@ def _render_limit_pricing_matrix(o: dict):
 
     # Recommended cells first (置顶), then the rest in stable order.
     reco_cells = [
-        cell for cell in matrix
-        if (str(cell.get("band")), _num(cell.get("limit")), _num(cell.get("rate"))) in reco_keys
+        cell
+        for cell in matrix
+        if (str(cell.get("band")), _num(cell.get("limit")), _num(cell.get("rate")))
+        in reco_keys
     ]
     other_cells = [
-        cell for cell in matrix
-        if (str(cell.get("band")), _num(cell.get("limit")), _num(cell.get("rate"))) not in reco_keys
+        cell
+        for cell in matrix
+        if (str(cell.get("band")), _num(cell.get("limit")), _num(cell.get("rate")))
+        not in reco_keys
     ]
-    tables = [{
-        "title": "额度×定价矩阵（★为推荐档，⚠为负利润）",
-        "columns": ["band", "额度", "年化", "样本数", "PD", "EL", "预期利润", "ROA", "可行"],
-        "rows": [_cell_row(cell) for cell in [*reco_cells, *other_cells]],
-    }]
+    tables = [
+        {
+            "title": "额度×定价矩阵（★为推荐档，⚠为负利润）",
+            "columns": [
+                "band",
+                "额度",
+                "年化",
+                "样本数",
+                "PD",
+                "EL",
+                "预期利润",
+                "ROA",
+                "可行",
+            ],
+            "rows": [_cell_row(cell) for cell in [*reco_cells, *other_cells]],
+        }
+    ]
     if red_flags:
         tables.append(_red_flag_table(red_flags))
     return text, tables
@@ -1618,15 +2025,13 @@ def _render_limit_pricing_matrix(o: dict):
 
 def _render_profit_calc(o: dict):
     results = [row for row in (o.get("results") or []) if isinstance(row, dict)]
-    warnings = [item for item in (o.get("quality_warnings") or []) if isinstance(item, dict)]
+    warnings = [
+        item for item in (o.get("quality_warnings") or []) if isinstance(item, dict)
+    ]
     artifacts = [item for item in (o.get("artifacts") or []) if isinstance(item, dict)]
     registered_artifacts = [item for item in artifacts if item.get("artifact_id")]
-    total_profit = sum(
-        float(row.get("net_profit") or 0.0) for row in results
-    )
-    text = (
-        f"**利润分析完成**：{len(results)} 个分群，合计净利润 {_num(total_profit)}。"
-    )
+    total_profit = sum(float(row.get("net_profit") or 0.0) for row in results)
+    text = f"**利润分析完成**：{len(results)} 个分群，合计净利润 {_num(total_profit)}。"
     if warnings:
         text += f" {len(warnings)} 条数据质量提示。"
     if registered_artifacts:
@@ -1684,7 +2089,9 @@ def _render_roll_rate_matrix(o: dict):
     matrix = o.get("matrix") or []
     base_counts = o.get("base_counts") or {}
     warnings = [
-        item for item in (o.get("data_quality_warnings") or []) if isinstance(item, dict)
+        item
+        for item in (o.get("data_quality_warnings") or [])
+        if isinstance(item, dict)
     ]
     artifacts = [item for item in (o.get("artifacts") or []) if isinstance(item, dict)]
     registered_artifacts = [item for item in artifacts if item.get("artifact_id")]
@@ -1700,7 +2107,11 @@ def _render_roll_rate_matrix(o: dict):
 
     rows = []
     for index, state in enumerate(states):
-        raw_row = matrix[index] if index < len(matrix) and isinstance(matrix[index], list) else []
+        raw_row = (
+            matrix[index]
+            if index < len(matrix) and isinstance(matrix[index], list)
+            else []
+        )
         rows.append(
             [
                 state,
@@ -1741,17 +2152,23 @@ def _render_adopt_strategy(o: dict):
         f"{o.get('status', '')}），退役 {len(retired)} 个旧版本，"
         f"生成 {len(artifacts)} 份交付物。本地采纳不代表生产环境已上线。"
     )
-    tables = [{
-        "title": "交付物",
-        "columns": ["类型", "路径"],
-        "rows": [[str(a.get("kind", "")), str(a.get("path", ""))] for a in artifacts],
-    }]
+    tables = [
+        {
+            "title": "交付物",
+            "columns": ["类型", "路径"],
+            "rows": [
+                [str(a.get("kind", "")), str(a.get("path", ""))] for a in artifacts
+            ],
+        }
+    ]
     if retired:
-        tables.append({
-            "title": "退役策略",
-            "columns": ["策略 id"],
-            "rows": [[item] for item in retired],
-        })
+        tables.append(
+            {
+                "title": "退役策略",
+                "columns": ["策略 id"],
+                "rows": [[item] for item in retired],
+            }
+        )
     return text, tables
 
 
@@ -1764,22 +2181,30 @@ def _render_challenger_report(o: dict):
         f"**挑战者对比报告已生成**：`{o.get('report_path', '')}`，"
         f"登记 {len(artifacts)} 份交付物。"
     )
-    tables = [{
-        "title": "交付物",
-        "columns": ["类型", "路径"],
-        "rows": [[str(a.get("kind", "")), str(a.get("path", ""))] for a in artifacts],
-    }]
+    tables = [
+        {
+            "title": "交付物",
+            "columns": ["类型", "路径"],
+            "rows": [
+                [str(a.get("kind", "")), str(a.get("path", ""))] for a in artifacts
+            ],
+        }
+    ]
     return text, tables
 
 
 def _render_strategy_doc(o: dict):
     sections = [str(item) for item in (o.get("sections") or [])]
     text = f"**策略文档已生成**：`{o.get('doc_path', '')}`，共 {len(sections)} 个章节。"
-    tables = [{
-        "title": "文档章节",
-        "columns": ["#", "章节"],
-        "rows": [[str(index), section] for index, section in enumerate(sections, start=1)],
-    }]
+    tables = [
+        {
+            "title": "文档章节",
+            "columns": ["#", "章节"],
+            "rows": [
+                [str(index), section] for index, section in enumerate(sections, start=1)
+            ],
+        }
+    ]
     return text, tables
 
 
@@ -1793,25 +2218,34 @@ def _render_vintage_curve(o: dict):
     curves = o.get("curves") if isinstance(o.get("curves"), dict) else {}
     counts = o.get("counts") if isinstance(o.get("counts"), dict) else {}
     if cohorts and mob_axis:
-        tables.append({
-            "title": "Vintage 累计坏账率",
-            "columns": ["cohort", "样本数", *[f"MOB{mob}" for mob in mob_axis]],
-            "rows": [
-                [
-                    cohort,
-                    _fmt(counts.get(cohort, "")),
-                    *[_pct(value) if value is not None else "n/a" for value in (curves.get(cohort) or [])[:len(mob_axis)]],
-                ]
-                for cohort in cohorts
-            ],
-        })
+        tables.append(
+            {
+                "title": "Vintage 累计坏账率",
+                "columns": ["cohort", "样本数", *[f"MOB{mob}" for mob in mob_axis]],
+                "rows": [
+                    [
+                        cohort,
+                        _fmt(counts.get(cohort, "")),
+                        *[
+                            _pct(value) if value is not None else "n/a"
+                            for value in (curves.get(cohort) or [])[: len(mob_axis)]
+                        ],
+                    ]
+                    for cohort in cohorts
+                ],
+            }
+        )
     at_ref = summary.get("at_ref") if isinstance(summary.get("at_ref"), dict) else {}
     if at_ref:
-        tables.append({
-            "title": "参考 MOB 坏账率",
-            "columns": ["cohort", "坏账率"],
-            "rows": [[str(cohort), _pct(value)] for cohort, value in at_ref.items()],
-        })
+        tables.append(
+            {
+                "title": "参考 MOB 坏账率",
+                "columns": ["cohort", "坏账率"],
+                "rows": [
+                    [str(cohort), _pct(value)] for cohort, value in at_ref.items()
+                ],
+            }
+        )
     # A1: surface the vintage kernel's data-quality warnings (e.g. the snapshot-flag
     # red flag when data looks cumulative but was declared incremental) as red flags,
     # mirroring _render_slice_aggregate. De-duplicated: the kernel attaches the same
@@ -1861,23 +2295,34 @@ def _render_slice_aggregate(o: dict):
     metric_text = "、".join(_slice_metric_text(m) for m in metrics) or "—"
     echo_parts = [f"口径:按〔{group_text}〕统计〔{metric_text}〕"]
     if spec.get("month_col") and spec.get("months"):
-        echo_parts.append(f"，时间〔{'、'.join(str(m) for m in spec.get('months') or [])}〕")
+        echo_parts.append(
+            f"，时间〔{'、'.join(str(m) for m in spec.get('months') or [])}〕"
+        )
     filters = [f for f in (spec.get("filters") or []) if isinstance(f, dict)]
     if filters:
-        filter_text = "、".join(f"{f.get('col')}{f.get('op')}{f.get('value')}" for f in filters)
+        filter_text = "、".join(
+            f"{f.get('col')}{f.get('op')}{f.get('value')}" for f in filters
+        )
         echo_parts.append(f"，筛选〔{filter_text}〕")
-    text = "**即席问数结果**（" + str(len(rows)) + " 行）。\n" + "".join(echo_parts) + "。"
+    text = (
+        "**即席问数结果**（" + str(len(rows)) + " 行）。\n" + "".join(echo_parts) + "。"
+    )
     # A4: bad_rate/approval_rate may now be NULL for an all-unlabeled group — render it as
     # "n/a" rather than the literal "None" so the honest "no labeled samples" answer reads
     # cleanly. The companion unlabeled_count_<col> columns flow through automatically.
-    tables = [{
-        "title": "聚合结果",
-        "columns": columns,
-        "rows": [
-            ["n/a" if row.get(col) is None else _fmt(row.get(col)) for col in columns]
-            for row in rows
-        ],
-    }]
+    tables = [
+        {
+            "title": "聚合结果",
+            "columns": columns,
+            "rows": [
+                [
+                    "n/a" if row.get(col) is None else _fmt(row.get(col))
+                    for col in columns
+                ]
+                for row in rows
+            ],
+        }
+    ]
     red_flags = [f for f in (o.get("red_flags") or []) if isinstance(f, dict)]
     if red_flags:
         text += "\n" + "\n".join(f"🚩 {str(f.get('message') or '')}" for f in red_flags)
@@ -1923,8 +2368,16 @@ def _profile_tagged_value(value) -> str:
 
 def _profile_semantics(o: dict) -> tuple[dict, dict]:
     semantics = o.get("semantics") if isinstance(o.get("semantics"), dict) else {}
-    roles = semantics.get("field_roles") if isinstance(semantics.get("field_roles"), dict) else {}
-    names = semantics.get("business_names") if isinstance(semantics.get("business_names"), dict) else {}
+    roles = (
+        semantics.get("field_roles")
+        if isinstance(semantics.get("field_roles"), dict)
+        else {}
+    )
+    names = (
+        semantics.get("business_names")
+        if isinstance(semantics.get("business_names"), dict)
+        else {}
+    )
     return roles, names
 
 
@@ -1962,9 +2415,13 @@ def _render_profile_dataset(o: dict):
 
     result = o.get("result") if isinstance(o.get("result"), dict) else {}
     dataset = result.get("dataset") if isinstance(result.get("dataset"), dict) else {}
-    fields = [field for field in (result.get("fields") or []) if isinstance(field, dict)]
+    fields = [
+        field for field in (result.get("fields") or []) if isinstance(field, dict)
+    ]
     options = o.get("options_echo") if isinstance(o.get("options_echo"), dict) else {}
-    sections = [str(item) for item in (options.get("sections") or _PROFILE_SECTION_LABELS)]
+    sections = [
+        str(item) for item in (options.get("sections") or _PROFILE_SECTION_LABELS)
+    ]
     requested = set(sections)
     roles, business_names = _profile_semantics(o)
     row_count = o.get("row_count_scanned", dataset.get("row_count", 0))
@@ -1983,7 +2440,15 @@ def _render_profile_dataset(o: dict):
         tables.append(
             {
                 "title": "字段概览",
-                "columns": ["字段", "角色", "类型", "总行数", "缺失数", "缺失率", "唯一值数"],
+                "columns": [
+                    "字段",
+                    "角色",
+                    "类型",
+                    "总行数",
+                    "缺失数",
+                    "缺失率",
+                    "唯一值数",
+                ],
                 "rows": [
                     [
                         _profile_field_label(field.get("name"), business_names),
@@ -2024,8 +2489,12 @@ def _render_profile_dataset(o: dict):
 
     target = result.get("target_distribution")
     if "target" in requested and isinstance(target, dict):
-        frequency = target.get("frequency") if isinstance(target.get("frequency"), dict) else {}
-        items = [item for item in (frequency.get("items") or []) if isinstance(item, dict)]
+        frequency = (
+            target.get("frequency") if isinstance(target.get("frequency"), dict) else {}
+        )
+        items = [
+            item for item in (frequency.get("items") or []) if isinstance(item, dict)
+        ]
         tables.append(
             {
                 "title": "Target 分布",
@@ -2045,16 +2514,35 @@ def _render_profile_dataset(o: dict):
         tables.append(
             {
                 "title": "字段分布",
-                "columns": ["字段", "类型", "Min", "P25", "P50", "P75", "Max", "频数摘要"],
+                "columns": [
+                    "字段",
+                    "类型",
+                    "Min",
+                    "P25",
+                    "P50",
+                    "P75",
+                    "Max",
+                    "频数摘要",
+                ],
                 "rows": [
                     [
                         _profile_field_label(field.get("name"), business_names),
                         str(field.get("kind") or field.get("duckdb_type") or "—"),
-                        _fmt((field.get("numeric") or {}).get("min")) if isinstance(field.get("numeric"), dict) else "n/a",
-                        _fmt((field.get("numeric") or {}).get("p25")) if isinstance(field.get("numeric"), dict) else "n/a",
-                        _fmt((field.get("numeric") or {}).get("p50")) if isinstance(field.get("numeric"), dict) else "n/a",
-                        _fmt((field.get("numeric") or {}).get("p75")) if isinstance(field.get("numeric"), dict) else "n/a",
-                        _fmt((field.get("numeric") or {}).get("max")) if isinstance(field.get("numeric"), dict) else "n/a",
+                        _fmt((field.get("numeric") or {}).get("min"))
+                        if isinstance(field.get("numeric"), dict)
+                        else "n/a",
+                        _fmt((field.get("numeric") or {}).get("p25"))
+                        if isinstance(field.get("numeric"), dict)
+                        else "n/a",
+                        _fmt((field.get("numeric") or {}).get("p50"))
+                        if isinstance(field.get("numeric"), dict)
+                        else "n/a",
+                        _fmt((field.get("numeric") or {}).get("p75"))
+                        if isinstance(field.get("numeric"), dict)
+                        else "n/a",
+                        _fmt((field.get("numeric") or {}).get("max"))
+                        if isinstance(field.get("numeric"), dict)
+                        else "n/a",
                         _profile_frequency_text(field.get("frequency") or {})
                         if isinstance(field.get("frequency"), dict)
                         else "n/a",
@@ -2082,7 +2570,10 @@ def _render_profile_dataset(o: dict):
         tables.append(
             {
                 "title": "相关矩阵",
-                "columns": ["字段", *[_profile_field_label(name, business_names) for name in columns]],
+                "columns": [
+                    "字段",
+                    *[_profile_field_label(name, business_names) for name in columns],
+                ],
                 "rows": rows,
             }
         )
@@ -2192,7 +2683,14 @@ def _render_transform_dataset(o: dict):
         tables.append(
             {
                 "title": "加工步骤影响",
-                "columns": ["步骤", "操作", "加工前行数", "加工后行数", "行变化", "影响证据"],
+                "columns": [
+                    "步骤",
+                    "操作",
+                    "加工前行数",
+                    "加工后行数",
+                    "行变化",
+                    "影响证据",
+                ],
                 "rows": [
                     [
                         _fmt(step.get("step")),
@@ -2215,7 +2713,10 @@ def _render_transform_dataset(o: dict):
     renamed_fields = semantic.get("renamed_fields")
     dropped_fields = [str(item) for item in (semantic.get("dropped_fields") or [])]
     semantic_rows = [
-        ["语义映射 SHA-256", f"{semantic.get('before_hash') or 'n/a'} → {semantic.get('after_hash') or 'n/a'}"],
+        [
+            "语义映射 SHA-256",
+            f"{semantic.get('before_hash') or 'n/a'} → {semantic.get('after_hash') or 'n/a'}",
+        ],
         ["重命名字段", _transform_mapping_text(renamed_fields)],
         ["删除字段", "、".join(dropped_fields) if dropped_fields else "无"],
     ]
@@ -2384,35 +2885,48 @@ def _render_propose_join(o: dict):
         # Prefer the friendly file name (features.parquet) over the raw ds_<hash> id.
         fname = str(j.get("feature_name") or j.get("feature_id", "?"))
         key_pairs = j.get("key_pairs") or []
-        keys = ", ".join(
-            f"{_key_label(p.get('anchor_col'), dictionary)}={_key_label(p.get('feature_col'), dictionary)}"
-            for p in key_pairs
-        ) or "?"
+        keys = (
+            ", ".join(
+                f"{_key_label(p.get('anchor_col'), dictionary)}={_key_label(p.get('feature_col'), dictionary)}"
+                for p in key_pairs
+            )
+            or "?"
+        )
         # Dynamic key relaxation proposals (spec §4/§5): low-match keys may match better with
         # one element dropped — surface as suggestions (the user confirms; never auto-applied).
-        for alt in (diag.get("key_alternatives") or []):
+        for alt in diag.get("key_alternatives") or []:
             if not isinstance(alt, dict):
                 continue
             alt_keys = ", ".join(f"{a}={f}" for a, f in (alt.get("key_pairs") or []))
-            relax_rows.append([
-                fname,
-                _fmt(match_rate) if match_rate is not None else "n/a",
-                f"减「{alt.get('dropped', '?')}」→ {alt_keys}",
-                _fmt(alt.get("match_rate")) if alt.get("match_rate") is not None else "n/a",
-                "是" if alt.get("feature_key_unique") else "否",
-                "⚠️是" if alt.get("fan_out_detected") else "否",
-            ])
+            relax_rows.append(
+                [
+                    fname,
+                    _fmt(match_rate) if match_rate is not None else "n/a",
+                    f"减「{alt.get('dropped', '?')}」→ {alt_keys}",
+                    _fmt(alt.get("match_rate"))
+                    if alt.get("match_rate") is not None
+                    else "n/a",
+                    "是" if alt.get("feature_key_unique") else "否",
+                    "⚠️是" if alt.get("fan_out_detected") else "否",
+                ]
+            )
         # Fingerprint consistency (spec §5 C2 "指纹 raw=md5? ✓/✗"): transform_side == "both"
         # means anchor and feature key share format (both raw or both md5); anything else
         # means one side is raw and the other md5 (键格式不一致), joinable only via a hash
         # transform — surfaced so the user can sanity-check the key before执行.
-        fp_consistent = all((p.get("transform_side") or "both") == "both" for p in key_pairs) if key_pairs else True
+        fp_consistent = (
+            all((p.get("transform_side") or "both") == "both" for p in key_pairs)
+            if key_pairs
+            else True
+        )
         if not fp_consistent:
             any_fp_mismatch = True
         fp_cell = "✓" if fp_consistent else "✗ raw≠md5"
         # T1-B8: key-dtype divergence (one side text, one side float/int) risks a silent miss
         # via precision / leading-zero loss. A "red" (text↔float) divergence forces confirm.
-        divergences = [d for d in (diag.get("key_dtype_divergences") or []) if isinstance(d, dict)]
+        divergences = [
+            d for d in (diag.get("key_dtype_divergences") or []) if isinstance(d, dict)
+        ]
         red_divergence = any(d.get("level") == "red" for d in divergences)
         if red_divergence:
             any_dtype_mismatch = True
@@ -2428,16 +2942,18 @@ def _render_propose_join(o: dict):
         if conflict_keys:
             any_conflict = True
         dedup_cell = "-" if unique else f"安全{safe_dropped}/⚠️冲突{conflict_keys}"
-        rows.append([
-            fname,
-            keys,
-            fp_cell,
-            dtype_cell,
-            _fmt(match_rate) if match_rate is not None else "n/a",
-            "是" if unique else "否",
-            "⚠️是" if fan_out else "否",
-            dedup_cell,
-        ])
+        rows.append(
+            [
+                fname,
+                keys,
+                fp_cell,
+                dtype_cell,
+                _fmt(match_rate) if match_rate is not None else "n/a",
+                "是" if unique else "否",
+                "⚠️是" if fan_out else "否",
+                dedup_cell,
+            ]
+        )
     text = (
         f"**拼接诊断完成**:{len(joins)} 张特征表待左连接到锚样本（锚行数 **1:1 保留**）。\n"
         "请核对每张表的命中率/键唯一性/是否膨胀。键不唯一的特征需选去重策略；确认后才会真正执行拼接。"
@@ -2466,33 +2982,68 @@ def _render_propose_join(o: dict):
     # independent ways (DuckDB SQL vs pandas); any divergence beyond tolerance is a BLOCKING
     # red flag showing BOTH path values, so the human sees the disagreement rather than
     # rubber-stamping one number. Silent (no line) when the two paths agree.
-    reconcile_summary = o.get("reconcile_summary") if isinstance(o.get("reconcile_summary"), dict) else {}
-    for flag in (reconcile_summary.get("red_flags") or []):
+    reconcile_summary = (
+        o.get("reconcile_summary")
+        if isinstance(o.get("reconcile_summary"), dict)
+        else {}
+    )
+    for flag in reconcile_summary.get("red_flags") or []:
         if isinstance(flag, dict) and flag.get("message"):
             text += f"\n\n🚩 {str(flag.get('message'))}"
     tables = []
     if rows:
-        tables.append({
-            "title": "拼接诊断（逐特征表）",
-            "columns": ["特征表", "匹配键", "指纹（raw=md5?）", "键类型", "命中率", "键唯一", "膨胀", "去重（安全/冲突键）"],
-            "rows": rows,
-        })
+        tables.append(
+            {
+                "title": "拼接诊断（逐特征表）",
+                "columns": [
+                    "特征表",
+                    "匹配键",
+                    "指纹（raw=md5?）",
+                    "键类型",
+                    "命中率",
+                    "键唯一",
+                    "膨胀",
+                    "去重（安全/冲突键）",
+                ],
+                "rows": rows,
+            }
+        )
     if relax_rows:
-        tables.append({
-            "title": "择键建议（减要素换更高命中）",
-            "columns": ["特征表", "当前命中率", "建议键", "减后命中率", "减后唯一", "减后膨胀"],
-            "rows": relax_rows,
-        })
+        tables.append(
+            {
+                "title": "择键建议（减要素换更高命中）",
+                "columns": [
+                    "特征表",
+                    "当前命中率",
+                    "建议键",
+                    "减后命中率",
+                    "减后唯一",
+                    "减后膨胀",
+                ],
+                "rows": relax_rows,
+            }
+        )
     # T3: expandable "数字溯源" detail — the two-path match count + the provenance tuple
     # (dataset fingerprint / code version / params digest / seed) behind each feature's
     # headline number, so the displayed number is auditable back to its inputs.
     trust_rows = _join_trust_rows(joins)
     if trust_rows:
-        tables.append({
-            "title": "数字溯源（对账 + 血缘）",
-            "columns": ["特征表", "匹配行数(权威路)", "匹配行数(独立路)", "对账", "数据指纹", "代码版本", "参数摘要", "seed"],
-            "rows": trust_rows,
-        })
+        tables.append(
+            {
+                "title": "数字溯源（对账 + 血缘）",
+                "columns": [
+                    "特征表",
+                    "匹配行数(权威路)",
+                    "匹配行数(独立路)",
+                    "对账",
+                    "数据指纹",
+                    "代码版本",
+                    "参数摘要",
+                    "seed",
+                ],
+                "rows": trust_rows,
+            }
+        )
     return text, tables
 
 
@@ -2522,16 +3073,18 @@ def _join_trust_rows(joins) -> list[list[str]]:
             verdict = "🚩 分歧"
         else:
             verdict = "—"
-        rows.append([
-            fname,
-            _fmt(primary) if primary is not None else "n/a",
-            _fmt(secondary) if secondary is not None else "n/a",
-            verdict,
-            _short_digest(prov.get("dataset_fingerprint")) if prov else "—",
-            str(prov.get("code_version") or "—") if prov else "—",
-            _short_digest(prov.get("params_digest")) if prov else "—",
-            str(prov.get("seed")) if prov and prov.get("seed") is not None else "—",
-        ])
+        rows.append(
+            [
+                fname,
+                _fmt(primary) if primary is not None else "n/a",
+                _fmt(secondary) if secondary is not None else "n/a",
+                verdict,
+                _short_digest(prov.get("dataset_fingerprint")) if prov else "—",
+                str(prov.get("code_version") or "—") if prov else "—",
+                _short_digest(prov.get("params_digest")) if prov else "—",
+                str(prov.get("seed")) if prov and prov.get("seed") is not None else "—",
+            ]
+        )
     return rows
 
 
@@ -2539,7 +3092,7 @@ def _short_digest(value) -> str:
     """Truncate a ``sha256:<hex>`` digest to a readable prefix for gate display."""
     text = str(value or "")
     if text.startswith("sha256:"):
-        body = text[len("sha256:"):]
+        body = text[len("sha256:") :]
         return f"sha256:{body[:12]}…" if len(body) > 12 else text
     return text[:16] + "…" if len(text) > 16 else text
 
@@ -2587,20 +3140,22 @@ def _render_execute_join(o: dict):
     tables = []
     per_table = [row for row in (o.get("per_table") or []) if isinstance(row, dict)]
     if per_table:
-        tables.append({
-            "title": "各特征表贡献",
-            "columns": ["特征表", "命中率", "新增列", "新列缺失率", "去重策略"],
-            "rows": [
-                [
-                    str(row.get("feature_id", "?")),
-                    _num(row.get("match_rate")),
-                    str(row.get("new_columns", "")),
-                    _num(row.get("new_columns_null_rate")),
-                    str(row.get("dedup_strategy", "无")),
-                ]
-                for row in per_table
-            ],
-        })
+        tables.append(
+            {
+                "title": "各特征表贡献",
+                "columns": ["特征表", "命中率", "新增列", "新列缺失率", "去重策略"],
+                "rows": [
+                    [
+                        str(row.get("feature_id", "?")),
+                        _num(row.get("match_rate")),
+                        str(row.get("new_columns", "")),
+                        _num(row.get("new_columns_null_rate")),
+                        str(row.get("dedup_strategy", "无")),
+                    ]
+                    for row in per_table
+                ],
+            }
+        )
     return text, tables
 
 
@@ -2610,33 +3165,51 @@ def _render_post_training_action(o: dict):
     skipped = sum(1 for item in actions if item.get("status") == "skipped")
     text = (
         f"**训练后交付动作完成**:成功 {succeeded} 个，跳过 {skipped} 个。"
-        if actions else "**训练后交付动作完成**。"
+        if actions
+        else "**训练后交付动作完成**。"
     )
     rows = [
-        ["原生模型", "succeeded" if o.get("native_model_path") else "missing", o.get("native_model_path") or "", ""],
+        [
+            "原生模型",
+            "succeeded" if o.get("native_model_path") else "missing",
+            o.get("native_model_path") or "",
+            "",
+        ],
     ]
     if o.get("approval_package_path"):
-        rows.append([
-            "审批包",
-            "succeeded",
-            o.get("approval_package_markdown_path") or o.get("approval_package_path"),
-            "模型审批与交付证据包",
-        ])
+        rows.append(
+            [
+                "审批包",
+                "succeeded",
+                o.get("approval_package_markdown_path")
+                or o.get("approval_package_path"),
+                "模型审批与交付证据包",
+            ]
+        )
     if o.get("model_card_path"):
-        rows.append([
-            "模型卡",
-            "succeeded",
-            o.get("model_card_markdown_path") or o.get("model_card_path"),
-            "最终模型卡",
-        ])
+        rows.append(
+            [
+                "模型卡",
+                "succeeded",
+                o.get("model_card_markdown_path") or o.get("model_card_path"),
+                "最终模型卡",
+            ]
+        )
     if o.get("monitoring_policy_path"):
-        monitoring = o.get("monitoring_policy") if isinstance(o.get("monitoring_policy"), dict) else {}
-        rows.append([
-            "监控策略",
-            monitoring.get("status") or "succeeded",
-            o.get("monitoring_policy_markdown_path") or o.get("monitoring_policy_path"),
-            monitoring.get("recommendation") or "模型监控阈值策略",
-        ])
+        monitoring = (
+            o.get("monitoring_policy")
+            if isinstance(o.get("monitoring_policy"), dict)
+            else {}
+        )
+        rows.append(
+            [
+                "监控策略",
+                monitoring.get("status") or "succeeded",
+                o.get("monitoring_policy_markdown_path")
+                or o.get("monitoring_policy_path"),
+                monitoring.get("recommendation") or "模型监控阈值策略",
+            ]
+        )
     for item in actions:
         action = str(item.get("action") or "")
         status = str(item.get("status") or "")
@@ -2649,11 +3222,13 @@ def _render_post_training_action(o: dict):
             or ""
         )
         rows.append([action, status, artifact, str(item.get("reason") or "")])
-    tables = [{
-        "title": "训练后交付状态",
-        "columns": ["动作", "状态", "产物/任务", "说明"],
-        "rows": rows,
-    }]
+    tables = [
+        {
+            "title": "训练后交付状态",
+            "columns": ["动作", "状态", "产物/任务", "说明"],
+            "rows": rows,
+        }
+    ]
     caps = o.get("capabilities") or {}
     if caps:
         cap_rows = [
@@ -2663,7 +3238,9 @@ def _render_post_training_action(o: dict):
         ]
         if caps.get("reason"):
             cap_rows.append(["说明", caps.get("reason")])
-        tables.append({"title": "最终模型交付能力", "columns": ["能力", "状态"], "rows": cap_rows})
+        tables.append(
+            {"title": "最终模型交付能力", "columns": ["能力", "状态"], "rows": cap_rows}
+        )
     return text, tables
 
 
@@ -2684,30 +3261,41 @@ def _render_make_split(o: dict):
     )
     tables = []
     if rows:
-        tables.append({
-            "title": "切分计数（train/test/oot）",
-            "columns": ["划分", "行数", "占比"],
-            "rows": rows,
-        })
+        tables.append(
+            {
+                "title": "切分计数（train/test/oot）",
+                "columns": ["划分", "行数", "占比"],
+                "rows": rows,
+            }
+        )
     for group_col, dist in (analysis.get("group_distributions") or {}).items():
         if not isinstance(dist, dict):
             continue
-        group_values = sorted({gv for per in dist.values() if isinstance(per, dict) for gv in per})
+        group_values = sorted(
+            {gv for per in dist.values() if isinstance(per, dict) for gv in per}
+        )
         grows = [
             [str(split)] + [int(per.get(gv, 0)) for gv in group_values]
-            for split, per in dist.items() if isinstance(per, dict)
+            for split, per in dist.items()
+            if isinstance(per, dict)
         ]
         if grows:
-            tables.append({
-                "title": f"按「{group_col}」分布（逐划分）",
-                "columns": ["划分", *[str(gv) for gv in group_values]],
-                "rows": grows,
-            })
+            tables.append(
+                {
+                    "title": f"按「{group_col}」分布（逐划分）",
+                    "columns": ["划分", *[str(gv) for gv in group_values]],
+                    "rows": grows,
+                }
+            )
     return text, tables
 
 
 def _render_score_dataset(o: dict):
-    direction_label = "分数越高风险越高" if o.get("score_direction") == "higher_is_riskier" else "分数越高风险越低"
+    direction_label = (
+        "分数越高风险越高"
+        if o.get("score_direction") == "higher_is_riskier"
+        else "分数越高风险越低"
+    )
     text = (
         f"**打分完成**（{direction_label}）:"
         f"{_fmt(o.get('row_count'))} 行,分数列 `{o.get('score_col')}`,"
@@ -2754,14 +3342,27 @@ def _render_monitor_run(o: dict):
         ]
         for c in checks
     ]
-    tables = [{"title": "监控判级明细", "columns": ["检查项", "判级", "值", "说明"], "rows": rows}]
-    drifted = [row for row in (o.get("top_drifted_features") or []) if isinstance(row, dict)]
+    tables = [
+        {
+            "title": "监控判级明细",
+            "columns": ["检查项", "判级", "值", "说明"],
+            "rows": rows,
+        }
+    ]
+    drifted = [
+        row for row in (o.get("top_drifted_features") or []) if isinstance(row, dict)
+    ]
     if drifted:
-        tables.append({
-            "title": "特征漂移 Top",
-            "columns": ["特征", "CSI"],
-            "rows": [[str(row.get("feature") or ""), _fmt(row.get("csi"))] for row in drifted[:10]],
-        })
+        tables.append(
+            {
+                "title": "特征漂移 Top",
+                "columns": ["特征", "CSI"],
+                "rows": [
+                    [str(row.get("feature") or ""), _fmt(row.get("csi"))]
+                    for row in drifted[:10]
+                ],
+            }
+        )
     return text, tables
 
 
@@ -2800,14 +3401,27 @@ def _render_run_strategy_monitoring(o: dict):
         ]
         for c in checks
     ]
-    tables = [{"title": "监控判级明细", "columns": ["检查项", "判级", "值", "说明"], "rows": rows}]
-    drifted = [row for row in (o.get("top_drifted_features") or []) if isinstance(row, dict)]
+    tables = [
+        {
+            "title": "监控判级明细",
+            "columns": ["检查项", "判级", "值", "说明"],
+            "rows": rows,
+        }
+    ]
+    drifted = [
+        row for row in (o.get("top_drifted_features") or []) if isinstance(row, dict)
+    ]
     if drifted:
-        tables.append({
-            "title": "特征漂移 Top",
-            "columns": ["特征", "CSI"],
-            "rows": [[str(row.get("feature") or ""), _fmt(row.get("csi"))] for row in drifted[:10]],
-        })
+        tables.append(
+            {
+                "title": "特征漂移 Top",
+                "columns": ["特征", "CSI"],
+                "rows": [
+                    [str(row.get("feature") or ""), _fmt(row.get("csi"))]
+                    for row in drifted[:10]
+                ],
+            }
+        )
     return text, tables
 
 
@@ -2845,23 +3459,32 @@ def _render_monitoring_report(o: dict):
     if label:
         head += f",最近总体判级【{label}】"
     head += f",历史监控 {len(timeline)} 次。"
-    next_action = o.get("next_action") if isinstance(o.get("next_action"), dict) else None
+    next_action = (
+        o.get("next_action") if isinstance(o.get("next_action"), dict) else None
+    )
     if next_action and next_action.get("prompt"):
         head += f"\n\n下一步:{next_action['prompt']}"
     tables = []
     if timeline:
-        tables.append({
-            "title": "监控判级时间线",
-            "columns": ["时间", "总体判级", "样本量"],
-            "rows": [
-                [
-                    str(row.get("at") or ""),
-                    _MONITOR_LEVEL_LABEL.get(str(row.get("overall_level")), str(row.get("overall_level") or "")),
-                    _fmt(row.get("row_count")) if row.get("row_count") is not None else "",
-                ]
-                for row in timeline
-            ],
-        })
+        tables.append(
+            {
+                "title": "监控判级时间线",
+                "columns": ["时间", "总体判级", "样本量"],
+                "rows": [
+                    [
+                        str(row.get("at") or ""),
+                        _MONITOR_LEVEL_LABEL.get(
+                            str(row.get("overall_level")),
+                            str(row.get("overall_level") or ""),
+                        ),
+                        _fmt(row.get("row_count"))
+                        if row.get("row_count") is not None
+                        else "",
+                    ]
+                    for row in timeline
+                ],
+            }
+        )
     return head, tables
 
 
@@ -2874,11 +3497,20 @@ def _render_flow_rate(o: dict):
         text += f" 红旗 {len(red_flags)} 项。"
     tables = []
     if net_flows:
-        tables.append({
-            "title": "逐月净流量（进入坏 / 退出坏）",
-            "columns": ["月份", "进入坏", "退出坏"],
-            "rows": [[str(r.get("month") or ""), _fmt(r.get("into_bad")), _fmt(r.get("out_of_bad"))] for r in net_flows],
-        })
+        tables.append(
+            {
+                "title": "逐月净流量（进入坏 / 退出坏）",
+                "columns": ["月份", "进入坏", "退出坏"],
+                "rows": [
+                    [
+                        str(r.get("month") or ""),
+                        _fmt(r.get("into_bad")),
+                        _fmt(r.get("out_of_bad")),
+                    ]
+                    for r in net_flows
+                ],
+            }
+        )
     if red_flags:
         tables.append(_data_quality_flag_table(red_flags))
     return text, tables
@@ -2894,16 +3526,21 @@ def _render_bucket_migration(o: dict):
     tables = []
     if heat_table and to_states:
         columns = ["from", *to_states]
-        rows = [[str(row.get("from") or ""), *[_pct(row.get(state)) for state in to_states]] for row in heat_table]
+        rows = [
+            [str(row.get("from") or ""), *[_pct(row.get(state)) for state in to_states]]
+            for row in heat_table
+        ]
         # matrix-heat column_specs: the from label is text, each to-state cell is a
         # heat cell colored from its own 0..1 migration rate (frontend matrix-heat).
         column_specs = [{"kind": "text"}, *[{"kind": "matrix-heat"} for _ in to_states]]
-        tables.append({
-            "title": "平均迁徙率矩阵",
-            "columns": columns,
-            "rows": rows,
-            "column_specs": column_specs,
-        })
+        tables.append(
+            {
+                "title": "平均迁徙率矩阵",
+                "columns": columns,
+                "rows": rows,
+                "column_specs": column_specs,
+            }
+        )
     if red_flags:
         tables.append(_data_quality_flag_table(red_flags))
     return text, tables
@@ -2919,21 +3556,29 @@ def _render_segment_profile(o: dict):
     )
     tables = []
     if segments:
-        tables.append({
-            "title": "细分画像",
-            "columns": ["细分", "样本数", "占比", "坏率", "均分", "净利润"],
-            "rows": [
-                [
-                    str(r.get("segment") or ""),
-                    _fmt(r.get("count")),
-                    _pct(r.get("pop_pct")),
-                    _pct(r.get("bad_rate")) if r.get("bad_rate") is not None else "n/a",
-                    _fmt(r.get("avg_score")) if r.get("avg_score") is not None else "n/a",
-                    _fmt(r.get("net_profit")) if r.get("net_profit") is not None else "n/a",
-                ]
-                for r in segments
-            ],
-        })
+        tables.append(
+            {
+                "title": "细分画像",
+                "columns": ["细分", "样本数", "占比", "坏率", "均分", "净利润"],
+                "rows": [
+                    [
+                        str(r.get("segment") or ""),
+                        _fmt(r.get("count")),
+                        _pct(r.get("pop_pct")),
+                        _pct(r.get("bad_rate"))
+                        if r.get("bad_rate") is not None
+                        else "n/a",
+                        _fmt(r.get("avg_score"))
+                        if r.get("avg_score") is not None
+                        else "n/a",
+                        _fmt(r.get("net_profit"))
+                        if r.get("net_profit") is not None
+                        else "n/a",
+                    ]
+                    for r in segments
+                ],
+            }
+        )
     if red_flags:
         tables.append(_data_quality_flag_table(red_flags))
     return text, tables
@@ -2951,24 +3596,32 @@ def _render_el_estimate(o: dict):
     text = f"**预期损失估计完成**:损失态 `{o.get('loss_state', '')}`，合计 EL {_fmt(o.get('total_el'))}{basis_note}。"
     tables = []
     if chain:
-        tables.append({
-            "title": "各状态到损失态的吸收概率",
-            "columns": ["起始状态", "P(损失)"],
-            "rows": [[str(r.get("from_state") or ""), _pct(r.get("p_to_loss"))] for r in chain],
-        })
+        tables.append(
+            {
+                "title": "各状态到损失态的吸收概率",
+                "columns": ["起始状态", "P(损失)"],
+                "rows": [
+                    [str(r.get("from_state") or ""), _pct(r.get("p_to_loss"))]
+                    for r in chain
+                ],
+            }
+        )
     if el_by_month:
-        tables.append({
-            "title": "逐月预期损失",
-            "columns": ["月份", "余额", "预期损失"],
-            "rows": [
-                [
-                    ("★ " if r.get("is_reference") else "") + str(r.get("month") or ""),
-                    _fmt(r.get("balance")),
-                    _fmt(r.get("expected_loss")),
-                ]
-                for r in el_by_month
-            ],
-        })
+        tables.append(
+            {
+                "title": "逐月预期损失",
+                "columns": ["月份", "余额", "预期损失"],
+                "rows": [
+                    [
+                        ("★ " if r.get("is_reference") else "")
+                        + str(r.get("month") or ""),
+                        _fmt(r.get("balance")),
+                        _fmt(r.get("expected_loss")),
+                    ]
+                    for r in el_by_month
+                ],
+            }
+        )
     if red_flags:
         tables.append(_data_quality_flag_table(red_flags))
     return text, tables
@@ -2976,10 +3629,18 @@ def _render_el_estimate(o: dict):
 
 def _render_portfolio_report(o: dict):
     sheets = [str(s) for s in (o.get("sheets") or [])]
-    text = f"**组合报告已生成**:`{o.get('report_path', '')}`，含 {len(sheets)} 个 sheet。"
+    text = (
+        f"**组合报告已生成**:`{o.get('report_path', '')}`，含 {len(sheets)} 个 sheet。"
+    )
     tables = []
     if sheets:
-        tables.append({"title": "报告 sheet", "columns": ["#", "sheet"], "rows": [[str(i), s] for i, s in enumerate(sheets, start=1)]})
+        tables.append(
+            {
+                "title": "报告 sheet",
+                "columns": ["#", "sheet"],
+                "rows": [[str(i), s] for i, s in enumerate(sheets, start=1)],
+            }
+        )
     return text, tables
 
 
@@ -2989,17 +3650,21 @@ def _render_portfolio_gate_summary(o: dict):
     text = f"**组合分析汇总**:{o.get('red_flag_count', 0)} 项数据质量红旗，请确认后生成报告。"
     tables = []
     if highlights:
-        tables.append({
-            "title": "关键数字",
-            "columns": ["指标", "值"],
-            "rows": [[str(k), _fmt(v)] for k, v in highlights.items()],
-        })
+        tables.append(
+            {
+                "title": "关键数字",
+                "columns": ["指标", "值"],
+                "rows": [[str(k), _fmt(v)] for k, v in highlights.items()],
+            }
+        )
     if checklist:
-        tables.append({
-            "title": "红旗 checklist",
-            "columns": ["#", "红旗"],
-            "rows": [[str(i), item] for i, item in enumerate(checklist, start=1)],
-        })
+        tables.append(
+            {
+                "title": "红旗 checklist",
+                "columns": ["#", "红旗"],
+                "rows": [[str(i), item] for i, item in enumerate(checklist, start=1)],
+            }
+        )
     return text, tables
 
 
@@ -3007,12 +3672,16 @@ def _data_quality_flag_table(red_flags: list[dict]) -> dict:
     return {
         "title": "数据质量红旗",
         "columns": ["类型", "说明"],
-        "rows": [[str(f.get("kind") or ""), str(f.get("message") or "")] for f in red_flags],
+        "rows": [
+            [str(f.get("kind") or ""), str(f.get("message") or "")] for f in red_flags
+        ],
     }
 
 
 def _render_mine_rules(o: dict):
-    rules = [rule for rule in (o.get("candidate_rules") or []) if isinstance(rule, dict)]
+    rules = [
+        rule for rule in (o.get("candidate_rules") or []) if isinstance(rule, dict)
+    ]
     red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
     n_rows = o.get("n_rows")
     text = (
@@ -3025,27 +3694,32 @@ def _render_mine_rules(o: dict):
         text += f" 红旗:{names}。"
     tables = []
     if rules:
-        tables.append({
-            "title": "候选规则（按 lift 降序）",
-            "columns": ["#", "规则", "支持度", "命中坏率", "lift", "来源"],
-            "rows": [
-                [
-                    str(index),
-                    str(rule.get("condition", "")),
-                    _pct(rule.get("support")),
-                    _pct(rule.get("hit_bad_rate")),
-                    _num(rule.get("lift")),
-                    str(rule.get("source", "")),
-                ]
-                for index, rule in enumerate(rules, start=1)
-            ],
-        })
+        tables.append(
+            {
+                "title": "候选规则（按 lift 降序）",
+                "columns": ["#", "规则", "支持度", "命中坏率", "lift", "来源"],
+                "rows": [
+                    [
+                        str(index),
+                        str(rule.get("condition", "")),
+                        _pct(rule.get("support")),
+                        _pct(rule.get("hit_bad_rate")),
+                        _num(rule.get("lift")),
+                        str(rule.get("source", "")),
+                    ]
+                    for index, rule in enumerate(rules, start=1)
+                ],
+            }
+        )
     if red_flags:
         tables.append(_red_flag_table(red_flags))
     return text, tables
 
+
 def _render_select_rule_set(o: dict):
-    selected = [rule for rule in (o.get("selected_rules") or []) if isinstance(rule, dict)]
+    selected = [
+        rule for rule in (o.get("selected_rules") or []) if isinstance(rule, dict)
+    ]
     candidate_count = o.get("candidate_count")
     text = (
         f"**规则集已选定**:从 {_fmt(candidate_count)} 条候选中选定 **{len(selected)}** 条规则"
@@ -3053,21 +3727,28 @@ def _render_select_rule_set(o: dict):
     )
     tables = []
     if selected:
-        tables.append({
-            "title": "已选规则（按顺序命中）",
-            "columns": ["#", "规则", "命中坏率", "lift", "来源"],
-            "rows": [
-                [
-                    str(index),
-                    str(rule.get("condition", "")),
-                    _pct(rule.get("hit_bad_rate")) if rule.get("hit_bad_rate") is not None else "n/a",
-                    _num(rule.get("lift")) if rule.get("lift") is not None else "n/a",
-                    str(rule.get("source", "")),
-                ]
-                for index, rule in enumerate(selected, start=1)
-            ],
-        })
+        tables.append(
+            {
+                "title": "已选规则（按顺序命中）",
+                "columns": ["#", "规则", "命中坏率", "lift", "来源"],
+                "rows": [
+                    [
+                        str(index),
+                        str(rule.get("condition", "")),
+                        _pct(rule.get("hit_bad_rate"))
+                        if rule.get("hit_bad_rate") is not None
+                        else "n/a",
+                        _num(rule.get("lift"))
+                        if rule.get("lift") is not None
+                        else "n/a",
+                        str(rule.get("source", "")),
+                    ]
+                    for index, rule in enumerate(selected, start=1)
+                ],
+            }
+        )
     return text, tables
+
 
 def _render_evaluate_rule_set(o: dict):
     waterfall = [row for row in (o.get("waterfall") or []) if isinstance(row, dict)]
@@ -3081,44 +3762,62 @@ def _render_evaluate_rule_set(o: dict):
         f"残余通过率 {_pct(residual.get('approval_rate'))}，"
         f"通过客群坏率 {_pct(residual.get('bad_rate'))}。"
     )
-    red_items = [flag for flag in red_flags if flag.get("code") in {"rule_shadowed", "high_overlap"}]
+    red_items = [
+        flag
+        for flag in red_flags
+        if flag.get("code") in {"rule_shadowed", "high_overlap"}
+    ]
     if red_items:
         names = "、".join(str(flag.get("code")) for flag in red_items)
         text += f" 告警:{names}。"
     tables = []
     if waterfall:
-        tables.append({
-            "title": "命中瀑布（按顺序，首个命中生效）",
-            "columns": ["规则", "增量命中", "增量坏率", "累计拒绝率", "累计拒绝坏率"],
-            "rows": [
-                [
-                    str(row.get("rule_id", "")),
-                    _fmt(row.get("incremental_hits")),
-                    _pct(row.get("incremental_bad_rate")),
-                    _pct(row.get("cum_reject_rate")),
-                    _pct(row.get("cum_reject_bad_rate")),
-                ]
-                for row in waterfall
-            ],
-        })
+        tables.append(
+            {
+                "title": "命中瀑布（按顺序，首个命中生效）",
+                "columns": [
+                    "规则",
+                    "增量命中",
+                    "增量坏率",
+                    "累计拒绝率",
+                    "累计拒绝坏率",
+                ],
+                "rows": [
+                    [
+                        str(row.get("rule_id", "")),
+                        _fmt(row.get("incremental_hits")),
+                        _pct(row.get("incremental_bad_rate")),
+                        _pct(row.get("cum_reject_rate")),
+                        _pct(row.get("cum_reject_bad_rate")),
+                    ]
+                    for row in waterfall
+                ],
+            }
+        )
     overlap = o.get("overlap_matrix")
     if isinstance(overlap, list) and len(overlap) > 1:
         header = [f"R{index}" for index in range(1, len(overlap) + 1)]
-        tables.append({
-            "title": "规则重叠矩阵（共同命中占比）",
-            "columns": ["", *header],
-            "rows": [
-                [f"R{i + 1}", *[_pct(overlap[i][j]) for j in range(len(overlap[i]))]]
-                for i in range(len(overlap))
-            ],
-        })
+        tables.append(
+            {
+                "title": "规则重叠矩阵（共同命中占比）",
+                "columns": ["", *header],
+                "rows": [
+                    [
+                        f"R{i + 1}",
+                        *[_pct(overlap[i][j]) for j in range(len(overlap[i]))],
+                    ]
+                    for i in range(len(overlap))
+                ],
+            }
+        )
     if red_flags:
         tables.append(_red_flag_table(red_flags))
     return text, tables
 
 
 _RENDERERS = {
-    "make_split": _render_make_split,    "choose_modeling_spec": _render_choose_modeling_spec,
+    "make_split": _render_make_split,
+    "choose_modeling_spec": _render_choose_modeling_spec,
     "screen_features": _render_screen,
     "select_features": _render_select,
     "configure_tuning": _render_configure_tuning,
@@ -3136,6 +3835,7 @@ _RENDERERS = {
     "generate_feature_report": _render_feature_report,
     "build_strategy": _render_build_strategy,
     "design_strategy_candidate": _render_design_strategy_candidate,
+    "analyze_univariate_candidates": _render_analyze_univariate_candidates,
     "backtest_strategy": _render_backtest_strategy,
     "tradeoff_view": _render_tradeoff_view,
     "design_cutoff_bands": _render_design_cutoff_bands,

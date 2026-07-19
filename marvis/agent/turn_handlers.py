@@ -180,7 +180,9 @@ class _TurnHandlerSpec:
     #   - a tuple (template_id, slots, start_kwargs): the driver.start(...)
     #     call to make once the pre-start assistant message has already been
     #     appended by the callback itself.
-    run_setup: Callable[[DriverTurnRuntime, TaskRepository, TaskRecord, str | None], dict | tuple]
+    run_setup: Callable[
+        [DriverTurnRuntime, TaskRepository, TaskRecord, str | None], dict | tuple
+    ]
     # join/modeling display "已确认文件角色与目标列。" instead of the raw
     # [C1]-prefixed payload text when logging the user turn; the other three
     # types always log user_text verbatim.
@@ -416,10 +418,16 @@ def _run_driver_turn(
 
 
 def _append_spec_messages(
-    spec: _TurnHandlerSpec, repo: TaskRepository, task: TaskRecord, turn, runtime: DriverTurnRuntime
+    spec: _TurnHandlerSpec,
+    repo: TaskRepository,
+    task: TaskRecord,
+    turn,
+    runtime: DriverTurnRuntime,
 ) -> None:
     if spec.pass_memory_kwargs:
-        append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
+        append_driver_messages(
+            repo, task.id, turn, settings=runtime.settings, task=task
+        )
     else:
         append_driver_messages(repo, task.id, turn)
 
@@ -433,7 +441,10 @@ def _identity_display_text(user_text: str) -> str:
 
 
 def _run_join_setup(
-    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    user_text: str | None,
 ) -> dict | tuple:
     conversation = repo.list_agent_messages(task.id)
     c1_state = _latest_c1_state(conversation)
@@ -453,7 +464,9 @@ def _run_join_setup(
         )
         return join_turn_response(repo, task.id)
     if not assignment["anchor_id"]:
-        return append_join_error(repo, task.id, "请先指定样本锚表（通常是含目标列的那张），再确认。")
+        return append_join_error(
+            repo, task.id, "请先指定样本锚表（通常是含目标列的那张），再确认。"
+        )
     if not assignment["feature_ids"]:
         repo.add_agent_message(
             task.id,
@@ -465,13 +478,19 @@ def _run_join_setup(
         return join_turn_response(repo, task.id)
     return (
         "data_join",
-        {"anchor_id": assignment["anchor_id"], "feature_ids": assignment["feature_ids"]},
+        {
+            "anchor_id": assignment["anchor_id"],
+            "feature_ids": assignment["feature_ids"],
+        },
         {},
     )
 
 
 def _run_feature_setup(
-    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    user_text: str | None,
 ) -> dict | tuple:
     backend, registry = _modeling_data_runtime(runtime.settings)
     proposal = build_feature_proposal(
@@ -579,7 +598,9 @@ def _run_strategy_setup(
         )
         notices = registry.consume_ingest_notices(task.id)
         note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
-        bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
+        bad = (
+            f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
+        )
         constraints = []
         if proposal.max_bad_rate is not None:
             constraints.append(f"通过客群坏率 ≤ {proposal.max_bad_rate:.2%}")
@@ -762,7 +783,11 @@ def _strategy_input_snapshot(strategy_input) -> dict | None:
 
 
 def _run_rule_strategy_setup(
-    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, backend, registry
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    backend,
+    registry,
 ) -> dict | tuple:
     proposal = build_rule_strategy_proposal(
         registry,
@@ -793,7 +818,11 @@ def _run_rule_strategy_setup(
 
 
 def _run_strategy_monitoring_setup(
-    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, backend, registry
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    backend,
+    registry,
 ) -> dict | tuple:
     proposal = build_monitoring_setup_proposal(
         registry,
@@ -824,7 +853,10 @@ def _run_strategy_monitoring_setup(
 
 
 def _run_vintage_setup(
-    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    user_text: str | None,
 ) -> dict | tuple:
     backend, registry = _modeling_data_runtime(runtime.settings)
     proposal = build_vintage_proposal(
@@ -872,7 +904,10 @@ def _latest_portfolio_states(conversation: list[dict]) -> dict | None:
 
 
 def _run_portfolio_setup(
-    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    user_text: str | None,
 ) -> dict | tuple:
     backend, registry = _modeling_data_runtime(runtime.settings)
     conversation = repo.list_agent_messages(task.id)
@@ -941,14 +976,19 @@ def _run_portfolio_setup(
         task.id,
         role="assistant",
         stage="chat",
-        content=f"已确认桶顺序：{' → '.join(states)}。开始并行分析（流量/迁徙/细分" + ("/趋势" if proposal.experiment_id else "") + "），随后汇总确认。",
+        content=f"已确认桶顺序：{' → '.join(states)}。开始并行分析（流量/迁徙/细分"
+        + ("/趋势" if proposal.experiment_id else "")
+        + "），随后汇总确认。",
         metadata={"intent": "portfolio"},
     )
     return (proposal.template_id, proposal.template_slots(states), {})
 
 
 def _run_modeling_setup(
-    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    user_text: str | None,
 ) -> dict | tuple:
     backend, registry = _modeling_data_runtime(runtime.settings)
     conversation = repo.list_agent_messages(task.id)
@@ -971,7 +1011,9 @@ def _run_modeling_setup(
             )
             return join_turn_response(repo, task.id)
         if not c1_assignment["anchor_id"]:
-            return append_join_error(repo, task.id, "请先指定建模样本主表（通常是含目标列的那张），再确认。")
+            return append_join_error(
+                repo, task.id, "请先指定建模样本主表（通常是含目标列的那张），再确认。"
+            )
     proposal = build_modeling_proposal(
         registry,
         backend,
@@ -1272,10 +1314,10 @@ _STRATEGY_REQUEST_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_SUBJECT_RE = re.compile(
-    r"(?:策略|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|cutoff|利润|收益|"
+    r"(?:策略|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|单变量|分箱|cutoff|利润|收益|"
     r"催收|滚动率|迁徙率|迁徙矩阵|定价矩阵|额度矩阵|网格|ROA|"
     r"roll(?:\s|-|_)*rate|strategy|approval|reject|limit|pricing|segment|rule|"
-    r"profit|collection)",
+    r"univariate|binning|profit|collection)",
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_CANCEL_RE = re.compile(
@@ -1368,9 +1410,7 @@ def _maybe_handle_strategy_request_turn(
             PendingStrategyRequestRepository(runtime.settings.db_path).cancel(
                 task_id=task.id,
                 request_id=str(pending.get("request_id") or ""),
-                expected_payload_sha256=str(
-                    pending.get("payload_sha256") or ""
-                ),
+                expected_payload_sha256=str(pending.get("payload_sha256") or ""),
             )
         except (
             PendingStrategyRequestConflictError,
@@ -1511,11 +1551,9 @@ def _maybe_handle_strategy_request_turn(
             repo,
             task,
             code=(
-                compilation.clarification_code
-                or "strategy_request_needs_clarification"
+                compilation.clarification_code or "strategy_request_needs_clarification"
             ),
-            message=compilation.clarification
-            or "请补充策略操作、策略类型和业务口径。",
+            message=compilation.clarification or "请补充策略操作、策略类型和业务口径。",
             fields=compilation.clarification_fields,
         )
     preflight = _strategy_request_preflight(runtime, task, compilation.draft)
@@ -1669,11 +1707,34 @@ def _run_validated_strategy_request(
             "profit_calc": "strategy_profit_analysis",
             "roll_rate_matrix": "strategy_roll_rate_analysis",
             "limit_pricing_matrix": "strategy_limit_pricing_analysis",
+            "univariate_candidate_analysis": ("strategy_univariate_candidate_analysis"),
         }[draft.workflow]
         slots = {
             "dataset_id": context.dataset_id,
             **draft.to_dict()["workflow_inputs"],
         }
+        if draft.workflow == "univariate_candidate_analysis":
+            binding = {
+                "expected_content_hash": getattr(context, "dataset_content_hash", None),
+                "workspace_revision": getattr(context, "workspace_revision", None),
+                "analysis_generation": getattr(context, "analysis_generation", None),
+                "semantic_mapping_hash": getattr(
+                    context, "semantic_mapping_hash", None
+                ),
+            }
+            if (
+                not isinstance(binding["expected_content_hash"], str)
+                or not isinstance(binding["semantic_mapping_hash"], str)
+                or isinstance(binding["workspace_revision"], bool)
+                or not isinstance(binding["workspace_revision"], int)
+                or isinstance(binding["analysis_generation"], bool)
+                or not isinstance(binding["analysis_generation"], int)
+            ):
+                raise StrategySetupError(
+                    "单变量候选分析无法绑定当前数据工作区，请重新选择活动数据集。"
+                )
+            slots.update(binding)
+            slots["target_col"] = context.target_col
         return _start_confirmed_strategy_plan(
             runtime,
             repo,
@@ -1789,9 +1850,7 @@ def _run_validated_strategy_request(
             forced_intent=STRATEGY_INTENT_MONITORING,
         )
     else:  # guarded by _strategy_request_preflight
-        raise StrategySetupError(
-            f"strategy operation is not wired: {draft.operation}"
-        )
+        raise StrategySetupError(f"strategy operation is not wired: {draft.operation}")
     if isinstance(setup, dict):
         return setup
     template_id, slots, start_kwargs = setup
@@ -2122,9 +2181,9 @@ def _strategy_request_preflight(
                 "目标、审批约束、策略 ID、预先采纳理由或审批利润口径不会被静默忽略。",
             )
         if draft.baseline_strategy_id:
-            baseline = StrategyRepository(
-                runtime.settings.db_path
-            ).get_strategy_meta(draft.baseline_strategy_id)
+            baseline = StrategyRepository(runtime.settings.db_path).get_strategy_meta(
+                draft.baseline_strategy_id
+            )
             if baseline is None or baseline.get("task_id") != task.id:
                 return (
                     "strategy_baseline_not_owned_by_task",
@@ -2534,11 +2593,26 @@ def _strategy_dataset_binding_matches(
         return False
 
     identity = preview.identity if isinstance(preview.identity, dict) else {}
+    refreshed_identity = (
+        refreshed.identity if isinstance(refreshed.identity, dict) else {}
+    )
+    context_fields = {
+        "workspace_revision": getattr(context, "workspace_revision", None),
+        "analysis_generation": getattr(context, "analysis_generation", None),
+        "semantic_mapping_hash": getattr(context, "semantic_mapping_hash", None),
+    }
+    for field, context_value in context_fields.items():
+        if field in identity and (
+            identity[field] != refreshed_identity.get(field)
+            or identity[field] != context_value
+        ):
+            return False
     if identity.get("kind") == "registered":
         return (
-            identity.get("dataset_id") == refreshed.identity.get("dataset_id")
+            identity.get("dataset_id") == refreshed_identity.get("dataset_id")
+            and identity.get("content_hash") == refreshed_identity.get("content_hash")
             and identity.get("content_hash")
-            == refreshed.identity.get("content_hash")
+            == getattr(context, "dataset_content_hash", None)
         )
     if identity.get("kind") != "source":
         return False
@@ -2547,6 +2621,9 @@ def _strategy_dataset_binding_matches(
     if not source_path or not expected_hash:
         return False
     try:
+        # CSV/XLSX source registration may normalize bytes into Parquet.  The
+        # confirmation binds the original source here; the registered Parquet
+        # hash is bound separately in the plan/tool inputs.
         return sha256_file(Path(str(source_path))) == str(expected_hash)
     except OSError:
         return False
@@ -2722,9 +2799,7 @@ def _strategy_request_allowed_columns(preview) -> tuple[str, ...]:
         return ()
     # The observed target is evidence, never a deployable strategy feature or
     # an input to an LLM-authored profit contract.
-    return tuple(
-        column for column in preview.columns if column != preview.target_col
-    )
+    return tuple(column for column in preview.columns if column != preview.target_col)
 
 
 def _strategy_request_requires_dataset(
@@ -2739,7 +2814,7 @@ def _strategy_request_requires_target(
     draft: CompiledStrategyRequestDraft,
 ) -> bool:
     if isinstance(draft, StandardWorkflowRequestDraft):
-        return (
+        return draft.workflow == "univariate_candidate_analysis" or (
             draft.workflow == "limit_pricing_matrix"
             and "target_col" in draft.workflow_inputs
         )
@@ -2756,7 +2831,7 @@ def _strategy_request_requires_complete_labels(
     """Whether execution would otherwise exclude missing supervision rows."""
 
     if isinstance(draft, StandardWorkflowRequestDraft):
-        return (
+        return draft.workflow == "univariate_candidate_analysis" or (
             draft.workflow == "limit_pricing_matrix"
             and "target_col" in draft.workflow_inputs
         )
@@ -2855,13 +2930,9 @@ def _strategy_request_success_criteria(
         return None
     criteria: list[dict] = []
     if draft.max_bad_rate is not None:
-        criteria.append(
-            {"metric": "approved_bad_rate", "max": draft.max_bad_rate}
-        )
+        criteria.append({"metric": "approved_bad_rate", "max": draft.max_bad_rate})
     if draft.min_approval_rate is not None:
-        criteria.append(
-            {"metric": "approval_rate", "min": draft.min_approval_rate}
-        )
+        criteria.append({"metric": "approval_rate", "min": draft.min_approval_rate})
     return criteria or None
 
 
@@ -2901,14 +2972,16 @@ def _strategy_request_clarification_response(
 
 def _latest_strategy_request_pending(conversation: list[dict]) -> dict | None:
     last_assistant = next(
-        (message for message in reversed(conversation) if message.get("role") == "assistant"),
+        (
+            message
+            for message in reversed(conversation)
+            if message.get("role") == "assistant"
+        ),
         None,
     )
     if last_assistant is None:
         return None
-    pending = (last_assistant.get("metadata") or {}).get(
-        _STRATEGY_REQUEST_META_KEY
-    )
+    pending = (last_assistant.get("metadata") or {}).get(_STRATEGY_REQUEST_META_KEY)
     return pending if isinstance(pending, dict) else None
 
 
@@ -2925,9 +2998,7 @@ def _latest_strategy_nan_label_confirmation(
     )
     if last_assistant is None:
         return None
-    state = (last_assistant.get("metadata") or {}).get(
-        _STRATEGY_NAN_LABEL_META_KEY
-    )
+    state = (last_assistant.get("metadata") or {}).get(_STRATEGY_NAN_LABEL_META_KEY)
     return state if isinstance(state, dict) else None
 
 
@@ -2994,9 +3065,9 @@ def _maybe_handle_dataset_transform_turn(
         },
     )
     try:
-        snapshot = DataWorkspaceRepository(
-            runtime.settings.db_path
-        ).get_or_default(task.id)
+        snapshot = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
+            task.id
+        )
     except (DataWorkspaceDataError, DataWorkspaceDatasetNotFound, KeyError) as exc:
         return _dataset_transform_clarification(
             repo,
@@ -3222,9 +3293,9 @@ def _maybe_handle_dataset_export_turn(
         metadata={"intent": "dataset_export"},
     )
     try:
-        snapshot = DataWorkspaceRepository(
-            runtime.settings.db_path
-        ).get_or_default(task.id)
+        snapshot = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
+            task.id
+        )
     except (DataWorkspaceDataError, DataWorkspaceDatasetNotFound, KeyError) as exc:
         return _dataset_export_clarification(
             repo,
@@ -3273,9 +3344,7 @@ def _maybe_handle_dataset_export_turn(
         "expected_content_hash": dataset.content_hash,
         "workspace_revision": snapshot.revision,
         "analysis_generation": snapshot.analysis_generation,
-        "semantic_mapping_hash": data_semantic_mapping_hash(
-            snapshot.semantic_mapping
-        ),
+        "semantic_mapping_hash": data_semantic_mapping_hash(snapshot.semantic_mapping),
         "format": request.format,
         "text_columns": list(request.text_columns),
     }
@@ -3351,9 +3420,9 @@ def _maybe_handle_dataset_analysis_turn(
         metadata={"intent": "dataset_analysis"},
     )
     try:
-        snapshot = DataWorkspaceRepository(
-            runtime.settings.db_path
-        ).get_or_default(task.id)
+        snapshot = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
+            task.id
+        )
     except (DataWorkspaceDataError, DataWorkspaceDatasetNotFound, KeyError) as exc:
         return _dataset_analysis_clarification(
             repo,
@@ -3404,9 +3473,7 @@ def _maybe_handle_dataset_analysis_turn(
         "expected_content_hash": snapshot.active_dataset_content_hash,
         "workspace_revision": snapshot.revision,
         "analysis_generation": snapshot.analysis_generation,
-        "semantic_mapping_hash": data_semantic_mapping_hash(
-            snapshot.semantic_mapping
-        ),
+        "semantic_mapping_hash": data_semantic_mapping_hash(snapshot.semantic_mapping),
         "sections": list(request.sections),
     }
     if request.columns is not None:
@@ -3486,8 +3553,11 @@ def _maybe_handle_adhoc_turn(
         # (deny / rephrase) drops the pending spec and returns to the normal flow.
         if is_confirm(user_text or ""):
             repo.add_agent_message(
-                task.id, role="user", stage="chat",
-                content=user_text or "", metadata={"intent": "adhoc_query"},
+                task.id,
+                role="user",
+                stage="chat",
+                content=user_text or "",
+                metadata={"intent": "adhoc_query"},
             )
             return _run_adhoc_slice_plan(runtime, repo, task, pending)
         return None
@@ -3503,23 +3573,32 @@ def _maybe_handle_adhoc_turn(
     if resolved is None:
         return None
     dataset_id, columns = resolved
-    result = build_slice_spec_from_utterance(user_text or "", columns, runtime.llm_client)
+    result = build_slice_spec_from_utterance(
+        user_text or "", columns, runtime.llm_client
+    )
     repo.add_agent_message(
-        task.id, role="user", stage="chat",
-        content=user_text or "", metadata={"intent": "adhoc_query"},
+        task.id,
+        role="user",
+        stage="chat",
+        content=user_text or "",
+        metadata={"intent": "adhoc_query"},
     )
     if result.needs_clarification:
         # A Chinese clarification (never a guess, INV-1). No pending state is
         # stored — the user simply rephrases and round A runs again.
         repo.add_agent_message(
-            task.id, role="assistant", stage="chat",
+            task.id,
+            role="assistant",
+            stage="chat",
             content=result.clarify or "没能理解这个问题，请换一种说法。",
             metadata={"intent": "adhoc_query"},
         )
         return join_turn_response(repo, task.id)
     # A validated spec: show the 口径确认门 and stash the exact tool inputs on it.
     repo.add_agent_message(
-        task.id, role="assistant", stage="chat",
+        task.id,
+        role="assistant",
+        stage="chat",
         content=result.confirmation_text or "",
         metadata={_ADHOC_SPEC_META_KEY: result.spec.tool_inputs(dataset_id)},
     )
@@ -3527,7 +3606,10 @@ def _maybe_handle_adhoc_turn(
 
 
 def _run_adhoc_slice_plan(
-    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, tool_inputs: dict
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    tool_inputs: dict,
 ) -> dict:
     """Build + run the single-step slice_aggregate plan for a confirmed 口径.
 
@@ -3572,12 +3654,17 @@ def _resolve_adhoc_dataset(settings, task_id: str) -> tuple[str, list[str]] | No
     from source_dir; that is the setup flow's job). Prefers a target-carrying
     dataset, else the largest — same ranking feature/vintage setup use."""
     backend, registry = _modeling_data_runtime(settings)
-    datasets = [d for d in registry.list_for_task(task_id) if d.role in _ADHOC_DATA_ROLES]
+    datasets = [
+        d for d in registry.list_for_task(task_id) if d.role in _ADHOC_DATA_ROLES
+    ]
     if not datasets:
         return None
     dataset = sorted(
         datasets,
-        key=lambda d: (not bool(getattr(d, "has_target", False)), -int(getattr(d, "row_count", 0) or 0)),
+        key=lambda d: (
+            not bool(getattr(d, "has_target", False)),
+            -int(getattr(d, "row_count", 0) or 0),
+        ),
     )[0]
     try:
         columns = list(backend.column_names(registry.resolve_path(dataset.id)))
@@ -3609,7 +3696,9 @@ def agent_autodrive_turn(
             memory_anchor = build_memory_anchor(
                 driver_settings,
                 task,
-                gate_metadata=gate.get("metadata") if isinstance(gate.get("metadata"), dict) else {},
+                gate_metadata=gate.get("metadata")
+                if isinstance(gate.get("metadata"), dict)
+                else {},
             )
         if memory_anchor is not None:
             gate = dict(gate)
@@ -3658,7 +3747,9 @@ def agent_autodrive_turn(
                 )
             except Exception:
                 pass
-        gate_meta = gate.get("metadata") if isinstance(gate.get("metadata"), dict) else {}
+        gate_meta = (
+            gate.get("metadata") if isinstance(gate.get("metadata"), dict) else {}
+        )
         gate_step_id = gate_meta.get("step_id")
         if action == "confirm":
             turn_fn(
@@ -3671,9 +3762,21 @@ def agent_autodrive_turn(
             )
             continue
         if action == "adjust":
-            params = decision.get("params") if isinstance(decision.get("params"), dict) else None
-            selection = decision.get("selection") if isinstance(decision.get("selection"), list) else None
-            dedup = decision.get("dedup_strategies") if isinstance(decision.get("dedup_strategies"), dict) else None
+            params = (
+                decision.get("params")
+                if isinstance(decision.get("params"), dict)
+                else None
+            )
+            selection = (
+                decision.get("selection")
+                if isinstance(decision.get("selection"), list)
+                else None
+            )
+            dedup = (
+                decision.get("dedup_strategies")
+                if isinstance(decision.get("dedup_strategies"), dict)
+                else None
+            )
             if not (params or selection or dedup):
                 return
             turn_fn(
@@ -3710,7 +3813,13 @@ def agent_autodrive_turn(
                 )
             except DriverError:
                 return
-            append_driver_messages(repo, task.id, turn, settings=getattr(runtime, "settings", None), task=task)
+            append_driver_messages(
+                repo,
+                task.id,
+                turn,
+                settings=getattr(runtime, "settings", None),
+                task=task,
+            )
             continue
         return
     # AGT-7: the budget ran out with a gate STILL open (every iteration matched a
@@ -3761,12 +3870,26 @@ def append_driver_messages(
 
 
 def join_turn_response(repo: TaskRepository, task_id: str) -> dict:
-    return {"task_id": task_id, "status": "ok", "messages": repo.list_agent_messages(task_id)}
+    return {
+        "task_id": task_id,
+        "status": "ok",
+        "messages": repo.list_agent_messages(task_id),
+    }
 
 
 def append_join_error(repo: TaskRepository, task_id: str, detail: str) -> dict:
-    repo.add_agent_message(task_id, role="assistant", stage="chat", content=detail, metadata={"error": True})
-    return {"task_id": task_id, "status": "error", "messages": repo.list_agent_messages(task_id)}
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="chat",
+        content=detail,
+        metadata={"error": True},
+    )
+    return {
+        "task_id": task_id,
+        "status": "error",
+        "messages": repo.list_agent_messages(task_id),
+    }
 
 
 def append_workflow_error(
@@ -3803,7 +3926,9 @@ def append_workflow_error(
 
 
 def latest_open_gate(messages: list[dict]) -> dict | None:
-    last_assistant = next((m for m in reversed(messages) if m.get("role") == "assistant"), None)
+    last_assistant = next(
+        (m for m in reversed(messages) if m.get("role") == "assistant"), None
+    )
     if last_assistant is None:
         return None
     meta = last_assistant.get("metadata") or {}
@@ -3898,14 +4023,22 @@ def _append_c1_message(repo: TaskRepository, task_id: str, proposal) -> None:
     if proposal.skip:
         text = (
             f"我发现 {len(files)} 个数据文件。提议**样本主表 = `{anchor.name if anchor else '?'}`**"
-            + (f"，目标列 = `{proposal.target_col}`" if proposal.target_col else "（未识别目标列，请指定）")
+            + (
+                f"，目标列 = `{proposal.target_col}`"
+                if proposal.target_col
+                else "（未识别目标列，请指定）"
+            )
             + "。只有一张表，确认后将跳过拼接。请确认，或用下方控件调整。"
         )
     else:
         text = (
             f"我发现 {len(files)} 个数据文件，先确认每张的**角色与目标列**（样本是锚，只贴列不改行，**1:1**）:\n"
             f"- 提议**样本主表** = `{anchor.name if anchor else '?'}`"
-            + (f"（目标列 `{proposal.target_col}`）" if proposal.target_col else "（未识别目标列，请指定）")
+            + (
+                f"（目标列 `{proposal.target_col}`）"
+                if proposal.target_col
+                else "（未识别目标列，请指定）"
+            )
             + "\n- 提议**特征表** = "
             + (", ".join(f"`{name}`" for name in feature_names) or "（无）")
             + "\n确认无误回复「确认」；要改就用下方控件选好角色/目标列后点「确认角色」。"
@@ -3969,7 +4102,7 @@ def _parse_c1_reply(user_text: str | None, c1_state: dict) -> dict | None:
     text = (user_text or "").strip()
     if text.startswith("[C1]"):
         try:
-            payload = json.loads(text[len("[C1]"):])
+            payload = json.loads(text[len("[C1]") :])
         except (ValueError, TypeError):
             return None
         anchor_ids = [aid for aid in (payload.get("anchor_ids") or []) if aid]
@@ -3986,7 +4119,9 @@ def _parse_c1_reply(user_text: str | None, c1_state: dict) -> dict | None:
             )
         anchor_id = anchor_ids[0] if anchor_ids else payload.get("anchor_id")
         feature_ids = [
-            fid for fid in (payload.get("feature_ids") or []) if fid and fid != anchor_id
+            fid
+            for fid in (payload.get("feature_ids") or [])
+            if fid and fid != anchor_id
         ]
         return {
             "anchor_id": anchor_id,
@@ -4008,11 +4143,19 @@ def _c1_dataset_names(c1_state: dict, dataset_ids: list[str]) -> list[str]:
 
 
 def _feature_metrics(task: TaskRecord) -> list[str]:
-    return [str(item).strip() for item in (getattr(task, "metrics", None) or []) if str(item).strip()]
+    return [
+        str(item).strip()
+        for item in (getattr(task, "metrics", None) or [])
+        if str(item).strip()
+    ]
 
 
 def _modeling_recipes(task: TaskRecord) -> list[str] | None:
-    recipes = [str(item).strip() for item in (getattr(task, "recipes", None) or []) if str(item).strip()]
+    recipes = [
+        str(item).strip()
+        for item in (getattr(task, "recipes", None) or [])
+        if str(item).strip()
+    ]
     return recipes or None
 
 
@@ -4045,9 +4188,14 @@ def _modeling_field_hint_keywords(task: TaskRecord, c1_proposal) -> tuple[str, .
     # names (+ model name) so a hint only ever comes from prior tasks that look
     # like they touched the same data, never an unrelated model's column names.
     values = [getattr(task, "model_name", None)]
-    values.extend(getattr(item, "name", None) for item in getattr(c1_proposal, "files", None) or ())
+    values.extend(
+        getattr(item, "name", None)
+        for item in getattr(c1_proposal, "files", None) or ()
+    )
     return tuple(
-        dict.fromkeys(str(value).strip() for value in values if str(value or "").strip())
+        dict.fromkeys(
+            str(value).strip() for value in values if str(value or "").strip()
+        )
     )
 
 

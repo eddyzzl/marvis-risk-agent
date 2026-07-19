@@ -15,6 +15,7 @@ STRATEGY_DSL_SCHEMA_VERSION = "strategy.dsl.v1"
 FIRST_MATCH_POLICY = "first_match"
 
 _COMPARISON_OPERATORS = frozenset({"<", "<=", ">", ">=", "==", "!=", "in", "not_in"})
+_COMPARISON_COERCIONS = frozenset({"auto", "strict"})
 _MISSING_POLICIES = frozenset({"no_match", "match", "error"})
 _ACTION_TYPES = frozenset(
     {"approval", "reject", "review", "limit", "pricing", "segment"}
@@ -28,6 +29,8 @@ _STRATEGY_ACTION_TYPES = {
     "pricing": frozenset({"pricing"}),
     "segmentation": frozenset({"segment"}),
 }
+
+
 def _object(payload: Mapping[str, Any] | object, *, name: str) -> Mapping[str, Any]:
     if not isinstance(payload, Mapping):
         raise StrategyError(f"{name} must be an object")
@@ -111,7 +114,7 @@ def canonicalize_expression(expression: Mapping[str, Any]) -> dict[str, Any]:
     if op == "compare":
         _only_keys(
             payload,
-            {"op", "field", "operator", "value", "missing"},
+            {"op", "field", "operator", "value", "missing", "coercion"},
             name="compare expression",
         )
         field_name = _field_name(payload)
@@ -125,14 +128,29 @@ def canonicalize_expression(expression: Mapping[str, Any]) -> dict[str, Any]:
         if operator in {"in", "not_in"} and not isinstance(value, list):
             raise StrategyError(f"comparison operator {operator} requires a list value")
         if operator not in {"in", "not_in"} and isinstance(value, dict | list):
-            raise StrategyError(f"comparison operator {operator} requires a scalar value")
-        return {
+            raise StrategyError(
+                f"comparison operator {operator} requires a scalar value"
+            )
+        coercion = payload.get("coercion", "auto")
+        if not isinstance(coercion, str) or coercion not in _COMPARISON_COERCIONS:
+            allowed = ", ".join(sorted(_COMPARISON_COERCIONS))
+            raise StrategyError(f"comparison coercion must be one of: {allowed}")
+        if coercion == "strict" and operator not in {"==", "!=", "in", "not_in"}:
+            raise StrategyError(
+                "strict comparison coercion supports only equality and membership operators"
+            )
+        result = {
             "op": op,
             "field": field_name,
             "operator": operator,
             "value": value,
             "missing": missing,
         }
+        # Preserve the historical canonical form and hashes for ordinary DSL.
+        # Strict is opt-in for type-preserving categorical evidence.
+        if coercion == "strict":
+            result["coercion"] = "strict"
+        return result
 
     if op == "between":
         _only_keys(
@@ -184,7 +202,10 @@ def canonicalize_expression(expression: Mapping[str, Any]) -> dict[str, Any]:
             raise StrategyError(f"{op} expression args must be a list")
         if not args_value:
             raise StrategyError(f"{op} expression requires at least one argument")
-        args = [canonicalize_expression(_object(arg, name=f"{op} argument")) for arg in args_value]
+        args = [
+            canonicalize_expression(_object(arg, name=f"{op} argument"))
+            for arg in args_value
+        ]
         if op != "n_of_k":
             return {"op": op, "args": args}
         n = payload.get("n")
@@ -200,7 +221,9 @@ def canonicalize_expression(expression: Mapping[str, Any]) -> dict[str, Any]:
             raise StrategyError("not expression requires arg")
         return {
             "op": op,
-            "arg": canonicalize_expression(_object(payload["arg"], name="not argument")),
+            "arg": canonicalize_expression(
+                _object(payload["arg"], name="not argument")
+            ),
         }
 
     raise StrategyError(f"unsupported expression op: {op}")
@@ -229,16 +252,12 @@ class StrategyAction:
         if value is None and fixed_value is not None:
             value = fixed_value
         elif fixed_value is not None and value != fixed_value:
-            raise StrategyError(
-                f"action {action_type} value must be {fixed_value!r}"
-            )
+            raise StrategyError(f"action {action_type} value must be {fixed_value!r}")
         if value is None and action_type in _VALUE_ACTION_TYPES:
             raise StrategyError(f"action {action_type} requires a value")
         value = _canonical_json_value(value, path="action value")
         if action_type == "limit" and (
-            not isinstance(value, int | float)
-            or isinstance(value, bool)
-            or value < 0
+            not isinstance(value, int | float) or isinstance(value, bool) or value < 0
         ):
             raise StrategyError("action limit value must be a non-negative number")
         if action_type == "pricing" and (
@@ -274,9 +293,7 @@ class StrategyAction:
         if not isinstance(self.stop, bool):
             raise StrategyError("action stop must be a boolean")
         if not self.stop:
-            raise StrategyError(
-                "strategy.dsl.v1 first_match supports only stop=true"
-            )
+            raise StrategyError("strategy.dsl.v1 first_match supports only stop=true")
         object.__setattr__(self, "type", action_type)
         object.__setattr__(self, "value", value)
         object.__setattr__(self, "reason_code", reason_code)
@@ -347,7 +364,9 @@ class StrategyRuleSpec:
             rule_id=value.get("rule_id"),
             priority=value.get("priority"),
             condition=_object(value.get("condition"), name="rule condition"),
-            action=StrategyAction.from_dict(_object(value.get("action"), name="rule action")),
+            action=StrategyAction.from_dict(
+                _object(value.get("action"), name="rule action")
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -370,24 +389,32 @@ class StrategySpec:
 
     def __post_init__(self) -> None:
         if self.schema_version != STRATEGY_DSL_SCHEMA_VERSION:
-            raise StrategyError(f"unsupported strategy schema_version: {self.schema_version}")
+            raise StrategyError(
+                f"unsupported strategy schema_version: {self.schema_version}"
+            )
         strategy_type = _nonempty_string(self.strategy_type, name="strategy_type")
         if strategy_type not in _STRATEGY_TYPES:
             raise StrategyError(f"unsupported strategy_type: {strategy_type}")
         if self.match_policy != FIRST_MATCH_POLICY:
-            raise StrategyError(f"unsupported strategy match_policy: {self.match_policy}")
+            raise StrategyError(
+                f"unsupported strategy match_policy: {self.match_policy}"
+            )
         default_action = self.default_action
         if isinstance(default_action, Mapping):
             default_action = StrategyAction.from_dict(default_action)
         if not isinstance(default_action, StrategyAction):
             raise StrategyError("default_action must be a StrategyAction")
         rules = tuple(
-            rule if isinstance(rule, StrategyRuleSpec) else StrategyRuleSpec.from_dict(rule)
+            rule
+            if isinstance(rule, StrategyRuleSpec)
+            else StrategyRuleSpec.from_dict(rule)
             for rule in self.rules
         )
         rules = tuple(sorted(rules, key=lambda rule: rule.priority))
         rule_ids = [rule.rule_id for rule in rules]
-        duplicate_ids = sorted({rule_id for rule_id in rule_ids if rule_ids.count(rule_id) > 1})
+        duplicate_ids = sorted(
+            {rule_id for rule_id in rule_ids if rule_ids.count(rule_id) > 1}
+        )
         if duplicate_ids:
             raise StrategyError(f"duplicate rule_id: {', '.join(duplicate_ids)}")
         priorities = [rule.priority for rule in rules]
@@ -410,7 +437,9 @@ class StrategySpec:
             raise StrategyError(
                 f"action type is not allowed for {strategy_type}: {rendered}"
             )
-        metadata = _canonical_json_value(_object(self.metadata, name="strategy metadata"), path="metadata")
+        metadata = _canonical_json_value(
+            _object(self.metadata, name="strategy metadata"), path="metadata"
+        )
         lineage = metadata.get("lineage", {})
         if not isinstance(lineage, dict):
             raise StrategyError("strategy metadata lineage must be an object")
@@ -496,7 +525,9 @@ def canonical_strategy_json(
 
 
 def strategy_spec_hash(spec: StrategySpec | Mapping[str, Any]) -> str:
-    canonical = canonical_strategy_json(spec, include_display_metadata=False).encode("utf-8")
+    canonical = canonical_strategy_json(spec, include_display_metadata=False).encode(
+        "utf-8"
+    )
     return hashlib.sha256(canonical).hexdigest()
 
 

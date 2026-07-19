@@ -1,8 +1,8 @@
 {
   "name": "strategy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "display_name": "Strategy Pack",
-  "description": "Vintage, roll-rate, profitability, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
+  "description": "Vintage, roll-rate, profitability, governed univariate candidate analysis, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
   "python_requires": ">=3.10,<3.14",
   "tools": [
@@ -405,6 +405,239 @@
         "read:dataset",
         "write:artifact"
       ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "analyze_univariate_candidates",
+      "summary": "Deterministically analyze bounded numeric and categorical fields, preserve canonical bin conditions, and emit development-only candidate evidence with JSON/XLSX reports.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "expected_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "workspace_revision": {"type": "integer", "minimum": 0},
+          "analysis_generation": {"type": "integer", "minimum": 0},
+          "semantic_mapping_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "target_col": {"type": "string", "minLength": 1},
+          "drop_nan_labels": {"type": "boolean"},
+          "features": {
+            "type": "array",
+            "maxItems": 50,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "methods": {
+            "type": "array",
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": ["equal_frequency", "equal_width", "chimerge", "tree"]
+            }
+          },
+          "bin_count": {"type": "integer", "minimum": 3, "maximum": 20},
+          "min_bin_pct": {"type": "number", "minimum": 0, "maximum": 0.5},
+          "loan_amount_col": {"type": "string", "minLength": 1},
+          "overdue_amount_col": {"type": "string", "minLength": 1},
+          "sentinel_values": {
+            "type": "array",
+            "maxItems": 20,
+            "uniqueItems": true,
+            "items": {
+              "oneOf": [
+                {"type": "string"},
+                {"type": "number"}
+              ]
+            }
+          }
+        },
+        "required": [
+          "dataset_id",
+          "expected_content_hash",
+          "workspace_revision",
+          "analysis_generation",
+          "semantic_mapping_hash",
+          "target_col",
+          "features",
+          "methods",
+          "bin_count",
+          "min_bin_pct",
+          "sentinel_values"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {"const": "strategy.univariate-candidate-tool.v1"},
+          "candidate_id": {"type": "string", "pattern": "^candidate-[0-9a-f]{32}$"},
+          "evidence_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "validation_status": {"const": "unvalidated"},
+          "dataset_id": {"type": "string", "minLength": 1},
+          "dataset_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "workspace_revision": {"type": "integer", "minimum": 0},
+          "workspace_generation": {"type": "integer", "minimum": 0},
+          "semantic_mapping_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "target_col": {"type": "string", "minLength": 1},
+          "nan_labels_dropped": {"type": "integer", "minimum": 0},
+          "feature_count": {"type": "integer", "minimum": 1, "maximum": 50},
+          "available_method_count": {"type": "integer", "minimum": 1},
+          "rankings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "feature": {"type": "string", "minLength": 1},
+                "method": {"type": "string", "minLength": 1},
+                "iv": {"type": "number"},
+                "ks": {"type": "number"},
+                "auc": {"type": "number"}
+              },
+              "required": ["feature", "method", "iv", "ks", "auc"],
+              "additionalProperties": false
+            }
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "candidate_evidence": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"const": "strategy.candidate-evidence.v1"},
+              "candidate_id": {"type": "string", "pattern": "^candidate-[0-9a-f]{32}$"},
+              "candidate_type": {"const": "univariate"},
+              "effect_stage": {"const": "development"},
+              "validation_status": {"const": "unvalidated"},
+              "identity": {
+                "type": "object",
+                "properties": {
+                  "task_id": {"type": "string", "minLength": 1},
+                  "dataset_id": {"type": "string", "minLength": 1},
+                  "dataset_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "workspace_revision": {"type": "integer", "minimum": 0},
+                  "workspace_generation": {"type": "integer", "minimum": 0},
+                  "semantic_mapping_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "required": [
+                  "task_id",
+                  "dataset_id",
+                  "dataset_content_hash",
+                  "workspace_revision",
+                  "workspace_generation",
+                  "semantic_mapping_hash"
+                ],
+                "additionalProperties": false
+              },
+              "generation": {
+                "type": "object",
+                "properties": {
+                  "parameters": {"type": "object"},
+                  "seed": {"type": "integer", "minimum": 0},
+                  "budget": {"type": "integer", "minimum": 1},
+                  "truncated": {"type": "boolean"}
+                },
+                "required": ["parameters", "seed", "budget", "truncated"],
+                "additionalProperties": false
+              },
+              "analysis": {"type": "object", "minProperties": 1},
+              "metrics": {"type": "array", "minItems": 1},
+              "source_refs": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1}
+              },
+              "red_flags": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1}
+              },
+              "producer_version": {"type": "string", "minLength": 1},
+              "evidence_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            },
+            "required": [
+              "schema_version",
+              "candidate_id",
+              "candidate_type",
+              "effect_stage",
+              "validation_status",
+              "identity",
+              "generation",
+              "analysis",
+              "metrics",
+              "source_refs",
+              "red_flags",
+              "producer_version",
+              "evidence_hash"
+            ],
+            "additionalProperties": false
+          },
+          "artifacts": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {"type": "string", "minLength": 1},
+                "kind": {
+                  "type": "string",
+                  "enum": ["strategy_candidate_json", "strategy_candidate_xlsx"]
+                },
+                "filename": {"type": "string", "minLength": 1},
+                "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "download_url": {"type": "string", "minLength": 1}
+              },
+              "required": [
+                "artifact_id",
+                "kind",
+                "filename",
+                "content_hash",
+                "download_url"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "candidate_id",
+          "evidence_hash",
+          "validation_status",
+          "dataset_id",
+          "dataset_content_hash",
+          "workspace_revision",
+          "workspace_generation",
+          "semantic_mapping_hash",
+          "target_col",
+          "nan_labels_dropped",
+          "feature_count",
+          "available_method_count",
+          "rankings",
+          "red_flags",
+          "candidate_evidence",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 180,
+      "failure_policy": "fail",
+      "entrypoint": "tool_analyze_univariate_candidates",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:artifact"],
       "memory_limit_mb": 4096
     },
     {
@@ -813,6 +1046,7 @@
                 "enum": ["<", "<=", ">", ">=", "==", "!=", "in", "not_in"]
               },
               "value": {},
+              "coercion": {"type": "string", "enum": ["auto", "strict"]},
               "missing": {"type": "string", "enum": ["no_match", "match", "error"]}
             },
             "required": ["op", "field", "operator", "value"],

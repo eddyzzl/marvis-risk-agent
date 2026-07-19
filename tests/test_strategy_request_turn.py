@@ -200,9 +200,7 @@ def _spec(strategy_type: str, *, field: str = "x") -> dict:
 
 def _last_assistant(messages: list[dict]) -> dict:
     return next(
-        message
-        for message in reversed(messages)
-        if message["role"] == "assistant"
+        message for message in reversed(messages) if message["role"] == "assistant"
     )
 
 
@@ -313,9 +311,9 @@ def test_five_typed_requests_auto_run_real_typed_workflow(
     )
     assert len(strategies) == 1
     assert strategies[0].strategy_type == strategy_type
-    backtests = StrategyRepository(
-        client.app.state.settings.db_path
-    ).list_backtests(strategies[0].id)
+    backtests = StrategyRepository(client.app.state.settings.db_path).list_backtests(
+        strategies[0].id
+    )
     assert len(backtests) == 1
     assert backtests[0].schema_version == "strategy.backtest.v2"
     assert backtests[0].strategy_type == strategy_type
@@ -559,9 +557,7 @@ def test_strategy_metric_question_wins_over_adhoc_routing(
         if message.get("role") == "assistant"
     )
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
-    assert [plan["template_id"] for plan in plans] == [
-        "stored_strategy_evaluation"
-    ]
+    assert [plan["template_id"] for plan in plans] == ["stored_strategy_evaluation"]
     assert plans[0]["status"] == "done"
     assert len(llm.calls) == 1
 
@@ -584,9 +580,10 @@ def test_action_or_subject_alone_does_not_invoke_strategy_compiler(
 
     assert response.status_code == 202, response.text
     assert llm.calls == []
-    assert "strategy_request" not in _last_assistant(
-        response.json()["messages"]
-    )["metadata"]
+    assert (
+        "strategy_request"
+        not in _last_assistant(response.json()["messages"])["metadata"]
+    )
 
 
 def test_legacy_confirmation_releases_claim_after_driver_start_failure(
@@ -707,9 +704,10 @@ def test_cancel_discards_pending_draft_without_execution(
         },
         target_col="bad",
     )
-    assert DatasetRepository(
-        client.app.state.settings.db_path
-    ).list_datasets(task_id) == []
+    assert (
+        DatasetRepository(client.app.state.settings.db_path).list_datasets(task_id)
+        == []
+    )
     pending_message = _last_assistant(
         TaskRepository(client.app.state.settings.db_path).list_agent_messages(task_id)
     )
@@ -728,10 +726,16 @@ def test_cancel_discards_pending_draft_without_execution(
     assert "没有创建计划" in _last_assistant(cancelled.json()["messages"])["content"]
     assert llm.calls == []
     assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
-    assert StrategyRepository(client.app.state.settings.db_path).list_for_task(task_id) == []
-    assert PendingStrategyRequestRepository(
-        client.app.state.settings.db_path
-    ).get(task_id, pending_ref["request_id"]).status == "cancelled"
+    assert (
+        StrategyRepository(client.app.state.settings.db_path).list_for_task(task_id)
+        == []
+    )
+    assert (
+        PendingStrategyRequestRepository(client.app.state.settings.db_path)
+        .get(task_id, pending_ref["request_id"])
+        .status
+        == "cancelled"
+    )
 
 
 def test_rephrasing_invalidates_old_pending_strategy_request(
@@ -766,9 +770,9 @@ def test_rephrasing_invalidates_old_pending_strategy_request(
     )
 
     assert replaced.status_code == 202, replaced.text
-    record = PendingStrategyRequestRepository(
-        client.app.state.settings.db_path
-    ).get(task_id, pending_ref["request_id"])
+    record = PendingStrategyRequestRepository(client.app.state.settings.db_path).get(
+        task_id, pending_ref["request_id"]
+    )
     assert record.status == "invalidated"
     assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
 
@@ -928,12 +932,14 @@ def test_explicit_preview_only_strategy_request_never_compiles_or_executes(
     assert response.json()["code"] == "strategy_execution_not_authorized"
     assert llm.calls == []
     assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
-    assert DatasetRepository(
-        client.app.state.settings.db_path
-    ).list_datasets(task_id) == []
-    assert StrategyRepository(
-        client.app.state.settings.db_path
-    ).list_for_task(task_id) == []
+    assert (
+        DatasetRepository(client.app.state.settings.db_path).list_datasets(task_id)
+        == []
+    )
+    assert (
+        StrategyRepository(client.app.state.settings.db_path).list_for_task(task_id)
+        == []
+    )
 
 
 def test_nan_target_requires_explicit_drop_then_threads_consent_into_workflow(
@@ -958,9 +964,7 @@ def test_nan_target_requires_explicit_drop_then_threads_consent_into_workflow(
 
     assert opened.status_code == 202, opened.text
     assert opened.json()["status"] == "clarification_required"
-    assert opened.json()["code"] == (
-        "strategy_drop_nan_labels_confirmation_required"
-    )
+    assert opened.json()["code"] == ("strategy_drop_nan_labels_confirmation_required")
     assert opened.json()["label_quality"] == {
         "target_col": "bad",
         "n_total": 6,
@@ -1000,6 +1004,38 @@ def test_nan_target_requires_explicit_drop_then_threads_consent_into_workflow(
     assert len(llm.calls) == 1
 
 
+def test_univariate_candidate_analysis_requires_explicit_nan_label_policy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path))
+    task_id = _nan_target_task(client, tmp_path)
+    llm = _FakeLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "univariate_candidate_analysis",
+            "workflow_inputs": {
+                "features": ["score"],
+                "bin_count": 3,
+                "min_bin_pct": 0.02,
+                "sentinel_values": [],
+            },
+        }
+    )
+    _install_llm(monkeypatch, llm)
+
+    opened = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "分析策略 score 的单变量效果"},
+    )
+
+    assert opened.status_code == 202, opened.text
+    assert opened.json()["code"] == ("strategy_drop_nan_labels_confirmation_required")
+    assert opened.json()["label_quality"]["n_nan"] == 1
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert len(llm.calls) == 1
+
+
 def test_nan_target_confirmation_is_invalidated_by_dataset_mutation(
     tmp_path: Path,
     monkeypatch,
@@ -1019,9 +1055,7 @@ def test_nan_target_confirmation_is_invalidated_by_dataset_mutation(
         json={"content": "回测这份审批策略"},
     )
     assert opened.status_code == 202, opened.text
-    assert opened.json()["code"] == (
-        "strategy_drop_nan_labels_confirmation_required"
-    )
+    assert opened.json()["code"] == ("strategy_drop_nan_labels_confirmation_required")
 
     settings = client.app.state.settings
     registry = DatasetRegistry(
@@ -1130,9 +1164,12 @@ def test_existing_strategy_operations_route_to_dedicated_workflows(
     else:
         assert plans[0]["status"] == "done"
         assert all(step["status"] == "done" for step in plans[0]["steps"])
-    assert len(
-        StrategyRepository(client.app.state.settings.db_path).list_for_task(task_id)
-    ) == 1
+    assert (
+        len(
+            StrategyRepository(client.app.state.settings.db_path).list_for_task(task_id)
+        )
+        == 1
+    )
 
 
 @pytest.mark.parametrize(
@@ -1226,13 +1263,16 @@ def test_apply_existing_strategy_to_unlabeled_sample_end_to_end(
     assert plan["template_id"] == "typed_strategy_apply"
     assert plan["status"] == "done"
     assert [step["status"] for step in plan["steps"]] == ["done"] * 3
-    datasets = DatasetRepository(
-        client.app.state.settings.db_path
-    ).list_datasets(task_id)
+    datasets = DatasetRepository(client.app.state.settings.db_path).list_datasets(
+        task_id
+    )
     assert [dataset.role for dataset in datasets].count("strategy.applied") == 1
-    assert len(
-        StrategyRepository(client.app.state.settings.db_path).list_for_task(task_id)
-    ) == 1
+    assert (
+        len(
+            StrategyRepository(client.app.state.settings.db_path).list_for_task(task_id)
+        )
+        == 1
+    )
     assert len(llm.calls) == 1
 
 

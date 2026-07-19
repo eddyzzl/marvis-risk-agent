@@ -22,7 +22,9 @@ STRATEGY_ANALYSIS = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
-        SlotSpec("drop_nan_labels", False, "user", "Confirmed target null-row exclusion"),
+        SlotSpec(
+            "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
+        ),
         SlotSpec("score_col", True, "task_context", "Score column"),
         SlotSpec("strategy_type", True, "user", "Strategy type"),
         SlotSpec("rules", True, "user", "Ordered strategy rules"),
@@ -55,9 +57,15 @@ STRATEGY_ANALYSIS = WorkflowTemplate(
             post_checks=(
                 PostCheck("nonempty", {"field": "backtest_id"}),
                 PostCheck("range", {"field": "approval_rate", "min": 0.0, "max": 1.0}),
-                PostCheck("range", {"field": "approved_bad_rate", "min": 0.0, "max": 1.0}),
-                PostCheck("range", {"field": "rejected_bad_rate", "min": 0.0, "max": 1.0}),
-                PostCheck("range", {"field": "expected_profit", "allow_null": True}),  # FIN-3 #4: None when profit requested w/o pd_col (graceful EL degradation)
+                PostCheck(
+                    "range", {"field": "approved_bad_rate", "min": 0.0, "max": 1.0}
+                ),
+                PostCheck(
+                    "range", {"field": "rejected_bad_rate", "min": 0.0, "max": 1.0}
+                ),
+                PostCheck(
+                    "range", {"field": "expected_profit", "allow_null": True}
+                ),  # FIN-3 #4: None when profit requested w/o pd_col (graceful EL degradation)
             ),
             decision_point=True,
         ),
@@ -84,10 +92,17 @@ STRATEGY_PROFIT_ANALYSIS = WorkflowTemplate(
     title="分群利润分析",
     goal_patterns=("分群利润分析", "利润测算", "profit analysis", "profit calculation"),
     slots=(
-        SlotSpec("dataset_id", True, "task_context", "Registered task-owned dataset id"),
+        SlotSpec(
+            "dataset_id", True, "task_context", "Registered task-owned dataset id"
+        ),
         SlotSpec("ead_col", True, "user", "Exposure at default column"),
         SlotSpec("pd_col", True, "user", "Probability of default column"),
-        SlotSpec("profit_params", True, "user", "Pricing, funding, LGD, cost, and term assumptions"),
+        SlotSpec(
+            "profit_params",
+            True,
+            "user",
+            "Pricing, funding, LGD, cost, and term assumptions",
+        ),
         SlotSpec("segment_col", False, "user", "Optional segment column"),
     ),
     steps=(
@@ -119,12 +134,16 @@ STRATEGY_ROLL_RATE_ANALYSIS = WorkflowTemplate(
     title="Roll-rate 迁徙分析",
     goal_patterns=("roll rate 分析", "迁徙率分析", "roll-rate analysis"),
     slots=(
-        SlotSpec("dataset_id", True, "task_context", "Registered task-owned dataset id"),
+        SlotSpec(
+            "dataset_id", True, "task_context", "Registered task-owned dataset id"
+        ),
         SlotSpec("id_col", True, "user", "Entity identifier column"),
         SlotSpec("time_col", True, "user", "Observation time column"),
         SlotSpec("status_col", True, "user", "Status bucket column"),
         SlotSpec("states", True, "user", "Ordered status bucket values"),
-        SlotSpec("balance_col", False, "user", "Optional from-observation balance weight"),
+        SlotSpec(
+            "balance_col", False, "user", "Optional from-observation balance weight"
+        ),
         SlotSpec(
             "observation_semantics",
             False,
@@ -158,6 +177,108 @@ STRATEGY_ROLL_RATE_ANALYSIS = WorkflowTemplate(
 )
 
 
+STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS = WorkflowTemplate(
+    id="strategy_univariate_candidate_analysis",
+    title="单变量候选分析",
+    goal_patterns=(
+        "单变量候选分析",
+        "单变量效果分析",
+        "比较分箱方法",
+        "univariate candidate analysis",
+    ),
+    slots=(
+        SlotSpec(
+            "dataset_id", True, "task_context", "Registered task-owned dataset id"
+        ),
+        SlotSpec(
+            "expected_content_hash",
+            True,
+            "task_context",
+            "Confirmed immutable dataset hash",
+        ),
+        SlotSpec(
+            "workspace_revision",
+            False,
+            "task_context",
+            "Confirmed data-workspace revision; zero is valid",
+        ),
+        SlotSpec(
+            "analysis_generation",
+            False,
+            "task_context",
+            "Confirmed active dataset generation; zero is valid",
+        ),
+        SlotSpec(
+            "semantic_mapping_hash",
+            True,
+            "task_context",
+            "Confirmed semantic mapping hash",
+        ),
+        SlotSpec(
+            "target_col", True, "task_context", "Server-bound binary target column"
+        ),
+        SlotSpec(
+            "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
+        ),
+        SlotSpec(
+            "features", False, "user", "Explicit fields or [] for semantic candidates"
+        ),
+        SlotSpec(
+            "methods", False, "user", "Ordered methods or [] for type-aware defaults"
+        ),
+        SlotSpec("bin_count", True, "user", "Requested bins per numeric method"),
+        SlotSpec("min_bin_pct", True, "user", "Minimum desired bin population share"),
+        SlotSpec("loan_amount_col", False, "user", "Optional disbursed amount column"),
+        SlotSpec("overdue_amount_col", False, "user", "Optional overdue amount column"),
+        SlotSpec(
+            "sentinel_values",
+            False,
+            "user",
+            "Explicit special values kept separate; [] is valid",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="分析单变量候选",
+            tool_ref=ToolRef("strategy", "analyze_univariate_candidates"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "expected_content_hash": "{slot:expected_content_hash}",
+                "workspace_revision": "{slot:workspace_revision}",
+                "analysis_generation": "{slot:analysis_generation}",
+                "semantic_mapping_hash": "{slot:semantic_mapping_hash}",
+                "target_col": "{slot:target_col}",
+                "drop_nan_labels": "{slot:drop_nan_labels}",
+                "features": "{slot:features}",
+                "methods": "{slot:methods}",
+                "bin_count": "{slot:bin_count}",
+                "min_bin_pct": "{slot:min_bin_pct}",
+                "loan_amount_col": "{slot:loan_amount_col}",
+                "overdue_amount_col": "{slot:overdue_amount_col}",
+                "sentinel_values": "{slot:sentinel_values}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "candidate_id"}),
+                PostCheck("nonempty", {"field": "evidence_hash"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+                PostCheck("range", {"field": "rankings.0.iv", "min": 0.0}),
+                PostCheck(
+                    "range",
+                    {"field": "rankings.0.ks", "min": 0.0, "max": 1.0},
+                ),
+                PostCheck(
+                    "range",
+                    {"field": "rankings.0.auc", "min": 0.0, "max": 1.0},
+                ),
+            ),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 _LIMIT_PRICING_INPUTS = {
     "dataset_id": "{slot:dataset_id}",
     "score_col": "{slot:score_col}",
@@ -182,21 +303,42 @@ STRATEGY_LIMIT_PRICING_ANALYSIS = WorkflowTemplate(
     title="额度与定价矩阵分析",
     goal_patterns=("额度定价矩阵", "额度与定价分析", "limit pricing matrix"),
     slots=(
-        SlotSpec("dataset_id", True, "task_context", "Registered task-owned dataset id"),
+        SlotSpec(
+            "dataset_id", True, "task_context", "Registered task-owned dataset id"
+        ),
         SlotSpec("score_col", True, "user", "Score column"),
-        SlotSpec("pd_col", False, "user", "Calibrated PD column; mutually exclusive with target_col"),
-        SlotSpec("target_col", False, "user", "Binary target used as PD proxy; mutually exclusive with pd_col"),
+        SlotSpec(
+            "pd_col",
+            False,
+            "user",
+            "Calibrated PD column; mutually exclusive with target_col",
+        ),
+        SlotSpec(
+            "target_col",
+            False,
+            "user",
+            "Binary target used as PD proxy; mutually exclusive with pd_col",
+        ),
         SlotSpec("limit_grid", True, "user", "Candidate limits"),
         SlotSpec("rate_grid", True, "user", "Candidate annual rates"),
         SlotSpec("funding_rate", True, "user", "Annual funding rate"),
         SlotSpec("term_months", True, "user", "Term in months"),
         SlotSpec("cost_per_loan", True, "user", "Operating cost per loan"),
         SlotSpec("band_edges", False, "user", "Optional explicit score band edges"),
-        SlotSpec("n_bands", False, "user", "Number of score bands when edges are omitted"),
+        SlotSpec(
+            "n_bands", False, "user", "Number of score bands when edges are omitted"
+        ),
         SlotSpec("lgd", False, "user", "Loss given default; default 0.6"),
         SlotSpec("el_ead_max", False, "user", "Maximum feasible EL/EAD ratio"),
-        SlotSpec("strategy_id", False, "task_context", "Optional task-owned limit/pricing strategy id"),
-        SlotSpec("drop_nan_labels", False, "user", "Confirmed target null-row exclusion"),
+        SlotSpec(
+            "strategy_id",
+            False,
+            "task_context",
+            "Optional task-owned limit/pricing strategy id",
+        ),
+        SlotSpec(
+            "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
+        ),
     ),
     steps=(
         StepTemplate(
@@ -236,9 +378,15 @@ DETERMINISTIC_STRATEGY_CANDIDATE_DEVELOPMENT = WorkflowTemplate(
         "deterministic strategy candidate development",
     ),
     slots=(
-        SlotSpec("dataset_id", True, "task_context", "Registered task-owned dataset id"),
-        SlotSpec("target_col", True, "task_context", "Server-bound binary target column"),
-        SlotSpec("drop_nan_labels", False, "user", "Confirmed target null-row exclusion"),
+        SlotSpec(
+            "dataset_id", True, "task_context", "Registered task-owned dataset id"
+        ),
+        SlotSpec(
+            "target_col", True, "task_context", "Server-bound binary target column"
+        ),
+        SlotSpec(
+            "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
+        ),
         SlotSpec(
             "strategy_type",
             True,
@@ -306,9 +454,7 @@ DETERMINISTIC_STRATEGY_CANDIDATE_DEVELOPMENT = WorkflowTemplate(
                 "baseline_strategy_id": "{slot:baseline_strategy_id}",
                 # Reuse the normalized bundle emitted by design so candidate
                 # selection and backtest cannot silently diverge in economics.
-                "economics_inputs": (
-                    "$ref:确定性设计策略候选.output.economics_inputs"
-                ),
+                "economics_inputs": ("$ref:确定性设计策略候选.output.economics_inputs"),
             },
             depends_on_titles=("确定性设计策略候选", "构造确定性候选策略"),
             post_checks=(
@@ -437,10 +583,16 @@ TYPED_STRATEGY_EVALUATION = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
-        SlotSpec("drop_nan_labels", False, "user", "Confirmed target null-row exclusion"),
+        SlotSpec(
+            "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
+        ),
         SlotSpec("strategy_spec", True, "user", "Validated canonical Strategy DSL"),
-        SlotSpec("baseline_strategy_id", False, "user", "Optional baseline strategy id"),
-        SlotSpec("economics_inputs", False, "user", "Typed limit/pricing economics inputs"),
+        SlotSpec(
+            "baseline_strategy_id", False, "user", "Optional baseline strategy id"
+        ),
+        SlotSpec(
+            "economics_inputs", False, "user", "Typed limit/pricing economics inputs"
+        ),
         SlotSpec("profit_params", False, "user", "Approval/reject profit parameters"),
         SlotSpec("ead_col", False, "user", "Approval/reject EAD column"),
         SlotSpec("pd_col", False, "user", "Approval/reject PD column"),
@@ -480,7 +632,12 @@ TYPED_STRATEGY_EVALUATION = WorkflowTemplate(
                 # three typed envelopes are valid, hence ``allow_null``.
                 PostCheck(
                     "range",
-                    {"field": "approval_rate", "min": 0.0, "max": 1.0, "allow_null": True},
+                    {
+                        "field": "approval_rate",
+                        "min": 0.0,
+                        "max": 1.0,
+                        "allow_null": True,
+                    },
                 ),
                 PostCheck(
                     "range",
@@ -580,10 +737,16 @@ STORED_STRATEGY_EVALUATION = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
-        SlotSpec("drop_nan_labels", False, "user", "Confirmed target null-row exclusion"),
+        SlotSpec(
+            "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
+        ),
         SlotSpec("strategy_id", True, "user", "Task-owned strategy id"),
-        SlotSpec("baseline_strategy_id", False, "user", "Optional same-type baseline id"),
-        SlotSpec("economics_inputs", False, "user", "Typed limit/pricing economics inputs"),
+        SlotSpec(
+            "baseline_strategy_id", False, "user", "Optional same-type baseline id"
+        ),
+        SlotSpec(
+            "economics_inputs", False, "user", "Typed limit/pricing economics inputs"
+        ),
         SlotSpec("profit_params", False, "user", "Approval/reject profit parameters"),
         SlotSpec("ead_col", False, "user", "Approval/reject EAD column"),
         SlotSpec("pd_col", False, "user", "Approval/reject PD column"),
@@ -656,9 +819,7 @@ STORED_STRATEGY_REPORT = WorkflowTemplate(
     id="stored_strategy_report",
     title="已有策略报告",
     goal_patterns=("生成已有策略报告", "stored strategy report"),
-    slots=(
-        SlotSpec("strategy_id", True, "user", "Task-owned strategy id"),
-    ),
+    slots=(SlotSpec("strategy_id", True, "user", "Task-owned strategy id"),),
     steps=(
         StepTemplate(
             title="生成已有策略报告",
@@ -711,10 +872,14 @@ STORED_STRATEGY_ADOPTION = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
-        SlotSpec("drop_nan_labels", False, "user", "Confirmed target null-row exclusion"),
+        SlotSpec(
+            "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
+        ),
         SlotSpec("strategy_id", True, "user", "Task-owned draft strategy id"),
         SlotSpec("adoption_reason", True, "user", "Human supplied adoption reason"),
-        SlotSpec("economics_inputs", False, "user", "Typed limit/pricing economics inputs"),
+        SlotSpec(
+            "economics_inputs", False, "user", "Typed limit/pricing economics inputs"
+        ),
         SlotSpec("profit_params", False, "user", "Approval/reject profit parameters"),
         SlotSpec("ead_col", False, "user", "Approval/reject EAD column"),
         SlotSpec("pd_col", False, "user", "Approval/reject PD column"),
@@ -809,7 +974,12 @@ VINTAGE_ANALYSIS = WorkflowTemplate(
         # basis makes tool_vintage_curve raise LabelSemanticsNotDeclaredError so the
         # user is forced to pick incremental vs snapshot; drop_nan_labels threads the
         # NaN-label confirmation through the same gate.
-        SlotSpec("label_semantics", False, "user", "Bad-column cumulation basis: incremental or snapshot"),
+        SlotSpec(
+            "label_semantics",
+            False,
+            "user",
+            "Bad-column cumulation basis: incremental or snapshot",
+        ),
         SlotSpec("drop_nan_labels", False, "user", "Confirm dropping NaN-label rows"),
     ),
     steps=(
@@ -857,7 +1027,9 @@ SLICE_AGGREGATE = WorkflowTemplate(
     goal_patterns=("问数", "即席分析", "slice aggregate", "ad-hoc query"),
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Ready dataset id to aggregate"),
-        SlotSpec("metrics", True, "task_context", "Validated aggregate metrics (op/col)"),
+        SlotSpec(
+            "metrics", True, "task_context", "Validated aggregate metrics (op/col)"
+        ),
         SlotSpec("group_by", False, "task_context", "Optional group-by columns"),
         SlotSpec("filters", False, "task_context", "Optional filter conditions"),
         SlotSpec("month_col", False, "task_context", "Optional month column"),
@@ -910,17 +1082,40 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
-        SlotSpec("drop_nan_labels", False, "user", "Confirmed target null-row exclusion"),
+        SlotSpec(
+            "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
+        ),
         SlotSpec("score_col", True, "task_context", "Score column"),
-        SlotSpec("score_direction", False, "task_context", "Score direction if a model artifact injected one"),
+        SlotSpec(
+            "score_direction",
+            False,
+            "task_context",
+            "Score direction if a model artifact injected one",
+        ),
         SlotSpec("objective", False, "user", "max_profit or max_approval"),
         SlotSpec("max_bad_rate", False, "user", "Max approved bad rate constraint"),
         SlotSpec("min_approval_rate", False, "user", "Min approval rate constraint"),
-        SlotSpec("ead_col", False, "user", "Exposure-at-default column for profit evaluation"),
-        SlotSpec("pd_col", False, "user", "Probability-of-default column for profit evaluation"),
-        SlotSpec("profit_params", False, "user", "Profit parameters for expected-profit"),
-        SlotSpec("strategy_type", True, "task_context", "Approval or reject strategy type"),
-        SlotSpec("baseline_strategy_id", False, "user", "Baseline strategy id for the optional compare step"),
+        SlotSpec(
+            "ead_col", False, "user", "Exposure-at-default column for profit evaluation"
+        ),
+        SlotSpec(
+            "pd_col",
+            False,
+            "user",
+            "Probability-of-default column for profit evaluation",
+        ),
+        SlotSpec(
+            "profit_params", False, "user", "Profit parameters for expected-profit"
+        ),
+        SlotSpec(
+            "strategy_type", True, "task_context", "Approval or reject strategy type"
+        ),
+        SlotSpec(
+            "baseline_strategy_id",
+            False,
+            "user",
+            "Baseline strategy id for the optional compare step",
+        ),
     ),
     steps=(
         StepTemplate(
@@ -996,9 +1191,15 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
             post_checks=(
                 PostCheck("nonempty", {"field": "backtest_id"}),
                 PostCheck("range", {"field": "approval_rate", "min": 0.0, "max": 1.0}),
-                PostCheck("range", {"field": "approved_bad_rate", "min": 0.0, "max": 1.0}),
-                PostCheck("range", {"field": "rejected_bad_rate", "min": 0.0, "max": 1.0}),
-                PostCheck("range", {"field": "expected_profit", "allow_null": True}),  # FIN-3 #4: None when profit requested w/o pd_col (graceful EL degradation)
+                PostCheck(
+                    "range", {"field": "approved_bad_rate", "min": 0.0, "max": 1.0}
+                ),
+                PostCheck(
+                    "range", {"field": "rejected_bad_rate", "min": 0.0, "max": 1.0}
+                ),
+                PostCheck(
+                    "range", {"field": "expected_profit", "allow_null": True}
+                ),  # FIN-3 #4: None when profit requested w/o pd_col (graceful EL degradation)
             ),
             decision_point=True,
         ),
@@ -1084,9 +1285,21 @@ RULE_STRATEGY = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
-        SlotSpec("drop_nan_labels", False, "user", "Confirmed target null-row exclusion"),
-        SlotSpec("feature_cols", False, "user", "Candidate feature columns (default: numeric columns)"),
-        SlotSpec("score_col", False, "user", "Score column, if the rules should carry score-band rules"),
+        SlotSpec(
+            "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
+        ),
+        SlotSpec(
+            "feature_cols",
+            False,
+            "user",
+            "Candidate feature columns (default: numeric columns)",
+        ),
+        SlotSpec(
+            "score_col",
+            False,
+            "user",
+            "Score column, if the rules should carry score-band rules",
+        ),
         SlotSpec("max_depth", False, "user", "Decision-tree depth for rule mining"),
         SlotSpec("min_support", False, "user", "Minimum rule support"),
         SlotSpec("min_lift", False, "user", "Minimum rule lift"),
@@ -1167,9 +1380,15 @@ RULE_STRATEGY = WorkflowTemplate(
             post_checks=(
                 PostCheck("nonempty", {"field": "backtest_id"}),
                 PostCheck("range", {"field": "approval_rate", "min": 0.0, "max": 1.0}),
-                PostCheck("range", {"field": "approved_bad_rate", "min": 0.0, "max": 1.0}),
-                PostCheck("range", {"field": "rejected_bad_rate", "min": 0.0, "max": 1.0}),
-                PostCheck("range", {"field": "expected_profit", "allow_null": True}),  # FIN-3 #4: None when profit requested w/o pd_col (graceful EL degradation)
+                PostCheck(
+                    "range", {"field": "approved_bad_rate", "min": 0.0, "max": 1.0}
+                ),
+                PostCheck(
+                    "range", {"field": "rejected_bad_rate", "min": 0.0, "max": 1.0}
+                ),
+                PostCheck(
+                    "range", {"field": "expected_profit", "allow_null": True}
+                ),  # FIN-3 #4: None when profit requested w/o pd_col (graceful EL degradation)
             ),
             decision_point=True,
         ),

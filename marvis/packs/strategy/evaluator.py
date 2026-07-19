@@ -79,6 +79,22 @@ def _numeric_literal(value: Any) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool)
 
 
+def _boolean_literal(value: Any) -> bool:
+    return isinstance(value, (bool, np.bool_))
+
+
+def _strict_equal(value: Any, expected: Any) -> bool:
+    """Compare JSON scalar values without the legacy numeric-string coercion."""
+
+    if _boolean_literal(expected):
+        return _boolean_literal(value) and bool(value) is bool(expected)
+    if _numeric_literal(expected):
+        return _numeric_literal(value) and bool(value == expected)
+    if isinstance(expected, str):
+        return isinstance(value, str) and value == expected
+    return value is expected
+
+
 def _coerce_numeric(value: Any) -> int | float:
     if _is_missing(value):
         raise StrategyError("condition comparison failed: field value is missing")
@@ -87,7 +103,9 @@ def _coerce_numeric(value: Any) -> int | float:
     except (TypeError, ValueError) as exc:
         raise StrategyError("condition comparison failed") from exc
     if _is_missing(numeric):
-        raise StrategyError("condition comparison failed: field contains a non-numeric value")
+        raise StrategyError(
+            "condition comparison failed: field contains a non-numeric value"
+        )
     if isinstance(numeric, Integral):
         return int(numeric)
     return float(numeric)
@@ -105,10 +123,23 @@ def _missing_result(value: Any, policy: str) -> bool | None:
     raise StrategyError(f"unsupported missing policy: {policy}")
 
 
-def _compare(value: Any, operator: str, expected: Any, *, missing: str) -> bool:
+def _compare(
+    value: Any,
+    operator: str,
+    expected: Any,
+    *,
+    missing: str,
+    coercion: str = "auto",
+) -> bool:
     missing_result = _missing_result(value, missing)
     if missing_result is not None:
         return missing_result
+    if coercion == "strict":
+        if operator in {"in", "not_in"}:
+            matched = any(_strict_equal(value, item) for item in expected)
+            return matched if operator == "in" else not matched
+        matched = _strict_equal(value, expected)
+        return matched if operator == "==" else not matched
     try:
         if operator in {"in", "not_in"}:
             candidates = list(expected)
@@ -160,6 +191,7 @@ def _evaluate_canonical(row: Mapping[str, Any], expression: Mapping[str, Any]) -
             expression["operator"],
             expression["value"],
             missing=expression["missing"],
+            coercion=expression.get("coercion", "auto"),
         )
     if op == "between":
         value = _lookup(row, expression["field"])
@@ -257,11 +289,31 @@ def _coerce_numeric_series(values: pd.Series) -> pd.Series:
     except (TypeError, ValueError) as exc:
         raise StrategyError("condition comparison failed") from exc
     if bool(numeric.isna().any()):
-        raise StrategyError("condition comparison failed: field contains a non-numeric value")
+        raise StrategyError(
+            "condition comparison failed: field contains a non-numeric value"
+        )
     return numeric
 
 
-def _compare_series(values: pd.Series, operator: str, expected: Any) -> pd.Series:
+def _strict_equal_series(values: pd.Series, expected: Any) -> pd.Series:
+    return values.map(lambda value: _strict_equal(value, expected)).astype(bool)
+
+
+def _compare_series(
+    values: pd.Series,
+    operator: str,
+    expected: Any,
+    *,
+    coercion: str = "auto",
+) -> pd.Series:
+    if coercion == "strict":
+        if operator in {"in", "not_in"}:
+            matched = pd.Series(False, index=values.index, dtype=bool)
+            for candidate in expected:
+                matched |= _strict_equal_series(values, candidate)
+            return matched if operator == "in" else ~matched
+        matched = _strict_equal_series(values, expected)
+        return matched if operator == "==" else ~matched
     try:
         if operator in {"in", "not_in"}:
             candidates = list(expected)
@@ -308,6 +360,7 @@ def _evaluate_frame_compare(
             present_values,
             expression["operator"],
             expression["value"],
+            coercion=expression.get("coercion", "auto"),
         )
         result.loc[present_values.index] = comparison.fillna(False).astype(bool)
     return result
@@ -343,7 +396,9 @@ def _evaluate_frame_between(
             if expression["include_upper"]
             else present_values < upper
         )
-        result.loc[present_values.index] = (lower_match & upper_match).fillna(False).astype(bool)
+        result.loc[present_values.index] = (
+            (lower_match & upper_match).fillna(False).astype(bool)
+        )
     except (TypeError, ValueError) as exc:
         raise StrategyError("condition comparison failed") from exc
     return result
@@ -488,14 +543,10 @@ def evaluate_strategy_frame(
         _assert_known_frame_fields(frame, rule.condition)
 
     working = frame.reset_index(drop=True)
-    decisions = _filled_object_array(
-        len(working), parsed.default_action.decision_value
-    )
+    decisions = _filled_object_array(len(working), parsed.default_action.decision_value)
     matched_rule_ids = _filled_object_array(len(working), None)
     action_types = _filled_object_array(len(working), parsed.default_action.type)
-    reason_codes = _filled_object_array(
-        len(working), parsed.default_action.reason_code
-    )
+    reason_codes = _filled_object_array(len(working), parsed.default_action.reason_code)
     remaining = pd.Series(True, index=working.index, dtype=bool)
 
     for rule in parsed.rules:
@@ -552,9 +603,7 @@ def evaluate_strategy_rows(
 
     parsed = parse_strategy_spec(spec)
     if isinstance(rows, pd.DataFrame):
-        iterable: Iterable[Mapping[str, Any]] = (
-            row for _, row in rows.iterrows()
-        )
+        iterable: Iterable[Mapping[str, Any]] = (row for _, row in rows.iterrows())
     else:
         iterable = rows
     return tuple(evaluate_strategy_row(row, parsed) for row in iterable)

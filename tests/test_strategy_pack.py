@@ -85,18 +85,20 @@ def _real_builtin_registry(tmp_path):
 
 
 def _register_strategy_sample(registry, tmp_path, task_id: str):
-    frame = pd.DataFrame({
-        "customer_id": ["A", "A", "B", "B", "C", "C"],
-        "month": ["2026-01", "2026-02", "2026-01", "2026-02", "2026-01", "2026-02"],
-        "status": ["C", "M1", "C", "C", "M3+", "M3+"],
-        "cohort": ["202601", "202601", "202602", "202602", "202603", "202603"],
-        "mob": [0, 1, 0, 1, 0, 1],
-        "bad": [1, 1, 0, 0, 1, 1],
-        "score": [580, 620, 730, 760, 590, 800],
-        "ead": [1000.0, 2000.0, 1000.0, 500.0, 1000.0, 800.0],
-        "pd": [0.20, 0.05, 0.02, 0.10, 0.15, 0.03],
-        "segment": ["A", "A", "B", "B", "A", "B"],
-    })
+    frame = pd.DataFrame(
+        {
+            "customer_id": ["A", "A", "B", "B", "C", "C"],
+            "month": ["2026-01", "2026-02", "2026-01", "2026-02", "2026-01", "2026-02"],
+            "status": ["C", "M1", "C", "C", "M3+", "M3+"],
+            "cohort": ["202601", "202601", "202602", "202602", "202603", "202603"],
+            "mob": [0, 1, 0, 1, 0, 1],
+            "bad": [1, 1, 0, 0, 1, 1],
+            "score": [580, 620, 730, 760, 590, 800],
+            "ead": [1000.0, 2000.0, 1000.0, 500.0, 1000.0, 800.0],
+            "pd": [0.20, 0.05, 0.02, 0.10, 0.15, 0.03],
+            "segment": ["A", "A", "B", "B", "A", "B"],
+        }
+    )
     path = tmp_path / "strategy_sample.parquet"
     frame.to_parquet(path, index=False)
     return registry.register_existing(path, task_id=task_id, role="strategy_sample")
@@ -208,10 +210,15 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     manifest = plugin_registry.get("strategy")
     tool_names = {tool.name for tool in manifest.tools}
     build_tool = next(tool for tool in manifest.tools if tool.name == "build_strategy")
-    backtest_tool = next(tool for tool in manifest.tools if tool.name == "backtest_strategy")
+    backtest_tool = next(
+        tool for tool in manifest.tools if tool.name == "backtest_strategy"
+    )
     apply_tool = next(tool for tool in manifest.tools if tool.name == "apply_strategy")
     candidate_tool = next(
         tool for tool in manifest.tools if tool.name == "design_strategy_candidate"
+    )
+    univariate_tool = next(
+        tool for tool in manifest.tools if tool.name == "analyze_univariate_candidates"
     )
     run_monitoring_tool = next(
         tool for tool in manifest.tools if tool.name == "run_strategy_monitoring"
@@ -227,6 +234,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "vintage_curve",
         "roll_rate_matrix",
         "profit_calc",
+        "analyze_univariate_candidates",
         "design_strategy_candidate",
         "build_strategy",
         "apply_strategy",
@@ -252,6 +260,12 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert backtest_tool.policy.human_decision_gate == "none"
     assert candidate_tool.policy.human_decision_gate == "none"
     assert candidate_tool.side_effects == ("read:dataset",)
+    assert univariate_tool.policy.human_decision_gate == "none"
+    assert set(univariate_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+    }
     assert set(run_monitoring_tool.side_effects) == {
         "read:task",
         "read:dataset",
@@ -533,9 +547,9 @@ def test_build_strategy_persistence_identity_is_task_scoped_and_payload_exact(
         "方案 A",
         "方案 B",
     ]
-    assert [
-        item.description for item in repository.list_for_task(second_task.id)
-    ] == ["方案 A"]
+    assert [item.description for item in repository.list_for_task(second_task.id)] == [
+        "方案 A"
+    ]
     cross_task_backtest = runner.invoke(
         ToolRef("strategy", "backtest_strategy"),
         {
@@ -609,7 +623,11 @@ def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
 
     assert vintage.ok is True, vintage.error
     assert vintage.output["cohorts"] == ["2026-01", "2026-02", "2026-03"]
-    assert vintage.output["summary"]["trend"] in {"deteriorating", "stable", "improving"}
+    assert vintage.output["summary"]["trend"] in {
+        "deteriorating",
+        "stable",
+        "improving",
+    }
     assert roll.ok is True, roll.error
     assert roll.output["base_counts"] == {"C": 2, "M1": 0, "M3+": 1}
     assert roll.output["observation_semantics"] == "adjacent_observation"
@@ -650,7 +668,10 @@ def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
     assert built.output["strategy_id"]
     assert built.output["dsl_schema_version"] == "strategy.dsl.v1"
     assert built.output["strategy_spec"]["rules"][0]["rule_id"]
-    assert built.output["rules"][0]["rule_id"] == built.output["strategy_spec"]["rules"][0]["rule_id"]
+    assert (
+        built.output["rules"][0]["rule_id"]
+        == built.output["strategy_spec"]["rules"][0]["rule_id"]
+    )
 
     backtest = runner.invoke(
         ToolRef("strategy", "backtest_strategy"),
@@ -706,12 +727,14 @@ def test_roll_rate_matrix_tool_surfaces_balance_weighting_and_warnings(tmp_path)
     # DOM-8: balance_col weights transitions; a missing-month gap for one id
     # surfaces as a data_quality_warnings entry through the tool boundary.
     runner, _plugin_registry, registry, task = _runtime(tmp_path)
-    frame = pd.DataFrame({
-        "customer_id": ["A", "A", "B", "B"],
-        "month": ["202601", "202603", "202601", "202602"],
-        "status": ["C", "M1", "C", "C"],
-        "balance": [100.0, 100.0, 300.0, 300.0],
-    })
+    frame = pd.DataFrame(
+        {
+            "customer_id": ["A", "A", "B", "B"],
+            "month": ["202601", "202603", "202601", "202602"],
+            "status": ["C", "M1", "C", "C"],
+            "balance": [100.0, 100.0, 300.0, 300.0],
+        }
+    )
     path = tmp_path / "roll_rate_balance_sample.parquet"
     frame.to_parquet(path, index=False)
     dataset = registry.register_existing(path, task_id=task.id, role="strategy_sample")
@@ -736,10 +759,12 @@ def test_roll_rate_matrix_tool_surfaces_balance_weighting_and_warnings(tmp_path)
 
 
 def _register_strategy_sample_with_nan_label(registry, tmp_path, task_id: str):
-    frame = pd.DataFrame({
-        "bad": [1.0, 0.0, float("nan"), 0.0, 1.0, 0.0],
-        "score": [580, 620, 730, 760, 590, 800],
-    })
+    frame = pd.DataFrame(
+        {
+            "bad": [1.0, 0.0, float("nan"), 0.0, 1.0, 0.0],
+            "score": [580, 620, 730, 760, 590, 800],
+        }
+    )
     path = tmp_path / "strategy_nan_sample.parquet"
     frame.to_parquet(path, index=False)
     return registry.register_existing(path, task_id=task_id, role="strategy_sample")
@@ -755,7 +780,9 @@ def test_tradeoff_view_gates_nan_label(tmp_path):
         "cutoffs": [600, 700],
     }
 
-    blocked = runner.invoke(ToolRef("strategy", "tradeoff_view"), dict(base_inputs), task_id=task.id)
+    blocked = runner.invoke(
+        ToolRef("strategy", "tradeoff_view"), dict(base_inputs), task_id=task.id
+    )
     assert blocked.ok is False
     assert blocked.error_kind == "nan_label_not_confirmed"
     assert blocked.error_detail["n_nan"] == 1
@@ -771,11 +798,13 @@ def test_tradeoff_view_gates_nan_label(tmp_path):
 
 def test_vintage_curve_gates_nan_label(tmp_path):
     runner, _plugin_registry, registry, task = _runtime(tmp_path)
-    frame = pd.DataFrame({
-        "cohort": ["202601", "202601", "202602"],
-        "mob": [0, 1, 0],
-        "bad": [0.0, float("nan"), 1.0],
-    })
+    frame = pd.DataFrame(
+        {
+            "cohort": ["202601", "202601", "202602"],
+            "mob": [0, 1, 0],
+            "bad": [0.0, float("nan"), 1.0],
+        }
+    )
     path = tmp_path / "vintage_nan_sample.parquet"
     frame.to_parquet(path, index=False)
     dataset = registry.register_existing(path, task_id=task.id, role="strategy_sample")
@@ -812,18 +841,25 @@ def test_tool_vintage_curve_raises_label_semantics_not_declared(tmp_path):
     # Snapshot-flag frame with clean 0/1 labels: no NaN gate, so the undeclared
     # label_semantics gate is what fires. 3 MOBs with non-decreasing bad_count so the
     # monotone snapshot heuristic also trips (advisory hint in the gate detail).
-    frame = pd.DataFrame({
-        "cohort": ["202601"] * 12,
-        "mob": [0, 0, 0, 0] + [1, 1, 1, 1] + [2, 2, 2, 2],
-        "bad": [1, 0, 0, 0] + [1, 1, 0, 0] + [1, 1, 0, 0],
-    })
+    frame = pd.DataFrame(
+        {
+            "cohort": ["202601"] * 12,
+            "mob": [0, 0, 0, 0] + [1, 1, 1, 1] + [2, 2, 2, 2],
+            "bad": [1, 0, 0, 0] + [1, 1, 0, 0] + [1, 1, 0, 0],
+        }
+    )
     path = tmp_path / "vintage_semantics_sample.parquet"
     frame.to_parquet(path, index=False)
     dataset = registry.register_existing(path, task_id=task.id, role="strategy_sample")
 
     blocked = runner.invoke(
         ToolRef("strategy", "vintage_curve"),
-        {"dataset_id": dataset.id, "cohort_col": "cohort", "mob_col": "mob", "bad_col": "bad"},
+        {
+            "dataset_id": dataset.id,
+            "cohort_col": "cohort",
+            "mob_col": "mob",
+            "bad_col": "bad",
+        },
         task_id=task.id,
     )
     assert blocked.ok is False
@@ -838,11 +874,13 @@ def test_tool_vintage_curve_surfaces_warnings_in_output(tmp_path):
     runner, _plugin_registry, registry, task = _runtime(tmp_path)
     # Monotone snapshot-flag data declared incremental -> the tool output carries a
     # non-empty 'warnings' list (schema additionalProperties:false compliance).
-    frame = pd.DataFrame({
-        "cohort": ["202601"] * 12,
-        "mob": [0, 0, 0, 0] + [1, 1, 1, 1] + [2, 2, 2, 2],
-        "bad": [1, 0, 0, 0] + [1, 1, 0, 0] + [1, 1, 0, 0],
-    })
+    frame = pd.DataFrame(
+        {
+            "cohort": ["202601"] * 12,
+            "mob": [0, 0, 0, 0] + [1, 1, 1, 1] + [2, 2, 2, 2],
+            "bad": [1, 0, 0, 0] + [1, 1, 0, 0] + [1, 1, 0, 0],
+        }
+    )
     path = tmp_path / "vintage_warnings_sample.parquet"
     frame.to_parquet(path, index=False)
     dataset = registry.register_existing(path, task_id=task.id, role="strategy_sample")
@@ -860,4 +898,6 @@ def test_tool_vintage_curve_surfaces_warnings_in_output(tmp_path):
     )
     assert result.ok is True, result.error
     assert isinstance(result.output["warnings"], list)
-    assert any("snapshot" in w.lower() or "快照" in w for w in result.output["warnings"])
+    assert any(
+        "snapshot" in w.lower() or "快照" in w for w in result.output["warnings"]
+    )

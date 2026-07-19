@@ -518,6 +518,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 只产出 report-ready candidate evidence，不在报告层复制算法。
 
+**单变量候选分析首个纵切（已完成，2026-07-19）**：新增自然语言可达的 `strategy_univariate_candidate_analysis` Workflow 和 `strategy.analyze_univariate_candidates`。数值字段可按等频、等距、ChiMerge 和受约束决策树分箱，类别字段使用类型保持的等值箱；统一输出缺失/哨兵箱、左闭右开 DSL 条件、count/good/bad、占比、坏率、WOE、IV、Lift、累计 KS、方法级 KS/AUC、风险方向，以及放款金额、逾期金额和配对逾期率口径。执行绑定确认时的 task、dataset/hash、workspace revision、analysis generation 和 semantic mapping hash，计算后在事务内再次复核；敏感/标识字段不会进入候选，资源超限和不可用方法显式失败或记录 typed evidence，不静默换方法。结果固化为自认证 `CandidateEvidence`，明确 `development/unvalidated`，并生成字节稳定、公式安全、task-owned 的 JSON/XLSX（Summary、Rankings、Bins、Metrics、Red Flags、Lineage）供下载和后续七步报告组装。该纵切尚不等于 Phase 3 完成：人工选箱/合并入池、逐月稳定性、树、评分卡、Voting、Cross、代码生成与列写回仍按本 Phase 继续交付。
+
 交付：
 
 1. **单规则**：tree/quantile/equal-width/chi 四类分箱、类别等值箱、3-20 箱、最小样本、KS/IV/AUC/WOE/LIFT、件数+金额、批量排序、人工选箱/合并入池和 Excel；
@@ -724,7 +726,7 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 ### Phase 3：Candidate Lab
 
-32. 单规则四分箱、类别箱、全指标和选箱入池；
+32. 单规则四分箱、类别箱、全指标和选箱入池（确定性分析、证据与 JSON/XLSX 纵切已完成；选箱/合并入池和逐月稳定性待续）；
 33. 加权自动规则树、方向检查、树图和写回；
 34. 交互树节点/候选/手工分裂内核；
 35. 交互树删节点、自动续建、可视化、代码和入池；

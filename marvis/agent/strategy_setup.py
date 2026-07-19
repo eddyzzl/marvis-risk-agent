@@ -16,10 +16,17 @@ from pathlib import Path
 import pandas as pd
 
 from marvis.agent.sample_setup import detect_setup
+from marvis.data.contracts import Dataset
+from marvis.data.errors import DatasetContentDriftError
 from marvis.data.labels import nan_label_mask
+from marvis.data.workspace import data_semantic_mapping_hash
 from marvis.db import StrategyRepository
 from marvis.domain import STRATEGY_OBJECTIVES, FileRole
 from marvis.files import scan_source_dir, sha256_file
+from marvis.repositories.data_workspace import (
+    DataWorkspaceDataError,
+    DataWorkspaceRepository,
+)
 from marvis.strategy_lifecycle import ASSET_STATUS_ADOPTED_LOCAL
 
 _DATA_ROLES = frozenset({FileRole.SAMPLE.value, "sample", "strategy_sample"})
@@ -40,7 +47,13 @@ _SCORE_HINTS = (
 # (rule mining) instead of the default strategy_analysis. Kept in sync with
 # RULE_STRATEGY.goal_patterns; the strategy_setup intent branch multi-recognizes
 # these -- parallel to how strategy_development got its own goal_patterns (S2).
-_RULE_STRATEGY_GOAL_PATTERNS = ("规则挖掘", "拒绝规则", "规则策略", "rule mining", "rule strategy")
+_RULE_STRATEGY_GOAL_PATTERNS = (
+    "规则挖掘",
+    "拒绝规则",
+    "规则策略",
+    "rule mining",
+    "rule strategy",
+)
 
 # S5: goal phrases that route a strategy task to the strategy_monitoring template
 # (run one monitoring pass for an adopted strategy) instead of a development flow.
@@ -124,7 +137,9 @@ def is_rule_strategy_goal(*texts: str | None) -> bool:
 
 def is_strategy_monitoring_goal(*texts: str | None) -> bool:
     haystack = " ".join(text.lower() for text in texts if text)
-    return any(pattern.lower() in haystack for pattern in _STRATEGY_MONITORING_GOAL_PATTERNS)
+    return any(
+        pattern.lower() in haystack for pattern in _STRATEGY_MONITORING_GOAL_PATTERNS
+    )
 
 
 def is_quick_strategy_analysis_goal(*texts: str | None) -> bool:
@@ -137,7 +152,8 @@ def is_quick_strategy_analysis_goal(*texts: str | None) -> bool:
 
     haystack = " ".join(text.lower() for text in texts if text)
     return any(
-        pattern.lower() in haystack for pattern in _QUICK_STRATEGY_ANALYSIS_GOAL_PATTERNS
+        pattern.lower() in haystack
+        for pattern in _QUICK_STRATEGY_ANALYSIS_GOAL_PATTERNS
     )
 
 
@@ -159,11 +175,18 @@ def is_standard_strategy_analysis_goal(*texts: str | None) -> bool:
     """Guard standalone deterministic analyses from approval-plan fallback."""
 
     haystack = " ".join(text.lower() for text in texts if text)
-    if not any(pattern.lower() in haystack for pattern in _STANDARD_ANALYSIS_GOAL_PATTERNS):
+    if not any(
+        pattern.lower() in haystack for pattern in _STANDARD_ANALYSIS_GOAL_PATTERNS
+    ):
         return False
-    if any(token in haystack for token in ("滚动率", "迁徙率", "roll rate", "roll-rate", "roll_rate")):
+    if any(
+        token in haystack
+        for token in ("滚动率", "迁徙率", "roll rate", "roll-rate", "roll_rate")
+    ):
         return True
-    return not any(pattern.lower() in haystack for pattern in _LIFECYCLE_PROFIT_PATTERNS)
+    return not any(
+        pattern.lower() in haystack for pattern in _LIFECYCLE_PROFIT_PATTERNS
+    )
 
 
 def resolve_strategy_intent(strategy_input, *texts: str | None) -> str:
@@ -196,9 +219,9 @@ def resolve_strategy_intent(strategy_input, *texts: str | None) -> str:
 def strategy_development_clarification(strategy_input) -> dict | None:
     """Return a structured missing-input envelope, or ``None`` when start is safe."""
 
-    strategy_type = str(
-        _input_value(strategy_input, "strategy_type") or "approval"
-    ).strip().lower()
+    strategy_type = (
+        str(_input_value(strategy_input, "strategy_type") or "approval").strip().lower()
+    )
     if strategy_type not in {"approval", "reject"}:
         return {
             "code": "strategy_typed_spec_required",
@@ -255,7 +278,9 @@ def strategy_development_slot_clarification(slots) -> dict | None:
     objective = str(objective_value or "").strip()
     if _contract_value_missing(objective_value):
         missing.append("objective")
-    elif not isinstance(objective_value, str) or objective not in STRATEGY_OBJECTIVES - {""}:
+    elif not isinstance(
+        objective_value, str
+    ) or objective not in STRATEGY_OBJECTIVES - {""}:
         invalid.append("objective")
 
     constraint_values = {
@@ -359,6 +384,10 @@ class StrategyDatasetContext:
     dataset_name: str
     target_col: str | None
     columns: tuple[str, ...]
+    dataset_content_hash: str | None = None
+    workspace_revision: int | None = None
+    analysis_generation: int | None = None
+    semantic_mapping_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -372,6 +401,16 @@ class StrategyDatasetPreview:
     identity: dict
 
 
+@dataclass(frozen=True)
+class _ResolvedStrategyDataset:
+    dataset: Dataset
+    path: Path
+    workspace_target_col: str | None = None
+    workspace_revision: int | None = None
+    analysis_generation: int | None = None
+    semantic_mapping_hash: str | None = None
+
+
 def preview_strategy_dataset_context(
     registry,
     backend,
@@ -382,14 +421,23 @@ def preview_strategy_dataset_context(
 ) -> StrategyDatasetPreview:
     """Inspect columns without registering, converting or persisting a dataset."""
 
-    datasets = [
-        dataset
-        for dataset in registry.list_for_task(task_id)
-        if dataset.role in _DATA_ROLES
-    ]
-    if datasets:
-        dataset = _select_dataset(datasets)
-        path = registry.resolve_path(dataset.id)
+    active = _resolve_active_workspace_dataset(registry, task_id)
+    datasets = []
+    if active is None:
+        datasets = [
+            dataset
+            for dataset in registry.list_for_task(task_id)
+            if dataset.role in _DATA_ROLES
+        ]
+    if active is not None or datasets:
+        if active is None:
+            dataset = _select_dataset(datasets)
+            path = registry.resolve_path(dataset.id)
+            workspace_target_col = None
+        else:
+            dataset = active.dataset
+            path = active.path
+            workspace_target_col = active.workspace_target_col
         identity = {
             "kind": "registered",
             "dataset_id": dataset.id,
@@ -428,13 +476,21 @@ def preview_strategy_dataset_context(
         dataset_id = None
         dataset_name = path.name
 
+    identity.update(_strategy_workspace_identity(registry, task_id))
+
     columns = list(backend.column_names(path))
     try:
         resolved_target = _resolve_target_col(
             backend,
             path,
             columns,
-            target_col,
+            _preferred_target_col(
+                columns,
+                requested=target_col,
+                workspace_target_col=workspace_target_col
+                if active is not None
+                else None,
+            ),
         )
     except StrategySetupError:
         resolved_target = None
@@ -463,26 +519,61 @@ def build_strategy_dataset_context(
     inventing or requiring a label that is unavailable at decision time.
     """
 
-    dataset = _resolve_dataset(registry, task_id, source_dir)
-    path = registry.resolve_path(dataset.id)
+    resolved = _resolve_dataset_binding(registry, task_id, source_dir)
+    dataset = resolved.dataset
+    path = resolved.path
     columns = list(backend.column_names(path))
+    preferred_target = _preferred_target_col(
+        columns,
+        requested=target_col,
+        workspace_target_col=resolved.workspace_target_col,
+    )
     if require_target:
-        resolved_target = _resolve_target_col(backend, path, columns, target_col)
+        resolved_target = _resolve_target_col(
+            backend,
+            path,
+            columns,
+            preferred_target,
+        )
     else:
         try:
             resolved_target = _resolve_target_col(
                 backend,
                 path,
                 columns,
-                target_col,
+                preferred_target,
             )
         except StrategySetupError:
             resolved_target = None
+    workspace_revision = None
+    analysis_generation = None
+    semantic_mapping_hash = None
+    dataset_repo = getattr(registry, "_repo", None)
+    db_path = getattr(dataset_repo, "db_path", None)
+    if db_path is not None:
+        try:
+            snapshot = DataWorkspaceRepository(Path(db_path)).get_or_default(task_id)
+        except (DataWorkspaceDataError, KeyError, TypeError, ValueError) as exc:
+            raise StrategySetupError(
+                "策略分析的数据工作区绑定无效，请重新选择任务内数据集。"
+            ) from exc
+        if snapshot.active_dataset_id is not None and (
+            snapshot.active_dataset_id != dataset.id
+            or snapshot.active_dataset_content_hash != dataset.content_hash
+        ):
+            raise StrategySetupError("策略分析的数据工作区在上下文解析期间发生变化。")
+        workspace_revision = snapshot.revision
+        analysis_generation = snapshot.analysis_generation
+        semantic_mapping_hash = data_semantic_mapping_hash(snapshot.semantic_mapping)
     return StrategyDatasetContext(
         dataset_id=dataset.id,
         dataset_name=_dataset_name(dataset),
         target_col=resolved_target,
         columns=tuple(columns),
+        dataset_content_hash=dataset.content_hash,
+        workspace_revision=workspace_revision,
+        analysis_generation=analysis_generation,
+        semantic_mapping_hash=semantic_mapping_hash,
     )
 
 
@@ -617,7 +708,8 @@ def build_monitoring_setup_proposal(
     sample). target_col/score_col are optional passthroughs (labels may not have
     matured; score_col only matters for a model-backed strategy)."""
     adopted = [
-        meta for meta in StrategyRepository(db_path).list_meta_for_task(task_id)
+        meta
+        for meta in StrategyRepository(db_path).list_meta_for_task(task_id)
         if meta.get("asset_status") == ASSET_STATUS_ADOPTED_LOCAL
     ]
     if not adopted:
@@ -664,7 +756,9 @@ def build_strategy_proposal(
             f"策略条件暂只支持 Python 标识符列名；评分列 `{resolved_score}` 需先重命名后再回测。"
         )
     frame = backend.read_frame(path, columns=[resolved_target, resolved_score])
-    profile = _score_profile(frame, target_col=resolved_target, score_col=resolved_score)
+    profile = _score_profile(
+        frame, target_col=resolved_target, score_col=resolved_score
+    )
     rule = {
         "condition": profile["condition"],
         "decision": "reject",
@@ -715,10 +809,13 @@ def build_strategy_development_proposal(
     pd_col = _optional_text(_input_value(profit, "pd_col"))
     objective = str(_input_value(strategy_input, "objective") or "").strip()
     if objective == "max_profit":
-        missing_columns = [column for column in (ead_col, pd_col) if column not in columns]
+        missing_columns = [
+            column for column in (ead_col, pd_col) if column not in columns
+        ]
         if missing_columns:
             raise StrategySetupError(
-                "利润目标引用的数据列不存在：" + "、".join(f"`{column}`" for column in missing_columns)
+                "利润目标引用的数据列不存在："
+                + "、".join(f"`{column}`" for column in missing_columns)
             )
 
     bad_rate, n_nan_labels = _target_bad_rate(backend, path, resolved_target)
@@ -733,11 +830,11 @@ def build_strategy_development_proposal(
         dataset_name=_dataset_name(dataset),
         target_col=resolved_target,
         score_col=resolved_score,
-        strategy_type=str(
-            _input_value(strategy_input, "strategy_type") or "approval"
-        ),
+        strategy_type=str(_input_value(strategy_input, "strategy_type") or "approval"),
         objective=objective,
-        max_bad_rate=_optional_float_value(_input_value(strategy_input, "max_bad_rate")),
+        max_bad_rate=_optional_float_value(
+            _input_value(strategy_input, "max_bad_rate")
+        ),
         min_approval_rate=_optional_float_value(
             _input_value(strategy_input, "min_approval_rate")
         ),
@@ -812,7 +909,9 @@ def _optional_float_value(value) -> float | None:
 
 
 def _profit_params_payload(profit) -> dict | None:
-    if profit is None or any(_input_value(profit, field) is None for field in _PROFIT_PARAM_FIELDS):
+    if profit is None or any(
+        _input_value(profit, field) is None for field in _PROFIT_PARAM_FIELDS
+    ):
         return None
     return {field: _input_value(profit, field) for field in _PROFIT_PARAM_FIELDS}
 
@@ -833,32 +932,139 @@ def _target_bad_rate(backend, path, target_col: str) -> tuple[float | None, int]
         mask = nan_label_mask(frame, target_col)
     except Exception:
         return None, 0
-    finite = pd.to_numeric(frame[target_col], errors="coerce").to_numpy(dtype=float)[~mask]
+    finite = pd.to_numeric(frame[target_col], errors="coerce").to_numpy(dtype=float)[
+        ~mask
+    ]
     if finite.size == 0:
         return None, int(mask.sum())
     return float((finite == 1).mean()), int(mask.sum())
 
 
-def _resolve_dataset(registry, task_id: str, source_dir):
+def _resolve_dataset(registry, task_id: str, source_dir) -> Dataset:
+    """Compatibility view for setup paths that only need the dataset record."""
+
+    return _resolve_dataset_binding(registry, task_id, source_dir).dataset
+
+
+def _resolve_dataset_binding(
+    registry,
+    task_id: str,
+    source_dir,
+) -> _ResolvedStrategyDataset:
+    active = _resolve_active_workspace_dataset(registry, task_id)
+    if active is not None:
+        return active
     datasets = [d for d in registry.list_for_task(task_id) if d.role in _DATA_ROLES]
     if not datasets and source_dir is not None:
         for artifact in scan_source_dir(Path(source_dir)):
             if artifact.role == FileRole.SAMPLE:
-                registry.register_from_upload(task_id, Path(artifact.path), role="sample")
+                registry.register_from_upload(
+                    task_id, Path(artifact.path), role="sample"
+                )
         datasets = [d for d in registry.list_for_task(task_id) if d.role in _DATA_ROLES]
     if not datasets:
         raise StrategySetupError(f"策略分析未找到数据文件:{source_dir}")
-    return _select_dataset(datasets)
+    dataset = _select_dataset(datasets)
+    return _ResolvedStrategyDataset(
+        dataset=dataset,
+        path=registry.resolve_path(dataset.id),
+    )
+
+
+def _resolve_active_workspace_dataset(
+    registry,
+    task_id: str,
+) -> _ResolvedStrategyDataset | None:
+    """Return the exact task-scoped workspace selection, if one exists.
+
+    Some narrow legacy/unit-test registries do not expose a database-backed
+    repository.  They retain the pre-workspace fallback.  A real registry with
+    a workspace selection is fail-closed: an invalid owner, catalog hash, or
+    physical file hash must never silently select a different (often larger)
+    historical sample.
+    """
+
+    dataset_repo = getattr(registry, "_repo", None)
+    db_path = getattr(dataset_repo, "db_path", None)
+    if db_path is None:
+        return None
+    try:
+        snapshot = DataWorkspaceRepository(Path(db_path)).get_or_default(task_id)
+    except (DataWorkspaceDataError, KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "策略分析的数据工作区绑定无效，请重新选择任务内数据集。"
+        ) from exc
+    if snapshot.active_dataset_id is None:
+        return None
+    try:
+        dataset = registry.get(snapshot.active_dataset_id)
+        if dataset.task_id != task_id:
+            raise StrategySetupError("策略分析的活动数据集不属于当前任务。")
+        if dataset.content_hash != snapshot.active_dataset_content_hash:
+            raise StrategySetupError("策略分析的活动数据集哈希与工作区绑定不一致。")
+        path = registry.resolve_verified_path(dataset.id)
+    except StrategySetupError:
+        raise
+    except (DatasetContentDriftError, KeyError, OSError, ValueError) as exc:
+        raise StrategySetupError(
+            "策略分析的活动数据集无法通过归属或内容哈希校验。"
+        ) from exc
+    return _ResolvedStrategyDataset(
+        dataset=dataset,
+        path=path,
+        workspace_target_col=snapshot.semantic_mapping.target_col,
+        workspace_revision=snapshot.revision,
+        analysis_generation=snapshot.analysis_generation,
+        semantic_mapping_hash=data_semantic_mapping_hash(snapshot.semantic_mapping),
+    )
+
+
+def _strategy_workspace_identity(registry, task_id: str) -> dict[str, object]:
+    dataset_repo = getattr(registry, "_repo", None)
+    db_path = getattr(dataset_repo, "db_path", None)
+    if db_path is None:
+        return {}
+    try:
+        snapshot = DataWorkspaceRepository(Path(db_path)).get_or_default(task_id)
+    except (DataWorkspaceDataError, KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "策略分析的数据工作区绑定无效，请重新选择任务内数据集。"
+        ) from exc
+    return {
+        "workspace_revision": snapshot.revision,
+        "analysis_generation": snapshot.analysis_generation,
+        "semantic_mapping_hash": data_semantic_mapping_hash(snapshot.semantic_mapping),
+    }
+
+
+def _preferred_target_col(
+    columns: list[str],
+    *,
+    requested: str | None,
+    workspace_target_col: str | None,
+) -> str | None:
+    requested = str(requested or "").strip()
+    if requested and requested in columns:
+        return requested
+    workspace_target = str(workspace_target_col or "").strip()
+    if workspace_target and workspace_target in columns:
+        return workspace_target
+    return requested or None
 
 
 def _select_dataset(datasets):
     return sorted(
         datasets,
-        key=lambda d: (not bool(getattr(d, "has_target", False)), -int(getattr(d, "row_count", 0) or 0)),
+        key=lambda d: (
+            not bool(getattr(d, "has_target", False)),
+            -int(getattr(d, "row_count", 0) or 0),
+        ),
     )[0]
 
 
-def _resolve_target_col(backend, path: Path, columns: list[str], requested: str | None) -> str:
+def _resolve_target_col(
+    backend, path: Path, columns: list[str], requested: str | None
+) -> str:
     requested = str(requested or "").strip()
     if requested and requested in columns:
         return requested
@@ -913,11 +1119,15 @@ def _score_profile(frame: pd.DataFrame, *, target_col: str, score_col: str) -> d
     if higher_score_riskier:
         condition = f"{score_col} >= {cutoff_literal}"
         direction = "higher_score_riskier"
-        notes = [f"评分越高坏样本率越高，默认拒绝评分最高约 20%（cutoff={cutoff_literal}）。"]
+        notes = [
+            f"评分越高坏样本率越高，默认拒绝评分最高约 20%（cutoff={cutoff_literal}）。"
+        ]
     else:
         condition = f"{score_col} < {cutoff_literal}"
         direction = "lower_score_riskier"
-        notes = [f"评分越低坏样本率越高，默认拒绝评分最低约 20%（cutoff={cutoff_literal}）。"]
+        notes = [
+            f"评分越低坏样本率越高，默认拒绝评分最低约 20%（cutoff={cutoff_literal}）。"
+        ]
     if n_nan_labels:
         notes.append(
             f"注意：目标列 `{target_col}` 有 {n_nan_labels} 行标签为空/非法，"

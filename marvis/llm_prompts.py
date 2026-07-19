@@ -54,7 +54,7 @@ REPLAN_SYS = PromptSpec(
     text=(
         "你在修订一个 MARVIS 执行计划的剩余步骤。已完成步骤和结果在进度里，"
         "不要重做。只能从工具目录选工具。不要计算任何指标。不要偏离原始目标。"
-        "输出严格 JSON，格式为 {\"steps\": [...]}。"
+        '输出严格 JSON，格式为 {"steps": [...]}。'
     ),
 )
 EXPLORE_SYS = PromptSpec(
@@ -62,7 +62,7 @@ EXPLORE_SYS = PromptSpec(
     version=1,
     text=(
         "你在 MARVIS explore 模式下规划下一小段步骤。基于进度判断目标是否已完成。"
-        "若已完成，输出 {\"done\": true, \"steps\": []}；否则只输出下一小段 steps。"
+        '若已完成，输出 {"done": true, "steps": []}；否则只输出下一小段 steps。'
         "只能从工具目录选工具，不计算指标，输出严格 JSON。"
     ),
 )
@@ -114,14 +114,14 @@ GATE_INSTRUCTION_ROUTER_SYS = PromptSpec(
     text=(
         "你是信贷风控建模 Agent。用户在一个需要确认的节点没有直接确认,而是提了一条指令。"
         "判断该指令属于哪类并抽取要素:\n"
-        "- confirm:其实是同意继续(如\"可以\"\"没问题\")。\n"
-        "- adjust:调整刚算出这一步的参数后重算(如\"n_trials 调到 20\"\"阈值放宽到 0.1\")。"
+        '- confirm:其实是同意继续(如"可以""没问题")。\n'
+        '- adjust:调整刚算出这一步的参数后重算(如"n_trials 调到 20""阈值放宽到 0.1")。'
         "把参数抽成 params 字典(键=参数名,值=新值,数字请用数字)。"
         "params 的键只能取自下方【可调参数】列表中的参数名,不要自己编造参数名;"
         "取值要落在给出的取值范围内。\n"
         "- replan:结构性改动(加/删步骤、换算法、换流程),把诉求写进 constraint。\n"
         "- clarify:看不懂或信息不足。\n"
-        '严格只返回 JSON:'
+        "严格只返回 JSON:"
         '{"action":"confirm|adjust|replan|clarify","params":{},"constraint":"","reason":"一句话中文"}。'
     ),
 )
@@ -236,10 +236,10 @@ SLICE_SPEC_SYS = PromptSpec(
         "只能使用给定列白名单里的列名；不要编造列名。算子只能取："
         "count/sum/mean/min/max/bad_rate/approval_rate/distinct。\n"
         "严格只返回 JSON 对象，字段："
-        "{\"group_by\":[列名…],\"metrics\":[{\"op\":算子,\"col\":列名?}…],"
-        "\"filters\":[{\"col\":列名,\"op\":比较符,\"value\":值}…],"
-        "\"month_col\":列名?,\"months\":[月份…]?,\"sort_by\":列名或指标标签?}。\n"
-        "无法确定列或意图时，返回 {\"clarify\":\"一句中文澄清问题\"}，不要猜。"
+        '{"group_by":[列名…],"metrics":[{"op":算子,"col":列名?}…],'
+        '"filters":[{"col":列名,"op":比较符,"value":值}…],'
+        '"month_col":列名?,"months":[月份…]?,"sort_by":列名或指标标签?}。\n'
+        '无法确定列或意图时，返回 {"clarify":"一句中文澄清问题"}，不要猜。'
     ),
 )
 
@@ -247,14 +247,15 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=4,
+    version=5,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
         "先判断 request_kind。策略开发、规则、已有策略的分析/回测/应用/采纳/报告/监控属于 "
-        "strategy_lifecycle；独立的利润测算、滚动率矩阵、额度利率网格测算属于 standard_workflow。\n"
+        "strategy_lifecycle；独立的利润测算、滚动率矩阵、额度利率网格测算和单变量候选分析属于 standard_workflow。\n"
         "standard_workflow 只能输出 request_kind=standard_workflow、workflow、workflow_inputs。workflow "
-        "只能是 profit_calc/roll_rate_matrix/limit_pricing_matrix。profit_calc 需要 ead_col、pd_col、"
+        "只能是 profit_calc/roll_rate_matrix/limit_pricing_matrix/univariate_candidate_analysis。"
+        "profit_calc 需要 ead_col、pd_col、"
         "可选 segment_col 及完整 profit_params。roll_rate_matrix 需要 id_col、time_col、status_col、"
         "有序且不重复的 states，可选 balance_col，observation_semantics 固定为 adjacent_observation；"
         "如果用户只说迁徙矩阵而无法判断相邻观测还是固定月末快照，必须 clarification，不能猜。"
@@ -262,6 +263,10 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "limit_grid、rate_grid、lgd、funding_rate、term_months、cost_per_loan、el_ead_max，可选 strategy_id。"
         "只有用户明确要求丢弃缺失标签时，才能在使用 target_col 的矩阵请求中写 "
         "drop_nan_labels=true；使用 pd_col 时禁止写该字段。"
+        "univariate_candidate_analysis 只抽取 features（用户说全部候选字段时可省略）、methods、"
+        "bin_count、min_bin_pct、loan_amount_col、overdue_amount_col、sentinel_values。methods 只能从 "
+        "equal_frequency/equal_width/chimerge/tree 中选择；不得输出 target_col、分箱边界、WOE、IV、"
+        "KS、AUC、Lift、规则、推荐或任何计算结果。金额字段只能来自列白名单；用户未提供时不要猜。"
         "最大化利润开发审批 cutoff 属于 strategy_lifecycle，不是独立 profit_calc；定价规则开发、应用或采纳"
         "也属于 strategy_lifecycle，不是 limit_pricing_matrix。\n"
         "operation 与 strategy_type 是两个正交字段，必须分别判断。operation 只能是："
@@ -290,7 +295,7 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "不要生成自由表达式。不要输出任何其他字段。\n"
         "strategy_lifecycle 可省略 request_kind 以兼容旧请求，也可以显式写 request_kind=strategy_lifecycle。"
         "信息足够时只返回一个 JSON 草案对象；信息不足或存在歧义时只返回 "
-        "{\"clarification\":\"一句明确的中文问题\"}。禁止把任何指标结果放进 JSON。"
+        '{"clarification":"一句明确的中文问题"}。禁止把任何指标结果放进 JSON。'
     ),
 )
 

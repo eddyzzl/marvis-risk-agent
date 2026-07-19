@@ -34,7 +34,7 @@ _LOCKED_HASHES = {
     "CROSS_SYS": (1, "0d13fa241b855e51"),
     "REPORT_NARRATIVE_SYS": (1, "a6ff4690f78c4fe2"),
     "SLICE_SPEC_SYS": (1, "11e47cc62475346a"),
-    "STRATEGY_REQUEST_COMPILER_SYS": (4, "9194d7c6057e125e"),
+    "STRATEGY_REQUEST_COMPILER_SYS": (5, "014096d1fda7cada"),
 }
 
 
@@ -104,7 +104,10 @@ def test_call_site_constants_re_export_registry_text_unchanged():
         (learning.LEARN_SYS, lp.LEARN_SYS.text),
         (derive.CROSS_SYS, lp.CROSS_SYS.text),
         (agent_prompts.AGENT_SYSTEM_PROMPT, lp.AGENT_SYSTEM_PROMPT.text),
-        (agent_prompts.WORD_CONCLUSION_SYSTEM_PROMPT, lp.WORD_CONCLUSION_SYSTEM_PROMPT.text),
+        (
+            agent_prompts.WORD_CONCLUSION_SYSTEM_PROMPT,
+            lp.WORD_CONCLUSION_SYSTEM_PROMPT.text,
+        ),
         (modeling_tools.REPORT_NARRATIVE_SYS, lp.REPORT_NARRATIVE_SYS.text),
         (
             strategy_request_compiler._SYSTEM,

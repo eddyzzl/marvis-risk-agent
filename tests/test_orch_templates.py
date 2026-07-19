@@ -70,11 +70,17 @@ def test_load_builtin_templates_registers_sample_echo_idempotently():
     assert model_validation.success_criteria == ()
     assert "model_validation" in builtin_template_ids()
     standard_modeling = get_template("standard_modeling")
-    assert standard_modeling.steps[-2].tool_ref == ToolRef("modeling", "generate_model_report")
-    assert standard_modeling.steps[-1].tool_ref == ToolRef("modeling", "post_training_action")
+    assert standard_modeling.steps[-2].tool_ref == ToolRef(
+        "modeling", "generate_model_report"
+    )
+    assert standard_modeling.steps[-1].tool_ref == ToolRef(
+        "modeling", "post_training_action"
+    )
     assert standard_modeling.steps[-1].needs_confirmation is True
     for template_id in ("standard_modeling", "modeling", "modeling_with_join"):
-        assert "champion_reference" in {slot.name for slot in get_template(template_id).slots}
+        assert "champion_reference" in {
+            slot.name for slot in get_template(template_id).slots
+        }
     assert not any(step.decision_point for step in standard_modeling.steps)
     assert standard_modeling.success_criteria == ()
     assert "standard_modeling" in builtin_template_ids()
@@ -119,7 +125,10 @@ def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):
             "split_values": {"train": "train", "test": "test", "oot": "oot"},
             "recipe": "lr",
             "seed": 7,
-            "business_columns": {"loan_month_col": "loan_month", "interest_rate_col": "rate"},
+            "business_columns": {
+                "loan_month_col": "loan_month",
+                "interest_rate_col": "rate",
+            },
             "feature_dictionary_id": "dict-1",
             "project_meta": {"项目名称": "A卡模型"},
             "champion_reference": {"experiment_id": "exp-current-champion"},
@@ -144,24 +153,45 @@ def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):
     select_step = plan.steps[6]
     report_step = plan.steps[7]
     delivery_step = plan.steps[8]
-    assert compare_step.inputs == {"experiment_ids": [f"$ref:{train_step.id}.output.experiment_id"]}
-    assert select_step.inputs["experiment_ids"] == [f"$ref:{train_step.id}.output.experiment_id"]
-    assert select_step.inputs["selection_policy"] == {"require_pmml": True, "require_handoff": True}
-    assert report_step.inputs["experiment_id"] == f"$ref:{select_step.id}.output.selected_experiment_id"
+    assert compare_step.inputs == {
+        "experiment_ids": [f"$ref:{train_step.id}.output.experiment_id"]
+    }
+    assert select_step.inputs["experiment_ids"] == [
+        f"$ref:{train_step.id}.output.experiment_id"
+    ]
+    assert select_step.inputs["selection_policy"] == {
+        "require_pmml": True,
+        "require_handoff": True,
+    }
+    assert (
+        report_step.inputs["experiment_id"]
+        == f"$ref:{select_step.id}.output.selected_experiment_id"
+    )
     assert report_step.inputs["dataset_id"] == "dataset-1"
-    assert report_step.inputs["business_columns"] == {"loan_month_col": "loan_month", "interest_rate_col": "rate"}
+    assert report_step.inputs["business_columns"] == {
+        "loan_month_col": "loan_month",
+        "interest_rate_col": "rate",
+    }
     assert report_step.inputs["feature_dictionary_id"] == "dict-1"
     assert report_step.inputs["project_meta"] == {"项目名称": "A卡模型"}
     assert report_step.needs_confirmation is True
-    assert delivery_step.inputs["experiment_id"] == f"$ref:{select_step.id}.output.selected_experiment_id"
+    assert (
+        delivery_step.inputs["experiment_id"]
+        == f"$ref:{select_step.id}.output.selected_experiment_id"
+    )
     assert delivery_step.inputs["sample_dataset_id"] == "dataset-1"
     assert delivery_step.inputs["actions"] == [
         "export_pmml",
         "handoff_to_validation",
         "create_challenger_backtest",
     ]
-    assert delivery_step.inputs["selection_policy_decision"] == f"$ref:{select_step.id}.output.policy_decision"
-    assert delivery_step.inputs["champion_reference"] == {"experiment_id": "exp-current-champion"}
+    assert (
+        delivery_step.inputs["selection_policy_decision"]
+        == f"$ref:{select_step.id}.output.policy_decision"
+    )
+    assert delivery_step.inputs["champion_reference"] == {
+        "experiment_id": "exp-current-champion"
+    }
     assert delivery_step.needs_confirmation is True
     assert plan.success_criteria == []
 
@@ -210,16 +240,48 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     ]
     # phase tags for right-rail big-step grouping
     assert [step.phase for step in plan.steps] == [
-        "特征", "建模", "特征", "特征", "建模", "建模", "建模", "建模", "建模", "报告", "交付"
+        "特征",
+        "建模",
+        "特征",
+        "特征",
+        "建模",
+        "建模",
+        "建模",
+        "建模",
+        "建模",
+        "报告",
+        "交付",
     ]
     # gates: confirm split/features/refined-features/tuning config, select final
     # experiment, approve report and delivery.
     assert [step.needs_confirmation for step in plan.steps] == [
-        False, False, True, True, True, True, False, False, True, True, True
+        False,
+        False,
+        True,
+        True,
+        True,
+        True,
+        False,
+        False,
+        True,
+        True,
+        True,
     ]
     assert not any(step.decision_point for step in plan.steps)
 
-    make_split, spec, screen, refine, tuning_config, tune, train, compare, select, report, delivery = plan.steps
+    (
+        make_split,
+        spec,
+        screen,
+        refine,
+        tuning_config,
+        tune,
+        train,
+        compare,
+        select,
+        report,
+        delivery,
+    ) = plan.steps
     # screen/tune/train run on the split frame produced by the G1 gate
     split_ref = f"$ref:{make_split.id}.output.result_dataset_id"
     assert spec.inputs["features"] == f"$ref:{make_split.id}.output.feature_cols"
@@ -239,7 +301,9 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     assert refine.inputs["space"] == "raw"
     assert refine.inputs["iv_min"] == 0.02
     assert refine.inputs["corr_max"] == 0.95
-    assert refine.inputs["vif_max"] == 1e9  # VIF off by default (tree recipes don't need it)
+    assert (
+        refine.inputs["vif_max"] == 1e9
+    )  # VIF off by default (tree recipes don't need it)
     assert refine.needs_confirmation is True
     assert tune.inputs["dataset_id"] == split_ref
     assert train.inputs["dataset_id"] == split_ref
@@ -247,25 +311,45 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     # consumes tuned params
     assert tuning_config.inputs["recipe"] == f"$ref:{spec.id}.output.recipe"
     assert tuning_config.inputs["recipes"] == f"$ref:{spec.id}.output.recipes"
-    assert tuning_config.inputs["n_trials_by_recipe"] == f"$ref:{spec.id}.output.n_trials_by_recipe"
+    assert (
+        tuning_config.inputs["n_trials_by_recipe"]
+        == f"$ref:{spec.id}.output.n_trials_by_recipe"
+    )
     assert tune.inputs["features"] == f"$ref:{refine.id}.output.selected"
     assert tune.inputs["recipe"] == f"$ref:{tuning_config.id}.output.recipe"
     assert tune.inputs["recipes"] == f"$ref:{tuning_config.id}.output.recipes"
-    assert tune.inputs["n_trials_by_recipe"] == f"$ref:{tuning_config.id}.output.n_trials_by_recipe"
+    assert (
+        tune.inputs["n_trials_by_recipe"]
+        == f"$ref:{tuning_config.id}.output.n_trials_by_recipe"
+    )
     assert tune.inputs["params"] == f"$ref:{tuning_config.id}.output.params"
     assert train.inputs["features"] == f"$ref:{refine.id}.output.selected"
     assert train.inputs["params"] == f"$ref:{tune.id}.output.best_params"
     assert train.inputs["recipes"] == f"$ref:{spec.id}.output.recipes"
     assert train.inputs["target_type"] == f"$ref:{spec.id}.output.target_type"
-    assert compare.inputs == {"experiment_ids": f"$ref:{train.id}.output.experiment_ids"}
+    assert compare.inputs == {
+        "experiment_ids": f"$ref:{train.id}.output.experiment_ids"
+    }
     assert select.inputs["experiment_ids"] == f"$ref:{train.id}.output.experiment_ids"
     assert select.inputs["target_type"] == f"$ref:{spec.id}.output.target_type"
-    assert select.inputs["selection_policy"] == {"require_pmml": True, "require_handoff": True}
-    assert report.inputs["experiment_id"] == f"$ref:{select.id}.output.selected_experiment_id"
+    assert select.inputs["selection_policy"] == {
+        "require_pmml": True,
+        "require_handoff": True,
+    }
+    assert (
+        report.inputs["experiment_id"]
+        == f"$ref:{select.id}.output.selected_experiment_id"
+    )
     assert report.inputs["dataset_id"] == "dataset-1"
-    assert delivery.inputs["experiment_id"] == f"$ref:{select.id}.output.selected_experiment_id"
+    assert (
+        delivery.inputs["experiment_id"]
+        == f"$ref:{select.id}.output.selected_experiment_id"
+    )
     assert delivery.inputs["sample_dataset_id"] == "dataset-1"
-    assert delivery.inputs["selection_policy_decision"] == f"$ref:{select.id}.output.policy_decision"
+    assert (
+        delivery.inputs["selection_policy_decision"]
+        == f"$ref:{select.id}.output.policy_decision"
+    )
     assert plan.success_criteria == []
     assert "modeling" in builtin_template_ids()
 
@@ -302,7 +386,10 @@ def test_modeling_template_validates_with_optional_slots_omitted(tmp_path):
     assert "sample_weight_candidates" not in spec.inputs
     assert "params" not in spec.inputs
     tuning_config = plan.steps[4]
-    assert tuning_config.inputs["sample_weight_col"] == f"$ref:{spec.id}.output.sample_weight_col"
+    assert (
+        tuning_config.inputs["sample_weight_col"]
+        == f"$ref:{spec.id}.output.sample_weight_col"
+    )
     assert tuning_config.inputs["params"] == f"$ref:{spec.id}.output.params"
     report = plan.steps[-2]
     assert "business_columns" not in report.inputs
@@ -421,7 +508,11 @@ def test_data_join_template_phases_gate_and_refs(tmp_path):
     assert confirm.inputs["dedup_strategies"] == {"ds-f1": "first"}
     # execute_join must directly depend on propose (it refs its output) and on confirm (ordering)
     assert set(execute.depends_on) == {propose.id, confirm.id}
-    assert {check.kind for check in execute.post_checks} == {"nonempty", "rowcount", "invariant"}
+    assert {check.kind for check in execute.post_checks} == {
+        "nonempty",
+        "rowcount",
+        "invariant",
+    }
     assert any(
         check.kind == "invariant" and check.spec["rule"] == "joined_rows<=anchor_rows"
         for check in execute.post_checks
@@ -480,12 +571,16 @@ def test_feature_derivation_template_marks_adaptive_decision_point(tmp_path):
         ToolRef("feature", "compute_feature_metrics"),
         ToolRef("feature", "cross_features"),
         ToolRef("feature", "compute_feature_metrics"),
-        ToolRef("feature", "screen_features"),  # FEAT-3: derivation now ends in a screening step
+        ToolRef(
+            "feature", "screen_features"
+        ),  # FEAT-3: derivation now ends in a screening step
     ]
     assert plan.steps[-1].title == "特征筛选"
     assert [step.title for step in plan.steps if step.decision_point] == ["衍生特征"]
     assert not get_template("model_validation").steps[-1].decision_point
-    assert not any(step.decision_point for step in get_template("standard_modeling").steps)
+    assert not any(
+        step.decision_point for step in get_template("standard_modeling").steps
+    )
 
 
 def test_strategy_analysis_template_marks_backtest_decision_point(tmp_path):
@@ -578,8 +673,7 @@ def test_strategy_templates_thread_explicit_nan_label_exclusion_contract():
         threaded = {
             step.tool_ref.tool
             for step in template.steps
-            if step.inputs_template.get("drop_nan_labels")
-            == "{slot:drop_nan_labels}"
+            if step.inputs_template.get("drop_nan_labels") == "{slot:drop_nan_labels}"
         }
         assert threaded == consumer_tools
 
@@ -616,6 +710,23 @@ def test_strategy_templates_thread_explicit_nan_label_exclusion_contract():
             [ToolRef("strategy", "roll_rate_matrix")],
         ),
         (
+            "strategy_univariate_candidate_analysis",
+            {
+                "dataset_id": "dataset-1",
+                "expected_content_hash": "a" * 64,
+                "workspace_revision": 1,
+                "analysis_generation": 1,
+                "semantic_mapping_hash": "b" * 64,
+                "target_col": "bad",
+                "features": ["score", "segment"],
+                "methods": [],
+                "bin_count": 5,
+                "min_bin_pct": 0.02,
+                "sentinel_values": [],
+            },
+            [ToolRef("strategy", "analyze_univariate_candidates")],
+        ),
+        (
             "strategy_limit_pricing_analysis",
             {
                 "dataset_id": "dataset-1",
@@ -648,8 +759,10 @@ def test_standard_strategy_workflow_templates_validate(
     if template_id == "strategy_limit_pricing_analysis":
         assert plan.steps[0].inputs["confirm"] is False
         assert plan.steps[1].inputs["confirm"] is True
-        assert plan.steps[1].inputs["expected_source_hash"].endswith(
-            ".output.source_dataset_content_hash"
+        assert (
+            plan.steps[1]
+            .inputs["expected_source_hash"]
+            .endswith(".output.source_dataset_content_hash")
         )
         assert plan.steps[1].needs_confirmation is False
         assert plan.steps[0].decision_point is True
@@ -708,7 +821,9 @@ def test_deterministic_nonapproval_candidate_template_contract_is_registered() -
     )
 
 
-def test_candidate_template_goal_patterns_do_not_cross_approval_or_matrix_flows() -> None:
+def test_candidate_template_goal_patterns_do_not_cross_approval_or_matrix_flows() -> (
+    None
+):
     load_builtin_templates()
     candidate = get_template("deterministic_strategy_candidate_development")
 
@@ -722,7 +837,9 @@ def test_candidate_template_goal_patterns_do_not_cross_approval_or_matrix_flows(
         )
 
 
-def test_segmentation_candidate_plan_validates_with_only_adoption_gate(tmp_path) -> None:
+def test_segmentation_candidate_plan_validates_with_only_adoption_gate(
+    tmp_path,
+) -> None:
     load_builtin_templates()
     tool_registry = _tool_registry(tmp_path)
     planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
@@ -750,9 +867,7 @@ def test_segmentation_candidate_plan_validates_with_only_adoption_gate(tmp_path)
     design, _build, backtest, pre_adoption_doc, adopt, final_doc = plan.steps
     assert backtest.inputs["drop_nan_labels"] is True
     assert "economics_inputs" not in design.inputs
-    assert backtest.inputs["economics_inputs"].endswith(
-        ".output.economics_inputs"
-    )
+    assert backtest.inputs["economics_inputs"].endswith(".output.economics_inputs")
     assert pre_adoption_doc.index < adopt.index < final_doc.index
 
 
@@ -762,7 +877,11 @@ def test_segmentation_candidate_plan_validates_with_only_adoption_gate(tmp_path)
         ("approval", {"type": "approval"}, {"type": "reject"}),
         ("reject", {"type": "approval"}, {"type": "reject"}),
         ("limit", {"type": "limit", "value": 1000}, {"type": "limit", "value": 2000}),
-        ("pricing", {"type": "pricing", "value": 0.1}, {"type": "pricing", "value": 0.2}),
+        (
+            "pricing",
+            {"type": "pricing", "value": 0.1},
+            {"type": "pricing", "value": 0.2},
+        ),
         (
             "segmentation",
             {"type": "segment", "value": "base"},
@@ -1025,16 +1144,25 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
     # The reason belongs to the final evidence-bound adoption gate, not task setup.
     # Keeping an explicit empty key gives that gate a structured override target.
     assert adopt_step.inputs["adoption_reason"] == ""
-    assert build_step.inputs["rules"] == f"$ref:{bands_step.id}.output.recommended_rules"
-    assert adopt_step.inputs["backtest_id"] == f"$ref:{backtest_step.id}.output.backtest_id"
+    assert (
+        build_step.inputs["rules"] == f"$ref:{bands_step.id}.output.recommended_rules"
+    )
+    assert (
+        adopt_step.inputs["backtest_id"]
+        == f"$ref:{backtest_step.id}.output.backtest_id"
+    )
     assert adopt_step.inputs["band_stats"] == f"$ref:{bands_step.id}.output"
     assert doc_step.inputs["strategy_id"] == f"$ref:{build_step.id}.output.strategy_id"
     # The challenger report sits after compare, before adopt. It accepts only a
     # persisted challenger backtest receipt and recomputes task-owned evidence;
     # caller-provided compare metrics are intentionally not threaded into it.
     assert "compare" not in report_step.inputs
-    assert report_step.inputs["challenger_backtest"] == f"$ref:{backtest_step.id}.output"
-    assert report_step.inputs["strategy_id"] == f"$ref:{build_step.id}.output.strategy_id"
+    assert (
+        report_step.inputs["challenger_backtest"] == f"$ref:{backtest_step.id}.output"
+    )
+    assert (
+        report_step.inputs["strategy_id"] == f"$ref:{build_step.id}.output.strategy_id"
+    )
     assert report_step.inputs["champion_strategy_id"] == "strategy-baseline"
 
 
@@ -1100,9 +1228,18 @@ def test_rule_strategy_template_instantiates_and_validates(tmp_path):
     # Selection and backtest remain evidence-bearing decision points, while only
     # the evidence-bound adoption effect is a mandatory confirmation gate.
     assert [step.needs_confirmation for step in plan.steps] == [
-        False, False, False, False, False, True, False
+        False,
+        False,
+        False,
+        False,
+        False,
+        True,
+        False,
     ]
-    assert [step.title for step in plan.steps if step.decision_point] == ["评估规则集", "回测策略"]
+    assert [step.title for step in plan.steps if step.decision_point] == [
+        "评估规则集",
+        "回测策略",
+    ]
     assert select.policy.human_decision_gate == "none"
     assert backtest.policy.human_decision_gate == "none"
     # $ref wiring: select consumes the mined candidates; evaluate + build consume
@@ -1149,8 +1286,12 @@ def test_vintage_analysis_template_runs_vintage_curve(tmp_path):
     )
 
     assert PlanValidator(tool_registry).validate(plan) == []
-    assert [step.tool_ref for step in plan.steps] == [ToolRef("strategy", "vintage_curve")]
-    assert [step.title for step in plan.steps if step.decision_point] == ["计算 Vintage 曲线"]
+    assert [step.tool_ref for step in plan.steps] == [
+        ToolRef("strategy", "vintage_curve")
+    ]
+    assert [step.title for step in plan.steps if step.decision_point] == [
+        "计算 Vintage 曲线"
+    ]
 
 
 def test_vintage_template_threads_label_semantics_and_drop_nan_labels(tmp_path):
@@ -1163,12 +1304,21 @@ def test_vintage_template_threads_label_semantics_and_drop_nan_labels(tmp_path):
 
     plan = planner.from_template(
         get_template("vintage_analysis"),
-        {"dataset_id": "dataset-1", "cohort_col": "cohort", "mob_col": "mob", "bad_col": "bad"},
+        {
+            "dataset_id": "dataset-1",
+            "cohort_col": "cohort",
+            "mob_col": "mob",
+            "bad_col": "bad",
+        },
         task_id="task-1",
     )
 
     assert PlanValidator(tool_registry).validate(plan) == []
-    step = next(step for step in plan.steps if step.tool_ref == ToolRef("strategy", "vintage_curve"))
+    step = next(
+        step
+        for step in plan.steps
+        if step.tool_ref == ToolRef("strategy", "vintage_curve")
+    )
     # label_semantics is baked as a literal null default (mirrors band_edges) so
     # the apply_adjust gate override can write the user's choice onto the step.
     assert "label_semantics" in step.inputs
@@ -1201,7 +1351,10 @@ def test_monitoring_run_template_chains_score_then_monitor_as_decision_point(tmp
     assert [step.title for step in plan.steps if step.needs_confirmation] == []
     score_step = next(step for step in plan.steps if step.title == "打分")
     monitor_step = next(step for step in plan.steps if step.title == "监控运行")
-    assert monitor_step.inputs["scored_dataset_id"] == f"$ref:{score_step.id}.output.result_dataset_id"
+    assert (
+        monitor_step.inputs["scored_dataset_id"]
+        == f"$ref:{score_step.id}.output.result_dataset_id"
+    )
     assert monitor_step.inputs["score_col"] == f"$ref:{score_step.id}.output.score_col"
     assert score_step.id in monitor_step.depends_on
     assert "monitoring_run" in builtin_template_ids()

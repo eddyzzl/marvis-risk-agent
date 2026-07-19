@@ -58,6 +58,13 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "profit_calc",
     "roll_rate_matrix",
     "limit_pricing_matrix",
+    "univariate_candidate_analysis",
+)
+UNIVARIATE_BINNING_METHODS = (
+    "equal_frequency",
+    "equal_width",
+    "chimerge",
+    "tree",
 )
 
 _OPTIONAL_DRAFT_FIELDS = {
@@ -312,16 +319,8 @@ STRATEGY_REQUEST_JSON_SCHEMA = {
                                         {"required": ["funding_rate_value"]},
                                         {"required": ["term_months_col"]},
                                         {"required": ["term_months_value"]},
-                                        {
-                                            "required": [
-                                                "operating_cost_per_loan_col"
-                                            ]
-                                        },
-                                        {
-                                            "required": [
-                                                "operating_cost_per_loan_value"
-                                            ]
-                                        },
+                                        {"required": ["operating_cost_per_loan_col"]},
+                                        {"required": ["operating_cost_per_loan_value"]},
                                     ]
                                 }
                             },
@@ -772,7 +771,9 @@ def _validate_payload(
         unexpected = sorted(set(payload) - _STANDARD_WORKFLOW_DRAFT_FIELDS)
         if unexpected:
             rendered = "、".join(f"「{field}」" for field in unexpected)
-            return _invalid(f"标准 Workflow 请求包含不支持的字段 {rendered}，请删除后重新说明。")
+            return _invalid(
+                f"标准 Workflow 请求包含不支持的字段 {rendered}，请删除后重新说明。"
+            )
         return _validate_standard_workflow_payload(
             payload,
             whitelist,
@@ -785,7 +786,9 @@ def _validate_payload(
         return _invalid(f"策略请求包含不支持的字段 {rendered}，请删除后重新说明。")
     if payload.get("request_kind") not in (None, "strategy_lifecycle"):
         return _invalid("策略生命周期请求的 request_kind 必须是 strategy_lifecycle。")
-    missing = [field for field in ("operation", "strategy_type") if field not in payload]
+    missing = [
+        field for field in ("operation", "strategy_type") if field not in payload
+    ]
     if missing:
         rendered = "、".join(missing)
         return _invalid(f"没有识别到必需字段 {rendered}，请补充策略操作和策略类型。")
@@ -875,7 +878,9 @@ def _validate_standard_workflow_payload(
     *,
     target_col: str | None,
 ) -> _ValidationOutcome:
-    missing = [field for field in ("workflow", "workflow_inputs") if field not in payload]
+    missing = [
+        field for field in ("workflow", "workflow_inputs") if field not in payload
+    ]
     if missing:
         return _invalid("标准 Workflow 请求缺少字段：" + "、".join(missing) + "。")
     workflow = payload["workflow"]
@@ -895,8 +900,14 @@ def _validate_standard_workflow_payload(
             normalized = _validate_profit_workflow_inputs(raw_inputs, whitelist)
         elif workflow == "roll_rate_matrix":
             normalized = _validate_roll_rate_workflow_inputs(raw_inputs, whitelist)
-        else:
+        elif workflow == "limit_pricing_matrix":
             normalized = _validate_pricing_workflow_inputs(
+                raw_inputs,
+                whitelist,
+                target_col=target_col,
+            )
+        else:
+            normalized = _validate_univariate_workflow_inputs(
                 raw_inputs,
                 whitelist,
                 target_col=target_col,
@@ -938,9 +949,7 @@ def _validate_profit_workflow_inputs(
     unexpected_params = sorted(set(params) - _PROFIT_PARAMETER_FIELDS)
     if missing_params:
         raise _DraftValidationError(
-            "profit_calc 的 profit_params 缺少字段："
-            + "、".join(missing_params)
-            + "。"
+            "profit_calc 的 profit_params 缺少字段：" + "、".join(missing_params) + "。"
         )
     if unexpected_params:
         raise _DraftValidationError(
@@ -993,18 +1002,24 @@ def _validate_roll_rate_workflow_inputs(
             "roll_rate_matrix 缺少字段：" + "、".join(missing) + "。"
         )
     normalized = {
-        key: _workflow_column(inputs[key], name=f"roll_rate_matrix {key}", whitelist=whitelist)
+        key: _workflow_column(
+            inputs[key], name=f"roll_rate_matrix {key}", whitelist=whitelist
+        )
         for key in ("id_col", "time_col", "status_col")
     }
     if len(set(normalized.values())) != len(normalized):
-        raise _DraftValidationError("roll_rate_matrix 的 id_col、time_col、status_col 必须互不相同。")
+        raise _DraftValidationError(
+            "roll_rate_matrix 的 id_col、time_col、status_col 必须互不相同。"
+        )
     states = inputs["states"]
     if (
         not isinstance(states, Sequence)
         or isinstance(states, str | bytes | bytearray)
         or not 2 <= len(states) <= 50
     ):
-        raise _DraftValidationError("roll_rate_matrix states 必须是包含 2 到 50 个状态的有序数组。")
+        raise _DraftValidationError(
+            "roll_rate_matrix states 必须是包含 2 到 50 个状态的有序数组。"
+        )
     normalized_states = [
         _required_text(state, name="roll_rate_matrix states 状态") for state in states
     ]
@@ -1029,7 +1044,9 @@ def _validate_roll_rate_workflow_inputs(
             normalized["time_col"],
             normalized["status_col"],
         }:
-            raise _DraftValidationError("roll_rate_matrix balance_col 不能复用 ID、时间或状态列。")
+            raise _DraftValidationError(
+                "roll_rate_matrix balance_col 不能复用 ID、时间或状态列。"
+            )
         normalized["balance_col"] = balance_col
     return normalized
 
@@ -1105,7 +1122,9 @@ def _validate_pricing_workflow_inputs(
             maximum=1,
             maximum_items=50,
         ),
-        "lgd": _bounded_number(inputs["lgd"], name="limit_pricing_matrix lgd", maximum=1),
+        "lgd": _bounded_number(
+            inputs["lgd"], name="limit_pricing_matrix lgd", maximum=1
+        ),
         "funding_rate": _bounded_number(
             inputs["funding_rate"],
             name="limit_pricing_matrix funding_rate",
@@ -1127,7 +1146,9 @@ def _validate_pricing_workflow_inputs(
         or not isinstance(term_months, int)
         or not 1 <= term_months <= 600
     ):
-        raise _DraftValidationError("limit_pricing_matrix term_months 必须是 1 到 600 的整数。")
+        raise _DraftValidationError(
+            "limit_pricing_matrix term_months 必须是 1 到 600 的整数。"
+        )
     normalized["term_months"] = term_months
 
     if has_pd:
@@ -1156,13 +1177,21 @@ def _validate_pricing_workflow_inputs(
             minimum_items=2,
         )
         if any(right <= left for left, right in zip(edges, edges[1:])):
-            raise _DraftValidationError("limit_pricing_matrix band_edges 必须严格递增。")
+            raise _DraftValidationError(
+                "limit_pricing_matrix band_edges 必须严格递增。"
+            )
         normalized["band_edges"] = edges
         band_count = len(edges) - 1
     else:
         n_bands = inputs["n_bands"]
-        if isinstance(n_bands, bool) or not isinstance(n_bands, int) or not 1 <= n_bands <= 20:
-            raise _DraftValidationError("limit_pricing_matrix n_bands 必须是 1 到 20 的整数。")
+        if (
+            isinstance(n_bands, bool)
+            or not isinstance(n_bands, int)
+            or not 1 <= n_bands <= 20
+        ):
+            raise _DraftValidationError(
+                "limit_pricing_matrix n_bands 必须是 1 到 20 的整数。"
+            )
         normalized["n_bands"] = n_bands
         band_count = n_bands
     if band_count * len(normalized["limit_grid"]) * len(normalized["rate_grid"]) > 2000:
@@ -1174,13 +1203,150 @@ def _validate_pricing_workflow_inputs(
         )
     if "drop_nan_labels" in inputs:
         if not isinstance(inputs["drop_nan_labels"], bool):
-            raise _DraftValidationError("limit_pricing_matrix drop_nan_labels 必须是布尔值。")
+            raise _DraftValidationError(
+                "limit_pricing_matrix drop_nan_labels 必须是布尔值。"
+            )
         if has_pd:
             raise _DraftValidationError(
                 "limit_pricing_matrix 使用 pd_col 时不会读取标签，"
                 "请删除未使用的 drop_nan_labels。"
             )
         normalized["drop_nan_labels"] = inputs["drop_nan_labels"]
+    return normalized
+
+
+def _validate_univariate_workflow_inputs(
+    inputs: Mapping[str, Any],
+    whitelist: tuple[str, ...],
+    *,
+    target_col: str | None,
+) -> dict[str, Any]:
+    allowed = {
+        "features",
+        "methods",
+        "bin_count",
+        "min_bin_pct",
+        "loan_amount_col",
+        "overdue_amount_col",
+        "sentinel_values",
+    }
+    workflow = "univariate_candidate_analysis"
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+
+    raw_features = inputs.get("features", [])
+    if (
+        not isinstance(raw_features, Sequence)
+        or isinstance(raw_features, str | bytes | bytearray)
+        or len(raw_features) > 50
+    ):
+        raise _DraftValidationError(
+            f"{workflow} features 必须是最多 50 个字段的有序数组。"
+        )
+    features = [
+        _workflow_column(
+            value,
+            name=f"{workflow} features",
+            whitelist=whitelist,
+        )
+        for value in raw_features
+    ]
+    if len(features) != len(set(features)):
+        raise _DraftValidationError(f"{workflow} features 不能包含重复字段。")
+    if target_col is not None and target_col in features:
+        raise _DraftValidationError(
+            f"{workflow} features 不能包含目标列 {target_col}。"
+        )
+
+    methods_supplied = "methods" in inputs
+    raw_methods = inputs.get("methods", [])
+    if (
+        not isinstance(raw_methods, Sequence)
+        or isinstance(raw_methods, str | bytes | bytearray)
+        or (
+            methods_supplied
+            and not 1 <= len(raw_methods) <= len(UNIVARIATE_BINNING_METHODS)
+        )
+    ):
+        raise _DraftValidationError(
+            f"{workflow} methods 必须包含 1 到 {len(UNIVARIATE_BINNING_METHODS)} 个分箱方法。"
+        )
+    methods = [
+        _required_text(value, name=f"{workflow} methods") for value in raw_methods
+    ]
+    unknown_methods = sorted(set(methods) - set(UNIVARIATE_BINNING_METHODS))
+    if unknown_methods:
+        raise _DraftValidationError(
+            f"{workflow} 不支持分箱方法：" + "、".join(unknown_methods) + "。"
+        )
+    if len(methods) != len(set(methods)):
+        raise _DraftValidationError(f"{workflow} methods 不能包含重复方法。")
+
+    bin_count = inputs.get("bin_count", 10)
+    if (
+        isinstance(bin_count, bool)
+        or not isinstance(bin_count, int)
+        or not 3 <= bin_count <= 20
+    ):
+        raise _DraftValidationError(f"{workflow} bin_count 必须是 3 到 20 的整数。")
+    min_bin_pct = _bounded_number(
+        inputs.get("min_bin_pct", 0.02),
+        name=f"{workflow} min_bin_pct",
+        maximum=0.5,
+    )
+    normalized: dict[str, Any] = {
+        "features": features,
+        "methods": methods,
+        "bin_count": bin_count,
+        "min_bin_pct": min_bin_pct,
+        "sentinel_values": _sentinel_sequence(
+            inputs.get("sentinel_values", []),
+            name=f"{workflow} sentinel_values",
+        ),
+    }
+    for field in ("loan_amount_col", "overdue_amount_col"):
+        if field in inputs:
+            normalized[field] = _workflow_column(
+                inputs[field],
+                name=f"{workflow} {field}",
+                whitelist=whitelist,
+            )
+            if target_col is not None and normalized[field] == target_col:
+                raise _DraftValidationError(f"{workflow} {field} 不能使用目标列。")
+    if normalized.get("loan_amount_col") is not None and normalized.get(
+        "loan_amount_col"
+    ) == normalized.get("overdue_amount_col"):
+        raise _DraftValidationError(
+            f"{workflow} loan_amount_col 与 overdue_amount_col 必须是不同字段。"
+        )
+    return normalized
+
+
+def _sentinel_sequence(value: object, *, name: str) -> list[str | int | float]:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, str | bytes | bytearray)
+        or len(value) > 20
+    ):
+        raise _DraftValidationError(f"{name} 必须是最多 20 个文本或有限数字的数组。")
+    normalized: list[str | int | float] = []
+    identities: set[str] = set()
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, str | int | float):
+            raise _DraftValidationError(f"{name} 只能包含文本或有限数字。")
+        if isinstance(item, float) and not math.isfinite(item):
+            raise _DraftValidationError(f"{name} 只能包含文本或有限数字。")
+        if isinstance(item, int) and abs(item) > 2**53 - 1:
+            raise _DraftValidationError(f"{name} 中的整数超出精确 JSON 范围。")
+        identity = json.dumps(
+            [type(item).__name__, item],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        if identity in identities:
+            raise _DraftValidationError(f"{name} 不能包含重复值。")
+        identities.add(identity)
+        normalized.append(item)
     return normalized
 
 
@@ -1240,7 +1406,9 @@ def _number_sequence(
             number < minimum or (exclusive_minimum and number == minimum)
         ):
             relation = "大于" if exclusive_minimum else "大于等于"
-            raise _DraftValidationError(f"{name} 中每个值都必须{relation} {minimum:g}。")
+            raise _DraftValidationError(
+                f"{name} 中每个值都必须{relation} {minimum:g}。"
+            )
         if maximum is not None and number > maximum:
             raise _DraftValidationError(f"{name} 中每个值都必须小于等于 {maximum:g}。")
         numbers.append(number)
@@ -1259,7 +1427,11 @@ def _standard_workflow_confirmation_text(
             "已识别为〔标准利润分析 Workflow〕",
             f"EAD 列 {inputs['ead_col']}，PD 列 {inputs['pd_col']}",
             "分析范围："
-            + (f"按 {inputs['segment_col']} 分组" if "segment_col" in inputs else "全样本"),
+            + (
+                f"按 {inputs['segment_col']} 分组"
+                if "segment_col" in inputs
+                else "全样本"
+            ),
             (
                 f"年利率 {params['annual_rate']:.2%}，资金成本率 {params['funding_rate']:.2%}，"
                 f"LGD {params['lgd']:.2%}，单笔成本 {params['operating_cost_per_loan']:g}，"
@@ -1278,7 +1450,7 @@ def _standard_workflow_confirmation_text(
         ]
         if "balance_col" in inputs:
             details.append(f"余额加权列：{inputs['balance_col']}")
-    else:
+    elif draft.workflow == "limit_pricing_matrix":
         risk_source = (
             f"PD 列 {inputs['pd_col']}"
             if "pd_col" in inputs
@@ -1292,7 +1464,8 @@ def _standard_workflow_confirmation_text(
         details = [
             "已识别为〔标准额度定价矩阵 Workflow〕",
             f"评分列 {inputs['score_col']}，风险来源 {risk_source}，{banding}",
-            "额度网格：" + "、".join(f"{value:,.12g}" for value in inputs["limit_grid"]),
+            "额度网格："
+            + "、".join(f"{value:,.12g}" for value in inputs["limit_grid"]),
             "利率网格：" + "、".join(f"{value:.2%}" for value in inputs["rate_grid"]),
             (
                 f"LGD {inputs['lgd']:.2%}，资金成本率 {inputs['funding_rate']:.2%}，"
@@ -1312,6 +1485,33 @@ def _standard_workflow_confirmation_text(
         if "strategy_id" in inputs:
             details.append(f"关联策略 ID：{inputs['strategy_id']}")
         details.append("平台先计算完整矩阵；接受或导出矩阵仍需第二次明确确认")
+    else:
+        feature_text = (
+            "、".join(inputs["features"])
+            if inputs["features"]
+            else "当前语义映射中的全部候选字段"
+        )
+        method_text = (
+            "数值字段自动比较等频、等距、ChiMerge、决策树；类别字段使用等值箱"
+            if not inputs["methods"]
+            else "、".join(inputs["methods"]) + "；类别字段仍使用等值箱"
+        )
+        details = [
+            "已识别为〔单变量候选分析 Workflow〕",
+            f"候选字段：{feature_text}",
+            "分箱方法：" + method_text,
+            (f"目标箱数 {inputs['bin_count']}，最小箱占比 {inputs['min_bin_pct']:.2%}"),
+        ]
+        if "loan_amount_col" in inputs:
+            details.append(f"放款金额列：{inputs['loan_amount_col']}")
+        if "overdue_amount_col" in inputs:
+            details.append(f"逾期金额列：{inputs['overdue_amount_col']}")
+        if inputs["sentinel_values"]:
+            details.append(
+                "独立哨兵值："
+                + "、".join(str(value) for value in inputs["sentinel_values"])
+            )
+        details.append("只生成 development/unvalidated 候选证据，不冒充独立验证结果")
     details.append(
         "请确认以上口径。确认后 Agent 只编排受信任工具；所有数字由平台确定性计算。"
     )
@@ -1374,9 +1574,7 @@ def _optional_profit(
     missing = sorted(_PROFIT_FIELDS - set(profit))
     unexpected = sorted(set(profit) - _PROFIT_FIELDS)
     if missing:
-        raise _DraftValidationError(
-            "利润参数缺少字段：" + "、".join(missing) + "。"
-        )
+        raise _DraftValidationError("利润参数缺少字段：" + "、".join(missing) + "。")
     if unexpected:
         raise _DraftValidationError(
             "利润参数包含不支持的字段：" + "、".join(unexpected) + "。"
@@ -1388,7 +1586,9 @@ def _optional_profit(
             raise _DraftValidationError(
                 f"利润参数 {name} 使用了数据集中不存在的列「{column}」，请从列白名单选择。"
             )
-    annual_rate = _bounded_number(profit["annual_rate"], name="利润 annual_rate", maximum=1)
+    annual_rate = _bounded_number(
+        profit["annual_rate"], name="利润 annual_rate", maximum=1
+    )
     funding_rate = _bounded_number(
         profit["funding_rate"], name="利润 funding_rate", maximum=1
     )
@@ -1398,7 +1598,11 @@ def _optional_profit(
         name="利润 operating_cost_per_loan",
     )
     term_months = profit["term_months"]
-    if isinstance(term_months, bool) or not isinstance(term_months, int) or term_months < 1:
+    if (
+        isinstance(term_months, bool)
+        or not isinstance(term_months, int)
+        or term_months < 1
+    ):
         raise _DraftValidationError("利润 term_months 必须是大于等于 1 的整数。")
     return {
         "ead_col": ead_col,
@@ -1484,13 +1688,9 @@ def _optional_economics_inputs(
         raise _DraftValidationError("经济参数 economics_inputs 的字段名必须是文本。")
 
     names = (
-        _LIMIT_ECONOMICS_NAMES
-        if strategy_type == "limit"
-        else _PRICING_ECONOMICS_NAMES
+        _LIMIT_ECONOMICS_NAMES if strategy_type == "limit" else _PRICING_ECONOMICS_NAMES
     )
-    allowed_fields = {
-        key for name in names for key in (f"{name}_col", f"{name}_value")
-    }
+    allowed_fields = {key for name in names for key in (f"{name}_col", f"{name}_value")}
     unexpected = sorted(set(raw_inputs) - allowed_fields)
     if unexpected:
         raise _DraftValidationError(
@@ -1545,9 +1745,7 @@ def _economics_value(name: str, value: object) -> float:
     if name == "term_months":
         number = _bounded_number(value, name=f"经济参数 {label}")
         if number <= 0:
-            raise _DraftValidationError(
-                f"经济参数 {label} 必须是大于 0 的有限数字。"
-            )
+            raise _DraftValidationError(f"经济参数 {label} 必须是大于 0 的有限数字。")
         return number
     return _bounded_number(
         value,
@@ -1735,8 +1933,10 @@ def _bounded_number(
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise _DraftValidationError(f"{name} 必须是有限数字。")
     number = float(value)
-    if not math.isfinite(number) or number < 0 or (
-        maximum is not None and number > maximum
+    if (
+        not math.isfinite(number)
+        or number < 0
+        or (maximum is not None and number > maximum)
     ):
         if maximum is None:
             raise _DraftValidationError(f"{name} 必须是大于等于 0 的有限数字。")
@@ -1860,6 +2060,7 @@ _TYPE_LABELS = {
 __all__ = [
     "CompiledStrategyRequestDraft",
     "STANDARD_STRATEGY_WORKFLOWS",
+    "UNIVARIATE_BINNING_METHODS",
     "STRATEGY_REQUEST_KINDS",
     "STRATEGY_OPERATIONS",
     "STRATEGY_REQUEST_JSON_SCHEMA",
