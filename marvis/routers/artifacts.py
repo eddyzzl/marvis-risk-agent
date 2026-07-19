@@ -20,8 +20,11 @@ router = APIRouter(prefix="/api", tags=["artifacts"])
 
 _STRATEGY_ARTIFACT_MEDIA_TYPES = {
     ".csv": "text/csv",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".json": "application/json",
     ".md": "text/markdown",
+    ".pdf": "application/pdf",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
 

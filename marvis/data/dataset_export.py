@@ -22,6 +22,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -36,8 +37,22 @@ _PRODUCER = {"name": "marvis.data.dataset_export", "version": "1"}
 _EXCEL_MAX_ROWS = 1_048_576
 _EXCEL_MAX_COLUMNS = 16_384
 _EXCEL_MAX_DATA_ROWS = _EXCEL_MAX_ROWS - 1  # one row is reserved for headers
+_FIXED_WORKBOOK_DATETIME = datetime(2000, 1, 1)
+_FIXED_ZIP_DATETIME = (1980, 1, 1, 0, 0, 0)
 _FORMULA_PREFIXES = frozenset("=+-@")
 _XLSX_ILLEGAL_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_EXCEL_NUMERIC_TEXT = re.compile(
+    r"^[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)"
+    r"(?:[eE][+-]?\d+)?%?$"
+)
+_EXCEL_DATE_OR_TIME_TEXT = re.compile(
+    r"^(?:"
+    r"\d{1,4}[-/.]\d{1,2}(?:[-/.]\d{1,4})?"
+    r"|\d{2,4}年\d{1,2}月(?:\d{1,2}日?)?"
+    r"|\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[AP]M)?"
+    r")$",
+    re.IGNORECASE,
+)
 _HARD_CONFIG_MAXIMUMS = {
     "max_rows": 100_000_000,
     "max_columns": _EXCEL_MAX_COLUMNS,
@@ -118,6 +133,7 @@ class DatasetExportConfig:
 class _SafetyCounts:
     formula_cells_escaped: int = 0
     text_column_cells_written: int = 0
+    csv_text_cells_coerced: int = 0
     large_integer_cells_as_text: int = 0
     decimal_cells_as_text: int = 0
     high_precision_decimal_cells_as_text: int = 0
@@ -404,6 +420,8 @@ def _write_xlsx(
 ) -> int:
     text_set = set(text_columns)
     workbook = Workbook(write_only=True)
+    workbook.properties.created = _FIXED_WORKBOOK_DATETIME
+    workbook.properties.modified = _FIXED_WORKBOOK_DATETIME
     sheet = workbook.create_sheet("data")
     try:
         sheet.append(
@@ -432,6 +450,7 @@ def _write_xlsx(
                 )
                 written_rows += 1
         workbook.save(scratch)
+        _canonicalize_xlsx_archive(scratch)
         return written_rows
     finally:
         workbook.close()
@@ -442,25 +461,81 @@ def _csv_cell(value: Any, *, force_text: bool, safety: _SafetyCounts) -> str:
         return ""
     if force_text:
         safety.text_column_cells_written += 1
+    precision_marker_required = False
     if isinstance(value, bool):
         text = "true" if value else "false"
     elif isinstance(value, int):
         text = str(value)
         if _integer_has_more_than_15_digits(value):
             safety.large_integer_cells_as_text += 1
-            text = _prefix_text_marker(text)
+            precision_marker_required = True
     elif isinstance(value, float):
         text = _finite_float_text(value, safety=safety)
     elif isinstance(value, Decimal):
         text = format(value, "f")
         if _decimal_exceeds_excel_precision(value):
             safety.high_precision_decimal_cells_as_text += 1
-            text = _prefix_text_marker(text)
+            precision_marker_required = True
     elif isinstance(value, (datetime, date, time)):
         text = value.isoformat()
     else:
         text = str(value)
-    return _safe_string(text, safety=safety)
+    if precision_marker_required:
+        text = _prefix_text_marker(text)
+    # Only user-controlled strings can be spreadsheet formulas.  Native
+    # numeric scalars such as -9999 and -1.5 must remain numeric text in CSV;
+    # treating their minus sign as a formula prefix corrupts the export.
+    if isinstance(value, str):
+        text = _safe_string(text, safety=safety)
+    if force_text and _looks_like_excel_auto_coercion(_stable_text(value)):
+        safety.csv_text_cells_coerced += 1
+        text = _prefix_text_marker(text)
+    return text
+
+
+def _canonicalize_xlsx_archive(path: Path) -> None:
+    """Remove ZIP-container clock variance from an openpyxl workbook.
+
+    Fixing core.xml's created/modified values is necessary but insufficient:
+    ``zipfile`` also stamps every OOXML member with the wall clock.  Repacking
+    members in name order with fixed metadata makes equal inputs byte-identical
+    across processes and seconds, so the reported content hash is reproducible.
+    """
+
+    canonical = path.with_name(f".{path.name}.{uuid.uuid4().hex}.canonical")
+    try:
+        with ZipFile(path, "r") as source_archive:
+            source_members = sorted(
+                source_archive.infolist(), key=lambda member: member.filename
+            )
+            with ZipFile(
+                canonical,
+                "w",
+                compression=ZIP_DEFLATED,
+                compresslevel=9,
+                allowZip64=True,
+            ) as output_archive:
+                for source_member in source_members:
+                    payload = source_archive.read(source_member.filename)
+                    member = ZipInfo(
+                        filename=source_member.filename,
+                        date_time=_FIXED_ZIP_DATETIME,
+                    )
+                    member.compress_type = ZIP_DEFLATED
+                    member.create_system = 0
+                    member.external_attr = 0
+                    member.internal_attr = 0
+                    member.comment = b""
+                    member.extra = b""
+                    output_archive.writestr(
+                        member,
+                        payload,
+                        compress_type=ZIP_DEFLATED,
+                        compresslevel=9,
+                    )
+        os.replace(canonical, path)
+    finally:
+        canonical.unlink(missing_ok=True)
 
 
 def _xlsx_cell(
@@ -564,6 +639,33 @@ def _looks_like_formula(value: str) -> bool:
             continue
         return character in _FORMULA_PREFIXES
     return False
+
+
+def _looks_like_excel_auto_coercion(value: str) -> bool:
+    candidate = _strip_excel_ignored_edges(value)
+    if not candidate:
+        return False
+    return bool(
+        _EXCEL_NUMERIC_TEXT.fullmatch(candidate)
+        or _EXCEL_DATE_OR_TIME_TEXT.fullmatch(candidate)
+        or candidate.upper() in {"TRUE", "FALSE"}
+    )
+
+
+def _strip_excel_ignored_edges(value: str) -> str:
+    start = 0
+    end = len(value)
+    while start < end and (
+        value[start].isspace()
+        or unicodedata.category(value[start]).startswith("C")
+    ):
+        start += 1
+    while end > start and (
+        value[end - 1].isspace()
+        or unicodedata.category(value[end - 1]).startswith("C")
+    ):
+        end -= 1
+    return value[start:end]
 
 
 def _prefix_text_marker(value: str) -> str:

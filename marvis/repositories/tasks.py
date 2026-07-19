@@ -277,10 +277,13 @@ class TaskRepository:
         # CASCADE from tasks (see marvis/db_schema.py); their own children
         # (model_artifacts, backtests, plan_steps/outputs/runs) do cascade once the
         # parent row is removed. jobs/agent_messages already cascade from tasks.
-        # Data workspace and analysis rows hold dataset foreign keys. Remove
-        # them first so an analyzed task can be purged without violating the
-        # dataset evidence boundary; the surrounding transaction restores all
-        # rows if any later purge step fails.
+        # Data workspace, analysis, transform and lineage rows hold dataset
+        # foreign keys. Remove the append-only evidence graph first so an
+        # analyzed/transformed task can be purged without violating those
+        # boundaries; the surrounding transaction restores all rows if any
+        # later purge step fails.
+        conn.execute("DELETE FROM dataset_lineage_edges WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM data_transform_runs WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM data_analysis_runs WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM data_workspaces WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM datasets WHERE task_id = ?", (task_id,))
@@ -1484,6 +1487,8 @@ def _task_purge_summary(conn: sqlite3.Connection, task_id: str) -> dict:
         "sub_agents": _count("sub_agents", "parent_task_id"),
         "draft_tools": _count("draft_tools"),
         "draft_runs": _count("draft_runs"),
+        "dataset_lineage_edges": _count("dataset_lineage_edges"),
+        "data_transform_runs": _count("data_transform_runs"),
         "data_analysis_runs": _count("data_analysis_runs"),
         "data_workspaces": _count("data_workspaces"),
         "_dataset_source_paths": removable_paths,

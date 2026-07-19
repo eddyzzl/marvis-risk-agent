@@ -2089,6 +2089,282 @@ def _render_profile_dataset(o: dict):
     return text, tables
 
 
+_TRANSFORM_OPERATION_LABELS = {
+    "rename_columns": "重命名字段",
+    "drop_columns": "删除字段",
+    "cast_columns": "转换字段类型",
+    "fill_missing": "填补缺失",
+    "filter_rows": "筛选样本",
+    "derive_columns": "生成字段",
+    "deduplicate": "去重",
+}
+
+
+def _transform_field_list(value) -> str:
+    if not isinstance(value, (list, tuple)):
+        return "n/a"
+    fields = [str(item) for item in value]
+    return "、".join(fields) if fields else "无"
+
+
+def _transform_mapping_text(value) -> str:
+    if not isinstance(value, dict) or not value:
+        return "无"
+    return "；".join(f"{source} → {target}" for source, target in value.items())
+
+
+def _transform_impact_text(op: str, impact) -> str:
+    """Render the kernel's impact evidence without deriving replacement metrics."""
+
+    if not isinstance(impact, dict):
+        return "n/a"
+    if op == "rename_columns":
+        return (
+            f"重命名 {_fmt(impact.get('renamed_count'))} 个："
+            f"{_transform_mapping_text(impact.get('mapping'))}"
+        )
+    if op == "drop_columns":
+        return (
+            f"删除 {_fmt(impact.get('dropped_count'))} 个："
+            f"{_transform_field_list(impact.get('columns'))}"
+        )
+    if op == "cast_columns":
+        return (
+            f"转换字段：{_transform_field_list(impact.get('columns'))}；"
+            f"输入非空 {_fmt(impact.get('non_null_input_count'))}；"
+            f"无效转空 {_fmt(impact.get('invalid_to_null_count'))}"
+        )
+    if op == "fill_missing":
+        return (
+            f"填补 {_fmt(impact.get('filled_count'))} 个缺失值："
+            f"{_transform_field_list(impact.get('columns'))}"
+        )
+    if op == "filter_rows":
+        return (
+            f"保留 {_fmt(impact.get('kept_rows'))} 行；"
+            f"移除 {_fmt(impact.get('removed_rows'))} 行"
+        )
+    if op == "derive_columns":
+        return (
+            f"生成 {_fmt(impact.get('derived_count'))} 个字段："
+            f"{_transform_field_list(impact.get('columns'))}"
+        )
+    if op == "deduplicate":
+        return (
+            f"按 {_transform_field_list(impact.get('keys'))} 去重；"
+            f"保留 {_fmt(impact.get('kept_rows'))} 行；"
+            f"移除 {_fmt(impact.get('removed_rows'))} 行"
+        )
+    scalar_items = [
+        f"{key}={_fmt(value)}"
+        for key, value in impact.items()
+        if isinstance(value, (str, int, float, bool)) or value is None
+    ]
+    return "；".join(scalar_items) if scalar_items else "n/a"
+
+
+def _render_transform_dataset(o: dict):
+    """Present only persisted transform, semantic, workspace and lineage evidence."""
+
+    source_id = str(o.get("source_dataset_id") or "")
+    result_id = str(o.get("result_dataset_id") or "")
+    text = (
+        f"**数据加工完成**：`{source_id}`（{_fmt(o.get('row_count_before'))} 行 / "
+        f"{_fmt(o.get('column_count_before'))} 列）→ `{result_id}`"
+        f"（{_fmt(o.get('row_count_after'))} 行 / "
+        f"{_fmt(o.get('column_count_after'))} 列）。"
+    )
+    if o.get("cached") is True:
+        text += " 本次复用已验证证据。"
+
+    steps = [item for item in (o.get("steps") or []) if isinstance(item, dict)]
+    semantic = (
+        o.get("semantic_migration")
+        if isinstance(o.get("semantic_migration"), dict)
+        else {}
+    )
+    protected = [str(item) for item in (semantic.get("dropped_protected_fields") or [])]
+    if protected:
+        text += f" 已按明确确认删除受保护字段：{'、'.join(protected)}。"
+
+    tables = []
+    if steps:
+        tables.append(
+            {
+                "title": "加工步骤影响",
+                "columns": ["步骤", "操作", "加工前行数", "加工后行数", "行变化", "影响证据"],
+                "rows": [
+                    [
+                        _fmt(step.get("step")),
+                        _TRANSFORM_OPERATION_LABELS.get(
+                            str(step.get("op") or ""),
+                            str(step.get("op") or "未知操作"),
+                        ),
+                        _fmt(step.get("row_count_before")),
+                        _fmt(step.get("row_count_after")),
+                        _fmt(step.get("row_delta")),
+                        _transform_impact_text(
+                            str(step.get("op") or ""), step.get("impact")
+                        ),
+                    ]
+                    for step in steps
+                ],
+            }
+        )
+
+    renamed_fields = semantic.get("renamed_fields")
+    dropped_fields = [str(item) for item in (semantic.get("dropped_fields") or [])]
+    semantic_rows = [
+        ["语义映射 SHA-256", f"{semantic.get('before_hash') or 'n/a'} → {semantic.get('after_hash') or 'n/a'}"],
+        ["重命名字段", _transform_mapping_text(renamed_fields)],
+        ["删除字段", "、".join(dropped_fields) if dropped_fields else "无"],
+    ]
+    if protected:
+        semantic_rows.append(["已确认删除受保护字段", "、".join(protected)])
+    tables.append(
+        {
+            "title": "字段语义迁移",
+            "columns": ["项目", "工具证据"],
+            "rows": semantic_rows,
+        }
+    )
+
+    workspace = o.get("workspace") if isinstance(o.get("workspace"), dict) else {}
+    tables.append(
+        {
+            "title": "Workspace 版本迁移",
+            "columns": ["项目", "加工前", "加工后"],
+            "rows": [
+                [
+                    "Revision",
+                    _fmt(workspace.get("source_revision")),
+                    _fmt(workspace.get("result_revision")),
+                ],
+                [
+                    "分析代次",
+                    _fmt(workspace.get("source_analysis_generation")),
+                    _fmt(workspace.get("result_analysis_generation")),
+                ],
+            ],
+        }
+    )
+
+    lineage = o.get("lineage") if isinstance(o.get("lineage"), dict) else {}
+    tables.append(
+        {
+            "title": "数据血缘",
+            "columns": ["父数据集", "子数据集", "关系", "边序号"],
+            "rows": [
+                [
+                    str(lineage.get("parent_dataset_id") or ""),
+                    str(lineage.get("child_dataset_id") or ""),
+                    str(lineage.get("relation_kind") or ""),
+                    _fmt(lineage.get("edge_order")),
+                ]
+            ],
+        }
+    )
+
+    tables.append(
+        {
+            "title": "证据与下载",
+            "columns": ["项目", "值"],
+            "rows": [
+                ["Run ID", str(o.get("run_id") or "")],
+                ["结果 SHA-256", str(o.get("result_content_hash") or "")],
+                ["证据产物", str(o.get("evidence_artifact_id") or "")],
+                ["下载地址", str(o.get("evidence_download_url") or "")],
+            ],
+        }
+    )
+    return text, tables
+
+
+_EXPORT_SAFETY_LABELS = (
+    ("formula_cells_escaped", "公式注入转义"),
+    ("text_column_cells_written", "文本字段单元格"),
+    ("csv_text_cells_coerced", "CSV 文本保护"),
+    ("large_integer_cells_as_text", "超长整数按文本"),
+    ("decimal_cells_as_text", "小数按文本"),
+    ("high_precision_decimal_cells_as_text", "高精度小数按文本"),
+    ("non_finite_cells_as_text", "非有限数值按文本"),
+    ("xlsx_control_characters_escaped", "Excel 控制字符转义"),
+)
+
+
+def _export_integer(value) -> str:
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError, OverflowError):
+        return "n/a"
+
+
+def _export_size(value) -> str:
+    try:
+        size = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return "n/a"
+    if size < 0:
+        return "n/a"
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024**2:
+        return f"{size / 1024:.2f} KB"
+    if size < 1024**3:
+        return f"{size / 1024**2:.2f} MB"
+    return f"{size / 1024**3:.2f} GB"
+
+
+def _render_export_dataset(o: dict):
+    """Render only the persisted export artifact and safety evidence."""
+
+    export_format = str(o.get("format") or "").casefold()
+    if export_format == "csv":
+        format_label = "CSV"
+    elif export_format == "xlsx":
+        format_label = "Excel"
+    else:
+        format_label = export_format.upper() or "未知格式"
+    text = (
+        f"**数据导出完成**：{format_label}，"
+        f"{_export_integer(o.get('row_count'))} 行 / "
+        f"{_export_integer(o.get('column_count'))} 列，"
+        f"文件大小 {_export_size(o.get('size_bytes'))}。"
+    )
+    if o.get("cached") is True:
+        text += " 本次复用已验证产物。"
+
+    options = o.get("options") if isinstance(o.get("options"), dict) else {}
+    text_columns = [str(item) for item in (options.get("text_columns") or [])]
+    safety = o.get("safety") if isinstance(o.get("safety"), dict) else {}
+    return text, [
+        {
+            "title": "导出文件",
+            "columns": ["项目", "值"],
+            "rows": [
+                ["格式", format_label],
+                ["数据集", str(o.get("dataset_id") or "")],
+                ["数据集 SHA-256", str(o.get("dataset_content_hash") or "")],
+                ["Workspace Revision", _num(o.get("workspace_revision"))],
+                ["分析代次", _num(o.get("analysis_generation"))],
+                ["文件大小", _export_size(o.get("size_bytes"))],
+                ["文件 SHA-256", str(o.get("content_hash") or "")],
+                ["按文本导出的字段", "、".join(text_columns) if text_columns else "无"],
+                ["产物", str(o.get("artifact_id") or "")],
+                ["下载地址", str(o.get("download_url") or "")],
+            ],
+        },
+        {
+            "title": "安全处理",
+            "columns": ["保护项目", "处理单元格数"],
+            "rows": [
+                [label, _export_integer(safety.get(key))]
+                for key, label in _EXPORT_SAFETY_LABELS
+            ],
+        },
+    ]
+
+
 def _render_propose_join(o: dict):
     joins = o.get("joins") or []
     # GAP-4: business-meaning lookup for raw key-column codes (e.g. als_m3_id_nbank_orgnum),
@@ -2873,6 +3149,8 @@ _RENDERERS = {
     "vintage_curve": _render_vintage_curve,
     "slice_aggregate": _render_slice_aggregate,
     "profile_dataset": _render_profile_dataset,
+    "transform_dataset": _render_transform_dataset,
+    "export_dataset": _render_export_dataset,
     "score_dataset": _render_score_dataset,
     "monitor_run": _render_monitor_run,
     "run_strategy_monitoring": _render_run_strategy_monitoring,

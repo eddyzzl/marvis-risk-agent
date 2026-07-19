@@ -15,6 +15,14 @@ from marvis.agent.dataset_analysis import (
     build_dataset_analysis_request,
     detect_dataset_analysis_intent,
 )
+from marvis.agent.dataset_export import (
+    build_dataset_export_request,
+    detect_dataset_export_intent,
+)
+from marvis.agent.dataset_transform import (
+    build_dataset_transform_request,
+    detect_dataset_transform_intent,
+)
 from marvis.agent.feature_setup import FeatureSetupError, build_feature_proposal
 from marvis.agent.join_setup import JoinSetupError, build_join_proposal
 from marvis.agent.memory_bridge import (
@@ -78,6 +86,7 @@ from marvis.agent_memory.store import AgentMemoryStore
 from marvis.data.backend import DataBackend
 from marvis.data.labels import nan_label_mask
 from marvis.data.registry import DatasetRegistry
+from marvis.data.transform_semantics import effective_transform_semantic_mapping
 from marvis.data.workspace import data_semantic_mapping_hash
 from marvis.db import DatasetRepository, StrategyRepository, TaskRepository
 from marvis.domain import (
@@ -1104,6 +1113,25 @@ def dispatch_driver_turn(
     )
     if recovery is not None:
         return recovery
+    # Dataset changes get first refusal over descriptive analysis.  Phrases
+    # such as "填充缺失值" describe a governed mutation, not a request for a
+    # missing-value report; the transform always creates an immutable child.
+    dataset_transform = _maybe_handle_dataset_transform_turn(
+        runtime,
+        repo,
+        task,
+        user_text=user_text,
+    )
+    if dataset_transform is not None:
+        return dataset_transform
+    dataset_export = _maybe_handle_dataset_export_turn(
+        runtime,
+        repo,
+        task,
+        user_text=user_text,
+    )
+    if dataset_export is not None:
+        return dataset_export
     # Explicit dataset diagnostics are narrower than the strategy compiler's
     # generic "分析" operation. Give this branch first refusal so phrases such
     # as "分析当前样本" cannot be mistaken for a request to design a strategy.
@@ -2924,6 +2952,375 @@ def _invalidate_pending_strategy_request(
         # The clarification path must remain safe under a concurrent confirm or
         # cancel. The winning transition is already audited by the repository.
         return
+
+
+# Governed dataset transformation --------------------------------------------
+
+
+_DATASET_TRANSFORM_PROTECTED_DROP_META_KEY = "pending_protected_drop"
+
+
+def _maybe_handle_dataset_transform_turn(
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    user_text: str | None,
+) -> dict | None:
+    """Compile a natural-language data change into the closed transform AST."""
+
+    text = str(user_text or "").strip()
+    if not text:
+        return None
+    conversation = repo.list_agent_messages(task.id)
+    if _active_plan(runtime.plan_repo, task.id) is not None:
+        return None
+    if latest_open_gate(conversation) is not None:
+        return None
+
+    pending = _latest_pending_transform_protected_drop(conversation)
+    confirming_pending = pending is not None and is_confirm(text)
+    if not confirming_pending and not detect_dataset_transform_intent(text):
+        return None
+
+    repo.add_agent_message(
+        task.id,
+        role="user",
+        stage="chat",
+        content=text,
+        metadata={
+            "intent": "dataset_transform",
+            **({"confirmation": "protected_drop"} if confirming_pending else {}),
+        },
+    )
+    try:
+        snapshot = DataWorkspaceRepository(
+            runtime.settings.db_path
+        ).get_or_default(task.id)
+    except (DataWorkspaceDataError, DataWorkspaceDatasetNotFound, KeyError) as exc:
+        return _dataset_transform_clarification(
+            repo,
+            task.id,
+            code="workspace_unavailable",
+            message=f"数据工作区当前不可用：{exc}",
+        )
+    if snapshot.active_dataset_id is None:
+        return _dataset_transform_clarification(
+            repo,
+            task.id,
+            code="active_dataset_required",
+            message="请先在数据工作区选择并保存本次要加工的样本。",
+        )
+
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    try:
+        dataset = registry.get(snapshot.active_dataset_id)
+        if dataset.task_id != task.id:
+            raise PermissionError("active dataset does not belong to this task")
+        path = registry.resolve_verified_path(dataset.id)
+        columns = tuple(backend.column_names(path))
+    except Exception as exc:  # noqa: BLE001 - converted to a typed chat boundary
+        return _dataset_transform_clarification(
+            repo,
+            task.id,
+            code="dataset_unavailable",
+            message=f"当前活动样本无法安全读取：{exc}",
+        )
+
+    semantic_hash = data_semantic_mapping_hash(snapshot.semantic_mapping)
+    effective_semantics = effective_transform_semantic_mapping(
+        dataset,
+        snapshot.semantic_mapping,
+        source_columns=columns,
+    )
+    if confirming_pending:
+        if not _pending_transform_matches_workspace(
+            pending,
+            dataset_id=dataset.id,
+            content_hash=dataset.content_hash,
+            analysis_generation=snapshot.analysis_generation,
+            semantic_mapping_hash=semantic_hash,
+        ):
+            return _dataset_transform_clarification(
+                repo,
+                task.id,
+                code="protected_drop_source_changed",
+                message=(
+                    "待确认期间活动数据或字段语义已经变化。请重新说明要删除的字段，"
+                    "我会基于当前版本重新确认。"
+                ),
+            )
+        pending_operations = pending.get("operations")
+        pending_protected = pending.get("protected_fields")
+        if (
+            not isinstance(pending_operations, list)
+            or not pending_operations
+            or not all(isinstance(item, dict) for item in pending_operations)
+            or not isinstance(pending_protected, list)
+            or not pending_protected
+            or not all(isinstance(item, str) for item in pending_protected)
+        ):
+            return _dataset_transform_clarification(
+                repo,
+                task.id,
+                code="protected_drop_state_invalid",
+                message="待确认的删列请求不完整，请重新说明要删除的字段。",
+            )
+        operations = list(pending_operations)
+        confirm_protected_drop = True
+    else:
+        parsed = build_dataset_transform_request(
+            text,
+            columns=columns,
+            business_names=effective_semantics.business_names,
+            semantic_mapping=effective_semantics,
+        )
+        if parsed.request is None:
+            extra_metadata: dict = {}
+            if parsed.operations and parsed.protected_fields:
+                extra_metadata[_DATASET_TRANSFORM_PROTECTED_DROP_META_KEY] = {
+                    "request_text": text,
+                    "operations": [dict(item) for item in parsed.operations],
+                    "protected_fields": list(parsed.protected_fields),
+                    "dataset_id": dataset.id,
+                    "dataset_content_hash": dataset.content_hash,
+                    "analysis_generation": snapshot.analysis_generation,
+                    "semantic_mapping_hash": semantic_hash,
+                }
+            return _dataset_transform_clarification(
+                repo,
+                task.id,
+                code="transform_request_clarification",
+                message=parsed.clarification or "请说明要如何加工当前数据。",
+                extra_metadata=extra_metadata,
+            )
+        request = parsed.request
+        operations = list(request.operations)
+        confirm_protected_drop = request.confirm_protected_drop
+
+    slots = {
+        "dataset_id": dataset.id,
+        "expected_content_hash": dataset.content_hash,
+        "workspace_revision": snapshot.revision,
+        "analysis_generation": snapshot.analysis_generation,
+        "semantic_mapping_hash": semantic_hash,
+        "operations": operations,
+        "confirm_protected_drop": confirm_protected_drop,
+    }
+    driver = _driver(runtime)
+    try:
+        started = driver.start(
+            task_id=task.id,
+            template_id="dataset_transform",
+            slots=slots,
+            tier=runtime.tier,
+        )
+        # A normal transform is reversible by selecting the immutable parent;
+        # protected drops reached this point only after the explicit dialogue
+        # acknowledgement above, so no second generic gate is needed.
+        turn = driver.resume(plan_id=started.plan_id, user_text="确认")
+    except DriverError:
+        raise
+    except Exception as exc:
+        return append_join_error(repo, task.id, f"数据加工出错：{exc}")
+    append_driver_messages(
+        repo,
+        task.id,
+        turn,
+        settings=runtime.settings,
+        task=task,
+    )
+    return join_turn_response(repo, task.id)
+
+
+def _latest_pending_transform_protected_drop(
+    conversation: list[dict],
+) -> dict | None:
+    last_assistant = next(
+        (
+            message
+            for message in reversed(conversation)
+            if message.get("role") == "assistant"
+        ),
+        None,
+    )
+    if last_assistant is None:
+        return None
+    pending = (last_assistant.get("metadata") or {}).get(
+        _DATASET_TRANSFORM_PROTECTED_DROP_META_KEY
+    )
+    return pending if isinstance(pending, dict) else None
+
+
+def _pending_transform_matches_workspace(
+    pending: dict,
+    *,
+    dataset_id: str,
+    content_hash: str,
+    analysis_generation: int,
+    semantic_mapping_hash: str,
+) -> bool:
+    request_text = pending.get("request_text")
+    return (
+        isinstance(request_text, str)
+        and bool(request_text.strip())
+        and pending.get("dataset_id") == dataset_id
+        and pending.get("dataset_content_hash") == content_hash
+        and pending.get("analysis_generation") == analysis_generation
+        and pending.get("semantic_mapping_hash") == semantic_mapping_hash
+    )
+
+
+def _dataset_transform_clarification(
+    repo: TaskRepository,
+    task_id: str,
+    *,
+    code: str,
+    message: str,
+    extra_metadata: dict | None = None,
+) -> dict:
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="chat",
+        content=message,
+        metadata={
+            "intent": "dataset_transform",
+            "kind": "clarification",
+            "code": code,
+            **dict(extra_metadata or {}),
+        },
+    )
+    return join_turn_response(repo, task_id)
+
+
+# Safe task-owned dataset export ---------------------------------------------
+
+
+def _maybe_handle_dataset_export_turn(
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    user_text: str | None,
+) -> dict | None:
+    """Run a bound CSV/XLSX export when the dataset object is explicit."""
+
+    if not detect_dataset_export_intent(user_text):
+        return None
+    conversation = repo.list_agent_messages(task.id)
+    if _active_plan(runtime.plan_repo, task.id) is not None:
+        return None
+    if latest_open_gate(conversation) is not None:
+        return None
+
+    repo.add_agent_message(
+        task.id,
+        role="user",
+        stage="chat",
+        content=user_text or "",
+        metadata={"intent": "dataset_export"},
+    )
+    try:
+        snapshot = DataWorkspaceRepository(
+            runtime.settings.db_path
+        ).get_or_default(task.id)
+    except (DataWorkspaceDataError, DataWorkspaceDatasetNotFound, KeyError) as exc:
+        return _dataset_export_clarification(
+            repo,
+            task.id,
+            code="workspace_unavailable",
+            message=f"数据工作区当前不可用：{exc}",
+        )
+    if snapshot.active_dataset_id is None:
+        return _dataset_export_clarification(
+            repo,
+            task.id,
+            code="active_dataset_required",
+            message="请先在数据工作区选择并保存本次要导出的样本。",
+        )
+
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    try:
+        dataset = registry.get(snapshot.active_dataset_id)
+        if dataset.task_id != task.id:
+            raise PermissionError("active dataset does not belong to this task")
+        path = registry.resolve_verified_path(dataset.id)
+        columns = tuple(backend.column_names(path))
+    except Exception as exc:  # noqa: BLE001 - converted to a typed chat boundary
+        return _dataset_export_clarification(
+            repo,
+            task.id,
+            code="dataset_unavailable",
+            message=f"当前活动样本无法安全读取：{exc}",
+        )
+
+    parsed = build_dataset_export_request(
+        user_text or "",
+        columns=columns,
+        business_names=snapshot.semantic_mapping.business_names,
+    )
+    if parsed.request is None:
+        return _dataset_export_clarification(
+            repo,
+            task.id,
+            code="export_request_clarification",
+            message=parsed.clarification or "请选择 CSV 或 Excel 导出格式。",
+        )
+    request = parsed.request
+    slots = {
+        "dataset_id": dataset.id,
+        "expected_content_hash": dataset.content_hash,
+        "workspace_revision": snapshot.revision,
+        "analysis_generation": snapshot.analysis_generation,
+        "semantic_mapping_hash": data_semantic_mapping_hash(
+            snapshot.semantic_mapping
+        ),
+        "format": request.format,
+        "text_columns": list(request.text_columns),
+    }
+    driver = _driver(runtime)
+    try:
+        started = driver.start(
+            task_id=task.id,
+            template_id="dataset_export",
+            slots=slots,
+            tier=runtime.tier,
+        )
+        turn = driver.resume(plan_id=started.plan_id, user_text="确认")
+    except DriverError:
+        raise
+    except Exception as exc:
+        return append_join_error(repo, task.id, f"数据导出出错：{exc}")
+    append_driver_messages(
+        repo,
+        task.id,
+        turn,
+        settings=runtime.settings,
+        task=task,
+    )
+    return join_turn_response(repo, task.id)
+
+
+def _dataset_export_clarification(
+    repo: TaskRepository,
+    task_id: str,
+    *,
+    code: str,
+    message: str,
+) -> dict:
+    repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage="chat",
+        content=message,
+        metadata={
+            "intent": "dataset_export",
+            "kind": "clarification",
+            "code": code,
+        },
+    )
+    return join_turn_response(repo, task_id)
 
 
 # Report-ready dataset analysis -----------------------------------------------

@@ -197,6 +197,208 @@ class DataWorkspaceRepository:
             )
             return snapshot
 
+    def activate_derived(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+        source_dataset_id: str,
+        source_dataset_content_hash: str,
+        result_dataset_id: str,
+        result_dataset_content_hash: str,
+        semantic_mapping,
+        page: str = "overview",
+        selected_field: str | None = None,
+        audit: dict | None = None,
+    ) -> DataWorkspaceSnapshot:
+        """Atomically replace the active dataset with a verified derived dataset.
+
+        Ordinary ``save`` deliberately requires a full semantic reset whenever
+        the physical dataset changes.  A governed transform is the sole safe
+        exception: its caller supplies an explicitly migrated semantic mapping,
+        and this method binds that migration to the exact source workspace
+        revision and content hash before activating the result.
+        """
+
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return self.activate_derived_on_connection(
+                conn,
+                task_id,
+                expected_revision=expected_revision,
+                source_dataset_id=source_dataset_id,
+                source_dataset_content_hash=source_dataset_content_hash,
+                result_dataset_id=result_dataset_id,
+                result_dataset_content_hash=result_dataset_content_hash,
+                semantic_mapping=semantic_mapping,
+                page=page,
+                selected_field=selected_field,
+                audit=audit,
+            )
+
+    def activate_derived_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        *,
+        expected_revision: int,
+        source_dataset_id: str,
+        source_dataset_content_hash: str,
+        result_dataset_id: str,
+        result_dataset_content_hash: str,
+        semantic_mapping,
+        page: str = "overview",
+        selected_field: str | None = None,
+        audit: dict | None = None,
+    ) -> DataWorkspaceSnapshot:
+        """Connection-scoped variant for a dataset/run/artifact unit of work."""
+
+        normalized_task_id = _canonical_text(task_id, field_name="task_id")
+        expected = _non_negative_int(
+            expected_revision,
+            field_name="expected_revision",
+        )
+        source_id = _canonical_text(
+            source_dataset_id,
+            field_name="source_dataset_id",
+        )
+        source_hash = _canonical_hash(
+            source_dataset_content_hash,
+            field_name="source_dataset_content_hash",
+        )
+        result_id = _canonical_text(
+            result_dataset_id,
+            field_name="result_dataset_id",
+        )
+        result_hash = _canonical_hash(
+            result_dataset_content_hash,
+            field_name="result_dataset_content_hash",
+        )
+        if audit is not None and not isinstance(audit, dict):
+            raise DataWorkspaceDataError("audit must be an object")
+        if audit is not None:
+            unexpected = set(audit) - {"actor", "detail"}
+            if unexpected:
+                raise DataWorkspaceDataError(
+                    "audit may only customize actor and detail"
+                )
+            if not isinstance(audit.get("detail", {}), dict):
+                raise DataWorkspaceDataError("audit detail must be an object")
+        try:
+            draft = DataWorkspaceDraft(
+                active_dataset_id=result_id,
+                active_dataset_content_hash=result_hash,
+                page=page,
+                selected_field=selected_field,
+                semantic_mapping=semantic_mapping,
+            )
+        except (TypeError, ValueError) as exc:
+            raise DataWorkspaceDataError(str(exc)) from exc
+
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        _task_row(conn, normalized_task_id)
+        row = conn.execute(
+            "SELECT * FROM data_workspaces WHERE task_id = ?",
+            (normalized_task_id,),
+        ).fetchone()
+        if row is None:
+            raise DataWorkspaceRevisionConflict(
+                "derived activation requires a persisted source data workspace"
+            )
+        current = _snapshot_from_row(row)
+        _validate_snapshot_against_dataset(conn, current)
+        if current.revision != expected:
+            raise DataWorkspaceRevisionConflict(
+                "stale data workspace revision: "
+                f"expected {expected}, found {current.revision}"
+            )
+        if current.active_dataset_id != source_id or not (
+            isinstance(current.active_dataset_content_hash, str)
+            and hmac.compare_digest(current.active_dataset_content_hash, source_hash)
+        ):
+            raise DataWorkspaceRevisionConflict(
+                "data workspace source dataset changed before derived activation"
+            )
+        if source_id == result_id:
+            raise DataWorkspaceDataError(
+                "derived result dataset must differ from its source dataset"
+            )
+
+        result_columns = _dataset_columns_for_draft(
+            conn,
+            task_id=normalized_task_id,
+            draft=draft,
+        )
+        _validate_column_references(draft, result_columns)
+
+        new_revision = current.revision + 1
+        new_generation = current.analysis_generation + 1
+        updated_at = _now()
+        mapping_json = _canonical_json(
+            data_semantic_mapping_to_dict(draft.semantic_mapping)
+        )
+        cursor = conn.execute(
+            """
+            UPDATE data_workspaces
+               SET schema_version = ?, revision = ?,
+                   active_dataset_id = ?, active_dataset_content_hash = ?,
+                   analysis_generation = ?, page = ?, selected_field = ?,
+                   semantic_mapping_json = ?, updated_at = ?
+             WHERE task_id = ?
+               AND revision = ?
+               AND active_dataset_id = ?
+               AND active_dataset_content_hash = ?
+            """,
+            (
+                DATA_WORKSPACE_SCHEMA_VERSION,
+                new_revision,
+                result_id,
+                result_hash,
+                new_generation,
+                draft.page,
+                draft.selected_field,
+                mapping_json,
+                updated_at,
+                normalized_task_id,
+                current.revision,
+                source_id,
+                source_hash,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise DataWorkspaceRevisionConflict(
+                "data workspace changed while activating derived dataset"
+            )
+
+        snapshot = DataWorkspaceSnapshot(
+            task_id=normalized_task_id,
+            updated_at=updated_at,
+            revision=new_revision,
+            active_dataset_id=result_id,
+            active_dataset_content_hash=result_hash,
+            analysis_generation=new_generation,
+            page=draft.page,
+            selected_field=draft.selected_field,
+            semantic_mapping=draft.semantic_mapping,
+        )
+        audit_detail = {"source_dataset_id": source_id}
+        if audit is not None:
+            audit_detail.update(audit.get("detail", {}))
+        derived_audit = {
+            "actor": (audit or {}).get("actor", "system"),
+            "detail": audit_detail,
+        }
+        _write_workspace_audit(
+            conn,
+            task_id=normalized_task_id,
+            snapshot=snapshot,
+            draft=draft,
+            audit=derived_audit,
+            kind="data.workspace.derived.activate",
+        )
+        return snapshot
+
 
 def _task_row(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row:
     row = conn.execute(
@@ -380,6 +582,7 @@ def _write_workspace_audit(
     snapshot: DataWorkspaceSnapshot,
     draft: DataWorkspaceDraft,
     audit: dict | None,
+    kind: str = "data.workspace.update",
 ) -> None:
     draft_json = _canonical_json(data_workspace_draft_to_dict(draft))
     inputs_hash = hashlib.sha256(draft_json.encode("utf-8")).hexdigest()
@@ -407,7 +610,7 @@ def _write_workspace_audit(
     }
     _write_audit_row(
         conn,
-        kind="data.workspace.update",
+        kind=kind,
         target_ref=task_id,
         actor=actor,
         inputs_hash=inputs_hash,
@@ -438,6 +641,14 @@ def _canonical_text(value: object, *, field_name: str) -> str:
     ):
         raise DataWorkspaceDataError(
             f"{field_name} must be canonical non-empty text"
+        )
+    return value
+
+
+def _canonical_hash(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise DataWorkspaceDataError(
+            f"{field_name} must be a 64-character lowercase SHA-256 hex"
         )
     return value
 

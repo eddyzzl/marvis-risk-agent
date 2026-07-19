@@ -35,6 +35,8 @@ _MIGRATION_TABLES = frozenset({
     "strategy_artifacts",
     "validation_input_contracts",
     "data_analysis_runs",
+    "data_transform_runs",
+    "dataset_lineage_edges",
 })
 
 # ARCH-10: schema_version mechanism.
@@ -123,7 +125,12 @@ _MIGRATION_TABLES = frozenset({
 # ledger for deterministic data-analysis artifacts.  The row is idempotent by
 # canonical computational input and keeps the originating workspace revision as
 # immutable provenance.
-SCHEMA_VERSION = 13
+#
+# _migration_014_data_transform_lineage adds immutable, task-owned successful
+# transform records plus explicit parent->child dataset lineage.  A transform
+# is bound to the exact source workspace generation and the activated result
+# workspace generation; result bytes and structured evidence are content-bound.
+SCHEMA_VERSION = 14
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -1606,6 +1613,153 @@ def _migration_013_data_analysis_runs(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_014_data_transform_lineage(conn: sqlite3.Connection) -> None:
+    """Add immutable data-transform evidence and parent/child lineage."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS data_transform_runs (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'data-transform.v1'),
+            task_id TEXT NOT NULL,
+            source_dataset_id TEXT NOT NULL,
+            source_content_hash TEXT NOT NULL
+                CHECK(length(source_content_hash) = 64)
+                CHECK(source_content_hash NOT GLOB '*[^0-9a-f]*'),
+            workspace_revision INTEGER NOT NULL CHECK(workspace_revision >= 0),
+            analysis_generation INTEGER NOT NULL CHECK(analysis_generation >= 0),
+            semantic_mapping_hash TEXT NOT NULL
+                CHECK(length(semantic_mapping_hash) = 64)
+                CHECK(semantic_mapping_hash NOT GLOB '*[^0-9a-f]*'),
+            operations_json TEXT NOT NULL,
+            operations_hash TEXT NOT NULL
+                CHECK(length(operations_hash) = 64)
+                CHECK(operations_hash NOT GLOB '*[^0-9a-f]*'),
+            producer_version TEXT NOT NULL,
+            input_hash TEXT NOT NULL
+                CHECK(length(input_hash) = 64)
+                CHECK(input_hash NOT GLOB '*[^0-9a-f]*'),
+            result_dataset_id TEXT NOT NULL,
+            result_content_hash TEXT NOT NULL
+                CHECK(length(result_content_hash) = 64)
+                CHECK(result_content_hash NOT GLOB '*[^0-9a-f]*'),
+            result_artifact_id TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            result_hash TEXT NOT NULL
+                CHECK(length(result_hash) = 64)
+                CHECK(result_hash NOT GLOB '*[^0-9a-f]*'),
+            result_workspace_revision INTEGER NOT NULL
+                CHECK(result_workspace_revision > workspace_revision),
+            result_analysis_generation INTEGER NOT NULL
+                CHECK(result_analysis_generation = analysis_generation + 1),
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, input_hash),
+            CHECK(source_dataset_id <> result_dataset_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(source_dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(result_dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(result_artifact_id) REFERENCES task_artifacts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_transform_runs_task
+            ON data_transform_runs(task_id, created_at DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_transform_runs_source
+            ON data_transform_runs(task_id, source_dataset_id, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_data_transform_runs_result
+            ON data_transform_runs(task_id, result_dataset_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_data_transform_runs_immutable
+        BEFORE UPDATE ON data_transform_runs
+        BEGIN
+            SELECT RAISE(ABORT, 'data_transform_runs are immutable');
+        END
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dataset_lineage_edges (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'dataset-lineage.v1'),
+            task_id TEXT NOT NULL,
+            parent_dataset_id TEXT NOT NULL,
+            child_dataset_id TEXT NOT NULL,
+            transform_run_id TEXT NOT NULL,
+            relation_kind TEXT NOT NULL CHECK(relation_kind = 'transform'),
+            edge_order INTEGER NOT NULL CHECK(edge_order >= 0),
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, parent_dataset_id, child_dataset_id, relation_kind),
+            CHECK(parent_dataset_id <> child_dataset_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(parent_dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(child_dataset_id) REFERENCES datasets(id),
+            FOREIGN KEY(transform_run_id) REFERENCES data_transform_runs(id)
+                ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dataset_lineage_edges_task
+            ON dataset_lineage_edges(task_id, created_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dataset_lineage_edges_parent
+            ON dataset_lineage_edges(task_id, parent_dataset_id, edge_order, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dataset_lineage_edges_child
+            ON dataset_lineage_edges(task_id, child_dataset_id, edge_order, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_dataset_lineage_edges_matches_run
+        BEFORE INSERT ON dataset_lineage_edges
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM data_transform_runs AS run
+             WHERE run.id = NEW.transform_run_id
+               AND run.task_id = NEW.task_id
+               AND run.source_dataset_id = NEW.parent_dataset_id
+               AND run.result_dataset_id = NEW.child_dataset_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'dataset lineage edge does not match transform run');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_dataset_lineage_edges_immutable
+        BEFORE UPDATE ON dataset_lineage_edges
+        BEGIN
+            SELECT RAISE(ABORT, 'dataset_lineage_edges are immutable');
+        END
+        """
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -1627,6 +1781,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (11, _migration_011_verified_strategy_artifacts),
     (12, _migration_012_data_workspaces),
     (13, _migration_013_data_analysis_runs),
+    (14, _migration_014_data_transform_lineage),
 ]
 
 

@@ -108,7 +108,7 @@ def test_migration_008_upgrades_and_is_idempotent(tmp_path):
             for row in conn.execute("PRAGMA table_info(strategy_monitoring_runs)")
         }
 
-    assert version == db_schema.SCHEMA_VERSION == 13
+    assert version == db_schema.SCHEMA_VERSION == 14
     assert {"strategy_monitoring_plans", "strategy_monitoring_runs"} <= tables
     assert {
         "id",

@@ -724,6 +724,44 @@ def test_task_artifact_list_is_path_free_and_downloads_by_owned_id(tmp_path):
     assert generic_download.text == "segment,net_profit\nA,12.5\n"
 
 
+def test_task_artifact_download_supports_xlsx_exports(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task = TaskRepository(app.state.settings.db_path).create_task(
+        TaskCreate(
+            model_name="数据导出任务",
+            model_version="v1",
+            validator="owner",
+            source_dir=str(app.state.settings.workspace),
+            task_type="strategy",
+        )
+    )
+    artifact = (
+        app.state.settings.tasks_dir
+        / task.id
+        / "data_exports"
+        / "strategy_sample.xlsx"
+    )
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"xlsx-export-evidence")
+    task_id, record, _ = _seed_task_artifact(
+        app,
+        task_id=task.id,
+        path=artifact,
+        kind="dataset_export",
+    )
+
+    downloaded = client.get(
+        f"/api/tasks/{task_id}/task-artifacts/{record['id']}/download"
+    )
+
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"xlsx-export-evidence"
+    assert downloaded.headers["content-type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
 def test_task_artifact_download_rejects_content_drift(tmp_path):
     app = create_app(tmp_path)
     client = TestClient(app)

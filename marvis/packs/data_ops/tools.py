@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from urllib.parse import quote
+import uuid
 
 import pandas as pd
 
@@ -31,14 +33,29 @@ from marvis.data.excel_ingest import (
     list_sheets,
     new_excel_artifact_name,
 )
+from marvis.data.dataset_export import export_dataset
 from marvis.data.join_engine import JoinEngine, _key_fps
 from marvis.data.workspace import data_semantic_mapping_hash
+from marvis.data.transform_semantics import (
+    effective_transform_semantic_mapping,
+    migrate_transform_semantics,
+)
+from marvis.data.transforms import transform_parquet
 from marvis.provenance import NumberProvenance
 from marvis.reconcile import EXACT_ABS_TOL, EXACT_REL_TOL, ReconcileReport, reconcile
 from marvis.db_schema import connect
 from marvis.plugins.sdk import PackRuntime
 from marvis.repositories.strategy import _write_audit_row
 from marvis.repositories.data_workspace import DataWorkspaceRepository
+from marvis.repositories.data_transform import (
+    DATA_TRANSFORM_ARTIFACT_KIND,
+    DATA_TRANSFORM_ORIGIN_TOOL,
+    DataTransformIdentity,
+    DataTransformRepository,
+    data_transform_artifact_provenance,
+)
+from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.files import sha256_file
 from marvis.safe_paths import assert_within
 
 
@@ -536,6 +553,1008 @@ def tool_propose_join(inputs: dict, ctx) -> dict:
     except Exception:  # noqa: BLE001 - trust layer is additive, never fatal to the join
         pass
     return payload
+
+
+_DATA_TRANSFORM_PRODUCER_VERSION = "marvis.data-transform/2"
+_DATASET_EXPORT_PRODUCER_VERSION = "marvis.dataset-export/1"
+_DATASET_EXPORT_ARTIFACT_SCHEMA_VERSION = "dataset-export-artifact.v1"
+_DATASET_EXPORT_ARTIFACT_KIND = "dataset_export"
+_DATASET_EXPORT_ORIGIN_TOOL = "data_ops.export_dataset"
+_DATASET_EXPORT_TEXT_ROLES = frozenset({"phone", "idcard", "id", "name"})
+
+
+class _DatasetExportConcurrentReplay(RuntimeError):
+    """A concurrent transaction committed this exact export input first."""
+
+
+def tool_transform_dataset(inputs: dict, ctx) -> dict:
+    """Apply a canonical transform and atomically activate its derived dataset.
+
+    The LLM or Workflow may author only the closed operation AST accepted by
+    :func:`transform_parquet`.  Physical bytes, dataset registration, semantic
+    migration, workspace activation, task artifact, immutable run, lineage and
+    audit either commit together or roll back together.
+    """
+
+    runtime = _runtime(ctx)
+    task_id = str(ctx.task_id)
+    dataset_id = str(inputs["dataset_id"])
+    dataset = runtime.registry.get(dataset_id)
+    if str(dataset.task_id) != task_id:
+        raise PermissionError(
+            f"dataset {dataset_id} belongs to task {dataset.task_id}, not {task_id}"
+        )
+    expected_hash = str(inputs["expected_content_hash"])
+    registered_hash = getattr(dataset, "content_hash", None)
+    if not isinstance(registered_hash, str) or not hmac.compare_digest(
+        registered_hash,
+        expected_hash,
+    ):
+        raise ValueError("dataset content hash does not match expected content hash")
+
+    workspace_repo = DataWorkspaceRepository(runtime.settings.db_path)
+    snapshot = workspace_repo.get_or_default(task_id)
+    if snapshot.active_dataset_id != dataset_id:
+        raise ValueError("dataset is not the active data-workspace dataset")
+    if not isinstance(snapshot.active_dataset_content_hash, str) or not hmac.compare_digest(
+        snapshot.active_dataset_content_hash,
+        expected_hash,
+    ):
+        raise ValueError(
+            "active data-workspace content hash does not match expected content hash"
+        )
+    workspace_revision = int(inputs["workspace_revision"])
+    if snapshot.revision != workspace_revision:
+        raise ValueError(
+            "data workspace revision mismatch: "
+            f"expected {workspace_revision}, found {snapshot.revision}"
+        )
+    analysis_generation = int(inputs["analysis_generation"])
+    if snapshot.analysis_generation != analysis_generation:
+        raise ValueError(
+            "data workspace analysis generation mismatch: "
+            f"expected {analysis_generation}, found {snapshot.analysis_generation}"
+        )
+    expected_semantic_hash = str(inputs["semantic_mapping_hash"])
+    actual_semantic_hash = data_semantic_mapping_hash(snapshot.semantic_mapping)
+    if not hmac.compare_digest(actual_semantic_hash, expected_semantic_hash):
+        raise ValueError("data workspace semantic mapping hash mismatch")
+    protected_drop = inputs.get("confirm_protected_drop", False)
+    if not isinstance(protected_drop, bool):
+        raise ValueError("confirm_protected_drop must be boolean")
+    operations = inputs.get("operations")
+    if not isinstance(operations, list):
+        raise ValueError("operations must be an ordered array")
+
+    source_path = runtime.registry.resolve_verified_path(dataset.id)
+    source_columns = tuple(runtime.backend.column_names(source_path))
+    output_dir = _safe_dataset_directory(
+        runtime.datasets_root,
+        task_id,
+        "transforms",
+    )
+    with tempfile.TemporaryDirectory(
+        prefix=".transform_compute_",
+        dir=output_dir,
+    ) as scratch_name:
+        computed_path = Path(scratch_name) / "result.parquet"
+        core_result = transform_parquet(
+            source_path,
+            computed_path,
+            temp_directory=runtime.datasets_root.parent / ".duckdb_tmp",
+            operations=operations,
+        )
+        canonical_operations = core_result.get("operations")
+        if not isinstance(canonical_operations, list):
+            raise ValueError("transform kernel returned invalid canonical operations")
+        output_columns_payload = core_result.get("output", {}).get("columns")
+        if not isinstance(output_columns_payload, list) or not all(
+            isinstance(item, dict) and isinstance(item.get("name"), str)
+            for item in output_columns_payload
+        ):
+            raise ValueError("transform kernel returned invalid output schema")
+        result_columns = tuple(str(item["name"]) for item in output_columns_payload)
+        effective_semantics = effective_transform_semantic_mapping(
+            dataset,
+            snapshot.semantic_mapping,
+            source_columns=source_columns,
+        )
+        effective_semantic_hash = data_semantic_mapping_hash(effective_semantics)
+        semantic_migration = migrate_transform_semantics(
+            effective_semantics,
+            selected_field=snapshot.selected_field,
+            operations=canonical_operations,
+            source_columns=source_columns,
+            result_columns=result_columns,
+            confirm_protected_drop=protected_drop,
+        )
+        identity = DataTransformIdentity(
+            task_id=task_id,
+            source_dataset_id=dataset.id,
+            source_content_hash=expected_hash,
+            workspace_revision=snapshot.revision,
+            analysis_generation=snapshot.analysis_generation,
+            semantic_mapping_hash=effective_semantic_hash,
+            operations=tuple(canonical_operations),
+            producer_version=_DATA_TRANSFORM_PRODUCER_VERSION,
+        )
+        # Protected-field validation must happen before an identical-run cache
+        # lookup.  Otherwise a concurrent confirmed call could make an
+        # unconfirmed call appear successful by handing it the cached record.
+        existing = runtime.transforms.find_by_input_hash(task_id, identity.input_hash)
+        if existing is not None:
+            _verify_cached_transform_record(runtime, existing)
+            return _transform_tool_payload(existing, cached=True)
+
+        uow = ArtifactUnitOfWork()
+        attempt_token = uuid.uuid4().hex
+        parquet_artifact = uow.stage_file(
+            output_dir,
+            f"{identity.run_id}.{attempt_token}.parquet",
+        )
+        # stage_file reserves its path with a placeholder.  The transform core
+        # intentionally refuses pre-existing outputs, so move the already
+        # computed unique result into that reserved stage path.
+        parquet_artifact.path.unlink(missing_ok=True)
+        shutil.move(computed_path, parquet_artifact.path)
+        evidence_dir = _safe_task_artifact_directory(
+            runtime.settings,
+            task_id,
+            "data_transforms",
+        )
+        evidence_artifact = uow.stage_file(
+            evidence_dir,
+            f"{identity.run_id}.{attempt_token}.evidence.json",
+        )
+
+        try:
+            # Close the compute/commit TOCTOU window before promoting anything.
+            verified_source = runtime.registry.resolve_verified_path(dataset.id)
+            if verified_source != source_path:
+                raise ValueError("source dataset path changed during transform")
+
+            def _commit(conn):
+                conn.execute("BEGIN IMMEDIATE")
+                if not hmac.compare_digest(sha256_file(source_path), expected_hash):
+                    raise ValueError("source dataset changed during transform")
+                result_dataset = runtime.registry.register_existing_on_connection(
+                    conn,
+                    parquet_artifact.final_path,
+                    task_id=task_id,
+                    role="derived",
+                    target_col_override=semantic_migration.semantic_mapping.target_col,
+                    seed=_seed(ctx),
+                )
+                kernel_hash = str(core_result["output"]["content_hash"])
+                if not isinstance(result_dataset.content_hash, str) or not hmac.compare_digest(
+                    result_dataset.content_hash,
+                    kernel_hash,
+                ):
+                    raise ValueError("registered derived dataset hash mismatch")
+                activated = workspace_repo.activate_derived_on_connection(
+                    conn,
+                    task_id,
+                    expected_revision=snapshot.revision,
+                    source_dataset_id=dataset.id,
+                    source_dataset_content_hash=expected_hash,
+                    result_dataset_id=result_dataset.id,
+                    result_dataset_content_hash=result_dataset.content_hash,
+                    page="history",
+                    selected_field=semantic_migration.selected_field,
+                    semantic_mapping=semantic_migration.semantic_mapping,
+                    audit={
+                        "actor": "agent:data-transform",
+                        "detail": {"transform_run_id": identity.run_id},
+                    },
+                )
+                evidence = _transform_evidence_payload(
+                    identity=identity,
+                    core_result=core_result,
+                    source_dataset=dataset,
+                    result_dataset=result_dataset,
+                    source_workspace=snapshot,
+                    result_workspace=activated,
+                    semantic_migration=semantic_migration,
+                )
+                evidence_json = json.dumps(
+                    evidence,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                evidence_artifact.final_path.write_text(evidence_json, encoding="utf-8")
+                evidence_hash = sha256_file(evidence_artifact.final_path)
+                artifact_record = runtime.task_artifacts.register_on_connection(
+                    conn,
+                    task_id=task_id,
+                    kind=DATA_TRANSFORM_ARTIFACT_KIND,
+                    path=str(evidence_artifact.final_path),
+                    content_hash=evidence_hash,
+                    origin_tool=DATA_TRANSFORM_ORIGIN_TOOL,
+                    provenance=data_transform_artifact_provenance(
+                        identity,
+                        result_dataset_id=result_dataset.id,
+                        result_content_hash=result_dataset.content_hash,
+                    ),
+                )
+                record = runtime.transforms.record_succeeded_on_connection(
+                    conn,
+                    identity,
+                    result_dataset_id=result_dataset.id,
+                    result_content_hash=result_dataset.content_hash,
+                    result_artifact_id=artifact_record["id"],
+                    result_payload=evidence,
+                    result_workspace_revision=activated.revision,
+                    result_analysis_generation=activated.analysis_generation,
+                )
+                runtime.repo.write_audit_on_connection(
+                    conn,
+                    kind="data.transform.completed",
+                    target_ref=identity.run_id,
+                    actor="agent:data-transform",
+                    inputs_hash=identity.input_hash,
+                    outcome="succeeded",
+                    detail={
+                        "task_id": task_id,
+                        "source_dataset_id": dataset.id,
+                        "result_dataset_id": result_dataset.id,
+                        "result_content_hash": result_dataset.content_hash,
+                        "operations_hash": identity.operations_hash,
+                        "result_artifact_id": artifact_record["id"],
+                        "result_workspace_revision": activated.revision,
+                        "result_analysis_generation": activated.analysis_generation,
+                    },
+                )
+                return record
+
+            record = uow.finalize_with_connection(runtime.repo.transaction, _commit)
+        except Exception:
+            uow.rollback()
+            raise
+    return _transform_tool_payload(record, cached=False)
+
+
+def _transform_evidence_payload(
+    *,
+    identity,
+    core_result: dict,
+    source_dataset,
+    result_dataset,
+    source_workspace,
+    result_workspace,
+    semantic_migration,
+) -> dict:
+    safe_core = deepcopy(core_result)
+    output = safe_core.get("output")
+    if isinstance(output, dict):
+        output.pop("path", None)
+    return {
+        "schema_version": "data-transform-evidence.v1",
+        "run_id": identity.run_id,
+        "producer_version": identity.producer_version,
+        "input_hash": identity.input_hash,
+        "operations_hash": identity.operations_hash,
+        "source": {
+            "dataset_id": source_dataset.id,
+            "content_hash": source_dataset.content_hash,
+            "row_count": source_dataset.row_count,
+        },
+        "result": {
+            "dataset_id": result_dataset.id,
+            "content_hash": result_dataset.content_hash,
+            "row_count": result_dataset.row_count,
+        },
+        "transform": safe_core,
+        "semantic_migration": {
+            "before_hash": identity.semantic_mapping_hash,
+            "after_hash": data_semantic_mapping_hash(
+                semantic_migration.semantic_mapping
+            ),
+            "renamed_fields": dict(semantic_migration.renamed_fields),
+            "dropped_fields": list(semantic_migration.dropped_fields),
+            "dropped_protected_fields": list(
+                semantic_migration.dropped_protected_fields
+            ),
+        },
+        "workspace": {
+            "source_revision": source_workspace.revision,
+            "result_revision": result_workspace.revision,
+            "source_analysis_generation": source_workspace.analysis_generation,
+            "result_analysis_generation": result_workspace.analysis_generation,
+        },
+        "lineage": {
+            "parent_dataset_id": source_dataset.id,
+            "child_dataset_id": result_dataset.id,
+            "relation_kind": "transform",
+            "edge_order": 0,
+        },
+    }
+
+
+def _transform_tool_payload(record, *, cached: bool) -> dict:
+    evidence = record.result_payload
+    transform = evidence.get("transform") or {}
+    summary = transform.get("summary") or {}
+    semantic = evidence.get("semantic_migration") or {}
+    workspace = evidence.get("workspace") or {}
+    return {
+        "schema_version": "data-transform-tool-result.v1",
+        "run_id": record.id,
+        "source_dataset_id": record.source_dataset_id,
+        "result_dataset_id": record.result_dataset_id,
+        "result_content_hash": record.result_content_hash,
+        "row_count_before": int(summary.get("row_count_before") or 0),
+        "row_count_after": int(summary.get("row_count_after") or 0),
+        "column_count_before": int(summary.get("column_count_before") or 0),
+        "column_count_after": int(summary.get("column_count_after") or 0),
+        "operations": list(record.operations),
+        "steps": list(transform.get("steps") or []),
+        "semantic_migration": dict(semantic),
+        "workspace": dict(workspace),
+        "lineage": dict(evidence.get("lineage") or {}),
+        "evidence_artifact_id": record.result_artifact_id,
+        "evidence_download_url": (
+            f"/api/tasks/{record.task_id}/task-artifacts/"
+            f"{record.result_artifact_id}/download"
+        ),
+        "cached": cached,
+    }
+
+
+def _verify_cached_transform_record(runtime, record) -> None:
+    """Fail closed before presenting an immutable transform as verified cache."""
+
+    result_dataset = runtime.registry.get(record.result_dataset_id)
+    if str(result_dataset.task_id) != record.task_id:
+        raise ValueError("cached transform result dataset ownership mismatch")
+    result_hash = getattr(result_dataset, "content_hash", None)
+    if not isinstance(result_hash, str) or not hmac.compare_digest(
+        result_hash,
+        record.result_content_hash,
+    ):
+        raise ValueError("cached transform result dataset hash mismatch")
+    runtime.registry.resolve_verified_path(record.result_dataset_id)
+
+    artifact = runtime.task_artifacts.get_for_task(
+        record.task_id,
+        record.result_artifact_id,
+    )
+    if artifact is None:
+        raise ValueError("cached transform evidence artifact is missing")
+    expected_provenance = data_transform_artifact_provenance(
+        DataTransformIdentity(
+            task_id=record.task_id,
+            source_dataset_id=record.source_dataset_id,
+            source_content_hash=record.source_content_hash,
+            workspace_revision=record.workspace_revision,
+            analysis_generation=record.analysis_generation,
+            semantic_mapping_hash=record.semantic_mapping_hash,
+            operations=record.operations,
+            producer_version=record.producer_version,
+        ),
+        result_dataset_id=record.result_dataset_id,
+        result_content_hash=record.result_content_hash,
+    )
+    if (
+        artifact.get("kind") != DATA_TRANSFORM_ARTIFACT_KIND
+        or artifact.get("origin_tool") != DATA_TRANSFORM_ORIGIN_TOOL
+        or artifact.get("content_hash") != record.result_hash
+        or artifact.get("provenance") != expected_provenance
+    ):
+        raise ValueError("cached transform evidence registry mismatch")
+    artifact_path = Path(str(artifact["path"]))
+    try:
+        artifact_path.resolve(strict=True).relative_to(
+            (runtime.settings.tasks_dir / record.task_id).resolve(strict=True)
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("cached transform evidence path is unavailable or unsafe") from exc
+    if not artifact_path.is_file() or not hmac.compare_digest(
+        sha256_file(artifact_path),
+        record.result_hash,
+    ):
+        raise ValueError("cached transform evidence integrity check failed")
+
+    active = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
+        record.task_id
+    )
+    if (
+        active.active_dataset_id != record.result_dataset_id
+        or active.active_dataset_content_hash != record.result_content_hash
+        or active.revision != record.result_workspace_revision
+        or active.analysis_generation != record.result_analysis_generation
+    ):
+        raise ValueError("cached transform workspace evidence is no longer active")
+
+
+def _safe_task_artifact_directory(settings, task_id: str, child: str) -> Path:
+    """Create a task-local artifact directory without accepting symlink hops."""
+
+    if Path(task_id).name != task_id or task_id in {".", ".."}:
+        raise ValueError("task id is unsafe for an artifact directory")
+    if Path(child).name != child or child in {".", ".."}:
+        raise ValueError("artifact directory name is unsafe")
+    declared_root = Path(settings.tasks_dir).absolute()
+    if declared_root.is_symlink():
+        raise ValueError("task artifact root must not be a symlink")
+    declared_root.mkdir(parents=True, exist_ok=True)
+    resolved_root = declared_root.resolve(strict=True)
+    task_root = declared_root / task_id
+    if task_root.is_symlink():
+        raise ValueError("task artifact directory must not be a symlink")
+    task_root.mkdir(exist_ok=True)
+    resolved_task = task_root.resolve(strict=True)
+    if resolved_task.parent != resolved_root:
+        raise ValueError("task artifact directory escaped the task root")
+    artifact_dir = task_root / child
+    if artifact_dir.is_symlink():
+        raise ValueError("task artifact subdirectory must not be a symlink")
+    artifact_dir.mkdir(exist_ok=True)
+    if artifact_dir.resolve(strict=True).parent != resolved_task:
+        raise ValueError("task artifact subdirectory escaped the task directory")
+    return artifact_dir
+
+
+def _safe_dataset_directory(datasets_root: Path, task_id: str, child: str) -> Path:
+    """Create a task-local dataset directory without accepting symlink hops."""
+
+    if Path(task_id).name != task_id or task_id in {".", ".."}:
+        raise ValueError("task id is unsafe for a dataset directory")
+    if Path(child).name != child or child in {".", ".."}:
+        raise ValueError("dataset directory name is unsafe")
+    declared_root = Path(datasets_root).absolute()
+    if declared_root.is_symlink():
+        raise ValueError("dataset root must not be a symlink")
+    declared_root.mkdir(parents=True, exist_ok=True)
+    resolved_root = declared_root.resolve(strict=True)
+    task_root = declared_root / task_id
+    if task_root.is_symlink():
+        raise ValueError("task dataset directory must not be a symlink")
+    task_root.mkdir(exist_ok=True)
+    resolved_task = task_root.resolve(strict=True)
+    if resolved_task.parent != resolved_root:
+        raise ValueError("task dataset directory escaped the dataset root")
+    dataset_dir = task_root / child
+    if dataset_dir.is_symlink():
+        raise ValueError("task dataset subdirectory must not be a symlink")
+    dataset_dir.mkdir(exist_ok=True)
+    if dataset_dir.resolve(strict=True).parent != resolved_task:
+        raise ValueError("task dataset subdirectory escaped the task directory")
+    return dataset_dir
+
+
+def tool_export_dataset(inputs: dict, ctx) -> dict:
+    """Export the exact active dataset as a safe, task-owned CSV or XLSX."""
+
+    runtime = _runtime(ctx)
+    task_id = str(ctx.task_id)
+    dataset_id = str(inputs["dataset_id"])
+    dataset = runtime.registry.get(dataset_id)
+    if str(dataset.task_id) != task_id:
+        raise PermissionError(
+            f"dataset {dataset_id} belongs to task {dataset.task_id}, not {task_id}"
+        )
+    expected_hash = str(inputs["expected_content_hash"])
+    registered_hash = getattr(dataset, "content_hash", None)
+    if not isinstance(registered_hash, str) or not hmac.compare_digest(
+        registered_hash,
+        expected_hash,
+    ):
+        raise ValueError("dataset content hash does not match expected content hash")
+
+    workspace_repo = DataWorkspaceRepository(runtime.settings.db_path)
+    snapshot = workspace_repo.get_or_default(task_id)
+    if snapshot.active_dataset_id != dataset_id:
+        raise ValueError("dataset is not the active data-workspace dataset")
+    if not isinstance(snapshot.active_dataset_content_hash, str) or not hmac.compare_digest(
+        snapshot.active_dataset_content_hash,
+        expected_hash,
+    ):
+        raise ValueError(
+            "active data-workspace content hash does not match expected content hash"
+        )
+    workspace_revision = int(inputs["workspace_revision"])
+    if snapshot.revision != workspace_revision:
+        raise ValueError(
+            "data workspace revision mismatch: "
+            f"expected {workspace_revision}, found {snapshot.revision}"
+        )
+    analysis_generation = int(inputs["analysis_generation"])
+    if snapshot.analysis_generation != analysis_generation:
+        raise ValueError(
+            "data workspace analysis generation mismatch: "
+            f"expected {analysis_generation}, found {snapshot.analysis_generation}"
+        )
+    expected_semantic_hash = str(inputs["semantic_mapping_hash"])
+    actual_semantic_hash = data_semantic_mapping_hash(snapshot.semantic_mapping)
+    if not hmac.compare_digest(actual_semantic_hash, expected_semantic_hash):
+        raise ValueError("data workspace semantic mapping hash mismatch")
+
+    export_format = str(inputs["format"])
+    if export_format not in {"csv", "xlsx"}:
+        raise ValueError("format must be csv or xlsx")
+    source_path = runtime.registry.resolve_verified_path(dataset.id)
+    source_columns = tuple(runtime.backend.column_names(source_path))
+    text_columns = _dataset_export_text_columns(
+        dataset,
+        snapshot.semantic_mapping,
+        source_columns=source_columns,
+        requested=inputs.get("text_columns"),
+    )
+    identity_payload = {
+        "schema_version": "dataset-export-input.v1",
+        "task_id": task_id,
+        "dataset_id": dataset.id,
+        "dataset_content_hash": expected_hash,
+        "workspace_revision": snapshot.revision,
+        "analysis_generation": snapshot.analysis_generation,
+        "semantic_mapping_hash": actual_semantic_hash,
+        "format": export_format,
+        "text_columns": list(text_columns),
+        "producer_version": _DATASET_EXPORT_PRODUCER_VERSION,
+    }
+    input_json = json.dumps(
+        identity_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    input_hash = hashlib.sha256(input_json.encode("utf-8")).hexdigest()
+    existing = _find_existing_dataset_export(
+        runtime,
+        task_id=task_id,
+        input_hash=input_hash,
+    )
+    if existing is not None:
+        with runtime.repo.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_dataset_export_binding_on_connection(
+                conn,
+                task_id=task_id,
+                dataset_id=dataset.id,
+                expected_content_hash=expected_hash,
+                workspace_revision=snapshot.revision,
+                analysis_generation=snapshot.analysis_generation,
+                semantic_mapping_hash=actual_semantic_hash,
+            )
+            if not hmac.compare_digest(sha256_file(source_path), expected_hash):
+                raise ValueError("source dataset changed before cached export replay")
+        return _dataset_export_tool_payload(existing, cached=True)
+
+    export_dir = _safe_task_artifact_directory(
+        runtime.settings,
+        task_id,
+        "data_exports",
+    )
+    with tempfile.TemporaryDirectory(
+        prefix=".dataset_export_compute_",
+        dir=export_dir,
+    ) as scratch_name:
+        computed_path = Path(scratch_name) / f"export.{export_format}"
+        core_result = export_dataset(
+            source_path,
+            computed_path,
+            format=export_format,
+            temp_directory=runtime.datasets_root.parent / ".duckdb_tmp",
+            text_columns=text_columns,
+        )
+        safe_core = deepcopy(core_result)
+        core_output = safe_core.get("output")
+        if not isinstance(core_output, dict):
+            raise ValueError("dataset export kernel returned invalid output evidence")
+        core_output.pop("path", None)
+        output_hash = str(core_output.get("content_hash") or "")
+        if len(output_hash) != 64:
+            raise ValueError("dataset export kernel returned invalid content hash")
+        if (
+            core_output.get("row_count") != int(dataset.row_count)
+            or core_output.get("column_count") != len(source_columns)
+        ):
+            raise ValueError("dataset export kernel row or column count mismatch")
+        artifact_provenance = {
+            "schema_version": _DATASET_EXPORT_ARTIFACT_SCHEMA_VERSION,
+            "input_schema_version": identity_payload["schema_version"],
+            "producer_version": _DATASET_EXPORT_PRODUCER_VERSION,
+            "input_hash": input_hash,
+            **identity_payload,
+            "export": safe_core,
+        }
+        artifact_provenance["schema_version"] = (
+            _DATASET_EXPORT_ARTIFACT_SCHEMA_VERSION
+        )
+        filename = (
+            f"dataset_export_{input_hash[:24]}.{uuid.uuid4().hex}.{export_format}"
+        )
+        uow = ArtifactUnitOfWork()
+        staged = uow.stage_file(export_dir, filename)
+        staged.path.unlink(missing_ok=True)
+        shutil.move(computed_path, staged.path)
+
+        try:
+            verified_source = runtime.registry.resolve_verified_path(dataset.id)
+            if verified_source != source_path:
+                raise ValueError("source dataset path changed during export")
+
+            def _commit(conn):
+                conn.execute("BEGIN IMMEDIATE")
+                if _dataset_export_exists_on_connection(
+                    conn,
+                    task_id=task_id,
+                    input_hash=input_hash,
+                ):
+                    raise _DatasetExportConcurrentReplay(input_hash)
+                _require_dataset_export_binding_on_connection(
+                    conn,
+                    task_id=task_id,
+                    dataset_id=dataset.id,
+                    expected_content_hash=expected_hash,
+                    workspace_revision=snapshot.revision,
+                    analysis_generation=snapshot.analysis_generation,
+                    semantic_mapping_hash=actual_semantic_hash,
+                )
+                if not hmac.compare_digest(sha256_file(source_path), expected_hash):
+                    raise ValueError("source dataset changed during export")
+                if not hmac.compare_digest(sha256_file(staged.final_path), output_hash):
+                    raise ValueError("published dataset export hash mismatch")
+                artifact = runtime.task_artifacts.register_on_connection(
+                    conn,
+                    task_id=task_id,
+                    kind=_DATASET_EXPORT_ARTIFACT_KIND,
+                    path=str(staged.final_path),
+                    content_hash=output_hash,
+                    origin_tool=_DATASET_EXPORT_ORIGIN_TOOL,
+                    provenance=artifact_provenance,
+                )
+                runtime.repo.write_audit_on_connection(
+                    conn,
+                    kind="data.export.completed",
+                    target_ref=artifact["id"],
+                    actor="agent:data-export",
+                    inputs_hash=input_hash,
+                    outcome="succeeded",
+                    detail={
+                        "task_id": task_id,
+                        "dataset_id": dataset.id,
+                        "dataset_content_hash": expected_hash,
+                        "format": export_format,
+                        "artifact_id": artifact["id"],
+                        "content_hash": output_hash,
+                        "workspace_revision": snapshot.revision,
+                        "analysis_generation": snapshot.analysis_generation,
+                    },
+                )
+                return artifact
+
+            artifact = uow.finalize_with_connection(
+                runtime.repo.transaction,
+                _commit,
+            )
+        except _DatasetExportConcurrentReplay:
+            uow.rollback()
+            winner = _find_existing_dataset_export(
+                runtime,
+                task_id=task_id,
+                input_hash=input_hash,
+            )
+            if winner is None:  # pragma: no cover - defensive transaction invariant
+                raise ValueError("concurrent dataset export winner is missing")
+            return _dataset_export_tool_payload(winner, cached=True)
+        except Exception:
+            uow.rollback()
+            raise
+    return _dataset_export_tool_payload(artifact, cached=False)
+
+
+def _dataset_export_text_columns(
+    dataset,
+    semantic_mapping,
+    *,
+    source_columns: tuple[str, ...],
+    requested,
+) -> tuple[str, ...]:
+    roles = {
+        str(column.name): str(column.semantic_role)
+        for column in dataset.columns
+        if str(column.semantic_role) in _DATASET_EXPORT_TEXT_ROLES
+    }
+    roles.update(
+        {
+            str(name): str(role)
+            for name, role in semantic_mapping.field_roles.items()
+            if str(role) in _DATASET_EXPORT_TEXT_ROLES
+        }
+    )
+    selected = set(roles)
+    if requested is not None:
+        if isinstance(requested, (str, bytes)) or not isinstance(requested, list):
+            raise ValueError("text_columns must be an ordered array")
+        for raw_name in requested:
+            if not isinstance(raw_name, str) or raw_name not in source_columns:
+                raise ValueError(f"unknown text column: {raw_name}")
+            selected.add(raw_name)
+    return tuple(name for name in source_columns if name in selected)
+
+
+def _find_existing_dataset_export(runtime, *, task_id: str, input_hash: str):
+    matches = []
+    for artifact in runtime.task_artifacts.list_for_task(task_id):
+        provenance = artifact.get("provenance") or {}
+        if (
+            artifact.get("kind") == _DATASET_EXPORT_ARTIFACT_KIND
+            and artifact.get("origin_tool") == _DATASET_EXPORT_ORIGIN_TOOL
+            and provenance.get("schema_version")
+            == _DATASET_EXPORT_ARTIFACT_SCHEMA_VERSION
+            and provenance.get("input_hash") == input_hash
+        ):
+            matches.append(artifact)
+    if len(matches) > 1:
+        raise ValueError("dataset export input has multiple immutable artifacts")
+    if not matches:
+        return None
+    artifact = matches[0]
+    _validate_dataset_export_artifact(
+        artifact,
+        expected_input_hash=input_hash,
+    )
+    provenance = artifact["provenance"]
+    dataset = runtime.registry.get(str(provenance["dataset_id"]))
+    if (
+        str(dataset.task_id) != task_id
+        or dataset.content_hash != provenance["dataset_content_hash"]
+    ):
+        raise ValueError("cached dataset export source identity mismatch")
+    runtime.registry.resolve_verified_path(dataset.id)
+    path = Path(str(artifact["path"]))
+    expected_hash = str(artifact["content_hash"])
+    try:
+        path.resolve(strict=True).relative_to(
+            (runtime.settings.tasks_dir / task_id).resolve(strict=True)
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("cached dataset export path is unavailable or unsafe") from exc
+    expected_size = artifact["provenance"]["export"]["output"]["size_bytes"]
+    if (
+        not path.is_file()
+        or path.stat().st_size != expected_size
+        or not hmac.compare_digest(sha256_file(path), expected_hash)
+    ):
+        raise ValueError("cached dataset export integrity check failed")
+    return artifact
+
+
+def _validate_dataset_export_artifact(
+    artifact,
+    *,
+    expected_input_hash: str | None = None,
+) -> None:
+    provenance = artifact.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("dataset export provenance must be an object")
+    if (
+        provenance.get("schema_version")
+        != _DATASET_EXPORT_ARTIFACT_SCHEMA_VERSION
+        or provenance.get("input_schema_version") != "dataset-export-input.v1"
+        or provenance.get("producer_version")
+        != _DATASET_EXPORT_PRODUCER_VERSION
+        or artifact.get("kind") != _DATASET_EXPORT_ARTIFACT_KIND
+        or artifact.get("origin_tool") != _DATASET_EXPORT_ORIGIN_TOOL
+        or provenance.get("task_id") != artifact.get("task_id")
+    ):
+        raise ValueError("dataset export artifact identity is invalid")
+    input_hash = provenance.get("input_hash")
+    if (
+        not isinstance(input_hash, str)
+        or len(input_hash) != 64
+        or any(character not in "0123456789abcdef" for character in input_hash)
+        or (
+            expected_input_hash is not None
+            and not hmac.compare_digest(input_hash, expected_input_hash)
+        )
+    ):
+        raise ValueError("dataset export input hash is invalid")
+    dataset_hash = provenance.get("dataset_content_hash")
+    if (
+        not isinstance(dataset_hash, str)
+        or len(dataset_hash) != 64
+        or any(character not in "0123456789abcdef" for character in dataset_hash)
+    ):
+        raise ValueError("dataset export source hash is invalid")
+    text_columns = provenance.get("text_columns")
+    workspace_revision = provenance.get("workspace_revision")
+    analysis_generation = provenance.get("analysis_generation")
+    semantic_hash = provenance.get("semantic_mapping_hash")
+    if (
+        not isinstance(provenance.get("task_id"), str)
+        or not provenance["task_id"]
+        or not isinstance(provenance.get("dataset_id"), str)
+        or not provenance["dataset_id"]
+        or isinstance(workspace_revision, bool)
+        or not isinstance(workspace_revision, int)
+        or workspace_revision < 0
+        or isinstance(analysis_generation, bool)
+        or not isinstance(analysis_generation, int)
+        or analysis_generation < 0
+        or not isinstance(semantic_hash, str)
+        or len(semantic_hash) != 64
+        or any(character not in "0123456789abcdef" for character in semantic_hash)
+        or not isinstance(text_columns, list)
+        or not all(isinstance(item, str) and item for item in text_columns)
+        or len(text_columns) != len(set(text_columns))
+        or provenance.get("format") not in {"csv", "xlsx"}
+    ):
+        raise ValueError("dataset export input evidence is invalid")
+    identity_payload = {
+        "schema_version": provenance["input_schema_version"],
+        "task_id": provenance["task_id"],
+        "dataset_id": provenance["dataset_id"],
+        "dataset_content_hash": dataset_hash,
+        "workspace_revision": workspace_revision,
+        "analysis_generation": analysis_generation,
+        "semantic_mapping_hash": semantic_hash,
+        "format": provenance["format"],
+        "text_columns": text_columns,
+        "producer_version": provenance["producer_version"],
+    }
+    canonical_identity = json.dumps(
+        identity_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    canonical_input_hash = hashlib.sha256(
+        canonical_identity.encode("utf-8")
+    ).hexdigest()
+    if not hmac.compare_digest(canonical_input_hash, input_hash):
+        raise ValueError("dataset export input hash does not match provenance")
+    export = provenance.get("export")
+    if not isinstance(export, dict) or export.get("schema_version") != (
+        "dataset-export-result.v1"
+    ):
+        raise ValueError("dataset export evidence schema is invalid")
+    output = export.get("output")
+    if not isinstance(output, dict):
+        raise ValueError("dataset export output evidence is invalid")
+    artifact_hash = artifact.get("content_hash")
+    if (
+        output.get("content_hash") != artifact_hash
+        or output.get("format") != provenance.get("format")
+        or provenance.get("format") not in {"csv", "xlsx"}
+        or isinstance(output.get("row_count"), bool)
+        or not isinstance(output.get("row_count"), int)
+        or output["row_count"] < 0
+        or isinstance(output.get("column_count"), bool)
+        or not isinstance(output.get("column_count"), int)
+        or output["column_count"] < 1
+        or isinstance(output.get("size_bytes"), bool)
+        or not isinstance(output.get("size_bytes"), int)
+        or output["size_bytes"] < 0
+    ):
+        raise ValueError("dataset export output evidence does not match artifact")
+    options = export.get("options")
+    if (
+        not isinstance(options, dict)
+        or options.get("text_columns") != provenance.get("text_columns")
+        or not isinstance(export.get("safety"), dict)
+    ):
+        raise ValueError("dataset export options or safety evidence is invalid")
+
+
+def _dataset_export_exists_on_connection(
+    conn,
+    *,
+    task_id: str,
+    input_hash: str,
+) -> bool:
+    rows = conn.execute(
+        """
+        SELECT provenance_json
+          FROM task_artifacts
+         WHERE task_id = ? AND kind = ? AND origin_tool = ?
+        """,
+        (task_id, _DATASET_EXPORT_ARTIFACT_KIND, _DATASET_EXPORT_ORIGIN_TOOL),
+    ).fetchall()
+    matches = 0
+    for row in rows:
+        try:
+            provenance = json.loads(str(row["provenance_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("persisted dataset export provenance is invalid") from exc
+        if (
+            isinstance(provenance, dict)
+            and provenance.get("schema_version")
+            == _DATASET_EXPORT_ARTIFACT_SCHEMA_VERSION
+            and provenance.get("input_hash") == input_hash
+        ):
+            matches += 1
+    if matches > 1:
+        raise ValueError("dataset export input has multiple immutable artifacts")
+    return matches == 1
+
+
+def _require_dataset_export_binding_on_connection(
+    conn,
+    *,
+    task_id: str,
+    dataset_id: str,
+    expected_content_hash: str,
+    workspace_revision: int,
+    analysis_generation: int,
+    semantic_mapping_hash: str,
+) -> None:
+    dataset_row = conn.execute(
+        "SELECT task_id, content_hash FROM datasets WHERE id = ?",
+        (dataset_id,),
+    ).fetchone()
+    if dataset_row is None or str(dataset_row["task_id"]) != task_id:
+        raise ValueError("dataset ownership changed during export")
+    registered_hash = dataset_row["content_hash"]
+    if not isinstance(registered_hash, str) or not hmac.compare_digest(
+        registered_hash,
+        expected_content_hash,
+    ):
+        raise ValueError("dataset content hash changed during export")
+    workspace_row = conn.execute(
+        """
+        SELECT active_dataset_id, active_dataset_content_hash, revision,
+               analysis_generation, semantic_mapping_json
+          FROM data_workspaces
+         WHERE task_id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    if workspace_row is None:
+        raise ValueError("data workspace disappeared during export")
+    active_hash = workspace_row["active_dataset_content_hash"]
+    mapping_json = workspace_row["semantic_mapping_json"]
+    if not isinstance(mapping_json, str):
+        raise ValueError("data workspace semantic mapping is invalid")
+    mapping_payload = json.loads(mapping_json)
+    from marvis.data.workspace import data_semantic_mapping_from_dict
+
+    live_semantic_hash = data_semantic_mapping_hash(
+        data_semantic_mapping_from_dict(mapping_payload)
+    )
+    if (
+        str(workspace_row["active_dataset_id"]) != dataset_id
+        or not isinstance(active_hash, str)
+        or not hmac.compare_digest(active_hash, expected_content_hash)
+        or int(workspace_row["revision"]) != workspace_revision
+        or int(workspace_row["analysis_generation"]) != analysis_generation
+        or not hmac.compare_digest(live_semantic_hash, semantic_mapping_hash)
+    ):
+        raise ValueError("data workspace changed during export")
+
+
+def _dataset_export_tool_payload(artifact, *, cached: bool) -> dict:
+    _validate_dataset_export_artifact(artifact)
+    provenance = artifact.get("provenance") or {}
+    export = provenance.get("export") or {}
+    output = export.get("output") or {}
+    return {
+        "schema_version": "dataset-export-tool-result.v1",
+        "input_hash": provenance.get("input_hash"),
+        "dataset_id": provenance.get("dataset_id"),
+        "dataset_content_hash": provenance.get("dataset_content_hash"),
+        "workspace_revision": provenance.get("workspace_revision"),
+        "analysis_generation": provenance.get("analysis_generation"),
+        "semantic_mapping_hash": provenance.get("semantic_mapping_hash"),
+        "format": output.get("format"),
+        "row_count": output.get("row_count"),
+        "column_count": output.get("column_count"),
+        "size_bytes": output.get("size_bytes"),
+        "content_hash": output.get("content_hash"),
+        "options": dict(export.get("options") or {}),
+        "safety": dict(export.get("safety") or {}),
+        "artifact_id": artifact.get("id"),
+        "download_url": (
+            f"/api/tasks/{quote(str(artifact.get('task_id')), safe='')}"
+            f"/task-artifacts/{quote(str(artifact.get('id')), safe='')}/download"
+        ),
+        "cached": cached,
+    }
 
 
 def _attach_join_trust_layer(
@@ -1213,6 +2232,8 @@ class _Runtime(PackRuntime):
     def _extend(self, ctx) -> None:
         self.aligner = ColumnAligner(self.backend)
         self.join_engine = JoinEngine(self.backend, self.aligner, self.registry, self.repo)
+        self.transforms = DataTransformRepository(self.settings.db_path)
+        self.task_artifacts = TaskArtifactRepository(self.settings.db_path)
 
 
 def _runtime(ctx) -> _Runtime:

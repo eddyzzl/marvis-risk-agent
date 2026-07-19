@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZipFile
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from openpyxl import load_workbook
+from openpyxl.packaging import core as openpyxl_core
 
 import marvis.data.dataset_export as dataset_export
 from marvis.data.dataset_export import (
@@ -70,7 +72,7 @@ def test_csv_export_is_streamed_safe_exact_and_json_evidence_is_finite(
     assert rows[0] == ["客户姓名", "手机号", "order_id", "金额", "申请日", "ratio"]
     assert rows[1] == [
         "张三",
-        "0013800000000",
+        "'0013800000000",
         "'9007199254740993",
         "123.45",
         "2026-07-01",
@@ -102,6 +104,7 @@ def test_csv_export_is_streamed_safe_exact_and_json_evidence_is_finite(
     assert result["options"]["null_representation"] == "empty_cell"
     assert result["options"]["text_columns"] == ["手机号"]
     assert result["safety"]["formula_cells_escaped"] == 2
+    assert result["safety"]["csv_text_cells_coerced"] == 2
     assert result["safety"]["large_integer_cells_as_text"] == 1
     assert result["safety"]["high_precision_decimal_cells_as_text"] == 1
     assert result["safety"]["non_finite_cells_as_text"] == 2
@@ -200,6 +203,141 @@ def test_formula_guard_detects_leading_control_characters_in_csv(tmp_path: Path)
     assert rows[2][0] == "'\r+cmd"
     assert rows[3][0] == "safe"
     assert result["safety"]["formula_cells_escaped"] == 2
+
+
+def test_csv_text_columns_guard_excel_numeric_and_date_coercion_only(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.parquet"
+    output = tmp_path / "export.csv"
+    _write_parquet(
+        source,
+        pa.table(
+            {
+                "id": [
+                    "00123",
+                    "1234567890123456",
+                    "12345",
+                    "2026-07-19",
+                    "张三",
+                    "A001",
+                    "=cmd",
+                ]
+            }
+        ),
+    )
+
+    result = export_dataset(
+        source,
+        output,
+        format="csv",
+        temp_directory=tmp_path / "scratch",
+        text_columns=("id",),
+    )
+
+    with output.open("r", encoding="utf-8-sig", newline="") as handle:
+        values = [row[0] for row in list(csv.reader(handle))[1:]]
+    assert values == [
+        "'00123",
+        "'1234567890123456",
+        "'12345",
+        "'2026-07-19",
+        "张三",
+        "A001",
+        "'=cmd",
+    ]
+    assert result["safety"]["text_column_cells_written"] == 7
+    assert result["safety"]["csv_text_cells_coerced"] == 4
+    assert result["safety"]["formula_cells_escaped"] == 1
+    json.dumps(result, allow_nan=False)
+
+
+def test_csv_native_negative_numbers_are_not_mistaken_for_formulas(tmp_path: Path) -> None:
+    source = tmp_path / "source.parquet"
+    output = tmp_path / "export.csv"
+    _write_parquet(
+        source,
+        pa.Table.from_arrays(
+            [
+                pa.array([-9999], type=pa.int64()),
+                pa.array([-1.5], type=pa.float64()),
+                pa.array([Decimal("-2.50")], type=pa.decimal128(5, 2)),
+                pa.array(["-cmd"], type=pa.string()),
+                pa.array([-9007199254740993], type=pa.int64()),
+                pa.array(
+                    [Decimal("-1234567890123456.78")],
+                    type=pa.decimal128(20, 2),
+                ),
+            ],
+            names=["missing_code", "ratio", "amount", "raw_text", "big_id", "exact"],
+        ),
+    )
+
+    result = export_dataset(
+        source,
+        output,
+        format="csv",
+        temp_directory=tmp_path / "scratch",
+    )
+
+    with output.open("r", encoding="utf-8-sig", newline="") as handle:
+        row = list(csv.reader(handle))[1]
+    assert row == [
+        "-9999",
+        "-1.5",
+        "-2.50",
+        "'-cmd",
+        "'-9007199254740993",
+        "'-1234567890123456.78",
+    ]
+    assert result["safety"]["formula_cells_escaped"] == 1
+    assert result["safety"]["large_integer_cells_as_text"] == 1
+    assert result["safety"]["high_precision_decimal_cells_as_text"] == 1
+
+
+def test_xlsx_bytes_and_hash_are_deterministic_across_creation_clocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.parquet"
+    first = tmp_path / "first.xlsx"
+    second = tmp_path / "second.xlsx"
+    _write_parquet(source, pa.table({"姓名": ["张三"], "id": [9007199254740993]}))
+
+    def clock_at(year: int) -> SimpleNamespace:
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = cls(year, 1, 2, 3, 4, 5)
+                return value.replace(tzinfo=tz) if tz is not None else value
+
+        return SimpleNamespace(datetime=FrozenDateTime, timezone=timezone)
+
+    monkeypatch.setattr(openpyxl_core, "datetime", clock_at(2020))
+    first_result = export_dataset(
+        source,
+        first,
+        format="xlsx",
+        temp_directory=tmp_path / "scratch",
+        text_columns=("id",),
+    )
+    monkeypatch.setattr(openpyxl_core, "datetime", clock_at(2035))
+    second_result = export_dataset(
+        source,
+        second,
+        format="xlsx",
+        temp_directory=tmp_path / "scratch",
+        text_columns=("id",),
+    )
+
+    assert first.read_bytes() == second.read_bytes()
+    assert first_result["output"]["content_hash"] == second_result["output"]["content_hash"]
+    with ZipFile(first) as archive:
+        assert {member.date_time for member in archive.infolist()} == {
+            (1980, 1, 1, 0, 0, 0)
+        }
+        core_xml = archive.read("docProps/core.xml")
+    assert b"2000-01-01T00:00:00Z" in core_xml
 
 
 @pytest.mark.parametrize("format_name,suffix", [("csv", ".csv"), ("xlsx", ".xlsx")])
@@ -346,8 +484,12 @@ def test_output_size_failure_and_atomic_replace_failure_leave_no_residue(
     assert not output.exists()
     assert not list(tmp_path.glob(".out.csv.*.tmp"))
 
-    def fail_replace(_source: Path, _destination: Path) -> None:
-        raise OSError("simulated publication failure")
+    real_replace = dataset_export.os.replace
+
+    def fail_replace(source_path: Path, destination_path: Path) -> None:
+        if Path(destination_path) == output:
+            raise OSError("simulated publication failure")
+        real_replace(source_path, destination_path)
 
     monkeypatch.setattr(dataset_export.os, "replace", fail_replace)
     with pytest.raises(OSError, match="publication failure"):

@@ -557,3 +557,156 @@ def test_missing_task_and_noncanonical_direct_inputs_fail_closed(tmp_path):
         repo.get_or_default(" missing")
     with pytest.raises(DataWorkspaceDataError, match="non-negative integer"):
         repo.save("missing", DataWorkspaceDraft(), expected_revision=True)
+
+
+def test_activate_derived_dataset_preserves_migrated_semantics_and_audits(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    _seed_task(db_path)
+    source_hash = _seed_dataset(db_path, dataset_id="source")
+    result_hash = _seed_dataset(
+        db_path,
+        dataset_id="result",
+        columns=("customer_id", "label", "score_v2", "ratio"),
+    )
+    assert source_hash is not None and result_hash is not None
+    repo = DataWorkspaceRepository(db_path)
+    activated = repo.save(
+        "task-1",
+        _activation("source", source_hash),
+        expected_revision=0,
+    )
+    configured = repo.save(
+        "task-1",
+        DataWorkspaceDraft(
+            active_dataset_id="source",
+            active_dataset_content_hash=source_hash,
+            page="semantics",
+            selected_field="score",
+            semantic_mapping=DataSemanticMapping(
+                target_col="bad",
+                field_roles={
+                    "customer_id": "id",
+                    "bad": "target",
+                    "score": "score",
+                },
+                business_names={"bad": "风险标签", "score": "模型分"},
+            ),
+        ),
+        expected_revision=activated.revision,
+    )
+
+    derived = repo.activate_derived(
+        "task-1",
+        expected_revision=configured.revision,
+        source_dataset_id="source",
+        source_dataset_content_hash=source_hash,
+        result_dataset_id="result",
+        result_dataset_content_hash=result_hash,
+        page="history",
+        selected_field="score_v2",
+        semantic_mapping=DataSemanticMapping(
+            target_col="label",
+            field_roles={
+                "customer_id": "id",
+                "label": "target",
+                "score_v2": "score",
+            },
+            business_names={"label": "风险标签", "score_v2": "模型分"},
+        ),
+        audit={
+            "actor": "agent:data-transform",
+            "detail": {"transform_run_id": "transform-1"},
+        },
+    )
+
+    assert derived.revision == configured.revision + 1
+    assert derived.analysis_generation == configured.analysis_generation + 1
+    assert derived.active_dataset_id == "result"
+    assert derived.active_dataset_content_hash == result_hash
+    assert derived.page == "history"
+    assert derived.selected_field == "score_v2"
+    assert derived.semantic_mapping.target_col == "label"
+    assert dict(derived.semantic_mapping.business_names) == {
+        "label": "风险标签",
+        "score_v2": "模型分",
+    }
+    assert repo.get_or_default("task-1") == derived
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT kind, actor, detail_json FROM audit ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+    detail = json.loads(row["detail_json"])
+    assert row["kind"] == "data.workspace.derived.activate"
+    assert row["actor"] == "agent:data-transform"
+    assert detail["source_dataset_id"] == "source"
+    assert detail["active_dataset_id"] == "result"
+    assert detail["transform_run_id"] == "transform-1"
+
+
+def test_activate_derived_dataset_is_cas_bound_to_exact_source_workspace(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    _seed_task(db_path)
+    source_hash = _seed_dataset(db_path, dataset_id="source")
+    result_hash = _seed_dataset(db_path, dataset_id="result")
+    assert source_hash is not None and result_hash is not None
+    repo = DataWorkspaceRepository(db_path)
+    source = repo.save(
+        "task-1",
+        _activation("source", source_hash),
+        expected_revision=0,
+    )
+
+    with pytest.raises(DataWorkspaceRevisionConflict, match="expected 0"):
+        repo.activate_derived(
+            "task-1",
+            expected_revision=0,
+            source_dataset_id="source",
+            source_dataset_content_hash=source_hash,
+            result_dataset_id="result",
+            result_dataset_content_hash=result_hash,
+            semantic_mapping=DataSemanticMapping(),
+        )
+    with pytest.raises(DataWorkspaceRevisionConflict, match="source dataset"):
+        repo.activate_derived(
+            "task-1",
+            expected_revision=source.revision,
+            source_dataset_id="result",
+            source_dataset_content_hash=result_hash,
+            result_dataset_id="result",
+            result_dataset_content_hash=result_hash,
+            semantic_mapping=DataSemanticMapping(),
+        )
+
+
+def test_activate_derived_dataset_validates_result_semantic_references(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    _seed_task(db_path)
+    source_hash = _seed_dataset(db_path, dataset_id="source")
+    result_hash = _seed_dataset(
+        db_path,
+        dataset_id="result",
+        columns=("customer_id", "score"),
+    )
+    assert source_hash is not None and result_hash is not None
+    repo = DataWorkspaceRepository(db_path)
+    source = repo.save(
+        "task-1",
+        _activation("source", source_hash),
+        expected_revision=0,
+    )
+
+    with pytest.raises(DataWorkspaceDataError, match="unknown dataset column.*bad"):
+        repo.activate_derived(
+            "task-1",
+            expected_revision=source.revision,
+            source_dataset_id="source",
+            source_dataset_content_hash=source_hash,
+            result_dataset_id="result",
+            result_dataset_content_hash=result_hash,
+            semantic_mapping=DataSemanticMapping(
+                target_col="bad",
+                field_roles={"bad": "target"},
+            ),
+        )
+
+    assert repo.get_or_default("task-1") == source

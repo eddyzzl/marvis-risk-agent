@@ -39,6 +39,7 @@ _VERIFIED_FILE_CACHE: OrderedDict[
     tuple[int, int, int, int, int],
 ] = OrderedDict()
 _VERIFIED_FILE_CACHE_LOCK = Lock()
+_INFER_TARGET = object()
 
 
 class DatasetRegistry:
@@ -275,6 +276,7 @@ class DatasetRegistry:
         task_id: str,
         role: str,
         anchor_target: str | None = None,
+        target_col_override: str | None | object = _INFER_TARGET,
         seed: int = 0,
     ) -> Dataset:
         parquet_path = self._ensure_under_root(Path(parquet_path), task_id)
@@ -283,6 +285,7 @@ class DatasetRegistry:
             task_id=task_id,
             role=role,
             anchor_target=anchor_target,
+            target_col_override=target_col_override,
             seed=seed,
         )
         create_on_connection = getattr(self._repo, "create_dataset_on_connection", None)
@@ -596,16 +599,30 @@ class DatasetRegistry:
         task_id: str,
         role: str,
         anchor_target: str | None,
+        target_col_override: str | None | object = _INFER_TARGET,
         seed: int,
     ) -> Dataset:
         profiles = profile_dataset(self._backend, parquet_path, seed=seed)
-        target = None
-        if anchor_target:
-            anchor = self.get(anchor_target)
-            target = anchor.target_col if anchor.has_target else None
-        if target is None:
-            sample = self._backend.sample_rows(parquet_path, 1000, seed=seed)
-            target = detect_target_column(profiles, sample)
+        profile_names = {profile.name for profile in profiles}
+        if target_col_override is not _INFER_TARGET:
+            if target_col_override is not None and (
+                not isinstance(target_col_override, str)
+                or target_col_override not in profile_names
+            ):
+                raise DataBackendError(
+                    "target_col_override must be null or an existing output column"
+                )
+            target = target_col_override
+        else:
+            target = None
+            if anchor_target:
+                anchor = self.get(anchor_target)
+                inherited = anchor.target_col if anchor.has_target else None
+                if inherited in profile_names:
+                    target = inherited
+            if target is None:
+                sample = self._backend.sample_rows(parquet_path, 1000, seed=seed)
+                target = detect_target_column(profiles, sample)
         return Dataset(
             id=_new_dataset_id(),
             task_id=task_id,

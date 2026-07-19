@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from marvis.orchestrator.templates import _register_builtin_template
 from marvis.orchestrator.templates.data import DATASET_DESCRIPTIVE_ANALYSIS
+from marvis.orchestrator.templates.data_export import DATASET_EXPORT
+from marvis.orchestrator.templates.data_transform import DATASET_TRANSFORM
 from marvis.orchestrator.templates.feature import (
     FEATURE_ANALYSIS,
     FEATURE_ANALYSIS_WITH_JOIN,
@@ -46,6 +48,8 @@ from marvis.orchestrator.templates.validation import MODEL_VALIDATION
 BUILTIN_TEMPLATES = (
     SAMPLE_ECHO,
     DATASET_DESCRIPTIVE_ANALYSIS,
+    DATASET_TRANSFORM,
+    DATASET_EXPORT,
     MODEL_VALIDATION,
     STANDARD_MODELING,
     DATA_JOIN,

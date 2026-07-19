@@ -11,6 +11,7 @@
 - V2 不是只有 Plugin/Tool runtime 外壳；欢迎页展示的入口必须对应真实可用的端到端 workflow：人在环确认、受控工具执行、结构化结果、下载/报告或可审计产物。
 - Portfolio / 组合分析能力已有后端工具、模板和测试覆盖；具体是否作为首屏入口或 Agent start allowlist 暴露，以当前代码和 UI 为准。
 - 策略平台改造的 Phase 0A（真实完整开发入口与业务 contract）、Phase 0B（运行时门禁、人工决策证明和一次性副作用授权）和 Phase 1（五类统一 DSL、自然语言可逆执行、标准分析 Workflow、版本化监控/处置、新版本 handoff、生命周期与可下载 artifact）已完成。策略采纳和监控处置仍是人工责任门，本地采纳不等于生产部署。Phase 2 及全部后续范围继续在 V2.x 内交付，不得推到 V3/V4。
+- Phase 2 的 task-scoped 数据工作区、CSV/XLS/XLSX 导入、报告级描述分析、自然语言受限数据变换、不可变派生 lineage，以及安全 CSV/XLSX 导出已经完成纵向闭环。SQL connector、隔离自定义派生、风险方向、版本化指标语义、当前项目快照和历史资料映射仍在 Phase 2 内继续交付；Phase 2 尚未整体完成。
 
 ## 术语
 

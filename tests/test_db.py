@@ -1166,7 +1166,7 @@ def test_init_db_migration_009_backfills_canonical_strategy_asset_status(tmp_pat
             "SELECT id, status, asset_status FROM strategies ORDER BY id"
         ).fetchall()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 13
+    assert version == db_schema_module.SCHEMA_VERSION == 14
     assert "asset_status" in columns
     assert [tuple(row) for row in rows] == [
         ("adopted-strategy", "adopted", "adopted_local"),
@@ -1228,7 +1228,7 @@ def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_pa
             row[1] for row in conn.execute("PRAGMA index_list(task_artifacts)")
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 13
+    assert version == db_schema_module.SCHEMA_VERSION == 14
     assert columns == {
         "id",
         "task_id",
@@ -1264,7 +1264,7 @@ def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
         }
         task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 13
+    assert version == db_schema_module.SCHEMA_VERSION == 14
     assert columns == {
         "task_id",
         "schema_version",
@@ -1312,7 +1312,7 @@ def test_init_db_migration_013_adds_data_analysis_runs_to_v12_database(tmp_path)
         }
         task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 13
+    assert version == db_schema_module.SCHEMA_VERSION == 14
     assert columns == {
         "id",
         "schema_version",
@@ -1347,6 +1347,93 @@ def test_init_db_migration_013_adds_data_analysis_runs_to_v12_database(tmp_path)
         "trg_data_analysis_runs_succeeded_immutable",
     } <= triggers
     assert task["id"] == "task-1"
+
+
+def test_init_db_migration_014_adds_transform_runs_and_lineage_to_v13_database(
+    tmp_path,
+):
+    db_path = tmp_path / "legacy_v13.sqlite"
+    with connect(db_path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE task_artifacts (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
+        conn.execute("PRAGMA user_version = 13")
+
+    init_db(db_path)
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        run_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(data_transform_runs)")
+        }
+        edge_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(dataset_lineage_edges)")
+        }
+        run_indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(data_transform_runs)")
+        }
+        edge_indexes = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(dataset_lineage_edges)")
+        }
+        triggers = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name IN ('data_transform_runs', 'dataset_lineage_edges')"
+            )
+        }
+
+    assert version == db_schema_module.SCHEMA_VERSION == 14
+    assert run_columns == {
+        "id",
+        "schema_version",
+        "task_id",
+        "source_dataset_id",
+        "source_content_hash",
+        "workspace_revision",
+        "analysis_generation",
+        "semantic_mapping_hash",
+        "operations_json",
+        "operations_hash",
+        "producer_version",
+        "input_hash",
+        "result_dataset_id",
+        "result_content_hash",
+        "result_artifact_id",
+        "result_json",
+        "result_hash",
+        "result_workspace_revision",
+        "result_analysis_generation",
+        "created_at",
+    }
+    assert edge_columns == {
+        "id",
+        "schema_version",
+        "task_id",
+        "parent_dataset_id",
+        "child_dataset_id",
+        "transform_run_id",
+        "relation_kind",
+        "edge_order",
+        "created_at",
+    }
+    assert {
+        "idx_data_transform_runs_task",
+        "idx_data_transform_runs_source",
+        "idx_data_transform_runs_result",
+    } <= run_indexes
+    assert {
+        "idx_dataset_lineage_edges_task",
+        "idx_dataset_lineage_edges_parent",
+        "idx_dataset_lineage_edges_child",
+    } <= edge_indexes
+    assert {
+        "trg_data_transform_runs_immutable",
+        "trg_dataset_lineage_edges_immutable",
+    } <= triggers
 
 
 def test_init_db_migration_009_rejects_unknown_legacy_status_without_stamping(tmp_path):
