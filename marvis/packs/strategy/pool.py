@@ -15,12 +15,16 @@ import hmac
 import json
 from typing import Any
 
-from marvis.packs.strategy.candidate_asset import validate_candidate_asset
+from marvis.packs.strategy.candidate_fragment import (
+    univariate_asset_to_verified_fragment,
+    validate_verified_candidate_fragment,
+    verified_fragment_from_pool_parts,
+    verified_fragment_pool_parts,
+)
 from marvis.packs.strategy.dsl import (
     StrategyAction,
     StrategyRuleSpec,
     StrategySpec,
-    canonicalize_expression,
 )
 from marvis.packs.strategy.errors import StrategyError
 from marvis.repositories.strategy_pool import (
@@ -33,14 +37,12 @@ from marvis.repositories.strategy_pool import (
 )
 
 
-POOL_SCHEMA_VERSION = "strategy.candidate-pool.v1"
-POOL_PRODUCER_VERSION = "strategy.candidate-pool/1"
-SELECTED_STRATEGY_DESIGN_SCHEMA_VERSION = "strategy.selected-strategy-design.v1"
+POOL_SCHEMA_VERSION = "strategy.candidate-pool.v2"
+POOL_PRODUCER_VERSION = "strategy.candidate-pool/2"
+SELECTED_STRATEGY_DESIGN_SCHEMA_VERSION = "strategy.selected-strategy-design.v2"
 
 _STATUS = "draft"
 _VALIDATION_STATUS = "unvalidated"
-_CANDIDATE_KIND = "univariate_refinement"
-_CANDIDATE_ARTIFACT_KIND = "strategy_candidate_asset_json"
 _MUTATION_KINDS = frozenset(
     {
         "add_candidate",
@@ -81,17 +83,23 @@ _ENTRY_FIELDS = frozenset(
 _SOURCE_FIELDS = frozenset(
     {
         "artifact_id",
-        "kind",
-        "content_hash",
+        "artifact_kind",
+        "artifact_schema_version",
+        "artifact_content_hash",
+        "origin_tool",
+        "asset_schema_version",
         "asset_id",
         "asset_hash",
-        "candidate_kind",
+        "asset_type",
         "fragment_id",
+        "fragment_hash",
+        "fragment_type",
         "effect_id",
-        "effect_stage",
+        "evidence_id",
+        "evidence_hash",
+        "candidate_stage",
+        "observation_stage",
         "validation_status",
-        "parent_candidate_id",
-        "parent_evidence_hash",
         "evidence_identity",
     }
 )
@@ -102,6 +110,7 @@ _EVIDENCE_IDENTITY_FIELDS = frozenset(
         "workspace_revision",
         "workspace_generation",
         "semantic_mapping_hash",
+        "sample_context_hash",
     }
 )
 _EXECUTION_FIELDS = frozenset({"condition", "requirements"})
@@ -122,7 +131,37 @@ def add_candidate(
     action: Mapping[str, Any],
     reason: str | None = None,
 ) -> dict[str, Any]:
-    """Append one verified candidate fragment to a new immutable pool revision."""
+    """Compatibility wrapper for the historical univariate Candidate Asset v1."""
+
+    try:
+        fragment = univariate_asset_to_verified_fragment(
+            candidate_asset,
+            source_binding=source_binding,
+        )
+    except StrategyError as exc:
+        raise CandidatePoolError(f"candidate adapter rejected source: {exc}") from exc
+    return add_verified_candidate_fragment(
+        pool,
+        task_id=task_id,
+        strategy_type=strategy_type,
+        default_action=default_action,
+        verified_candidate_fragment=fragment,
+        action=action,
+        reason=reason,
+    )
+
+
+def add_verified_candidate_fragment(
+    pool: Mapping[str, Any] | None,
+    *,
+    task_id: str,
+    strategy_type: str,
+    default_action: Mapping[str, Any],
+    verified_candidate_fragment: Mapping[str, Any],
+    action: Mapping[str, Any],
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Append one generic, self-authenticating candidate fragment."""
 
     task = _text(task_id, "task_id")
     strategy_kind = _text(strategy_type, "strategy_type")
@@ -145,11 +184,13 @@ def add_candidate(
         parent_revision_id = current["revision_id"]
         entries = [_json_object(item, "pool entry") for item in current["entries"]]
 
-    asset = validate_candidate_asset(candidate_asset)
-    source = _candidate_source(source_binding, asset=asset)
-    rule = asset["rule"]
-    condition = canonicalize_expression(rule["condition"])
-    rule_id = _text(rule["rule_id"], "candidate rule_id")
+    try:
+        verified = validate_verified_candidate_fragment(
+            verified_candidate_fragment
+        )
+        source, rule_id, execution = verified_fragment_pool_parts(verified)
+    except StrategyError as exc:
+        raise CandidatePoolError(f"verified candidate fragment is invalid: {exc}") from exc
     canonical_action = _action(action, "action")
     entry_id = _stable_id(
         "pool-entry",
@@ -157,12 +198,21 @@ def add_candidate(
             "pool_id": pool_id,
             "artifact_id": source["artifact_id"],
             "asset_id": source["asset_id"],
-            "rule_id": rule_id,
             "fragment_id": source["fragment_id"],
         },
     )
-    if any(item["source"]["asset_id"] == source["asset_id"] for item in entries):
-        raise CandidatePoolError(f"duplicate asset in strategy pool: {source['asset_id']}")
+    if any(
+        (
+            item["source"]["asset_id"],
+            item["source"]["fragment_id"],
+        )
+        == (source["asset_id"], source["fragment_id"])
+        for item in entries
+    ):
+        raise CandidatePoolError(
+            "duplicate asset fragment in strategy pool: "
+            f"{source['asset_id']} / {source['fragment_id']}"
+        )
     if any(item["rule_id"] == rule_id for item in entries):
         raise CandidatePoolError(f"duplicate rule in strategy pool: {rule_id}")
     if any(item["entry_id"] == entry_id for item in entries):
@@ -180,7 +230,7 @@ def add_candidate(
             "rule_id": rule_id,
             "position": len(entries),
             "source": source,
-            "execution": {"condition": condition, "requirements": []},
+            "execution": execution,
             "action": canonical_action,
             "enabled": True,
         }
@@ -311,7 +361,15 @@ def compile_strategy_pool(pool: Mapping[str, Any]) -> dict[str, Any]:
         "revision_id": current["revision_id"],
         "snapshot_hash": snapshot_hash,
     }
-    requirements: list[dict[str, Any]] = []
+    requirements = [
+        {
+            "rule_id": item["rule_id"],
+            "fragment_id": item["source"]["fragment_id"],
+            "requirement": _json_object(requirement, "candidate requirement"),
+        }
+        for item in entries
+        for requirement in item["execution"]["requirements"]
+    ]
     spec = StrategySpec(
         strategy_type=current["strategy_type"],
         default_action=StrategyAction.from_dict(current["default_action"]),
@@ -368,10 +426,13 @@ def validate_strategy_pool(payload: Mapping[str, Any]) -> dict[str, Any]:
     ]
     entry_ids = [item["entry_id"] for item in entries]
     rule_ids = [item["rule_id"] for item in entries]
-    asset_ids = [item["source"]["asset_id"] for item in entries]
+    asset_fragments = [
+        (item["source"]["asset_id"], item["source"]["fragment_id"])
+        for item in entries
+    ]
     _assert_unique(entry_ids, "entry_id")
     _assert_unique(rule_ids, "rule_id")
-    _assert_unique(asset_ids, "source asset_id")
+    _assert_unique(asset_fragments, "source asset fragment")
     evidence_identities = {
         _canonical_json(item["source"]["evidence_identity"]) for item in entries
     }
@@ -502,64 +563,6 @@ def _snapshot(
     )
 
 
-def _candidate_source(
-    value: Mapping[str, Any], *, asset: Mapping[str, Any]
-) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise CandidatePoolError("source_binding must be an object")
-    _exact_fields(value, _SOURCE_FIELDS, "source_binding")
-    source = {
-        "artifact_id": _text(value["artifact_id"], "source artifact_id"),
-        "kind": _text(value["kind"], "source kind"),
-        "content_hash": _hash(value["content_hash"], "source content_hash"),
-        "asset_id": _text(value["asset_id"], "source asset_id"),
-        "asset_hash": _hash(value["asset_hash"], "source asset_hash"),
-        "candidate_kind": _text(value["candidate_kind"], "candidate_kind"),
-        "fragment_id": _text(value["fragment_id"], "fragment_id"),
-        "effect_id": _text(value["effect_id"], "effect_id"),
-        "effect_stage": _text(value["effect_stage"], "effect_stage"),
-        "validation_status": _text(
-            value["validation_status"], "source validation_status"
-        ),
-        "parent_candidate_id": _text(
-            value["parent_candidate_id"], "parent_candidate_id"
-        ),
-        "parent_evidence_hash": _hash(
-            value["parent_evidence_hash"], "parent_evidence_hash"
-        ),
-        "evidence_identity": _evidence_identity(value["evidence_identity"]),
-    }
-    if source["kind"] != _CANDIDATE_ARTIFACT_KIND:
-        raise CandidatePoolError(
-            "source kind must be strategy_candidate_asset_json"
-        )
-    if source["candidate_kind"] != _CANDIDATE_KIND:
-        raise CandidatePoolError("candidate_kind must be univariate_refinement")
-    comparisons = {
-        "asset_id": asset["asset_id"],
-        "asset_hash": asset["asset_hash"],
-        "fragment_id": asset["rule"]["rule_id"],
-        "effect_id": asset["effect"]["effect_id"],
-        "effect_stage": asset["effect_stage"],
-        "validation_status": asset["validation_status"],
-        "parent_candidate_id": asset["parent"]["candidate_id"],
-        "parent_evidence_hash": asset["parent"]["evidence_hash"],
-    }
-    for field, expected in comparisons.items():
-        if source[field] != expected:
-            raise CandidatePoolError(
-                f"source {field} does not match the candidate asset"
-            )
-    if (
-        source["effect_stage"] != "development"
-        or source["validation_status"] != "unvalidated"
-    ):
-        raise CandidatePoolError(
-            "candidate asset must remain development and unvalidated"
-        )
-    return source
-
-
 def _normalize_entry(
     value: object, *, pool_id: str, expected_position: int
 ) -> dict[str, Any]:
@@ -572,9 +575,19 @@ def _normalize_entry(
         raise CandidatePoolError("entry positions must be contiguous from zero")
     source = _normalize_source(value["source"])
     execution = _normalize_execution(value["execution"])
+    try:
+        verified_fragment_from_pool_parts(
+            source=source,
+            rule_id=rule_id,
+            execution=execution,
+        )
+    except StrategyError as exc:
+        raise CandidatePoolError(
+            f"entry verified candidate fragment is invalid: {exc}"
+        ) from exc
     action = _action(value["action"], "entry action")
     if value["enabled"] is not True:
-        raise CandidatePoolError("pool entries must remain enabled in v1")
+        raise CandidatePoolError("pool entries must remain enabled in v2")
     entry_id = _text(value["entry_id"], "entry_id")
     expected_id = _stable_id(
         "pool-entry",
@@ -582,14 +595,11 @@ def _normalize_entry(
             "pool_id": pool_id,
             "artifact_id": source["artifact_id"],
             "asset_id": source["asset_id"],
-            "rule_id": rule_id,
             "fragment_id": source["fragment_id"],
         },
     )
     if entry_id != expected_id:
         raise CandidatePoolError("entry_id does not match candidate membership")
-    if rule_id != source["fragment_id"]:
-        raise CandidatePoolError("entry rule_id must match source fragment_id")
     return {
         "entry_id": entry_id,
         "rule_id": rule_id,
@@ -607,37 +617,42 @@ def _normalize_source(value: object) -> dict[str, Any]:
     _exact_fields(value, _SOURCE_FIELDS, "entry source")
     source = {
         "artifact_id": _text(value["artifact_id"], "source artifact_id"),
-        "kind": _text(value["kind"], "source kind"),
-        "content_hash": _hash(value["content_hash"], "source content_hash"),
+        "artifact_kind": _text(value["artifact_kind"], "source artifact_kind"),
+        "artifact_schema_version": _text(
+            value["artifact_schema_version"], "source artifact_schema_version"
+        ),
+        "artifact_content_hash": _hash(
+            value["artifact_content_hash"], "source artifact_content_hash"
+        ),
+        "origin_tool": _text(value["origin_tool"], "source origin_tool"),
+        "asset_schema_version": _text(
+            value["asset_schema_version"], "source asset_schema_version"
+        ),
         "asset_id": _text(value["asset_id"], "source asset_id"),
         "asset_hash": _hash(value["asset_hash"], "source asset_hash"),
-        "candidate_kind": _text(value["candidate_kind"], "candidate_kind"),
+        "asset_type": _text(value["asset_type"], "source asset_type"),
         "fragment_id": _text(value["fragment_id"], "fragment_id"),
+        "fragment_hash": _hash(value["fragment_hash"], "fragment_hash"),
+        "fragment_type": _text(value["fragment_type"], "fragment_type"),
         "effect_id": _text(value["effect_id"], "effect_id"),
-        "effect_stage": _text(value["effect_stage"], "effect_stage"),
+        "evidence_id": _text(value["evidence_id"], "evidence_id"),
+        "evidence_hash": _hash(value["evidence_hash"], "evidence_hash"),
+        "candidate_stage": _text(value["candidate_stage"], "candidate_stage"),
+        "observation_stage": _text(
+            value["observation_stage"], "observation_stage"
+        ),
         "validation_status": _text(
             value["validation_status"], "source validation_status"
         ),
-        "parent_candidate_id": _text(
-            value["parent_candidate_id"], "parent_candidate_id"
-        ),
-        "parent_evidence_hash": _hash(
-            value["parent_evidence_hash"], "parent_evidence_hash"
-        ),
         "evidence_identity": _evidence_identity(value["evidence_identity"]),
     }
-    if source["kind"] != _CANDIDATE_ARTIFACT_KIND:
-        raise CandidatePoolError(
-            "entry source kind must be strategy_candidate_asset_json"
-        )
-    if source["candidate_kind"] != _CANDIDATE_KIND:
-        raise CandidatePoolError("entry candidate_kind must be univariate_refinement")
     if (
-        source["effect_stage"] != "development"
+        source["candidate_stage"] != "development"
+        or source["observation_stage"] != "backtested"
         or source["validation_status"] != "unvalidated"
     ):
         raise CandidatePoolError(
-            "entry source must remain development and unvalidated"
+            "entry source must remain development, backtested, and unvalidated"
         )
     return source
 
@@ -660,6 +675,9 @@ def _evidence_identity(value: object) -> dict[str, Any]:
         "semantic_mapping_hash": _hash(
             value["semantic_mapping_hash"], "evidence semantic_mapping_hash"
         ),
+        "sample_context_hash": _hash(
+            value["sample_context_hash"], "evidence sample_context_hash"
+        ),
     }
 
 
@@ -668,14 +686,20 @@ def _normalize_execution(value: object) -> dict[str, Any]:
         raise CandidatePoolError("entry execution must be an object")
     _exact_fields(value, _EXECUTION_FIELDS, "entry execution")
     requirements = value["requirements"]
-    if requirements != []:
-        raise CandidatePoolError("candidate pool v1 requirements must be empty")
+    if isinstance(requirements, str | bytes | bytearray) or not isinstance(
+        requirements, Sequence
+    ):
+        raise CandidatePoolError("entry requirements must be an array")
     condition = value["condition"]
     if not isinstance(condition, Mapping):
         raise CandidatePoolError("entry condition must be an object")
+    try:
+        normalized_requirements = json.loads(_canonical_json(requirements))
+    except json.JSONDecodeError as exc:
+        raise CandidatePoolError("entry requirements must be canonical JSON") from exc
     return {
-        "condition": canonicalize_expression(condition),
-        "requirements": [],
+        "condition": _json_object(condition, "entry condition"),
+        "requirements": normalized_requirements,
     }
 
 
@@ -818,6 +842,7 @@ __all__ = [
     "POOL_SCHEMA_VERSION",
     "SELECTED_STRATEGY_DESIGN_SCHEMA_VERSION",
     "add_candidate",
+    "add_verified_candidate_fragment",
     "canonical_strategy_pool_json",
     "compile_strategy_pool",
     "remove_pool_entry",

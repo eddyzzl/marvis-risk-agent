@@ -39,4 +39,24 @@ class StrategyNotAdoptedError(StrategyError):
         }
 
 
-__all__ = ["StrategyError", "StrategyNotAdoptedError"]
+class StrategyPoolLegacyDraftNeedsRebuildError(StrategyError):
+    """A v1 draft was archived and cannot be interpreted as a v2 Pool."""
+
+    def __init__(self, archive: dict) -> None:
+        self.archive = dict(archive)
+        super().__init__(
+            "archived Strategy Pool v1 draft requires an explicit v2 rebuild"
+        )
+
+    def to_detail(self) -> dict:
+        return {
+            "kind": ErrorKind.LEGACY_POOL_DRAFT_NEEDS_REBUILD,
+            "archive": self.archive,
+        }
+
+
+__all__ = [
+    "StrategyError",
+    "StrategyNotAdoptedError",
+    "StrategyPoolLegacyDraftNeedsRebuildError",
+]

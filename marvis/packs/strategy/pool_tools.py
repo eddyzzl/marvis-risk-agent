@@ -43,10 +43,20 @@ from marvis.packs.strategy.candidate_asset_tools import (
     _require_source_on_connection,
 )
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
-from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.candidate_fragment import (
+    UNIVARIATE_ASSET_ARTIFACT_SCHEMA_VERSION,
+    UNIVARIATE_ASSET_ORIGIN_TOOL,
+    UNIVARIATE_ASSET_SCHEMA_VERSION,
+    univariate_asset_to_verified_fragment,
+    verified_fragment_pool_parts,
+)
+from marvis.packs.strategy.errors import (
+    StrategyError,
+    StrategyPoolLegacyDraftNeedsRebuildError,
+)
 from marvis.packs.strategy.pool import (
     POOL_PRODUCER_VERSION,
-    add_candidate,
+    add_verified_candidate_fragment,
     compile_strategy_pool,
     remove_pool_entry,
     reorder_strategy_pool,
@@ -71,9 +81,13 @@ from marvis.repositories.task_artifacts import (
 )
 
 
-POOL_ARTIFACT_SCHEMA_VERSION = "strategy.candidate-pool-artifact.v1"
-POOL_MUTATION_TOOL_SCHEMA_VERSION = "strategy.candidate-pool-mutation-tool.v1"
-POOL_COMPILE_TOOL_SCHEMA_VERSION = "strategy.compile-candidate-pool-tool.v1"
+POOL_ARTIFACT_SCHEMA_VERSION = "strategy.candidate-pool-artifact.v2"
+POOL_MUTATION_TOOL_SCHEMA_VERSION = "strategy.candidate-pool-mutation-tool.v2"
+POOL_COMPILE_TOOL_SCHEMA_VERSION = "strategy.compile-candidate-pool-tool.v2"
+_LEGACY_ARCHIVE_WARNING = (
+    "A draft Strategy Pool v1 ledger was archived unchanged; this v2 Pool is "
+    "a separate rebuild and does not claim v1 revision continuity."
+)
 
 _ADD_INPUT_FIELDS = frozenset(
     {
@@ -174,6 +188,7 @@ class _CandidateLineage:
     parent_record: Any
     evidence: dict[str, Any]
     dataset: Any
+    verified_fragment: dict[str, Any]
     source_binding: dict[str, Any]
 
 
@@ -184,6 +199,9 @@ def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
         normalized = _validate_add_inputs(inputs)
         task_id = _required_text(ctx.task_id, "task_id")
         repository = StrategyCandidatePoolRepository(runtime.settings.db_path)
+        legacy_archive = repository.get_archived_legacy_draft(
+            task_id, normalized["strategy_type"]
+        )
         base = _expected_base_pool(
             repository,
             task_id=task_id,
@@ -200,13 +218,12 @@ def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
             expected_asset_id=normalized["expected_asset_id"],
             expected_asset_hash=normalized["expected_asset_hash"],
         )
-        snapshot = add_candidate(
+        snapshot = add_verified_candidate_fragment(
             base,
             task_id=task_id,
             strategy_type=normalized["strategy_type"],
             default_action=normalized["default_action"],
-            candidate_asset=candidate.asset,
-            source_binding=candidate.source_binding,
+            verified_candidate_fragment=candidate.verified_fragment,
             action=normalized["action"],
             reason=normalized.get("reason"),
         )
@@ -218,6 +235,7 @@ def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
             expected_snapshot_hash=normalized["expected_pool_snapshot_hash"],
             lineages=[*prior_lineages, candidate],
             inputs=normalized,
+            legacy_archive=legacy_archive,
         )
     except StrategyError:
         raise
@@ -236,7 +254,9 @@ def run_remove_pool_entry(inputs, ctx, runtime) -> dict[str, Any]:
             tool_name="remove_pool_entry",
         )
         normalized = _normalize_common_mutation_inputs(normalized, include_rule=True)
-        task_id, repository, base = _mutation_base(runtime, ctx, normalized)
+        task_id, repository, base, legacy_archive = _mutation_base(
+            runtime, ctx, normalized
+        )
         entry_id = _entry_id_for_rule(base, normalized["rule_id"])
         snapshot = remove_pool_entry(
             base,
@@ -252,6 +272,7 @@ def run_remove_pool_entry(inputs, ctx, runtime) -> dict[str, Any]:
             expected_snapshot_hash=normalized["expected_pool_snapshot_hash"],
             lineages=lineages,
             inputs=normalized,
+            legacy_archive=legacy_archive,
         )
     except StrategyError:
         raise
@@ -273,7 +294,9 @@ def run_set_pool_entry_action(inputs, ctx, runtime) -> dict[str, Any]:
         if not isinstance(normalized["action"], Mapping):
             raise StrategyError("action must be an object")
         normalized["action"] = _json_object(normalized["action"], "action")
-        task_id, repository, base = _mutation_base(runtime, ctx, normalized)
+        task_id, repository, base, legacy_archive = _mutation_base(
+            runtime, ctx, normalized
+        )
         entry_id = _entry_id_for_rule(base, normalized["rule_id"])
         snapshot = set_pool_entry_action(
             base,
@@ -290,6 +313,7 @@ def run_set_pool_entry_action(inputs, ctx, runtime) -> dict[str, Any]:
             expected_snapshot_hash=normalized["expected_pool_snapshot_hash"],
             lineages=lineages,
             inputs=normalized,
+            legacy_archive=legacy_archive,
         )
     except StrategyError:
         raise
@@ -312,7 +336,9 @@ def run_reorder_strategy_pool(inputs, ctx, runtime) -> dict[str, Any]:
         if len(set(ordered)) != len(ordered):
             raise StrategyError("ordered_rule_ids must not contain duplicate rule_ids")
         normalized["ordered_rule_ids"] = ordered
-        task_id, repository, base = _mutation_base(runtime, ctx, normalized)
+        task_id, repository, base, legacy_archive = _mutation_base(
+            runtime, ctx, normalized
+        )
         entry_ids = [_entry_id_for_rule(base, rule_id) for rule_id in ordered]
         snapshot = reorder_strategy_pool(
             base,
@@ -328,6 +354,7 @@ def run_reorder_strategy_pool(inputs, ctx, runtime) -> dict[str, Any]:
             expected_snapshot_hash=normalized["expected_pool_snapshot_hash"],
             lineages=lineages,
             inputs=normalized,
+            legacy_archive=legacy_archive,
         )
     except StrategyError:
         raise
@@ -348,8 +375,13 @@ def run_compile_strategy_pool(inputs, ctx, runtime) -> dict[str, Any]:
         normalized = _normalize_cas_inputs(normalized)
         task_id = _required_text(ctx.task_id, "task_id")
         repository = StrategyCandidatePoolRepository(runtime.settings.db_path)
+        legacy_archive = repository.get_archived_legacy_draft(
+            task_id, normalized["strategy_type"]
+        )
         current = repository.get_current(task_id, normalized["strategy_type"])
         if current is None:
+            if legacy_archive is not None:
+                raise StrategyPoolLegacyDraftNeedsRebuildError(legacy_archive)
             raise StrategyError("strategy candidate pool not found")
         pool = validate_strategy_pool(current)
         if (
@@ -374,6 +406,10 @@ def run_compile_strategy_pool(inputs, ctx, runtime) -> dict[str, Any]:
             "design_hash": selected["design_hash"],
             "selected_strategy_design": selected,
             "artifacts": [_artifact_output(artifact, task_id=task_id)],
+            "archived_legacy_draft": legacy_archive,
+            "warnings": (
+                [] if legacy_archive is None else [_LEGACY_ARCHIVE_WARNING]
+            ),
         }
     except StrategyError:
         raise
@@ -467,6 +503,9 @@ def _normalize_cas_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
 def _mutation_base(runtime, ctx, inputs):
     task_id = _required_text(ctx.task_id, "task_id")
     repository = StrategyCandidatePoolRepository(runtime.settings.db_path)
+    legacy_archive = repository.get_archived_legacy_draft(
+        task_id, inputs["strategy_type"]
+    )
     base = _expected_base_pool(
         repository,
         task_id=task_id,
@@ -475,8 +514,10 @@ def _mutation_base(runtime, ctx, inputs):
         expected_snapshot_hash=inputs["expected_pool_snapshot_hash"],
     )
     if base is None:
+        if legacy_archive is not None:
+            raise StrategyPoolLegacyDraftNeedsRebuildError(legacy_archive)
         raise StrategyError("strategy candidate pool not found at expected revision")
-    return task_id, repository, base
+    return task_id, repository, base, legacy_archive
 
 
 def _expected_base_pool(
@@ -520,11 +561,22 @@ def _load_pool_lineages(
     lineages: list[_CandidateLineage] = []
     for entry in normalized["entries"]:
         source = entry["source"]
+        if (
+            source["artifact_kind"] != ASSET_ARTIFACT_KIND
+            or source["artifact_schema_version"]
+            != UNIVARIATE_ASSET_ARTIFACT_SCHEMA_VERSION
+            or source["origin_tool"] != UNIVARIATE_ASSET_ORIGIN_TOOL
+            or source["asset_schema_version"] != UNIVARIATE_ASSET_SCHEMA_VERSION
+            or source["asset_type"] != "univariate_refinement"
+        ):
+            raise StrategyError(
+                "strategy pool contains an unsupported candidate fragment adapter"
+            )
         lineage = _load_candidate_lineage(
             runtime,
             task_id=task_id,
             artifact_id=source["artifact_id"],
-            expected_content_hash=source["content_hash"],
+            expected_content_hash=source["artifact_content_hash"],
             expected_asset_id=source["asset_id"],
             expected_asset_hash=source["asset_hash"],
         )
@@ -648,6 +700,8 @@ def _load_candidate_lineage(
         "artifact_id": asset_record.artifact_id,
         "kind": asset_record.kind,
         "content_hash": asset_record.content_hash,
+        "origin_tool": asset_record.origin_tool,
+        "artifact_schema_version": provenance["schema_version"],
         "asset_id": asset["asset_id"],
         "asset_hash": asset["asset_hash"],
         "candidate_kind": asset["asset_type"],
@@ -665,13 +719,22 @@ def _load_candidate_lineage(
             "semantic_mapping_hash": identity["semantic_mapping_hash"],
         },
     }
+    verified_fragment = univariate_asset_to_verified_fragment(
+        asset,
+        source_binding=source_binding,
+        candidate_evidence=evidence,
+    )
+    generic_source, _rule_id, _execution = verified_fragment_pool_parts(
+        verified_fragment
+    )
     return _CandidateLineage(
         asset_record=asset_record,
         asset=asset,
         parent_record=parent_record,
         evidence=evidence,
         dataset=dataset,
-        source_binding=source_binding,
+        verified_fragment=verified_fragment,
+        source_binding=generic_source,
     )
 
 
@@ -713,6 +776,7 @@ def _persist_mutation(
     expected_snapshot_hash: str,
     lineages: Sequence[_CandidateLineage],
     inputs: Mapping[str, Any],
+    legacy_archive: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     normalized = validate_strategy_pool(snapshot)
     canonical = canonical_strategy_pool_snapshot_json(normalized)
@@ -721,6 +785,30 @@ def _persist_mutation(
     if not hmac.compare_digest(_sha256(content), content_hash):
         raise StrategyError("canonical pool artifact content hash is inconsistent")
     task_id = normalized["task_id"]
+    parent_snapshot: dict[str, Any] | None = None
+    parent_artifact_binding = None
+    if expected_revision != ABSENT_POOL_REVISION:
+        persisted_parent = repository.get_revision(
+            task_id,
+            normalized["strategy_type"],
+            expected_revision,
+        )
+        if persisted_parent is None:
+            raise StrategyError("parent strategy pool revision not found")
+        parent_snapshot = validate_strategy_pool(persisted_parent)
+        if not hmac.compare_digest(
+            parent_snapshot["snapshot_hash"], expected_snapshot_hash
+        ):
+            raise StrategyError("parent strategy pool snapshot hash changed")
+        if normalized["parent_revision_id"] != parent_snapshot["revision_id"]:
+            raise StrategyError("new strategy pool revision has a mismatched parent")
+        parent_artifact_binding = _normalize_source_record(
+            _load_pool_artifact(
+                runtime,
+                task_id=task_id,
+                snapshot=parent_snapshot,
+            )
+        )
     out_dir = Path(runtime.settings.tasks_dir) / task_id / "strategy_candidate_pools"
     _require_output_directory(out_dir, root=Path(runtime.settings.tasks_dir))
     filename = _pool_filename(normalized)
@@ -735,6 +823,13 @@ def _persist_mutation(
         with runtime.task_artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
+                if parent_snapshot is not None and parent_artifact_binding is not None:
+                    _require_parent_pool_artifact_on_connection(
+                        conn,
+                        parent_artifact_binding,
+                        snapshot=parent_snapshot,
+                        tasks_root=Path(runtime.settings.tasks_dir),
+                    )
                 for lineage in lineages:
                     _require_lineage_on_connection(
                         conn,
@@ -771,7 +866,15 @@ def _persist_mutation(
                             _canonical_json(inputs).encode("utf-8")
                         ),
                         "outcome": "succeeded",
-                        "detail": {"entry_count": len(normalized["entries"])},
+                        "detail": {
+                            "entry_count": len(normalized["entries"]),
+                            "archived_legacy_draft": legacy_archive,
+                            "warnings": (
+                                []
+                                if legacy_archive is None
+                                else [_LEGACY_ARCHIVE_WARNING]
+                            ),
+                        },
                     },
                 )
                 conn.commit()
@@ -798,6 +901,8 @@ def _persist_mutation(
         "entries": persisted["entries"],
         "pool": persisted,
         "artifacts": [_artifact_output(record, task_id=task_id)],
+        "archived_legacy_draft": legacy_archive,
+        "warnings": [] if legacy_archive is None else [_LEGACY_ARCHIVE_WARNING],
     }
 
 
@@ -827,6 +932,33 @@ def _require_lineage_on_connection(conn, lineage, *, tasks_root: Path) -> None:
         lineage.dataset.content_hash,
         "candidate source dataset content hash drifted",
     )
+
+
+def _require_parent_pool_artifact_on_connection(
+    conn,
+    binding,
+    *,
+    snapshot: Mapping[str, Any],
+    tasks_root: Path,
+) -> None:
+    """Replay the immutable parent Pool artifact under the mutation DB lock."""
+
+    _require_source_on_connection(conn, binding)
+    _require_regular_artifact_path(binding.path, root=tasks_root)
+    _require_file_content_hash(
+        binding.path,
+        binding.content_hash,
+        "parent strategy pool artifact content hash drifted",
+    )
+    try:
+        raw = binding.path.read_text("utf-8")
+        persisted = validate_strategy_pool(
+            json.loads(raw, object_pairs_hook=_object_without_duplicate_keys)
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise StrategyError("parent strategy pool artifact is invalid") from exc
+    if canonical_strategy_pool_snapshot_json(persisted) != raw or persisted != snapshot:
+        raise StrategyError("parent strategy pool artifact is not canonical")
 
 
 def _load_pool_artifact(runtime, *, task_id: str, snapshot: Mapping[str, Any]):

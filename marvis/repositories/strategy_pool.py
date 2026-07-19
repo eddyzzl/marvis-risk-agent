@@ -20,16 +20,24 @@ from typing import Any
 
 from marvis.db_schema import connect
 from marvis.domain import STRATEGY_TYPES
+from marvis.packs.strategy.candidate_fragment import (
+    verified_fragment_from_pool_parts,
+)
+from marvis.packs.strategy.errors import StrategyError
 from marvis.repositories.audit import _write_audit_row
 
 
-POOL_SCHEMA_VERSION = "strategy.candidate-pool.v1"
-POOL_HEAD_SCHEMA_VERSION = "strategy.candidate-pool-head.v1"
+POOL_SCHEMA_VERSION = "strategy.candidate-pool.v2"
+POOL_HEAD_SCHEMA_VERSION = "strategy.candidate-pool-head.v2"
+POOL_OPERATION_SCHEMA_VERSION = "strategy.candidate-pool-operation.v2"
+LEGACY_POOL_ARCHIVE_SCHEMA_VERSION = "strategy.candidate-pool-legacy-archive.v1"
 POOL_ARTIFACT_KIND = "strategy_candidate_pool_json"
+# Historical public import retained; the repository no longer constrains Pool
+# sources to this concrete adapter kind.
 SOURCE_ARTIFACT_KIND = "strategy_candidate_asset_json"
 ABSENT_POOL_REVISION = 0
 ABSENT_POOL_SNAPSHOT_HASH = hashlib.sha256(
-    b"strategy.candidate-pool.absent.v1"
+    b"strategy.candidate-pool.absent.v2"
 ).hexdigest()
 
 _POOL_ID_RE = re.compile(r"^strategy-pool-[0-9a-f]{32}$")
@@ -67,17 +75,23 @@ _ENTRY_FIELDS = frozenset(
 _SOURCE_FIELDS = frozenset(
     {
         "artifact_id",
-        "kind",
-        "content_hash",
+        "artifact_kind",
+        "artifact_schema_version",
+        "artifact_content_hash",
+        "origin_tool",
+        "asset_schema_version",
         "asset_id",
         "asset_hash",
-        "candidate_kind",
+        "asset_type",
         "fragment_id",
+        "fragment_hash",
+        "fragment_type",
         "effect_id",
-        "effect_stage",
+        "evidence_id",
+        "evidence_hash",
+        "candidate_stage",
+        "observation_stage",
         "validation_status",
-        "parent_candidate_id",
-        "parent_evidence_hash",
         "evidence_identity",
     }
 )
@@ -88,6 +102,7 @@ _EVIDENCE_IDENTITY_FIELDS = frozenset(
         "workspace_revision",
         "workspace_generation",
         "semantic_mapping_hash",
+        "sample_context_hash",
     }
 )
 _EXECUTION_FIELDS = frozenset({"condition", "requirements"})
@@ -137,7 +152,7 @@ def strategy_pool_operation_hash(
     if normalized_status != "draft":
         raise StrategyCandidatePoolDataError("status must remain draft")
     payload = {
-        "schema_version": "strategy.candidate-pool-operation.v1",
+        "schema_version": POOL_OPERATION_SCHEMA_VERSION,
         "pool_id": normalized_pool_id,
         "parent_revision_id": parent,
         "kind": operation_kind,
@@ -243,6 +258,102 @@ class StrategyCandidatePoolRepository:
                     "pool head does not match its current revision"
                 )
             return snapshot
+
+    def get_archived_legacy_draft(
+        self, task_id: str, strategy_type: str
+    ) -> dict[str, Any] | None:
+        """Return direct v1 archive metadata without parsing v1 snapshot JSON."""
+
+        task = _required_text(task_id, field="task_id")
+        kind = _strategy_type(strategy_type)
+        with connect(self.db_path) as conn:
+            archive_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'strategy_candidate_pools_v1_archive'"
+            ).fetchone()
+            if archive_exists is None:
+                return None
+            head = conn.execute(
+                """
+                SELECT * FROM strategy_candidate_pools_v1_archive
+                 WHERE task_id = ? AND strategy_type = ?
+                """,
+                (task, kind),
+            ).fetchone()
+            if head is None:
+                return None
+            pool_id = str(head["id"])
+            revision_rows = conn.execute(
+                """
+                SELECT revision, id, snapshot_hash, artifact_id,
+                       artifact_content_hash
+                  FROM strategy_candidate_pool_revisions_v1_archive
+                 WHERE pool_id = ?
+                 ORDER BY revision, id
+                """,
+                (pool_id,),
+            ).fetchall()
+            item_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                      FROM strategy_candidate_pool_items_v1_archive
+                     WHERE pool_id = ?
+                    """,
+                    (pool_id,),
+                ).fetchone()[0]
+            )
+            source_artifact_ids = [
+                str(row[0])
+                for row in conn.execute(
+                    """
+                    SELECT DISTINCT source_artifact_id
+                      FROM strategy_candidate_pool_items_v1_archive
+                     WHERE pool_id = ?
+                     ORDER BY source_artifact_id
+                    """,
+                    (pool_id,),
+                ).fetchall()
+            ]
+        current_revision = int(head["current_revision"])
+        current_hash = _sha256(
+            head["current_snapshot_hash"], field="legacy current_snapshot_hash"
+        )
+        return {
+            "schema_version": LEGACY_POOL_ARCHIVE_SCHEMA_VERSION,
+            "status": "archived_legacy_draft",
+            "requires_rebuild": True,
+            "reason": "candidate_pool_v1_incompatible_with_generic_fragment_v2",
+            "pool_id": pool_id,
+            "task_id": task,
+            "strategy_type": kind,
+            "archived_head_schema_version": str(head["schema_version"]),
+            "current_revision": current_revision,
+            "current_revision_id": (
+                None
+                if head["current_revision_id"] is None
+                else str(head["current_revision_id"])
+            ),
+            "current_snapshot_hash": current_hash,
+            "revision_count": len(revision_rows),
+            "item_count": item_count,
+            "revision_artifacts": [
+                {
+                    "revision": int(row["revision"]),
+                    "revision_id": str(row["id"]),
+                    "snapshot_hash": _sha256(
+                        row["snapshot_hash"], field="legacy snapshot_hash"
+                    ),
+                    "artifact_id": str(row["artifact_id"]),
+                    "artifact_content_hash": _sha256(
+                        row["artifact_content_hash"],
+                        field="legacy artifact_content_hash",
+                    ),
+                }
+                for row in revision_rows
+            ],
+            "source_artifact_ids": source_artifact_ids,
+        }
 
     def get_revision(
         self,
@@ -486,16 +597,15 @@ class StrategyCandidatePoolRepository:
             artifact_id=artifact_identity,
             kind=POOL_ARTIFACT_KIND,
             content_hash=artifact_hash,
-            source=None,
         )
         for entry in normalized["entries"]:
             _require_artifact(
                 conn,
                 task_id=normalized["task_id"],
                 artifact_id=entry["source"]["artifact_id"],
-                kind=entry["source"]["kind"],
-                content_hash=entry["source"]["content_hash"],
-                source=entry["source"],
+                kind=entry["source"]["artifact_kind"],
+                content_hash=entry["source"]["artifact_content_hash"],
+                origin_tool=entry["source"]["origin_tool"],
             )
 
         operation = normalized["operation"]
@@ -687,11 +797,6 @@ def _normalize_entry(value: object, *, expected_position: int) -> dict[str, Any]
     if not isinstance(source_raw, Mapping):
         raise StrategyCandidatePoolDataError("entry.source must be an object")
     _exact_fields(source_raw, _SOURCE_FIELDS, field="entry.source")
-    source_kind = _required_text(source_raw["kind"], field="source.kind")
-    if source_kind != SOURCE_ARTIFACT_KIND:
-        raise StrategyCandidatePoolDataError(
-            f"source.kind must be {SOURCE_ARTIFACT_KIND}"
-        )
     identity_raw = source_raw["evidence_identity"]
     if not isinstance(identity_raw, Mapping):
         raise StrategyCandidatePoolDataError(
@@ -722,39 +827,72 @@ def _normalize_entry(value: object, *, expected_position: int) -> dict[str, Any]
             identity_raw["semantic_mapping_hash"],
             field="evidence_identity.semantic_mapping_hash",
         ),
+        "sample_context_hash": _sha256(
+            identity_raw["sample_context_hash"],
+            field="evidence_identity.sample_context_hash",
+        ),
     }
     source = {
         "artifact_id": _required_text(
             source_raw["artifact_id"], field="source.artifact_id"
         ),
-        "kind": source_kind,
-        "content_hash": _sha256(
-            source_raw["content_hash"], field="source.content_hash"
+        "artifact_kind": _required_text(
+            source_raw["artifact_kind"], field="source.artifact_kind"
+        ),
+        "artifact_schema_version": _required_text(
+            source_raw["artifact_schema_version"],
+            field="source.artifact_schema_version",
+        ),
+        "artifact_content_hash": _sha256(
+            source_raw["artifact_content_hash"],
+            field="source.artifact_content_hash",
+        ),
+        "origin_tool": _required_text(
+            source_raw["origin_tool"], field="source.origin_tool"
+        ),
+        "asset_schema_version": _required_text(
+            source_raw["asset_schema_version"], field="source.asset_schema_version"
         ),
         "asset_id": _required_text(source_raw["asset_id"], field="source.asset_id"),
         "asset_hash": _sha256(source_raw["asset_hash"], field="source.asset_hash"),
-        "candidate_kind": _required_text(
-            source_raw["candidate_kind"], field="source.candidate_kind"
+        "asset_type": _required_text(
+            source_raw["asset_type"], field="source.asset_type"
         ),
         "fragment_id": _required_text(
             source_raw["fragment_id"], field="source.fragment_id"
         ),
+        "fragment_hash": _sha256(
+            source_raw["fragment_hash"], field="source.fragment_hash"
+        ),
+        "fragment_type": _required_text(
+            source_raw["fragment_type"], field="source.fragment_type"
+        ),
         "effect_id": _required_text(source_raw["effect_id"], field="source.effect_id"),
-        "effect_stage": _required_text(
-            source_raw["effect_stage"], field="source.effect_stage"
+        "evidence_id": _required_text(
+            source_raw["evidence_id"], field="source.evidence_id"
+        ),
+        "evidence_hash": _sha256(
+            source_raw["evidence_hash"], field="source.evidence_hash"
+        ),
+        "candidate_stage": _required_text(
+            source_raw["candidate_stage"], field="source.candidate_stage"
+        ),
+        "observation_stage": _required_text(
+            source_raw["observation_stage"], field="source.observation_stage"
         ),
         "validation_status": _required_text(
             source_raw["validation_status"], field="source.validation_status"
         ),
-        "parent_candidate_id": _required_text(
-            source_raw["parent_candidate_id"], field="source.parent_candidate_id"
-        ),
-        "parent_evidence_hash": _sha256(
-            source_raw["parent_evidence_hash"],
-            field="source.parent_evidence_hash",
-        ),
         "evidence_identity": evidence_identity,
     }
+    if (
+        source["candidate_stage"] != "development"
+        or source["observation_stage"] != "backtested"
+        or source["validation_status"] != "unvalidated"
+    ):
+        raise StrategyCandidatePoolDataError(
+            "pool source must remain development, backtested, and unvalidated"
+        )
     execution_raw = value["execution"]
     if not isinstance(execution_raw, Mapping):
         raise StrategyCandidatePoolDataError("entry.execution must be an object")
@@ -766,12 +904,23 @@ def _normalize_entry(value: object, *, expected_position: int) -> dict[str, Any]
     enabled = value["enabled"]
     if not isinstance(enabled, bool):
         raise StrategyCandidatePoolDataError("entry.enabled must be a boolean")
+    execution = {"condition": condition, "requirements": requirements}
+    try:
+        verified_fragment_from_pool_parts(
+            source=source,
+            rule_id=_required_text(value["rule_id"], field="entry.rule_id"),
+            execution=execution,
+        )
+    except StrategyError as exc:
+        raise StrategyCandidatePoolDataError(
+            f"entry verified candidate fragment is invalid: {exc}"
+        ) from exc
     return {
         "entry_id": _required_text(value["entry_id"], field="entry.entry_id"),
         "rule_id": _required_text(value["rule_id"], field="entry.rule_id"),
         "position": position,
         "source": source,
-        "execution": {"condition": condition, "requirements": requirements},
+        "execution": execution,
         "action": _json_object_or_none(value["action"], field="entry.action"),
         "enabled": enabled,
     }
@@ -821,13 +970,16 @@ def _insert_item(
         """
         INSERT INTO strategy_candidate_pool_items(
             revision_id, pool_id, task_id, position, entry_id, rule_id,
-            source_artifact_id, source_kind, source_content_hash, asset_id,
-            asset_hash, candidate_kind, fragment_id, effect_id, effect_stage,
-            source_validation_status, parent_candidate_id,
-            parent_evidence_hash, dataset_id, dataset_content_hash,
+            source_artifact_id, source_artifact_kind,
+            source_artifact_schema_version, source_artifact_content_hash,
+            source_origin_tool, asset_schema_version, asset_id, asset_hash,
+            asset_type, fragment_id, fragment_hash, fragment_type, effect_id,
+            evidence_id, evidence_hash, candidate_stage, observation_stage,
+            source_validation_status, dataset_id, dataset_content_hash,
             workspace_revision, workspace_generation, semantic_mapping_hash,
+            sample_context_hash,
             condition_json, requirements_json, action_json, enabled
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             snapshot["revision_id"],
@@ -837,22 +989,29 @@ def _insert_item(
             entry["entry_id"],
             entry["rule_id"],
             source["artifact_id"],
-            source["kind"],
-            source["content_hash"],
+            source["artifact_kind"],
+            source["artifact_schema_version"],
+            source["artifact_content_hash"],
+            source["origin_tool"],
+            source["asset_schema_version"],
             source["asset_id"],
             source["asset_hash"],
-            source["candidate_kind"],
+            source["asset_type"],
             source["fragment_id"],
+            source["fragment_hash"],
+            source["fragment_type"],
             source["effect_id"],
-            source["effect_stage"],
+            source["evidence_id"],
+            source["evidence_hash"],
+            source["candidate_stage"],
+            source["observation_stage"],
             source["validation_status"],
-            source["parent_candidate_id"],
-            source["parent_evidence_hash"],
             source["evidence_identity"]["dataset_id"],
             source["evidence_identity"]["dataset_content_hash"],
             source["evidence_identity"]["workspace_revision"],
             source["evidence_identity"]["workspace_generation"],
             source["evidence_identity"]["semantic_mapping_hash"],
+            source["evidence_identity"]["sample_context_hash"],
             _canonical_json(execution["condition"]),
             _canonical_json(execution["requirements"]),
             _canonical_json(entry["action"]),
@@ -906,7 +1065,6 @@ def _snapshot_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, 
         artifact_id=str(row["artifact_id"]),
         kind=POOL_ARTIFACT_KIND,
         content_hash=str(row["artifact_content_hash"]),
-        source=None,
     )
     if not hmac.compare_digest(
         str(row["artifact_content_hash"]),
@@ -949,23 +1107,30 @@ def _entry_from_item_row(row: sqlite3.Row) -> dict[str, Any]:
         "position": int(row["position"]),
         "source": {
             "artifact_id": str(row["source_artifact_id"]),
-            "kind": str(row["source_kind"]),
-            "content_hash": str(row["source_content_hash"]),
+            "artifact_kind": str(row["source_artifact_kind"]),
+            "artifact_schema_version": str(row["source_artifact_schema_version"]),
+            "artifact_content_hash": str(row["source_artifact_content_hash"]),
+            "origin_tool": str(row["source_origin_tool"]),
+            "asset_schema_version": str(row["asset_schema_version"]),
             "asset_id": str(row["asset_id"]),
             "asset_hash": str(row["asset_hash"]),
-            "candidate_kind": str(row["candidate_kind"]),
+            "asset_type": str(row["asset_type"]),
             "fragment_id": str(row["fragment_id"]),
+            "fragment_hash": str(row["fragment_hash"]),
+            "fragment_type": str(row["fragment_type"]),
             "effect_id": str(row["effect_id"]),
-            "effect_stage": str(row["effect_stage"]),
+            "evidence_id": str(row["evidence_id"]),
+            "evidence_hash": str(row["evidence_hash"]),
+            "candidate_stage": str(row["candidate_stage"]),
+            "observation_stage": str(row["observation_stage"]),
             "validation_status": str(row["source_validation_status"]),
-            "parent_candidate_id": str(row["parent_candidate_id"]),
-            "parent_evidence_hash": str(row["parent_evidence_hash"]),
             "evidence_identity": {
                 "dataset_id": str(row["dataset_id"]),
                 "dataset_content_hash": str(row["dataset_content_hash"]),
                 "workspace_revision": int(row["workspace_revision"]),
                 "workspace_generation": int(row["workspace_generation"]),
                 "semantic_mapping_hash": str(row["semantic_mapping_hash"]),
+                "sample_context_hash": str(row["sample_context_hash"]),
             },
         },
         "execution": {"condition": condition, "requirements": requirements},
@@ -981,7 +1146,7 @@ def _require_artifact(
     artifact_id: str,
     kind: str,
     content_hash: str,
-    source: Mapping[str, Any] | None,
+    origin_tool: str | None = None,
 ) -> None:
     row = conn.execute(
         "SELECT * FROM task_artifacts WHERE id = ? AND task_id = ?",
@@ -997,73 +1162,10 @@ def _require_artifact(
         raise StrategyCandidatePoolDataError(
             f"artifact binding does not match pool evidence: {artifact_id}"
         )
-    if source is None:
-        return
-    try:
-        provenance = json.loads(
-            str(row["provenance_json"]), object_pairs_hook=_unique_object
-        )
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    if origin_tool is not None and str(row["origin_tool"]) != origin_tool:
         raise StrategyCandidatePoolDataError(
-            "candidate asset provenance is invalid"
-        ) from exc
-    if not isinstance(provenance, dict):
-        raise StrategyCandidatePoolDataError(
-            "candidate asset provenance must be an object"
+            f"artifact origin_tool does not match pool evidence: {artifact_id}"
         )
-    bindings = {
-        "asset_id": source["asset_id"],
-        "asset_hash": source["asset_hash"],
-        "candidate_id": source["parent_candidate_id"],
-        "evidence_hash": source["parent_evidence_hash"],
-    }
-    for key, expected in bindings.items():
-        if provenance.get(key) != expected:
-            raise StrategyCandidatePoolDataError(
-                f"candidate asset provenance {key} does not match pool source"
-            )
-    identity = source["evidence_identity"]
-    direct_identity = {
-        key: provenance.get(key)
-        for key in _EVIDENCE_IDENTITY_FIELDS
-        if key in provenance
-    }
-    if set(direct_identity) == _EVIDENCE_IDENTITY_FIELDS:
-        identity_provenance = direct_identity
-    else:
-        parent_artifact_id = provenance.get("source_artifact_id")
-        if not isinstance(parent_artifact_id, str) or not parent_artifact_id:
-            raise StrategyCandidatePoolDataError(
-                "candidate asset provenance lacks evidence identity lineage"
-            )
-        parent = conn.execute(
-            "SELECT * FROM task_artifacts WHERE id = ? AND task_id = ?",
-            (parent_artifact_id, task_id),
-        ).fetchone()
-        if parent is None:
-            raise StrategyCandidatePoolNotFoundError(
-                f"parent candidate artifact not found for task: {parent_artifact_id}"
-            )
-        try:
-            parent_provenance = json.loads(
-                str(parent["provenance_json"]), object_pairs_hook=_unique_object
-            )
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise StrategyCandidatePoolDataError(
-                "parent candidate artifact provenance is invalid"
-            ) from exc
-        if not isinstance(parent_provenance, dict):
-            raise StrategyCandidatePoolDataError(
-                "parent candidate artifact provenance must be an object"
-            )
-        identity_provenance = {
-            key: parent_provenance.get(key) for key in _EVIDENCE_IDENTITY_FIELDS
-        }
-    for key, expected in identity.items():
-        if identity_provenance.get(key) != expected:
-            raise StrategyCandidatePoolDataError(
-                f"candidate asset evidence identity {key} does not match pool source"
-            )
 
 
 def _select_head(
@@ -1319,7 +1421,9 @@ __all__ = [
     "ABSENT_POOL_SNAPSHOT_HASH",
     "POOL_ARTIFACT_KIND",
     "POOL_HEAD_SCHEMA_VERSION",
+    "POOL_OPERATION_SCHEMA_VERSION",
     "POOL_SCHEMA_VERSION",
+    "LEGACY_POOL_ARCHIVE_SCHEMA_VERSION",
     "SOURCE_ARTIFACT_KIND",
     "StrategyCandidatePoolConflictError",
     "StrategyCandidatePoolDataError",

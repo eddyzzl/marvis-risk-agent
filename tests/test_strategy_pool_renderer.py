@@ -107,7 +107,7 @@ def test_mutation_renderer_reads_governance_fields_from_canonical_source() -> No
 
 def test_compile_renderer_labels_spec_as_unadopted_design_only() -> None:
     output = {
-        "schema_version": "strategy.compile-candidate-pool-tool.v1",
+        "schema_version": "strategy.compile-candidate-pool-tool.v2",
         "pool_id": "strategy-pool-1",
         "revision": 4,
         "snapshot_hash": "a" * 64,

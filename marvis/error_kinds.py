@@ -50,6 +50,7 @@ class ErrorKind:
 
     # --- Pack typed errors (marvis/packs/*/errors.py to_detail kinds) ---
     STRATEGY_NOT_ADOPTED = "strategy_not_adopted"
+    LEGACY_POOL_DRAFT_NEEDS_REBUILD = "legacy_pool_draft_needs_rebuild"
     MISSING_BASELINE = "missing_baseline"
     REPORT_SCORE_MISSING = "report_score_missing"
 

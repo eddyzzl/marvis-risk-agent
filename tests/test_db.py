@@ -1166,7 +1166,7 @@ def test_init_db_migration_009_backfills_canonical_strategy_asset_status(tmp_pat
             "SELECT id, status, asset_status FROM strategies ORDER BY id"
         ).fetchall()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 15
+    assert version == db_schema_module.SCHEMA_VERSION == 16
     assert "asset_status" in columns
     assert [tuple(row) for row in rows] == [
         ("adopted-strategy", "adopted", "adopted_local"),
@@ -1228,7 +1228,7 @@ def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_pa
             row[1] for row in conn.execute("PRAGMA index_list(task_artifacts)")
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 15
+    assert version == db_schema_module.SCHEMA_VERSION == 16
     assert columns == {
         "id",
         "task_id",
@@ -1264,7 +1264,7 @@ def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
         }
         task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 15
+    assert version == db_schema_module.SCHEMA_VERSION == 16
     assert columns == {
         "task_id",
         "schema_version",
@@ -1312,7 +1312,7 @@ def test_init_db_migration_013_adds_data_analysis_runs_to_v12_database(tmp_path)
         }
         task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 15
+    assert version == db_schema_module.SCHEMA_VERSION == 16
     assert columns == {
         "id",
         "schema_version",
@@ -1386,7 +1386,7 @@ def test_init_db_migration_014_adds_transform_runs_and_lineage_to_v13_database(
             )
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 15
+    assert version == db_schema_module.SCHEMA_VERSION == 16
     assert run_columns == {
         "id",
         "schema_version",
@@ -1436,7 +1436,7 @@ def test_init_db_migration_014_adds_transform_runs_and_lineage_to_v13_database(
     } <= triggers
 
 
-def test_init_db_migration_015_adds_strategy_candidate_pool_ledger_to_v14_database(
+def test_init_db_migration_016_upgrades_candidate_pool_ledger_from_v14_database(
     tmp_path,
 ):
     db_path = tmp_path / "legacy_v14.sqlite"
@@ -1448,7 +1448,8 @@ def test_init_db_migration_015_adds_strategy_candidate_pool_ledger_to_v14_databa
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
-                content_hash TEXT NOT NULL
+                content_hash TEXT NOT NULL,
+                origin_tool TEXT NOT NULL
             )
             """
         )
@@ -1471,6 +1472,12 @@ def test_init_db_migration_015_adds_strategy_candidate_pool_ledger_to_v14_databa
                 "PRAGMA table_info(strategy_candidate_pool_items)"
             )
         }
+        archived_item_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(strategy_candidate_pool_items_v1_archive)"
+            )
+        }
         triggers = {
             row[0]
             for row in conn.execute(
@@ -1479,11 +1486,14 @@ def test_init_db_migration_015_adds_strategy_candidate_pool_ledger_to_v14_databa
             )
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 15
+    assert version == db_schema_module.SCHEMA_VERSION == 16
     assert {
         "strategy_candidate_pools",
         "strategy_candidate_pool_revisions",
         "strategy_candidate_pool_items",
+        "strategy_candidate_pools_v1_archive",
+        "strategy_candidate_pool_revisions_v1_archive",
+        "strategy_candidate_pool_items_v1_archive",
     } <= tables
     assert {
         "dataset_id",
@@ -1491,12 +1501,79 @@ def test_init_db_migration_015_adds_strategy_candidate_pool_ledger_to_v14_databa
         "workspace_revision",
         "workspace_generation",
         "semantic_mapping_hash",
+        "sample_context_hash",
+        "source_artifact_kind",
+        "source_artifact_schema_version",
+        "source_origin_tool",
+        "fragment_hash",
     } <= item_columns
+    assert "source_kind" in archived_item_columns
+    assert "source_artifact_kind" not in archived_item_columns
     assert {
         "trg_strategy_candidate_pool_revisions_immutable_update",
         "trg_strategy_candidate_pool_items_immutable_update",
         "trg_strategy_candidate_pools_head_target",
     } <= triggers
+
+
+def test_init_db_migration_and_version_stamp_share_one_atomic_transaction(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "migration_atomicity.sqlite"
+    with connect(db_path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute(
+            """
+            CREATE TABLE task_artifacts (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                origin_tool TEXT NOT NULL
+            )
+            """
+        )
+        db_schema_module._migration_015_strategy_candidate_pools(conn)
+        conn.execute("PRAGMA user_version = 15")
+
+    migration_016 = db_schema_module._migration_016_strategy_candidate_pool_v2
+
+    def crash_after_schema_change(conn):
+        migration_016(conn)
+        assert conn.in_transaction is True
+        raise RuntimeError("simulated crash before version stamp")
+
+    monkeypatch.setattr(db_schema_module, "_MIGRATIONS", [(16, crash_after_schema_change)])
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        init_db(db_path)
+
+    with connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        item_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(strategy_candidate_pool_items)"
+            )
+        }
+    assert "strategy_candidate_pools_v1_archive" not in tables
+    assert "source_kind" in item_columns
+    assert "source_artifact_kind" not in item_columns
+
+    monkeypatch.setattr(db_schema_module, "_MIGRATIONS", [(16, migration_016)])
+    init_db(db_path)
+    with connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'strategy_candidate_pools_v1_archive'"
+        ).fetchone()
 
 
 def test_init_db_migration_009_rejects_unknown_legacy_status_without_stamping(tmp_path):

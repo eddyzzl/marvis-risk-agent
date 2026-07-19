@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pandas as pd
@@ -19,7 +20,19 @@ from marvis.db_schema import connect
 from marvis.domain import TaskCreate
 from marvis.files import sha256_file
 from marvis.packs.strategy import tools as strategy_tools
-from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.errors import (
+    StrategyError,
+    StrategyPoolLegacyDraftNeedsRebuildError,
+)
+from marvis.packs.strategy.candidate_fragment import (
+    build_verified_candidate_fragment,
+    sample_context_hash_from_candidate_evidence,
+)
+from marvis.packs.strategy.pool import (
+    add_verified_candidate_fragment,
+    canonical_strategy_pool_json,
+)
+import marvis.packs.strategy.pool_tools as pool_tools_module
 from marvis.packs.strategy.pool import ABSENT_POOL_SNAPSHOT_HASH
 from marvis.packs.strategy.pool_tools import (
     POOL_ARTIFACT_KIND,
@@ -31,7 +44,11 @@ from marvis.packs.strategy.pool_tools import (
 )
 from marvis.plugins.contracts import ToolContext
 from marvis.repositories.data_workspace import DataWorkspaceRepository
-from marvis.repositories.strategy_pool import StrategyCandidatePoolRepository
+from marvis.repositories.strategy_pool import (
+    StrategyCandidatePoolRepository,
+    strategy_pool_id,
+    strategy_pool_artifact_content_hash,
+)
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
 
@@ -177,6 +194,7 @@ def _setup(tmp_path: Path) -> dict:
         "ctx": ctx,
         "runtime": runtime,
         "dataset": dataset,
+        "source_output": source_output,
         "first": refine(0),
         "refine": refine,
     }
@@ -201,6 +219,76 @@ def _add_inputs(
         "expected_pool_revision": expected_revision,
         "expected_pool_snapshot_hash": expected_hash,
     }
+
+
+def _insert_archived_legacy_draft(fixture: dict) -> dict:
+    task_id = fixture["task"].id
+    pool_id = strategy_pool_id(task_id, "approval")
+    revision_id = "legacy-pool-revision-1"
+    snapshot_hash = "d" * 64
+    operation_hash = "e" * 64
+    old_absent_hash = (
+        "9024538661b531de814a43e87e932bf39b4b87522525f7a7afea1bf5bf8968ee"
+    )
+    legacy_bytes = b'{"schema_version":"strategy.candidate-pool.v1"}'
+    path = (
+        Path(fixture["settings"].tasks_dir)
+        / task_id
+        / "strategy_candidate_pools"
+        / "legacy-v1.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(legacy_bytes)
+    artifact = TaskArtifactRepository(fixture["settings"].db_path).register(
+        task_id=task_id,
+        kind=POOL_ARTIFACT_KIND,
+        path=str(path),
+        content_hash=hashlib.sha256(legacy_bytes).hexdigest(),
+        origin_tool="strategy.add_candidate_to_pool",
+        provenance={"schema_version": "strategy.candidate-pool-artifact.v1"},
+    )
+    timestamp = "2026-07-19T00:00:00+00:00"
+    with connect(fixture["settings"].db_path) as conn:
+        conn.execute("PRAGMA defer_foreign_keys = ON")
+        conn.execute(
+            """
+            INSERT INTO strategy_candidate_pools_v1_archive(
+                id, schema_version, task_id, strategy_type, current_revision,
+                current_revision_id, current_snapshot_hash, created_at, updated_at
+            ) VALUES (?, 'strategy.candidate-pool-head.v1', ?, 'approval',
+                      1, ?, ?, ?, ?)
+            """,
+            (pool_id, task_id, revision_id, snapshot_hash, timestamp, timestamp),
+        )
+        conn.execute(
+            """
+            INSERT INTO strategy_candidate_pool_revisions_v1_archive(
+                id, schema_version, pool_id, task_id, strategy_type, revision,
+                parent_revision_id, parent_snapshot_hash, operation_kind,
+                operation_hash, operation_reason, default_action_json, status,
+                validation_status, snapshot_json, snapshot_hash, artifact_id,
+                artifact_content_hash, created_at
+            ) VALUES (?, 'strategy.candidate-pool.v1', ?, ?, 'approval', 1,
+                      NULL, ?, 'add_candidate', ?, 'legacy draft', '{}', 'draft',
+                      'unvalidated', '{}', ?, ?, ?, ?)
+            """,
+            (
+                revision_id,
+                pool_id,
+                task_id,
+                old_absent_hash,
+                operation_hash,
+                snapshot_hash,
+                artifact["id"],
+                artifact["content_hash"],
+                timestamp,
+            ),
+        )
+    archive = StrategyCandidatePoolRepository(
+        fixture["settings"].db_path
+    ).get_archived_legacy_draft(task_id, "approval")
+    assert archive is not None
+    return archive
 
 
 def _refine_for_workspace(fixture: dict, workspace, bin_index: int) -> dict:
@@ -266,6 +354,11 @@ def test_add_and_compile_persist_governed_pool_without_building_strategy(
     assert added["validation_status"] == "unvalidated"
     assert added["entry_count"] == 1
     assert added["entries"][0]["rule_id"] == fixture["first"]["rule"]["rule_id"]
+    assert added["entries"][0]["source"]["evidence_identity"][
+        "sample_context_hash"
+    ] == sample_context_hash_from_candidate_evidence(
+        fixture["source_output"]["candidate_evidence"]
+    )
     assert len(added["artifacts"]) == 1
     assert added["artifacts"][0]["kind"] == POOL_ARTIFACT_KIND
 
@@ -303,6 +396,67 @@ def test_add_and_compile_persist_governed_pool_without_building_strategy(
         "design_hash"
     ]
     assert fixture["runtime"].strategies.list_for_task(fixture["task"].id) == []
+
+
+def test_archived_v1_draft_requires_rebuild_and_is_disclosed_by_v2_mutation(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    archive = _insert_archived_legacy_draft(fixture)
+
+    with pytest.raises(StrategyPoolLegacyDraftNeedsRebuildError) as exc:
+        run_compile_strategy_pool(
+            {
+                "strategy_type": "approval",
+                "expected_pool_revision": archive["current_revision"],
+                "expected_pool_snapshot_hash": archive["current_snapshot_hash"],
+            },
+            fixture["ctx"],
+            fixture["runtime"],
+        )
+    detail = exc.value.to_detail()
+    assert detail["kind"] == "legacy_pool_draft_needs_rebuild"
+    assert detail["archive"] == archive
+
+    added = run_add_candidate_to_pool(
+        _add_inputs(
+            fixture["first"],
+            expected_revision=0,
+            expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    assert added["revision"] == 1
+    assert added["archived_legacy_draft"] == archive
+    assert len(added["warnings"]) == 1
+    assert "separate rebuild" in added["warnings"][0]
+
+    compiled = run_compile_strategy_pool(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": added["revision"],
+            "expected_pool_snapshot_hash": added["snapshot_hash"],
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    assert compiled["archived_legacy_draft"] == archive
+    assert compiled["warnings"] == added["warnings"]
+    assert (
+        compiled["selected_strategy_design"]["schema_version"]
+        == "strategy.selected-strategy-design.v2"
+    )
+
+    with connect(fixture["settings"].db_path) as conn:
+        detail_json = conn.execute(
+            "SELECT detail_json FROM audit "
+            "WHERE kind = 'strategy.pool.add_candidate' "
+            "ORDER BY at DESC LIMIT 1"
+        ).fetchone()[0]
+    audit_detail = json.loads(detail_json)
+    assert audit_detail["archived_legacy_draft"] == archive
+    assert audit_detail["warnings"] == added["warnings"]
 
 
 def test_mutation_tools_resolve_rule_ids_and_require_complete_reorder(
@@ -540,6 +694,52 @@ def test_compile_fails_closed_when_pool_artifact_bytes_drift(tmp_path: Path) -> 
         )
 
 
+def test_mutation_fails_closed_when_parent_pool_artifact_bytes_drift(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    added = run_add_candidate_to_pool(
+        _add_inputs(
+            fixture["first"],
+            expected_revision=0,
+            expected_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    artifact_repository = TaskArtifactRepository(fixture["settings"].db_path)
+    record = artifact_repository.get_for_task(
+        fixture["task"].id,
+        added["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    before_artifacts = artifact_repository.list_for_task(fixture["task"].id)
+    path = Path(record["path"])
+    path.write_bytes(path.read_bytes() + b"\n")
+
+    with pytest.raises(StrategyError, match="content hash drifted"):
+        run_set_pool_entry_action(
+            {
+                "strategy_type": "approval",
+                "expected_pool_revision": added["revision"],
+                "expected_pool_snapshot_hash": added["snapshot_hash"],
+                "rule_id": added["entries"][0]["rule_id"],
+                "action": _action("reject", reason="DRIFT_MUST_BLOCK"),
+            },
+            fixture["ctx"],
+            fixture["runtime"],
+        )
+
+    assert StrategyCandidatePoolRepository(
+        fixture["settings"].db_path
+    ).get_current(fixture["task"].id, "approval") == added["pool"]
+    assert artifact_repository.list_for_task(fixture["task"].id) == before_artifacts
+    with connect(fixture["settings"].db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM strategy_candidate_pool_revisions"
+        ).fetchone()[0] == 1
+
+
 @pytest.mark.parametrize("drift_target", ["parent_evidence", "dataset"])
 def test_add_fails_closed_when_parent_or_dataset_bytes_drift(
     tmp_path: Path,
@@ -677,3 +877,121 @@ def test_pool_artifact_and_revision_roll_back_when_audit_write_fails(
         assert conn.execute(
             "SELECT COUNT(*) FROM audit WHERE kind LIKE 'strategy.pool.%'"
         ).fetchone()[0] == 0
+
+
+def test_compile_rejects_repository_valid_but_unknown_candidate_adapter(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    task_id = fixture["task"].id
+    source_path = (
+        Path(fixture["settings"].tasks_dir)
+        / task_id
+        / "strategy_tree_candidates"
+        / "tree-candidate.json"
+    )
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_bytes = b"{}"
+    source_path.write_bytes(source_bytes)
+    source_hash = hashlib.sha256(source_bytes).hexdigest()
+    source_record = TaskArtifactRepository(
+        fixture["settings"].db_path
+    ).register(
+        task_id=task_id,
+        kind="strategy_tree_candidate_json",
+        path=str(source_path),
+        content_hash=source_hash,
+        origin_tool="strategy.build_tree_candidate",
+        provenance={"schema_version": "strategy.tree-candidate-artifact.v1"},
+    )
+    candidate_evidence = fixture["source_output"]["candidate_evidence"]
+    identity = candidate_evidence["identity"]
+    fragment = build_verified_candidate_fragment(
+        artifact={
+            "artifact_id": source_record["id"],
+            "artifact_kind": source_record["kind"],
+            "artifact_schema_version": "strategy.tree-candidate-artifact.v1",
+            "artifact_content_hash": source_record["content_hash"],
+            "origin_tool": source_record["origin_tool"],
+        },
+        asset={
+            "schema_version": "strategy.tree-candidate.v1",
+            "asset_id": "tree-asset-a",
+            "asset_hash": "a" * 64,
+            "asset_type": "decision_tree",
+        },
+        fragment_type="strategy_rule",
+        rule_id="tree-rule-a",
+        condition={
+            "op": "compare",
+            "field": "score",
+            "operator": "<",
+            "value": 200,
+            "missing": "no_match",
+        },
+        requirements=[],
+        effect_id="tree-effect-a",
+        evidence_id="tree-evidence-a",
+        evidence_hash="b" * 64,
+        evidence_identity={
+            "dataset_id": identity["dataset_id"],
+            "dataset_content_hash": identity["dataset_content_hash"],
+            "workspace_revision": identity["workspace_revision"],
+            "workspace_generation": identity["workspace_generation"],
+            "semantic_mapping_hash": identity["semantic_mapping_hash"],
+            "sample_context_hash": sample_context_hash_from_candidate_evidence(
+                candidate_evidence
+            ),
+        },
+    )
+    snapshot = add_verified_candidate_fragment(
+        None,
+        task_id=task_id,
+        strategy_type="approval",
+        default_action=_action("approval"),
+        verified_candidate_fragment=fragment,
+        action=_action("reject", reason="TREE"),
+    )
+    pool_path = (
+        Path(fixture["settings"].tasks_dir)
+        / task_id
+        / "strategy_candidate_pools"
+        / pool_tools_module._pool_filename(snapshot)
+    )
+    pool_path.parent.mkdir(parents=True, exist_ok=True)
+    pool_path.write_text(canonical_strategy_pool_json(snapshot), "utf-8")
+    pool_record = TaskArtifactRepository(
+        fixture["settings"].db_path
+    ).register(
+        task_id=task_id,
+        kind=POOL_ARTIFACT_KIND,
+        path=str(pool_path),
+        content_hash=strategy_pool_artifact_content_hash(snapshot),
+        origin_tool="strategy.add_candidate_to_pool",
+        provenance=pool_tools_module._pool_provenance(snapshot),
+    )
+    StrategyCandidatePoolRepository(fixture["settings"].db_path).apply_snapshot(
+        snapshot=snapshot,
+        expected_revision=0,
+        expected_snapshot_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        artifact_id=pool_record["id"],
+        artifact_content_hash=pool_record["content_hash"],
+        audit={
+            "kind": "strategy.pool.add_candidate",
+            "target_ref": snapshot["revision_id"],
+            "inputs_hash": snapshot["operation"]["operation_hash"],
+            "outcome": "succeeded",
+            "detail": {"entry_count": 1},
+        },
+    )
+
+    with pytest.raises(StrategyError, match="unsupported candidate fragment adapter"):
+        run_compile_strategy_pool(
+            {
+                "strategy_type": "approval",
+                "expected_pool_revision": 1,
+                "expected_pool_snapshot_hash": snapshot["snapshot_hash"],
+            },
+            fixture["ctx"],
+            fixture["runtime"],
+        )

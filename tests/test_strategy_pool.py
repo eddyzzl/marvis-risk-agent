@@ -7,6 +7,10 @@ import pytest
 
 from marvis.feature.univariate import analyze_univariate
 from marvis.packs.strategy.candidate_asset import refine_univariate_candidate
+from marvis.packs.strategy.candidate_fragment import (
+    build_verified_candidate_fragment,
+    univariate_asset_to_verified_fragment,
+)
 from marvis.packs.strategy.candidate_evidence import (
     MetricObservation,
     build_candidate_evidence,
@@ -16,6 +20,7 @@ from marvis.packs.strategy.evaluator import evaluate_strategy_frame
 from marvis.packs.strategy.pool import (
     CandidatePoolError,
     add_candidate,
+    add_verified_candidate_fragment,
     canonical_strategy_pool_json,
     compile_strategy_pool,
     remove_pool_entry,
@@ -108,6 +113,8 @@ def _binding(
         "artifact_id": f"artifact-asset-{suffix}",
         "kind": "strategy_candidate_asset_json",
         "content_hash": suffix * 64,
+        "origin_tool": "strategy.refine_univariate_candidate",
+        "artifact_schema_version": "strategy.candidate-asset-artifact.v1",
         "asset_id": asset["asset_id"],
         "asset_hash": asset["asset_hash"],
         "candidate_kind": "univariate_refinement",
@@ -351,3 +358,141 @@ def test_compile_is_pure_and_design_hash_binds_order_and_action() -> None:
     empty = remove_pool_entry(pool, entry_id)
     with pytest.raises(CandidatePoolError, match="empty"):
         compile_strategy_pool(empty)
+
+
+def test_generic_pool_accepts_two_fragments_from_same_asset_and_rejects_pair() -> None:
+    asset = _asset(0)
+    first_fragment = univariate_asset_to_verified_fragment(
+        asset,
+        source_binding=_binding(asset, suffix="1"),
+    )
+    identity = first_fragment["evidence"]["identity"]
+    second_fragment = build_verified_candidate_fragment(
+        artifact=first_fragment["artifact"],
+        asset=first_fragment["asset"],
+        fragment_type="strategy_rule",
+        rule_id="candidate-rule-second-fragment",
+        condition={
+            "op": "compare",
+            "field": "score",
+            "operator": ">=",
+            "value": 400,
+            "missing": "no_match",
+        },
+        requirements=[{"type": "sample_weight", "column": "weight_b"}],
+        effect_id="candidate-effect-second-fragment",
+        evidence_id=first_fragment["evidence"]["evidence_id"],
+        evidence_hash=first_fragment["evidence"]["evidence_hash"],
+        evidence_identity=identity,
+    )
+
+    pool = add_verified_candidate_fragment(
+        None,
+        task_id="task-1",
+        strategy_type="approval",
+        default_action=_approval(),
+        verified_candidate_fragment=first_fragment,
+        action=_reject(),
+    )
+    pool = add_verified_candidate_fragment(
+        pool,
+        task_id="task-1",
+        strategy_type="approval",
+        default_action=_approval(),
+        verified_candidate_fragment=second_fragment,
+        action=_review(),
+    )
+
+    assert [entry["source"]["asset_id"] for entry in pool["entries"]] == [
+        asset["asset_id"],
+        asset["asset_id"],
+    ]
+    assert len({entry["source"]["fragment_id"] for entry in pool["entries"]}) == 2
+    assert all(
+        entry["rule_id"] != entry["source"]["fragment_id"]
+        for entry in pool["entries"]
+    )
+    assert compile_strategy_pool(pool)["requirements"] == [
+        {
+            "rule_id": "candidate-rule-second-fragment",
+            "fragment_id": second_fragment["fragment"]["fragment_id"],
+            "requirement": {"type": "sample_weight", "column": "weight_b"},
+        }
+    ]
+
+    same_pair_different_rule = build_verified_candidate_fragment(
+        artifact=first_fragment["artifact"],
+        asset=first_fragment["asset"],
+        fragment_id=first_fragment["fragment"]["fragment_id"],
+        fragment_type="strategy_rule",
+        rule_id="candidate-rule-same-fragment-new-rule",
+        condition=first_fragment["fragment"]["condition"],
+        requirements=[],
+        effect_id=first_fragment["fragment"]["effect_id"],
+        evidence_id=first_fragment["evidence"]["evidence_id"],
+        evidence_hash=first_fragment["evidence"]["evidence_hash"],
+        evidence_identity=identity,
+    )
+    with pytest.raises(CandidatePoolError, match="duplicate asset fragment"):
+        add_verified_candidate_fragment(
+            pool,
+            task_id="task-1",
+            strategy_type="approval",
+            default_action=_approval(),
+            verified_candidate_fragment=same_pair_different_rule,
+            action=_reject(),
+        )
+
+
+def test_generic_pool_rejects_mixed_sample_context_without_changing_revision() -> None:
+    asset = _asset(0)
+    first = univariate_asset_to_verified_fragment(
+        asset,
+        source_binding=_binding(asset, suffix="1"),
+    )
+    pool = add_verified_candidate_fragment(
+        None,
+        task_id="task-1",
+        strategy_type="approval",
+        default_action=_approval(),
+        verified_candidate_fragment=first,
+        action=_reject(),
+    )
+    mixed_identity = deepcopy(first["evidence"]["identity"])
+    mixed_identity["sample_context_hash"] = HASH_C
+    mixed = build_verified_candidate_fragment(
+        artifact={
+            **first["artifact"],
+            "artifact_id": "artifact-asset-other",
+            "artifact_content_hash": HASH_C,
+        },
+        asset={
+            **first["asset"],
+            "asset_id": "candidate-asset-other",
+        },
+        fragment_type="strategy_rule",
+        rule_id="candidate-rule-other",
+        condition={
+            "op": "compare",
+            "field": "score",
+            "operator": ">=",
+            "value": 400,
+            "missing": "no_match",
+        },
+        requirements=[],
+        effect_id="candidate-effect-other",
+        evidence_id="candidate-evidence-other",
+        evidence_hash=HASH_C,
+        evidence_identity=mixed_identity,
+    )
+
+    with pytest.raises(CandidatePoolError, match="evidence identity"):
+        add_verified_candidate_fragment(
+            pool,
+            task_id="task-1",
+            strategy_type="approval",
+            default_action=_approval(),
+            verified_candidate_fragment=mixed,
+            action=_reject(),
+        )
+    assert pool["revision"] == 1
