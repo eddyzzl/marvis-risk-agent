@@ -60,6 +60,9 @@ from marvis.packs.strategy.automatic_tree_leaf_tools import (
 from marvis.packs.strategy.voting_candidate_tools import (
     run_build_voting_candidate,
 )
+from marvis.packs.strategy.cross_matrix_candidate_tools import (
+    run_build_cross_matrix_candidate,
+)
 from marvis.packs.strategy.pool_tools import (
     run_add_candidate_to_pool,
     run_compile_strategy_pool,
@@ -738,6 +741,12 @@ def tool_build_voting_candidate(inputs: dict, ctx) -> dict:
     """Build one immutable n-of-k candidate from an exact Pool revision."""
 
     return run_build_voting_candidate(inputs, ctx, _runtime(ctx))
+
+
+def tool_build_cross_matrix_candidate(inputs: dict, ctx) -> dict:
+    """Build one complete immutable two-dimensional Cross Matrix candidate."""
+
+    return run_build_cross_matrix_candidate(inputs, ctx, _runtime(ctx))
 
 
 def tool_add_candidate_to_pool(inputs: dict, ctx) -> dict:

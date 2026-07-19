@@ -65,6 +65,7 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "automatic_tree_candidate_build",
     "automatic_tree_leaf_materialization",
     "voting_candidate_build",
+    "cross_matrix_analysis",
     "strategy_pool_add_candidate",
     "strategy_pool_remove_entry",
     "strategy_pool_set_action",
@@ -78,6 +79,109 @@ UNIVARIATE_BINNING_METHODS = (
     "tree",
 )
 UNIVARIATE_REFINEMENT_METHODS = (*UNIVARIATE_BINNING_METHODS, "categorical")
+_CROSS_MATRIX_TARGET_RE = re.compile(
+    r"(?:二维|2\s*[dD])[^，,；;。\n]{0,24}(?:交叉|cross)|"
+    r"(?:交叉|cross)[^，,；;。\n]{0,24}(?:矩阵|matrix)",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_BUILD_RE = re.compile(
+    r"(?:构建|生成|创建|计算|分析|制作|做)|"
+    r"(?<![A-Za-z0-9_])(?:build|create|generate|compute|analy[sz]e|make)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_NEGATED_BUILD_RE = re.compile(
+    r"(?:不要|不再|无需|不用|别|禁止)\s*(?:构建|生成|创建|计算|分析|制作|做)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never)\s+"
+    r"(?:build|create|generate|compute|analy[sz]e|make)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_NONCOMMAND_RE = re.compile(
+    r"[?？]|"
+    r"(?:能否|可否|是否|可以吗|能不能|要不要|会不会|如何|怎么|怎样|"
+    r"假设|假如|如果|若|万一|演示|示范|测试|举例|说明|解释|介绍|"
+    r"描述|告诉我|展示)"
+    r"[^；;。\n]{0,220}(?:二维|2\s*[dD]|交叉|cross|matrix)|"
+    r"(?:昨天|昨日|之前|此前|过去|上次|前次|早些时候|曾经|历史上|"
+    r"文档|报告|示例|例子|原文|材料|未来|将来|以后|稍后|晚点|"
+    r"回头|明天|后天|下周|下月|下个月|月底|届时)"
+    r"[^；;。\n]{0,220}(?:构建|生成|创建|计算|分析|二维|交叉|cross|matrix)|"
+    r"(?<![A-Za-z0-9_])(?:can\s+you|could\s+you|would\s+you|"
+    r"is\s+it\s+possible|what\s+if|suppose|assuming|hypothetically|"
+    r"how\s+to|demonstrate|demo|test|example|yesterday|previously|"
+    r"earlier|last\s+time|in\s+the\s+future|later|tomorrow|"
+    r"next\s+(?:week|month)|when|once|after)"
+    r"[^;.!?\n]{0,220}(?:build|create|generate|compute|analy[sz]e|"
+    r"cross|matrix)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_POSTPONED_CANCELLATION_RE = re.compile(
+    r"(?:^|[，,；;。.!?？！]\s*)(?:等等|等一下|算了|作罢|反悔了|"
+    r"取消(?:吧|了)?|撤回|撤销|停止|先不做(?:了)?|暂不做(?:了)?|"
+    r"别做(?:了)?|不要做(?:了)?|不执行(?:了)?)(?:[，,。.!！?？]?\s*)$|"
+    r"(?:^|[,;.!?]\s*)(?:never\s+mind|forget\s+it|scratch\s+that|"
+    r"cancel|abort|withdraw|stop|do(?:n't|\s+not)\s+(?:do|execute)\s+it)"
+    r"(?:[,!.?]?\s*)$",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_CONTROL_REWRITE_RE = re.compile(
+    r"(?:不要|不用|别用|不使用|排除|剔除|去掉)\s*(?:用|使用)?"
+    r"[^，,；;。\n]{0,32}(?:等频|等数量|分位数|等距|等宽|卡方|"
+    r"决策树|类别(?:等值)?箱|quantile|equal[-_\s]*(?:frequency|width)|"
+    r"chi[-_\s]*merge|chimerge|tree|categorical)|"
+    r"(?:改用|改成|改为|换成|而不是)|"
+    r"(?<![A-Za-z0-9_])(?:instead\s+of|switch\s+to|change\s+to)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_COMMAND_CLAUSE_RE = re.compile(r"[^；;。.!！?？\n]+")
+_CROSS_MATRIX_BIN_COUNT_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])(?P<count>\d{1,2})\s*(?:个)?(?:箱|bins?)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_MIN_BIN_PCT_RE = re.compile(
+    r"(?:最小箱占比|min[_\s-]*bin[_\s-]*(?:pct|share))\s*"
+    r"(?:=|:|：|为)?\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<pct>%?)",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_SENTINEL_LABEL_RE = re.compile(
+    r"(?:哨兵(?:值)?|特殊值|sentinel(?:[_\s-]*values?)?)",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_SENTINEL_STOP_RE = re.compile(
+    r"[，,]\s*(?=(?:最小箱占比|min[_\s-]*bin|放款金额|授信金额|借款金额|"
+    r"逾期金额|坏账金额|损失金额|loan[_\s-]*amount|"
+    r"overdue[_\s-]*amount|[xXyY]\s*轴|两个轴|每(?:个)?轴|目标箱数))",
+    re.IGNORECASE,
+)
+_CROSS_MATRIX_SENTINEL_NUMBER_RE = re.compile(
+    r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+)
+_CROSS_MATRIX_FOLLOW_UP_RE = re.compile(
+    r"(?:选(?:择|中)?格|格子入池|加入策略池|入池|采纳|部署|上线|投产|"
+    r"写回|回写|生成(?:Python|SQL|代码)|"
+    r"(?<![A-Za-z0-9_])(?:select\s+cells?|add\s+to\s+(?:strategy\s+)?pool|"
+    r"adopt|deploy|write[-\s]*back|generate\s+(?:python|sql|code))"
+    r"(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_CROSS_METHOD_GROUNDING = {
+    "equal_frequency": re.compile(
+        r"(?:等频|等数量|分位数|quantile|equal[-_\s]*frequency)",
+        re.IGNORECASE,
+    ),
+    "equal_width": re.compile(
+        r"(?:等距|等宽|equal[-_\s]*width)",
+        re.IGNORECASE,
+    ),
+    "chimerge": re.compile(r"(?:卡方|chi[-_\s]*merge|chimerge)", re.IGNORECASE),
+    "tree": re.compile(r"(?:决策树|tree)", re.IGNORECASE),
+    "categorical": re.compile(
+        r"(?:类别等值箱|类别箱|等值箱|categorical)",
+        re.IGNORECASE,
+    ),
+}
 AUTOMATIC_TREE_DIRECTIONS = (
     "increasing",
     "decreasing",
@@ -2006,6 +2110,12 @@ def _validate_standard_workflow_payload(
             )
         elif workflow == "voting_candidate_build":
             normalized = _validate_voting_candidate_build_inputs(raw_inputs)
+        elif workflow == "cross_matrix_analysis":
+            normalized = _validate_cross_matrix_workflow_inputs(
+                raw_inputs,
+                whitelist,
+                target_col=target_col,
+            )
         elif workflow in _STRATEGY_POOL_WORKFLOWS:
             normalized = _validate_strategy_pool_workflow_inputs(
                 workflow,
@@ -2420,6 +2530,96 @@ def _validate_univariate_workflow_inputs(
             f"{workflow} loan_amount_col 与 overdue_amount_col 必须是不同字段。"
         )
     return normalized
+
+
+def _validate_cross_matrix_workflow_inputs(
+    inputs: Mapping[str, Any],
+    whitelist: tuple[str, ...],
+    *,
+    target_col: str | None,
+) -> dict[str, Any]:
+    """Validate only user-owned controls for one explicit 2D matrix build."""
+
+    workflow = "cross_matrix_analysis"
+    axis_fields = {"x_feature", "x_method", "y_feature", "y_method"}
+    derived_fields = {"features", "methods"}
+    analysis_fields = {
+        "bin_count",
+        "min_bin_pct",
+        "loan_amount_col",
+        "overdue_amount_col",
+        "sentinel_values",
+    }
+    _reject_workflow_fields(
+        inputs,
+        axis_fields | analysis_fields | derived_fields,
+        workflow=workflow,
+    )
+    missing = sorted(axis_fields - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+    x_feature = _workflow_column(
+        inputs["x_feature"],
+        name=f"{workflow} x_feature",
+        whitelist=whitelist,
+    )
+    y_feature = _workflow_column(
+        inputs["y_feature"],
+        name=f"{workflow} y_feature",
+        whitelist=whitelist,
+    )
+    if x_feature == y_feature:
+        raise _DraftValidationError(f"{workflow} 两个轴必须使用不同字段。")
+    if target_col is not None and target_col in {x_feature, y_feature}:
+        raise _DraftValidationError(f"{workflow} 交叉轴不能使用目标列。")
+
+    def axis_method(field: str) -> str:
+        method = _required_text(inputs[field], name=f"{workflow} {field}")
+        if method not in UNIVARIATE_REFINEMENT_METHODS:
+            raise _DraftValidationError(
+                f"{workflow} {field} 只能是："
+                + "、".join(UNIVARIATE_REFINEMENT_METHODS)
+                + "。"
+            )
+        return method
+
+    x_method = axis_method("x_method")
+    y_method = axis_method("y_method")
+    numeric_methods = list(
+        dict.fromkeys(
+            method
+            for method in (x_method, y_method)
+            if method != "categorical"
+        )
+    )
+    if "features" in inputs and inputs["features"] != [x_feature, y_feature]:
+        raise _DraftValidationError(
+            f"{workflow} features 只能是平台派生的有序轴字段。"
+        )
+    if "methods" in inputs and inputs["methods"] != numeric_methods:
+        raise _DraftValidationError(
+            f"{workflow} methods 只能是平台派生的数值轴方法。"
+        )
+    analysis_inputs: dict[str, Any] = {
+        "features": [x_feature, y_feature],
+        **{field: inputs[field] for field in analysis_fields if field in inputs},
+    }
+    if numeric_methods:
+        analysis_inputs["methods"] = numeric_methods
+    normalized = _validate_univariate_workflow_inputs(
+        analysis_inputs,
+        whitelist,
+        target_col=target_col,
+    )
+    return {
+        **normalized,
+        "x_feature": x_feature,
+        "x_method": x_method,
+        "y_feature": y_feature,
+        "y_method": y_method,
+    }
 
 
 def _sentinel_sequence(value: object, *, name: str) -> list[str | int | float]:
@@ -3129,6 +3329,556 @@ def _voting_positive_command_clause_spans(
     return tuple(spans)
 
 
+def _utterance_targets_cross_matrix(utterance: str) -> bool:
+    return _CROSS_MATRIX_TARGET_RE.search(utterance) is not None
+
+
+def _cross_positive_command_clause_spans(
+    utterance: str,
+) -> tuple[tuple[int, int], ...]:
+    """Return clauses that contain one positive Cross build request."""
+
+    spans: list[tuple[int, int]] = []
+    for clause_match in _CROSS_MATRIX_COMMAND_CLAUSE_RE.finditer(utterance):
+        clause = clause_match.group(0)
+        if (
+            _CROSS_MATRIX_TARGET_RE.search(clause) is not None
+            and _CROSS_MATRIX_BUILD_RE.search(clause) is not None
+            and _CROSS_MATRIX_NEGATED_BUILD_RE.search(clause) is None
+        ):
+            spans.append(clause_match.span())
+    return tuple(spans)
+
+
+def _cross_mention_is_within(
+    start: int,
+    end: int,
+    command_span: tuple[int, int],
+) -> bool:
+    return command_span[0] <= start and end <= command_span[1]
+
+
+def _cross_spans_are_near(
+    utterance: str,
+    first: tuple[int, int],
+    second: tuple[int, int],
+    *,
+    maximum_gap: int = 32,
+) -> bool:
+    first_start, first_end = first
+    second_start, second_end = second
+    if first_end <= second_start:
+        gap_start, gap_end = first_end, second_start
+    elif second_end <= first_start:
+        gap_start, gap_end = second_end, first_start
+    else:
+        gap_start = gap_end = max(first_start, second_start)
+    return (
+        gap_end - gap_start <= maximum_gap
+        and not any(
+            separator in utterance[gap_start:gap_end]
+            for separator in ("；", ";", "。", "\n")
+        )
+    )
+
+
+def _cross_method_mentions(
+    utterance: str,
+) -> tuple[tuple[str, int, int], ...]:
+    return tuple(
+        sorted(
+            (
+                (method, match.start(), match.end())
+                for method, pattern in _CROSS_METHOD_GROUNDING.items()
+                for match in pattern.finditer(utterance)
+            ),
+            key=lambda item: (item[1], item[2], item[0]),
+        )
+    )
+
+
+def _cross_axis_method_is_grounded(
+    utterance: str,
+    *,
+    feature: str,
+    method: str,
+    whitelist: Sequence[str],
+    shared_method: bool,
+    command_span: tuple[int, int],
+) -> bool:
+    feature_spans = [
+        (start, end)
+        for start, end, column in _automatic_tree_column_mentions(
+            utterance,
+            whitelist,
+        )
+        if column == feature
+        and _cross_mention_is_within(start, end, command_span)
+        and not _automatic_tree_span_is_negated(
+            utterance,
+            start=start,
+            end=end,
+        )
+    ]
+    method_spans = [
+        (start, end)
+        for observed_method, start, end in _cross_method_mentions(utterance)
+        if observed_method == method
+        and _cross_mention_is_within(start, end, command_span)
+        and not _automatic_tree_span_is_negated(
+            utterance,
+            start=start,
+            end=end,
+        )
+    ]
+    if shared_method:
+        return bool(feature_spans and method_spans)
+    return any(
+        _cross_spans_are_near(
+            utterance,
+            (feature_start, feature_end),
+            (method_start, method_end),
+        )
+        for feature_start, feature_end in feature_spans
+        for method_start, method_end in method_spans
+    )
+
+
+def _cross_amount_column_is_grounded(
+    utterance: str,
+    *,
+    column: str,
+    field: str,
+    whitelist: Sequence[str],
+    command_span: tuple[int, int],
+) -> bool:
+    label_pattern = (
+        re.compile(r"(?:放款|授信|借款)金额|loan[_\s-]*amount", re.IGNORECASE)
+        if field == "loan_amount_col"
+        else re.compile(r"(?:逾期|坏账|损失)金额|overdue[_\s-]*amount", re.IGNORECASE)
+    )
+    column_spans = [
+        (start, end)
+        for start, end, observed in _automatic_tree_column_mentions(
+            utterance,
+            whitelist,
+        )
+        if observed == column and _cross_mention_is_within(start, end, command_span)
+    ]
+    label_spans = [
+        match.span()
+        for match in label_pattern.finditer(utterance)
+        if _cross_mention_is_within(match.start(), match.end(), command_span)
+    ]
+    return any(
+        _cross_spans_are_near(utterance, column_span, label_span, maximum_gap=48)
+        for column_span in column_spans
+        for label_span in label_spans
+    )
+
+
+def _cross_sentinel_literal(token: str) -> str | int | float | None:
+    """Parse one explicitly written sentinel without guessing its JSON type."""
+
+    value = token.strip()
+    if not value:
+        return None
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        if value[0] == '"':
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError:
+                return None
+            return decoded if isinstance(decoded, str) else None
+        inner = value[1:-1]
+        return inner if "\\" not in inner else None
+    if _CROSS_MATRIX_SENTINEL_NUMBER_RE.fullmatch(value) is not None:
+        try:
+            parsed = float(value) if any(mark in value.lower() for mark in (".", "e")) else int(value)
+        except ValueError:
+            return None
+        if isinstance(parsed, float) and not math.isfinite(parsed):
+            return None
+        return parsed
+    if re.fullmatch(r"[^\s，,、/;；。.!！?？]+", value) is not None:
+        return value
+    return None
+
+
+def _cross_explicit_sentinel_values(
+    utterance: str,
+    *,
+    command_span: tuple[int, int],
+) -> tuple[tuple[str | int | float, ...] | None, bool]:
+    """Return the exact sentinel sequence named in the positive command.
+
+    ``None`` means no sentinel control was present. The boolean marks syntax that
+    cannot be interpreted without guessing, which must fail closed.
+    """
+
+    command = utterance[command_span[0] : command_span[1]]
+    labels = tuple(_CROSS_MATRIX_SENTINEL_LABEL_RE.finditer(command))
+    if not labels:
+        return None, False
+    if len(labels) != 1:
+        return (), True
+    label = labels[0]
+    prefix = command[: label.start()]
+    reverse = re.search(r"(?:作为|当作|视为|按)\s*$", prefix)
+    if reverse is not None:
+        start = max(
+            prefix.rfind("，", 0, reverse.start()),
+            prefix.rfind(",", 0, reverse.start()),
+        )
+        body = prefix[start + 1 : reverse.start()]
+    else:
+        body = command[label.end() :]
+        body = re.sub(
+            r"^\s*(?:=|:|：|为|是|包括|包含|采用|使用|用)\s*",
+            "",
+            body,
+        )
+        stop = _CROSS_MATRIX_SENTINEL_STOP_RE.search(body)
+        if stop is not None:
+            body = body[: stop.start()]
+    body = body.strip()
+    if body.startswith("[") and body.endswith("]"):
+        body = body[1:-1].strip()
+    if not body:
+        return (), True
+    raw_tokens = re.split(r"\s*(?:、|，|,|/|和|与|及|\band\b)\s*", body)
+    if not raw_tokens or any(not token for token in raw_tokens):
+        return (), True
+    values: list[str | int | float] = []
+    identities: set[str] = set()
+    for token in raw_tokens:
+        value = _cross_sentinel_literal(token)
+        if value is None:
+            return (), True
+        identity = json.dumps(
+            [type(value).__name__, value],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        if identity in identities:
+            return (), True
+        identities.add(identity)
+        values.append(value)
+    return tuple(values), False
+
+
+def _cross_analysis_controls_not_grounded(
+    utterance: str,
+    *,
+    inputs: Mapping[str, Any],
+    whitelist: Sequence[str],
+    command_span: tuple[int, int],
+) -> tuple[str, ...]:
+    missing: list[str] = []
+    bin_mentions = tuple(_CROSS_MATRIX_BIN_COUNT_RE.finditer(utterance))
+    if any(
+        not _cross_mention_is_within(match.start(), match.end(), command_span)
+        for match in bin_mentions
+    ):
+        missing.append("bin_count")
+    observed_bin_counts = {int(match.group("count")) for match in bin_mentions}
+    if observed_bin_counts:
+        if observed_bin_counts != {inputs["bin_count"]}:
+            missing.append("bin_count")
+    elif inputs["bin_count"] != 10:
+        missing.append("bin_count")
+
+    min_pct_mentions = tuple(_CROSS_MATRIX_MIN_BIN_PCT_RE.finditer(utterance))
+    if any(
+        not _cross_mention_is_within(match.start(), match.end(), command_span)
+        for match in min_pct_mentions
+    ):
+        missing.append("min_bin_pct")
+    observed_min_pcts = {
+        float(match.group("value")) / (100.0 if match.group("pct") else 1.0)
+        for match in min_pct_mentions
+    }
+    if observed_min_pcts:
+        if len(observed_min_pcts) != 1 or not math.isclose(
+            next(iter(observed_min_pcts)),
+            float(inputs["min_bin_pct"]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            missing.append("min_bin_pct")
+    elif not math.isclose(
+        float(inputs["min_bin_pct"]),
+        0.02,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        missing.append("min_bin_pct")
+
+    for field in ("loan_amount_col", "overdue_amount_col"):
+        if field in inputs and not _cross_amount_column_is_grounded(
+            utterance,
+            column=str(inputs[field]),
+            field=field,
+            whitelist=whitelist,
+            command_span=command_span,
+        ):
+            missing.append(field)
+    observed_sentinels, sentinel_syntax_ambiguous = _cross_explicit_sentinel_values(
+        utterance,
+        command_span=command_span,
+    )
+    expected_sentinels = tuple(inputs["sentinel_values"])
+    if observed_sentinels is None:
+        if expected_sentinels:
+            missing.append("sentinel_values")
+    else:
+        observed_identities = {
+            json.dumps(
+                [type(value).__name__, value],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            for value in observed_sentinels
+        }
+        expected_identities = {
+            json.dumps(
+                [type(value).__name__, value],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            for value in expected_sentinels
+        }
+        if sentinel_syntax_ambiguous or observed_identities != expected_identities:
+            missing.append("sentinel_values")
+    return tuple(dict.fromkeys(missing))
+
+
+def _ground_cross_matrix_analysis(
+    utterance: str,
+    result: StrategyRequestCompilation,
+    *,
+    whitelist: tuple[str, ...],
+) -> StrategyRequestCompilation:
+    """Require an explicit positive 2D matrix command and two grounded axes."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if _CROSS_MATRIX_NEGATED_BUILD_RE.search(utterance) is not None:
+        return _clarification(
+            "原话否定了二维 Cross Matrix 构建，因此本次不会执行。",
+            code="cross_matrix_build_intent_negated",
+            fields=("build_intent",),
+        )
+    if (
+        _CROSS_MATRIX_NONCOMMAND_RE.search(utterance) is not None
+        or _CROSS_MATRIX_POSTPONED_CANCELLATION_RE.search(utterance) is not None
+    ):
+        return _clarification(
+            "当前原话是问句、假设/未来/历史描述、演示性文本或已在句尾撤销，"
+            "不能视为立即执行二维 Cross Matrix 的唯一正向命令。请单独重述本次"
+            "要构建的两个有序轴、各自分箱方法和明确分析参数。",
+            code="cross_matrix_positive_command_required",
+            fields=("build_intent",),
+        )
+    command_spans = _cross_positive_command_clause_spans(utterance)
+    if not command_spans:
+        return _clarification(
+            "请明确发出一次正向的二维 Cross Matrix 构建命令；查看、说明或"
+            "假设性请求不会创建候选资产。",
+            code="cross_matrix_build_intent_required",
+            fields=("build_intent",),
+        )
+    if len(command_spans) != 1:
+        return _clarification(
+            "一次请求只能包含一个立即执行的二维 Cross Matrix 构建子句；"
+            "请把不同轴组合拆成独立请求。",
+            code="cross_matrix_single_command_required",
+            fields=("build_intent",),
+        )
+    command_span = command_spans[0]
+    if (
+        len(
+            tuple(
+                _CROSS_MATRIX_TARGET_RE.finditer(
+                    utterance[command_span[0] : command_span[1]]
+                )
+            )
+        )
+        != 1
+    ):
+        return _clarification(
+            "一次请求只能构建一个二维 Cross Matrix；请把多个矩阵拆开。",
+            code="cross_matrix_single_command_required",
+            fields=("build_intent",),
+        )
+    if _CROSS_MATRIX_FOLLOW_UP_RE.search(utterance) is not None:
+        return _clarification(
+            "本轮只能生成二维 Cross Matrix 及 development evidence。"
+            "选格、入池、代码、写回、采纳或部署必须拆成后续请求。",
+            code="cross_matrix_single_step_required",
+            fields=("next_action",),
+        )
+    if _CROSS_MATRIX_CONTROL_REWRITE_RE.search(utterance) is not None:
+        return _clarification(
+            "原话包含被否定或随后改写的轴/分箱控制。请只保留最终的一组"
+            "有序轴和分箱方法后重新发送，平台不会替你选择新旧值。",
+            code="cross_matrix_controls_rewritten",
+            fields=("x_feature", "x_method", "y_feature", "y_method"),
+        )
+
+    mentions, ambiguous = _automatic_tree_column_mention_resolution(
+        utterance,
+        whitelist,
+    )
+    if ambiguous:
+        return _clarification(
+            "交叉轴字段在原话中存在重叠或大小写歧义，请用分隔符写出两个"
+            "准确列名：" + "、".join(ambiguous) + "。",
+            code="cross_matrix_axes_ambiguous",
+            fields=ambiguous,
+        )
+    if any(
+        not _cross_mention_is_within(start, end, command_span)
+        for start, end, _column in mentions
+    ):
+        return _clarification(
+            "二维 Cross Matrix 的字段和分析列必须全部位于唯一正向构建子句中；"
+            "历史、引用、否定或其他子句中的列不会被消费。",
+            code="cross_matrix_controls_outside_command",
+            fields=("x_feature", "y_feature"),
+        )
+    if any(
+        _automatic_tree_span_is_negated(
+            utterance,
+            start=start,
+            end=end,
+        )
+        for start, end, _column in mentions
+    ):
+        return _clarification(
+            "原话包含被否定的字段控制。请只保留最终要使用的两个有序轴。",
+            code="cross_matrix_controls_rewritten",
+            fields=("x_feature", "y_feature"),
+        )
+
+    positive_mentions = [
+        (start, end, column)
+        for start, end, column in mentions
+    ]
+    expected_columns = {inputs["x_feature"], inputs["y_feature"]}
+    expected_columns.update(
+        inputs[field]
+        for field in ("loan_amount_col", "overdue_amount_col")
+        if field in inputs
+    )
+    observed_columns = {column for _start, _end, column in positive_mentions}
+    if not {inputs["x_feature"], inputs["y_feature"]} <= observed_columns:
+        return _clarification(
+            "请在原话中明确写出两个不同的交叉轴字段；平台不会从列白名单"
+            "补齐或猜测第二个轴。",
+            code="cross_matrix_axes_not_grounded",
+            fields=("x_feature", "y_feature"),
+        )
+    if observed_columns != expected_columns:
+        return _clarification(
+            "请在唯一构建子句中只写出一个明确轴对及已声明的金额列；"
+            "平台不会从额外字段中挑选两个轴，也不会遗漏用户点名的字段。",
+            code="cross_matrix_axes_not_unique",
+            fields=("x_feature", "y_feature"),
+        )
+
+    axis_order: list[str] = []
+    for _start, _end, column in positive_mentions:
+        if (
+            column in {inputs["x_feature"], inputs["y_feature"]}
+            and column not in axis_order
+        ):
+            axis_order.append(column)
+    if axis_order != [inputs["x_feature"], inputs["y_feature"]]:
+        return _clarification(
+            "矩阵 X/Y 方向必须与原话中两个轴的首次出现顺序一致；"
+            "平台不会让模型任意转置后生成不同 asset hash。",
+            code="cross_matrix_axis_order_not_grounded",
+            fields=("x_feature", "y_feature"),
+        )
+
+    method_mentions = _cross_method_mentions(utterance)
+    if any(
+        not _cross_mention_is_within(start, end, command_span)
+        for _method, start, end in method_mentions
+    ):
+        return _clarification(
+            "两个轴的分箱方法必须全部位于唯一正向构建子句中。",
+            code="cross_matrix_controls_outside_command",
+            fields=("x_method", "y_method"),
+        )
+    if any(
+        _automatic_tree_span_is_negated(
+            utterance,
+            start=start,
+            end=end,
+        )
+        for _method, start, end in method_mentions
+    ):
+        return _clarification(
+            "原话包含被否定的分箱方法。请只保留最终使用的方法。",
+            code="cross_matrix_controls_rewritten",
+            fields=("x_method", "y_method"),
+        )
+    if {method for method, _start, _end in method_mentions} != {
+        inputs["x_method"],
+        inputs["y_method"],
+    }:
+        return _clarification(
+            "原话中的分箱方法与结构化草案不唯一或不一致；"
+            "平台不会补全、替换或遗漏方法。",
+            code="cross_matrix_methods_not_grounded",
+            fields=("x_method", "y_method"),
+        )
+
+    shared_method = inputs["x_method"] == inputs["y_method"]
+    missing_methods = [
+        field
+        for field, feature_field in (
+            ("x_method", "x_feature"),
+            ("y_method", "y_feature"),
+        )
+        if not _cross_axis_method_is_grounded(
+            utterance,
+            feature=inputs[feature_field],
+            method=inputs[field],
+            whitelist=whitelist,
+            shared_method=shared_method,
+            command_span=command_span,
+        )
+    ]
+    if missing_methods:
+        return _clarification(
+            "请明确两个轴各自使用的分箱方法；相同方法可说明一次，混合方法"
+            "必须分别紧邻对应字段。平台不会替你选择方法。",
+            code="cross_matrix_methods_not_grounded",
+            fields=tuple(missing_methods),
+        )
+    missing_analysis_controls = _cross_analysis_controls_not_grounded(
+        utterance,
+        inputs=inputs,
+        whitelist=whitelist,
+        command_span=command_span,
+    )
+    if missing_analysis_controls:
+        return _clarification(
+            "目标箱数、最小箱占比、金额列和哨兵值只能采用原话明确值；"
+            "未写明时只能使用平台默认值，不能由模型另选。",
+            code="cross_matrix_analysis_controls_not_grounded",
+            fields=missing_analysis_controls,
+        )
+    return result
+
+
 def _voting_strategy_type_mentions(
     utterance: str,
 ) -> tuple[tuple[str, int, int], ...]:
@@ -3176,6 +3926,19 @@ def _ground_refinement_request(
 ) -> StrategyRequestCompilation:
     draft = result.draft
     if (
+        _utterance_targets_cross_matrix(utterance)
+        and not (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow == "cross_matrix_analysis"
+        )
+    ):
+        return _clarification(
+            "原话明确要求二维 Cross Matrix，只能编译为 cross_matrix_analysis；"
+            "通用策略生命周期或其他 Workflow 不能消费这两个交叉轴。",
+            code="cross_matrix_workflow_required",
+            fields=("workflow",),
+        )
+    if (
         draft is not None
         and _utterance_targets_voting_candidate(utterance)
         and not (
@@ -3204,6 +3967,12 @@ def _ground_refinement_request(
         return _ground_automatic_tree_leaf_materialization(utterance, result)
     if draft.workflow == "voting_candidate_build":
         return _ground_voting_candidate_build(utterance, result)
+    if draft.workflow == "cross_matrix_analysis":
+        return _ground_cross_matrix_analysis(
+            utterance,
+            result,
+            whitelist=whitelist,
+        )
     if draft.workflow != "univariate_candidate_refinement":
         return result
     inputs = draft.to_dict()["workflow_inputs"]
@@ -5899,6 +6668,30 @@ def _standard_workflow_confirmation_text(
         ]
         if "selection_reason" in inputs:
             details.append(f"选择说明：{inputs['selection_reason']}")
+    elif draft.workflow == "cross_matrix_analysis":
+        details = [
+            "已识别为〔二维 Cross Matrix 候选分析 Workflow〕",
+            (
+                f"X 轴：{inputs['x_feature']} / {inputs['x_method']}；"
+                f"Y 轴：{inputs['y_feature']} / {inputs['y_method']}"
+            ),
+            (
+                f"数值目标箱数 {inputs['bin_count']}，"
+                f"最小箱占比 {inputs['min_bin_pct']:.2%}"
+            ),
+            "平台会先生成两个轴的不可变单变量证据，再逐行重放完整二维矩阵",
+            "只生成 development/backtested/unvalidated Cross evidence；"
+            "不会选择格子、入池、采纳或部署",
+        ]
+        if "loan_amount_col" in inputs:
+            details.append(f"放款金额列：{inputs['loan_amount_col']}")
+        if "overdue_amount_col" in inputs:
+            details.append(f"逾期金额列：{inputs['overdue_amount_col']}")
+        if inputs["sentinel_values"]:
+            details.append(
+                "独立哨兵值："
+                + "、".join(str(value) for value in inputs["sentinel_values"])
+            )
     elif draft.workflow == "automatic_tree_candidate_build":
         direction_labels = {
             "increasing": "递增",
@@ -6507,6 +7300,11 @@ def _user_prompt(
         "Voting/n-of-k 构建命令；‘最好规则’‘刚才那些’等启发式引用，或同一句串联入池、"
         "动作、采纳、部署、写回时必须澄清。问句、假设/未来/历史描述、演示文本、句尾"
         "撤销以及多个 strategy_type/n 候选也必须澄清；显式 k 必须与 rule_ids 数量一致。"
+        "对于 cross_matrix_analysis，只能抄录两个明确轴字段、各自方法及用户明确给出的"
+        "单变量分析参数；不得输出平台数据绑定、目标列、预算、边界、cell、condition、"
+        "指标、artifact/asset/effect/rule id、动作或推荐。它只构建二维矩阵证据，不能"
+        "串联选格、入池、代码、写回、采纳或部署；明确的二维 Cross Matrix 请求不能"
+        "改路由到其他 Workflow。"
         "对于 strategy_pool_add_candidate，candidate_asset_id 与 selection_id "
         "严格二选一且必须逐字抄录唯一完整 ID；必须分别抄录显式的策略池类型、"
         "Pool 默认动作和命中动作标签，不能对调或从动作反推 Pool 类型。reason 仅在"

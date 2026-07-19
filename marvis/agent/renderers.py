@@ -1656,6 +1656,201 @@ def _render_build_voting_candidate(o: dict):
     return text, tables
 
 
+def _cross_matrix_cell_metric(cell: dict, name: str):
+    effect = cell.get("effect") if isinstance(cell.get("effect"), dict) else {}
+    return effect.get(name, cell.get(name))
+
+
+def _cross_matrix_observation_value(observation: dict, field: str, *, pct=False):
+    status = str(observation.get("status") or "unavailable")
+    value = observation.get(field)
+    if status in {"unavailable", "insufficient_data", "not_applicable"}:
+        return "n/a"
+    return _pct(value) if pct else _num(value)
+
+
+def _render_build_cross_matrix_candidate(o: dict):
+    """Render a complete matrix in canonical axis order without selecting cells."""
+
+    row_axis = o.get("row_axis") if isinstance(o.get("row_axis"), dict) else {}
+    column_axis = (
+        o.get("column_axis") if isinstance(o.get("column_axis"), dict) else {}
+    )
+    asset = (
+        o.get("cross_matrix_candidate")
+        if isinstance(o.get("cross_matrix_candidate"), dict)
+        else {}
+    )
+    matrix = asset.get("matrix") if isinstance(asset.get("matrix"), dict) else {}
+    cells = [item for item in (matrix.get("cells") or []) if isinstance(item, dict)]
+    axes = [item for item in (asset.get("axes") or []) if isinstance(item, dict)]
+    source_bin_by_id = {
+        str(bin_row.get("bin_id") or ""): str(bin_row.get("source_bin_id") or "")
+        for axis in axes
+        for bin_row in (axis.get("bins") or [])
+        if isinstance(bin_row, dict) and bin_row.get("bin_id")
+    }
+    artifacts = [item for item in (o.get("artifacts") or []) if isinstance(item, dict)]
+    lifecycle = " / ".join(
+        str(o.get(field) or "unknown")
+        for field in ("candidate_stage", "observation_stage", "validation_status")
+    )
+    drop_text = (
+        "true"
+        if o.get("drop_nan_labels") is True
+        else "false"
+        if o.get("drop_nan_labels") is False
+        else "n/a"
+    )
+    text = (
+        f"**二维 Cross Matrix 候选构建完成**：资产 `{o.get('asset_id', '')}`，"
+        f"asset hash `{o.get('asset_hash', '')}`；矩阵候选证据 "
+        f"`{o.get('candidate_id', '')}` / `{o.get('evidence_hash', '')}`；"
+        "来源单变量候选证据 "
+        f"`{o.get('parent_candidate_id', '')}` / `{o.get('parent_evidence_hash', '')}`。\n"
+        f"- X 轴：{row_axis.get('feature', '')} / {row_axis.get('method', '')} / "
+        f"{row_axis.get('bin_count', 0)} bins\n"
+        f"- Y 轴：{column_axis.get('feature', '')} / "
+        f"{column_axis.get('method', '')} / {column_axis.get('bin_count', 0)} bins\n"
+        f"- 已固化 {o.get('cell_count', 0)} 个完整单元格；状态 `{lifecycle}`。\n"
+        "**本步骤只生成完整矩阵 evidence：未选择格子、未入池、未应用写回、"
+        "未采纳、未部署。**"
+    )
+    text += (
+        "\n\n**绑定样本口径**："
+        f"dataset `{o.get('dataset_id', 'n/a')}`，target `{o.get('target_col', 'n/a')}`；"
+        f"population {_fmt(o.get('population_count'))}，"
+        f"labeled {_fmt(o.get('labeled_count'))}；"
+        f"drop_nan_labels `{drop_text}`，"
+        f"nan_labels_dropped {_fmt(o.get('nan_labels_dropped'))}。"
+    )
+    text += (
+        "\n\n**绑定样本观测（未独立验证）**："
+        "下表保持 X/Y 分箱及完整 Cartesian 单元格的资产顺序，不按坏率、Lift "
+        "或其他指标重排，也不构成格子选择建议。"
+    )
+    links = [
+        f"[{str(item.get('filename') or item.get('kind') or '下载')}]"
+        f"({str(item.get('download_url'))})"
+        for item in artifacts
+        if item.get("download_url")
+    ]
+    if links:
+        text += "\n\n**Cross Matrix 完整 JSON**：" + "；".join(links)
+
+    metric_rows = []
+    amount_rows = []
+    for cell in cells:
+        row_bin_id = str(cell.get("row_bin_id") or "")
+        column_bin_id = str(cell.get("column_bin_id") or "")
+        row_bin = source_bin_by_id.get(
+            row_bin_id,
+            str(cell.get("row_source_bin_id") or row_bin_id),
+        )
+        column_bin = source_bin_by_id.get(
+            column_bin_id,
+            str(cell.get("column_source_bin_id") or column_bin_id),
+        )
+        cell_id = str(cell.get("cell_id") or f"{row_bin} × {column_bin}")
+        metric_rows.append(
+            [
+                cell_id,
+                row_bin,
+                column_bin,
+                _fmt(_cross_matrix_cell_metric(cell, "count")),
+                _pct(_cross_matrix_cell_metric(cell, "share")),
+                _fmt(_cross_matrix_cell_metric(cell, "good")),
+                _fmt(_cross_matrix_cell_metric(cell, "bad")),
+                _pct(_cross_matrix_cell_metric(cell, "bad_rate")),
+                _num(_cross_matrix_cell_metric(cell, "lift")),
+                _num(_cross_matrix_cell_metric(cell, "woe")),
+                _num(_cross_matrix_cell_metric(cell, "iv_contribution")),
+            ]
+        )
+        effect = cell.get("effect") if isinstance(cell.get("effect"), dict) else {}
+        amounts = (
+            effect.get("amount_metrics")
+            if isinstance(effect.get("amount_metrics"), dict)
+            else {}
+        )
+        for dimension, label in (
+            ("loan_amount", "放款金额"),
+            ("overdue_amount", "逾期金额"),
+            ("overdue_rate", "配对逾期率"),
+        ):
+            observation = (
+                amounts.get(dimension)
+                if isinstance(amounts.get(dimension), dict)
+                else None
+            )
+            if observation is None:
+                continue
+            status = str(observation.get("status") or "unavailable")
+            covered = observation.get("covered_count")
+            amount_rows.append(
+                [
+                    cell_id,
+                    row_bin,
+                    column_bin,
+                    label,
+                    status,
+                    "n/a" if covered is None else _fmt(covered),
+                    _cross_matrix_observation_value(
+                        observation,
+                        "coverage_rate",
+                        pct=True,
+                    ),
+                    _cross_matrix_observation_value(
+                        observation,
+                        "value",
+                        pct=dimension == "overdue_rate",
+                    ),
+                    str(observation.get("reason") or ""),
+                ]
+            )
+
+    tables = []
+    if metric_rows:
+        tables.append(
+            {
+                "title": "二维 Cross Matrix 全量单元格（保持 X/Y 分箱顺序）",
+                "columns": [
+                    "Cell ID",
+                    "X source bin",
+                    "Y source bin",
+                    "样本数",
+                    "样本占比",
+                    "好样本",
+                    "坏样本",
+                    "坏率",
+                    "Lift",
+                    "WOE",
+                    "IV",
+                ],
+                "rows": metric_rows,
+            }
+        )
+    if amount_rows:
+        tables.append(
+            {
+                "title": "二维 Cross Matrix 金额观测",
+                "columns": [
+                    "Cell ID",
+                    "X source bin",
+                    "Y source bin",
+                    "维度",
+                    "状态",
+                    "覆盖样本",
+                    "覆盖率",
+                    "观测值",
+                    "原因",
+                ],
+                "rows": amount_rows,
+            }
+        )
+    return text, tables
+
+
 def _render_strategy_pool_mutation(o: dict):
     entries = [entry for entry in (o.get("entries") or []) if isinstance(entry, dict)]
     artifacts = [item for item in (o.get("artifacts") or []) if isinstance(item, dict)]
@@ -4370,6 +4565,7 @@ _RENDERERS = {
         _render_materialize_automatic_tree_leaf_fragment
     ),
     "build_voting_candidate": _render_build_voting_candidate,
+    "build_cross_matrix_candidate": _render_build_cross_matrix_candidate,
     "refine_univariate_candidate": _render_refine_univariate_candidate,
     "add_candidate_to_pool": _render_strategy_pool_mutation,
     "remove_pool_entry": _render_strategy_pool_mutation,

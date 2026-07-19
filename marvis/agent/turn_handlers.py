@@ -1358,7 +1358,7 @@ _STRATEGY_REQUEST_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_SUBJECT_RE = re.compile(
-    r"(?:策略|策略池|规则池|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|自动树|决策树|叶子|叶节点|投票|Voting|n[-_ ]?of[-_ ]?k|cutoff|利润|收益|"
+    r"(?:策略|策略池|规则池|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|自动树|决策树|叶子|叶节点|投票|Voting|n[-_ ]?of[-_ ]?k|(?:二维|2\s*[dD])?\s*(?:交叉|cross)\s*(?:矩阵|matrix)|cutoff|利润|收益|"
     r"催收|滚动率|迁徙率|迁徙矩阵|定价矩阵|额度矩阵|网格|ROA|"
     r"roll(?:\s|-|_)*rate|strategy(?:\s|-|_)*pool|pool|strategy|approval|reject|limit|pricing|segment|rule|candidate|automatic(?:\s|-|_)*tree|decision(?:\s|-|_)*tree|leaf|"
     r"candidate\s+bins?|\bbins?\b|univariate|binning|profit|collection)",
@@ -1857,6 +1857,7 @@ def _run_validated_strategy_request(
             "roll_rate_matrix": "strategy_roll_rate_analysis",
             "limit_pricing_matrix": "strategy_limit_pricing_analysis",
             "univariate_candidate_analysis": ("strategy_univariate_candidate_analysis"),
+            "cross_matrix_analysis": "strategy_cross_matrix_analysis",
             "automatic_tree_candidate_build": (
                 "strategy_automatic_tree_candidate_build"
             ),
@@ -1883,6 +1884,7 @@ def _run_validated_strategy_request(
             "univariate_candidate_analysis",
             "univariate_candidate_refinement",
             "automatic_tree_candidate_build",
+            "cross_matrix_analysis",
         }:
             binding = {
                 "expected_content_hash": getattr(context, "dataset_content_hash", None),
@@ -3794,6 +3796,7 @@ def _strategy_request_requires_target(
             in {
                 "univariate_candidate_analysis",
                 "automatic_tree_candidate_build",
+                "cross_matrix_analysis",
             }
             or refinement_needs_current_target
             or (
@@ -3823,6 +3826,7 @@ def _strategy_request_requires_complete_labels(
             in {
                 "univariate_candidate_analysis",
                 "automatic_tree_candidate_build",
+                "cross_matrix_analysis",
             }
             or refinement_needs_current_labels
             or (

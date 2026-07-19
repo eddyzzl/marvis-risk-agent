@@ -1,8 +1,8 @@
 {
   "name": "strategy",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "display_name": "Strategy Pack",
-  "description": "Vintage, roll-rate, profitability, governed univariate, automatic-tree, and Voting n-of-k candidate development with explicit leaf materialization, Strategy Pool assembly, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
+  "description": "Vintage, roll-rate, profitability, governed univariate, automatic-tree, Voting n-of-k, and complete two-dimensional Cross Matrix candidate development with explicit leaf materialization, Strategy Pool assembly, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
   "python_requires": ">=3.10,<3.14",
   "tools": [
@@ -1915,6 +1915,252 @@
       "timeout_seconds": 300,
       "failure_policy": "fail",
       "entrypoint": "tool_build_voting_candidate",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:artifact"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "build_cross_matrix_candidate",
+      "summary": "Replay two explicit axes from one exact task-owned univariate evidence artifact, measure every Cartesian cell once on its immutable labelled sample, and publish one complete development-only two-dimensional Cross Matrix JSON asset without selecting cells, changing a Strategy Pool, writing back data, adopting, or deploying.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source_artifact_id": {"type": "string", "minLength": 1},
+          "expected_artifact_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expected_candidate_id": {
+            "type": "string",
+            "pattern": "^candidate-[0-9a-f]{32}$"
+          },
+          "expected_evidence_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "x_feature": {"type": "string", "minLength": 1},
+          "x_method": {
+            "type": "string",
+            "enum": [
+              "equal_frequency",
+              "equal_width",
+              "chimerge",
+              "tree",
+              "categorical"
+            ]
+          },
+          "y_feature": {"type": "string", "minLength": 1},
+          "y_method": {
+            "type": "string",
+            "enum": [
+              "equal_frequency",
+              "equal_width",
+              "chimerge",
+              "tree",
+              "categorical"
+            ]
+          }
+        },
+        "required": [
+          "source_artifact_id",
+          "expected_artifact_content_hash",
+          "expected_candidate_id",
+          "expected_evidence_hash",
+          "x_feature",
+          "x_method",
+          "y_feature",
+          "y_method"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.build-cross-matrix-candidate-tool.v1"
+          },
+          "asset_id": {
+            "type": "string",
+            "pattern": "^candidate-asset-[0-9a-f]{32}$"
+          },
+          "asset_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "candidate_id": {
+            "type": "string",
+            "pattern": "^candidate-[0-9a-f]{32}$"
+          },
+          "evidence_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "parent_candidate_id": {
+            "type": "string",
+            "pattern": "^candidate-[0-9a-f]{32}$"
+          },
+          "parent_evidence_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "dataset_id": {"type": "string", "minLength": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "population_count": {"type": "integer", "minimum": 1},
+          "labeled_count": {"type": "integer", "minimum": 1},
+          "drop_nan_labels": {"type": "boolean"},
+          "nan_labels_dropped": {"type": "integer", "minimum": 0},
+          "row_axis": {"$ref": "#/$defs/axis_summary"},
+          "column_axis": {"$ref": "#/$defs/axis_summary"},
+          "cell_count": {"type": "integer", "minimum": 1, "maximum": 400},
+          "candidate_stage": {"const": "development"},
+          "observation_stage": {"const": "backtested"},
+          "validation_status": {"const": "unvalidated"},
+          "cross_matrix_candidate": {"$ref": "#/$defs/cross_matrix_asset"},
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"$ref": "#/$defs/artifact"}
+          },
+          "not_selected": {"const": true},
+          "not_admitted": {"const": true},
+          "not_applied": {"const": true},
+          "not_adopted": {"const": true},
+          "not_deployed": {"const": true}
+        },
+        "required": [
+          "schema_version",
+          "asset_id",
+          "asset_hash",
+          "candidate_id",
+          "evidence_hash",
+          "parent_candidate_id",
+          "parent_evidence_hash",
+          "dataset_id",
+          "target_col",
+          "population_count",
+          "labeled_count",
+          "drop_nan_labels",
+          "nan_labels_dropped",
+          "row_axis",
+          "column_axis",
+          "cell_count",
+          "candidate_stage",
+          "observation_stage",
+          "validation_status",
+          "cross_matrix_candidate",
+          "artifacts",
+          "not_selected",
+          "not_admitted",
+          "not_applied",
+          "not_adopted",
+          "not_deployed"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "cross_matrix_asset": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "const": "strategy.cross-matrix-candidate-asset.v1"
+              },
+              "asset_type": {"const": "cross_matrix"},
+              "lifecycle": {"type": "object"},
+              "parent": {"type": "object"},
+              "sample_identity": {"type": "object"},
+              "axes": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {"type": "object"}
+              },
+              "measurement": {"type": "object"},
+              "budget": {"type": "object"},
+              "matrix": {"type": "object"},
+              "summary": {"type": "object"},
+              "producer_version": {
+                "const": "strategy.cross-matrix-candidate-asset/1"
+              },
+              "candidate_evidence": {"type": "object"},
+              "asset_id": {
+                "type": "string",
+                "pattern": "^candidate-asset-[0-9a-f]{32}$"
+              },
+              "asset_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "schema_version",
+              "asset_type",
+              "lifecycle",
+              "parent",
+              "sample_identity",
+              "axes",
+              "measurement",
+              "budget",
+              "matrix",
+              "summary",
+              "producer_version",
+              "candidate_evidence",
+              "asset_id",
+              "asset_hash"
+            ],
+            "additionalProperties": false
+          },
+          "axis_summary": {
+            "type": "object",
+            "properties": {
+              "feature": {"type": "string", "minLength": 1},
+              "method": {
+                "type": "string",
+                "enum": [
+                  "equal_frequency",
+                  "equal_width",
+                  "chimerge",
+                  "tree",
+                  "categorical"
+                ]
+              },
+              "bin_count": {"type": "integer", "minimum": 1, "maximum": 51}
+            },
+            "required": ["feature", "method", "bin_count"],
+            "additionalProperties": false
+          },
+          "artifact": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "minLength": 1},
+              "kind": {"const": "strategy_cross_matrix_candidate_json"},
+              "format": {"const": "json"},
+              "filename": {"type": "string", "minLength": 1},
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "download_url": {"type": "string", "minLength": 1}
+            },
+            "required": [
+              "artifact_id",
+              "kind",
+              "format",
+              "filename",
+              "content_hash",
+              "download_url"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_build_cross_matrix_candidate",
       "policy": {
         "schema_version": "tool-policy.v1",
         "human_decision_gate": "none",

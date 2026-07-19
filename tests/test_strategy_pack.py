@@ -234,6 +234,9 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     voting_tool = next(
         tool for tool in manifest.tools if tool.name == "build_voting_candidate"
     )
+    cross_matrix_tool = next(
+        tool for tool in manifest.tools if tool.name == "build_cross_matrix_candidate"
+    )
     refinement_tool = next(
         tool for tool in manifest.tools if tool.name == "refine_univariate_candidate"
     )
@@ -271,6 +274,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "apply_automatic_tree",
         "materialize_automatic_tree_leaf_fragment",
         "build_voting_candidate",
+        "build_cross_matrix_candidate",
         "refine_univariate_candidate",
         "add_candidate_to_pool",
         "remove_pool_entry",
@@ -489,6 +493,87 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "maxItems": 1,
         "items": {"$ref": "#/$defs/artifact"},
     }
+    assert cross_matrix_tool.determinism == "deterministic"
+    assert cross_matrix_tool.policy.human_decision_gate == "none"
+    assert cross_matrix_tool.policy.effect_authorization == "none"
+    assert set(cross_matrix_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+    }
+    assert cross_matrix_tool.input_schema["additionalProperties"] is False
+    assert set(cross_matrix_tool.input_schema["required"]) == {
+        "source_artifact_id",
+        "expected_artifact_content_hash",
+        "expected_candidate_id",
+        "expected_evidence_hash",
+        "x_feature",
+        "x_method",
+        "y_feature",
+        "y_method",
+    }
+    assert "budget" not in cross_matrix_tool.input_schema["properties"]
+    assert "cells" not in cross_matrix_tool.input_schema["properties"]
+    assert cross_matrix_tool.output_schema["additionalProperties"] is False
+    assert cross_matrix_tool.output_schema["properties"]["schema_version"] == {
+        "const": "strategy.build-cross-matrix-candidate-tool.v1"
+    }
+    assert cross_matrix_tool.output_schema["properties"]["cell_count"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 400,
+    }
+    assert cross_matrix_tool.output_schema["properties"]["asset_id"] == {
+        "type": "string",
+        "pattern": "^candidate-asset-[0-9a-f]{32}$",
+    }
+    assert cross_matrix_tool.output_schema["properties"]["candidate_id"] == {
+        "type": "string",
+        "pattern": "^candidate-[0-9a-f]{32}$",
+    }
+    assert cross_matrix_tool.output_schema["properties"]["evidence_hash"] == {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$",
+    }
+    assert {"candidate_id", "evidence_hash"} <= set(
+        cross_matrix_tool.output_schema["required"]
+    )
+    cross_asset_schema = cross_matrix_tool.output_schema["$defs"][
+        "cross_matrix_asset"
+    ]
+    assert cross_asset_schema["additionalProperties"] is False
+    assert set(cross_asset_schema["required"]) == {
+        "schema_version",
+        "asset_type",
+        "lifecycle",
+        "parent",
+        "sample_identity",
+        "axes",
+        "measurement",
+        "budget",
+        "matrix",
+        "summary",
+        "producer_version",
+        "candidate_evidence",
+        "asset_id",
+        "asset_hash",
+    }
+    for boundary in (
+        "not_selected",
+        "not_admitted",
+        "not_applied",
+        "not_adopted",
+        "not_deployed",
+    ):
+        assert cross_matrix_tool.output_schema["properties"][boundary] == {
+            "const": True
+        }
+    assert cross_matrix_tool.output_schema["properties"]["artifacts"] == {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 1,
+        "items": {"$ref": "#/$defs/artifact"},
+    }
     assert refinement_tool.policy.human_decision_gate == "none"
     assert refinement_tool.policy.effect_authorization == "none"
     assert set(refinement_tool.side_effects) == {
@@ -496,7 +581,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "read:dataset",
         "write:artifact",
     }
-    assert manifest.version == "0.7.0"
+    assert manifest.version == "0.8.0"
     assert "refined univariate asset" in add_pool_tool.summary
     assert "automatic-tree leaf selection" in add_pool_tool.summary
     assert "Voting n-of-k candidate" in add_pool_tool.summary

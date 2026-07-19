@@ -247,7 +247,7 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=18,
+    version=19,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
@@ -256,7 +256,7 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "standard_workflow 只能输出 request_kind=standard_workflow、workflow、workflow_inputs。workflow "
         "只能是 profit_calc/roll_rate_matrix/limit_pricing_matrix/univariate_candidate_analysis/"
         "univariate_candidate_refinement/automatic_tree_candidate_build/"
-        "automatic_tree_leaf_materialization/voting_candidate_build/"
+        "automatic_tree_leaf_materialization/voting_candidate_build/cross_matrix_analysis/"
         "strategy_pool_add_candidate/strategy_pool_remove_entry/"
         "strategy_pool_set_action/strategy_pool_reorder/strategy_pool_compile。"
         "profit_calc 需要 ead_col、pd_col、"
@@ -317,6 +317,14 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "显式 k 必须等于 rule_ids 数量，不能让模型在多个候选值之间选择。"
         "只要原话明确出现 Voting/n-of-k 和完整 candidate-rule ID，就只能输出 "
         "voting_candidate_build 或 clarification，禁止改路由到 strategy_lifecycle 或其他 workflow。"
+        "cross_matrix_analysis 表示只构建一个显式二维 Cross Matrix。workflow_inputs 只允许"
+        "x_feature、x_method、y_feature、y_method、bin_count、min_bin_pct、loan_amount_col、"
+        "overdue_amount_col 和 sentinel_values；两个轴字段必须不同并逐字来自列白名单，轴方法"
+        "只能是 equal_frequency/equal_width/chimerge/tree/categorical。用户必须明确正向要求"
+        "二维交叉矩阵并写出两个轴及其方法；不得输出 dataset/hash/workspace/target、分箱边界、"
+        "cell condition、指标、预算、artifact/asset/effect/rule id、动作或推荐。该 Workflow 只"
+        "生成 development/backtested/unvalidated 矩阵证据；选格、入池、代码、写回、采纳或部署"
+        "必须拆成后续请求。明确的二维 Cross Matrix 请求只能路由到本 Workflow 或 clarification。"
         "Strategy Pool 请求只抽取用户拥有的控制字段，禁止输出 artifact hash、asset hash、pool revision、"
         "pool snapshot hash、entry/rule 指标或推荐顺序；这些字段全部由平台从当前 task 绑定。"
         "strategy_pool_add_candidate 只允许 candidate_asset_id 与 selection_id 严格二选一。"

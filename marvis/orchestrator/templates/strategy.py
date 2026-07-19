@@ -279,6 +279,55 @@ STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS = WorkflowTemplate(
 )
 
 
+STRATEGY_CROSS_MATRIX_ANALYSIS = WorkflowTemplate(
+    id="strategy_cross_matrix_analysis",
+    title="二维 Cross Matrix 候选分析",
+    goal_patterns=(
+        "二维交叉矩阵",
+        "二维 Cross Matrix",
+        "2D cross matrix",
+    ),
+    slots=(
+        *STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS.slots,
+        SlotSpec("x_feature", True, "user", "Explicit X-axis feature"),
+        SlotSpec("x_method", True, "user", "Explicit X-axis binning method"),
+        SlotSpec("y_feature", True, "user", "Explicit Y-axis feature"),
+        SlotSpec("y_method", True, "user", "Explicit Y-axis binning method"),
+    ),
+    steps=(
+        STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS.steps[0],
+        StepTemplate(
+            title="构建二维 Cross Matrix 候选",
+            tool_ref=ToolRef("strategy", "build_cross_matrix_candidate"),
+            inputs_template={
+                "source_artifact_id": (
+                    "$ref:分析单变量候选.output.artifacts.0.artifact_id"
+                ),
+                "expected_artifact_content_hash": (
+                    "$ref:分析单变量候选.output.artifacts.0.content_hash"
+                ),
+                "expected_candidate_id": "$ref:分析单变量候选.output.candidate_id",
+                "expected_evidence_hash": "$ref:分析单变量候选.output.evidence_hash",
+                "x_feature": "{slot:x_feature}",
+                "x_method": "{slot:x_method}",
+                "y_feature": "{slot:y_feature}",
+                "y_method": "{slot:y_method}",
+            },
+            depends_on_titles=("分析单变量候选",),
+            post_checks=(
+                PostCheck("nonempty", {"field": "asset_id"}),
+                PostCheck("nonempty", {"field": "asset_hash"}),
+                PostCheck("nonempty", {"field": "cell_count"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_AUTOMATIC_TREE_CANDIDATE_BUILD = WorkflowTemplate(
     id="strategy_automatic_tree_candidate_build",
     title="自动决策树候选构建",
