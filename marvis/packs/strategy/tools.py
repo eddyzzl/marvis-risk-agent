@@ -48,6 +48,13 @@ from marvis.packs.strategy.candidate_evidence import (
 from marvis.packs.strategy.candidate_asset_tools import (
     run_refine_univariate_candidate,
 )
+from marvis.packs.strategy.pool_tools import (
+    run_add_candidate_to_pool,
+    run_compile_strategy_pool,
+    run_remove_pool_entry,
+    run_reorder_strategy_pool,
+    run_set_pool_entry_action,
+)
 from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.contracts import Strategy
 from marvis.packs.strategy.deliverables import decision_table_csv
@@ -694,6 +701,36 @@ def tool_refine_univariate_candidate(inputs: dict, ctx) -> dict:
     """Refine task-owned evidence into an immutable development candidate asset."""
 
     return run_refine_univariate_candidate(inputs, ctx, _runtime(ctx))
+
+
+def tool_add_candidate_to_pool(inputs: dict, ctx) -> dict:
+    """Add one immutable Candidate Asset to a governed draft pool revision."""
+
+    return run_add_candidate_to_pool(inputs, ctx, _runtime(ctx))
+
+
+def tool_remove_pool_entry(inputs: dict, ctx) -> dict:
+    """Remove one pool entry addressed by its external stable rule id."""
+
+    return run_remove_pool_entry(inputs, ctx, _runtime(ctx))
+
+
+def tool_set_pool_entry_action(inputs: dict, ctx) -> dict:
+    """Set the Pool-owned typed action for one stable rule id."""
+
+    return run_set_pool_entry_action(inputs, ctx, _runtime(ctx))
+
+
+def tool_reorder_strategy_pool(inputs: dict, ctx) -> dict:
+    """Persist one complete rule-id ordering as a new draft pool revision."""
+
+    return run_reorder_strategy_pool(inputs, ctx, _runtime(ctx))
+
+
+def tool_compile_strategy_pool(inputs: dict, ctx) -> dict:
+    """Compile an exact pool revision to a canonical, unexecuted design."""
+
+    return run_compile_strategy_pool(inputs, ctx, _runtime(ctx))
 
 
 def tool_design_strategy_candidate(inputs: dict, ctx) -> dict:

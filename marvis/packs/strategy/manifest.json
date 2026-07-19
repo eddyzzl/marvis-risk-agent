@@ -1,8 +1,8 @@
 {
   "name": "strategy",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "display_name": "Strategy Pack",
-  "description": "Vintage, roll-rate, profitability, governed univariate analysis and candidate refinement, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
+  "description": "Vintage, roll-rate, profitability, governed univariate candidate refinement and Strategy Pool assembly, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
   "python_requires": ">=3.10,<3.14",
   "tools": [
@@ -831,6 +831,424 @@
       },
       "side_effects": ["read:task", "read:dataset", "write:artifact"],
       "memory_limit_mb": 4096
+    },
+    {
+      "name": "add_candidate_to_pool",
+      "summary": "Add one immutable task-owned Candidate Asset to a draft Strategy Pool revision after strict parent-evidence, dataset, and optimistic-lock validation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source_artifact_id": {"type": "string", "minLength": 1},
+          "expected_artifact_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expected_asset_id": {
+            "type": "string",
+            "pattern": "^candidate-asset-[0-9a-f]{32}$"
+          },
+          "expected_asset_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "strategy_type": {
+            "type": "string",
+            "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+          },
+          "default_action": {"type": "object", "minProperties": 1},
+          "action": {"type": "object", "minProperties": 1},
+          "expected_pool_revision": {"type": "integer", "minimum": 0},
+          "expected_pool_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "reason": {"type": "string", "minLength": 1, "maxLength": 500}
+        },
+        "required": [
+          "source_artifact_id",
+          "expected_artifact_content_hash",
+          "expected_asset_id",
+          "expected_asset_hash",
+          "strategy_type",
+          "default_action",
+          "action",
+          "expected_pool_revision",
+          "expected_pool_snapshot_hash"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.candidate-pool-mutation-tool.v1"
+          },
+          "operation": {"const": "add_candidate"},
+          "pool_id": {"type": "string", "minLength": 1},
+          "revision": {"type": "integer", "minimum": 1},
+          "snapshot_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "status": {"const": "draft"},
+          "validation_status": {"const": "unvalidated"},
+          "entry_count": {"type": "integer", "minimum": 1},
+          "entries": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+          "pool": {"type": "object", "minProperties": 1},
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"$ref": "#/$defs/artifact"}
+          }
+        },
+        "required": [
+          "schema_version",
+          "operation",
+          "pool_id",
+          "revision",
+          "snapshot_hash",
+          "status",
+          "validation_status",
+          "entry_count",
+          "entries",
+          "pool",
+          "artifacts"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "artifact": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "minLength": 1},
+              "kind": {"const": "strategy_candidate_pool_json"},
+              "filename": {"type": "string", "minLength": 1},
+              "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "download_url": {"type": "string", "minLength": 1}
+            },
+            "required": [
+              "artifact_id",
+              "kind",
+              "filename",
+              "content_hash",
+              "download_url"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_add_candidate_to_pool",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:artifact"],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "remove_pool_entry",
+      "summary": "Remove one Strategy Pool membership by stable rule_id and persist a new draft revision; no strategy is adopted or deployed.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_type": {
+            "type": "string",
+            "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+          },
+          "rule_id": {"type": "string", "minLength": 1},
+          "expected_pool_revision": {"type": "integer", "minimum": 1},
+          "expected_pool_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "reason": {"type": "string", "minLength": 1, "maxLength": 500}
+        },
+        "required": [
+          "strategy_type",
+          "rule_id",
+          "expected_pool_revision",
+          "expected_pool_snapshot_hash"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.candidate-pool-mutation-tool.v1"
+          },
+          "operation": {"const": "remove_entry"},
+          "pool_id": {"type": "string", "minLength": 1},
+          "revision": {"type": "integer", "minimum": 2},
+          "snapshot_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "status": {"const": "draft"},
+          "validation_status": {"const": "unvalidated"},
+          "entry_count": {"type": "integer", "minimum": 0},
+          "entries": {"type": "array", "items": {"type": "object"}},
+          "pool": {"type": "object", "minProperties": 1},
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"type": "object", "minProperties": 1}
+          }
+        },
+        "required": [
+          "schema_version",
+          "operation",
+          "pool_id",
+          "revision",
+          "snapshot_hash",
+          "status",
+          "validation_status",
+          "entry_count",
+          "entries",
+          "pool",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_remove_pool_entry",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:artifact"],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "set_pool_entry_action",
+      "summary": "Replace the Pool-owned typed action for one stable rule_id and persist a new draft revision.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_type": {
+            "type": "string",
+            "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+          },
+          "rule_id": {"type": "string", "minLength": 1},
+          "action": {"type": "object", "minProperties": 1},
+          "expected_pool_revision": {"type": "integer", "minimum": 1},
+          "expected_pool_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "reason": {"type": "string", "minLength": 1, "maxLength": 500}
+        },
+        "required": [
+          "strategy_type",
+          "rule_id",
+          "action",
+          "expected_pool_revision",
+          "expected_pool_snapshot_hash"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.candidate-pool-mutation-tool.v1"
+          },
+          "operation": {"const": "set_entry_action"},
+          "pool_id": {"type": "string", "minLength": 1},
+          "revision": {"type": "integer", "minimum": 2},
+          "snapshot_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "status": {"const": "draft"},
+          "validation_status": {"const": "unvalidated"},
+          "entry_count": {"type": "integer", "minimum": 1},
+          "entries": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+          "pool": {"type": "object", "minProperties": 1},
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"type": "object", "minProperties": 1}
+          }
+        },
+        "required": [
+          "schema_version",
+          "operation",
+          "pool_id",
+          "revision",
+          "snapshot_hash",
+          "status",
+          "validation_status",
+          "entry_count",
+          "entries",
+          "pool",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_set_pool_entry_action",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:artifact"],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "reorder_strategy_pool",
+      "summary": "Persist one complete, duplicate-free stable rule_id ordering as a new draft Strategy Pool revision.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_type": {
+            "type": "string",
+            "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+          },
+          "ordered_rule_ids": {
+            "type": "array",
+            "maxItems": 1000,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "expected_pool_revision": {"type": "integer", "minimum": 1},
+          "expected_pool_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "reason": {"type": "string", "minLength": 1, "maxLength": 500}
+        },
+        "required": [
+          "strategy_type",
+          "ordered_rule_ids",
+          "expected_pool_revision",
+          "expected_pool_snapshot_hash"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.candidate-pool-mutation-tool.v1"
+          },
+          "operation": {"const": "reorder_entries"},
+          "pool_id": {"type": "string", "minLength": 1},
+          "revision": {"type": "integer", "minimum": 2},
+          "snapshot_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "status": {"const": "draft"},
+          "validation_status": {"const": "unvalidated"},
+          "entry_count": {"type": "integer", "minimum": 0},
+          "entries": {"type": "array", "items": {"type": "object"}},
+          "pool": {"type": "object", "minProperties": 1},
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"type": "object", "minProperties": 1}
+          }
+        },
+        "required": [
+          "schema_version",
+          "operation",
+          "pool_id",
+          "revision",
+          "snapshot_hash",
+          "status",
+          "validation_status",
+          "entry_count",
+          "entries",
+          "pool",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_reorder_strategy_pool",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:artifact"],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "compile_strategy_pool",
+      "summary": "Compile an exact current Strategy Pool revision to canonical StrategySpec and SelectedStrategyDesign hashes without dataset execution, persistence, adoption, or deployment.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_type": {
+            "type": "string",
+            "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+          },
+          "expected_pool_revision": {"type": "integer", "minimum": 1},
+          "expected_pool_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "strategy_type",
+          "expected_pool_revision",
+          "expected_pool_snapshot_hash"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {"const": "strategy.compile-candidate-pool-tool.v1"},
+          "pool_id": {"type": "string", "minLength": 1},
+          "revision": {"type": "integer", "minimum": 1},
+          "snapshot_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "requirements": {"type": "array", "maxItems": 0},
+          "strategy_spec": {"type": "object", "minProperties": 1},
+          "source_entry_refs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "object", "minProperties": 1}
+          },
+          "design_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "selected_strategy_design": {"type": "object", "minProperties": 1},
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"type": "object", "minProperties": 1}
+          }
+        },
+        "required": [
+          "schema_version",
+          "pool_id",
+          "revision",
+          "snapshot_hash",
+          "requirements",
+          "strategy_spec",
+          "source_entry_refs",
+          "design_hash",
+          "selected_strategy_design",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_compile_strategy_pool",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset"],
+      "memory_limit_mb": 2048
     },
     {
       "name": "design_strategy_candidate",

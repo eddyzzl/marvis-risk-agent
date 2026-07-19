@@ -223,6 +223,18 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     refinement_tool = next(
         tool for tool in manifest.tools if tool.name == "refine_univariate_candidate"
     )
+    pool_mutation_tools = [
+        next(tool for tool in manifest.tools if tool.name == name)
+        for name in (
+            "add_candidate_to_pool",
+            "remove_pool_entry",
+            "set_pool_entry_action",
+            "reorder_strategy_pool",
+        )
+    ]
+    compile_pool_tool = next(
+        tool for tool in manifest.tools if tool.name == "compile_strategy_pool"
+    )
     run_monitoring_tool = next(
         tool for tool in manifest.tools if tool.name == "run_strategy_monitoring"
     )
@@ -239,6 +251,11 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "profit_calc",
         "analyze_univariate_candidates",
         "refine_univariate_candidate",
+        "add_candidate_to_pool",
+        "remove_pool_entry",
+        "set_pool_entry_action",
+        "reorder_strategy_pool",
+        "compile_strategy_pool",
         "design_strategy_candidate",
         "build_strategy",
         "apply_strategy",
@@ -277,6 +294,17 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "read:dataset",
         "write:artifact",
     }
+    assert manifest.version == "0.4.0"
+    for pool_tool in pool_mutation_tools:
+        assert pool_tool.policy.human_decision_gate == "none"
+        assert pool_tool.policy.effect_authorization == "none"
+        required = set(pool_tool.input_schema["required"])
+        assert {
+            "expected_pool_revision",
+            "expected_pool_snapshot_hash",
+        } <= required
+    assert compile_pool_tool.policy.human_decision_gate == "none"
+    assert compile_pool_tool.policy.effect_authorization == "none"
     assert set(run_monitoring_tool.side_effects) == {
         "read:task",
         "read:dataset",

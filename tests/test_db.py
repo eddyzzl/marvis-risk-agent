@@ -1166,7 +1166,7 @@ def test_init_db_migration_009_backfills_canonical_strategy_asset_status(tmp_pat
             "SELECT id, status, asset_status FROM strategies ORDER BY id"
         ).fetchall()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 14
+    assert version == db_schema_module.SCHEMA_VERSION == 15
     assert "asset_status" in columns
     assert [tuple(row) for row in rows] == [
         ("adopted-strategy", "adopted", "adopted_local"),
@@ -1228,7 +1228,7 @@ def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_pa
             row[1] for row in conn.execute("PRAGMA index_list(task_artifacts)")
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 14
+    assert version == db_schema_module.SCHEMA_VERSION == 15
     assert columns == {
         "id",
         "task_id",
@@ -1264,7 +1264,7 @@ def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
         }
         task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 14
+    assert version == db_schema_module.SCHEMA_VERSION == 15
     assert columns == {
         "task_id",
         "schema_version",
@@ -1312,7 +1312,7 @@ def test_init_db_migration_013_adds_data_analysis_runs_to_v12_database(tmp_path)
         }
         task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 14
+    assert version == db_schema_module.SCHEMA_VERSION == 15
     assert columns == {
         "id",
         "schema_version",
@@ -1386,7 +1386,7 @@ def test_init_db_migration_014_adds_transform_runs_and_lineage_to_v13_database(
             )
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 14
+    assert version == db_schema_module.SCHEMA_VERSION == 15
     assert run_columns == {
         "id",
         "schema_version",
@@ -1433,6 +1433,69 @@ def test_init_db_migration_014_adds_transform_runs_and_lineage_to_v13_database(
     assert {
         "trg_data_transform_runs_immutable",
         "trg_dataset_lineage_edges_immutable",
+    } <= triggers
+
+
+def test_init_db_migration_015_adds_strategy_candidate_pool_ledger_to_v14_database(
+    tmp_path,
+):
+    db_path = tmp_path / "legacy_v14.sqlite"
+    with connect(db_path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute(
+            """
+            CREATE TABLE task_artifacts (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content_hash TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("PRAGMA user_version = 14")
+
+    init_db(db_path)
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        item_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(strategy_candidate_pool_items)"
+            )
+        }
+        triggers = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name LIKE 'strategy_candidate_pool%'"
+            )
+        }
+
+    assert version == db_schema_module.SCHEMA_VERSION == 15
+    assert {
+        "strategy_candidate_pools",
+        "strategy_candidate_pool_revisions",
+        "strategy_candidate_pool_items",
+    } <= tables
+    assert {
+        "dataset_id",
+        "dataset_content_hash",
+        "workspace_revision",
+        "workspace_generation",
+        "semantic_mapping_hash",
+    } <= item_columns
+    assert {
+        "trg_strategy_candidate_pool_revisions_immutable_update",
+        "trg_strategy_candidate_pool_items_immutable_update",
+        "trg_strategy_candidate_pools_head_target",
     } <= triggers
 
 

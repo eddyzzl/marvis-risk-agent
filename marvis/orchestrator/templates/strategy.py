@@ -412,6 +412,222 @@ STRATEGY_UNIVARIATE_CANDIDATE_REFINEMENT_EXISTING = WorkflowTemplate(
 )
 
 
+STRATEGY_POOL_ADD_CANDIDATE = WorkflowTemplate(
+    id="strategy_pool_add_candidate",
+    title="候选资产加入 Strategy Pool",
+    goal_patterns=("候选入池", "添加候选规则", "add candidate to strategy pool"),
+    slots=(
+        SlotSpec("source_artifact_id", True, "task_context", "Bound candidate asset artifact"),
+        SlotSpec(
+            "expected_artifact_content_hash",
+            True,
+            "task_context",
+            "Bound candidate artifact content hash",
+        ),
+        SlotSpec("expected_asset_id", True, "task_context", "Verified candidate asset id"),
+        SlotSpec("expected_asset_hash", True, "task_context", "Verified candidate asset hash"),
+        SlotSpec("strategy_type", True, "user", "Typed Strategy Pool kind"),
+        SlotSpec("default_action", True, "user", "Explicit typed default action"),
+        SlotSpec("action", True, "user", "Explicit typed action for the candidate rule"),
+        # Planner's required-slot check treats the valid absent-pool revision
+        # ``0`` as falsy.  Keep this Planner-optional while the template and
+        # Tool schema still require and carry the platform-bound CAS value.
+        SlotSpec("expected_pool_revision", False, "task_context", "Current Pool CAS revision"),
+        SlotSpec(
+            "expected_pool_snapshot_hash",
+            True,
+            "task_context",
+            "Current Pool CAS snapshot hash",
+        ),
+        SlotSpec("reason", False, "user", "Optional user-owned edit rationale"),
+    ),
+    steps=(
+        StepTemplate(
+            title="候选资产加入策略池",
+            tool_ref=ToolRef("strategy", "add_candidate_to_pool"),
+            inputs_template={
+                "source_artifact_id": "{slot:source_artifact_id}",
+                "expected_artifact_content_hash": "{slot:expected_artifact_content_hash}",
+                "expected_asset_id": "{slot:expected_asset_id}",
+                "expected_asset_hash": "{slot:expected_asset_hash}",
+                "strategy_type": "{slot:strategy_type}",
+                "default_action": "{slot:default_action}",
+                "action": "{slot:action}",
+                "expected_pool_revision": "{slot:expected_pool_revision}",
+                "expected_pool_snapshot_hash": "{slot:expected_pool_snapshot_hash}",
+                "reason": "{slot:reason}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "pool_id"}),
+                PostCheck("nonempty", {"field": "snapshot_hash"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STRATEGY_POOL_REMOVE_ENTRY = WorkflowTemplate(
+    id="strategy_pool_remove_entry",
+    title="从 Strategy Pool 删除条目",
+    goal_patterns=("策略池删除规则", "移除池条目", "remove strategy pool entry"),
+    slots=(
+        SlotSpec("strategy_type", True, "user", "Typed Strategy Pool kind"),
+        SlotSpec("rule_id", True, "task_context", "Verified rule id from the current Pool"),
+        SlotSpec("expected_pool_revision", True, "task_context", "Current Pool CAS revision"),
+        SlotSpec(
+            "expected_pool_snapshot_hash",
+            True,
+            "task_context",
+            "Current Pool CAS snapshot hash",
+        ),
+        SlotSpec("reason", False, "user", "Optional user-owned edit rationale"),
+    ),
+    steps=(
+        StepTemplate(
+            title="删除策略池条目",
+            tool_ref=ToolRef("strategy", "remove_pool_entry"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "rule_id": "{slot:rule_id}",
+                "expected_pool_revision": "{slot:expected_pool_revision}",
+                "expected_pool_snapshot_hash": "{slot:expected_pool_snapshot_hash}",
+                "reason": "{slot:reason}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "pool_id"}),
+                PostCheck("nonempty", {"field": "snapshot_hash"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STRATEGY_POOL_SET_ACTION = WorkflowTemplate(
+    id="strategy_pool_set_action",
+    title="修改 Strategy Pool 条目动作",
+    goal_patterns=("修改池规则动作", "策略池动作", "set strategy pool entry action"),
+    slots=(
+        SlotSpec("strategy_type", True, "user", "Typed Strategy Pool kind"),
+        SlotSpec("rule_id", True, "task_context", "Verified rule id from the current Pool"),
+        SlotSpec("action", True, "user", "Explicit typed replacement action"),
+        SlotSpec("expected_pool_revision", True, "task_context", "Current Pool CAS revision"),
+        SlotSpec(
+            "expected_pool_snapshot_hash",
+            True,
+            "task_context",
+            "Current Pool CAS snapshot hash",
+        ),
+        SlotSpec("reason", False, "user", "Optional user-owned edit rationale"),
+    ),
+    steps=(
+        StepTemplate(
+            title="修改策略池条目动作",
+            tool_ref=ToolRef("strategy", "set_pool_entry_action"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "rule_id": "{slot:rule_id}",
+                "action": "{slot:action}",
+                "expected_pool_revision": "{slot:expected_pool_revision}",
+                "expected_pool_snapshot_hash": "{slot:expected_pool_snapshot_hash}",
+                "reason": "{slot:reason}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "pool_id"}),
+                PostCheck("nonempty", {"field": "snapshot_hash"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STRATEGY_POOL_REORDER = WorkflowTemplate(
+    id="strategy_pool_reorder",
+    title="完整重排 Strategy Pool",
+    goal_patterns=("策略池完整排序", "完整重排规则", "reorder strategy pool"),
+    slots=(
+        SlotSpec("strategy_type", True, "user", "Typed Strategy Pool kind"),
+        SlotSpec("ordered_rule_ids", True, "task_context", "Verified complete rule-id order"),
+        SlotSpec("expected_pool_revision", True, "task_context", "Current Pool CAS revision"),
+        SlotSpec(
+            "expected_pool_snapshot_hash",
+            True,
+            "task_context",
+            "Current Pool CAS snapshot hash",
+        ),
+        SlotSpec("reason", False, "user", "Optional user-owned edit rationale"),
+    ),
+    steps=(
+        StepTemplate(
+            title="完整重排策略池",
+            tool_ref=ToolRef("strategy", "reorder_strategy_pool"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "ordered_rule_ids": "{slot:ordered_rule_ids}",
+                "expected_pool_revision": "{slot:expected_pool_revision}",
+                "expected_pool_snapshot_hash": "{slot:expected_pool_snapshot_hash}",
+                "reason": "{slot:reason}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "pool_id"}),
+                PostCheck("nonempty", {"field": "snapshot_hash"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STRATEGY_POOL_COMPILE = WorkflowTemplate(
+    id="strategy_pool_compile",
+    title="编译预览 Strategy Pool",
+    goal_patterns=("预览策略池", "编译策略池草案", "compile strategy pool"),
+    slots=(
+        SlotSpec("strategy_type", True, "user", "Typed Strategy Pool kind"),
+        SlotSpec("expected_pool_revision", True, "task_context", "Current Pool revision"),
+        SlotSpec(
+            "expected_pool_snapshot_hash",
+            True,
+            "task_context",
+            "Current Pool snapshot hash",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="编译策略池草案",
+            tool_ref=ToolRef("strategy", "compile_strategy_pool"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "expected_pool_revision": "{slot:expected_pool_revision}",
+                "expected_pool_snapshot_hash": "{slot:expected_pool_snapshot_hash}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "design_hash"}),
+                PostCheck("nonempty", {"field": "strategy_spec"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 _LIMIT_PRICING_INPUTS = {
     "dataset_id": "{slot:dataset_id}",
     "score_col": "{slot:score_col}",

@@ -1290,6 +1290,138 @@ def _render_refine_univariate_candidate(o: dict):
     return text, []
 
 
+def _render_strategy_pool_mutation(o: dict):
+    entries = [entry for entry in (o.get("entries") or []) if isinstance(entry, dict)]
+    artifacts = [
+        item for item in (o.get("artifacts") or []) if isinstance(item, dict)
+    ]
+    revision = o.get("revision")
+    snapshot_hash = str(o.get("snapshot_hash") or "")
+    operation = str(o.get("operation") or "update")
+    text = (
+        f"**Strategy Pool 已更新**：操作 `{operation}`，Pool `{o.get('pool_id', '')}`，"
+        f"revision {revision}，snapshot hash `{snapshot_hash}`。"
+        f"当前完整有序条目 **{len(entries)}** 条；所有候选证据保持 "
+        "`development / unvalidated`。这是 task 内 draft Pool，**未采纳、未部署**。"
+    )
+    links = [
+        f"[{str(item.get('filename') or item.get('kind') or '下载')}]"
+        f"({str(item.get('download_url'))})"
+        for item in artifacts
+        if item.get("download_url")
+    ]
+    if links:
+        text += "\n\n**Pool revision artifact**：" + "；".join(links)
+
+    rows = []
+    for index, entry in enumerate(entries, start=1):
+        action = entry.get("action") if isinstance(entry.get("action"), dict) else {}
+        source = entry.get("source") if isinstance(entry.get("source"), dict) else {}
+        effect = entry.get("effect") if isinstance(entry.get("effect"), dict) else {}
+        asset_ref = (
+            entry.get("candidate_asset_ref")
+            if isinstance(entry.get("candidate_asset_ref"), dict)
+            else {}
+        )
+        asset_id = (
+            entry.get("candidate_asset_id")
+            or entry.get("asset_id")
+            or asset_ref.get("asset_id")
+            or source.get("asset_id")
+            or ""
+        )
+        effect_stage = str(
+            entry.get("effect_stage") or source.get("effect_stage") or "development"
+        )
+        validation_status = str(
+            entry.get("validation_status")
+            or source.get("validation_status")
+            or "unvalidated"
+        )
+        rows.append(
+            [
+                str(index),
+                str(entry.get("rule_id") or ""),
+                str(entry.get("entry_id") or ""),
+                str(asset_id),
+                str(action.get("type") or action.get("value") or ""),
+                _pct(effect.get("selected_share")),
+                _pct(effect.get("bad_rate")),
+                _num(effect.get("lift")),
+                f"{effect_stage} / {validation_status}",
+            ]
+        )
+    tables = [
+        {
+            "title": "Strategy Pool 完整顺序",
+            "columns": [
+                "#",
+                "rule_id",
+                "entry_id",
+                "candidate_asset_id",
+                "action",
+                "selected_share",
+                "bad_rate",
+                "lift",
+                "evidence status",
+            ],
+            "rows": rows,
+        }
+    ]
+    return text, tables
+
+
+def _render_compile_strategy_pool(o: dict):
+    spec = o.get("strategy_spec") if isinstance(o.get("strategy_spec"), dict) else {}
+    rules = [rule for rule in (spec.get("rules") or []) if isinstance(rule, dict)]
+    artifacts = [
+        item for item in (o.get("artifacts") or []) if isinstance(item, dict)
+    ]
+    text = (
+        f"**Strategy Pool 编译完成**：Pool `{o.get('pool_id', '')}` revision "
+        f"{o.get('revision')} 已只读编译为 canonical `StrategySpec`；design hash "
+        f"`{o.get('design_hash', '')}`，snapshot hash `{o.get('snapshot_hash', '')}`。"
+        "该结果只是**只读草案**，未创建已采纳策略，**未采纳、未部署**。"
+    )
+    requirements = o.get("requirements") or []
+    if requirements:
+        rendered_requirements = "；".join(
+            str(item.get("message") or item.get("code") or item)
+            if isinstance(item, dict)
+            else str(item)
+            for item in requirements
+        )
+        text += f"\n\n**尚待满足的要求**：{rendered_requirements}"
+    links = [
+        f"[{str(item.get('filename') or item.get('kind') or '下载')}]"
+        f"({str(item.get('download_url'))})"
+        for item in artifacts
+        if item.get("download_url")
+    ]
+    if links:
+        text += "\n\n**来源 Pool artifact**：" + "；".join(links)
+    return text, [
+        {
+            "title": "编译后的 StrategySpec 规则",
+            "columns": ["#", "rule_id", "priority", "action", "condition"],
+            "rows": [
+                [
+                    str(index),
+                    str(rule.get("rule_id") or ""),
+                    _fmt(rule.get("priority")),
+                    str(
+                        (rule.get("action") or {}).get("type")
+                        if isinstance(rule.get("action"), dict)
+                        else ""
+                    ),
+                    str(rule.get("condition") or ""),
+                ]
+                for index, rule in enumerate(rules, start=1)
+            ],
+        }
+    ]
+
+
 def _render_decision_backtest(
     o: dict,
     *,
@@ -3868,6 +4000,11 @@ _RENDERERS = {
     "design_strategy_candidate": _render_design_strategy_candidate,
     "analyze_univariate_candidates": _render_analyze_univariate_candidates,
     "refine_univariate_candidate": _render_refine_univariate_candidate,
+    "add_candidate_to_pool": _render_strategy_pool_mutation,
+    "remove_pool_entry": _render_strategy_pool_mutation,
+    "set_pool_entry_action": _render_strategy_pool_mutation,
+    "reorder_strategy_pool": _render_strategy_pool_mutation,
+    "compile_strategy_pool": _render_compile_strategy_pool,
     "backtest_strategy": _render_backtest_strategy,
     "tradeoff_view": _render_tradeoff_view,
     "design_cutoff_bands": _render_design_cutoff_bands,

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Callable
 import json
+from pathlib import Path
 import re
+from typing import Callable
 
 from marvis.agent.adhoc_analysis import (
     build_slice_spec_from_utterance,
@@ -114,6 +115,16 @@ from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestRepository,
 )
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.repositories.strategy_pool import (
+    ABSENT_POOL_REVISION,
+    ABSENT_POOL_SNAPSHOT_HASH,
+    StrategyCandidatePoolRepository,
+    strategy_pool_snapshot_hash,
+)
+from marvis.packs.strategy.candidate_asset import (
+    canonical_candidate_asset_json,
+    validate_candidate_asset,
+)
 from marvis.repositories.data_workspace import (
     DataWorkspaceDataError,
     DataWorkspaceDatasetNotFound,
@@ -1307,17 +1318,27 @@ def _maybe_handle_workflow_recovery_turn(
 # only real human-responsibility gates pause. Opaque pending drafts remain here
 # solely for read-compatible confirm/cancel handling of older conversations.
 _STRATEGY_REQUEST_META_KEY = "strategy_request"
+_STRATEGY_POOL_WORKFLOWS = frozenset(
+    {
+        "strategy_pool_add_candidate",
+        "strategy_pool_remove_entry",
+        "strategy_pool_set_action",
+        "strategy_pool_reorder",
+        "strategy_pool_compile",
+    }
+)
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
     r"(?:开发|设计|制定|创建|生成|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
     r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
+    r"添加|加入|入池|删除|移除|排序|重排|改为|编译|预览|"
     r"develop|design|create|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
-    r"adopt|report|monitor|mine|refine|select|merge)",
+    r"adopt|report|monitor|mine|refine|select|merge|add|remove|delete|reorder|compile|preview)",
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_SUBJECT_RE = re.compile(
-    r"(?:策略|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|cutoff|利润|收益|"
+    r"(?:策略|策略池|规则池|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|cutoff|利润|收益|"
     r"催收|滚动率|迁徙率|迁徙矩阵|定价矩阵|额度矩阵|网格|ROA|"
-    r"roll(?:\s|-|_)*rate|strategy|approval|reject|limit|pricing|segment|rule|candidate|"
+    r"roll(?:\s|-|_)*rate|strategy(?:\s|-|_)*pool|pool|strategy|approval|reject|limit|pricing|segment|rule|candidate|"
     r"candidate\s+bins?|\bbins?\b|univariate|binning|profit|collection)",
     re.IGNORECASE,
 )
@@ -1331,6 +1352,11 @@ _STRATEGY_REQUEST_NON_EXECUTION_RE = re.compile(
     r"只预览|仅预览|只讨论|仅讨论|只聊|仅供讨论|"
     r"do\s+not\s+(?:execute|run)|don't\s+(?:execute|run)|"
     r"preview\s+only|discussion\s+only|discuss\s+only)",
+    re.IGNORECASE,
+)
+_STRATEGY_POOL_COMPILE_REQUEST_RE = re.compile(
+    r"(?=.*(?:策略池|规则池|strategy(?:\s|-|_)*pool|\bpool\b))"
+    r"(?=.*(?:编译|预览|compile|preview))",
     re.IGNORECASE,
 )
 _STRATEGY_NAN_LABEL_META_KEY = "strategy_nan_label_confirmation"
@@ -1498,7 +1524,9 @@ def _maybe_handle_strategy_request_turn(
     if latest_open_gate(conversation) is not None:
         return None
 
-    if _STRATEGY_REQUEST_NON_EXECUTION_RE.search(text):
+    if _STRATEGY_REQUEST_NON_EXECUTION_RE.search(
+        text
+    ) and not _STRATEGY_POOL_COMPILE_REQUEST_RE.search(text):
         repo.add_agent_message(
             task.id,
             role="user",
@@ -1697,6 +1725,26 @@ def _run_validated_strategy_request(
             task,
             template_id="stored_strategy_report",
             slots={"strategy_id": draft.strategy_id},
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow in _STRATEGY_POOL_WORKFLOWS
+    ):
+        template_id = {
+            "strategy_pool_add_candidate": "strategy_pool_add_candidate",
+            "strategy_pool_remove_entry": "strategy_pool_remove_entry",
+            "strategy_pool_set_action": "strategy_pool_set_action",
+            "strategy_pool_reorder": "strategy_pool_reorder",
+            "strategy_pool_compile": "strategy_pool_compile",
+        }[draft.workflow]
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id=template_id,
+            slots=_strategy_pool_plan_slots(runtime, task, draft),
             auto_start=auto_start,
         )
 
@@ -2404,6 +2452,12 @@ def _standard_workflow_request_preflight(
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> tuple[str, str] | None:
+    if draft.workflow in _STRATEGY_POOL_WORKFLOWS:
+        try:
+            _strategy_pool_plan_slots(runtime, task, draft)
+        except StrategySetupError as exc:
+            return ("strategy_pool_binding_required", str(exc))
+        return None
     if draft.workflow == "univariate_candidate_refinement":
         source_candidate_id = draft.workflow_inputs.get("source_candidate_id")
         if source_candidate_id is not None:
@@ -2487,6 +2541,234 @@ def _candidate_source_artifact_slots(
         "expected_candidate_id": candidate_id,
         "expected_evidence_hash": evidence_hash,
     }
+
+
+def _strategy_pool_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict:
+    """Resolve all Pool integrity inputs from task-owned state, never the LLM."""
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    strategy_type = str(inputs["strategy_type"])
+    try:
+        current = StrategyCandidatePoolRepository(
+            runtime.settings.db_path
+        ).get_current(task.id, strategy_type)
+    except Exception as exc:
+        raise StrategySetupError(
+            "当前 Strategy Pool 状态无法通过完整性校验，请先检查任务数据。"
+        ) from exc
+
+    if current is None:
+        expected_revision = ABSENT_POOL_REVISION
+        expected_snapshot_hash = ABSENT_POOL_SNAPSHOT_HASH
+    else:
+        try:
+            expected_revision = int(current["revision"])
+            expected_snapshot_hash = strategy_pool_snapshot_hash(current)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StrategySetupError(
+                "当前 Strategy Pool revision/hash 绑定不完整，不能继续操作。"
+            ) from exc
+
+    slots: dict = {
+        "strategy_type": strategy_type,
+        "expected_pool_revision": expected_revision,
+        "expected_pool_snapshot_hash": expected_snapshot_hash,
+    }
+    if "reason" in inputs:
+        slots["reason"] = inputs["reason"]
+
+    if draft.workflow == "strategy_pool_add_candidate":
+        slots.update(
+            _candidate_asset_artifact_slots(
+                runtime,
+                task_id=task.id,
+                asset_id=str(inputs["candidate_asset_id"]),
+            )
+        )
+        slots["default_action"] = inputs["default_action"]
+        slots["action"] = inputs["action"]
+        if current is not None and current.get("default_action") != inputs["default_action"]:
+            raise StrategySetupError(
+                "请求中的 default_action 与当前 Strategy Pool 不一致；"
+                "不能在添加条目时静默改写 Pool 默认动作。"
+            )
+        asset_id = slots["expected_asset_id"]
+        if current is not None and any(
+            isinstance(entry, Mapping)
+            and isinstance(entry.get("source"), Mapping)
+            and entry["source"].get("asset_id") == asset_id
+            for entry in _strategy_pool_entries(current)
+        ):
+            raise StrategySetupError(f"候选资产 {asset_id} 已存在于当前 Strategy Pool。")
+        return slots
+
+    if draft.workflow == "strategy_pool_compile":
+        if current is None:
+            raise StrategySetupError(
+                "当前任务还没有该类型的 Strategy Pool，无法编译预览。"
+            )
+        return slots
+    if current is None:
+        raise StrategySetupError("当前任务还没有该类型的 Strategy Pool，无法执行此操作。")
+
+    if draft.workflow in {
+        "strategy_pool_remove_entry",
+        "strategy_pool_set_action",
+    }:
+        identifier = inputs.get("rule_id") or inputs.get("entry_id")
+        slots["rule_id"] = _strategy_pool_rule_id(current, str(identifier))
+        if draft.workflow == "strategy_pool_set_action":
+            slots["action"] = inputs["action"]
+        return slots
+
+    if draft.workflow == "strategy_pool_reorder":
+        slots["ordered_rule_ids"] = _strategy_pool_complete_rule_order(
+            current,
+            inputs["ordered_ids"],
+        )
+        return slots
+    raise StrategySetupError(f"未接线的 Strategy Pool Workflow：{draft.workflow}")
+
+
+def _candidate_asset_artifact_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    asset_id: str,
+) -> dict[str, str]:
+    matches = []
+    try:
+        artifacts = TaskArtifactRepository(runtime.settings.db_path).list_for_task(
+            task_id
+        )
+    except Exception as exc:
+        raise StrategySetupError(
+            "当前任务的候选资产 artifact registry 无法读取，不能安全绑定来源。"
+        ) from exc
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            raise StrategySetupError("当前任务的候选资产 artifact 记录结构无效。")
+        provenance = artifact.get("provenance")
+        if (
+            artifact.get("kind") == "strategy_candidate_asset_json"
+            and artifact.get("origin_tool") == "strategy.refine_univariate_candidate"
+            and isinstance(provenance, dict)
+            and provenance.get("asset_id") == asset_id
+        ):
+            matches.append(artifact)
+    if not matches:
+        raise StrategySetupError(
+            f"当前任务没有候选资产 {asset_id}；请使用结果中展示的完整 candidate-asset ID。"
+        )
+    if len(matches) != 1:
+        raise StrategySetupError(
+            f"候选资产 {asset_id} 对应多个 artifact，当前不能安全选择来源。"
+        )
+    artifact = matches[0]
+    artifact_id = artifact.get("id")
+    content_hash = artifact.get("content_hash")
+    path_value = artifact.get("path")
+    provenance = artifact.get("provenance")
+    asset_hash = provenance.get("asset_hash") if isinstance(provenance, dict) else None
+    if (
+        not isinstance(artifact_id, str)
+        or not artifact_id
+        or not isinstance(content_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", content_hash) is None
+        or not isinstance(asset_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", asset_hash) is None
+        or not isinstance(path_value, str)
+        or not path_value
+    ):
+        raise StrategySetupError(
+            f"候选资产 {asset_id} 的 artifact 完整性绑定不完整，请重新生成。"
+        )
+    path = Path(path_value)
+    try:
+        content = path.read_bytes()
+        if sha256_file(path) != content_hash:
+            raise StrategySetupError(
+                f"候选资产 {asset_id} 的 artifact 内容已漂移，不能加入 Strategy Pool。"
+            )
+        payload = json.loads(content)
+        normalized_asset = validate_candidate_asset(payload)
+        if canonical_candidate_asset_json(normalized_asset).encode("utf-8") != content:
+            raise StrategySetupError(
+                f"候选资产 {asset_id} 不是 canonical JSON，不能加入 Strategy Pool。"
+            )
+    except StrategySetupError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            f"候选资产 {asset_id} 无法通过 artifact 校验，请重新生成。"
+        ) from exc
+    if (
+        normalized_asset.get("asset_id") != asset_id
+        or normalized_asset.get("asset_hash") != asset_hash
+    ):
+        raise StrategySetupError(
+            f"候选资产 {asset_id} 与 artifact provenance 不一致，不能加入 Strategy Pool。"
+        )
+    return {
+        "source_artifact_id": artifact_id,
+        "expected_artifact_content_hash": content_hash,
+        "expected_asset_id": asset_id,
+        "expected_asset_hash": asset_hash,
+    }
+
+
+def _strategy_pool_entries(pool: Mapping) -> list[Mapping]:
+    entries = pool.get("entries")
+    if not isinstance(entries, Sequence) or isinstance(
+        entries, str | bytes | bytearray
+    ):
+        raise StrategySetupError("当前 Strategy Pool entries 无效。")
+    if any(not isinstance(entry, Mapping) for entry in entries):
+        raise StrategySetupError("当前 Strategy Pool entry 结构无效。")
+    return list(entries)
+
+
+def _strategy_pool_rule_id(pool: Mapping, identifier: str) -> str:
+    matches = [
+        entry
+        for entry in _strategy_pool_entries(pool)
+        if identifier in {str(entry.get("entry_id")), str(entry.get("rule_id"))}
+    ]
+    if len(matches) != 1:
+        raise StrategySetupError(
+            f"当前 Strategy Pool 中没有唯一匹配的 rule_id/entry_id：{identifier}。"
+        )
+    rule_id = matches[0].get("rule_id")
+    if not isinstance(rule_id, str) or not rule_id:
+        raise StrategySetupError("当前 Strategy Pool entry 缺少完整 rule_id。")
+    return rule_id
+
+
+def _strategy_pool_complete_rule_order(
+    pool: Mapping,
+    ordered_ids: object,
+) -> list[str]:
+    entries = _strategy_pool_entries(pool)
+    if not isinstance(ordered_ids, Sequence) or isinstance(
+        ordered_ids, str | bytes | bytearray
+    ):
+        raise StrategySetupError("Strategy Pool reorder 必须提供完整 ID 列表。")
+    resolved = [_strategy_pool_rule_id(pool, str(item)) for item in ordered_ids]
+    current_rule_ids = [str(entry.get("rule_id") or "") for entry in entries]
+    if (
+        len(resolved) != len(current_rule_ids)
+        or len(set(resolved)) != len(resolved)
+        or set(resolved) != set(current_rule_ids)
+    ):
+        raise StrategySetupError(
+            "Strategy Pool reorder 必须提供当前全部 rule_id/entry_id 的完整、无重复排列；"
+            "遗漏 ID 不会被解释为删除。"
+        )
+    return resolved
 
 
 def _stored_strategy_request_preflight(
@@ -2890,6 +3172,8 @@ def _strategy_request_requires_dataset(
     draft: CompiledStrategyRequestDraft,
 ) -> bool:
     if isinstance(draft, StandardWorkflowRequestDraft):
+        if draft.workflow in _STRATEGY_POOL_WORKFLOWS:
+            return False
         return True
     return not (draft.strategy_spec is None and draft.operation == "report")
 

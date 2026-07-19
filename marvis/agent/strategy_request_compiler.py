@@ -24,7 +24,7 @@ from marvis.packs.strategy.candidate_design import (
     normalize_candidate_design,
     normalize_candidate_economics_inputs,
 )
-from marvis.packs.strategy.dsl import parse_strategy_spec
+from marvis.packs.strategy.dsl import StrategyAction, parse_strategy_spec
 from marvis.packs.strategy.errors import StrategyError
 from marvis.strategy_adoption import AdoptionReasonError, normalize_adoption_reason
 
@@ -60,6 +60,11 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "limit_pricing_matrix",
     "univariate_candidate_analysis",
     "univariate_candidate_refinement",
+    "strategy_pool_add_candidate",
+    "strategy_pool_remove_entry",
+    "strategy_pool_set_action",
+    "strategy_pool_reorder",
+    "strategy_pool_compile",
 )
 UNIVARIATE_BINNING_METHODS = (
     "equal_frequency",
@@ -69,6 +74,66 @@ UNIVARIATE_BINNING_METHODS = (
 )
 UNIVARIATE_REFINEMENT_METHODS = (*UNIVARIATE_BINNING_METHODS, "categorical")
 _CANDIDATE_ID_RE = re.compile(r"^candidate-[0-9a-f]{32}$")
+_CANDIDATE_ASSET_ID_RE = re.compile(r"^candidate-asset-[0-9a-f]{32}$")
+_POOL_ITEM_ID_RE = re.compile(
+    r"^(?:candidate-rule|pool-entry)-[0-9a-f]{32}$"
+)
+_STRATEGY_POOL_WORKFLOWS = frozenset(
+    {
+        "strategy_pool_add_candidate",
+        "strategy_pool_remove_entry",
+        "strategy_pool_set_action",
+        "strategy_pool_reorder",
+        "strategy_pool_compile",
+    }
+)
+_POOL_MUTATION_WORKFLOWS = _STRATEGY_POOL_WORKFLOWS - {"strategy_pool_compile"}
+_POOL_ACTION_TYPES = {
+    "approval": frozenset({"approval", "reject", "review"}),
+    "reject": frozenset({"approval", "reject", "review"}),
+    "limit": frozenset({"limit"}),
+    "pricing": frozenset({"pricing"}),
+    "segmentation": frozenset({"segment"}),
+}
+_POOL_ACTION_GROUNDING = {
+    "approval": re.compile(r"(?:通过|批准|准入|approve|approval)", re.IGNORECASE),
+    "reject": re.compile(r"(?:拒绝|reject)", re.IGNORECASE),
+    "review": re.compile(r"(?:人工复核|人工审核|复核|审核|review)", re.IGNORECASE),
+    "limit": re.compile(r"(?:额度|授信|limit)", re.IGNORECASE),
+    "pricing": re.compile(r"(?:定价|利率|pricing|price)", re.IGNORECASE),
+    "segment": re.compile(r"(?:分群|分层|segment)", re.IGNORECASE),
+}
+_POOL_STRATEGY_TYPE_GROUNDING = {
+    "approval": re.compile(
+        r"(?:审批|准入|approval(?=.{0,12}(?:策略池|pool|strategy)))",
+        re.IGNORECASE,
+    ),
+    "reject": re.compile(
+        r"(?:拒绝(?:策略|规则)?池|拒绝策略|reject(?=.{0,12}(?:策略池|pool|strategy)))",
+        re.IGNORECASE,
+    ),
+    "limit": re.compile(
+        r"(?:额度|授信|limit(?=.{0,12}(?:策略池|pool|strategy)))",
+        re.IGNORECASE,
+    ),
+    "pricing": re.compile(
+        r"(?:定价|利率|pricing(?=.{0,12}(?:策略池|pool|strategy)))",
+        re.IGNORECASE,
+    ),
+    "segmentation": re.compile(
+        r"(?:分群|分层|segment(?:ation)?(?=.{0,12}(?:策略池|pool|strategy)))",
+        re.IGNORECASE,
+    ),
+}
+_POOL_PARTIAL_REORDER_RE = re.compile(
+    r"(?:放到?前面|移到?前面|置顶|提前|排最前|优先放|move\s+.*\s+first)",
+    re.IGNORECASE,
+)
+_POOL_HEURISTIC_REORDER_RE = re.compile(
+    r"(?:按.{0,12}(?:效果|坏率|lift|最好|最优|风险).{0,8}(?:排序|重排)|"
+    r"(?:自动|智能).{0,8}(?:排序|重排)|sort.{0,12}(?:best|effect|risk|lift))",
+    re.IGNORECASE,
+)
 _REFINEMENT_SELECTION_ACTION_RE = re.compile(
     r"(?:选择|选中|保留|筛选|作为|select|keep|retain)", re.IGNORECASE
 )
@@ -945,6 +1010,11 @@ def _validate_standard_workflow_payload(
                 whitelist,
                 target_col=target_col,
             )
+        elif workflow in _STRATEGY_POOL_WORKFLOWS:
+            normalized = _validate_strategy_pool_workflow_inputs(
+                workflow,
+                raw_inputs,
+            )
         else:  # pragma: no cover - guarded by STANDARD_STRATEGY_WORKFLOWS
             raise _DraftValidationError(f"不支持的标准 Workflow：{workflow}。")
     except _DraftValidationError as exc:
@@ -1592,14 +1662,152 @@ def _candidate_selection(value: object, *, name: str) -> dict[str, Any]:
     return {"risk_threshold": {"operator": operator, "value": risk_value}}
 
 
+def _validate_strategy_pool_workflow_inputs(
+    workflow: str,
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate user-owned Pool controls before platform bindings are added.
+
+    Artifact hashes and the current Pool revision/hash are deliberately absent
+    here.  The turn handler resolves those values from task-owned persistence at
+    plan creation time; an LLM is never allowed to author integrity metadata.
+    """
+
+    common = {"strategy_type", "reason"}
+    allowed_by_workflow = {
+        "strategy_pool_add_candidate": common
+        | {"candidate_asset_id", "default_action", "action"},
+        "strategy_pool_remove_entry": common | {"rule_id", "entry_id"},
+        "strategy_pool_set_action": common | {"rule_id", "entry_id", "action"},
+        "strategy_pool_reorder": common | {"ordered_ids"},
+        "strategy_pool_compile": {"strategy_type"},
+    }
+    _reject_workflow_fields(inputs, allowed_by_workflow[workflow], workflow=workflow)
+    if "strategy_type" not in inputs:
+        raise _DraftValidationError(f"{workflow} 缺少 strategy_type。")
+    strategy_type = _required_text(
+        inputs["strategy_type"], name=f"{workflow} strategy_type"
+    )
+    if strategy_type not in STRATEGY_TYPES:
+        raise _DraftValidationError(
+            f"{workflow} strategy_type 只能是：" + "、".join(STRATEGY_TYPES) + "。"
+        )
+    normalized: dict[str, Any] = {"strategy_type": strategy_type}
+
+    if workflow == "strategy_pool_add_candidate":
+        missing = sorted(
+            {"candidate_asset_id", "default_action", "action"} - set(inputs)
+        )
+        if missing:
+            raise _DraftValidationError(
+                f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+            )
+        asset_id = _required_text(
+            inputs["candidate_asset_id"],
+            name=f"{workflow} candidate_asset_id",
+        )
+        if _CANDIDATE_ASSET_ID_RE.fullmatch(asset_id) is None:
+            raise _DraftValidationError(
+                f"{workflow} candidate_asset_id 必须是完整 candidate-asset id。"
+            )
+        normalized.update(
+            {
+                "candidate_asset_id": asset_id,
+                "default_action": _strategy_pool_action(
+                    inputs["default_action"],
+                    strategy_type=strategy_type,
+                    name=f"{workflow} default_action",
+                ),
+                "action": _strategy_pool_action(
+                    inputs["action"],
+                    strategy_type=strategy_type,
+                    name=f"{workflow} action",
+                ),
+            }
+        )
+    elif workflow in {"strategy_pool_remove_entry", "strategy_pool_set_action"}:
+        identifiers = [name for name in ("rule_id", "entry_id") if name in inputs]
+        if len(identifiers) != 1:
+            raise _DraftValidationError(
+                f"{workflow} 必须且只能提供 rule_id 或 entry_id 之一。"
+            )
+        identifier_name = identifiers[0]
+        normalized[identifier_name] = _strategy_pool_identifier(
+            inputs[identifier_name],
+            name=f"{workflow} {identifier_name}",
+        )
+        if workflow == "strategy_pool_set_action":
+            if "action" not in inputs:
+                raise _DraftValidationError(f"{workflow} 缺少 action。")
+            normalized["action"] = _strategy_pool_action(
+                inputs["action"],
+                strategy_type=strategy_type,
+                name=f"{workflow} action",
+            )
+    elif workflow == "strategy_pool_reorder":
+        if "ordered_ids" not in inputs:
+            raise _DraftValidationError(f"{workflow} 缺少 ordered_ids。")
+        raw_order = inputs["ordered_ids"]
+        if (
+            not isinstance(raw_order, Sequence)
+            or isinstance(raw_order, str | bytes | bytearray)
+            or not 1 <= len(raw_order) <= 200
+        ):
+            raise _DraftValidationError(
+                f"{workflow} ordered_ids 必须是 1 到 200 个完整 rule_id/entry_id。"
+            )
+        ordered_ids = [
+            _strategy_pool_identifier(item, name=f"{workflow} ordered_ids")
+            for item in raw_order
+        ]
+        if len(set(ordered_ids)) != len(ordered_ids):
+            raise _DraftValidationError(f"{workflow} ordered_ids 不能包含重复 ID。")
+        normalized["ordered_ids"] = ordered_ids
+
+    if workflow in _POOL_MUTATION_WORKFLOWS and "reason" in inputs:
+        reason = _required_text(inputs["reason"], name=f"{workflow} reason")
+        if len(reason) > 500:
+            raise _DraftValidationError(f"{workflow} reason 最多 500 个字符。")
+        normalized["reason"] = reason
+    return normalized
+
+
+def _strategy_pool_action(
+    value: object,
+    *,
+    strategy_type: str,
+    name: str,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise _DraftValidationError(f"{name} 必须是 typed StrategyAction 对象。")
+    try:
+        action = StrategyAction.from_dict(value)
+    except StrategyError as exc:
+        raise _DraftValidationError(f"{name} 无效：{exc}") from exc
+    if action.type not in _POOL_ACTION_TYPES[strategy_type]:
+        raise _DraftValidationError(
+            f"{name} 的 {action.type} 动作不适用于 {strategy_type} 策略。"
+        )
+    return action.to_dict()
+
+
+def _strategy_pool_identifier(value: object, *, name: str) -> str:
+    identifier = _required_text(value, name=name)
+    if _POOL_ITEM_ID_RE.fullmatch(identifier) is None:
+        raise _DraftValidationError(f"{name} 必须是完整、安全的 rule_id 或 entry_id。")
+    return identifier
+
+
 def _ground_refinement_request(
     utterance: str,
     result: StrategyRequestCompilation,
 ) -> StrategyRequestCompilation:
     draft = result.draft
-    if not isinstance(draft, StandardWorkflowRequestDraft) or (
-        draft.workflow != "univariate_candidate_refinement"
-    ):
+    if not isinstance(draft, StandardWorkflowRequestDraft):
+        return result
+    if draft.workflow in _STRATEGY_POOL_WORKFLOWS:
+        return _ground_strategy_pool_request(utterance, result)
+    if draft.workflow != "univariate_candidate_refinement":
         return result
     inputs = draft.to_dict()["workflow_inputs"]
     missing_controls: list[str] = []
@@ -1646,6 +1854,127 @@ def _ground_refinement_request(
         code="strategy_refinement_controls_not_grounded",
         fields=tuple(dict.fromkeys(missing_controls)),
     )
+
+
+def _ground_strategy_pool_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Prove that every executable Pool control came from the user text."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    workflow = draft.workflow
+
+    if workflow == "strategy_pool_reorder" and (
+        _POOL_PARTIAL_REORDER_RE.search(utterance)
+        or _POOL_HEURISTIC_REORDER_RE.search(utterance)
+    ):
+        return _clarification(
+            "Strategy Pool 重排必须提供当前池全部 rule_id/entry_id 的完整、无重复顺序；"
+            "不能只说把某条放前面，也不能按效果、坏率或推荐自动排序。",
+            code="strategy_pool_full_order_required",
+            fields=("ordered_ids",),
+        )
+
+    missing_controls: list[str] = []
+    strategy_type = str(inputs.get("strategy_type") or "")
+    strategy_type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    if strategy_type_pattern is None or strategy_type_pattern.search(utterance) is None:
+        missing_controls.append(f"strategy_type {strategy_type or 'unknown'}")
+    if workflow == "strategy_pool_add_candidate":
+        asset_id = inputs["candidate_asset_id"]
+        if not _utterance_contains_token(utterance, asset_id):
+            missing_controls.append(asset_id)
+        missing_controls.extend(
+            _ungrounded_pool_actions(
+                utterance,
+                inputs["default_action"],
+                inputs["action"],
+            )
+        )
+    elif workflow in {"strategy_pool_remove_entry", "strategy_pool_set_action"}:
+        identifier_name = "rule_id" if "rule_id" in inputs else "entry_id"
+        identifier = inputs[identifier_name]
+        if not _utterance_contains_token(utterance, identifier):
+            missing_controls.append(identifier)
+        if workflow == "strategy_pool_set_action":
+            missing_controls.extend(
+                _ungrounded_pool_actions(utterance, inputs["action"])
+            )
+    elif workflow == "strategy_pool_reorder":
+        ordered_ids = inputs["ordered_ids"]
+        positions = [utterance.find(identifier) for identifier in ordered_ids]
+        missing_controls.extend(
+            identifier
+            for identifier, position in zip(ordered_ids, positions, strict=True)
+            if position < 0
+        )
+        observed_positions = [position for position in positions if position >= 0]
+        if observed_positions != sorted(observed_positions):
+            missing_controls.append("用户原话中的完整顺序")
+    elif workflow == "strategy_pool_compile":
+        pass
+
+    reason = inputs.get("reason")
+    if isinstance(reason, str) and reason.casefold() not in utterance.casefold():
+        missing_controls.append(reason)
+
+    if not missing_controls:
+        return result
+    rendered = "、".join(dict.fromkeys(missing_controls))
+    return _clarification(
+        "请在原话中明确提供 Strategy Pool 的策略类型、完整 ID 和 typed action；"
+        f"当前无法核对：{rendered}。平台不会采用 LLM 猜测的 ID、动作、顺序、hash 或指标。",
+        code="strategy_pool_controls_not_grounded",
+        fields=tuple(dict.fromkeys(missing_controls)),
+    )
+
+
+def _ungrounded_pool_actions(
+    utterance: str,
+    *actions: Mapping[str, Any],
+) -> list[str]:
+    missing: list[str] = []
+    for action in actions:
+        action_type = str(action.get("type") or "")
+        pattern = _POOL_ACTION_GROUNDING.get(action_type)
+        if pattern is None or pattern.search(utterance) is None:
+            missing.append(f"typed action {action_type or 'unknown'}")
+        reason_code = action.get("reason_code")
+        if isinstance(reason_code, str) and not _utterance_contains_token(
+            utterance, reason_code
+        ):
+            missing.append(reason_code)
+        if action_type in {"limit", "pricing", "segment"} and not (
+            _utterance_contains_pool_action_value(utterance, action.get("value"))
+        ):
+            missing.append(f"typed action value {action.get('value')}")
+        output_value = action.get("output_value")
+        if output_value is not None and not _utterance_contains_pool_action_value(
+            utterance, output_value
+        ):
+            missing.append(f"typed action output_value {output_value}")
+    return missing
+
+
+def _utterance_contains_pool_action_value(utterance: str, value: object) -> bool:
+    candidates = {str(value)}
+    try:
+        candidates.add(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+    except (TypeError, ValueError):
+        return False
+    folded = utterance.casefold()
+    return any(candidate.casefold() in folded for candidate in candidates)
 
 
 def _utterance_supports_risk_threshold(
@@ -1906,6 +2235,53 @@ def _standard_workflow_confirmation_text(
         ]
         if "selection_reason" in inputs:
             details.append(f"选择说明：{inputs['selection_reason']}")
+    elif draft.workflow == "strategy_pool_add_candidate":
+        details = [
+            "已识别为〔Strategy Pool 添加候选 Workflow〕",
+            f"候选资产：{inputs['candidate_asset_id']}",
+            f"策略类型：{inputs['strategy_type']}",
+            "默认动作：" + _compact_json(inputs["default_action"]),
+            "命中动作：" + _compact_json(inputs["action"]),
+            "平台将从当前 task 的不可变 artifact 绑定 hash、rule/effect/metrics，"
+            "并展示 development / unvalidated 证据后自动写入可逆 draft Pool revision",
+            "本操作只修改 draft Pool，不会采纳或部署策略",
+        ]
+        if "reason" in inputs:
+            details.append(f"操作说明：{inputs['reason']}")
+    elif draft.workflow in {
+        "strategy_pool_remove_entry",
+        "strategy_pool_set_action",
+    }:
+        identifier_name = "rule_id" if "rule_id" in inputs else "entry_id"
+        operation = "删除条目" if draft.workflow == "strategy_pool_remove_entry" else "修改动作"
+        details = [
+            f"已识别为〔Strategy Pool {operation} Workflow〕",
+            f"策略类型：{inputs['strategy_type']}",
+            f"目标 {identifier_name}：{inputs[identifier_name]}",
+            "平台将从 task 当前 Pool 解析完整条目并绑定 revision/hash，旧 revision 保持不可变",
+            "本操作不会采纳或部署策略",
+        ]
+        if "action" in inputs:
+            details.append("新动作：" + _compact_json(inputs["action"]))
+        if "reason" in inputs:
+            details.append(f"操作说明：{inputs['reason']}")
+    elif draft.workflow == "strategy_pool_reorder":
+        details = [
+            "已识别为〔Strategy Pool 完整重排 Workflow〕",
+            f"策略类型：{inputs['strategy_type']}",
+            "完整顺序：" + " → ".join(inputs["ordered_ids"]),
+            "平台会核对该列表与当前 Pool 是同一组无重复条目；遗漏不会被当作删除",
+            "旧 revision 保持不可变，本操作不会采纳或部署策略",
+        ]
+        if "reason" in inputs:
+            details.append(f"操作说明：{inputs['reason']}")
+    elif draft.workflow == "strategy_pool_compile":
+        details = [
+            "已识别为〔Strategy Pool 编译预览 Workflow〕",
+            f"策略类型：{inputs['strategy_type']}",
+            "平台只读编译当前 task Pool 为 canonical StrategySpec 并计算 design hash",
+            "结果只是草案预览，不会创建已采纳策略，也不会采纳或部署",
+        ]
     else:  # pragma: no cover - validated workflow exhaustiveness
         raise ValueError(f"unsupported standard workflow {draft.workflow}")
     details.append(
