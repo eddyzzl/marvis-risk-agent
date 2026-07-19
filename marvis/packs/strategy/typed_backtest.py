@@ -1515,14 +1515,14 @@ def run_typed_backtest(
                 approval_profit_inputs,
             )
     elif parsed.strategy_type == "segmentation":
-        segments = _normalized_segments(evaluation.decisions)
+        segments = _normalized_segments(evaluation.action_values)
         metrics, breakdown = _segmentation_metrics(
             segments,
             target,
             population_count=population_count,
         )
         if baseline_evaluation is not None:
-            baseline_segments = _normalized_segments(baseline_evaluation.decisions)
+            baseline_segments = _normalized_segments(baseline_evaluation.action_values)
             transitions = _segment_transitions(
                 baseline_segments,
                 segments,
@@ -1537,9 +1537,9 @@ def run_typed_backtest(
         baseline_decisions = (
             None
             if baseline_evaluation is None
-            else baseline_evaluation.decisions.reset_index(drop=True)
+            else baseline_evaluation.action_values.reset_index(drop=True)
         )
-        assigned = evaluation.decisions.reset_index(drop=True)
+        assigned = evaluation.action_values.reset_index(drop=True)
         if parsed.strategy_type == "limit":
             calculated = limit_metrics(
                 assigned,

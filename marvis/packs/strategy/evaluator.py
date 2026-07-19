@@ -34,6 +34,7 @@ class FrameEvaluation:
     """Vectorized first-match decisions aligned to the input DataFrame index."""
 
     decisions: pd.Series
+    action_values: pd.Series
     matched_rule_id: pd.Series
     action_type: pd.Series
     reason_code: pd.Series
@@ -544,6 +545,7 @@ def evaluate_strategy_frame(
 
     working = frame.reset_index(drop=True)
     decisions = _filled_object_array(len(working), parsed.default_action.decision_value)
+    action_values = _filled_object_array(len(working), parsed.default_action.value)
     matched_rule_ids = _filled_object_array(len(working), None)
     action_types = _filled_object_array(len(working), parsed.default_action.type)
     reason_codes = _filled_object_array(len(working), parsed.default_action.reason_code)
@@ -562,6 +564,9 @@ def evaluate_strategy_frame(
             decisions[positions] = _filled_object_array(
                 int(positions.size), rule.action.decision_value
             )
+            action_values[positions] = _filled_object_array(
+                int(positions.size), rule.action.value
+            )
             matched_rule_ids[positions] = rule.rule_id
             action_types[positions] = rule.action.type
             reason_codes[positions] = rule.action.reason_code
@@ -573,6 +578,12 @@ def evaluate_strategy_frame(
             index=frame.index,
             dtype="object",
             name="decision",
+        ),
+        action_values=pd.Series(
+            action_values,
+            index=frame.index,
+            dtype="object",
+            name="action_value",
         ),
         matched_rule_id=pd.Series(
             matched_rule_ids,

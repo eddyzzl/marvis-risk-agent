@@ -21,12 +21,17 @@ def _rule(
     value: object,
     *,
     action_type: str = "segment",
+    output_value: object = None,
 ) -> StrategyRuleSpec:
     return StrategyRuleSpec(
         rule_id=rule_id,
         priority=priority,
         condition=condition,
-        action=StrategyAction(type=action_type, value=value),
+        action=StrategyAction(
+            type=action_type,
+            value=value,
+            output_value=output_value,
+        ),
     )
 
 
@@ -115,8 +120,10 @@ def test_vectorized_strategy_evaluator_matches_row_golden_for_nested_dsl() -> No
 
     assert isinstance(actual, FrameEvaluation)
     assert actual.decisions.index.equals(frame.index)
+    assert actual.action_values.index.equals(frame.index)
     assert actual.matched_rule_id.index.equals(frame.index)
     assert actual.decisions.tolist() == [item.action.value for item in expected]
+    assert actual.action_values.tolist() == [item.action.value for item in expected]
     assert actual.matched_rule_id.tolist() == [item.matched_rule_id for item in expected]
     assert actual.decisions.tolist() == [
         "prime",
@@ -139,6 +146,38 @@ def test_vectorized_strategy_evaluator_matches_row_golden_for_nested_dsl() -> No
         "reason_code",
     ]
     assert actual.action_type.tolist() == ["segment"] * len(frame)
+
+
+def test_vectorized_evaluator_separates_row_aliases_from_typed_action_values() -> None:
+    spec = StrategySpec(
+        strategy_type="limit",
+        default_action=StrategyAction(
+            type="limit",
+            value=1000,
+            output_value={"legacy": "fallback"},
+        ),
+        rules=(
+            _rule(
+                "limit-hit",
+                1,
+                {"op": "compare", "field": "x", "operator": "==", "value": 0},
+                2000,
+                action_type="limit",
+                output_value=999999,
+            ),
+        ),
+    )
+
+    actual = evaluate_strategy_frame(pd.DataFrame({"x": [0, 1]}), spec)
+
+    assert actual.decisions.tolist() == [999999, {"legacy": "fallback"}]
+    assert actual.action_values.tolist() == [2000, 1000]
+    assert actual.to_frame().columns.tolist() == [
+        "decision",
+        "action_type",
+        "matched_rule_id",
+        "reason_code",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -324,6 +363,8 @@ def test_vectorized_evaluator_supports_empty_frames_after_schema_validation() ->
     result = evaluate_strategy_frame(frame, spec)
 
     assert result.decisions.empty
+    assert result.action_values.empty
     assert result.matched_rule_id.empty
     assert result.decisions.dtype == object
+    assert result.action_values.dtype == object
     assert result.matched_rule_id.dtype == object

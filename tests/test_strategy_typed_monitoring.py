@@ -38,16 +38,24 @@ def _spec(strategy_type: str) -> dict:
             {"type": "reject"},
         ),
         "limit": (
-            {"type": "limit", "value": 1000},
-            {"type": "limit", "value": 2000},
+            {"type": "limit", "value": 1000, "output_value": 10},
+            {"type": "limit", "value": 2000, "output_value": 20},
         ),
         "pricing": (
-            {"type": "pricing", "value": 0.10},
-            {"type": "pricing", "value": 0.20},
+            {"type": "pricing", "value": 0.10, "output_value": "legacy-low"},
+            {"type": "pricing", "value": 0.20, "output_value": "legacy-high"},
         ),
         "segmentation": (
-            {"type": "segment", "value": "base"},
-            {"type": "segment", "value": "high"},
+            {
+                "type": "segment",
+                "value": "base",
+                "output_value": {"legacy": "base"},
+            },
+            {
+                "type": "segment",
+                "value": "high",
+                "output_value": {"legacy": "high"},
+            },
         ),
     }
     default_action, matched_action = actions[strategy_type]

@@ -44,7 +44,7 @@ def load_json_object(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
     for candidate in candidates:
         try:
             data = json.loads(candidate)
-        except (TypeError, ValueError) as exc:
+        except (RecursionError, TypeError, ValueError) as exc:
             last_error = str(exc)
             continue
         if isinstance(data, dict):

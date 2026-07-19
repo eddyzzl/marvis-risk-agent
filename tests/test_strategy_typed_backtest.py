@@ -459,6 +459,43 @@ def test_limit_backtest_reuses_typed_decisions_for_metrics_baseline_and_economic
     json.dumps(result.to_dict(), allow_nan=False)
 
 
+def test_value_action_legacy_output_alias_cannot_override_typed_values() -> None:
+    spec = StrategySpec(
+        strategy_type="limit",
+        default_action=StrategyAction(
+            type="limit",
+            value=1000,
+            output_value={"legacy": "fallback"},
+        ),
+        rules=(
+            StrategyRuleSpec(
+                rule_id="limit-hit",
+                priority=1,
+                condition={
+                    "op": "compare",
+                    "field": "x",
+                    "operator": "==",
+                    "value": 0,
+                },
+                action=StrategyAction(
+                    type="limit",
+                    value=2000,
+                    output_value=999999,
+                ),
+            ),
+        ),
+    )
+
+    result = run_typed_backtest(
+        pd.DataFrame({"x": [0, 1], "target": [1, 0]}),
+        spec,
+        target_col="target",
+    )
+
+    assert result.metrics["total_limit"] == 3000.0
+    assert [row["assigned_limit"] for row in result.breakdown] == [1000.0, 2000.0]
+
+
 def test_pricing_backtest_computes_risk_tiers_repricing_and_profit_chain() -> None:
     frame = pd.DataFrame({"x": [0, 1], "target": [0, 1]})
 

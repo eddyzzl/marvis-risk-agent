@@ -113,10 +113,13 @@ from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.planner import Planner
 from marvis.orchestrator.validator import PlanValidator
 from marvis.packs.strategy.automatic_tree_leaf_fragment import (
+    AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_KIND,
+    AUTOMATIC_TREE_LEAF_FRAGMENT_ORIGIN_TOOL,
     AUTOMATIC_TREE_SOURCE_ARTIFACT_KIND,
     AUTOMATIC_TREE_SOURCE_ARTIFACT_ORIGIN_TOOL,
 )
 from marvis.packs.strategy.automatic_tree_leaf_tools import (
+    load_verified_automatic_tree_leaf_selection_artifact_on_connection,
     load_verified_automatic_tree_source_artifact_on_connection,
 )
 from marvis.repositories.plans import PlanRepository
@@ -2785,13 +2788,31 @@ def _strategy_pool_plan_slots(
         slots["reason"] = inputs["reason"]
 
     if draft.workflow == "strategy_pool_add_candidate":
-        slots.update(
-            _candidate_asset_artifact_slots(
-                runtime,
-                task_id=task.id,
-                asset_id=str(inputs["candidate_asset_id"]),
+        selection_id = inputs.get("selection_id")
+        candidate_asset_id = inputs.get("candidate_asset_id")
+        if (selection_id is None) == (candidate_asset_id is None):
+            raise StrategySetupError(
+                "加入 Strategy Pool 必须且只能指定一个 candidate asset ID "
+                "或 automatic-tree leaf selection ID。"
             )
-        )
+        fragment_id: str | None = None
+        if selection_id is not None:
+            selection_slots, fragment_id = (
+                _automatic_tree_leaf_selection_artifact_slots(
+                    runtime,
+                    task_id=task.id,
+                    selection_id=str(selection_id),
+                )
+            )
+            slots.update(selection_slots)
+        else:
+            slots.update(
+                _candidate_asset_artifact_slots(
+                    runtime,
+                    task_id=task.id,
+                    asset_id=str(candidate_asset_id),
+                )
+            )
         slots["default_action"] = inputs["default_action"]
         slots["action"] = inputs["action"]
         if current is not None and current.get("default_action") != inputs["default_action"]:
@@ -2800,13 +2821,29 @@ def _strategy_pool_plan_slots(
                 "不能在添加条目时静默改写 Pool 默认动作。"
             )
         asset_id = slots["expected_asset_id"]
-        if current is not None and any(
-            isinstance(entry, Mapping)
-            and isinstance(entry.get("source"), Mapping)
-            and entry["source"].get("asset_id") == asset_id
-            for entry in _strategy_pool_entries(current)
-        ):
-            raise StrategySetupError(f"候选资产 {asset_id} 已存在于当前 Strategy Pool。")
+        if current is not None:
+            entries = _strategy_pool_entries(current)
+            if fragment_id is None and any(
+                isinstance(entry.get("source"), Mapping)
+                and entry["source"].get("asset_id") == asset_id
+                for entry in entries
+            ):
+                raise StrategySetupError(
+                    f"候选资产 {asset_id} 已存在于当前 Strategy Pool。"
+                )
+            if fragment_id is not None and any(
+                isinstance(entry.get("source"), Mapping)
+                and entry["source"].get("asset_id") == asset_id
+                and entry["source"].get("fragment_id") == fragment_id
+                for entry in entries
+            ):
+                raise StrategySetupError(
+                    f"候选资产 {asset_id} 的片段 {fragment_id} "
+                    "已存在于当前 Strategy Pool。"
+                )
+        # The governed Pool kernel owns exact asset/fragment/rule uniqueness.
+        # In particular, one automatic tree may contribute multiple distinct
+        # leaves, so an asset-id-only preflight would reject valid requests.
         return slots
 
     if draft.workflow == "strategy_pool_compile":
@@ -2922,6 +2959,115 @@ def _candidate_asset_artifact_slots(
         "expected_asset_id": asset_id,
         "expected_asset_hash": asset_hash,
     }
+
+
+def _automatic_tree_leaf_selection_artifact_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    selection_id: str,
+) -> tuple[dict[str, str], str]:
+    """Bind one exact selection ID to four verified Pool Tool slots."""
+
+    if re.fullmatch(
+        r"automatic-tree-leaf-selection-[0-9a-f]{32}", selection_id
+    ) is None:
+        raise StrategySetupError(
+            "automatic-tree leaf selection ID 格式无效；请复制完整 selection ID。"
+        )
+    repository = TaskArtifactRepository(runtime.settings.db_path)
+    try:
+        with repository.transaction() as conn:
+            conn.execute("BEGIN")
+            rows = conn.execute(
+                """
+                SELECT id, content_hash, provenance_json
+                  FROM task_artifacts
+                 WHERE task_id = ? AND kind = ? AND origin_tool = ?
+                """,
+                (
+                    task_id,
+                    AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_KIND,
+                    AUTOMATIC_TREE_LEAF_FRAGMENT_ORIGIN_TOOL,
+                ),
+            ).fetchall()
+            matches: list[tuple[object, Mapping]] = []
+            for row in rows:
+                provenance_json = row["provenance_json"]
+                if not isinstance(provenance_json, str):
+                    raise StrategySetupError(
+                        "当前任务的 leaf selection artifact provenance 无效。"
+                    )
+                try:
+                    provenance = json.loads(provenance_json)
+                except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                    raise StrategySetupError(
+                        "当前任务的 leaf selection artifact provenance 无效。"
+                    ) from exc
+                if not isinstance(provenance, Mapping):
+                    raise StrategySetupError(
+                        "当前任务的 leaf selection artifact provenance 无效。"
+                    )
+                if provenance.get("selection_id") == selection_id:
+                    matches.append((row, provenance))
+            if not matches:
+                raise StrategySetupError(
+                    f"当前任务没有 automatic-tree leaf selection {selection_id}。"
+                )
+            if len(matches) != 1:
+                raise StrategySetupError(
+                    f"automatic-tree leaf selection {selection_id} 对应多个 "
+                    "selection artifact，当前不能安全绑定来源。"
+                )
+            row, provenance = matches[0]
+            verified = (
+                load_verified_automatic_tree_leaf_selection_artifact_on_connection(
+                    conn,
+                    tasks_dir=runtime.settings.tasks_dir,
+                    task_id=task_id,
+                    artifact_id=row["id"],
+                    expected_content_hash=row["content_hash"],
+                    expected_asset_id=provenance.get("tree_asset_id"),
+                    expected_asset_hash=provenance.get("tree_asset_hash"),
+                )
+            )
+            if verified.selection.get("selection_id") != selection_id:
+                raise StrategySetupError(
+                    "leaf selection artifact 的 selection ID 与请求不一致。"
+                )
+    except StrategySetupError:
+        raise
+    except Exception as exc:
+        raise StrategySetupError(
+            f"automatic-tree leaf selection {selection_id} 未通过 artifact "
+            "完整性校验，不能加入 Strategy Pool。"
+        ) from exc
+
+    tree_asset = verified.selection.get("tree_asset")
+    leaf = verified.selection.get("leaf")
+    if not isinstance(tree_asset, Mapping) or not isinstance(leaf, Mapping):
+        raise StrategySetupError(
+            "leaf selection artifact 缺少完整 tree/fragment 绑定。"
+        )
+    asset_id = tree_asset.get("asset_id")
+    asset_hash = tree_asset.get("asset_hash")
+    fragment_id = leaf.get("fragment_id")
+    if not all(
+        isinstance(value, str) and value
+        for value in (asset_id, asset_hash, fragment_id)
+    ):
+        raise StrategySetupError(
+            "leaf selection artifact 缺少完整 tree/fragment 绑定。"
+        )
+    return (
+        {
+            "source_artifact_id": verified.artifact_id,
+            "expected_artifact_content_hash": verified.content_hash,
+            "expected_asset_id": asset_id,
+            "expected_asset_hash": asset_hash,
+        },
+        fragment_id,
+    )
 
 
 def _strategy_pool_entries(pool: Mapping) -> list[Mapping]:

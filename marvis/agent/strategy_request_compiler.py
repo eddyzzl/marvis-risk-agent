@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 import json
 import math
 import re
@@ -83,6 +84,47 @@ AUTOMATIC_TREE_DIRECTIONS = (
 )
 _CANDIDATE_ID_RE = re.compile(r"^candidate-[0-9a-f]{32}$")
 _CANDIDATE_ASSET_ID_RE = re.compile(r"^candidate-asset-[0-9a-f]{32}$")
+_AUTOMATIC_TREE_LEAF_SELECTION_ID_RE = re.compile(
+    r"^automatic-tree-leaf-selection-[0-9a-f]{32}$"
+)
+_AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])automatic-tree-leaf-selection-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])"
+)
+_POOL_SOURCE_LIKE_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:candidate-asset|automatic-tree-leaf-selection)-"
+    r"[A-Za-z0-9_-]+(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+_POOL_SOURCE_PREFIX_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:candidate-asset|automatic-tree-leaf-selection)-",
+    re.IGNORECASE,
+)
+_POOL_SOURCE_CONFUSABLE_TRANSLATION = str.maketrans(
+    {
+        "\u200b": None,
+        "\u200c": None,
+        "\u200d": None,
+        "\u2060": None,
+        "\ufeff": None,
+        "‐": "-",
+        "‑": "-",
+        "‒": "-",
+        "–": "-",
+        "—": "-",
+        "―": "-",
+        "﹘": "-",
+        "﹣": "-",
+        "－": "-",
+    }
+)
+_POOL_MAX_CONTROL_VALUE_CHARS = 4096
+_POOL_MAX_UTTERANCE_CHARS = 8192
+_POOL_MAX_CONTROL_LABEL_MATCHES = 32
+_POOL_UNPARSEABLE_VALUE = object()
+_STRATEGY_REPLY_MAX_CHARS = 100_000
+_STRATEGY_REPLY_MAX_DEPTH = 64
+_STRATEGY_REPLY_MAX_NODES = 10_000
 _AUTOMATIC_TREE_LEAF_ID_RE = re.compile(r"^leaf-[0-9a-f]{20}$")
 _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])candidate-asset-[0-9a-f]{32}(?![A-Za-z0-9_-])"
@@ -290,9 +332,7 @@ _AUTOMATIC_TREE_LEAF_NEGATED_CLAUSE_RE = re.compile(
     r"(?:the\s+)?(?:strategy\s+)?pool(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
-_POOL_ITEM_ID_RE = re.compile(
-    r"^(?:candidate-rule|pool-entry)-[0-9a-f]{32}$"
-)
+_POOL_ITEM_ID_RE = re.compile(r"^(?:candidate-rule|pool-entry)-[0-9a-f]{32}$")
 _STRATEGY_POOL_WORKFLOWS = frozenset(
     {
         "strategy_pool_add_candidate",
@@ -311,12 +351,33 @@ _POOL_ACTION_TYPES = {
     "segmentation": frozenset({"segment"}),
 }
 _POOL_ACTION_GROUNDING = {
-    "approval": re.compile(r"(?:通过|批准|准入|approve|approval)", re.IGNORECASE),
-    "reject": re.compile(r"(?:拒绝|reject)", re.IGNORECASE),
-    "review": re.compile(r"(?:人工复核|人工审核|复核|审核|review)", re.IGNORECASE),
-    "limit": re.compile(r"(?:额度|授信|limit)", re.IGNORECASE),
-    "pricing": re.compile(r"(?:定价|利率|pricing|price)", re.IGNORECASE),
-    "segment": re.compile(r"(?:分群|分层|segment)", re.IGNORECASE),
+    "approval": re.compile(
+        r"(?:通过|批准|准入)|(?<![A-Za-z0-9_])(?:approve|approval)"
+        r"(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "reject": re.compile(
+        r"拒绝|(?<![A-Za-z0-9_])reject(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "review": re.compile(
+        r"(?:人工复核|人工审核|复核|审核)|"
+        r"(?<![A-Za-z0-9_])review(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "limit": re.compile(
+        r"(?:额度|授信)|(?<![A-Za-z0-9_])limit(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "pricing": re.compile(
+        r"(?:定价|利率)|(?<![A-Za-z0-9_])(?:pricing|price)"
+        r"(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "segment": re.compile(
+        r"(?:分群|分层)|(?<![A-Za-z0-9_])segment(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
 }
 _POOL_STRATEGY_TYPE_GROUNDING = {
     "approval": re.compile(
@@ -340,8 +401,24 @@ _POOL_STRATEGY_TYPE_GROUNDING = {
         re.IGNORECASE,
     ),
 }
+_POOL_STRATEGY_TYPE_VALUE_GROUNDING = {
+    "approval": re.compile(r"(?<![A-Za-z0-9_])approval(?![A-Za-z0-9_])|(?:审批|准入)"),
+    "reject": re.compile(r"(?<![A-Za-z0-9_])reject(?![A-Za-z0-9_])|拒绝"),
+    "limit": re.compile(r"(?<![A-Za-z0-9_])limit(?![A-Za-z0-9_])|(?:额度|授信)"),
+    "pricing": re.compile(r"(?<![A-Za-z0-9_])pricing(?![A-Za-z0-9_])|(?:定价|利率)"),
+    "segmentation": re.compile(
+        r"(?<![A-Za-z0-9_])segmentation(?![A-Za-z0-9_])|(?:分群|分层)"
+    ),
+}
 _POOL_PARTIAL_REORDER_RE = re.compile(
-    r"(?:放到?前面|移到?前面|置顶|提前|排最前|优先放|move\s+.*\s+first)",
+    r"(?:放|移|挪|排|调)(?:到|至|在)?(?:前面|后面|最前|末尾|最后|"
+    r"第[一二三四五六七八九十百0-9]+(?:位|个|条))|"
+    r"(?:上移|下移)[一二三四五六七八九十百0-9]+(?:位|个|条)|"
+    r"置顶|提前|排(?:在)?(?:最前|第一|末尾|最后)|优先放|"
+    r"(?:交换|互换)[^；;。\n]{0,200}(?:顺序|位置)|"
+    r"move\s+.*\s+(?:first|last|(?:to\s+)?(?:position\s+\d+|"
+    r"(?:second|third|fourth)\s+(?:place|position)))|"
+    r"swap\s+.*(?:order|position)",
     re.IGNORECASE,
 )
 _POOL_HEURISTIC_REORDER_RE = re.compile(
@@ -349,6 +426,268 @@ _POOL_HEURISTIC_REORDER_RE = re.compile(
     r"(?:自动|智能).{0,8}(?:排序|重排)|sort.{0,12}(?:best|effect|risk|lift))",
     re.IGNORECASE,
 )
+_POOL_ADD_INTENT_RE = re.compile(
+    r"(?:加入|添加到?|写入|放入|加到|放进|纳入|写到|新增到)"
+    r"[^，,；;。\n]{0,160}(?:策略池|规则池|(?<![A-Za-z0-9_])"
+    r"(?:strategy\s+)?pool(?![A-Za-z0-9_]))|"
+    r"(?:入池)(?!理由|原因|说明)|"
+    r"(?<![A-Za-z0-9_])(?:add|append|insert|write)\b"
+    r"[^,;.!?\n]{0,160}\bto\s+(?:the\s+)?"
+    r"(?:(?:approval|reject|limit|pricing|segmentation)\s+)?"
+    r"(?:(?:strategy|rule)\s+)?pool\b|"
+    r"(?<![A-Za-z0-9_])put\b[^,;.!?\n]{0,160}\binto\s+(?:the\s+)?"
+    r"(?:(?:approval|reject|limit|pricing|segmentation)\s+)?"
+    r"(?:(?:strategy|rule)\s+)?pool\b",
+    re.IGNORECASE,
+)
+_POOL_ADD_HYPOTHETICAL_RE = re.compile(
+    r"[?？]|"
+    r"(?:假设|假如|如果|若)\s*[^；;。\n]{0,180}(?:加入|添加|放进|纳入|入池)|"
+    r"(?:如何|怎么|怎样|请说明|说明一下|演示一下|示范一下|测试一下|举例)"
+    r"[^；;。\n]{0,180}(?:加入|添加|放进|纳入|入池)|"
+    r"(?:文档|说明|示例|例子|原文|材料|报告)[^；;。\n]{0,80}"
+    r"(?:写着|提到|说|包含|展示)[^；;。\n]{0,180}"
+    r"(?:加入|添加|放进|纳入|入池)|"
+    r"(?:文档|说明|示例|例子|原文|材料|报告)[^；;。\n]{0,120}"
+    r"(?:默认动作|命中动作|default\s+action|hit\s+action)|"
+    r"[“\"'‘][^”\"'’；;。\n]{0,240}(?:加入|添加|放进|纳入|入池)"
+    r"[^”\"'’；;。\n]{0,240}[”\"'’]|"
+    r"[“\"'‘][^”\"'’；;。\n]{0,240}"
+    r"(?:默认动作|命中动作|default\s+action|hit\s+action)"
+    r"[^”\"'’；;。\n]{0,240}[”\"'’]|"
+    r"(?:不要|不用|别|请勿|排除|忽略)[^；;。\n]{0,48}"
+    r"(?:(?:这个|该)\s*(?:source|ID|id|来源)|来源)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never)\s+use\s+"
+    r"(?:this\s+|that\s+)?(?:source|id)(?![A-Za-z0-9_])|"
+    r"(?:只|仅)\s*(?:告诉|说明|解释|展示|描述)[^；;。\n]{0,180}"
+    r"(?:加入|入池|策略池)|"
+    r"(?:评估|分析|了解|看看|查看|解释|模拟(?:一下)?)[^；;。\n]{0,180}"
+    r"(?:加入|入池|策略池)|"
+    r"(?:能否|可否|是否可以|可以吗|能不能)[^；;。\n]{0,180}"
+    r"(?:加入|入池|策略池)|"
+    r"(?:昨天|昨日|之前|此前|过去|上次|前次|早些时候|曾经|已经)"
+    r"[^；;。\n]{0,180}(?:加入|添加|放进|纳入|入池)|"
+    r"(?:改写|重写|润色|翻译|复述)[^；;。\n]{0,120}"
+    r"(?:这句|这句话|下句|以下|文本|文案|内容)|"
+    r"(?:改写|重写|润色|翻译|复述)(?:得|成|为|一下)|"
+    r"(?:无法|未能|没能)[^；;。\n]{0,80}(?:加入|添加|放进|纳入|入池)|"
+    r"(?:加入|添加|放进|纳入|入池)(?:不了|失败|不进去|不上)|"
+    r"(?:未来|将来|以后|之后|稍后|晚点|回头|明天|明早|今晚|后天|"
+    r"下周|下月|下个月|月底|届时|[一二两三四五六七八九十百0-9]+天后)"
+    r"[^；;。\n]{0,180}"
+    r"(?:加入|入池|策略池)|"
+    r"(?:等|待)?(?:审批|审核|评审|批准|确认)"
+    r"(?:通过|完成|同意|批准)?(?:后|之后|就|再|才)"
+    r"[^；;。\n]{0,180}(?:加入|添加|放进|纳入|入池)|"
+    r"(?:等|待)[^；;。\n]{0,100}(?:再|才)[^；;。\n]{0,100}"
+    r"(?:加入|入池|策略池)|"
+    r"(?:加入|添加|放进|纳入|入池)[^；;。\n]{0,100}"
+    r"(?:不允许|禁止|不可|不能执行)|"
+    r"(?:会发生什么|会怎样|将会怎样)|"
+    r"(?<![A-Za-z0-9_])(?:what\s+if|suppose|assuming|hypothetically|"
+    r"can\s+you|could\s+you|would\s+you|is\s+it\s+possible|"
+    r"evaluate|analy[sz]e|explain|how\s+to|demonstrate|demo|test|"
+    r"show\s+me\s+what\s+happens|documentation\s+says|example|"
+    r"yesterday|previously|earlier|last\s+time|failed\s+to|"
+    r"unable\s+to|could\s+not|couldn't|rewrite|rephrase|translate|"
+    r"in\s+the\s+future|later|tomorrow|next\s+(?:week|month)|"
+    r"after\s+approval|when|once)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_ADD_POSTPOSED_CANCELLATION_RE = re.compile(
+    r"(?:^|[，,；;。.!?？！]\s*)(?:等等|等一下|停一下|先等等)"
+    r"[，,]?\s*(?:还是\s*)?(?:(?:先\s*)?(?:不要了|不加(?:了)?|"
+    r"不入(?:了)?|别加(?:了)?|别入(?:了)?))"
+    r"(?:[，,。.!！?？]?\s*(?:谢谢(?:你)?|多谢|辛苦了))?\s*$|"
+    r"(?:^|[，,；;。.!?？！]\s*)(?:我\s*)?反悔了"
+    r"(?:[，,。.!！?？]?\s*(?:谢谢(?:你)?|多谢|辛苦了))?\s*$|"
+    r"(?:^|[，,；;。.!?？！]\s*)(?:等等|等一下|先等等|不[，,]?\s*)?"
+    r"(?:(?:刚才|前面)(?:那句|请求|操作)?\s*)?"
+    r"(?:算了|作废|撤回|不加了|不入了|不做了|别做了|先不弄了|"
+    r"取消(?:入池|操作|执行)?(?:吧)?|撤销(?:入池|操作|执行)?|"
+    r"不要(?:入池|执行|操作|做了)|先别(?:入池|执行|操作))"
+    r"(?:[，,]\s*(?:这次|本次)?\s*(?:先不做了|别做了|不执行了))?"
+    r"(?:[，,。.!！?？]?\s*(?:谢谢(?:你)?|多谢|辛苦了|麻烦(?:你)?了))?\s*$|"
+    r"(?:^|[,;.!?]\s*)(?:actually\s+)?(?:no|never\s+mind|forget\s+it|"
+    r"scratch\s+that|abort|withdraw|stop|cancel\s+(?:that|it)|"
+    r"do(?:n't|\s+not)\s+(?:do|execute)\s+(?:that|it))"
+    r"(?:[,!.?]?\s*(?:thanks(?:\s+a\s+lot)?|thank\s+you))?\s*$",
+    re.IGNORECASE,
+)
+_POOL_ADD_LIFECYCLE_RE = re.compile(
+    r"(?:采纳|采用|部署|上线|投产|投入生产|上生产|投用|发布到?生产|"
+    r"发布到?线上|推到?线上|推生产|正式运行|落地执行|立即执行|执行它?|"
+    r"投入使用|开始使用|启用|生效|激活)|"
+    r"(?<![A-Za-z0-9_])(?:adopt(?:s|ed|ing)?|deploy(?:s|ed|ing)?|"
+    r"promot(?:e|es|ed|ing)|activat(?:e|es|ed|ing)|"
+    r"enabl(?:e|es|ed|ing)|ship(?:s|ped|ping)?|"
+    r"push(?:es|ed|ing)?|releas(?:e|es|ed|ing)|"
+    r"publish(?:es|ed|ing)?|launch(?:es|ed|ing)?|"
+    r"productioniz(?:e|es|ed|ing)|execut(?:e|es|ed|ing)|run(?:s|ning)?|"
+    r"use(?:s|d|ing)?[^;.!?\n]{0,32}(?:in|on)[-\s]+prod(?:uction)?|"
+    r"put[^;.!?\n]{0,32}into[-\s]+prod(?:uction)?|"
+    r"enter(?:s|ed|ing)?[-\s]+prod(?:uction)?|take[^;.!?\n]{0,20}live|"
+    r"(?:go(?:es|ing)?|went)[-\s]+live|roll(?:s|ed|ing)?[-\s]+out)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_ADD_SECOND_OPERATION_RE = re.compile(
+    r"(?:删除|删掉|删去|删了|移除|撤下|撤掉|撤回|去掉|去除|清空|"
+    r"踢出|拿掉|剔除)"
+    r"[^；;。\n]{0,100}"
+    r"(?:pool-entry|candidate-rule|"
+    r"策略池|规则池|条目|规则|它|这个|该项)|"
+    r"(?:pool-entry|candidate-rule|策略池|规则池|条目|规则|它|这个|该项)"
+    r"[^；;。\n]{0,100}(?:删除|删掉|删去|删了|移除|撤下|撤掉|撤回|"
+    r"去掉|去除|清空|踢出|拿掉|剔除)|"
+    r"(?:动作)[^；;。\n]{0,32}(?:改为|改成|设置为|设置成|设为|设成|"
+    r"置为|置成|切换为|切换成|修改为)|"
+    r"(?:pool-entry|candidate-rule|条目|规则|它|这个|该项)[^；;。\n]{0,80}"
+    r"(?:改为|改成|设置为|设置成|设为|设成|置为|置成|切换为|切换成|"
+    r"修改为)|"
+    r"(?:重新|再次|然后|随后|接着|再)\s*(?:把[^；;。\n]{0,48})?"
+    r"(?:改为|改成|设置为|设置成|设为|设成|置为|置成|切换为|切换成)"
+    r"\s*(?:approval|reject|review|limit|pricing|segment|通过|拒绝|复核)|"
+    r"(?:调整|修改|变更)[^；;。\n]{0,80}(?:为|成)\s*"
+    r"(?:approval|reject|review|limit|pricing|segment|通过|拒绝|复核)|"
+    r"(?:完整)?(?:重排|排序)[^；;。\n]{0,100}(?:策略池|规则池)|"
+    r"(?:编译|预览)[^；;。\n]{0,80}(?:策略池|规则池)|"
+    r"(?:策略池|规则池)[^；;。\n]{0,80}(?:编译|预览)|"
+    r"(?:重新|再次|然后|随后|再)\s*(?:编译|预览)|"
+    r"(?:^|[，,；;。.!?？！]\s*)(?:(?:然后|随后|接着|再|并且|同时|"
+    r"完成后)\s*)?(?:立即\s*)?(?:回测|测算(?:效果|影响)?|"
+    r"应用到?(?:当前)?样本|生成(?:效果|策略|分析)?报告|形成文档|"
+    r"提交(?:审批|审核|评审)|发起(?:审批|审核|评审)|送审)|"
+    r"(?:^|[,;.!?]\s*)(?:(?:then|next|afterwards|and)\s+)?"
+    r"(?:immediately\s+)?(?:backtest|apply[^;.!?\n]{0,40}(?:sample|dataset)|"
+    r"generate[^;.!?\n]{0,40}report|submit[^;.!?\n]{0,40}(?:approval|review))|"
+    r"(?<![A-Za-z0-9_])(?:remove|delete)\b[^;.!?\n]{0,100}"
+    r"(?:pool-entry|candidate-rule|pool|entry|rule)|"
+    r"(?<![A-Za-z0-9_])(?:set|change|update|make)\b[^;.!?\n]{0,80}"
+    r"(?:\baction\b|\b(?:approval|reject|review|limit|pricing|segment)\b)|"
+    r"(?<![A-Za-z0-9_])(?:reorder|sort|compile|preview)\b"
+    r"[^;.!?\n]{0,100}\bpool\b",
+    re.IGNORECASE,
+)
+_POOL_MUTATION_INTENT_PATTERNS = {
+    "strategy_pool_remove_entry": re.compile(
+        r"(?:删除|删掉|删去|移除|撤下|撤掉|去掉|去除|踢出|拿掉|剔除)|"
+        r"(?<![A-Za-z0-9_])(?:remove|delete)(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "strategy_pool_set_action": re.compile(
+        r"(?:动作[^；;。\n]{0,32})?(?:改为|改成|设置为|设置成|设为|设成|"
+        r"置为|置成|切换为|切换成|修改为)|"
+        r"(?<![A-Za-z0-9_])(?:set|change|update)\b[^;.!?\n]{0,80}\baction\b",
+        re.IGNORECASE,
+    ),
+    "strategy_pool_reorder": re.compile(
+        r"(?:(?:按)?完整(?:顺序)?\s*)?(?:重排|排序)|"
+        r"(?<![A-Za-z0-9_])(?:reorder|sort)(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+}
+_POOL_MUTATION_NONCOMMAND_RE = re.compile(
+    r"[?？]|(?:能否|可否|是否|可以吗|能不能)|"
+    r"(?:昨天|昨日|之前|此前|过去|上次|前次|早些时候|曾经|已经)"
+    r"[^；;。\n]{0,180}(?:删除|移除|改成|设置|重排|排序)|"
+    r"(?:改写|重写|润色|翻译|复述)[^；;。\n]{0,120}"
+    r"(?:这句|这句话|下句|以下|文本|文案|内容)|"
+    r"(?<![A-Za-z0-9_])(?:can|could|would)\s+you\b|"
+    r"(?<![A-Za-z0-9_])(?:yesterday|previously|earlier|last\s+time|"
+    r"rewrite|rephrase|translate)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_REASON_CANCELLATION_RE = re.compile(
+    r"(?:算了|作罢|反悔|暂停|停一下|放一放|不要了|先别|取消|撤销|撤回)|"
+    r"(?<![A-Za-z0-9_])(?:never\s+mind|forget\s+it|scratch\s+that|"
+    r"hold\s+on|cancel|abort|withdraw|stop)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_ADD_STRATEGY_TYPE_LABEL_RE = re.compile(
+    r"(?:策略池类型|Pool\s*类型|strategy\s+pool\s+type|pool\s+type)"
+    r"\s*(?:[:：=]|是|为)",
+    re.IGNORECASE,
+)
+_POOL_ADD_DEFAULT_ACTION_LABEL_RE = re.compile(
+    r"(?:(?:Pool|策略池)\s*)?默认动作|"
+    r"(?<![A-Za-z0-9_])default\s+(?:pool\s+)?action"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_ADD_HIT_ACTION_LABEL_RE = re.compile(
+    r"(?:规则)?命中动作|(?<![A-Za-z0-9_])(?:hit|match(?:ed)?)"
+    r"\s+action(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_ADD_DEFAULT_REASON_CODE_LABEL_RE = re.compile(
+    r"(?:(?:Pool|策略池)\s*)?默认(?:动作)?原因码|"
+    r"(?<![A-Za-z0-9_])default(?:\s+action)?\s+"
+    r"reason(?:\s+|[-_])code(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_ADD_HIT_REASON_CODE_LABEL_RE = re.compile(
+    r"(?:规则)?命中(?:动作)?原因码|"
+    r"(?<![A-Za-z0-9_])(?:hit|match(?:ed)?)(?:\s+action)?\s+"
+    r"reason(?:\s+|[-_])code(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_ADD_DEFAULT_OUTPUT_VALUE_LABEL_RE = re.compile(
+    r"(?:(?:Pool|策略池)\s*)?默认(?:动作)?输出值|"
+    r"(?<![A-Za-z0-9_])default(?:\s+action)?\s+"
+    r"output(?:\s+|[-_])value(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_ADD_HIT_OUTPUT_VALUE_LABEL_RE = re.compile(
+    r"(?:规则)?命中(?:动作)?输出值|"
+    r"(?<![A-Za-z0-9_])(?:hit|match(?:ed)?)(?:\s+action)?\s+"
+    r"output(?:\s+|[-_])value(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_ADD_REASON_LABEL_RE = re.compile(
+    r"(?:入池|添加|操作)?理由\s*(?:[:：=]|是|为)\s*"
+    r"(?P<zh>[^，,；;。\n]+)|"
+    r"(?<![A-Za-z0-9_])(?:pool\s+reason|reason|rationale)"
+    r"\s*(?::|=|is)\s*(?P<en>[^,;.!?\n]+)",
+    re.IGNORECASE,
+)
+_POOL_ADD_STRATEGY_TYPE_NOUN_PATTERNS = {
+    "approval": re.compile(
+        r"(?:审批|准入)(?:策略|规则)?池|"
+        r"(?:审批|准入)\s*(?:(?:Strategy|Rule)\s*)?Pool|"
+        r"(?<![A-Za-z0-9_])approval\s+(?:(?:strategy|rule)\s+)?pool"
+        r"(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "reject": re.compile(
+        r"拒绝(?:策略|规则)?池|拒绝\s*(?:(?:Strategy|Rule)\s*)?Pool|"
+        r"(?<![A-Za-z0-9_])reject\s+(?:(?:strategy|rule)\s+)?pool"
+        r"(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "limit": re.compile(
+        r"(?:额度|授信)(?:策略|规则)?池|"
+        r"(?:额度|授信)\s*(?:(?:Strategy|Rule)\s*)?Pool|"
+        r"(?<![A-Za-z0-9_])limit\s+(?:(?:strategy|rule)\s+)?pool"
+        r"(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "pricing": re.compile(
+        r"(?:定价|利率)(?:策略|规则)?池|"
+        r"(?:定价|利率)\s*(?:(?:Strategy|Rule)\s*)?Pool|"
+        r"(?<![A-Za-z0-9_])pricing\s+(?:(?:strategy|rule)\s+)?pool"
+        r"(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "segmentation": re.compile(
+        r"(?:分群|分层)(?:策略|规则)?池|"
+        r"(?:分群|分层)\s*(?:(?:Strategy|Rule)\s*)?Pool|"
+        r"(?<![A-Za-z0-9_])segmentation\s+(?:(?:strategy|rule)\s+)?pool"
+        r"(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+}
 _REFINEMENT_SELECTION_ACTION_RE = re.compile(
     r"(?:选择|选中|保留|筛选|作为|select|keep|retain)", re.IGNORECASE
 )
@@ -668,6 +1007,7 @@ _NON_REPAIRABLE_CLARIFICATION_CODES = frozenset(
         "candidate_economics_ambiguous",
         "candidate_economics_incomplete",
         "candidate_requires_observed_economics",
+        "strategy_request_too_complex",
     }
 )
 
@@ -1274,12 +1614,44 @@ def _complete(llm, *, prompt: str, caller: str):
     )
 
 
+def _strategy_payload_within_limits(payload: object) -> bool:
+    stack: list[tuple[object, int]] = [(payload, 0)]
+    seen_containers: set[int] = set()
+    node_count = 0
+    while stack:
+        value, depth = stack.pop()
+        node_count += 1
+        if node_count > _STRATEGY_REPLY_MAX_NODES or depth > _STRATEGY_REPLY_MAX_DEPTH:
+            return False
+        if isinstance(value, Mapping):
+            identity = id(value)
+            if identity in seen_containers:
+                return False
+            seen_containers.add(identity)
+            stack.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, Sequence) and not isinstance(
+            value, str | bytes | bytearray
+        ):
+            identity = id(value)
+            if identity in seen_containers:
+                return False
+            seen_containers.add(identity)
+            stack.extend((item, depth + 1) for item in value)
+    return True
+
+
 def _validate_reply(
     raw: object,
     whitelist: tuple[str, ...],
     *,
     target_col: str | None,
 ) -> _ValidationOutcome:
+    if isinstance(raw, str) and len(raw) > _STRATEGY_REPLY_MAX_CHARS:
+        return _invalid(
+            "模型返回的策略草案过长，请缩小为一个明确的策略操作。",
+            code="strategy_request_too_complex",
+            fields=("reply",),
+        )
     payload, error = load_json_object(raw)
     if payload is None:
         message = "模型返回的策略草案不是有效 JSON 对象，请重新说明策略请求。"
@@ -1296,6 +1668,12 @@ def _validate_payload(
     if not isinstance(payload, Mapping):
         message = "策略请求必须是 JSON 对象，请重新说明。"
         return _invalid(message)
+    if not _strategy_payload_within_limits(payload):
+        return _invalid(
+            "策略草案嵌套过深或字段过多，请缩小为一个明确的策略操作。",
+            code="strategy_request_too_complex",
+            fields=("payload",),
+        )
     if any(not isinstance(key, str) for key in payload):
         return _invalid("策略请求的字段名必须是文本，请重新说明。")
 
@@ -2359,7 +2737,7 @@ def _validate_strategy_pool_workflow_inputs(
     common = {"strategy_type", "reason"}
     allowed_by_workflow = {
         "strategy_pool_add_candidate": common
-        | {"candidate_asset_id", "default_action", "action"},
+        | {"candidate_asset_id", "selection_id", "default_action", "action"},
         "strategy_pool_remove_entry": common | {"rule_id", "entry_id"},
         "strategy_pool_set_action": common | {"rule_id", "entry_id", "action"},
         "strategy_pool_reorder": common | {"ordered_ids"},
@@ -2378,24 +2756,41 @@ def _validate_strategy_pool_workflow_inputs(
     normalized: dict[str, Any] = {"strategy_type": strategy_type}
 
     if workflow == "strategy_pool_add_candidate":
-        missing = sorted(
-            {"candidate_asset_id", "default_action", "action"} - set(inputs)
-        )
+        missing = sorted({"default_action", "action"} - set(inputs))
         if missing:
             raise _DraftValidationError(
                 f"{workflow} 缺少字段：" + "、".join(missing) + "。"
             )
-        asset_id = _required_text(
-            inputs["candidate_asset_id"],
-            name=f"{workflow} candidate_asset_id",
+        source_fields = tuple(
+            name for name in ("candidate_asset_id", "selection_id") if name in inputs
         )
-        if _CANDIDATE_ASSET_ID_RE.fullmatch(asset_id) is None:
+        if len(source_fields) != 1:
+            raise _DraftValidationError(
+                f"{workflow} 必须且只能在 candidate_asset_id 与 selection_id 中二选一。"
+            )
+        source_field = source_fields[0]
+        source_id = _required_text(
+            inputs[source_field],
+            name=f"{workflow} {source_field}",
+        )
+        if (
+            source_field == "candidate_asset_id"
+            and _CANDIDATE_ASSET_ID_RE.fullmatch(source_id) is None
+        ):
             raise _DraftValidationError(
                 f"{workflow} candidate_asset_id 必须是完整 candidate-asset id。"
             )
+        if (
+            source_field == "selection_id"
+            and _AUTOMATIC_TREE_LEAF_SELECTION_ID_RE.fullmatch(source_id) is None
+        ):
+            raise _DraftValidationError(
+                f"{workflow} selection_id 必须是 automatic-tree-leaf-selection- "
+                "后接 32 位小写十六进制字符。"
+            )
         normalized.update(
             {
-                "candidate_asset_id": asset_id,
+                source_field: source_id,
                 "default_action": _strategy_pool_action(
                     inputs["default_action"],
                     strategy_type=strategy_type,
@@ -2733,8 +3128,7 @@ def _ground_automatic_tree_leaf_materialization(
         )
     if any(
         not _automatic_tree_leaf_rationale_is_allowed(reason)
-        or _AUTOMATIC_TREE_LEAF_RATIONALE_DECISION_SUBJECT_RE.search(reason)
-        is not None
+        or _AUTOMATIC_TREE_LEAF_RATIONALE_DECISION_SUBJECT_RE.search(reason) is not None
         for reason in explicit_reasons
     ):
         return _clarification(
@@ -3568,6 +3962,1005 @@ def _automatic_tree_number_text(field: str, value: float) -> str:
     return format(value, ".15g")
 
 
+def _pool_clause_prefix(
+    utterance: str,
+    *,
+    start: int,
+) -> str:
+    left = max(
+        utterance.rfind(separator, 0, start)
+        for separator in ("，", ",", "；", ";", "。", ".", "\n")
+    )
+    return utterance[left + 1 : start]
+
+
+def _pool_operation_is_negated(utterance: str, *, start: int) -> bool:
+    prefix = _pool_clause_prefix(utterance, start=start)
+    negations = tuple(
+        re.finditer(
+            r"(?:不要|不用|不再|无需|无须|不需要|不能|不可|不允许|不想|"
+            r"不打算|暂不|先不|别|请勿|切勿|勿|禁止|严禁|不得|拒绝|取消|"
+            r"撤销|停止|放弃|暂缓|不|未|无|没)|"
+            r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cannot|can't|won't|"
+            r"must\s+not|mustn't|should\s+not|shouldn't|not|without|cancel|"
+            r"stop|avoid|refrain)(?![A-Za-z0-9_])",
+            prefix,
+            re.IGNORECASE,
+        )
+    )
+    if not negations:
+        return False
+    negation = negations[-1]
+    return (
+        re.search(
+            r"(?:但(?:是)?|而(?:是)?|改为|改成|转而)|"
+            r"(?<![A-Za-z0-9_])(?:but|instead|rather\s+than)(?![A-Za-z0-9_])",
+            prefix[negation.end() :],
+            re.IGNORECASE,
+        )
+        is None
+    )
+
+
+def _pool_add_intent_state(utterance: str) -> tuple[bool, bool]:
+    reason_spans = _pool_add_reason_spans(utterance)
+    matches = tuple(
+        match
+        for match in _POOL_ADD_INTENT_RE.finditer(utterance)
+        if not any(left <= match.start() < right for left, right in reason_spans)
+    )
+    states = tuple(
+        not _pool_operation_is_negated(utterance, start=match.start())
+        for match in matches
+    )
+    return (
+        bool(matches),
+        bool(matches)
+        and any(states)
+        and all(states)
+        and _POOL_ADD_HYPOTHETICAL_RE.search(utterance) is None
+        and _POOL_ADD_POSTPOSED_CANCELLATION_RE.search(utterance) is None,
+    )
+
+
+def _pool_mutation_has_positive_intent(
+    utterance: str,
+    workflow: str,
+    inputs: Mapping[str, Any],
+) -> bool:
+    pattern = _POOL_MUTATION_INTENT_PATTERNS.get(workflow)
+    if pattern is None:
+        return False
+    reason_spans = _pool_add_reason_spans(utterance)
+    matches = tuple(
+        match
+        for match in pattern.finditer(utterance)
+        if not any(left <= match.start() < right for left, right in reason_spans)
+    )
+    states = tuple(
+        not _pool_operation_is_negated(utterance, start=match.start())
+        for match in matches
+    )
+    return (
+        len(matches) == 1
+        and any(states)
+        and all(states)
+        and _POOL_MUTATION_NONCOMMAND_RE.search(utterance) is None
+        and not _pool_mutation_unconsumed_text(
+            utterance,
+            workflow=workflow,
+            inputs=inputs,
+            intent_match=matches[0] if len(matches) == 1 else None,
+        )
+    )
+
+
+def _pool_source_prefix_count(utterance: str) -> int:
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFKC", utterance)
+        if unicodedata.category(character) not in {"Cf", "Mn", "Me"}
+    ).translate(
+        _POOL_SOURCE_CONFUSABLE_TRANSLATION
+        | str.maketrans(
+            {
+                "а": "a",
+                "А": "A",
+                "е": "e",
+                "Е": "E",
+                "о": "o",
+                "О": "O",
+                "с": "c",
+                "С": "C",
+                "х": "x",
+                "Х": "X",
+            }
+        )
+    )
+    return sum(1 for _ in _POOL_SOURCE_PREFIX_RE.finditer(normalized))
+
+
+_POOL_COMMAND_GLUE_RE = re.compile(
+    r"(?:请你|麻烦你|麻烦|请|帮我|帮忙|替我|给我|我要|我想要|我希望|"
+    r"现在|立即|直接|本次|这次|当前|先|就|把|将|从|在|到|至|"
+    r"这个|这条|该|上述|以下|选择结果|选中结果|候选资产|候选规则|"
+    r"候选|资产|叶节点|叶子|结果|规则池|策略池|规则|策略|池|条目|"
+    r"一条|一个|中|里|内|的|动作|按|完整|全部|所有|顺序|依次|"
+    r"和|及|与)|"
+    r"(?<![A-Za-z0-9_])(?:please|kindly|i\s+want\s+to|"
+    r"i\s+would\s+like\s+to|help\s+me|for\s+me|now|immediately|"
+    r"directly|this|that|the|selected|selection|candidate|asset|rule|"
+    r"leaf|result|from|in|inside|of|action|complete|full|order|all|"
+    r"strategy|pool|entry|and|to)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+
+def _pool_strip_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
+    characters = list(text)
+    for left, right in spans:
+        for index in range(max(left, 0), min(right, len(characters))):
+            characters[index] = " "
+    return "".join(characters)
+
+
+def _pool_command_residual(text: str) -> str:
+    previous = None
+    while previous != text:
+        previous = text
+        text = _POOL_COMMAND_GLUE_RE.sub(" ", text)
+    return re.sub(r"[\s，,；;。.!?？！:：=、'\"“”‘’（）()【】\[\]{}]+", "", text)
+
+
+def _pool_mutation_unconsumed_text(
+    utterance: str,
+    *,
+    workflow: str,
+    inputs: Mapping[str, Any],
+    intent_match: re.Match[str] | None,
+) -> str:
+    if intent_match is None:
+        return utterance
+    spans: list[tuple[int, int]] = [intent_match.span()]
+    identifiers: list[str] = []
+    if workflow in {"strategy_pool_remove_entry", "strategy_pool_set_action"}:
+        for field in ("rule_id", "entry_id"):
+            value = inputs.get(field)
+            if isinstance(value, str):
+                identifiers.append(value)
+    elif workflow == "strategy_pool_reorder":
+        ordered_ids = inputs.get("ordered_ids")
+        if isinstance(ordered_ids, Sequence) and not isinstance(
+            ordered_ids, str | bytes | bytearray
+        ):
+            identifiers.extend(value for value in ordered_ids if isinstance(value, str))
+    for identifier in identifiers:
+        spans.extend(match.span() for match in re.finditer(re.escape(identifier), utterance))
+    strategy_type = str(inputs.get("strategy_type") or "")
+    strategy_type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    if strategy_type_pattern is not None:
+        spans.extend(
+            match.span() for match in strategy_type_pattern.finditer(utterance)
+        )
+    if workflow == "strategy_pool_set_action":
+        action = inputs.get("action")
+        action_type = str(action.get("type") or "") if isinstance(action, Mapping) else ""
+        action_pattern = _POOL_ACTION_GROUNDING.get(action_type)
+        if action_pattern is not None:
+            spans.extend(match.span() for match in action_pattern.finditer(utterance))
+    spans.extend(_pool_add_reason_spans(utterance))
+    reason = inputs.get("reason")
+    if isinstance(reason, str) and reason:
+        spans.extend(match.span() for match in re.finditer(re.escape(reason), utterance))
+    return _pool_command_residual(_pool_strip_spans(utterance, spans))
+
+
+def _pool_add_unconsumed_text(utterance: str) -> str:
+    spans: list[tuple[int, int]] = []
+    spans.extend(match.span() for match in _POOL_ADD_INTENT_RE.finditer(utterance))
+    spans.extend(
+        match.span()
+        for pattern in (
+            _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE,
+            _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE,
+        )
+        for match in pattern.finditer(utterance)
+    )
+    for pattern in (
+        _POOL_ADD_STRATEGY_TYPE_LABEL_RE,
+        _POOL_ADD_DEFAULT_ACTION_LABEL_RE,
+        _POOL_ADD_HIT_ACTION_LABEL_RE,
+        _POOL_ADD_DEFAULT_REASON_CODE_LABEL_RE,
+        _POOL_ADD_HIT_REASON_CODE_LABEL_RE,
+        _POOL_ADD_DEFAULT_OUTPUT_VALUE_LABEL_RE,
+        _POOL_ADD_HIT_OUTPUT_VALUE_LABEL_RE,
+    ):
+        spans.extend(
+            (match.start(), _pool_add_clause_end(utterance, start=match.end()))
+            for match in pattern.finditer(utterance)
+        )
+    spans.extend(_pool_add_negated_follow_up_spans(utterance))
+    spans.extend(_pool_add_reason_spans(utterance))
+    return _pool_command_residual(_pool_strip_spans(utterance, spans))
+
+
+def _pool_add_negated_follow_up_spans(
+    utterance: str,
+) -> tuple[tuple[int, int], ...]:
+    clause_spans: set[tuple[int, int]] = set()
+    for pattern in (
+        _POOL_ADD_LIFECYCLE_RE,
+        _POOL_ADD_SECOND_OPERATION_RE,
+        _POOL_PARTIAL_REORDER_RE,
+        _POOL_HEURISTIC_REORDER_RE,
+    ):
+        for match in pattern.finditer(utterance):
+            negated = (
+                _pool_lifecycle_operation_is_negated(
+                    utterance,
+                    start=match.start(),
+                )
+                if pattern is _POOL_ADD_LIFECYCLE_RE
+                else _pool_operation_is_negated(utterance, start=match.start())
+            )
+            if not negated:
+                continue
+            left = max(
+                utterance.rfind(separator, 0, match.start())
+                for separator in ("，", ",", "；", ";", "。", ".", "\n")
+            )
+            right = _pool_add_clause_end(utterance, start=match.end())
+            if _POOL_ADD_INTENT_RE.search(utterance[left + 1 : right]) is None:
+                clause_spans.add((left + 1, right))
+    return tuple(sorted(clause_spans))
+
+
+def _pool_lifecycle_operation_is_negated(utterance: str, *, start: int) -> bool:
+    prefix = _pool_clause_prefix(utterance, start=start)
+    return (
+        re.search(
+            r"(?:不要|不用|不再|无需|无须|不需要|不能|不可|不允许|暂不|"
+            r"先不|别|请勿|切勿|勿|禁止|严禁|不得|不|未|无|没(?:有)?)"
+            r"\s*(?:再|进行|立即|直接)?\s*"
+            r"(?:(?:采纳|采用|部署|上线|投产|投入生产|上生产|投用|"
+            r"发布到?生产|发布到?线上|推到?线上|推生产|正式运行|落地执行|"
+            r"立即执行|执行它?|投入使用|开始使用|启用|生效|激活)"
+            r"\s*(?:或|和|及|以及|、)?\s*)*$|"
+            r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cannot|can't|won't|"
+            r"must\s+not|mustn't|should\s+not|shouldn't|not|without)\s+"
+            r"(?:(?:adopt(?:s|ed|ing)?|deploy(?:s|ed|ing)?|"
+            r"promot(?:e|es|ed|ing)|activat(?:e|es|ed|ing)|"
+            r"enabl(?:e|es|ed|ing)|ship(?:s|ped|ping)?|"
+            r"push(?:es|ed|ing)?|releas(?:e|es|ed|ing)|"
+            r"publish(?:es|ed|ing)?|launch(?:es|ed|ing)?|"
+            r"productioniz(?:e|es|ed|ing)|execut(?:e|es|ed|ing)|run(?:s|ning)?|"
+            r"use(?:s|d|ing)?[^;.!?\n]{0,32}(?:in|on)[-\s]+prod(?:uction)?|"
+            r"put[^;.!?\n]{0,32}into[-\s]+prod(?:uction)?|"
+            r"enter(?:s|ed|ing)?[-\s]+prod(?:uction)?|"
+            r"take[^;.!?\n]{0,20}live|"
+            r"(?:go(?:es|ing)?|went)[-\s]+live|"
+            r"roll(?:s|ed|ing)?[-\s]+out)\s*(?:or|and)?\s*)*$",
+            prefix,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _pool_add_has_positive_lifecycle_follow_up(utterance: str) -> bool:
+    positive_lifecycle = any(
+        not _pool_lifecycle_operation_is_negated(utterance, start=match.start())
+        for match in _POOL_ADD_LIFECYCLE_RE.finditer(utterance)
+    )
+    positive_second_operation = any(
+        not _pool_operation_is_negated(utterance, start=match.start())
+        for pattern in (
+            _POOL_ADD_SECOND_OPERATION_RE,
+            _POOL_PARTIAL_REORDER_RE,
+            _POOL_HEURISTIC_REORDER_RE,
+        )
+        for match in pattern.finditer(utterance)
+    )
+    return positive_lifecycle or positive_second_operation
+
+
+def _pool_add_strategy_types(utterance: str) -> tuple[frozenset[str], bool]:
+    reason_spans = _pool_add_reason_spans(utterance)
+    add_target_matches = tuple(
+        match
+        for match in _POOL_ADD_INTENT_RE.finditer(utterance)
+        if not _pool_operation_is_negated(utterance, start=match.start())
+        and not any(left <= match.start() < right for left, right in reason_spans)
+    )
+    observed: set[str] = set()
+    add_targets_valid = True
+    for match in add_target_matches:
+        add_target = match.group(0)
+        if _pool_add_body_is_negated(add_target):
+            add_targets_valid = False
+            continue
+        observed.update(
+            strategy_type
+            for strategy_type, pattern in _POOL_ADD_STRATEGY_TYPE_NOUN_PATTERNS.items()
+            if pattern.search(add_target) is not None
+        )
+    label_bodies = _pool_add_label_bodies(
+        utterance,
+        _POOL_ADD_STRATEGY_TYPE_LABEL_RE,
+    )
+    for label_value in label_bodies:
+        observed.update(
+            strategy_type
+            for strategy_type, pattern in _POOL_STRATEGY_TYPE_VALUE_GROUNDING.items()
+            if pattern.search(label_value) is not None
+        )
+    raw_label_count = _pool_add_label_match_count(
+        utterance,
+        _POOL_ADD_STRATEGY_TYPE_LABEL_RE,
+    )
+    return (
+        frozenset(observed),
+        add_targets_valid
+        and raw_label_count == len(label_bodies)
+        and raw_label_count <= 1,
+    )
+
+
+def _pool_add_reason_value_spans(utterance: str) -> tuple[tuple[int, int], ...]:
+    spans: list[tuple[int, int]] = []
+    for match in _POOL_ADD_REASON_LABEL_RE.finditer(utterance):
+        group = "zh" if match.group("zh") is not None else "en"
+        spans.append(match.span(group))
+    return tuple(spans)
+
+
+def _pool_add_reason_spans(utterance: str) -> tuple[tuple[int, int], ...]:
+    return tuple(
+        match.span() for match in _POOL_ADD_REASON_LABEL_RE.finditer(utterance)
+    )
+
+
+def _pool_add_label_match_count(utterance: str, pattern: re.Pattern[str]) -> int:
+    reason_spans = _pool_add_reason_spans(utterance)
+    return sum(
+        1
+        for match in pattern.finditer(utterance)
+        if not any(left <= match.start() < right for left, right in reason_spans)
+    )
+
+
+def _pool_add_clause_end(utterance: str, *, start: int) -> int:
+    """Find the next top-level clause boundary without splitting data values."""
+
+    opening = {"[": "]", "{": "}", "(": ")", "（": "）", "【": "】"}
+    closing = frozenset(opening.values())
+    stack: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for index in range(start, len(utterance)):
+        char = utterance[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            continue
+        if char in opening:
+            stack.append(opening[char])
+            continue
+        if char in closing:
+            if stack and stack[-1] == char:
+                stack.pop()
+            continue
+        if stack:
+            continue
+        if char in {"；", ";", "。", "\n", "?", "？", "!", "！", "，"}:
+            return index
+        if char == ",":
+            before = utterance[index - 1] if index > 0 else ""
+            after = utterance[index + 1] if index + 1 < len(utterance) else ""
+            if before.isdigit() and after.isdigit():
+                continue
+            return index
+        if char == ".":
+            before = utterance[index - 1] if index > 0 else ""
+            after = utterance[index + 1] if index + 1 < len(utterance) else ""
+            if before.isdigit() and after.isdigit():
+                continue
+            if after and not after.isspace() and after not in "，,；;。.!?？！":
+                continue
+            return index
+    return len(utterance)
+
+
+def _pool_add_authorized_clause_spans(
+    utterance: str,
+) -> tuple[tuple[int, int], ...]:
+    """Return positive add clauses; IDs elsewhere cannot authorize a mutation."""
+
+    reason_spans = _pool_add_reason_value_spans(utterance)
+    spans: list[tuple[int, int]] = []
+    for match in _POOL_ADD_INTENT_RE.finditer(utterance):
+        if any(left <= match.start() < right for left, right in reason_spans):
+            continue
+        if _pool_operation_is_negated(utterance, start=match.start()):
+            continue
+        left = max(
+            utterance.rfind(separator, 0, match.start())
+            for separator in ("，", ",", "；", ";", "。", ".", "\n")
+        )
+        prefix = utterance[left + 1 : match.start()]
+        contrasts = tuple(
+            re.finditer(
+                r"(?:但(?:是)?|不过|而是|转而)|"
+                r"(?<![A-Za-z0-9_])(?:but|instead|rather\s+than)"
+                r"(?![A-Za-z0-9_])",
+                prefix,
+                re.IGNORECASE,
+            )
+        )
+        if contrasts:
+            left += contrasts[-1].end()
+        right = _pool_add_clause_end(utterance, start=match.end())
+        spans.append((left + 1, right))
+    return tuple(dict.fromkeys(spans))
+
+
+def _pool_add_label_is_negated(utterance: str, *, start: int) -> bool:
+    prefix = _pool_clause_prefix(utterance, start=start)
+    return (
+        re.search(
+            r"(?:不要|不用|不应|不能|不可|并非|不是|非|未|别|禁止|取消)"
+            r"\s*(?:使用|设置|选择|采用)?\s*(?:这|该|一个|the)?\s*$|"
+            r"(?<![A-Za-z0-9_])(?:not|non|never)[-\s]*$|"
+            r"(?<![A-Za-z0-9_])(?:do\s+not|don't|cannot|can't|must\s+not|"
+            r"should\s+not)\s+(?:use|set|choose)\s*$",
+            prefix,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _pool_add_body_is_negated(body: str) -> bool:
+    return (
+        re.search(
+            r"(?:^|\s|但|但是|却|而|,|，)(?:请\s*)?"
+            r"(?:不要|不用|不应|不能|不可|并非|并不是|绝非|绝不是|不是|"
+            r"非|未|别|禁止|取消|"
+            r"排除|剔除|忽略|除外|不包含|不包括)|"
+            r"(?:非|排除|剔除|忽略|除外|不包含|不包括)"
+            r"(?=审批|准入|拒绝|额度|授信|定价|利率|分群|分层|"
+            r"approval|reject|review|limit|pricing|segment)|"
+            r"(?:除了|除开|不含)\s*(?:审批|准入|拒绝|额度|授信|定价|"
+            r"利率|分群|分层|approval|reject|review|limit|pricing|segment)|"
+            r"(?:审批|准入|拒绝|额度|授信|定价|利率|分群|分层|"
+            r"approval|reject|review|limit|pricing|segment)"
+            r"[^；;。\n]{0,24}(?:以外|之外|除外|排除|剔除|忽略|不包含|不包括)|"
+            r"(?:^|\s|but\s+)(?<![A-Za-z0-9_])(?:do\s+not|don't|cannot|can't|"
+            r"must\s+not|should\s+not|not|never|without|avoid|exclude(?:d|s|ing)?|"
+            r"except(?:ed|ing)?|omit(?:ted|ting)?|ignor(?:e|ed|ing))"
+            r"(?![A-Za-z0-9_])|"
+            r"(?<![A-Za-z0-9_])(?:approval|reject|review|limit|pricing|segment)"
+            r"\s+(?:is\s+)?(?:excluded|excepted|omitted|ignored)"
+            r"(?![A-Za-z0-9_])|"
+            r"(?<![A-Za-z0-9_])anything\s+but\s+"
+            r"(?:approval|reject|review|limit|pricing|segment)"
+            r"(?![A-Za-z0-9_])|"
+            r"(?<![A-Za-z0-9_])(?:anything\s+)?other\s+than\s+"
+            r"(?:approval|reject|review|limit|pricing|segment)"
+            r"(?![A-Za-z0-9_])",
+            body,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _pool_add_label_bodies(utterance: str, pattern: re.Pattern[str]) -> tuple[str, ...]:
+    bodies: list[str] = []
+    reason_spans = _pool_add_reason_value_spans(utterance)
+    matches: list[re.Match[str]] = []
+    for match in pattern.finditer(utterance):
+        matches.append(match)
+        if len(matches) > _POOL_MAX_CONTROL_LABEL_MATCHES:
+            return ()
+    for match in matches:
+        if any(left <= match.start() < right for left, right in reason_spans):
+            continue
+        if _pool_add_label_is_negated(utterance, start=match.start()):
+            continue
+        right = _pool_add_clause_end(utterance, start=match.end())
+        body = utterance[match.end() : right]
+        body = re.sub(r"^\s*(?:[:：=]|是|为)?\s*", "", body)
+        body = body.strip()
+        if body and not _pool_add_body_is_negated(body):
+            bodies.append(body)
+    return tuple(bodies)
+
+
+def _pool_add_labeled_action_types(
+    utterance: str,
+    *,
+    pattern: re.Pattern[str],
+) -> tuple[frozenset[str], ...]:
+    return tuple(
+        frozenset(
+            action_type
+            for action_type, grounding in _POOL_ACTION_GROUNDING.items()
+            if grounding.search(body) is not None
+        )
+        for body in _pool_add_label_bodies(utterance, pattern)
+    )
+
+
+def _pool_add_action_body_residual(
+    body: str,
+    action: Mapping[str, Any],
+) -> str:
+    action_type = str(action.get("type") or "")
+    pattern = _POOL_ACTION_GROUNDING.get(action_type)
+    spans: list[tuple[int, int]] = []
+    if pattern is not None:
+        spans.extend(match.span() for match in pattern.finditer(body))
+    if action_type in {"limit", "pricing", "segment"}:
+        value = action.get("value")
+        candidates = {str(value)}
+        try:
+            candidates.add(
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            )
+        except (TypeError, ValueError):
+            pass
+        for candidate in candidates:
+            spans.extend(
+                match.span()
+                for match in re.finditer(re.escape(candidate), body, re.IGNORECASE)
+            )
+    return _pool_command_residual(_pool_strip_spans(body, spans))
+
+
+def _pool_add_strategy_type_body_residual(body: str, strategy_type: str) -> str:
+    pattern = _POOL_STRATEGY_TYPE_VALUE_GROUNDING.get(strategy_type)
+    spans = tuple(match.span() for match in pattern.finditer(body)) if pattern else ()
+    return _pool_command_residual(_pool_strip_spans(body, spans))
+
+
+def _pool_reason_has_active_language(reason: str) -> bool:
+    if _POOL_REASON_CANCELLATION_RE.search(reason) is not None:
+        return True
+    return any(
+        pattern.search(reason) is not None
+        for pattern in (
+            _POOL_ADD_INTENT_RE,
+            _POOL_ADD_LIFECYCLE_RE,
+            _POOL_ADD_SECOND_OPERATION_RE,
+            _POOL_PARTIAL_REORDER_RE,
+            _POOL_HEURISTIC_REORDER_RE,
+            *_POOL_MUTATION_INTENT_PATTERNS.values(),
+        )
+    )
+
+
+def _pool_add_parse_complete_value(body: str) -> object:
+    text = body.strip()
+    if not text or len(text) > _POOL_MAX_CONTROL_VALUE_CHARS:
+        return _POOL_UNPARSEABLE_VALUE
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_pool_add_unique_json_object,
+            parse_constant=_pool_add_reject_json_constant,
+            parse_float=Decimal,
+        )
+    except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
+        pass
+    if text.startswith(("[", "{")):
+        return _POOL_UNPARSEABLE_VALUE
+    if text.casefold() in {
+        "nan",
+        "+nan",
+        "-nan",
+        "inf",
+        "+inf",
+        "-inf",
+        "infinity",
+        "+infinity",
+        "-infinity",
+    }:
+        return _POOL_UNPARSEABLE_VALUE
+    number = re.fullmatch(
+        r"(?P<number>[-+]?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)"
+        r"(?:\.[0-9]+)?)(?P<percent>\s*%)?",
+        text,
+    )
+    if number is not None:
+        token = number.group("number").replace(",", "")
+        unsigned = token.lstrip("+-")
+        integer_part = unsigned.split(".", 1)[0]
+        if len(integer_part) > 1 and integer_part.startswith("0"):
+            return _POOL_UNPARSEABLE_VALUE
+        try:
+            value: object = Decimal(token) if "." in token else int(token)
+        except (InvalidOperation, ValueError):
+            return _POOL_UNPARSEABLE_VALUE
+        return value / 100 if number.group("percent") else value
+    if text[0] in {"'", '"'} or text[-1] in {"'", '"'}:
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+            return text[1:-1]
+        return _POOL_UNPARSEABLE_VALUE
+    return unicodedata.normalize("NFC", text)
+
+
+def _pool_add_unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _pool_add_reject_json_constant(token: str) -> object:
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
+def _pool_add_values_equal(observed: object, expected: object) -> bool:
+    try:
+        return _pool_add_comparison_value(observed) == _pool_add_comparison_value(
+            expected
+        )
+    except (InvalidOperation, RecursionError, TypeError, ValueError):
+        return False
+
+
+def _pool_add_comparison_value(value: object) -> object:
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return (type(value).__name__, value)
+    if isinstance(value, int | float | Decimal):
+        numeric = value if isinstance(value, Decimal) else Decimal(str(value))
+        if not numeric.is_finite():
+            raise ValueError("non-finite numeric value")
+        return ("number", numeric)
+    if isinstance(value, list):
+        return ("array", tuple(_pool_add_comparison_value(item) for item in value))
+    if isinstance(value, dict):
+        return (
+            "object",
+            tuple(
+                (key, _pool_add_comparison_value(item))
+                for key, item in sorted(value.items())
+            ),
+        )
+    raise TypeError("unsupported comparison value")
+
+
+def _pool_add_body_matches_action_value(
+    body: str,
+    *,
+    action_type: str,
+    expected: object,
+) -> bool:
+    grounding = _POOL_ACTION_GROUNDING.get(action_type)
+    if grounding is None:
+        return False
+    match = grounding.search(body)
+    if match is None:
+        return False
+    value_text = re.sub(
+        r"^\s*(?:[:：=]|是|为)?\s*",
+        "",
+        body[match.end() :],
+    )
+    return _pool_add_values_equal(
+        _pool_add_parse_complete_value(value_text),
+        expected,
+    )
+
+
+def _pool_add_body_matches_complete_value(body: str, expected: object) -> bool:
+    return _pool_add_values_equal(
+        _pool_add_parse_complete_value(body),
+        expected,
+    )
+
+
+def _pool_add_action_payload_controls(
+    utterance: str,
+    action: Mapping[str, Any],
+    *,
+    action_bodies: Sequence[str],
+    reason_code_label: re.Pattern[str],
+    output_value_label: re.Pattern[str],
+) -> tuple[str, ...]:
+    missing: list[str] = []
+    reason_code_bodies = _pool_add_label_bodies(utterance, reason_code_label)
+    reason_code_label_count = _pool_add_label_match_count(
+        utterance,
+        reason_code_label,
+    )
+    reason_code = action.get("reason_code")
+    if bool(reason_code_label_count or reason_code is not None) and (
+        reason_code_label_count != len(reason_code_bodies)
+        or reason_code_label_count != 1
+        or len(reason_code_bodies) != 1
+        or not isinstance(reason_code, str)
+        or reason_code_bodies[0] != reason_code
+    ):
+        missing.append("reason_code")
+    action_type = str(action.get("type") or "")
+    if action_type in {"limit", "pricing", "segment"} and (
+        len(action_bodies) != 1
+        or not _pool_add_body_matches_action_value(
+            action_bodies[0],
+            action_type=action_type,
+            expected=action.get("value"),
+        )
+    ):
+        missing.append("value")
+    output_value = action.get("output_value")
+    output_value_bodies = _pool_add_label_bodies(utterance, output_value_label)
+    output_value_label_count = _pool_add_label_match_count(
+        utterance,
+        output_value_label,
+    )
+    if bool(output_value_label_count or output_value is not None) and (
+        output_value_label_count != len(output_value_bodies)
+        or output_value_label_count != 1
+        or len(output_value_bodies) != 1
+        or output_value is None
+        or not _pool_add_body_matches_complete_value(
+            output_value_bodies[0],
+            output_value,
+        )
+    ):
+        missing.append("output_value")
+    return tuple(missing)
+
+
+def _pool_add_explicit_reasons(utterance: str) -> tuple[str, ...]:
+    return tuple(
+        (match.group("zh") or match.group("en")).strip()
+        for match in _POOL_ADD_REASON_LABEL_RE.finditer(utterance)
+    )
+
+
+def _ground_strategy_pool_add_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Bind one explicit selection/asset and three independently labeled controls."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+
+    if len(utterance) > _POOL_MAX_UTTERANCE_CHARS:
+        return _clarification(
+            "单次 Strategy Pool 入池指令过长；请只保留一个 source ID、"
+            "策略池类型、默认动作、命中动作和可选理由。",
+            code="strategy_pool_add_request_too_large",
+            fields=("utterance",),
+        )
+
+    has_intent, has_positive_intent = _pool_add_intent_state(utterance)
+    if not has_positive_intent:
+        code = (
+            "strategy_pool_add_intent_negated"
+            if has_intent
+            else "strategy_pool_add_intent_required"
+        )
+        return _clarification(
+            "原话没有明确授权一次正向的 Strategy Pool 入池；否定式请求不会"
+            "创建 Pool revision。请明确说出要加入的完整 source ID。",
+            code=code,
+            fields=("pool_add_intent",),
+        )
+    if _pool_add_has_positive_lifecycle_follow_up(utterance):
+        return _clarification(
+            "本轮只能把一个明确候选写入可逆 draft Strategy Pool；采纳、部署、"
+            "上线或投产必须在后续请求中单独发起。",
+            code="strategy_pool_add_single_step_required",
+            fields=("next_action",),
+        )
+
+    candidate_matches = tuple(_AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance))
+    selection_matches = tuple(
+        _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE.finditer(utterance)
+    )
+    candidate_ids = frozenset(match.group(0) for match in candidate_matches)
+    selection_ids = frozenset(match.group(0) for match in selection_matches)
+    source_like_matches = tuple(_POOL_SOURCE_LIKE_TOKEN_RE.finditer(utterance))
+    source_like_ids = frozenset(match.group(0) for match in source_like_matches)
+    source_prefix_count = _pool_source_prefix_count(utterance)
+    canonical_source_ids = candidate_ids | selection_ids
+    source_count = len(candidate_matches) + len(selection_matches)
+    authorized_spans = _pool_add_authorized_clause_spans(utterance)
+    authorized_candidate_matches = tuple(
+        match
+        for match in candidate_matches
+        if any(
+            left <= match.start() and match.end() <= right
+            for left, right in authorized_spans
+        )
+    )
+    authorized_selection_matches = tuple(
+        match
+        for match in selection_matches
+        if any(
+            left <= match.start() and match.end() <= right
+            for left, right in authorized_spans
+        )
+    )
+    authorized_source_like_matches = tuple(
+        match
+        for match in source_like_matches
+        if any(
+            left <= match.start() and match.end() <= right
+            for left, right in authorized_spans
+        )
+    )
+    authorized_canonical_matches = (
+        authorized_candidate_matches + authorized_selection_matches
+    )
+    authorized_source_like_ids = frozenset(
+        match.group(0) for match in authorized_source_like_matches
+    )
+    authorized_canonical_ids = frozenset(
+        match.group(0) for match in authorized_canonical_matches
+    )
+    if (
+        source_count != 1
+        or len(source_like_matches) != 1
+        or source_like_ids != canonical_source_ids
+        or source_prefix_count != len(source_like_matches)
+        or len(authorized_spans) != 1
+        or len(authorized_canonical_matches) != 1
+        or len(authorized_source_like_matches) != 1
+        or authorized_source_like_ids != authorized_canonical_ids
+    ):
+        legacy_asset_id = inputs.get("candidate_asset_id")
+        if (
+            source_count == 0
+            and not source_like_matches
+            and source_prefix_count == 0
+            and isinstance(legacy_asset_id, str)
+        ):
+            return _clarification(
+                "请在原话中明确提供 Strategy Pool 的策略类型、完整 ID 和 typed "
+                f"action；当前无法核对：{legacy_asset_id}。平台不会采用 LLM "
+                "猜测的 ID、动作、顺序、hash 或指标。",
+                code="strategy_pool_controls_not_grounded",
+                fields=(legacy_asset_id,),
+            )
+        return _clarification(
+            "请逐字提供且只提供一个完整 candidate_asset_id 或 selection_id；"
+            "selection_id 必须是 automatic-tree-leaf-selection- 后接 32 位"
+            "小写十六进制字符，不能同时给出两类来源。",
+            code="strategy_pool_add_source_required",
+            fields=("candidate_asset_id", "selection_id"),
+        )
+    expected_source_field = (
+        "selection_id" if authorized_selection_matches else "candidate_asset_id"
+    )
+    observed_source_id = authorized_canonical_matches[0].group(0)
+    if (
+        set(inputs) & {"candidate_asset_id", "selection_id"} != {expected_source_field}
+        or inputs.get(expected_source_field) != observed_source_id
+    ):
+        return _clarification(
+            "模型草案中的入池来源与用户原话不一致；平台不会替换、补全或"
+            "猜测 candidate_asset_id/selection_id。",
+            code="strategy_pool_add_source_not_grounded",
+            fields=(expected_source_field,),
+        )
+
+    missing_controls: list[str] = []
+    observed_strategy_types, strategy_type_labels_valid = _pool_add_strategy_types(
+        utterance
+    )
+    strategy_type_bodies = _pool_add_label_bodies(
+        utterance,
+        _POOL_ADD_STRATEGY_TYPE_LABEL_RE,
+    )
+    if (
+        not strategy_type_labels_valid
+        or observed_strategy_types != {inputs["strategy_type"]}
+        or any(
+            _pool_add_strategy_type_body_residual(body, inputs["strategy_type"])
+            for body in strategy_type_bodies
+        )
+    ):
+        missing_controls.append("strategy_type")
+    for field, pattern, reason_code_label, output_value_label in (
+        (
+            "default_action",
+            _POOL_ADD_DEFAULT_ACTION_LABEL_RE,
+            _POOL_ADD_DEFAULT_REASON_CODE_LABEL_RE,
+            _POOL_ADD_DEFAULT_OUTPUT_VALUE_LABEL_RE,
+        ),
+        (
+            "action",
+            _POOL_ADD_HIT_ACTION_LABEL_RE,
+            _POOL_ADD_HIT_REASON_CODE_LABEL_RE,
+            _POOL_ADD_HIT_OUTPUT_VALUE_LABEL_RE,
+        ),
+    ):
+        action_bodies = _pool_add_label_bodies(utterance, pattern)
+        action_label_count = _pool_add_label_match_count(utterance, pattern)
+        labeled_types = _pool_add_labeled_action_types(utterance, pattern=pattern)
+        expected_type = inputs[field]["type"]
+        if (
+            action_label_count != 1
+            or action_label_count != len(action_bodies)
+            or len(labeled_types) != 1
+            or labeled_types[0] != {expected_type}
+            or (
+                len(action_bodies) == 1
+                and _pool_add_action_body_residual(action_bodies[0], inputs[field])
+            )
+        ):
+            missing_controls.append(field)
+        payload_controls = _pool_add_action_payload_controls(
+            utterance,
+            inputs[field],
+            action_bodies=action_bodies,
+            reason_code_label=reason_code_label,
+            output_value_label=output_value_label,
+        )
+        if payload_controls:
+            missing_controls.append(field)
+    if missing_controls:
+        return _clarification(
+            "请分别显式标注策略池类型、Pool 默认动作和命中动作；三者是"
+            "独立控制，平台不会从动作词推断 Pool 类型，也不会对调两个动作。"
+            "当前无法核对：" + "、".join(dict.fromkeys(missing_controls)) + "。",
+            code="strategy_pool_add_controls_not_grounded",
+            fields=tuple(dict.fromkeys(missing_controls)),
+        )
+
+    explicit_reasons = _pool_add_explicit_reasons(utterance)
+    reason = inputs.get("reason")
+    if bool(explicit_reasons or reason is not None) and (
+        len(explicit_reasons) != 1
+        or not isinstance(reason, str)
+        or reason != explicit_reasons[0]
+    ):
+        return _clarification(
+            "可选 reason 必须与用户以“入池理由/理由/reason”显式标注的"
+            "唯一文本逐字一致；未显式给出时模型必须省略。",
+            code="strategy_pool_add_reason_not_grounded",
+            fields=("reason",),
+        )
+    if isinstance(reason, str) and _pool_reason_has_active_language(reason):
+        return _clarification(
+            "reason 只能说明被动业务依据，不能承载入池、删除、改动作、"
+            "重排、撤销或其他操作指令。",
+            code="strategy_pool_reason_not_passive",
+            fields=("reason",),
+        )
+    if residual := _pool_add_unconsumed_text(utterance):
+        return _clarification(
+            "Strategy Pool 入池只能包含一个明确命令子句和已知的显式控制标签；"
+            "历史叙述、转述、考虑中描述、撤销语句或其他未消费操作不会执行。",
+            code="strategy_pool_add_command_not_explicit",
+            fields=(residual[:80],),
+        )
+    return result
+
+
 def _ground_strategy_pool_request(
     utterance: str,
     result: StrategyRequestCompilation,
@@ -3578,6 +4971,9 @@ def _ground_strategy_pool_request(
     assert isinstance(draft, StandardWorkflowRequestDraft)
     inputs = draft.to_dict()["workflow_inputs"]
     workflow = draft.workflow
+
+    if workflow == "strategy_pool_add_candidate":
+        return _ground_strategy_pool_add_request(utterance, result)
 
     if workflow == "strategy_pool_reorder" and (
         _POOL_PARTIAL_REORDER_RE.search(utterance)
@@ -3595,18 +4991,7 @@ def _ground_strategy_pool_request(
     strategy_type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
     if strategy_type_pattern is None or strategy_type_pattern.search(utterance) is None:
         missing_controls.append(f"strategy_type {strategy_type or 'unknown'}")
-    if workflow == "strategy_pool_add_candidate":
-        asset_id = inputs["candidate_asset_id"]
-        if not _utterance_contains_token(utterance, asset_id):
-            missing_controls.append(asset_id)
-        missing_controls.extend(
-            _ungrounded_pool_actions(
-                utterance,
-                inputs["default_action"],
-                inputs["action"],
-            )
-        )
-    elif workflow in {"strategy_pool_remove_entry", "strategy_pool_set_action"}:
+    if workflow in {"strategy_pool_remove_entry", "strategy_pool_set_action"}:
         identifier_name = "rule_id" if "rule_id" in inputs else "entry_id"
         identifier = inputs[identifier_name]
         if not _utterance_contains_token(utterance, identifier):
@@ -3633,15 +5018,31 @@ def _ground_strategy_pool_request(
     if isinstance(reason, str) and reason.casefold() not in utterance.casefold():
         missing_controls.append(reason)
 
-    if not missing_controls:
-        return result
-    rendered = "、".join(dict.fromkeys(missing_controls))
-    return _clarification(
-        "请在原话中明确提供 Strategy Pool 的策略类型、完整 ID 和 typed action；"
-        f"当前无法核对：{rendered}。平台不会采用 LLM 猜测的 ID、动作、顺序、hash 或指标。",
-        code="strategy_pool_controls_not_grounded",
-        fields=tuple(dict.fromkeys(missing_controls)),
-    )
+    if missing_controls:
+        rendered = "、".join(dict.fromkeys(missing_controls))
+        return _clarification(
+            "请在原话中明确提供 Strategy Pool 的策略类型、完整 ID 和 typed action；"
+            f"当前无法核对：{rendered}。平台不会采用 LLM 猜测的 ID、动作、顺序、hash 或指标。",
+            code="strategy_pool_controls_not_grounded",
+            fields=tuple(dict.fromkeys(missing_controls)),
+        )
+    if isinstance(reason, str) and _pool_reason_has_active_language(reason):
+        return _clarification(
+            "reason 只能说明被动业务依据，不能承载入池、删除、改动作、"
+            "重排、撤销或其他操作指令。",
+            code="strategy_pool_reason_not_passive",
+            fields=("reason",),
+        )
+    if workflow in _POOL_MUTATION_INTENT_PATTERNS and not (
+        _pool_mutation_has_positive_intent(utterance, workflow, inputs)
+    ):
+        return _clarification(
+            "原话没有明确授权当前轮执行一次正向 Strategy Pool 修改；否定、"
+            "问句、历史描述、失败态、撤销或其他未消费操作不会创建新的 Pool revision。",
+            code="strategy_pool_mutation_intent_required",
+            fields=("pool_mutation_intent",),
+        )
+    return result
 
 
 def _ungrounded_pool_actions(
@@ -4000,9 +5401,15 @@ def _standard_workflow_confirmation_text(
         if "selection_reason" in inputs:
             details.append(f"用户原话选择说明：{inputs['selection_reason']}")
     elif draft.workflow == "strategy_pool_add_candidate":
+        source_field = (
+            "selection_id" if "selection_id" in inputs else "candidate_asset_id"
+        )
+        source_label = (
+            "叶节点选择结果" if source_field == "selection_id" else "候选资产"
+        )
         details = [
             "已识别为〔Strategy Pool 添加候选 Workflow〕",
-            f"候选资产：{inputs['candidate_asset_id']}",
+            f"{source_label}：{inputs[source_field]}",
             f"策略类型：{inputs['strategy_type']}",
             "默认动作：" + _compact_json(inputs["default_action"]),
             "命中动作：" + _compact_json(inputs["action"]),
@@ -4017,7 +5424,9 @@ def _standard_workflow_confirmation_text(
         "strategy_pool_set_action",
     }:
         identifier_name = "rule_id" if "rule_id" in inputs else "entry_id"
-        operation = "删除条目" if draft.workflow == "strategy_pool_remove_entry" else "修改动作"
+        operation = (
+            "删除条目" if draft.workflow == "strategy_pool_remove_entry" else "修改动作"
+        )
         details = [
             f"已识别为〔Strategy Pool {operation} Workflow〕",
             f"策略类型：{inputs['strategy_type']}",
@@ -4529,6 +5938,14 @@ def _user_prompt(
         "Strategy Pool、业务动作、采纳、部署或 leaf ID 写回。selection_reason 中也"
         "不得藏入理由替换、后续动作、生命周期操作或极值/排名选叶语义；它只接受"
         "人工/业务/风险/合规/样本评审依据类短说明。"
+        "对于 strategy_pool_add_candidate，candidate_asset_id 与 selection_id "
+        "严格二选一且必须逐字抄录唯一完整 ID；必须分别抄录显式的策略池类型、"
+        "Pool 默认动作和命中动作标签，不能对调或从动作反推 Pool 类型。reason 仅在"
+        "显式标注时逐字抄录，未标注时省略；默认/命中 reason_code、output_value 和"
+        "value 也必须逐字归属各自标签，不得省略或对调。否定入池或串联采纳/部署时"
+        "必须澄清。source ID 必须与唯一正向入池命令位于同一子句，不能从否定子句、"
+        "reason、引用或代词上下文借用；未来/条件指令、问句、how-to、演示和测试也"
+        "必须澄清。"
     )
 
 

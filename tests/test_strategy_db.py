@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import hashlib
 import json
 
 import pandas as pd
@@ -238,18 +239,113 @@ def test_strategy_repository_persists_canonical_dsl_as_authoritative_spec(tmp_pa
 
     with connect(db_path) as conn:
         row = conn.execute(
-            "SELECT dsl_json, dsl_schema_version FROM strategies WHERE id = ?",
+            "SELECT dsl_json, dsl_schema_version, dsl_content_hash "
+            "FROM strategies WHERE id = ?",
             (strategy.id,),
         ).fetchone()
     payload = json.loads(row["dsl_json"])
     loaded = repo.get_strategy(strategy.id)
 
     assert row["dsl_schema_version"] == "strategy.dsl.v1"
+    assert row["dsl_content_hash"] == hashlib.sha256(
+        row["dsl_json"].encode("utf-8")
+    ).hexdigest()
     assert payload["rules"][0]["rule_id"] == strategy.rules[0].rule_id
     assert loaded.spec.to_dict() == strategy.spec.to_dict()
     assert apply_strategy(pd.DataFrame({"score": [599, 600]}), loaded).tolist() == [
         "reject",
         "approve",
+    ]
+
+
+def test_migration_018_backfills_existing_canonical_strategy_hash(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy)
+    with connect(db_path) as conn:
+        conn.execute("ALTER TABLE strategies DROP COLUMN dsl_content_hash")
+        conn.execute("PRAGMA user_version = 17")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT dsl_json, dsl_content_hash FROM strategies WHERE id = ?",
+            (strategy.id,),
+        ).fetchone()
+    assert row["dsl_content_hash"] == hashlib.sha256(
+        row["dsl_json"].encode("utf-8")
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "cleared_column",
+    ("dsl_json", "dsl_schema_version", "dsl_content_hash"),
+)
+def test_repository_rejects_incomplete_canonical_dsl_columns(
+    tmp_path,
+    cleared_column: str,
+) -> None:
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy)
+    with connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE strategies SET {cleared_column} = NULL WHERE id = ?",
+            (strategy.id,),
+        )
+
+    with pytest.raises(ValueError, match="canonical DSL columns are incomplete"):
+        repo.get_strategy(strategy.id)
+    with pytest.raises(ValueError, match="canonical DSL columns are incomplete"):
+        repo.get_strategy_spec_hash(strategy.id)
+
+
+def test_strategy_repository_round_trips_value_action_output_aliases(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = build_strategy_from_spec(
+        {
+            "strategy_type": "limit",
+            "default_action": {
+                "type": "limit",
+                "value": 1000,
+                "output_value": {"legacy": "fallback"},
+            },
+            "rules": [
+                {
+                    "rule_id": "positive",
+                    "priority": 10,
+                    "condition": {
+                        "op": "compare",
+                        "field": "x",
+                        "operator": ">",
+                        "value": 0,
+                    },
+                    "action": {
+                        "type": "limit",
+                        "value": 2000,
+                        "output_value": 1900,
+                    },
+                }
+            ],
+        }
+    )
+
+    repo.create_strategy("task-1", strategy)
+    loaded = repo.get_strategy(strategy.id)
+
+    assert loaded.spec.to_dict() == strategy.spec.to_dict()
+    assert loaded.default_decision == {"legacy": "fallback"}
+    assert loaded.rules[0].value == 2000
+    assert apply_strategy(pd.DataFrame({"x": [0, 1]}), loaded).tolist() == [
+        {"legacy": "fallback"},
+        1900,
     ]
 
 
@@ -332,6 +428,90 @@ def test_repository_fails_closed_when_compatibility_rules_drift_from_dsl(tmp_pat
                 '"reason_code":null}]',
                 strategy.id,
             ),
+        )
+
+    with pytest.raises(
+        ValueError, match="compatibility fields do not match canonical DSL"
+    ):
+        repo.get_strategy(strategy.id)
+
+
+def test_repository_fails_closed_when_default_action_value_drifts_from_output_alias(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = build_strategy_from_spec(
+        {
+            "strategy_type": "limit",
+            "default_action": {
+                "type": "limit",
+                "value": 1000,
+                "output_value": 900,
+            },
+            "rules": [],
+        }
+    )
+    repo.create_strategy("task-1", strategy)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT dsl_json FROM strategies WHERE id = ?",
+            (strategy.id,),
+        ).fetchone()
+        payload = json.loads(row["dsl_json"])
+        payload["default_action"]["value"] = 1100
+        conn.execute(
+            "UPDATE strategies SET dsl_json = ? WHERE id = ?",
+            (json.dumps(payload, ensure_ascii=False), strategy.id),
+        )
+
+    with pytest.raises(
+        ValueError, match="compatibility fields do not match canonical DSL"
+    ):
+        repo.get_strategy(strategy.id)
+
+
+def test_repository_fails_closed_when_rule_output_alias_drifts_from_typed_value(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = build_strategy_from_spec(
+        {
+            "strategy_type": "limit",
+            "default_action": {"type": "limit", "value": 1000},
+            "rules": [
+                {
+                    "rule_id": "positive",
+                    "priority": 10,
+                    "condition": {
+                        "op": "compare",
+                        "field": "x",
+                        "operator": ">",
+                        "value": 0,
+                    },
+                    "action": {
+                        "type": "limit",
+                        "value": 2000,
+                        "output_value": 1900,
+                    },
+                }
+            ],
+        }
+    )
+    repo.create_strategy("task-1", strategy)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT dsl_json FROM strategies WHERE id = ?",
+            (strategy.id,),
+        ).fetchone()
+        payload = json.loads(row["dsl_json"])
+        payload["rules"][0]["action"]["output_value"] = 1800
+        conn.execute(
+            "UPDATE strategies SET dsl_json = ? WHERE id = ?",
+            (json.dumps(payload, ensure_ascii=False), strategy.id),
         )
 
     with pytest.raises(
@@ -813,6 +993,88 @@ def test_new_version_from_accepts_canonical_nested_dsl_override(tmp_path) -> Non
         "approve",
         "reject",
     ]
+
+
+def test_new_version_from_rules_preserves_default_action_value_and_output_alias(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    source = build_strategy_from_spec(
+        {
+            "strategy_type": "limit",
+            "default_action": {
+                "type": "limit",
+                "value": 1000,
+                "output_value": 900,
+            },
+            "rules": [],
+        }
+    )
+    repo.create_strategy("task-1", source)
+
+    child = repo.new_version_from(
+        source.id,
+        rules=[{"condition": "x > 0", "decision": "limit", "value": 2000}],
+    )
+    loaded = repo.get_strategy(child.id)
+
+    assert loaded is not None
+    assert (
+        loaded.spec.default_action.to_dict()
+        == source.spec.default_action.to_dict()
+    )
+
+
+def test_new_version_from_on_connection_rules_preserves_default_action_value_and_output_alias(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    source = build_strategy_from_spec(
+        {
+            "strategy_type": "limit",
+            "default_action": {
+                "type": "limit",
+                "value": 1000,
+                "output_value": 900,
+            },
+            "rules": [],
+        }
+    )
+    repo.create_strategy("source-task", source)
+
+    with repo.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks(
+                id, task_type, model_name, model_version, validator, source_dir,
+                status, status_message, created_at, updated_at
+            ) VALUES (
+                'target-task', 'strategy', 'strategy task', 'v1', 'pytest',
+                '/tmp/source', 'created', 'created',
+                '2026-07-20T00:00:00Z', '2026-07-20T00:00:00Z'
+            )
+            """
+        )
+        child = repo.new_version_from_on_connection(
+            conn,
+            source.id,
+            target_task_id="target-task",
+            rules=[
+                {"condition": "x > 0", "decision": "limit", "value": 2000}
+            ],
+        )
+
+    loaded = repo.get_strategy(child.id)
+
+    assert loaded is not None
+    assert (
+        loaded.spec.default_action.to_dict()
+        == source.spec.default_action.to_dict()
+    )
 
 
 def test_strategy_artifacts_round_trip(tmp_path):

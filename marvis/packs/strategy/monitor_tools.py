@@ -757,7 +757,7 @@ def _validate_adjust_source_on_connection(
         """
         SELECT id, task_id, status, asset_status, version, strategy_type, rules_json,
                score_col, default_decision_json, description,
-               dsl_json, dsl_schema_version
+               dsl_json, dsl_schema_version, dsl_content_hash
           FROM strategies
          WHERE id = ?
         """,
@@ -1282,7 +1282,7 @@ def _typed_strategy_threshold_checks(
     if strategy_type == "limit":
         inputs = _resolve_economics_inputs(frame, plan, strategy_type="limit")
         assigned = _assigned_numeric_values(
-            evaluation.decisions, metric="mean_limit"
+            evaluation.action_values, metric="mean_limit"
         )
         calculated = limit_metrics(
             assigned,
@@ -1297,7 +1297,7 @@ def _typed_strategy_threshold_checks(
     elif strategy_type == "pricing":
         inputs = _resolve_economics_inputs(frame, plan, strategy_type="pricing")
         assigned = _assigned_numeric_values(
-            evaluation.decisions, metric="mean_rate"
+            evaluation.action_values, metric="mean_rate"
         )
         calculated = pricing_metrics(
             assigned,
@@ -1316,7 +1316,7 @@ def _typed_strategy_threshold_checks(
                 target_col=target_col,
             ),
             "segment_share_psi": _segment_share_psi(
-                evaluation.decisions,
+                evaluation.action_values,
                 baseline=plan.expectation_baseline,
             ),
         }

@@ -281,6 +281,7 @@ class StrategyAction:
             )
             if (
                 action_type in self._DEFAULT_VALUES
+                and isinstance(output_value, str)
                 and output_value in set(self._DEFAULT_VALUES.values())
                 and output_value != value
             ):

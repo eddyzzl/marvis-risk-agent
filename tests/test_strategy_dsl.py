@@ -432,6 +432,32 @@ def test_legacy_output_alias_is_explicit_and_cannot_impersonate_another_action()
     assert action.to_dict()["output_value"] == "pass"
     with pytest.raises(StrategyError, match="output_value contradicts"):
         StrategyAction(type="approval", output_value="reject")
+    structured = StrategyAction(type="approval", output_value=[1, {"route": "A"}])
+    assert structured.decision_value == [1, {"route": "A"}]
+    assert structured.to_dict()["output_value"] == [1, {"route": "A"}]
+
+
+@pytest.mark.parametrize(
+    ("action_type", "value", "output_value"),
+    [
+        ("limit", 1000, 900),
+        ("pricing", 0.1, 0.2),
+        ("segment", "prime", "subprime"),
+    ],
+)
+def test_value_actions_preserve_legacy_row_output_alias(
+    action_type: str,
+    value,
+    output_value,
+) -> None:
+    action = StrategyAction(
+        type=action_type,
+        value=value,
+        output_value=output_value,
+    )
+
+    assert action.decision_value == output_value
+    assert action.to_dict()["output_value"] == output_value
 
 
 @pytest.mark.parametrize(

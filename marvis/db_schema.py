@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import re
@@ -152,7 +153,12 @@ _MIGRATION_TABLES = frozenset({
 # committed-facts registry used by full automatic-tree dataset writeback.  The
 # repository remains deliberately narrower than transform lineage: callers own
 # file promotion, dataset/artifact registration, workspace activation and audit.
-SCHEMA_VERSION = 17
+#
+# _migration_018_strategy_dsl_content_hash adds an independent digest for the
+# complete canonical Strategy DSL.  Legacy compatibility columns cannot encode
+# both typed action values and optional row-output aliases, so they cannot prove
+# full DSL integrity by themselves.
+SCHEMA_VERSION = 18
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -2607,6 +2613,59 @@ def _migration_017_automatic_tree_apply_runs(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_018_strategy_dsl_content_hash(conn: sqlite3.Connection) -> None:
+    """Add and backfill the full-DSL digest for every canonical strategy row."""
+
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'strategies'"
+    ).fetchone()
+    if table is None:
+        return
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+    }
+    if "dsl_content_hash" not in existing:
+        conn.execute("ALTER TABLE strategies ADD COLUMN dsl_content_hash TEXT")
+    if not {"dsl_json", "dsl_schema_version"} <= existing:
+        # Compatibility tests and repaired databases may legitimately carry a
+        # high schema stamp with only the lifecycle subset.  There is no
+        # canonical Strategy DSL to backfill in that partial shape.
+        return
+    from marvis.packs.strategy.dsl import canonical_strategy_json, parse_strategy_spec
+
+    rows = conn.execute(
+        "SELECT id, dsl_json, dsl_schema_version, dsl_content_hash FROM strategies"
+    ).fetchall()
+    for row in rows:
+        dsl_json = row["dsl_json"]
+        schema_version = row["dsl_schema_version"]
+        stored_hash = row["dsl_content_hash"]
+        if dsl_json is None:
+            if schema_version is not None or stored_hash is not None:
+                raise ValueError(
+                    f"strategy {row['id']} has incomplete canonical DSL columns"
+                )
+            continue
+        if schema_version is None:
+            raise ValueError(
+                f"strategy {row['id']} has incomplete canonical DSL columns"
+            )
+        spec = parse_strategy_spec(json.loads(str(dsl_json)))
+        if str(schema_version) != spec.schema_version:
+            raise ValueError(
+                f"strategy {row['id']} dsl_schema_version does not match dsl_json"
+            )
+        expected_hash = hashlib.sha256(
+            canonical_strategy_json(spec).encode("utf-8")
+        ).hexdigest()
+        if stored_hash is not None and str(stored_hash) != expected_hash:
+            raise ValueError(f"strategy {row['id']} dsl_content_hash drifted")
+        conn.execute(
+            "UPDATE strategies SET dsl_content_hash = ? WHERE id = ?",
+            (expected_hash, row["id"]),
+        )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -2632,6 +2691,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (15, _migration_015_strategy_candidate_pools),
     (16, _migration_016_strategy_candidate_pool_v2),
     (17, _migration_017_automatic_tree_apply_runs),
+    (18, _migration_018_strategy_dsl_content_hash),
 ]
 
 

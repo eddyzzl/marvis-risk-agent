@@ -99,13 +99,9 @@ def _current_local_champion_ids(
 def _strategy_spec_hash_from_row(row: sqlite3.Row) -> str:
     """Hash the reviewed strategy definition, excluding lifecycle metadata."""
 
-    if "dsl_json" in row.keys() and row["dsl_json"] is not None:
-        spec = parse_strategy_spec(json.loads(str(row["dsl_json"])))
-        stored_version = _optional_str(row["dsl_schema_version"])
-        if stored_version != spec.schema_version:
-            raise ValueError(
-                "strategy dsl_schema_version does not match canonical dsl_json"
-            )
+    dsl_state = _strategy_dsl_state(row)
+    if dsl_state == "canonical":
+        spec = _strategy_spec_from_row(row)
         return strategy_spec_hash(spec)
 
     payload = {
@@ -377,7 +373,7 @@ class StrategyRepository:
                 """
                 SELECT id, task_id, strategy_type, rules_json, score_col,
                        default_decision_json, description, created_at,
-                       dsl_json, dsl_schema_version
+                       dsl_json, dsl_schema_version, dsl_content_hash
                   FROM strategies
                  WHERE id = ?
                 """,
@@ -411,7 +407,7 @@ class StrategyRepository:
                 """
                 SELECT strategy_type, rules_json, score_col,
                        default_decision_json, description,
-                       dsl_json, dsl_schema_version
+                       dsl_json, dsl_schema_version, dsl_content_hash
                   FROM strategies
                  WHERE id = ?
                 """,
@@ -425,7 +421,7 @@ class StrategyRepository:
                 """
                 SELECT id, task_id, strategy_type, rules_json, score_col,
                        default_decision_json, description, created_at,
-                       dsl_json, dsl_schema_version
+                       dsl_json, dsl_schema_version, dsl_content_hash
                   FROM strategies
                  WHERE task_id = ?
                  ORDER BY created_at, id
@@ -520,7 +516,7 @@ class StrategyRepository:
             """
             SELECT task_id, strategy_type, version, status, asset_status, rules_json,
                    score_col, default_decision_json, description,
-                   dsl_json, dsl_schema_version
+                   dsl_json, dsl_schema_version, dsl_content_hash
               FROM strategies
              WHERE id = ?
             """,
@@ -1318,7 +1314,7 @@ def _select_strategy_version_source(
         """
         SELECT id, task_id, strategy_type, rules_json, score_col,
                default_decision_json, description, created_at, version,
-               dsl_json, dsl_schema_version
+               dsl_json, dsl_schema_version, dsl_content_hash
           FROM strategies
          WHERE id = ?
         """,
@@ -1368,11 +1364,13 @@ def _insert_strategy_version_from_source(
             source_strategy.strategy_type,
             [_strategy_rule_to_dict(_coerce_rule(rule)) for rule in rules],
             score_col=source_strategy.score_col,
-            default_decision=source_strategy.default_decision,
+            default_decision=source_strategy.spec.default_action.value,
             description=child_description,
         )
         child_rules = built.rules
-        base_spec = built.spec
+        spec_payload = built.spec.to_dict()
+        spec_payload["default_action"] = source_strategy.spec.default_action.to_dict()
+        base_spec = parse_strategy_spec(spec_payload)
     else:
         base_spec = source_strategy.spec
         if base_spec is None:  # pragma: no cover - _strategy_from_row always supplies it
@@ -1398,9 +1396,9 @@ def _insert_strategy_version_from_source(
             id, task_id, strategy_type, rules_json, score_col,
             default_decision_json, description, created_at,
             version, status, asset_status, parent_strategy_id,
-            dsl_json, dsl_schema_version
+            dsl_json, dsl_schema_version, dsl_content_hash
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             child_id,
@@ -1417,13 +1415,14 @@ def _insert_strategy_version_from_source(
             parent_strategy_id,
             canonical_strategy_json(child_spec),
             child_spec.schema_version,
+            _strategy_dsl_content_hash(child_spec),
         ),
     )
     row = conn.execute(
         """
         SELECT id, task_id, strategy_type, rules_json, score_col,
                default_decision_json, description, created_at,
-               dsl_json, dsl_schema_version
+               dsl_json, dsl_schema_version, dsl_content_hash
           FROM strategies
          WHERE id = ?
         """,
@@ -1447,6 +1446,7 @@ def _strategy_insert_values(task_id: str, strategy: Strategy, created_at: str) -
         created_at,
         canonical_strategy_json(spec),
         spec.schema_version,
+        _strategy_dsl_content_hash(spec),
     )
 
 
@@ -1463,9 +1463,9 @@ def _insert_strategy_row(
             id, task_id, strategy_type, rules_json, score_col,
             default_decision_json, description, created_at,
             status, asset_status,
-            dsl_json, dsl_schema_version
+            dsl_json, dsl_schema_version, dsl_content_hash
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         values[:8]
         + (LEGACY_STATUS_DRAFT, ASSET_STATUS_DRAFT)
@@ -1485,13 +1485,9 @@ def _strategy_from_row(row: sqlite3.Row) -> Strategy:
         default_decision=json.loads(row["default_decision_json"]),
         description=str(row["description"]),
     )
-    if "dsl_json" in row.keys() and row["dsl_json"] is not None:
-        spec = parse_strategy_spec(json.loads(str(row["dsl_json"])))
-        stored_version = _optional_str(row["dsl_schema_version"])
-        if stored_version != spec.schema_version:
-            raise ValueError(
-                "strategy dsl_schema_version does not match canonical dsl_json"
-            )
+    dsl_state = _strategy_dsl_state(row)
+    if dsl_state == "canonical":
+        spec = _strategy_spec_from_row(row)
         _assert_strategy_matches_spec(strategy, spec)
         return Strategy(
             id=strategy.id,
@@ -1572,9 +1568,86 @@ def _rules_with_spec_identity(
 
 
 def _assert_strategy_matches_spec(strategy: Strategy, spec: StrategySpec) -> None:
-    compatibility_spec = legacy_strategy_to_spec(strategy)
-    if strategy_spec_hash(compatibility_spec) != strategy_spec_hash(spec):
+    compatibility_source = strategy
+    if spec.default_action.type in {"limit", "pricing", "segment"}:
+        compatibility_source = Strategy(
+            id=strategy.id,
+            strategy_type=strategy.strategy_type,
+            rules=strategy.rules,
+            score_col=strategy.score_col,
+            default_decision=spec.default_action.value,
+            description=strategy.description,
+        )
+    try:
+        compatibility_spec = legacy_strategy_to_spec(compatibility_source)
+    except StrategyError as exc:
+        raise ValueError(
+            "strategy compatibility fields do not match canonical DSL"
+        ) from exc
+    if (
+        strategy.strategy_type != spec.strategy_type
+        or _dump_json_any(strategy.default_decision)
+        != _dump_json_any(spec.default_action.decision_value)
+        or len(compatibility_spec.rules) != len(spec.rules)
+        or any(
+            _compatibility_rule_payload(legacy_rule)
+            != _compatibility_rule_payload(typed_rule)
+            for legacy_rule, typed_rule in zip(
+                compatibility_spec.rules,
+                spec.rules,
+                strict=True,
+            )
+        )
+    ):
         raise ValueError("strategy compatibility fields do not match canonical DSL")
+
+
+def _compatibility_rule_payload(rule) -> dict[str, Any]:
+    payload = rule.to_dict()
+    action = payload["action"]
+    if action["type"] in {"limit", "pricing", "segment"}:
+        action.pop("output_value", None)
+    return payload
+
+
+def _strategy_dsl_content_hash(spec: StrategySpec) -> str:
+    return hashlib.sha256(canonical_strategy_json(spec).encode("utf-8")).hexdigest()
+
+
+def _strategy_dsl_state(row: sqlite3.Row) -> str:
+    values = tuple(
+        row[field] if field in row.keys() else None
+        for field in ("dsl_json", "dsl_schema_version", "dsl_content_hash")
+    )
+    populated = tuple(value is not None for value in values)
+    if all(populated):
+        return "canonical"
+    if not any(populated):
+        return "legacy"
+    raise ValueError("strategy canonical DSL columns are incomplete")
+
+
+def _strategy_spec_from_row(row: sqlite3.Row) -> StrategySpec:
+    spec = parse_strategy_spec(json.loads(str(row["dsl_json"])))
+    stored_version = _optional_str(row["dsl_schema_version"])
+    if stored_version != spec.schema_version:
+        raise ValueError(
+            "strategy dsl_schema_version does not match canonical dsl_json"
+        )
+    stored_hash = _optional_str(row["dsl_content_hash"])
+    if stored_hash is None:
+        raise ValueError("strategy canonical DSL columns are incomplete")
+    if (
+        len(stored_hash) != 64
+        or stored_hash != stored_hash.lower()
+        or any(character not in "0123456789abcdef" for character in stored_hash)
+        or not hmac.compare_digest(stored_hash, _strategy_dsl_content_hash(spec))
+    ):
+        raise ValueError(
+            "strategy compatibility fields do not match canonical DSL: "
+            "dsl_content_hash drifted"
+        )
+    return spec
 
 
 def _strategy_rule_from_dict(payload: dict) -> StrategyRule:

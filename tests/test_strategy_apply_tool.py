@@ -259,6 +259,66 @@ def test_apply_strategy_preserves_legacy_row_output_alias(tmp_path: Path) -> Non
     assert derived[columns["value_type"]].tolist() == ["string"] * 3
 
 
+def test_apply_value_strategy_preserves_alias_while_typed_value_stays_in_dsl(
+    tmp_path: Path,
+) -> None:
+    settings, task, registry, dataset, _strategy, ctx = _runtime_fixture(
+        tmp_path,
+        "limit",
+    )
+    aliased = build_strategy_from_spec(
+        {
+            "strategy_type": "limit",
+            "default_action": {
+                "type": "limit",
+                "value": 1000,
+                "output_value": {"legacy": "fallback"},
+            },
+            "rules": [
+                {
+                    "rule_id": "positive",
+                    "priority": 10,
+                    "condition": {
+                        "op": "compare",
+                        "field": "x",
+                        "operator": ">",
+                        "value": 0,
+                    },
+                    "action": {
+                        "type": "limit",
+                        "value": 2000,
+                        "output_value": 1900,
+                    },
+                }
+            ],
+        }
+    )
+    StrategyRepository(settings.db_path).create_strategy(task.id, aliased)
+
+    result = tool_apply_strategy(
+        {"dataset_id": dataset.id, "strategy_id": aliased.id},
+        ctx,
+    )
+
+    derived = DataBackend(settings.datasets_dir).read_frame(
+        registry.resolve_path(result["result_dataset_id"])
+    )
+    columns = result["output_columns"]
+    assert derived[columns["value"]].tolist() == [
+        '{"legacy":"fallback"}',
+        "1900",
+        "1900",
+    ]
+    assert derived[columns["value_type"]].tolist() == [
+        "object",
+        "integer",
+        "integer",
+    ]
+    loaded = StrategyRepository(settings.db_path).get_strategy(aliased.id)
+    assert loaded.spec.default_action.value == 1000
+    assert loaded.spec.default_action.output_value == {"legacy": "fallback"}
+
+
 def test_apply_strategy_serializes_mixed_value_aliases_without_parquet_type_loss(
     tmp_path: Path,
 ) -> None:
