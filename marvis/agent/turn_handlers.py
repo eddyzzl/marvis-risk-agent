@@ -112,6 +112,13 @@ from marvis.orchestrator.capability import auto_gate_budget, resolve_tier
 from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.planner import Planner
 from marvis.orchestrator.validator import PlanValidator
+from marvis.packs.strategy.automatic_tree_leaf_fragment import (
+    AUTOMATIC_TREE_SOURCE_ARTIFACT_KIND,
+    AUTOMATIC_TREE_SOURCE_ARTIFACT_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.automatic_tree_leaf_tools import (
+    load_verified_automatic_tree_source_artifact_on_connection,
+)
 from marvis.repositories.plans import PlanRepository
 from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestConflictError,
@@ -1333,10 +1340,10 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
     }
 )
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
-    r"(?:开发|设计|制定|创建|生成|构建|训练|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
+    r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
     r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
     r"添加|加入|入池|删除|移除|排序|重排|改为|编译|预览|"
-    r"develop|design|create|build|train|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
+    r"develop|design|create|build|train|materialize|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
     r"adopt|report|monitor|mine|refine|select|merge|add|remove|delete|reorder|compile|preview)",
     re.IGNORECASE,
 )
@@ -1776,6 +1783,23 @@ def _run_validated_strategy_request(
             task,
             template_id="stored_strategy_report",
             slots={"strategy_id": draft.strategy_id},
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "automatic_tree_leaf_materialization"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_automatic_tree_leaf_materialization",
+            slots=_automatic_tree_leaf_materialization_slots(
+                runtime,
+                task_id=task.id,
+                draft=draft,
+            ),
             auto_start=auto_start,
         )
 
@@ -2507,6 +2531,16 @@ def _standard_workflow_request_preflight(
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> tuple[str, str] | None:
+    if draft.workflow == "automatic_tree_leaf_materialization":
+        try:
+            _automatic_tree_leaf_materialization_slots(
+                runtime,
+                task_id=task.id,
+                draft=draft,
+            )
+        except StrategySetupError as exc:
+            return ("automatic_tree_leaf_source_required", str(exc))
+        return None
     if draft.workflow in _STRATEGY_POOL_WORKFLOWS:
         try:
             _strategy_pool_plan_slots(runtime, task, draft)
@@ -2596,6 +2630,120 @@ def _candidate_source_artifact_slots(
         "expected_candidate_id": candidate_id,
         "expected_evidence_hash": evidence_hash,
     }
+
+
+def _automatic_tree_leaf_materialization_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Bind one explicit leaf request to one verified task-owned full tree."""
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    asset_id = inputs.get("tree_asset_id")
+    leaf_id = inputs.get("leaf_id")
+    if not isinstance(asset_id, str) or not isinstance(leaf_id, str):
+        raise StrategySetupError(
+            "自动树叶节点物化必须提供完整 tree asset ID 和 leaf ID。"
+        )
+
+    repository = TaskArtifactRepository(runtime.settings.db_path)
+    try:
+        artifacts = repository.list_for_task(task_id)
+    except Exception as exc:
+        raise StrategySetupError(
+            "当前任务的自动树 artifact registry 无法读取，不能安全绑定来源。"
+        ) from exc
+    matches = []
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            raise StrategySetupError("当前任务的自动树 artifact 记录结构无效。")
+        provenance = artifact.get("provenance")
+        if (
+            artifact.get("kind") == AUTOMATIC_TREE_SOURCE_ARTIFACT_KIND
+            and artifact.get("origin_tool")
+            == AUTOMATIC_TREE_SOURCE_ARTIFACT_ORIGIN_TOOL
+            and isinstance(provenance, Mapping)
+            and provenance.get("asset_id") == asset_id
+        ):
+            matches.append(artifact)
+    if not matches:
+        raise StrategySetupError(
+            f"当前任务没有自动树资产 {asset_id}；请使用构建结果中展示的完整 "
+            "candidate-asset ID。"
+        )
+    if len(matches) != 1:
+        raise StrategySetupError(
+            f"自动树资产 {asset_id} 对应多个 full-tree JSON artifact，"
+            "当前不能安全选择来源。"
+        )
+
+    artifact = matches[0]
+    provenance = artifact.get("provenance")
+    assert isinstance(provenance, Mapping)
+    artifact_id = artifact.get("id")
+    content_hash = artifact.get("content_hash")
+    asset_hash = provenance.get("asset_hash")
+    tree_result_hash = provenance.get("tree_result_hash")
+    if not all(
+        isinstance(value, str) and value
+        for value in (
+            artifact_id,
+            content_hash,
+            asset_hash,
+            tree_result_hash,
+        )
+    ):
+        raise StrategySetupError(
+            f"自动树资产 {asset_id} 的 artifact 完整性绑定不完整，请重新构建。"
+        )
+
+    try:
+        with repository.transaction() as conn:
+            verified = load_verified_automatic_tree_source_artifact_on_connection(
+                conn,
+                tasks_dir=runtime.settings.tasks_dir,
+                task_id=task_id,
+                artifact_id=artifact_id,
+                expected_content_hash=content_hash,
+                expected_asset_id=asset_id,
+                expected_asset_hash=asset_hash,
+                expected_tree_result_hash=tree_result_hash,
+            )
+    except Exception as exc:
+        raise StrategySetupError(
+            f"自动树资产 {asset_id} 未通过 artifact 完整性校验，请重新构建。"
+        ) from exc
+
+    fragments = verified.asset.get("fragments")
+    if isinstance(fragments, Sequence) and not isinstance(
+        fragments, str | bytes | bytearray
+    ):
+        leaf_matches = [
+            fragment
+            for fragment in fragments
+            if isinstance(fragment, Mapping) and fragment.get("leaf_id") == leaf_id
+        ]
+    else:
+        leaf_matches = []
+    if len(leaf_matches) != 1:
+        raise StrategySetupError(
+            f"自动树资产 {asset_id} 中没有唯一匹配的叶节点 {leaf_id}；"
+            "请从完整叶节点清单中复制准确 leaf ID。"
+        )
+
+    slots: dict[str, object] = {
+        "source_artifact_id": verified.artifact_id,
+        "expected_artifact_content_hash": verified.content_hash,
+        "expected_asset_id": verified.asset["asset_id"],
+        "expected_asset_hash": verified.asset["asset_hash"],
+        "expected_tree_result_hash": verified.asset["tree_result"]["result_hash"],
+        "leaf_id": leaf_id,
+    }
+    if "selection_reason" in inputs:
+        slots["selection_reason"] = inputs["selection_reason"]
+    return slots
 
 
 def _strategy_pool_plan_slots(
@@ -3227,7 +3375,10 @@ def _strategy_request_requires_dataset(
     draft: CompiledStrategyRequestDraft,
 ) -> bool:
     if isinstance(draft, StandardWorkflowRequestDraft):
-        if draft.workflow in _STRATEGY_POOL_WORKFLOWS:
+        if draft.workflow in {
+            *_STRATEGY_POOL_WORKFLOWS,
+            "automatic_tree_leaf_materialization",
+        }:
             return False
         return True
     return not (draft.strategy_spec is None and draft.operation == "report")

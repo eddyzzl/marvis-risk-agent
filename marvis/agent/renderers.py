@@ -1415,6 +1415,61 @@ def _render_build_automatic_tree_candidate(o: dict):
     return text, tables
 
 
+def _render_materialize_automatic_tree_leaf_fragment(o: dict):
+    artifacts = [
+        item for item in (o.get("artifacts") or []) if isinstance(item, dict)
+    ]
+    artifact = next(
+        (
+            item
+            for item in artifacts
+            if item.get("kind") == "strategy_automatic_tree_leaf_fragment_json"
+            and item.get("format") == "json"
+            and item.get("download_url")
+        ),
+        None,
+    )
+    text = (
+        "**自动树精确叶节点引用已物化。**"
+        "该产物仅是 `pointer-only` 引用，没有复制规则、指标或动作；"
+        "未入池、未配置动作、未采纳、未部署。"
+    )
+    if artifact is not None:
+        label = str(
+            artifact.get("filename")
+            or artifact.get("kind")
+            or "automatic-tree-leaf-selection.json"
+        )
+        text += f"\n\n**叶节点引用 JSON**：[{label}]({artifact['download_url']})"
+
+    reason = o.get("selection_reason")
+    reason_text = str(reason) if reason is not None else "未提供"
+    artifact_id = str(artifact.get("artifact_id") or "") if artifact else ""
+    artifact_content_hash = str(artifact.get("content_hash") or "") if artifact else ""
+    rows = [
+        ["Selection ID", str(o.get("selection_id") or "")],
+        ["Selection Hash", str(o.get("selection_hash") or "")],
+        ["Tree Asset ID", str(o.get("tree_asset_id") or "")],
+        ["Tree Asset Hash", str(o.get("tree_asset_hash") or "")],
+        ["Tree Result Hash", str(o.get("tree_result_hash") or "")],
+        ["Leaf ID", str(o.get("leaf_id") or "")],
+        ["Fragment ID", str(o.get("fragment_id") or "")],
+        ["Fragment Hash", str(o.get("fragment_hash") or "")],
+        ["Rule ID", str(o.get("rule_id") or "")],
+        ["Effect ID", str(o.get("effect_id") or "")],
+        ["Artifact ID", artifact_id],
+        ["Artifact Content Hash", artifact_content_hash],
+        ["Selection Reason", reason_text],
+    ]
+    return text, [
+        {
+            "title": "自动树精确叶节点引用",
+            "columns": ["字段", "值"],
+            "rows": rows,
+        }
+    ]
+
+
 def _render_refine_univariate_candidate(o: dict):
     rule = o.get("rule") if isinstance(o.get("rule"), dict) else {}
     effect = o.get("effect") if isinstance(o.get("effect"), dict) else {}
@@ -4152,6 +4207,9 @@ _RENDERERS = {
     "design_strategy_candidate": _render_design_strategy_candidate,
     "analyze_univariate_candidates": _render_analyze_univariate_candidates,
     "build_automatic_tree_candidate": _render_build_automatic_tree_candidate,
+    "materialize_automatic_tree_leaf_fragment": (
+        _render_materialize_automatic_tree_leaf_fragment
+    ),
     "refine_univariate_candidate": _render_refine_univariate_candidate,
     "add_candidate_to_pool": _render_strategy_pool_mutation,
     "remove_pool_entry": _render_strategy_pool_mutation,

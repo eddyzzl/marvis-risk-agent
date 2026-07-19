@@ -15,6 +15,7 @@ import math
 import re
 from types import MappingProxyType
 from typing import Any
+import unicodedata
 
 from marvis.agent.json_reply import load_json_object
 from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
@@ -61,6 +62,7 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "univariate_candidate_analysis",
     "univariate_candidate_refinement",
     "automatic_tree_candidate_build",
+    "automatic_tree_leaf_materialization",
     "strategy_pool_add_candidate",
     "strategy_pool_remove_entry",
     "strategy_pool_set_action",
@@ -81,6 +83,213 @@ AUTOMATIC_TREE_DIRECTIONS = (
 )
 _CANDIDATE_ID_RE = re.compile(r"^candidate-[0-9a-f]{32}$")
 _CANDIDATE_ASSET_ID_RE = re.compile(r"^candidate-asset-[0-9a-f]{32}$")
+_AUTOMATIC_TREE_LEAF_ID_RE = re.compile(r"^leaf-[0-9a-f]{20}$")
+_AUTOMATIC_TREE_ASSET_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])candidate-asset-[0-9a-f]{32}(?![A-Za-z0-9_-])"
+)
+_AUTOMATIC_TREE_LEAF_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])leaf-[0-9a-f]{20}(?![A-Za-z0-9_-])"
+)
+_AUTOMATIC_TREE_LEAF_AMBIGUOUS_SELECTION_RE = re.compile(
+    r"(?:最好|最优|最佳|最差|最坏|"
+    r"(?:坏账率|坏率|风险|捕获率|通过率|收益)\s*"
+    r"(?:最高|最低|最大|最小)|"
+    r"(?:最高|最低|最大|最小)\s*"
+    r"(?:坏账率|坏率|风险|捕获率|通过率|收益)|"
+    r"(?<![A-Za-z0-9_])(?:best|worst|"
+    r"(?:highest|lowest|maximum|minimum)[-\s]+(?:bad[-\s]+rate|risk|lift|"
+    r"capture[-\s]+rate|approval[-\s]+rate|profit))(?![A-Za-z0-9_]))"
+    r"[^，,；;。\n]{0,20}(?:叶(?:子|节点)?|(?<![A-Za-z0-9_])leaf(?![A-Za-z0-9_]))|"
+    r"(?:叶(?:子|节点)?|(?<![A-Za-z0-9_])leaf(?![A-Za-z0-9_]))"
+    r"[^，,；;。\n]{0,20}(?:最好|最优|最佳|最差|最坏|"
+    r"(?:坏账率|坏率|风险|捕获率|通过率|收益)\s*"
+    r"(?:最高|最低|最大|最小)|"
+    r"(?<![A-Za-z0-9_])(?:best|worst|"
+    r"(?:highest|lowest|maximum|minimum)[-\s]+(?:bad[-\s]+rate|risk|lift|"
+    r"capture[-\s]+rate|approval[-\s]+rate|profit))(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_MATERIALIZATION_ACTION_RE = re.compile(
+    r"(?:物化|固化|选中|(?<!候)选择)|"
+    r"(?<![A-Za-z0-9_])(?:materialize|select|pick)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_REASON_RE = re.compile(
+    r"(?:(?:选择)?理由|原因|说明)\s*(?:是|为|[:：])\s*"
+    r"(?P<zh>(?:(?!(?:但(?:是)?|不过|可是|然而|却|而(?:是)?))[^，,；;。])+)|"
+    r"(?<![A-Za-z0-9_])(?:selection\s+reason|reason|rationale)"
+    r"\s*(?::|is)\s*"
+    r"(?P<en>(?:(?!(?<![A-Za-z0-9_])(?:but|yet|however|instead)"
+    r"(?![A-Za-z0-9_]))[^,;.!?])+)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_REASON_NEGATION_RE = re.compile(
+    r"(?:不要|不|无需|不需要|别|禁止)\s*(?:使用|填写|记录|保留|采用)?\s*$|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never)\s+(?:use|record|keep)?\s*$",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_REASON_REPLACEMENT_RE = re.compile(
+    r"(?:(?:选择)?理由|原因|说明)\s*(?:是|为|[:：])|"
+    r"(?:改为|改成|换成|替换为)|"
+    r"(?<![A-Za-z0-9_])(?:(?:reason|rationale)\s*(?::|is)|instead|"
+    r"rather\s+than)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_NEGATED_REASON_CLAUSE_RE = re.compile(
+    r"(?:不要|不|无需|不需要|别|禁止)\s*(?:使用|填写|记录|保留|采用)?\s*"
+    r"(?:(?:选择)?理由|原因|说明)\s*(?:是|为|[:：])\s*"
+    r"(?:(?!(?:但(?:是)?|不过|可是|然而|却|而(?:是)?))[^，,；;。])+|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never)\s+"
+    r"(?:use|record|keep)?\s*(?:selection\s+reason|reason|rationale)"
+    r"\s*(?::|is)\s*(?:(?!(?<![A-Za-z0-9_])(?:but|yet|however|instead)"
+    r"(?![A-Za-z0-9_]))[^,;.!?])+",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_REASON_FORBIDDEN_OPERATION_RE = re.compile(
+    r"(?:策略池|规则池|(?<![A-Za-z0-9_])(?:strategy\s+)?pool(?![A-Za-z0-9_])|"
+    r"采纳|部署|上线|投产|投入(?:生产|使用)|发布到?生产|发布|启用|生效|"
+    r"激活|落地|执行|应用|使用|运行|拒绝|通过审批|审批|"
+    r"写回|回写|回填|"
+    r"(?<![A-Za-z0-9_])(?:adopt(?:s|ed|ing)?|deploy(?:s|ed|ing)?|"
+    r"promot(?:e|es|ed|ing)|activat(?:e|es|ed|ing)|enabl(?:e|es|ed|ing)|"
+    r"effective|publish(?:es|ed|ing)?|releas(?:e|es|ed|ing)|"
+    r"launch(?:es|ed|ing)?|production|execut(?:e|es|ed|ing)|"
+    r"appl(?:y|ies|ied|ying)|us(?:e|es|ed|ing)|run(?:s|ning)?|"
+    r"reject(?:s|ed|ing)?|approv(?:e|es|ed|ing)|rout(?:e|es|ed|ing)|"
+    r"go[-\s]+live|roll[-\s]+out|"
+    r"write[-\s]*back)"
+    r"(?![A-Za-z0-9_])|"
+    r"(?:动作|action)\s*(?:改成|设为|设置为|[:=])|"
+    r"(?:拒绝|通过|审批|人工复核|复核)[^，,；;。\n]{0,16}(?:客户|命中|叶)|"
+    r"(?:客户|命中|叶)[^，,；;。\n]{0,16}(?:拒绝|通过|审批|人工复核|复核)|"
+    r"(?<![A-Za-z0-9_])(?:reject|approve|review|route)"
+    r"[^,;.!?\n]{0,32}(?:match(?:ing|ed)?|customers?|leaves?|leaf)|"
+    r"(?<![A-Za-z0-9_])(?:match(?:ing|ed)?|customers?|leaves?|leaf)"
+    r"[^,;.!?\n]{0,32}(?:reject|approve|review|route)(?![A-Za-z0-9_])|"
+    r"(?:随后|然后|接着|同时|直接|"
+    r"(?<![A-Za-z0-9_])(?:and\s+then|then|afterwards)(?![A-Za-z0-9_])))",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_REASON_EXTREME_RE = re.compile(
+    r"(?=[^，,；;。\n]{0,120}(?:所有|全部|其他|其余|"
+    r"(?<![A-Za-z0-9_])(?:all|every|any)\s+other(?![A-Za-z0-9_])))"
+    r"(?=[^，,；;。\n]{0,120}(?:高于|低于|大于|小于|优于|差于|"
+    r"(?<![A-Za-z0-9_])(?:higher|lower|greater|less|better|worse)"
+    r"(?![A-Za-z0-9_])))|"
+    r"(?:最高|最低|最大|最小|最好|最优|最差|最坏|最危险|第一|首位|排名|排行)|"
+    r"第\s*(?:\d+|[零一二两三四五六七八九十百]+)\s*(?:名|位)?|"
+    r"(?:次高|次低|居首|垫底|末位)|(?:NO\.?\s*1|#\s*1|前\s*\d+\s*名)|"
+    r"(?:高于|低于|大于|小于|优于|差于)[^，,；;。\n]{0,24}"
+    r"(?:所有|全部|其他|其余)|"
+    r"(?<![A-Za-z0-9_])(?:best|worst|top(?:[-\s]*\d+)?|most|least|highest|"
+    r"lowest|maximum|minimum|largest|smallest|greatest|fewest|riskiest|safest|"
+    r"optimal|leading|trailing|rank(?:ed|ing)?|number\s+(?:one|two|three|\d+)|"
+    r"first|second|third|fourth|\d+(?:st|nd|rd|th)|no\.?\s*1|#\s*1|"
+    r"(?:higher|lower|greater|less|better|worse)[^,;.!?\n]{0,16}\s+than\s+"
+    r"(?:all|every|any)\s+other)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_RATIONALE_START_RE = re.compile(
+    r"^(?:"
+    r"(?:(?:人工|业务|风险|合规|监管|专家|样本|数据|模型|项目|候选)\s*)?"
+    r"(?:确认|复核|评审|审核|验证|分析|判断|讨论|记录|审计|测试|研究|要求|依据)|"
+    r"(?:用于|供|后续由)\s*[^，,；;。\n]{0,20}"
+    r"(?:确认|复核|评审|审核|验证|分析|判断|讨论|记录|审计|测试|研究)|"
+    r"(?:(?:manual|business|risk|compliance|regulatory|expert|sample|data|"
+    r"model|project)\s+)?(?:confirmation|review|assessment|validation|analysis|"
+    r"judgment|discussion|audit|testing|research|requirement|evidence)|"
+    r"(?:for|to\s+support)\s+[^,;.!?\n]{0,24}(?:review|assessment|validation|"
+    r"analysis|audit|testing|research)"
+    r")",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_RATIONALE_TOKEN_RE = re.compile(
+    r"(?:人工|业务|风险|合规|监管|专家|样本|数据|模型|项目|候选|该|这个|本次|"
+    r"本轮|下一轮|后续|未来|阶段|叶节点|叶子|叶|用于|供|由|作为|待|再次|"
+    r"确认|复核|评审|审核|验证|分析|判断|讨论|记录|审计|测试|研究|要求|依据|说明|"
+    r"(?<![A-Za-z0-9_])(?i:manual|business|risk|compliance|regulatory|expert|"
+    r"sample|data|model|project|candidate|this|current|next|later|future|phase|"
+    r"leaf|for|to|support|confirmation|review|assessment|validation|analysis|"
+    r"judgment|discussion|audit|testing|research|requirement|evidence)"
+    r"(?![A-Za-z0-9_])|[A-Z0-9][A-Z0-9._-]*|[\u00c0-\u024f]+)"
+)
+_AUTOMATIC_TREE_LEAF_RATIONALE_PUNCTUATION_RE = re.compile(
+    r"[\s，,；;。:：、.!?！？()（）\[\]{}\-_/]+"
+)
+_AUTOMATIC_TREE_LEAF_RATIONALE_DECISION_SUBJECT_RE = re.compile(
+    r"(?:命中|客户|申请人|借款人|用户|业务动作|策略池|规则池|生产|投产)|"
+    r"(?<![A-Za-z0-9_])(?:match(?:ing|ed)?|customers?|applicants?|borrowers?|"
+    r"actions?|pool|production)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_ALLOWED_REQUEST_TOKEN_RE = re.compile(
+    r"(?:请|帮我|麻烦|从|在|把|将|只|仅|也|和|以及|或|但(?:是)?|不过|可是|"
+    r"然而|却|而(?:是)?|一个|这个|该|指定|精确|"
+    r"完整|自动树|候选树|决策树|树资产|候选资产|资产|树|中|里的|里|的|"
+    r"叶节点|叶子|叶|节点|物化|固化|选中|(?<!候)选择|指针|引用|"
+    r"再次|确认|是|ID|id|"
+    r"(?<![A-Za-z0-9_])(?:please|from|in|the|a|an|this|that|exact|specified|"
+    r"automatic|decision|candidate|tree|asset|leaf|node|materialize|select|pick|"
+    r"pointer|reference|confirm|again|only|and|or|but|yet|however|instead)"
+    r"(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_REQUEST_PUNCTUATION_RE = re.compile(
+    r"[\s，,；;。:：、.!?！？()（）\[\]{}\-_/]+"
+)
+_AUTOMATIC_TREE_LEAF_POOL_CHAIN_RE = re.compile(
+    r"(?:加入|写入|放入|添加到).{0,16}(?:策略池|strategy\s*pool)|入池|"
+    r"(?<![A-Za-z0-9_])add\b.{0,24}\b(?:strategy\s*)?pool\b",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_ACTION_CHAIN_RE = re.compile(
+    r"(?:并|并且|然后|随后|再|且|以及|但(?:是)?|可是|不过|"
+    r"and(?:\s+then)?|but|yet)"
+    r"[^，,；;。\n]{0,48}"
+    r"(?:设置为?[^，,；;。\n]{0,12}(?:动作|action)|拒绝|通过审批|人工复核|"
+    r"(?<![A-Za-z0-9_])(?:set\s+(?:the\s+)?action|reject|approve|review)"
+    r"(?![A-Za-z0-9_]))|"
+    r"(?:作为|设为|设置为|转为|执行)"
+    r"[^，,；;。\n]{0,20}"
+    r"(?:拒绝|通过|审批|人工复核|动作|"
+    r"(?<![A-Za-z0-9_])(?:action|reject|approve|review)(?![A-Za-z0-9_]))|"
+    r"(?:^|[，,；;])\s*(?:直接|立即)?"
+    r"(?:拒绝|让[^，,；;。\n]{0,20}通过审批|转[^，,；;。\n]{0,8}人工复核|"
+    r"(?<![A-Za-z0-9_])action\s*[:=]\s*(?:reject|approve|review)"
+    r"(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_LIFECYCLE_CHAIN_RE = re.compile(
+    r"(?:并|并且|然后|随后|再|且|以及|但(?:是)?|可是|不过|"
+    r"and(?:\s+then)?|but|yet)"
+    r"[^，,；;。\n]{0,40}(?:采纳|采用这(?:条|个)|部署|上线|"
+    r"(?<![A-Za-z0-9_])(?:adopt|deploy)(?![A-Za-z0-9_]))|"
+    r"(?:^|[，,；;])\s*(?:直接|立即)?(?:采纳|采用|部署|上线|"
+    r"(?<![A-Za-z0-9_])(?:adopt|deploy)(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_WRITEBACK_CHAIN_RE = re.compile(
+    r"(?:写回|回写|write[-\s]*back)"
+    r"[^，,；;。\n]{0,24}(?:叶(?:子|节点)?\s*(?:id|ID)?|leaf|数据集|dataset)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_NEGATED_CLAUSE_RE = re.compile(
+    r"(?:也\s*)?(?:不要|不再|无需|不需要|别|禁止)\s*(?:"
+    r"(?:自动\s*)?(?:选择|挑选|推荐|找出)\s*"
+    r"(?:最好|最优|最佳|最差|最坏|风险最高|坏率最高)?\s*叶(?:子|节点)?|"
+    r"(?:加入|写入|放入|加到)\s*(?:策略池|规则池|pool)|"
+    r"(?:采纳|部署|上线)(?:\s*或\s*(?:采纳|部署|上线))*"
+    r")|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't)\s+(?:"
+    r"(?:automatically\s+)?(?:select|pick)\s+(?:the\s+)?"
+    r"(?:best|worst|highest[-\s]+risk)?\s*leaf|"
+    r"add\s+(?:it\s+)?to\s+(?:the\s+)?(?:strategy\s+)?pool|"
+    r"(?:adopt|deploy)(?:\s+it)?(?:\s+or\s+(?:adopt|deploy)(?:\s+it)?)*"
+    r")(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])without\s+adding\s+(?:it\s+)?to\s+"
+    r"(?:the\s+)?(?:strategy\s+)?pool(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
 _POOL_ITEM_ID_RE = re.compile(
     r"^(?:candidate-rule|pool-entry)-[0-9a-f]{32}$"
 )
@@ -258,7 +467,7 @@ _AUTOMATIC_TREE_FOLLOW_UP_CLAUSE_BOUNDARY_RE = re.compile(
 _AUTOMATIC_TREE_FOLLOW_UP_NEGATION_RE = re.compile(
     r"(?:不要|无需|不用|不必|别|禁止|不再|"
     r"不(?=\s*(?:把|将|让|对|依据|直接|自动|采用|使用|选择|挑选|推荐|"
-    r"设置|执行|拒绝|通过|审批|复核|给出|作为|加入|写入|放入))|"
+    r"物化|固化|选中|设置|执行|拒绝|通过|审批|复核|给出|作为|加入|写入|放入))|"
     r"(?<![A-Za-z0-9_])(?:do\s+not|don['’]t|never|not)(?![A-Za-z0-9_]))",
     re.IGNORECASE,
 )
@@ -1263,6 +1472,10 @@ def _validate_standard_workflow_payload(
                 whitelist,
                 target_col=target_col,
             )
+        elif workflow == "automatic_tree_leaf_materialization":
+            normalized = _validate_automatic_tree_leaf_materialization_inputs(
+                raw_inputs
+            )
         elif workflow in _STRATEGY_POOL_WORKFLOWS:
             normalized = _validate_strategy_pool_workflow_inputs(
                 workflow,
@@ -1861,6 +2074,70 @@ def _validate_automatic_tree_candidate_build_inputs(
     return normalized
 
 
+def _validate_automatic_tree_leaf_materialization_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the two explicit pointers and optional user-owned rationale.
+
+    The source TaskArtifact and every integrity hash are deliberately resolved
+    later by the platform.  The compiler may never accept a copied rule,
+    metric, effect, fragment or business action from the LLM.
+    """
+
+    workflow = "automatic_tree_leaf_materialization"
+    allowed = {"tree_asset_id", "leaf_id", "selection_reason"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted({"tree_asset_id", "leaf_id"} - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+
+    tree_asset_id = _required_text(
+        inputs["tree_asset_id"],
+        name=f"{workflow} tree_asset_id",
+    )
+    if _CANDIDATE_ASSET_ID_RE.fullmatch(tree_asset_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} tree_asset_id 必须是完整的自动树 candidate asset id。"
+        )
+    leaf_id = _required_text(
+        inputs["leaf_id"],
+        name=f"{workflow} leaf_id",
+    )
+    if _AUTOMATIC_TREE_LEAF_ID_RE.fullmatch(leaf_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} leaf_id 必须是 leaf- 后接 20 位小写十六进制字符。"
+        )
+
+    normalized = {"tree_asset_id": tree_asset_id, "leaf_id": leaf_id}
+    if "selection_reason" in inputs:
+        normalized["selection_reason"] = _automatic_tree_selection_reason(
+            inputs["selection_reason"]
+        )
+    return normalized
+
+
+def _automatic_tree_selection_reason(value: object) -> str:
+    """Use the leaf-fragment contract's NFC and canonical-whitespace rules."""
+
+    if not isinstance(value, str):
+        raise _DraftValidationError(
+            "automatic_tree_leaf_materialization selection_reason 必须是文本。"
+        )
+    if "\x00" in value:
+        raise _DraftValidationError(
+            "automatic_tree_leaf_materialization selection_reason 不能包含 NUL。"
+        )
+    normalized = unicodedata.normalize("NFC", value)
+    canonical = " ".join(normalized.split())
+    if not canonical:
+        raise _DraftValidationError(
+            "automatic_tree_leaf_materialization selection_reason 必须是非空文本。"
+        )
+    return canonical
+
+
 def _validate_univariate_refinement_workflow_inputs(
     inputs: Mapping[str, Any],
     whitelist: tuple[str, ...],
@@ -2221,6 +2498,8 @@ def _ground_refinement_request(
             result,
             whitelist=whitelist,
         )
+    if draft.workflow == "automatic_tree_leaf_materialization":
+        return _ground_automatic_tree_leaf_materialization(utterance, result)
     if draft.workflow != "univariate_candidate_refinement":
         return result
     inputs = draft.to_dict()["workflow_inputs"]
@@ -2309,6 +2588,237 @@ def _automatic_tree_platform_control_clarification(
             ),
         )
     return None
+
+
+def _automatic_tree_leaf_has_positive_materialization_intent(utterance: str) -> bool:
+    """Return true only for an explicit, non-negated pointer operation."""
+
+    operation_text = _AUTOMATIC_TREE_LEAF_REASON_RE.sub(" ", utterance)
+    for clause in _automatic_tree_follow_up_clauses(operation_text):
+        for match in _AUTOMATIC_TREE_LEAF_MATERIALIZATION_ACTION_RE.finditer(clause):
+            if re.search(r"(?:不|未|没(?:有)?)\s*$", clause[: match.start()]):
+                continue
+            if not _automatic_tree_follow_up_action_is_negated(
+                clause,
+                action_start=match.start(),
+            ):
+                return True
+    return False
+
+
+def _automatic_tree_leaf_explicit_reasons(utterance: str) -> tuple[str, ...]:
+    reasons: list[str] = []
+    for match in _AUTOMATIC_TREE_LEAF_REASON_RE.finditer(utterance):
+        left = max(
+            utterance.rfind(separator, 0, match.start())
+            for separator in ("，", ",", "；", ";", "。", "\n")
+        )
+        prefix = utterance[left + 1 : match.start()]
+        if _AUTOMATIC_TREE_LEAF_REASON_NEGATION_RE.search(prefix) is not None:
+            continue
+        value = match.group("zh") or match.group("en") or ""
+        canonical = " ".join(unicodedata.normalize("NFC", value).split())
+        if canonical:
+            reasons.append(canonical)
+    return tuple(reasons)
+
+
+def _automatic_tree_leaf_all_reason_values(utterance: str) -> tuple[str, ...]:
+    return tuple(
+        " ".join(
+            unicodedata.normalize(
+                "NFC",
+                match.group("zh") or match.group("en") or "",
+            ).split()
+        )
+        for match in _AUTOMATIC_TREE_LEAF_REASON_RE.finditer(utterance)
+    )
+
+
+def _automatic_tree_leaf_rationale_is_allowed(reason: str) -> bool:
+    if _AUTOMATIC_TREE_LEAF_RATIONALE_START_RE.search(reason) is None:
+        return False
+    remaining = _AUTOMATIC_TREE_LEAF_RATIONALE_TOKEN_RE.sub(" ", reason)
+    remaining = _AUTOMATIC_TREE_LEAF_RATIONALE_PUNCTUATION_RE.sub(" ", remaining)
+    return not remaining.strip()
+
+
+def _automatic_tree_leaf_unconsumed_request_text(utterance: str) -> str:
+    """Remove the one allowed pointer operation and return every other demand.
+
+    The grammar is intentionally narrow. New natural-language synonyms do not
+    silently become executable multi-step operations; they require a safe
+    clarification until the platform assigns them an explicit contract.
+    """
+
+    remaining = unicodedata.normalize("NFC", utterance)
+    remaining = _AUTOMATIC_TREE_LEAF_NEGATED_REASON_CLAUSE_RE.sub(" ", remaining)
+    remaining = _AUTOMATIC_TREE_LEAF_REASON_RE.sub(" ", remaining)
+    remaining = _AUTOMATIC_TREE_LEAF_NEGATED_CLAUSE_RE.sub(" ", remaining)
+    remaining = _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.sub(" ", remaining)
+    remaining = _AUTOMATIC_TREE_LEAF_ID_TOKEN_RE.sub(" ", remaining)
+    remaining = _AUTOMATIC_TREE_LEAF_ALLOWED_REQUEST_TOKEN_RE.sub(" ", remaining)
+    remaining = _AUTOMATIC_TREE_LEAF_REQUEST_PUNCTUATION_RE.sub(" ", remaining)
+    return " ".join(remaining.split())
+
+
+def _ground_automatic_tree_leaf_materialization(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Fail closed unless one exact full-tree asset and leaf were named.
+
+    This stage creates only an immutable pointer. It cannot rank/select on
+    measured outcomes or smuggle a later Pool, action, lifecycle or writeback
+    operation into the same confirmation.
+    """
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    positive_operation_text = _AUTOMATIC_TREE_LEAF_NEGATED_CLAUSE_RE.sub(
+        "",
+        utterance,
+    )
+
+    if (
+        _AUTOMATIC_TREE_LEAF_AMBIGUOUS_SELECTION_RE.search(positive_operation_text)
+        is not None
+    ):
+        return _clarification(
+            "请从完整候选树结果中复制一个明确的 leaf ID；不能按“最好”或"
+            "“风险最高”等指标描述替你选择叶节点。",
+            code="automatic_tree_leaf_selection_ambiguous",
+            fields=("leaf_id",),
+        )
+    if not _automatic_tree_leaf_has_positive_materialization_intent(utterance):
+        return _clarification(
+            "原话没有明确授权一次正向的叶节点物化；否定式或仅描述 ID 的请求"
+            "不会创建 pointer。如需继续，请重新明确说出要物化的完整资产 ID 和"
+            "叶节点 ID。",
+            code="automatic_tree_leaf_intent_negated",
+            fields=("materialization_intent",),
+        )
+    reason_values = _automatic_tree_leaf_all_reason_values(utterance)
+    explicit_reasons = _automatic_tree_leaf_explicit_reasons(utterance)
+    if any(
+        _AUTOMATIC_TREE_LEAF_REASON_REPLACEMENT_RE.search(reason) is not None
+        for reason in reason_values
+    ):
+        return _clarification(
+            "一条请求只能给出一个最终 selection_reason；理由内容中不能再次嵌套"
+            "理由字段或改为/替换指令。请只保留最终理由后重新确认。",
+            code="automatic_tree_leaf_reason_not_grounded",
+            fields=("selection_reason",),
+        )
+    if any(
+        _AUTOMATIC_TREE_LEAF_REASON_EXTREME_RE.search(reason) is not None
+        for reason in reason_values
+    ):
+        return _clarification(
+            "选择理由也不能包含按指标极值、排名或“最好/最差”替用户选择叶节点"
+            "的语义。请从完整候选树结果中复制一个人工明确确认的 leaf ID。",
+            code="automatic_tree_leaf_selection_ambiguous",
+            fields=("leaf_id", "selection_reason"),
+        )
+    if any(
+        _AUTOMATIC_TREE_LEAF_REASON_FORBIDDEN_OPERATION_RE.search(reason) is not None
+        for reason in reason_values
+    ):
+        return _clarification(
+            "selection_reason 只能记录本次人工选择说明，不能藏入随后入池、"
+            "业务动作、采纳、部署、投产或写回请求。请把这些操作拆成后续请求。",
+            code="automatic_tree_leaf_single_step_required",
+            fields=("selection_reason", "next_action"),
+        )
+    if any(
+        not _automatic_tree_leaf_rationale_is_allowed(reason)
+        or _AUTOMATIC_TREE_LEAF_RATIONALE_DECISION_SUBJECT_RE.search(reason)
+        is not None
+        for reason in explicit_reasons
+    ):
+        return _clarification(
+            "selection_reason 必须是人工/业务/风险/合规/样本评审依据类短说明，"
+            "不能包含命中客户、业务动作、策略池或生产操作。请只保留本次人工"
+            "选择依据，其他动作另发请求。",
+            code="automatic_tree_leaf_reason_not_grounded",
+            fields=("selection_reason",),
+        )
+    if any(
+        pattern.search(positive_operation_text) is not None
+        for pattern in (
+            _AUTOMATIC_TREE_LEAF_POOL_CHAIN_RE,
+            _AUTOMATIC_TREE_LEAF_ACTION_CHAIN_RE,
+            _AUTOMATIC_TREE_LEAF_LIFECYCLE_CHAIN_RE,
+            _AUTOMATIC_TREE_LEAF_WRITEBACK_CHAIN_RE,
+        )
+    ):
+        return _clarification(
+            "本轮只创建叶节点指针；加入 Strategy Pool、设置业务动作、采纳、"
+            "部署或把叶 ID 写回数据集必须分别发起后续请求。",
+            code="automatic_tree_leaf_single_step_required",
+            fields=("next_action",),
+        )
+
+    asset_ids = frozenset(
+        match.group(0)
+        for match in _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance)
+    )
+    leaf_ids = frozenset(
+        match.group(0) for match in _AUTOMATIC_TREE_LEAF_ID_TOKEN_RE.finditer(utterance)
+    )
+    ambiguous_fields: list[str] = []
+    if len(asset_ids) != 1:
+        ambiguous_fields.append("tree_asset_id")
+    if len(leaf_ids) != 1:
+        ambiguous_fields.append("leaf_id")
+    if ambiguous_fields:
+        return _clarification(
+            "请在同一条请求中逐字提供且只提供一个完整自动树 candidate asset ID"
+            "（candidate-asset- 后接 32 位小写十六进制）和一个完整 leaf ID"
+            "（leaf- 后接 20 位小写十六进制）；不能使用“刚才那棵树”或"
+            "“这个叶子”等代词。",
+            code="automatic_tree_leaf_explicit_ids_required",
+            fields=tuple(ambiguous_fields),
+        )
+
+    ungrounded: list[str] = []
+    if asset_ids != {inputs["tree_asset_id"]}:
+        ungrounded.append("tree_asset_id")
+    if leaf_ids != {inputs["leaf_id"]}:
+        ungrounded.append("leaf_id")
+    if ungrounded:
+        return _clarification(
+            "模型草案中的自动树资产或叶节点 ID 与用户原话不一致。请重新复制"
+            "完整 tree asset ID 和 leaf ID；平台不会替换、补全或猜测 ID。",
+            code="automatic_tree_leaf_controls_not_grounded",
+            fields=tuple(ungrounded),
+        )
+
+    selection_reason = inputs.get("selection_reason")
+    reason_mismatch = bool(explicit_reasons or selection_reason is not None) and (
+        len(explicit_reasons) != 1
+        or not isinstance(selection_reason, str)
+        or selection_reason != explicit_reasons[0]
+    )
+    if reason_mismatch:
+        return _clarification(
+            "selection_reason 必须与用户以“选择理由/理由/原因/说明”"
+            "显式给出的唯一理由完全一致；用户未给理由时模型也必须"
+            "省略该字段。平台不会改写、补充或推断选择理由。",
+            code="automatic_tree_leaf_reason_not_grounded",
+            fields=("selection_reason",),
+        )
+
+    if _automatic_tree_leaf_unconsumed_request_text(utterance):
+        return _clarification(
+            "本轮只接受一次明确的叶节点 pointer 物化；请求中还有无法按该"
+            "单步契约解释的内容。请把加入规则/策略池、业务动作、采纳、投产或"
+            "写回等操作拆成后续请求。",
+            code="automatic_tree_leaf_single_step_required",
+            fields=("next_action",),
+        )
+    return result
 
 
 def _ground_automatic_tree_candidate_build(
@@ -3478,6 +3988,17 @@ def _standard_workflow_confirmation_text(
                 "平台不会给叶子生成“最佳”自动排名；后续操作必须由用户引用明确 leaf",
             ]
         )
+    elif draft.workflow == "automatic_tree_leaf_materialization":
+        details = [
+            "已识别为〔自动树精确叶节点物化 Workflow〕",
+            f"完整树候选资产 pointer：{inputs['tree_asset_id']}",
+            f"精确叶节点 pointer：{inputs['leaf_id']}",
+            "本步骤只创建指向完整树中该叶节点的不可变 pointer；"
+            "不复制规则、条件、指标或业务动作",
+            "不会加入 Strategy Pool，也不会采纳或部署策略",
+        ]
+        if "selection_reason" in inputs:
+            details.append(f"用户原话选择说明：{inputs['selection_reason']}")
     elif draft.workflow == "strategy_pool_add_candidate":
         details = [
             "已识别为〔Strategy Pool 添加候选 Workflow〕",
@@ -4001,6 +4522,13 @@ def _user_prompt(
         "对于 automatic_tree_candidate_build，只能抄录用户明确提供的 features、"
         "权重/金额字段、方向和树参数；不得填写平台拥有的数据绑定、目标列、标签策略、"
         "预算、结果、叶子、动作、排名或推荐，也不得串联选叶或 Strategy Pool。"
+        "对于 automatic_tree_leaf_materialization，只能逐字抄录用户原话中唯一的"
+        "完整 tree_asset_id、唯一的完整 leaf_id，以及用户用“选择理由/理由/原因/说明”"
+        "显式标注时的逐字 selection_reason；未显式标注时必须省略。它只创建"
+        "pointer，不得复制规则、条件、指标、动作或平台 artifact/hash，也不得串联"
+        "Strategy Pool、业务动作、采纳、部署或 leaf ID 写回。selection_reason 中也"
+        "不得藏入理由替换、后续动作、生命周期操作或极值/排名选叶语义；它只接受"
+        "人工/业务/风险/合规/样本评审依据类短说明。"
     )
 
 

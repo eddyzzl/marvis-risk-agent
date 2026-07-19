@@ -395,6 +395,91 @@ STRATEGY_AUTOMATIC_TREE_CANDIDATE_BUILD = WorkflowTemplate(
 )
 
 
+STRATEGY_AUTOMATIC_TREE_LEAF_MATERIALIZATION = WorkflowTemplate(
+    id="strategy_automatic_tree_leaf_materialization",
+    title="自动树精确叶节点物化",
+    goal_patterns=(
+        "物化自动树指定叶节点",
+        "选择自动树精确叶节点",
+        "materialize exact automatic tree leaf",
+        "materialize an automatic tree leaf",
+    ),
+    slots=(
+        SlotSpec(
+            "source_artifact_id",
+            True,
+            "task_context",
+            "Verified task-owned automatic-tree artifact id",
+        ),
+        SlotSpec(
+            "expected_artifact_content_hash",
+            True,
+            "task_context",
+            "Verified automatic-tree artifact content hash",
+        ),
+        SlotSpec(
+            "expected_asset_id",
+            True,
+            "task_context",
+            "Verified automatic-tree asset id",
+        ),
+        SlotSpec(
+            "expected_asset_hash",
+            True,
+            "task_context",
+            "Verified automatic-tree asset hash",
+        ),
+        SlotSpec(
+            "expected_tree_result_hash",
+            True,
+            "task_context",
+            "Verified deterministic tree result hash",
+        ),
+        SlotSpec("leaf_id", True, "user", "Explicit automatic-tree leaf id"),
+        SlotSpec(
+            "selection_reason",
+            False,
+            "user",
+            "Optional user-owned leaf selection rationale",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="物化自动树精确叶节点",
+            tool_ref=ToolRef("strategy", "materialize_automatic_tree_leaf_fragment"),
+            inputs_template={
+                "source_artifact_id": "{slot:source_artifact_id}",
+                "expected_artifact_content_hash": (
+                    "{slot:expected_artifact_content_hash}"
+                ),
+                "expected_asset_id": "{slot:expected_asset_id}",
+                "expected_asset_hash": "{slot:expected_asset_hash}",
+                "expected_tree_result_hash": "{slot:expected_tree_result_hash}",
+                "leaf_id": "{slot:leaf_id}",
+                "selection_reason": "{slot:selection_reason}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "selection_id"}),
+                PostCheck("nonempty", {"field": "selection_hash"}),
+                PostCheck("nonempty", {"field": "tree_asset_id"}),
+                PostCheck("nonempty", {"field": "tree_asset_hash"}),
+                PostCheck("nonempty", {"field": "tree_result_hash"}),
+                PostCheck("nonempty", {"field": "leaf_id"}),
+                PostCheck("nonempty", {"field": "fragment_id"}),
+                PostCheck("nonempty", {"field": "fragment_hash"}),
+                PostCheck("nonempty", {"field": "rule_id"}),
+                PostCheck("nonempty", {"field": "effect_id"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_UNIVARIATE_CANDIDATE_REFINEMENT = WorkflowTemplate(
     id="strategy_univariate_candidate_refinement",
     title="单变量候选选择与合并",
