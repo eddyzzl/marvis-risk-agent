@@ -279,6 +279,122 @@ STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS = WorkflowTemplate(
 )
 
 
+STRATEGY_AUTOMATIC_TREE_CANDIDATE_BUILD = WorkflowTemplate(
+    id="strategy_automatic_tree_candidate_build",
+    title="自动决策树候选构建",
+    goal_patterns=(
+        "自动决策树候选",
+        "自动构建决策树",
+        "构建完整决策树",
+        "automatic tree candidate",
+        "build automatic strategy tree",
+    ),
+    slots=(
+        SlotSpec(
+            "dataset_id", True, "task_context", "Registered task-owned dataset id"
+        ),
+        SlotSpec(
+            "expected_content_hash",
+            True,
+            "task_context",
+            "Confirmed immutable dataset hash",
+        ),
+        SlotSpec(
+            "workspace_revision",
+            False,
+            "task_context",
+            "Confirmed data-workspace revision; zero is valid",
+        ),
+        SlotSpec(
+            "analysis_generation",
+            False,
+            "task_context",
+            "Confirmed active dataset generation; zero is valid",
+        ),
+        SlotSpec(
+            "semantic_mapping_hash",
+            True,
+            "task_context",
+            "Confirmed semantic mapping hash",
+        ),
+        SlotSpec(
+            "target_col", True, "task_context", "Server-bound binary target column"
+        ),
+        SlotSpec("features", True, "user", "Explicit ordered tree feature fields"),
+        SlotSpec(
+            "drop_nan_labels",
+            False,
+            "user",
+            "Confirmed target null-row exclusion",
+        ),
+        SlotSpec("sample_weight_col", False, "user", "Optional sample weight column"),
+        SlotSpec(
+            "directions",
+            False,
+            "user",
+            "Optional per-feature risk directions",
+        ),
+        SlotSpec("max_depth", False, "user", "Optional maximum tree depth"),
+        SlotSpec("min_leaf_count", False, "user", "Optional minimum rows per leaf"),
+        SlotSpec(
+            "min_weight_fraction_leaf",
+            False,
+            "user",
+            "Optional minimum weighted share per leaf",
+        ),
+        SlotSpec("seed", False, "user", "Optional deterministic tree seed"),
+        SlotSpec("loan_amount_col", False, "user", "Optional disbursed amount column"),
+        SlotSpec("overdue_amount_col", False, "user", "Optional overdue amount column"),
+    ),
+    steps=(
+        StepTemplate(
+            title="构建自动决策树候选",
+            tool_ref=ToolRef("strategy", "build_automatic_tree_candidate"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "expected_content_hash": "{slot:expected_content_hash}",
+                "workspace_revision": "{slot:workspace_revision}",
+                "analysis_generation": "{slot:analysis_generation}",
+                "semantic_mapping_hash": "{slot:semantic_mapping_hash}",
+                "target_col": "{slot:target_col}",
+                "features": "{slot:features}",
+                "drop_nan_labels": "{slot:drop_nan_labels}",
+                "sample_weight_col": "{slot:sample_weight_col}",
+                "directions": "{slot:directions}",
+                "max_depth": "{slot:max_depth}",
+                "min_leaf_count": "{slot:min_leaf_count}",
+                "min_weight_fraction_leaf": "{slot:min_weight_fraction_leaf}",
+                "seed": "{slot:seed}",
+                "loan_amount_col": "{slot:loan_amount_col}",
+                "overdue_amount_col": "{slot:overdue_amount_col}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "summary.asset_id"}),
+                PostCheck("nonempty", {"field": "summary.asset_hash"}),
+                PostCheck("nonempty", {"field": "summary.tree_id"}),
+                PostCheck("nonempty", {"field": "summary.tree_result_hash"}),
+                PostCheck("nonempty", {"field": "leaf_index"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+                PostCheck(
+                    "schema",
+                    {
+                        "schema": {
+                            "type": "object",
+                            "properties": {"report_info_gaps": {"type": "array"}},
+                            "required": ["report_info_gaps"],
+                        }
+                    },
+                ),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_UNIVARIATE_CANDIDATE_REFINEMENT = WorkflowTemplate(
     id="strategy_univariate_candidate_refinement",
     title="单变量候选选择与合并",

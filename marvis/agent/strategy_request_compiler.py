@@ -60,6 +60,7 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "limit_pricing_matrix",
     "univariate_candidate_analysis",
     "univariate_candidate_refinement",
+    "automatic_tree_candidate_build",
     "strategy_pool_add_candidate",
     "strategy_pool_remove_entry",
     "strategy_pool_set_action",
@@ -73,6 +74,11 @@ UNIVARIATE_BINNING_METHODS = (
     "tree",
 )
 UNIVARIATE_REFINEMENT_METHODS = (*UNIVARIATE_BINNING_METHODS, "categorical")
+AUTOMATIC_TREE_DIRECTIONS = (
+    "increasing",
+    "decreasing",
+    "unordered",
+)
 _CANDIDATE_ID_RE = re.compile(r"^candidate-[0-9a-f]{32}$")
 _CANDIDATE_ASSET_ID_RE = re.compile(r"^candidate-asset-[0-9a-f]{32}$")
 _POOL_ITEM_ID_RE = re.compile(
@@ -138,6 +144,242 @@ _REFINEMENT_SELECTION_ACTION_RE = re.compile(
     r"(?:选择|选中|保留|筛选|作为|select|keep|retain)", re.IGNORECASE
 )
 _REFINEMENT_MERGE_ACTION_RE = re.compile(r"(?:合并|并箱|merge|combine)", re.IGNORECASE)
+_AUTOMATIC_TREE_NODE_TOKEN_PATTERN = (
+    r"(?:"
+    r"(?:(?:坏率|风险)\s*最高(?:的)?|高风险|终端|末端)\s*(?:叶子|叶节点|节点)|"
+    r"叶(?:子|节点)?(?!权重|样本|数)|"
+    r"(?<![A-Za-z0-9_])(?:leaf|leaves)(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])(?:high(?:est)?[-\s]+risk|terminal|end)[-\s]+nodes?"
+    r"(?![A-Za-z0-9_])"
+    r")"
+)
+_AUTOMATIC_TREE_DECISION_EFFECT_PATTERN = (
+    r"(?:拒绝(?!率|数量|数|占比)|通过(?!率|数量|数|占比)|"
+    r"审批(?!率|数量|数|占比)|复核(?!率|数量|数|占比)|"
+    r"额度|定价|分群|动作|策略|"
+    r"(?<![A-Za-z0-9_])(?:action|reject|approve|review|limit|pricing|segment|strategy)"
+    r"(?:s|d|ed|ing)?(?![A-Za-z0-9_]))"
+)
+_AUTOMATIC_TREE_MULTI_STEP_RE = re.compile(
+    r"(?:然后|随后|之后|再|同时|并(?:且)?|and\s+then).{0,60}"
+    r"(?:自动\s*)?(?:选择|挑选|推荐|找出|(?<!候)选|select|pick|identify|materialize|加入|add).{0,24}"
+    r"(?:叶(?:子|节点)?(?!权重|样本|数)|leaf|策略池|strategy\s*pool|pool)",
+    re.IGNORECASE | re.DOTALL,
+)
+_AUTOMATIC_TREE_BEST_LEAF_RE = re.compile(
+    r"(?:自动\s*)?(?:选择|挑选|推荐|找出|(?<!候)选|select|pick|identify).{0,12}"
+    r"(?:最好|最优|最佳|best).{0,8}(?:叶(?:子|节点)?(?!权重|样本|数)|leaf)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_REVERSED_BEST_LEAF_RE = re.compile(
+    r"(?:最好|最优|最佳|best).{0,8}(?:叶(?:子|节点)?(?!权重|样本|数)|leaf).{0,12}"
+    r"(?:自动\s*)?(?:选择|挑选|推荐|找出|(?<!候)选|select|pick|identify)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_FOLLOW_UP_RE = re.compile(
+    r"(?:选择|挑选|固化|物化|(?<!候)选|select|pick|materialize).{0,16}"
+    r"(?:叶(?:子|节点)?(?!权重|样本|数)|leaf)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_POOL_FOLLOW_UP_RE = re.compile(
+    r"(?:加入|写入|放入|add).{0,16}(?:策略池|strategy\s*pool|pool)|入池",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_DECISION_FOLLOW_UP_RE = re.compile(
+    r"(?:"
+    r"(?:把|将)?\s*(?:任何|任一|某个|该|这个)?\s*"
+    r"(?:叶(?:子|节点)?(?!权重|样本|数)|leaf)"
+    r"[^，,；;。\n]{0,24}(?:作为|设为|设置为|配置为|用作|转为|为)"
+    rf"[^，,；;。\n]{{0,16}}{_AUTOMATIC_TREE_DECISION_EFFECT_PATTERN}|"
+    r"(?:设置|配置|采用|使用|把|将)"
+    r"[^，,；;。\n]{0,20}(?:叶(?:子|节点)?(?!权重|样本|数)|leaf)"
+    rf"[^，,；;。\n]{{0,20}}{_AUTOMATIC_TREE_DECISION_EFFECT_PATTERN}"
+    r")",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_HEURISTIC_LEAF_FOLLOW_UP_RE = re.compile(
+    r"(?:采用|使用|选用|选择|挑选|推荐|pick|select|use)"
+    r"[^，,；;。\n]{0,20}(?:坏率|风险|lift|捕获率|通过率|收益|profit)?"
+    r"[^，,；;。\n]{0,10}(?:最高|最低|最大|最小|最好|最优|最佳|best|highest|lowest)"
+    r"[^，,；;。\n]{0,10}(?:叶(?:子|节点)?(?!权重|样本|数)|leaf)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_NODE_RANK_FOLLOW_UP_RE = re.compile(
+    rf"(?:排名|排序|rank|sort)[^，,；;。\n]{{0,32}}{_AUTOMATIC_TREE_NODE_TOKEN_PATTERN}|"
+    rf"{_AUTOMATIC_TREE_NODE_TOKEN_PATTERN}[^，,；;。\n]{{0,32}}(?:排名|排序|rank|sort)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_NODE_SELECT_FOLLOW_UP_RE = re.compile(
+    rf"(?:选择|挑选|保留|采用|选用|select|pick|retain|keep|use)"
+    rf"[^，,；;。\n]{{0,24}}{_AUTOMATIC_TREE_NODE_TOKEN_PATTERN}|"
+    rf"{_AUTOMATIC_TREE_NODE_TOKEN_PATTERN}[^，,；;。\n]{{0,24}}"
+    r"(?:选择|挑选|保留|select|pick|retain|keep)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_NODE_EXTRACT_FOLLOW_UP_RE = re.compile(
+    rf"(?:提取|extract)\s*(?!(?:完整|全部|所有|complete|all))"
+    rf"[^，,；;。\n]{{0,24}}{_AUTOMATIC_TREE_NODE_TOKEN_PATTERN}",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LIFECYCLE_FOLLOW_UP_RE = re.compile(
+    r"(?:采纳|采用)\s*(?:这棵|该|当前|整个)\s*(?:树|决策树|模型|结果)|"
+    r"(?:部署|上线|发布到?生产|提升为生产|投入生产)|"
+    r"(?<![A-Za-z0-9_])(?:adopt\s+(?:it|this\s+tree|the\s+tree)|"
+    r"deploy|promote(?:\s+(?:it|this\s+tree|the\s+tree))?)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_ID_WRITEBACK_RE = re.compile(
+    r"(?:写回|回写|持久化|保存|write\s*back|persist|store)"
+    r"[^，,；;。\n]{0,20}(?:叶(?:子|节点)?\s*(?:ID|id|编号)|leaf[-_\s]*id)|"
+    r"(?:叶(?:子|节点)?\s*(?:ID|id|编号)|leaf[-_\s]*id)"
+    r"[^，,；;。\n]{0,20}(?:写回|回写|持久化|保存|write\s*back|persist|store)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_DECISION_ARTIFACT_RE = re.compile(
+    r"(?:生成|形成|制定|配置|执行|create|generate|form|formulate|define|configure|execute)"
+    rf"[^，,；;。\n]{{0,24}}{_AUTOMATIC_TREE_DECISION_EFFECT_PATTERN}",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_FOLLOW_UP_CLAUSE_BOUNDARY_RE = re.compile(
+    r"[，,；;。\n]+|"
+    r"(?:但(?:是)?|可是|不过|却|而(?:是)?|并且|同时|然后|随后|之后|接着)|"
+    r"后(?=\s*(?:直接|接着|然后|再|把|将|对|让|依据|执行|设置|采用|使用|"
+    r"选择|拒绝|通过|给出|加入|写入))|"
+    r"(?<!不)(?<!不要)(?<!无需)(?<!不用)(?<!不必)(?<!禁止)(?<!别)"
+    r"再(?=\s*(?:把|将|对|让|依据|直接|执行|设置|采用|使用|选择|拒绝|通过|"
+    r"给出|加入|写入))|"
+    r"且|"
+    r"并(?=(?:把|将|对|让|依据|执行|设置|采用|使用|选择|拒绝|通过|给出|加入|写入))|"
+    r"(?<![A-Za-z0-9_])(?:but|however|yet|and|then|afterwards|after\s+that)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_FOLLOW_UP_NEGATION_RE = re.compile(
+    r"(?:不要|无需|不用|不必|别|禁止|不再|"
+    r"不(?=\s*(?:把|将|让|对|依据|直接|自动|采用|使用|选择|挑选|推荐|"
+    r"设置|执行|拒绝|通过|审批|复核|给出|作为|加入|写入|放入))|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don['’]t|never|not)(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LEAF_TOKEN_RE = re.compile(
+    _AUTOMATIC_TREE_NODE_TOKEN_PATTERN,
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_DECISION_EFFECT_RE = re.compile(
+    _AUTOMATIC_TREE_DECISION_EFFECT_PATTERN,
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_FOLLOW_UP_ACTION_ANCHOR_RE = re.compile(
+    r"(?:选择|挑选|推荐|找出|(?<!候)选|加入|写入|放入|入池|作为|设为|"
+    r"设置|设置为|配置为|用作|转为|执行|给出|采用|使用|拒绝|通过|审批|复核|"
+    r"排名|排序|保留|提取|采纳|部署|上线|写回|回写|持久化|保存|生成|形成|"
+    r"制定|配置|"
+    r"(?<![A-Za-z0-9_])(?:select|pick|identify|materialize|add|use|route|set|"
+    r"make|reject|approve|review|rank|sort|retain|extract|adopt|deploy|promote|"
+    r"persist|store|create|generate|form|formulate|define|configure|execute)"
+    r"(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_NEGATED_FOLLOW_UP_PREFIX_RE = re.compile(
+    r"^(?:\s+|[-/:]|"
+    r"(?:再|自动|直接|仅|只|把|将|让|对|给|依据|根据|按|以|任何|任一|"
+    r"某个|该|这个|这些|这棵|整个|全部|所有|高风险|低风险|风险|坏率|给|"
+    r"风险最高|风险最低|坏率最高|坏率最低|最好|最优|最佳|完整|终端|末端|"
+    r"叶节点|叶子|叶|节点|树|决策树|模型|结果|走|"
+    r"转为|作为|设为|设置|设置为|配置|配置为|用作|执行|进行|给出|采用|使用|"
+    r"选择|挑选|推荐|找出|选用|加入|写入|放入|入池|人工|拒绝|通过|"
+    r"审批|复核|额度|定价|分群|规则|动作|策略|策略池|排名|排序|保留|"
+    r"提取|采纳|部署|上线|写回|回写|持久化|保存|生成|形成|制定)|"
+    r"(?<![A-Za-z0-9_])(?:auto|automatically|directly|the|any|a|an|all|some|"
+    r"high(?:est)?[-\s]+risk|best|worst|leaf(?:[-_][A-Za-z0-9.]+)?|leaves|"
+    r"to|as|manual|use|route|pick|select|set|make|turn|into|for|reject|"
+    r"approve|review|rule|action|add|materialize|strategy|pool|rank|sort|"
+    r"retain|extract|adopt|deploy|promote|persist|store|create|generate|form|"
+    r"formulate|define|configure|execute|it|this|tree)"
+    r"(?![A-Za-z0-9_]))*$",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_NEGATED_BUILD_RE = re.compile(
+    r"(?:不要|无需|不用|不必|别|禁止|不想|不需要)"
+    r"[^，,；;。\n]{0,40}(?:建(?:一棵)?(?:自动)?(?:决策)?树|"
+    r"(?:构建|训练|创建)[^，,；;。\n]{0,12}(?:树|决策树))|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don['’]t|never|not)"
+    r"[^，,；;。\n]{0,32}(?:build|train|create)"
+    r"[^，,；;。\n]{0,12}(?:tree)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_DATASET_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:dataset(?:_id)?|sample(?:_id)?)(?![A-Za-z0-9_])"
+    r"\s*(?:[:：=]|为|是)\s*[^\s，,；;。]+|"
+    r"(?:用|使用|改用|切换(?:到)?|换成)\s*(?:另一个|其他|新的|指定的?)?\s*"
+    r"(?:数据集|样本)(?!权重|数)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_TARGET_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:target(?:_col|\s+column)?|label(?:_col|\s+column)?)"
+    r"(?![A-Za-z0-9_])\s*(?:[:：=]|为|是)\s*[^\s，,；;。]+|"
+    r"(?:目标|标签)(?:列|字段)\s*(?:[:：=]|为|是|改为|切换为)\s*"
+    r"[^\s，,；;。]+",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_LABEL_POLICY_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:drop|keep)[_\s-]*(?:nan|null|missing)[_\s-]*labels?"
+    r"(?![A-Za-z0-9_])|"
+    r"(?:删除|丢弃|保留|填充|忽略)[^，,；;。\n]{0,12}"
+    r"(?:空|缺失|NULL|NaN)[^，,；;。\n]{0,6}(?:标签|目标值)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_BUDGET_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:budgets?\s*[.:]\s*)?max[_\s-]*"
+    r"(?:rows|features|cells|nodes|cutpoints?)(?![A-Za-z0-9_])|"
+    r"(?:最多|至多|不超过|仅|只|限制)[^，,；;。\n]{0,16}"
+    r"[0-9]+[^，,；;。\n]{0,8}(?:行|特征|变量|单元格|节点|切点)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_DIRECTION_GROUNDING = {
+    "increasing": (
+        r"(?:单调\s*)?(?:递增|上升)|正向|"
+        r"(?<![A-Za-z0-9_])increasing(?![A-Za-z0-9_])"
+    ),
+    "decreasing": (
+        r"(?:单调\s*)?(?:递减|下降)|负向|"
+        r"(?<![A-Za-z0-9_])decreasing(?![A-Za-z0-9_])"
+    ),
+    "unordered": (
+        r"无序|不约束(?:方向)?|不限方向|"
+        r"(?<![A-Za-z0-9_])unordered(?![A-Za-z0-9_])"
+    ),
+}
+_AUTOMATIC_TREE_NUMBER_LABELS = {
+    "max_depth": (
+        r"(?<![A-Za-z0-9_])max[_\s-]*depth(?![A-Za-z0-9_])|"
+        r"最大(?:树)?深度|树深"
+    ),
+    "min_leaf_count": (
+        r"(?<![A-Za-z0-9_])min[_\s-]*leaf[_\s-]*count(?![A-Za-z0-9_])|"
+        r"最小(?:叶(?:子|节点)?)(?:样本)?(?:数|量)?|"
+        r"叶(?:子|节点)?最少(?:样本)?(?:数|量)?"
+    ),
+    "min_weight_fraction_leaf": (
+        r"(?<![A-Za-z0-9_])min[_\s-]*weight[_\s-]*fraction[_\s-]*leaf"
+        r"(?![A-Za-z0-9_])|"
+        r"最小(?:叶(?:子|节点)?)?权重(?:占比|比例)|"
+        r"叶(?:子|节点)?最小权重(?:占比|比例)"
+    ),
+    "seed": r"(?:随机)?种子|(?<![A-Za-z0-9_])seed(?![A-Za-z0-9_])",
+}
+_AUTOMATIC_TREE_COLUMN_ROLE_LABELS = {
+    "sample_weight_col": (
+        r"sample[_\s-]*weight(?:[_\s-]*col)?|"
+        r"样本权重(?:列|字段)?|权重(?:列|字段)"
+    ),
+    "loan_amount_col": (
+        r"loan[_\s-]*amount(?:[_\s-]*col)?|"
+        r"放款金额(?:列|字段)?|贷款金额(?:列|字段)?"
+    ),
+    "overdue_amount_col": (r"overdue[_\s-]*amount(?:[_\s-]*col)?|逾期金额(?:列|字段)?"),
+}
 _RISK_THRESHOLD_EXPRESSION_RE = re.compile(
     r"(?:观测)?(?:坏率|坏账率|风险率|bad\s*rate|risk\s*rate)"
     r"\s*(?:为|是|需|需要|应|must\s+be|is)?\s*"
@@ -677,7 +919,11 @@ def compile_strategy_request(
         )
     outcome = _validate_reply(raw, whitelist, target_col=observed_target)
     if outcome.accepted:
-        return _ground_refinement_request(normalized_utterance, outcome.result)
+        return _ground_refinement_request(
+            normalized_utterance,
+            outcome.result,
+            whitelist=whitelist,
+        )
     if outcome.result.clarification_code in _NON_REPAIRABLE_CLARIFICATION_CODES:
         # These are platform-derived business-contract gaps, not JSON-format
         # mistakes. A second LLM pass cannot supply missing economics safely and
@@ -702,6 +948,7 @@ def compile_strategy_request(
         return _ground_refinement_request(
             normalized_utterance,
             repaired_outcome.result,
+            whitelist=whitelist,
         )
     return repaired_outcome.result
 
@@ -1006,6 +1253,12 @@ def _validate_standard_workflow_payload(
             )
         elif workflow == "univariate_candidate_refinement":
             normalized = _validate_univariate_refinement_workflow_inputs(
+                raw_inputs,
+                whitelist,
+                target_col=target_col,
+            )
+        elif workflow == "automatic_tree_candidate_build":
+            normalized = _validate_automatic_tree_candidate_build_inputs(
                 raw_inputs,
                 whitelist,
                 target_col=target_col,
@@ -1455,6 +1708,159 @@ def _sentinel_sequence(value: object, *, name: str) -> list[str | int | float]:
     return normalized
 
 
+def _validate_automatic_tree_candidate_build_inputs(
+    inputs: Mapping[str, Any],
+    whitelist: tuple[str, ...],
+    *,
+    target_col: str | None,
+) -> dict[str, Any]:
+    """Validate only controls the user owns for one automatic-tree build.
+
+    Dataset/workspace identity, target selection, label policy, execution
+    budgets and every result field are deliberately absent.  The trusted
+    template binds those values after confirmation.
+    """
+
+    workflow = "automatic_tree_candidate_build"
+    allowed = {
+        "features",
+        "sample_weight_col",
+        "directions",
+        "max_depth",
+        "min_leaf_count",
+        "min_weight_fraction_leaf",
+        "seed",
+        "loan_amount_col",
+        "overdue_amount_col",
+    }
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    if "features" not in inputs:
+        raise _DraftValidationError(f"{workflow} 缺少必需字段 features。")
+    raw_features = inputs["features"]
+    if (
+        not isinstance(raw_features, Sequence)
+        or isinstance(raw_features, str | bytes | bytearray)
+        or not 1 <= len(raw_features) <= 50
+    ):
+        raise _DraftValidationError(
+            f"{workflow} features 必须是包含 1 到 50 个字段的有序数组。"
+        )
+    features = [
+        _workflow_column(
+            value,
+            name=f"{workflow} features",
+            whitelist=whitelist,
+        )
+        for value in raw_features
+    ]
+    if len(features) != len(set(features)):
+        raise _DraftValidationError(f"{workflow} features 不能包含重复字段。")
+    if target_col is not None and target_col in features:
+        raise _DraftValidationError(
+            f"{workflow} features 不能包含目标列 {target_col}。"
+        )
+
+    normalized: dict[str, Any] = {"features": features}
+    for field in (
+        "sample_weight_col",
+        "loan_amount_col",
+        "overdue_amount_col",
+    ):
+        if field not in inputs:
+            continue
+        column = _workflow_column(
+            inputs[field],
+            name=f"{workflow} {field}",
+            whitelist=whitelist,
+        )
+        if target_col is not None and column == target_col:
+            raise _DraftValidationError(f"{workflow} {field} 不能使用目标列。")
+        normalized[field] = column
+
+    if "directions" in inputs:
+        raw_directions = inputs["directions"]
+        if not isinstance(raw_directions, Mapping) or not raw_directions:
+            raise _DraftValidationError(
+                f"{workflow} directions 必须是至少包含一个特征方向的对象；"
+                "没有风险方向诊断期望或检查时请省略该字段。"
+            )
+        if any(not isinstance(key, str) for key in raw_directions):
+            raise _DraftValidationError(f"{workflow} directions 的字段名必须是文本。")
+        unexpected_features = sorted(set(raw_directions) - set(features))
+        if unexpected_features:
+            raise _DraftValidationError(
+                f"{workflow} directions 引用了未选择的特征："
+                + "、".join(unexpected_features)
+                + "。"
+            )
+        directions: dict[str, str] = {}
+        for feature, value in raw_directions.items():
+            if not isinstance(value, str) or value not in AUTOMATIC_TREE_DIRECTIONS:
+                raise _DraftValidationError(
+                    f"{workflow} directions.{feature} 只能是 increasing、"
+                    "decreasing 或 unordered。"
+                )
+            directions[feature] = value
+        normalized["directions"] = directions
+
+    if "max_depth" in inputs:
+        max_depth = inputs["max_depth"]
+        if (
+            isinstance(max_depth, bool)
+            or not isinstance(max_depth, int)
+            or not 1 <= max_depth <= 8
+        ):
+            raise _DraftValidationError(f"{workflow} max_depth 必须是 1 到 8 的整数。")
+        normalized["max_depth"] = max_depth
+    if "min_leaf_count" in inputs:
+        min_leaf_count = inputs["min_leaf_count"]
+        if (
+            isinstance(min_leaf_count, bool)
+            or not isinstance(min_leaf_count, int)
+            or min_leaf_count <= 0
+        ):
+            raise _DraftValidationError(f"{workflow} min_leaf_count 必须是正整数。")
+        normalized["min_leaf_count"] = min_leaf_count
+    if "min_weight_fraction_leaf" in inputs:
+        normalized["min_weight_fraction_leaf"] = _bounded_number(
+            inputs["min_weight_fraction_leaf"],
+            name=f"{workflow} min_weight_fraction_leaf",
+            maximum=0.5,
+        )
+    if "seed" in inputs:
+        seed = inputs["seed"]
+        if (
+            isinstance(seed, bool)
+            or not isinstance(seed, int)
+            or not 0 <= seed <= 4_294_967_295
+        ):
+            raise _DraftValidationError(
+                f"{workflow} seed 必须是 0 到 4294967295 的整数。"
+            )
+        normalized["seed"] = seed
+
+    assigned_columns = [
+        normalized[field]
+        for field in (
+            "sample_weight_col",
+            "loan_amount_col",
+            "overdue_amount_col",
+        )
+        if field in normalized
+    ]
+    duplicate_roles = {
+        column for column in assigned_columns if assigned_columns.count(column) > 1
+    }
+    feature_conflicts = set(features) & set(assigned_columns)
+    if duplicate_roles or feature_conflicts:
+        conflicts = sorted(duplicate_roles | feature_conflicts)
+        raise _DraftValidationError(
+            f"{workflow} features、sample_weight_col、loan_amount_col 与 "
+            "overdue_amount_col 必须使用不同字段：" + "、".join(conflicts) + "。"
+        )
+    return normalized
+
+
 def _validate_univariate_refinement_workflow_inputs(
     inputs: Mapping[str, Any],
     whitelist: tuple[str, ...],
@@ -1801,12 +2207,20 @@ def _strategy_pool_identifier(value: object, *, name: str) -> str:
 def _ground_refinement_request(
     utterance: str,
     result: StrategyRequestCompilation,
+    *,
+    whitelist: tuple[str, ...],
 ) -> StrategyRequestCompilation:
     draft = result.draft
     if not isinstance(draft, StandardWorkflowRequestDraft):
         return result
     if draft.workflow in _STRATEGY_POOL_WORKFLOWS:
         return _ground_strategy_pool_request(utterance, result)
+    if draft.workflow == "automatic_tree_candidate_build":
+        return _ground_automatic_tree_candidate_build(
+            utterance,
+            result,
+            whitelist=whitelist,
+        )
     if draft.workflow != "univariate_candidate_refinement":
         return result
     inputs = draft.to_dict()["workflow_inputs"]
@@ -1854,6 +2268,794 @@ def _ground_refinement_request(
         code="strategy_refinement_controls_not_grounded",
         fields=tuple(dict.fromkeys(missing_controls)),
     )
+
+
+def _automatic_tree_platform_control_clarification(
+    utterance: str,
+) -> StrategyRequestCompilation | None:
+    if _AUTOMATIC_TREE_DATASET_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "自动树绑定当前任务的 dataset 与 workspace，本请求不能切换样本。"
+            "请先切换 workspace 或创建使用目标样本的新任务，再发起建树。",
+            code="automatic_tree_build_dataset_context_required",
+            fields=("dataset_id", "workspace_id"),
+        )
+    if _AUTOMATIC_TREE_TARGET_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "自动树目标列由当前任务上下文绑定，本请求不能覆盖 target_col。"
+            "请先在任务中确认或切换标签列，再发起建树。",
+            code="automatic_tree_build_target_context_required",
+            fields=("target_col",),
+        )
+    if _AUTOMATIC_TREE_LABEL_POLICY_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "空标签处理策略由平台任务契约绑定，不能在本次自动树请求中覆盖。"
+            "请先确认任务的标签清洗口径。",
+            code="automatic_tree_build_label_policy_not_overridable",
+            fields=("drop_nan_labels",),
+        )
+    if _AUTOMATIC_TREE_BUDGET_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "自动树执行预算及其默认值由平台治理，不能在本次请求中覆盖；"
+            "询问预算默认值也不会创建 build。请使用当前平台预算，或先调整治理配置。",
+            code="automatic_tree_build_platform_budget_not_overridable",
+            fields=(
+                "budgets",
+                "max_rows",
+                "max_features",
+                "max_cells",
+                "max_nodes",
+                "max_cutpoint",
+            ),
+        )
+    return None
+
+
+def _ground_automatic_tree_candidate_build(
+    utterance: str,
+    result: StrategyRequestCompilation,
+    *,
+    whitelist: tuple[str, ...],
+) -> StrategyRequestCompilation:
+    """Prove every tree-build control came from the user's original text."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if _AUTOMATIC_TREE_NEGATED_BUILD_RE.search(utterance) is not None:
+        return _clarification(
+            "原话明确否定了自动树构建，因此本次不会创建或执行 build。"
+            "如需建树，请重新给出一条明确的正向构建请求。",
+            code="automatic_tree_build_intent_negated",
+            fields=("build_intent",),
+        )
+    platform_control_clarification = _automatic_tree_platform_control_clarification(
+        utterance
+    )
+    if platform_control_clarification is not None:
+        return platform_control_clarification
+    if _utterance_requests_automatic_tree_follow_up(utterance):
+        return _clarification(
+            "自动树需要按可审计步骤逐次确认：本次只能单独完成候选树构建。"
+            "构建完成后，请查看平台叶子证据并在下一条请求中引用明确的 leaf；"
+            "平台不会让 LLM 自动选择“最好叶子”或直接写入 Strategy Pool。",
+            code="automatic_tree_build_single_step_required",
+            fields=("workflow_step", "leaf_id"),
+        )
+
+    column_mentions, ambiguous_columns = _automatic_tree_column_mention_resolution(
+        utterance,
+        whitelist,
+    )
+    if ambiguous_columns:
+        return _clarification(
+            "自动树字段名在原话中存在交叉重叠或大小写歧义，请用分隔符逐个写出"
+            "准确列名："
+            + "、".join(ambiguous_columns)
+            + "。平台不会按白名单顺序猜测。",
+            code="automatic_tree_build_column_mention_ambiguous",
+            fields=ambiguous_columns,
+        )
+    column_spans = tuple((start, end) for start, end, _ in column_mentions)
+    missing_controls: list[str] = []
+    missing_controls.extend(
+        feature
+        for feature in inputs["features"]
+        if not _utterance_supports_automatic_tree_feature(
+            utterance,
+            feature,
+            whitelist=whitelist,
+        )
+    )
+    explicit_features = tuple(
+        column
+        for column in whitelist
+        if _utterance_supports_automatic_tree_feature(
+            utterance,
+            column,
+            whitelist=whitelist,
+        )
+    )
+    missing_controls.extend(
+        f"features includes {feature}"
+        for feature in explicit_features
+        if feature not in inputs["features"]
+    )
+    for field in (
+        "sample_weight_col",
+        "loan_amount_col",
+        "overdue_amount_col",
+    ):
+        column = inputs.get(field)
+        if isinstance(
+            column, str
+        ) and not _utterance_supports_automatic_tree_column_role(
+            utterance,
+            field=field,
+            column=column,
+            whitelist=whitelist,
+        ):
+            missing_controls.append(f"{field}={column}")
+        explicit_columns = tuple(
+            candidate
+            for candidate in whitelist
+            if _utterance_supports_automatic_tree_column_role(
+                utterance,
+                field=field,
+                column=candidate,
+                whitelist=whitelist,
+            )
+        )
+        missing_controls.extend(
+            f"{field}={candidate}"
+            for candidate in explicit_columns
+            if column != candidate
+        )
+
+    for feature, direction in inputs.get("directions", {}).items():
+        if not _utterance_supports_automatic_tree_direction(
+            utterance,
+            feature=feature,
+            direction=direction,
+            column_spans=column_spans,
+            whitelist=whitelist,
+        ):
+            missing_controls.append(f"{feature}={direction}")
+    direction_features = tuple(dict.fromkeys((*explicit_features, *inputs["features"])))
+    supplied_directions = inputs.get("directions", {})
+    for feature in direction_features:
+        explicit_directions = tuple(
+            direction
+            for direction in AUTOMATIC_TREE_DIRECTIONS
+            if _utterance_supports_automatic_tree_direction(
+                utterance,
+                feature=feature,
+                direction=direction,
+                column_spans=column_spans,
+                whitelist=whitelist,
+            )
+        )
+        missing_controls.extend(
+            f"directions.{feature}={direction}"
+            for direction in explicit_directions
+            if supplied_directions.get(feature) != direction
+        )
+    for field in (
+        "max_depth",
+        "min_leaf_count",
+        "min_weight_fraction_leaf",
+        "seed",
+    ):
+        if field in inputs and not _utterance_supports_automatic_tree_number(
+            utterance,
+            field=field,
+            value=inputs[field],
+            column_spans=column_spans,
+        ):
+            missing_controls.append(f"{field}={inputs[field]}")
+        explicit_values = _automatic_tree_number_values(
+            utterance,
+            field=field,
+            column_spans=column_spans,
+        )
+        supplied_value = inputs.get(field)
+        missing_controls.extend(
+            f"{field}={_automatic_tree_number_text(field, explicit_value)}"
+            for explicit_value in explicit_values
+            if supplied_value is None
+            or not math.isclose(
+                float(supplied_value),
+                explicit_value,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        )
+
+    if not missing_controls:
+        return result
+    unique_missing = tuple(dict.fromkeys(missing_controls))
+    return _clarification(
+        "请在原话中明确列出自动树候选的全部特征，以及实际需要覆盖的权重列、"
+        "金额列、方向或树参数；当前无法核对："
+        + "、".join(unique_missing)
+        + "。平台不会采用 LLM 猜测的列、参数、默认值、结果或推荐。",
+        code="automatic_tree_build_controls_not_grounded",
+        fields=unique_missing,
+    )
+
+
+def _utterance_requests_automatic_tree_follow_up(utterance: str) -> bool:
+    follow_up_patterns = (
+        _AUTOMATIC_TREE_MULTI_STEP_RE,
+        _AUTOMATIC_TREE_BEST_LEAF_RE,
+        _AUTOMATIC_TREE_REVERSED_BEST_LEAF_RE,
+        _AUTOMATIC_TREE_LEAF_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_POOL_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_LEAF_DECISION_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_HEURISTIC_LEAF_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_NODE_RANK_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_NODE_SELECT_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_NODE_EXTRACT_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_LIFECYCLE_FOLLOW_UP_RE,
+        _AUTOMATIC_TREE_LEAF_ID_WRITEBACK_RE,
+        _AUTOMATIC_TREE_DECISION_ARTIFACT_RE,
+    )
+    for clause in _automatic_tree_follow_up_clauses(utterance):
+        leaf_matches = tuple(_AUTOMATIC_TREE_LEAF_TOKEN_RE.finditer(clause))
+        effect_matches = tuple(_AUTOMATIC_TREE_DECISION_EFFECT_RE.finditer(clause))
+        for leaf_match in leaf_matches:
+            for effect_match in effect_matches:
+                if not _automatic_tree_follow_up_action_is_negated(
+                    clause,
+                    action_start=effect_match.start(),
+                ):
+                    return True
+        for pattern in follow_up_patterns:
+            for match in pattern.finditer(clause):
+                anchor = _AUTOMATIC_TREE_FOLLOW_UP_ACTION_ANCHOR_RE.search(
+                    clause,
+                    match.start(),
+                    match.end(),
+                )
+                action_start = anchor.start() if anchor is not None else match.start()
+                if not _automatic_tree_follow_up_action_is_negated(
+                    clause,
+                    action_start=action_start,
+                ):
+                    return True
+    return False
+
+
+def _automatic_tree_follow_up_clauses(utterance: str) -> tuple[str, ...]:
+    """Split follow-up semantics so negation cannot hide a later positive action."""
+
+    clauses = tuple(
+        clause.strip()
+        for clause in _AUTOMATIC_TREE_FOLLOW_UP_CLAUSE_BOUNDARY_RE.split(utterance)
+        if clause.strip()
+    )
+    return clauses or (utterance,)
+
+
+def _automatic_tree_follow_up_action_is_negated(
+    clause: str,
+    *,
+    action_start: int,
+) -> bool:
+    """Accept negation only when it strictly scopes the leaf follow-up action."""
+
+    negations = tuple(
+        match
+        for match in _AUTOMATIC_TREE_FOLLOW_UP_NEGATION_RE.finditer(
+            clause,
+            0,
+            action_start,
+        )
+    )
+    if not negations:
+        return False
+    closest = negations[-1]
+    between = clause[closest.end() : action_start]
+    return _AUTOMATIC_TREE_NEGATED_FOLLOW_UP_PREFIX_RE.fullmatch(between) is not None
+
+
+def _automatic_tree_segment(
+    utterance: str,
+    *,
+    start: int,
+    end: int,
+    separators: Sequence[str],
+) -> tuple[str, int, int]:
+    left = max(utterance.rfind(separator, 0, start) for separator in separators) + 1
+    right_candidates = [
+        position
+        for separator in separators
+        if (position := utterance.find(separator, end)) >= 0
+    ]
+    right = min(right_candidates, default=len(utterance))
+    return utterance[left:right], left, right
+
+
+def _automatic_tree_column_spans(
+    utterance: str,
+    whitelist: Sequence[str],
+) -> tuple[tuple[int, int], ...]:
+    return tuple(
+        sorted(
+            {
+                (start, end)
+                for start, end, _ in _automatic_tree_column_mentions(
+                    utterance,
+                    whitelist,
+                )
+            }
+        )
+    )
+
+
+def _automatic_tree_column_mentions(
+    utterance: str,
+    whitelist: Sequence[str],
+) -> tuple[tuple[int, int, str], ...]:
+    mentions, _ = _automatic_tree_column_mention_resolution(utterance, whitelist)
+    return mentions
+
+
+def _automatic_tree_column_mention_resolution(
+    utterance: str,
+    whitelist: Sequence[str],
+) -> tuple[tuple[tuple[int, int, str], ...], tuple[str, ...]]:
+    """Resolve contained names and fail closed on genuinely ambiguous overlaps."""
+
+    candidates: list[tuple[int, int, str, int, bool]] = []
+    for order, column in enumerate(whitelist):
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        )
+        candidates.extend(
+            (
+                match.start(),
+                match.end(),
+                column,
+                order,
+                match.group(0) == column,
+            )
+            for match in pattern.finditer(utterance)
+        )
+
+    components: list[list[tuple[int, int, str, int, bool]]] = []
+    component_end = -1
+    for candidate in sorted(candidates, key=lambda item: (item[0], item[1], item[3])):
+        if not components or candidate[0] >= component_end:
+            components.append([candidate])
+            component_end = candidate[1]
+            continue
+        components[-1].append(candidate)
+        component_end = max(component_end, candidate[1])
+
+    accepted: list[tuple[int, int, str]] = []
+    ambiguous: set[str] = set()
+    for component in components:
+        spans = {(start, end) for start, end, *_ in component}
+        if len(spans) == 1:
+            chosen_span = next(iter(spans))
+        else:
+            containers = [
+                (start, end)
+                for start, end in spans
+                if all(
+                    start <= other_start and other_end <= end
+                    for other_start, other_end in spans
+                )
+            ]
+            if len(containers) != 1:
+                ambiguous.update(candidate[2] for candidate in component)
+                continue
+            chosen_span = containers[0]
+
+        choices = [candidate for candidate in component if candidate[:2] == chosen_span]
+        exact_choices = [candidate for candidate in choices if candidate[4]]
+        if len(exact_choices) == 1:
+            chosen = exact_choices[0]
+        elif len(choices) == 1:
+            chosen = choices[0]
+        else:
+            ambiguous.update(candidate[2] for candidate in choices)
+            continue
+        accepted.append((chosen[0], chosen[1], chosen[2]))
+
+    ordered_ambiguities = tuple(column for column in whitelist if column in ambiguous)
+    return (
+        tuple(sorted(accepted, key=lambda item: (item[0], item[1], item[2]))),
+        ordered_ambiguities,
+    )
+
+
+def _automatic_tree_span_is_negated(
+    utterance: str,
+    *,
+    start: int,
+    end: int,
+) -> bool:
+    segment, left, right = _automatic_tree_segment(
+        utterance,
+        start=start,
+        end=end,
+        separators=("，", ",", "、", "；", ";", "。", "\n"),
+    )
+    local_start = start - left
+    local_end = end - left
+    prefix = segment[max(0, local_start - 24) : local_start]
+    suffix = segment[local_end : min(len(segment), local_end + 24)]
+    negative_prefix = re.compile(
+        r"(?:不要|无需|不用|不使用|不选|别|禁止|排除|剔除|去掉|"
+        r"不是|并非|而非|不)\s*"
+        r"(?:再|用|使用|选择|选|包含|加入|设置|设为|作为)?\s*$",
+        re.IGNORECASE,
+    )
+    negative_suffix = re.compile(
+        r"^\s*(?:不要|无需|不用|不使用|不选|不作为|别|禁止|排除|"
+        r"剔除|去掉|不是|并非|而非)",
+        re.IGNORECASE,
+    )
+    return (
+        negative_prefix.search(prefix) is not None
+        or negative_suffix.search(suffix) is not None
+        or right < end
+    )
+
+
+def _automatic_tree_feature_span_is_negated(
+    utterance: str,
+    *,
+    start: int,
+    end: int,
+) -> bool:
+    """Extend local negation across an explicitly excluded feature list."""
+
+    if _automatic_tree_span_is_negated(utterance, start=start, end=end):
+        return True
+    segment, left, _ = _automatic_tree_segment(
+        utterance,
+        start=start,
+        end=end,
+        separators=("，", ",", "；", ";", "。", "\n"),
+    )
+    local_start = start - left
+    prefix = segment[:local_start]
+    scoped = re.search(
+        r"(?P<cue>不要(?:使用|选择|选)?|无需(?:使用|选择|选)?|"
+        r"不用|不使用|不选|禁止|排除|剔除|去掉|除去|除了|除)"
+        r"\s*(?:特征|候选变量|入模变量|自变量)?\s*(?P<body>.*)$",
+        prefix,
+        re.IGNORECASE,
+    )
+    if scoped is None:
+        return False
+    cue = scoped.group("cue")
+    following_sentence = utterance[
+        end : utterance.find("。", end) if "。" in utterance[end:] else len(utterance)
+    ]
+    if cue in {"除", "除了"} and re.search(
+        r"(?:还|也|另外|再加|并且)", following_sentence
+    ):
+        # Chinese “除了 A，还用 B” is additive rather than exclusionary.
+        return False
+    return (
+        re.search(
+            r"(?:但(?:是)?|而(?:是)?|改为|改用|转而)\s*"
+            r"(?:使用|选择|选用|保留|加入)?",
+            scoped.group("body"),
+            re.IGNORECASE,
+        )
+        is None
+    )
+
+
+def _automatic_tree_span_overlaps_columns(
+    start: int,
+    end: int,
+    column_spans: Sequence[tuple[int, int]],
+) -> bool:
+    return any(
+        start < column_end and column_start < end
+        for column_start, column_end in column_spans
+    )
+
+
+def _utterance_supports_automatic_tree_feature(
+    utterance: str,
+    feature: str,
+    *,
+    whitelist: Sequence[str],
+) -> bool:
+    if any(
+        _utterance_supports_automatic_tree_column_role(
+            utterance,
+            field=field,
+            column=feature,
+            whitelist=whitelist,
+        )
+        for field in _AUTOMATIC_TREE_COLUMN_ROLE_LABELS
+    ):
+        return False
+    mentions = tuple(
+        (start, end)
+        for start, end, column in _automatic_tree_column_mentions(
+            utterance,
+            whitelist,
+        )
+        if column == feature
+    )
+    cue_pattern = re.compile(
+        r"特征|候选变量|入模变量|自变量|features?|构建|"
+        r"建(?:一棵)?(?:自动)?(?:决策)?树|build|tree",
+        re.IGNORECASE,
+    )
+    blocker_pattern = re.compile(
+        "|".join(
+            f"(?:{pattern})"
+            for pattern in (
+                *_AUTOMATIC_TREE_COLUMN_ROLE_LABELS.values(),
+                *_AUTOMATIC_TREE_NUMBER_LABELS.values(),
+            )
+        ),
+        re.IGNORECASE,
+    )
+    for start, end in mentions:
+        if _automatic_tree_feature_span_is_negated(
+            utterance,
+            start=start,
+            end=end,
+        ):
+            continue
+        segment, _, _ = _automatic_tree_segment(
+            utterance,
+            start=start,
+            end=end,
+            separators=("，", ",", "；", ";", "。", "\n"),
+        )
+        if cue_pattern.search(segment) is not None:
+            return True
+        sentence, sentence_left, _ = _automatic_tree_segment(
+            utterance,
+            start=start,
+            end=end,
+            separators=("；", ";", "。", "\n"),
+        )
+        feature_start = start - sentence_left
+        feature_end = end - sentence_left
+        for cue in cue_pattern.finditer(sentence):
+            between = (
+                sentence[cue.end() : feature_start]
+                if cue.end() <= feature_start
+                else sentence[feature_end : cue.start()]
+            )
+            if blocker_pattern.search(between) is None:
+                return True
+    return False
+
+
+def _utterance_supports_automatic_tree_column_role(
+    utterance: str,
+    *,
+    field: str,
+    column: str,
+    whitelist: Sequence[str],
+) -> bool:
+    label = _AUTOMATIC_TREE_COLUMN_ROLE_LABELS[field]
+    resolved_mentions = tuple(
+        (start, end)
+        for start, end, resolved_column in _automatic_tree_column_mentions(
+            utterance,
+            whitelist,
+        )
+        if resolved_column == column
+    )
+    if not resolved_mentions:
+        return False
+    column_pattern = rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])"
+    paired = re.compile(
+        rf"(?:(?:{label})\s*(?:[:：=]|为|是|使用|用|取|设为)?\s*"
+        rf"{column_pattern}|"
+        rf"{column_pattern}\s*(?:作为|是|为|用作|设为)\s*(?:{label}))",
+        re.IGNORECASE,
+    )
+    for match in paired.finditer(utterance):
+        if not any(
+            match.start() <= start and end <= match.end()
+            for start, end in resolved_mentions
+        ):
+            continue
+        if not _automatic_tree_span_is_negated(
+            utterance,
+            start=match.start(),
+            end=match.end(),
+        ) and not _automatic_tree_value_is_replaced(utterance, end=match.end()):
+            return True
+    replacement = re.compile(
+        rf"(?:{label})\s*(?:[:：=]|为|是|使用|用|取|设为)?\s*"
+        r"(?:从|由)?\s*[^\s，,；;。]+\s*"
+        r"(?:改为|改成|调整为|替换为|而非|不是而是)\s*"
+        rf"{column_pattern}",
+        re.IGNORECASE,
+    )
+    return any(
+        any(
+            match.start() <= start and end <= match.end()
+            for start, end in resolved_mentions
+        )
+        and not _automatic_tree_span_is_negated(
+            utterance,
+            start=match.start(),
+            end=match.end(),
+        )
+        for match in replacement.finditer(utterance)
+    )
+
+
+def _automatic_tree_value_is_replaced(utterance: str, *, end: int) -> bool:
+    return (
+        re.match(
+            r"\s*(?:改为|改成|调整为|替换为|而非|不是而是)",
+            utterance[end:],
+        )
+        is not None
+    )
+
+
+def _utterance_supports_automatic_tree_direction(
+    utterance: str,
+    *,
+    feature: str,
+    direction: str,
+    column_spans: Sequence[tuple[int, int]],
+    whitelist: Sequence[str],
+) -> bool:
+    feature_mentions = tuple(
+        (start, end)
+        for start, end, column in _automatic_tree_column_mentions(
+            utterance,
+            whitelist,
+        )
+        if column == feature
+    )
+    for feature_start, feature_end in feature_mentions:
+        segment, left, _ = _automatic_tree_segment(
+            utterance,
+            start=feature_start,
+            end=feature_end,
+            separators=("，", ",", "、", "；", ";", "。", "\n"),
+        )
+        feature_center = (feature_start + feature_end) / 2 - left
+        candidates: list[tuple[float, str]] = []
+        for candidate_direction, pattern in _AUTOMATIC_TREE_DIRECTION_GROUNDING.items():
+            for direction_match in re.finditer(pattern, segment, re.IGNORECASE):
+                absolute_start = left + direction_match.start()
+                absolute_end = left + direction_match.end()
+                if _automatic_tree_span_overlaps_columns(
+                    absolute_start,
+                    absolute_end,
+                    column_spans,
+                ) or _automatic_tree_span_is_negated(
+                    utterance,
+                    start=absolute_start,
+                    end=absolute_end,
+                ):
+                    continue
+                replacement = segment[
+                    direction_match.end() : direction_match.end() + 16
+                ]
+                if re.match(r"\s*(?:改为|改成|调整为|而非|不是而是)", replacement):
+                    continue
+                direction_center = (direction_match.start() + direction_match.end()) / 2
+                candidates.append(
+                    (abs(direction_center - feature_center), candidate_direction)
+                )
+        if not candidates:
+            continue
+        nearest_distance = min(distance for distance, _ in candidates)
+        nearest = {
+            candidate_direction
+            for distance, candidate_direction in candidates
+            if math.isclose(
+                distance,
+                nearest_distance,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        }
+        if nearest == {direction}:
+            return True
+    return False
+
+
+def _utterance_supports_automatic_tree_number(
+    utterance: str,
+    *,
+    field: str,
+    value: object,
+    column_spans: Sequence[tuple[int, int]],
+) -> bool:
+    expected = float(value)
+    return any(
+        math.isclose(observed, expected, rel_tol=0.0, abs_tol=1e-12)
+        for observed in _automatic_tree_number_values(
+            utterance,
+            field=field,
+            column_spans=column_spans,
+        )
+    )
+
+
+def _automatic_tree_number_values(
+    utterance: str,
+    *,
+    field: str,
+    column_spans: Sequence[tuple[int, int]],
+) -> tuple[float, ...]:
+    label = _AUTOMATIC_TREE_NUMBER_LABELS[field]
+    expression = re.compile(
+        rf"(?:{label})\s*(?:[:：=]|为|设为|设置为|设成|设置成)?\s*"
+        r"(?P<value>百分之\s*[0-9]+(?:\.[0-9]+)?|"
+        r"[0-9]+(?:\.[0-9]+)?\s*%)?"
+        r"(?P<number>[0-9]+(?:\.[0-9]+)?)?",
+        re.IGNORECASE,
+    )
+    observed_values: list[float] = []
+    for match in expression.finditer(utterance):
+        if _automatic_tree_span_overlaps_columns(
+            match.start(),
+            match.end(),
+            column_spans,
+        ) or _automatic_tree_span_is_negated(
+            utterance,
+            start=match.start(),
+            end=match.end(),
+        ):
+            continue
+        token = match.group("value") or match.group("number")
+        if token is None:
+            continue
+        replacement = re.match(
+            r"\s*(?:改为|改成|调整为|替换为|而非|不是而是)\s*"
+            r"(?P<value>百分之\s*[0-9]+(?:\.[0-9]+)?|"
+            r"[0-9]+(?:\.[0-9]+)?\s*%|[0-9]+(?:\.[0-9]+)?)",
+            utterance[match.end() :],
+        )
+        if replacement is not None:
+            replacement_token = replacement.group("value")
+            replacement_value = _automatic_tree_number_token_value(
+                field,
+                replacement_token,
+            )
+            if (
+                replacement_value is not None
+                and replacement_value not in observed_values
+            ):
+                observed_values.append(replacement_value)
+            continue
+        observed = _automatic_tree_number_token_value(field, token)
+        if observed is None:
+            continue
+        if observed not in observed_values:
+            observed_values.append(observed)
+    return tuple(observed_values)
+
+
+def _automatic_tree_number_token_value(field: str, token: str) -> float | None:
+    if field == "min_weight_fraction_leaf":
+        return _ratio_token_value(token)
+    if "百分之" in token or "%" in token:
+        return None
+    return float(token)
+
+
+def _automatic_tree_number_text(field: str, value: float) -> str:
+    if field in {"max_depth", "min_leaf_count", "seed"}:
+        return str(int(value))
+    return format(value, ".15g")
 
 
 def _ground_strategy_pool_request(
@@ -2235,6 +3437,47 @@ def _standard_workflow_confirmation_text(
         ]
         if "selection_reason" in inputs:
             details.append(f"选择说明：{inputs['selection_reason']}")
+    elif draft.workflow == "automatic_tree_candidate_build":
+        direction_labels = {
+            "increasing": "递增",
+            "decreasing": "递减",
+            "unordered": "无序",
+        }
+        details = [
+            "已识别为〔自动决策树候选构建 Workflow〕",
+            "候选特征：" + "、".join(inputs["features"]),
+        ]
+        if "sample_weight_col" in inputs:
+            details.append(f"样本权重列 {inputs['sample_weight_col']}")
+        if "directions" in inputs:
+            details.append(
+                "风险方向诊断期望："
+                + "、".join(
+                    f"{feature}={direction_labels[direction]}"
+                    for feature, direction in inputs["directions"].items()
+                )
+            )
+        if "max_depth" in inputs:
+            details.append(f"最大深度 {inputs['max_depth']}")
+        if "min_leaf_count" in inputs:
+            details.append(f"最小叶样本数 {inputs['min_leaf_count']}")
+        if "min_weight_fraction_leaf" in inputs:
+            details.append(f"最小叶权重占比 {inputs['min_weight_fraction_leaf']:.2%}")
+        if "seed" in inputs:
+            details.append(f"随机种子 {inputs['seed']}")
+        if "loan_amount_col" in inputs:
+            details.append(f"放款金额列 {inputs['loan_amount_col']}")
+        if "overdue_amount_col" in inputs:
+            details.append(f"逾期金额列 {inputs['overdue_amount_col']}")
+        details.extend(
+            [
+                "数据集、hash、workspace、目标列、标签处理和执行预算由平台绑定，"
+                "LLM 不得填写",
+                "本步骤只构建完整候选树及确定性证据；不会自动选择叶子、写入 "
+                "Strategy Pool、采纳或部署",
+                "平台不会给叶子生成“最佳”自动排名；后续操作必须由用户引用明确 leaf",
+            ]
+        )
     elif draft.workflow == "strategy_pool_add_candidate":
         details = [
             "已识别为〔Strategy Pool 添加候选 Workflow〕",
@@ -2755,6 +3998,9 @@ def _user_prompt(
         "对于 limit/pricing/segmentation 的 develop 请求，只能抽取 candidate_design "
         "搜索空间与用户明确给出的 economics_inputs；禁止输出 strategy_spec、规则、"
         "动作、默认动作、推荐值或计算指标。缺少必要经济口径时只返回 clarification。"
+        "对于 automatic_tree_candidate_build，只能抄录用户明确提供的 features、"
+        "权重/金额字段、方向和树参数；不得填写平台拥有的数据绑定、目标列、标签策略、"
+        "预算、结果、叶子、动作、排名或推荐，也不得串联选叶或 Strategy Pool。"
     )
 
 

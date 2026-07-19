@@ -70,6 +70,40 @@ class DataWorkspaceRepository:
         expected_revision: int,
         audit: dict | None = None,
     ) -> DataWorkspaceSnapshot:
+        return self._save(
+            task_id,
+            draft,
+            expected_revision,
+            audit=audit,
+            allow_initial_semantic_binding=False,
+        )
+
+    def save_initial_binding(
+        self,
+        task_id: str,
+        draft: DataWorkspaceDraft,
+        expected_revision: int,
+        audit: dict | None = None,
+    ) -> DataWorkspaceSnapshot:
+        """Atomically select and map the first dataset in a pristine workspace."""
+
+        return self._save(
+            task_id,
+            draft,
+            expected_revision,
+            audit=audit,
+            allow_initial_semantic_binding=True,
+        )
+
+    def _save(
+        self,
+        task_id: str,
+        draft: DataWorkspaceDraft,
+        expected_revision: int,
+        *,
+        audit: dict | None,
+        allow_initial_semantic_binding: bool,
+    ) -> DataWorkspaceSnapshot:
         normalized_task_id = _canonical_text(task_id, field_name="task_id")
         expected = _non_negative_int(
             expected_revision,
@@ -98,6 +132,17 @@ class DataWorkspaceRepository:
                     "stale data workspace revision: "
                     f"expected {expected}, found {current.revision}"
                 )
+            pristine_initial_binding = (
+                allow_initial_semantic_binding
+                and row is None
+                and current.revision == 0
+                and current.active_dataset_id is None
+                and current.active_dataset_content_hash is None
+            )
+            if allow_initial_semantic_binding and not pristine_initial_binding:
+                raise DataWorkspaceRevisionConflict(
+                    "initial semantic binding requires a pristine data workspace"
+                )
 
             dataset_columns = _dataset_columns_for_draft(
                 conn,
@@ -109,7 +154,11 @@ class DataWorkspaceRepository:
                 or current.active_dataset_content_hash
                 != draft.active_dataset_content_hash
             )
-            if dataset_changed and not _is_reset_payload(draft):
+            if (
+                dataset_changed
+                and not _is_reset_payload(draft)
+                and not pristine_initial_binding
+            ):
                 raise DataWorkspaceResetRequired(
                     "active dataset change requires reset payload"
                 )

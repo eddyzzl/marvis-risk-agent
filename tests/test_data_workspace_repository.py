@@ -331,6 +331,68 @@ def test_initial_activation_requires_reset_and_increments_generation(tmp_path):
     assert repo.get_or_default("task-1") == activated
 
 
+def test_explicit_initial_semantic_binding_is_one_atomic_revision(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    _seed_task(db_path)
+    dataset_hash = _seed_dataset(db_path, dataset_id="dataset-1")
+    assert dataset_hash is not None
+    repo = DataWorkspaceRepository(db_path)
+    draft = DataWorkspaceDraft(
+        active_dataset_id="dataset-1",
+        active_dataset_content_hash=dataset_hash,
+        semantic_mapping=DataSemanticMapping(
+            target_col="bad",
+            field_roles={"bad": "target"},
+        ),
+    )
+
+    with pytest.raises(DataWorkspaceResetRequired, match="requires reset payload"):
+        repo.save("task-1", draft, expected_revision=0)
+
+    bound = repo.save_initial_binding("task-1", draft, expected_revision=0)
+
+    assert bound.revision == 1
+    assert bound.analysis_generation == 1
+    assert bound.active_dataset_id == "dataset-1"
+    assert bound.semantic_mapping.target_col == "bad"
+    assert bound.semantic_mapping.field_roles == {"bad": "target"}
+    assert repo.get_or_default("task-1") == bound
+
+    with pytest.raises(DataWorkspaceRevisionConflict, match="pristine"):
+        repo.save_initial_binding("task-1", draft, expected_revision=bound.revision)
+
+
+def test_failed_initial_semantic_binding_leaves_workspace_pristine(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    _seed_task(db_path)
+    dataset_hash = _seed_dataset(db_path, dataset_id="dataset-1")
+    assert dataset_hash is not None
+    repo = DataWorkspaceRepository(db_path)
+
+    with pytest.raises(DataWorkspaceDataError, match="unknown dataset column"):
+        repo.save_initial_binding(
+            "task-1",
+            DataWorkspaceDraft(
+                active_dataset_id="dataset-1",
+                active_dataset_content_hash=dataset_hash,
+                semantic_mapping=DataSemanticMapping(
+                    target_col="missing_target",
+                    field_roles={"missing_target": "target"},
+                ),
+            ),
+            expected_revision=0,
+        )
+
+    snapshot = repo.get_or_default("task-1")
+    assert snapshot.revision == 0
+    assert snapshot.analysis_generation == 0
+    assert snapshot.active_dataset_id is None
+    assert snapshot.semantic_mapping.target_col is None
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM data_workspaces").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM audit").fetchone()[0] == 0
+
+
 def test_same_dataset_allows_valid_semantics_without_generation_change(tmp_path):
     db_path = tmp_path / "app.sqlite"
     _seed_task(db_path)

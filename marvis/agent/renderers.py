@@ -8,6 +8,7 @@ in one small module.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -1193,7 +1194,9 @@ def _render_design_strategy_candidate(o: dict):
 def _render_analyze_univariate_candidates(o: dict):
     rankings = [item for item in (o.get("rankings") or []) if isinstance(item, dict)]
     red_flags = [str(item) for item in (o.get("red_flags") or [])]
-    artifacts = [item for item in (o.get("artifacts") or []) if isinstance(item, dict)]
+    artifacts = [
+        item for item in (o.get("artifacts") or []) if isinstance(item, dict)
+    ]
     text = (
         f"**单变量候选分析完成**：已分析 {o.get('feature_count', 0)} 个字段，"
         f"得到 {o.get('available_method_count', 0)} 个可用字段/分箱方法组合。"
@@ -1259,6 +1262,159 @@ def _render_analyze_univariate_candidates(o: dict):
     return text, tables
 
 
+def _automatic_tree_condition_text(value: object) -> str:
+    if value in (None, {}, []):
+        return "全部样本"
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            return "n/a"
+    return str(value)
+
+
+def _render_build_automatic_tree_candidate(o: dict):
+    """Render canonical leaves without deriving a ranking or recommendation."""
+
+    summary = o.get("summary") if isinstance(o.get("summary"), dict) else {}
+    leaves = [item for item in (o.get("leaf_index") or []) if isinstance(item, dict)]
+    artifacts = [
+        item for item in (o.get("artifacts") or []) if isinstance(item, dict)
+    ]
+    red_flags = [item for item in (o.get("red_flags") or []) if isinstance(item, dict)]
+    gaps = [
+        item
+        for item in (o.get("report_info_gaps") or [])
+        if isinstance(item, dict) and item.get("blocking") is False
+    ]
+    lifecycle = " / ".join(
+        str(summary.get(field) or "unknown")
+        for field in ("candidate_stage", "observation_stage", "validation_status")
+    )
+    text = (
+        f"**自动树候选构建完成**：资产 `{summary.get('asset_id', '')}`，"
+        f"asset hash `{summary.get('asset_hash', '')}`，"
+        f"tree result hash `{summary.get('tree_result_hash', '')}`。"
+        f"当前状态 `{lifecycle}`；指标、条件和叶节点顺序均来自平台确定性结果。\n"
+        "**尚未选叶、未入池、未配置动作，也未采纳、未部署。**"
+    )
+
+    links = [
+        f"[{str(item.get('filename') or item.get('kind') or '下载')}]"
+        f"({str(item.get('download_url'))})"
+        for item in artifacts
+        if item.get("download_url")
+    ]
+    if links:
+        text += "\n\n**自动树交付件**：" + "；".join(links)
+
+    if gaps:
+        labels = {
+            "sample_weight": "样本权重",
+            "loan_amount": "放款金额",
+            "overdue_amount": "逾期金额",
+        }
+        missing = "、".join(
+            labels.get(
+                str(item.get("context") or ""),
+                str(item.get("context") or item.get("code") or "补充信息"),
+            )
+            for item in gaps
+        )
+        text += (
+            f"\n\n报告补充信息当前缺少：{missing}。如有可补充；"
+            "暂时没有可跳过，最终报告留空。此项不阻塞继续做策略。"
+        )
+
+    if red_flags:
+        text += (
+            "\n\n**风险方向红旗**：存在分裂节点与期望风险方向不一致。"
+            "`directions` 在当前自动树中是诊断期望，不是强制分裂约束；"
+            "该候选仍为 development / unvalidated，选叶前必须逐项复核。"
+        )
+
+    rows = []
+    for leaf in leaves:
+        basis = (
+            leaf.get("metric_basis")
+            if isinstance(leaf.get("metric_basis"), dict)
+            else {}
+        )
+        primary = str(basis.get("primary") or "unweighted")
+        measurements = (
+            leaf.get("measurements")
+            if isinstance(leaf.get("measurements"), dict)
+            else {}
+        )
+        metrics = (
+            measurements.get(primary)
+            if isinstance(measurements.get(primary), dict)
+            else {}
+        )
+        rows.append(
+            [
+                str(leaf.get("leaf_id") or ""),
+                str(leaf.get("rule_id") or ""),
+                primary,
+                _num(metrics.get("total")),
+                _pct(metrics.get("share")),
+                _pct(metrics.get("bad_rate")),
+                _pct(metrics.get("bad_capture")),
+                _num(metrics.get("lift")),
+                _automatic_tree_condition_text(leaf.get("condition")),
+            ]
+        )
+    tables = []
+    if red_flags:
+        direction_labels = {
+            "increasing": "递增",
+            "decreasing": "递减",
+        }
+        tables.append(
+            {
+                "title": "自动树风险方向红旗",
+                "columns": ["类型", "Node ID", "特征", "期望风险方向"],
+                "rows": [
+                    [
+                        str(flag.get("code") or ""),
+                        str(flag.get("node_id") or ""),
+                        str(flag.get("feature") or ""),
+                        direction_labels.get(
+                            str(flag.get("expected_direction") or ""),
+                            str(flag.get("expected_direction") or ""),
+                        ),
+                    ]
+                    for flag in red_flags
+                ],
+            }
+        )
+    if rows:
+        tables.append(
+            {
+                "title": "自动树完整叶节点清单",
+                "columns": [
+                    "Leaf ID",
+                    "Rule ID",
+                    "指标口径",
+                    "样本数",
+                    "样本占比",
+                    "坏率",
+                    "坏样本捕获率",
+                    "Lift",
+                    "条件",
+                ],
+                "rows": rows,
+            }
+        )
+    return text, tables
+
+
 def _render_refine_univariate_candidate(o: dict):
     rule = o.get("rule") if isinstance(o.get("rule"), dict) else {}
     effect = o.get("effect") if isinstance(o.get("effect"), dict) else {}
@@ -1292,9 +1448,7 @@ def _render_refine_univariate_candidate(o: dict):
 
 def _render_strategy_pool_mutation(o: dict):
     entries = [entry for entry in (o.get("entries") or []) if isinstance(entry, dict)]
-    artifacts = [
-        item for item in (o.get("artifacts") or []) if isinstance(item, dict)
-    ]
+    artifacts = [item for item in (o.get("artifacts") or []) if isinstance(item, dict)]
     revision = o.get("revision")
     snapshot_hash = str(o.get("snapshot_hash") or "")
     operation = str(o.get("operation") or "update")
@@ -1374,9 +1528,7 @@ def _render_strategy_pool_mutation(o: dict):
 def _render_compile_strategy_pool(o: dict):
     spec = o.get("strategy_spec") if isinstance(o.get("strategy_spec"), dict) else {}
     rules = [rule for rule in (spec.get("rules") or []) if isinstance(rule, dict)]
-    artifacts = [
-        item for item in (o.get("artifacts") or []) if isinstance(item, dict)
-    ]
+    artifacts = [item for item in (o.get("artifacts") or []) if isinstance(item, dict)]
     text = (
         f"**Strategy Pool 编译完成**：Pool `{o.get('pool_id', '')}` revision "
         f"{o.get('revision')} 已只读编译为 canonical `StrategySpec`；design hash "
@@ -3999,6 +4151,7 @@ _RENDERERS = {
     "build_strategy": _render_build_strategy,
     "design_strategy_candidate": _render_design_strategy_candidate,
     "analyze_univariate_candidates": _render_analyze_univariate_candidates,
+    "build_automatic_tree_candidate": _render_build_automatic_tree_candidate,
     "refine_univariate_candidate": _render_refine_univariate_candidate,
     "add_candidate_to_pool": _render_strategy_pool_mutation,
     "remove_pool_entry": _render_strategy_pool_mutation,

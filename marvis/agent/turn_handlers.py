@@ -88,7 +88,11 @@ from marvis.data.backend import DataBackend
 from marvis.data.labels import nan_label_mask
 from marvis.data.registry import DatasetRegistry
 from marvis.data.transform_semantics import effective_transform_semantic_mapping
-from marvis.data.workspace import data_semantic_mapping_hash
+from marvis.data.workspace import (
+    DataSemanticMapping,
+    DataWorkspaceDraft,
+    data_semantic_mapping_hash,
+)
 from marvis.db import DatasetRepository, StrategyRepository, TaskRepository
 from marvis.domain import (
     TASK_TYPE_DATA_JOIN,
@@ -129,6 +133,7 @@ from marvis.repositories.data_workspace import (
     DataWorkspaceDataError,
     DataWorkspaceDatasetNotFound,
     DataWorkspaceRepository,
+    DataWorkspaceRevisionConflict,
 )
 from marvis.settings import Settings
 
@@ -1328,18 +1333,25 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
     }
 )
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
-    r"(?:开发|设计|制定|创建|生成|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
+    r"(?:开发|设计|制定|创建|生成|构建|训练|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
     r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
     r"添加|加入|入池|删除|移除|排序|重排|改为|编译|预览|"
-    r"develop|design|create|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
+    r"develop|design|create|build|train|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
     r"adopt|report|monitor|mine|refine|select|merge|add|remove|delete|reorder|compile|preview)",
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_SUBJECT_RE = re.compile(
-    r"(?:策略|策略池|规则池|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|cutoff|利润|收益|"
+    r"(?:策略|策略池|规则池|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|自动树|决策树|叶子|叶节点|cutoff|利润|收益|"
     r"催收|滚动率|迁徙率|迁徙矩阵|定价矩阵|额度矩阵|网格|ROA|"
-    r"roll(?:\s|-|_)*rate|strategy(?:\s|-|_)*pool|pool|strategy|approval|reject|limit|pricing|segment|rule|candidate|"
+    r"roll(?:\s|-|_)*rate|strategy(?:\s|-|_)*pool|pool|strategy|approval|reject|limit|pricing|segment|rule|candidate|automatic(?:\s|-|_)*tree|decision(?:\s|-|_)*tree|leaf|"
     r"candidate\s+bins?|\bbins?\b|univariate|binning|profit|collection)",
+    re.IGNORECASE,
+)
+_STRATEGY_AUTOMATIC_TREE_SHORTHAND_RE = re.compile(
+    r"(?:建\s*(?:一棵)?\s*(?:自动)?(?:决策)?树(?!状|莓|屋)|"
+    r"训练\s*(?:一棵)?\s*(?:自动)?(?:决策)?树(?:模型)?|"
+    r"(?<![A-Za-z0-9_])(?:build|train)\s+(?:an?\s+)?"
+    r"(?:(?:automatic|decision)\s+)?tree(?![A-Za-z0-9_]))",
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_CANCEL_RE = re.compile(
@@ -1373,6 +1385,18 @@ _STRATEGY_DROP_NAN_CANCEL_RE = re.compile(
 )
 _TYPED_EVALUATION_OPERATIONS = frozenset({"analyze", "backtest"})
 _STORED_EVALUATION_OPERATIONS = frozenset({"analyze", "backtest", "compare"})
+
+
+def _is_strategy_request_intent(text: str) -> bool:
+    """Recognize standard strategy requests plus narrow tree-build shorthand."""
+
+    return bool(
+        _STRATEGY_AUTOMATIC_TREE_SHORTHAND_RE.search(text)
+        or (
+            _STRATEGY_REQUEST_ACTION_RE.search(text)
+            and _STRATEGY_REQUEST_SUBJECT_RE.search(text)
+        )
+    )
 
 
 def _maybe_handle_strategy_request_turn(
@@ -1514,10 +1538,7 @@ def _maybe_handle_strategy_request_turn(
                 nan_confirmation,
             )
 
-    if not (
-        _STRATEGY_REQUEST_ACTION_RE.search(text)
-        and _STRATEGY_REQUEST_SUBJECT_RE.search(text)
-    ):
+    if not _is_strategy_request_intent(text):
         return None
     if _active_plan(runtime.plan_repo, task.id) is not None:
         return None
@@ -1645,6 +1666,36 @@ def _prepare_and_run_validated_strategy_request(
             )
         except StrategySetupError as exc:
             return append_join_error(repo, task.id, str(exc))
+        if _is_automatic_tree_build_draft(draft):
+            if preview is None or not _strategy_dataset_binding_matches(
+                runtime,
+                task,
+                preview=preview,
+                context=context,
+            ):
+                return _strategy_request_clarification_response(
+                    repo,
+                    task,
+                    code="strategy_dataset_context_changed",
+                    message=(
+                        "策略样本在编译与活动工作区绑定之间发生变化；本次请求未执行，"
+                        "请基于当前数据重新描述。"
+                    ),
+                )
+            try:
+                preview, context = _ensure_automatic_tree_active_workspace(
+                    runtime,
+                    task,
+                    preview=preview,
+                    context=context,
+                )
+            except StrategySetupError as exc:
+                return _strategy_request_clarification_response(
+                    repo,
+                    task,
+                    code="automatic_tree_active_workspace_required",
+                    message=str(exc),
+                )
         if preview is None or not _strategy_dataset_binding_matches(
             runtime,
             task,
@@ -1759,6 +1810,9 @@ def _run_validated_strategy_request(
             "roll_rate_matrix": "strategy_roll_rate_analysis",
             "limit_pricing_matrix": "strategy_limit_pricing_analysis",
             "univariate_candidate_analysis": ("strategy_univariate_candidate_analysis"),
+            "automatic_tree_candidate_build": (
+                "strategy_automatic_tree_candidate_build"
+            ),
             "univariate_candidate_refinement": (
                 "strategy_univariate_candidate_refinement_existing"
                 if source_candidate_id is not None
@@ -1781,6 +1835,7 @@ def _run_validated_strategy_request(
         elif draft.workflow in {
             "univariate_candidate_analysis",
             "univariate_candidate_refinement",
+            "automatic_tree_candidate_build",
         }:
             binding = {
                 "expected_content_hash": getattr(context, "dataset_content_hash", None),
@@ -1799,7 +1854,7 @@ def _run_validated_strategy_request(
                 or not isinstance(binding["analysis_generation"], int)
             ):
                 raise StrategySetupError(
-                    "单变量候选分析无法绑定当前数据工作区，请重新选择活动数据集。"
+                    "策略候选分析无法绑定当前数据工作区，请重新选择活动数据集。"
                 )
             slots.update(binding)
             slots["target_col"] = context.target_col
@@ -3178,6 +3233,103 @@ def _strategy_request_requires_dataset(
     return not (draft.strategy_spec is None and draft.operation == "report")
 
 
+def _is_automatic_tree_build_draft(
+    draft: CompiledStrategyRequestDraft,
+) -> bool:
+    return (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "automatic_tree_candidate_build"
+    )
+
+
+def _ensure_automatic_tree_active_workspace(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    *,
+    preview,
+    context,
+):
+    """Bind a fresh task's sole registered sample before governed tree evidence.
+
+    Automatic-tree artifacts deliberately require an active, persisted data
+    workspace.  A natural-language build on a fresh task may have just registered
+    its sole source sample, so selecting that one unambiguous dataset is normal
+    request preparation.  Multiple registered datasets remain a user decision.
+    """
+
+    repository = DataWorkspaceRepository(runtime.settings.db_path)
+    try:
+        snapshot = repository.get_or_default(task.id)
+    except (DataWorkspaceDataError, KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "自动树需要有效的数据工作区，请先重新选择活动样本。"
+        ) from exc
+    if snapshot.active_dataset_id is not None:
+        if (
+            snapshot.active_dataset_id != context.dataset_id
+            or snapshot.active_dataset_content_hash != context.dataset_content_hash
+        ):
+            raise StrategySetupError(
+                "自动树样本与当前活动数据集不一致，请先在数据工作区明确选择样本。"
+            )
+        if snapshot.semantic_mapping.target_col != context.target_col:
+            raise StrategySetupError(
+                "自动树目标列必须与当前数据工作区的 target 语义一致，请先确认 target_col。"
+            )
+        return preview, context
+
+    _backend, registry = _modeling_data_runtime(runtime.settings)
+    owned = [
+        dataset
+        for dataset in registry.list_for_task(task.id)
+        if str(dataset.task_id) == task.id
+    ]
+    if len(owned) != 1 or owned[0].id != context.dataset_id:
+        raise StrategySetupError(
+            "自动树需要一个明确的活动样本；当前存在多个或不确定的数据集，"
+            "请先在数据工作区选择并保存本次样本。"
+        )
+    if not isinstance(context.dataset_content_hash, str) or not context.target_col:
+        raise StrategySetupError(
+            "自动树无法绑定样本哈希或二元目标列，请先确认数据与 target_col。"
+        )
+
+    try:
+        repository.save_initial_binding(
+            task.id,
+            DataWorkspaceDraft(
+                active_dataset_id=context.dataset_id,
+                active_dataset_content_hash=context.dataset_content_hash,
+                semantic_mapping=DataSemanticMapping(
+                    target_col=context.target_col,
+                    field_roles={context.target_col: "target"},
+                ),
+            ),
+            expected_revision=snapshot.revision,
+            audit={
+                "actor": "agent:strategy-automatic-tree-build",
+                "detail": {
+                    "reason": "atomically bind sole task sample and target for automatic tree"
+                },
+            },
+        )
+    except (
+        DataWorkspaceDataError,
+        DataWorkspaceDatasetNotFound,
+        DataWorkspaceRevisionConflict,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise StrategySetupError(
+            "自动树数据工作区在计划创建前发生变化，请重新确认活动样本。"
+        ) from exc
+
+    refreshed_preview = _strategy_dataset_preview(runtime, task)
+    refreshed_context = _strategy_dataset_context(runtime, task, require_target=True)
+    return refreshed_preview, refreshed_context
+
+
 def _strategy_request_requires_target(
     draft: CompiledStrategyRequestDraft,
 ) -> bool:
@@ -3187,7 +3339,11 @@ def _strategy_request_requires_target(
             and "source_candidate_id" not in draft.workflow_inputs
         )
         return (
-            draft.workflow == "univariate_candidate_analysis"
+            draft.workflow
+            in {
+                "univariate_candidate_analysis",
+                "automatic_tree_candidate_build",
+            }
             or refinement_needs_current_target
             or (
                 draft.workflow == "limit_pricing_matrix"
@@ -3212,7 +3368,11 @@ def _strategy_request_requires_complete_labels(
             and "source_candidate_id" not in draft.workflow_inputs
         )
         return (
-            draft.workflow == "univariate_candidate_analysis"
+            draft.workflow
+            in {
+                "univariate_candidate_analysis",
+                "automatic_tree_candidate_build",
+            }
             or refinement_needs_current_labels
             or (
                 draft.workflow == "limit_pricing_matrix"
