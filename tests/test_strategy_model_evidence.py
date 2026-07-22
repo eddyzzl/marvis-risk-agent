@@ -96,7 +96,7 @@ def _univariate_observation(
     )
 
 
-def _univariate(sample_design):
+def _univariate(sample_design, *, analysis_variant="equal_width"):
     analysis_ref = _source(sample_design, "univariate-run", "risk", "development")
     bins = [
         build_univariate_bin_ref(
@@ -197,6 +197,7 @@ def _univariate(sample_design):
         population="risk",
         partition="development",
         analysis_ref=analysis_ref,
+        analysis_variant=analysis_variant,
         feature="age",
         bins=bins,
         missing_treatment="separate_bin",
@@ -427,6 +428,7 @@ def test_bundle_uses_real_sample_design_and_derives_all_six_exact_refs():
     assert evidence["schema_version"] == (
         STRATEGY_MODEL_EVIDENCE_BUNDLE_SCHEMA_VERSION
     )
+    assert evidence["univariate_evidence"][0]["analysis_variant"] == "equal_width"
     assert evidence["sample_refs"] == (
         sample_partition_refs_from_strategy_sample_design_v2(sample_design)
     )
@@ -452,6 +454,54 @@ def test_bundle_uses_real_sample_design_and_derives_all_six_exact_refs():
     assert validate_strategy_model_evidence_bundle(
         evidence, sample_design_bundle=sample_design
     ) == evidence
+
+
+def test_univariate_analysis_variant_is_required_addressed_and_canonical():
+    sample_design = build_sample_design_v2_fixture()
+    equal_width = _univariate(sample_design, analysis_variant="equal_width")
+    equal_frequency = _univariate(
+        sample_design, analysis_variant="equal_frequency"
+    )
+
+    assert equal_width["analysis_variant"] == "equal_width"
+    assert equal_width["evidence_id"] != equal_frequency["evidence_id"]
+    assert equal_width["content_hash"] != equal_frequency["content_hash"]
+
+    missing = deepcopy(equal_width)
+    del missing["analysis_variant"]
+    with pytest.raises(StrategyModelEvidenceError, match="analysis_variant"):
+        validate_univariate_evidence(missing, sample_design_bundle=sample_design)
+
+    with pytest.raises(StrategyModelEvidenceError, match="canonical text"):
+        build_univariate_evidence(
+            sample_design_bundle=sample_design,
+            population="risk",
+            partition="development",
+            analysis_ref=equal_width["analysis_ref"],
+            analysis_variant=" equal_width ",
+            feature="age",
+            bins=equal_width["bins"],
+            missing_treatment="separate_bin",
+            sentinel_treatment="not_configured",
+            observations=equal_width["observations"],
+        )
+
+
+def test_bundle_sorts_univariate_evidence_by_feature_variant_and_identity():
+    sample_design = build_sample_design_v2_fixture()
+    equal_width = _univariate(sample_design, analysis_variant="equal_width")
+    equal_frequency = _univariate(
+        sample_design, analysis_variant="equal_frequency"
+    )
+
+    bundle = build_strategy_model_evidence_bundle(
+        sample_design_bundle=sample_design,
+        univariate_evidence=[equal_width, equal_frequency],
+    )
+
+    assert [
+        item["analysis_variant"] for item in bundle["univariate_evidence"]
+    ] == ["equal_frequency", "equal_width"]
 
 
 def test_source_refs_carry_exact_sample_design_membership_dataset_and_workspace():
@@ -1007,6 +1057,7 @@ def test_univariate_bins_require_explicit_unique_consecutive_ordinals():
             population="risk",
             partition="development",
             analysis_ref=evidence["analysis_ref"],
+            analysis_variant=evidence["analysis_variant"],
             feature="age",
             bins=bins,
             missing_treatment="separate_bin",
@@ -1031,6 +1082,7 @@ def test_duplicate_semantic_observations_are_rejected_even_with_different_values
             population="risk",
             partition="development",
             analysis_ref=evidence["analysis_ref"],
+            analysis_variant=evidence["analysis_variant"],
             feature="age",
             bins=evidence["bins"],
             missing_treatment="separate_bin",

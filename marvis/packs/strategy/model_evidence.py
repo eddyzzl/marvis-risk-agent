@@ -166,6 +166,7 @@ _UNIVARIATE_FIELDS = frozenset(
         "evidence_id",
         "sample_ref",
         "analysis_ref",
+        "analysis_variant",
         "feature",
         "bins",
         "missing_treatment",
@@ -634,6 +635,7 @@ def build_univariate_evidence(
     population: str,
     partition: str,
     analysis_ref: Mapping[str, Any],
+    analysis_variant: str,
     feature: str,
     bins: Sequence[Mapping[str, Any]],
     missing_treatment: str,
@@ -645,6 +647,7 @@ def build_univariate_evidence(
         "schema_version": STRATEGY_UNIVARIATE_EVIDENCE_SCHEMA_VERSION,
         "sample_ref": _sample_for(context, population, partition),
         "analysis_ref": analysis_ref,
+        "analysis_variant": analysis_variant,
         "feature": feature,
         "bins": bins,
         "missing_treatment": missing_treatment,
@@ -1087,6 +1090,9 @@ def _normalize_univariate_body(value: object, context: Mapping[str, Any]) -> dic
     sample = _bound_sample_ref(obj["sample_ref"], context, "univariate.sample_ref")
     analysis_ref = _source_ref(obj["analysis_ref"], context, "univariate.analysis_ref")
     _require_source_matches_sample(analysis_ref, sample, "univariate.analysis_ref")
+    analysis_variant = _text(
+        obj["analysis_variant"], "univariate.analysis_variant"
+    )
     feature = _text(obj["feature"], "univariate.feature")
     bins_raw = _array(obj["bins"], "univariate.bins", required=True)
     if len(bins_raw) > MAX_BINS_PER_EVIDENCE:
@@ -1106,6 +1112,7 @@ def _normalize_univariate_body(value: object, context: Mapping[str, Any]) -> dic
         "schema_version": STRATEGY_UNIVARIATE_EVIDENCE_SCHEMA_VERSION,
         "sample_ref": sample,
         "analysis_ref": analysis_ref,
+        "analysis_variant": analysis_variant,
         "feature": feature,
         "bins": bins,
         "missing_treatment": _enum(obj["missing_treatment"], MISSING_TREATMENTS, "univariate.missing_treatment"),
@@ -1325,7 +1332,14 @@ def _normalize_bundle_body(value: object, context: Mapping[str, Any]) -> dict[st
             if model is None or model["content_hash"] != ref["content_hash"]:
                 raise StrategyModelEvidenceError("comparison model_evidence_ref does not resolve in bundle")
         _reconcile_comparison_metrics(comparison, model_index)
-    univariate.sort(key=lambda item: item["evidence_id"])
+    univariate.sort(
+        key=lambda item: (
+            *_sample_sort_key(item["sample_ref"]),
+            item["feature"],
+            item["analysis_variant"],
+            item["evidence_id"],
+        )
+    )
     models.sort(key=lambda item: item["evidence_id"])
     comparisons.sort(key=lambda item: item["comparison_id"])
     return {
