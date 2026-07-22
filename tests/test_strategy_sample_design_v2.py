@@ -52,29 +52,42 @@ def _legacy_ref(*, partition: str = "development") -> dict[str, str]:
     }
 
 
-def _decoded_membership(*, risk_outside_approval: bool = False):
+def _decoded_membership(
+    *,
+    risk_outside_approval: bool = False,
+    empty_development: bool = False,
+    empty_oot: bool = False,
+):
     approval_development = np.array(
-        [True, True, True, False, False, False, False, False]
+        [False, False, False, False, False, False, False, False]
+        if empty_development
+        else [True, True, True, False, False, False, False, False]
     )
     risk_development = np.array(
-        [True, True, False, False, False, False, False, False]
+        [False, False, False, False, False, False, False, False]
+        if empty_development
+        else [True, True, False, False, False, False, False, False]
     )
     if risk_outside_approval:
-        risk_development[6] = True
+        risk_development[7] = True
     masks = {
         "approval/development": approval_development,
         "approval/validation": np.array(
-            [False, False, False, True, False, False, False, False]
+            [False, False, False, True, False, True, False, False]
         ),
         "approval/oot": np.array(
-            [False, False, False, False, True, False, False, False]
+            [False, False, False, False, False, False, False, False]
+            if empty_oot
+            else [False, False, False, False, True, False, True, False]
         ),
         "risk/development": risk_development,
         "risk/validation": np.array(
-            [False, False, False, True, False, False, False, False]
+            [False, False, False, True, False, True, False, False]
         ),
         "risk/oot": np.array(
-            [False, False, False, False, True, False, False, False]
+            [False, False, False, False, False, False, False, False]
+            if empty_oot
+            else [False, False, False, False, True, False, True, False]
         ),
     }
     return decode_sample_membership(
@@ -232,7 +245,10 @@ def _diagnostic_statistics(decoded) -> dict:
         },
         "sufficiency": {
             "availability": "available",
-            "bad_count": 1,
+            "bad_count": min(
+                1,
+                decoded["header"]["counts"]["risk"]["development"],
+            ),
             "source_refs": [_source_ref("sufficiency")],
         },
     }
@@ -283,7 +299,14 @@ def _required_sources(decoded, design, label: str) -> list[dict[str, str]]:
     ]
 
 
-def _metric_observations(decoded, design, *, maturity_status: str):
+def _metric_observations(
+    decoded,
+    design,
+    *,
+    maturity_status: str,
+    single_class_development: bool = False,
+    single_class_validation: bool = False,
+):
     definitions = {
         item["metric_key"]: item for item in build_metric_definitions_v2()
     }
@@ -310,6 +333,10 @@ def _metric_observations(decoded, design, *, maturity_status: str):
             partition: int(labels[partition] > 0)
             for partition in ("development", "validation", "oot")
         }
+        if role == "risk" and single_class_development:
+            bads["development"] = labels["development"]
+        if role == "risk" and single_class_validation:
+            bads["validation"] = labels["validation"]
         bads["overall"] = sum(bads.values())
         for partition in ("overall", "development", "validation", "oot"):
             population = (
@@ -389,8 +416,16 @@ def _bundle(
     relationship: str = "nested_same_cohort",
     outside: bool = False,
     maturity_status: str = "confirmed_matured",
+    empty_development: bool = False,
+    empty_oot: bool = False,
+    single_class_development: bool = False,
+    single_class_validation: bool = False,
 ):
-    decoded = _decoded_membership(risk_outside_approval=outside)
+    decoded = _decoded_membership(
+        risk_outside_approval=outside,
+        empty_development=empty_development,
+        empty_oot=empty_oot,
+    )
     design, approval, risk, target, historical = _build_design(
         decoded,
         relationship=relationship,
@@ -408,7 +443,11 @@ def _bundle(
         policy=_policy(),
         diagnostic_statistics=_diagnostic_statistics(decoded),
         metric_observations=_metric_observations(
-            decoded, design, maturity_status=maturity_status
+            decoded,
+            design,
+            maturity_status=maturity_status,
+            single_class_development=single_class_development,
+            single_class_validation=single_class_validation,
         ),
         source_refs=[_source_ref("design-a"), _source_ref("design-b")],
         **_design_kwargs(maturity_status=maturity_status),
