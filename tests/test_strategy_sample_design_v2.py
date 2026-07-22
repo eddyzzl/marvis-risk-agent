@@ -324,16 +324,35 @@ def _metric_observations(decoded, design, *, maturity_status: str):
             )
             values = {
                 "population_count": ("present", population, population, population),
-                "labeled_count": ("present", labeled, labeled, population),
-                "label_coverage": (
-                    ("present", labeled / population, labeled, population)
-                    if population
-                    else ("insufficient_data", None, None, None)
-                ),
             }
-            if role == "risk" and maturity_status == "not_matured":
+            if role == "approval":
+                values.update(
+                    {
+                        metric_key: ("not_applicable", None, None, None)
+                        for metric_key in (
+                            "labeled_count",
+                            "label_coverage",
+                            "bad_count",
+                            "bad_rate",
+                        )
+                    }
+                )
+            else:
+                values.update(
+                    {
+                        "labeled_count": ("present", labeled, labeled, population),
+                        "label_coverage": (
+                            ("present", labeled / population, labeled, population)
+                            if population
+                            else ("insufficient_data", None, None, None)
+                        ),
+                    }
+                )
+            if role == "approval":
+                bad_status = "not_applicable"
+            elif maturity_status == "not_matured":
                 bad_status = "not_matured"
-            elif role == "risk" and maturity_status in {"unknown", "unavailable"}:
+            elif maturity_status in {"unknown", "unavailable"}:
                 bad_status = "unavailable"
             else:
                 bad_status = "present"
@@ -443,6 +462,19 @@ def test_v2_bundle_binds_governed_identity_semantics_and_complete_metrics():
     )
     assert len(bundle["metric_observations"]) == 2 * 4 * 5
     assert all(item["source_refs"] for item in bundle["metric_observations"])
+    metric_key_by_id = {
+        item["metric_definition_id"]: item["metric_key"]
+        for item in bundle["metric_definitions"]
+    }
+    assert {
+        item["status"]
+        for item in bundle["metric_observations"]
+        if item["population"] == "approval"
+        and metric_key_by_id[
+            item["metric_definition_ref"]["metric_definition_id"]
+        ]
+        != "population_count"
+    } == {"not_applicable"}
     assert all(item["status"] == "pass" for item in bundle["diagnostics"])
 
     canonical = canonical_strategy_sample_design_v2_bundle_json(bundle)

@@ -2794,6 +2794,19 @@ def _validate_observation_conservation(bundle: Mapping[str, Any]) -> None:
             denominator=sample_count,
             name=f"{role}/{partition} population_count",
         )
+        if role == "approval":
+            for metric_key in (
+                "labeled_count",
+                "label_coverage",
+                "bad_count",
+                "bad_rate",
+            ):
+                _require_observation_status(
+                    metrics[metric_key],
+                    "not_applicable",
+                    f"{role}/{partition} {metric_key}",
+                )
+            continue
         if not target_resolved:
             for metric_key in (
                 "labeled_count",
