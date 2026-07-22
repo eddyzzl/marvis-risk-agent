@@ -247,7 +247,7 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=25,
+    version=26,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
@@ -256,7 +256,8 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "standard_workflow 只能输出 request_kind=standard_workflow、workflow、workflow_inputs。workflow "
         "只能是 strategy_sample_design/profit_calc/roll_rate_matrix/limit_pricing_matrix/univariate_candidate_analysis/"
         "univariate_candidate_refinement/automatic_tree_candidate_build/"
-        "automatic_tree_leaf_materialization/voting_candidate_build/cross_matrix_analysis/"
+        "automatic_tree_apply/automatic_tree_leaf_materialization/"
+        "voting_candidate_build/cross_matrix_analysis/"
         "cross_matrix_cell_selection/"
         "strategy_pool_add_candidate/strategy_pool_remove_entry/"
         "strategy_pool_set_action/strategy_pool_reorder/strategy_pool_compile/"
@@ -306,6 +307,17 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "rules、leaf、result、action、rank、recommendation 都由平台拥有，禁止输出或猜测。"
         "自动树构建不能串联 build→select/materialize→Strategy Pool；每次只输出构建这一个 Workflow。"
         "用户要求自动选择“最好叶子”、自动排名或一步加入 Pool 时必须 clarification，不能替用户选择。"
+        "automatic_tree_apply 表示把一棵完整自动树确定性应用到其原始样本并创建不可变派生数据集。"
+        "workflow_inputs 只允许 tree_asset_id 和可选 leaf_id_column、rule_id_column。tree_asset_id 必须"
+        "逐字抄录用户原话中唯一完整的 candidate-asset- 后接 32 位小写十六进制；代词、多个 ID、"
+        "缺少 ID 或草案与原话不一致都必须 clarification。只有用户分别明确标注叶节点输出列或规则"
+        "输出列时才可逐字抄录对应列名；未提供时必须省略并由受控 Tool 使用默认值，不能猜。source "
+        "artifact id、artifact hash、asset hash、tree result hash、dataset/hash、workspace revision、"
+        "analysis generation、semantic mapping hash、activate_result、结果、指标和动作全部由平台从当前"
+        "任务不可变树资产重新校验并绑定，禁止输出或覆盖。用户必须发出单一、立即、肯定的写回命令；"
+        "问句、否定、假设、历史或未来描述必须 clarification。同一句不得串联选叶、Strategy Pool、"
+        "业务动作、报告、采纳或部署。该 Workflow 只创建 development / unvalidated 派生数据集，"
+        "不激活或替换当前 workspace。"
         "automatic_tree_leaf_materialization 表示从已生成的完整自动树候选中，只物化一个用户明确点名的"
         "叶节点 pointer。workflow_inputs 只允许 tree_asset_id、leaf_id 和可选 selection_reason。"
         "tree_asset_id 必须逐字抄录用户原话中的完整 candidate-asset- 后接 32 位小写十六进制；"

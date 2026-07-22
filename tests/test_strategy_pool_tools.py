@@ -7,7 +7,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import marvis.repositories.strategy_pool as strategy_pool_repository
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.data.workspace import (
@@ -20,6 +19,7 @@ from marvis.db_schema import connect
 from marvis.domain import TaskCreate
 from marvis.files import sha256_file
 from marvis.packs.strategy import tools as strategy_tools
+import marvis.repositories.strategy_pool as strategy_pool_repository
 from marvis.packs.strategy.errors import (
     StrategyError,
     StrategyPoolLegacyDraftNeedsRebuildError,
@@ -146,6 +146,34 @@ def _setup(tmp_path: Path) -> dict:
     )
     ctx = _context(settings, task.id)
     runtime = strategy_tools._runtime(ctx)
+    sample_design = strategy_tools.tool_materialize_sample_design(
+        {
+            "dataset_id": dataset.id,
+            "expected_dataset_content_hash": dataset.content_hash,
+            "workspace_revision": workspace.revision,
+            "workspace_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+            "target_col": "bad",
+            "target_bad_value": 1,
+            "performance_window_status": "provided",
+            "performance_window_days": 30,
+            "observation_window_status": "provided",
+            "observation_window_start": "2026-01-01",
+            "observation_window_end": "2026-01-31",
+            "maturity_status": "confirmed_matured",
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+            "drop_nan_labels": False,
+        },
+        ctx,
+    )
+    sample_design_ref = {
+        "artifact_id": sample_design["artifact"]["artifact_id"],
+        "artifact_content_hash": sample_design["artifact"]["content_hash"],
+        "sample_design_id": sample_design["sample_design_id"],
+        "sample_design_content_hash": sample_design["content_hash"],
+        "partition": "development",
+    }
     source_output = strategy_tools.tool_analyze_univariate_candidates(
         {
             "dataset_id": dataset.id,
@@ -154,6 +182,7 @@ def _setup(tmp_path: Path) -> dict:
             "analysis_generation": workspace.analysis_generation,
             "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
             "target_col": "bad",
+            "sample_design_ref": sample_design_ref,
             "features": ["score"],
             "methods": ["equal_width"],
             "bin_count": 3,
@@ -320,6 +349,36 @@ def _insert_archived_legacy_draft(fixture: dict) -> dict:
 
 
 def _refine_for_workspace(fixture: dict, workspace, bin_index: int) -> dict:
+    sample_design = strategy_tools.tool_materialize_sample_design(
+        {
+            "dataset_id": fixture["dataset"].id,
+            "expected_dataset_content_hash": fixture["dataset"].content_hash,
+            "workspace_revision": workspace.revision,
+            "workspace_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(
+                workspace.semantic_mapping
+            ),
+            "target_col": "bad",
+            "target_bad_value": 1,
+            "performance_window_status": "provided",
+            "performance_window_days": 30,
+            "observation_window_status": "provided",
+            "observation_window_start": "2026-01-01",
+            "observation_window_end": "2026-01-31",
+            "maturity_status": "confirmed_matured",
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+            "drop_nan_labels": False,
+        },
+        fixture["ctx"],
+    )
+    sample_design_ref = {
+        "artifact_id": sample_design["artifact"]["artifact_id"],
+        "artifact_content_hash": sample_design["artifact"]["content_hash"],
+        "sample_design_id": sample_design["sample_design_id"],
+        "sample_design_content_hash": sample_design["content_hash"],
+        "partition": "development",
+    }
     source_output = strategy_tools.tool_analyze_univariate_candidates(
         {
             "dataset_id": fixture["dataset"].id,
@@ -330,6 +389,7 @@ def _refine_for_workspace(fixture: dict, workspace, bin_index: int) -> dict:
                 workspace.semantic_mapping
             ),
             "target_col": "bad",
+            "sample_design_ref": sample_design_ref,
             "features": ["score"],
             "methods": ["equal_width"],
             "bin_count": 3,

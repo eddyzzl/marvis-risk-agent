@@ -28,11 +28,14 @@ from marvis.packs.strategy.dsl import (
 )
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.pool import CandidatePoolError, validate_strategy_pool
+from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
 
 
-VOTING_CANDIDATE_ASSET_SCHEMA_VERSION = "strategy.voting-candidate-asset.v1"
+VOTING_CANDIDATE_ASSET_SCHEMA_VERSION_V1 = "strategy.voting-candidate-asset.v1"
+VOTING_CANDIDATE_ASSET_SCHEMA_VERSION = "strategy.voting-candidate-asset.v2"
 VOTING_CANDIDATE_ASSET_TYPE = "voting_n_of_k"
-VOTING_CANDIDATE_ASSET_PRODUCER_VERSION = "strategy.voting-candidate-asset/1"
+VOTING_CANDIDATE_ASSET_PRODUCER_VERSION_V1 = "strategy.voting-candidate-asset/1"
+VOTING_CANDIDATE_ASSET_PRODUCER_VERSION = "strategy.voting-candidate-asset/2"
 VOTING_EFFECT_SCHEMA_VERSION = "strategy.voting-effect.v1"
 VOTING_METRICS_SCHEMA_VERSION = "strategy.voting-metrics.v1"
 
@@ -46,7 +49,7 @@ _FRAGMENT_ID_RE = re.compile(r"^candidate-fragment-[0-9a-f]{32}$")
 _EFFECT_ID_RE = re.compile(r"^candidate-effect-[0-9a-f]{32}$")
 _CANDIDATE_ID_RE = re.compile(r"^candidate-[0-9a-f]{32}$")
 
-_TOP_LEVEL_FIELDS = frozenset(
+_TOP_LEVEL_FIELDS_V1 = frozenset(
     {
         "schema_version",
         "asset_type",
@@ -66,6 +69,8 @@ _TOP_LEVEL_FIELDS = frozenset(
         "asset_hash",
     }
 )
+_TOP_LEVEL_FIELDS = _TOP_LEVEL_FIELDS_V1 | {"sample_design_ref"}
+_BODY_FIELDS_V1 = _TOP_LEVEL_FIELDS_V1 - {"asset_id", "asset_hash"}
 _BODY_FIELDS = _TOP_LEVEL_FIELDS - {"asset_id", "asset_hash"}
 _LIFECYCLE_FIELDS = frozenset(
     {"candidate_stage", "observation_stage", "validation_status"}
@@ -171,7 +176,10 @@ _METRICS_BODY_FIELDS = frozenset(
 _METRICS_FIELDS = _METRICS_BODY_FIELDS | frozenset(
     {"schema_version", "metrics_hash"}
 )
-_CANDIDATE_EVIDENCE_FIELDS = frozenset({"candidate_id", "evidence_hash"})
+_CANDIDATE_EVIDENCE_FIELDS_V1 = frozenset({"candidate_id", "evidence_hash"})
+_CANDIDATE_EVIDENCE_FIELDS = _CANDIDATE_EVIDENCE_FIELDS_V1 | {
+    "sample_design_ref"
+}
 
 
 class VotingCandidateAssetError(StrategyError):
@@ -184,6 +192,7 @@ def build_voting_candidate_asset(
     selected_entry_ids: Sequence[str],
     n: int,
     target_col: str,
+    sample_design_ref: Mapping[str, Any],
     effect: Mapping[str, Any],
     producer_version: str = VOTING_CANDIDATE_ASSET_PRODUCER_VERSION,
 ) -> dict[str, Any]:
@@ -195,7 +204,40 @@ def build_voting_candidate_asset(
     labelled sample named by the Pool evidence identity and ``target_col``.
     """
 
+    return _build_voting_candidate_asset(
+        pool,
+        selected_entry_ids=selected_entry_ids,
+        n=n,
+        target_col=target_col,
+        sample_design_ref=sample_design_ref,
+        effect=effect,
+        producer_version=producer_version,
+        schema_version=VOTING_CANDIDATE_ASSET_SCHEMA_VERSION,
+    )
+
+
+def _build_voting_candidate_asset(
+    pool: Mapping[str, Any],
+    *,
+    selected_entry_ids: Sequence[str],
+    n: int,
+    target_col: str,
+    sample_design_ref: Mapping[str, Any] | None,
+    effect: Mapping[str, Any],
+    producer_version: str,
+    schema_version: str,
+) -> dict[str, Any]:
     current = _validated_pool(pool)
+    if schema_version == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION:
+        normalized_sample_design_ref = _sample_design_ref(sample_design_ref)
+    elif schema_version == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION_V1:
+        if sample_design_ref is not None:
+            raise VotingCandidateAssetError(
+                "legacy Voting candidate cannot carry sample_design_ref"
+            )
+        normalized_sample_design_ref = None
+    else:
+        raise VotingCandidateAssetError("Voting candidate schema_version is invalid")
     selected_ids = _selected_entry_id_set(selected_entry_ids)
     by_id = {entry["entry_id"]: entry for entry in current["entries"]}
     unknown = sorted(set(selected_ids) - set(by_id))
@@ -251,6 +293,8 @@ def build_voting_candidate_asset(
         effect=normalized_effect,
     )
     candidate_evidence = _derive_candidate_evidence(
+        schema_version=schema_version,
+        sample_design_ref=normalized_sample_design_ref,
         pool_ref=pool_ref,
         evidence_identity=evidence_identity,
         measurement_context=measurement_context,
@@ -261,7 +305,7 @@ def build_voting_candidate_asset(
         metrics=metrics,
     )
     body = {
-        "schema_version": VOTING_CANDIDATE_ASSET_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "asset_type": VOTING_CANDIDATE_ASSET_TYPE,
         "lifecycle": _fixed_lifecycle(),
         "pool_ref": pool_ref,
@@ -274,8 +318,13 @@ def build_voting_candidate_asset(
         "effect": normalized_effect,
         "metrics": metrics,
         "candidate_evidence": candidate_evidence,
-        "producer_version": _producer_version(producer_version),
+        "producer_version": _producer_version(
+            producer_version,
+            schema_version=schema_version,
+        ),
     }
+    if normalized_sample_design_ref is not None:
+        body["sample_design_ref"] = normalized_sample_design_ref
     normalized_body = _normalize_body(body)
     asset_id = _stable_id("candidate-asset", normalized_body)
     without_hash = {**normalized_body, "asset_id": asset_id}
@@ -288,7 +337,13 @@ def validate_voting_candidate_asset(payload: Mapping[str, Any]) -> dict[str, Any
 
     if not isinstance(payload, Mapping):
         raise VotingCandidateAssetError("Voting candidate asset must be an object")
-    _exact_fields(payload, _TOP_LEVEL_FIELDS, "Voting candidate asset")
+    schema_version = _schema_version(payload.get("schema_version"))
+    expected_fields = (
+        _TOP_LEVEL_FIELDS
+        if schema_version == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION
+        else _TOP_LEVEL_FIELDS_V1
+    )
+    _exact_fields(payload, expected_fields, "Voting candidate asset")
     asset_id = _text(payload["asset_id"], "asset_id")
     if _ASSET_ID_RE.fullmatch(asset_id) is None:
         raise VotingCandidateAssetError("asset_id has an invalid format")
@@ -356,14 +411,27 @@ def verify_voting_candidate_asset_against_pool(
     effect_body = {
         field: asset["effect"][field] for field in _EFFECT_BODY_FIELDS
     }
-    rebuilt = build_voting_candidate_asset(
-        current,
-        selected_entry_ids=selected_ids,
-        n=asset["voting"]["n"],
-        target_col=asset["measurement_context"]["target_col"],
-        effect=effect_body,
-        producer_version=asset["producer_version"],
-    )
+    if asset["schema_version"] == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION:
+        rebuilt = build_voting_candidate_asset(
+            current,
+            selected_entry_ids=selected_ids,
+            n=asset["voting"]["n"],
+            target_col=asset["measurement_context"]["target_col"],
+            sample_design_ref=asset["sample_design_ref"],
+            effect=effect_body,
+            producer_version=asset["producer_version"],
+        )
+    else:
+        rebuilt = _build_voting_candidate_asset(
+            current,
+            selected_entry_ids=selected_ids,
+            n=asset["voting"]["n"],
+            target_col=asset["measurement_context"]["target_col"],
+            sample_design_ref=None,
+            effect=effect_body,
+            producer_version=asset["producer_version"],
+            schema_version=VOTING_CANDIDATE_ASSET_SCHEMA_VERSION_V1,
+        )
     if rebuilt != asset:
         raise VotingCandidateAssetError(
             "Voting candidate entry/source/fragment or evidence lineage changed"
@@ -372,11 +440,13 @@ def verify_voting_candidate_asset_against_pool(
 
 
 def _normalize_body(payload: Mapping[str, Any]) -> dict[str, Any]:
-    _exact_fields(payload, _BODY_FIELDS, "Voting candidate body")
-    if payload["schema_version"] != VOTING_CANDIDATE_ASSET_SCHEMA_VERSION:
-        raise VotingCandidateAssetError(
-            "schema_version must be " + VOTING_CANDIDATE_ASSET_SCHEMA_VERSION
-        )
+    schema_version = _schema_version(payload.get("schema_version"))
+    expected_fields = (
+        _BODY_FIELDS
+        if schema_version == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION
+        else _BODY_FIELDS_V1
+    )
+    _exact_fields(payload, expected_fields, "Voting candidate body")
     if payload["asset_type"] != VOTING_CANDIDATE_ASSET_TYPE:
         raise VotingCandidateAssetError(
             "asset_type must be " + VOTING_CANDIDATE_ASSET_TYPE
@@ -411,8 +481,15 @@ def _normalize_body(payload: Mapping[str, Any]) -> dict[str, Any]:
         rule=rule,
         effect=effect,
     )
+    sample_design_ref = (
+        _sample_design_ref(payload["sample_design_ref"])
+        if schema_version == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION
+        else None
+    )
     candidate_evidence = _normalize_candidate_evidence(
         payload["candidate_evidence"],
+        schema_version=schema_version,
+        sample_design_ref=sample_design_ref,
         pool_ref=pool_ref,
         evidence_identity=evidence_identity,
         measurement_context=measurement_context,
@@ -422,8 +499,8 @@ def _normalize_body(payload: Mapping[str, Any]) -> dict[str, Any]:
         effect=effect,
         metrics=metrics,
     )
-    return {
-        "schema_version": VOTING_CANDIDATE_ASSET_SCHEMA_VERSION,
+    body = {
+        "schema_version": schema_version,
         "asset_type": VOTING_CANDIDATE_ASSET_TYPE,
         "lifecycle": lifecycle,
         "pool_ref": pool_ref,
@@ -436,8 +513,14 @@ def _normalize_body(payload: Mapping[str, Any]) -> dict[str, Any]:
         "effect": effect,
         "metrics": metrics,
         "candidate_evidence": candidate_evidence,
-        "producer_version": _producer_version(payload["producer_version"]),
+        "producer_version": _producer_version(
+            payload["producer_version"],
+            schema_version=schema_version,
+        ),
     }
+    if sample_design_ref is not None:
+        body["sample_design_ref"] = sample_design_ref
+    return body
 
 
 def _validated_pool(value: object) -> dict[str, Any]:
@@ -1184,6 +1267,8 @@ def _normalize_fragment(
 
 def _candidate_evidence_content(
     *,
+    schema_version: str,
+    sample_design_ref: Mapping[str, Any] | None,
     pool_ref: Mapping[str, Any],
     evidence_identity: Mapping[str, Any],
     measurement_context: Mapping[str, Any],
@@ -1193,8 +1278,12 @@ def _candidate_evidence_content(
     effect: Mapping[str, Any],
     metrics: Mapping[str, Any],
 ) -> dict[str, Any]:
-    return {
-        "schema_version": "strategy.voting-candidate-evidence.v1",
+    content = {
+        "schema_version": (
+            "strategy.voting-candidate-evidence.v2"
+            if schema_version == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION
+            else "strategy.voting-candidate-evidence.v1"
+        ),
         "candidate_type": VOTING_CANDIDATE_ASSET_TYPE,
         "pool_ref": pool_ref,
         "evidence_identity": evidence_identity,
@@ -1218,10 +1307,15 @@ def _candidate_evidence_content(
         "effect_hash": effect["effect_hash"],
         "metrics_hash": metrics["metrics_hash"],
     }
+    if sample_design_ref is not None:
+        content["sample_design_ref"] = _sample_design_ref(sample_design_ref)
+    return content
 
 
 def _derive_candidate_evidence(
     *,
+    schema_version: str,
+    sample_design_ref: Mapping[str, Any] | None,
     pool_ref: Mapping[str, Any],
     evidence_identity: Mapping[str, Any],
     measurement_context: Mapping[str, Any],
@@ -1232,6 +1326,8 @@ def _derive_candidate_evidence(
     metrics: Mapping[str, Any],
 ) -> dict[str, str]:
     content = _candidate_evidence_content(
+        schema_version=schema_version,
+        sample_design_ref=sample_design_ref,
         pool_ref=pool_ref,
         evidence_identity=evidence_identity,
         measurement_context=measurement_context,
@@ -1245,12 +1341,17 @@ def _derive_candidate_evidence(
     evidence_hash = _sha256(
         _canonical_json({**content, "candidate_id": candidate_id})
     )
-    return {"candidate_id": candidate_id, "evidence_hash": evidence_hash}
+    result = {"candidate_id": candidate_id, "evidence_hash": evidence_hash}
+    if sample_design_ref is not None:
+        result["sample_design_ref"] = _sample_design_ref(sample_design_ref)
+    return result
 
 
 def _normalize_candidate_evidence(
     value: object,
     *,
+    schema_version: str,
+    sample_design_ref: Mapping[str, Any] | None,
     pool_ref: Mapping[str, Any],
     evidence_identity: Mapping[str, Any],
     measurement_context: Mapping[str, Any],
@@ -1262,8 +1363,15 @@ def _normalize_candidate_evidence(
 ) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise VotingCandidateAssetError("candidate_evidence must be an object")
-    _exact_fields(value, _CANDIDATE_EVIDENCE_FIELDS, "candidate_evidence")
+    expected_fields = (
+        _CANDIDATE_EVIDENCE_FIELDS
+        if schema_version == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION
+        else _CANDIDATE_EVIDENCE_FIELDS_V1
+    )
+    _exact_fields(value, expected_fields, "candidate_evidence")
     expected = _derive_candidate_evidence(
+        schema_version=schema_version,
+        sample_design_ref=sample_design_ref,
         pool_ref=pool_ref,
         evidence_identity=evidence_identity,
         measurement_context=measurement_context,
@@ -1287,6 +1395,12 @@ def _normalize_candidate_evidence(
         raise VotingCandidateAssetError(
             "evidence_hash does not authenticate Voting candidate evidence"
         )
+    if sample_design_ref is not None:
+        supplied_ref = _sample_design_ref(value["sample_design_ref"])
+        if supplied_ref != expected["sample_design_ref"]:
+            raise VotingCandidateAssetError(
+                "candidate_evidence sample_design_ref does not match asset"
+            )
     return expected
 
 
@@ -1310,13 +1424,37 @@ def _lifecycle(value: object) -> dict[str, str]:
     return expected
 
 
-def _producer_version(value: object) -> str:
+def _producer_version(value: object, *, schema_version: str) -> str:
     normalized = _text(value, "producer_version")
-    if normalized != VOTING_CANDIDATE_ASSET_PRODUCER_VERSION:
+    expected = (
+        VOTING_CANDIDATE_ASSET_PRODUCER_VERSION
+        if schema_version == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION
+        else VOTING_CANDIDATE_ASSET_PRODUCER_VERSION_V1
+    )
+    if normalized != expected:
         raise VotingCandidateAssetError(
-            "producer_version must be " + VOTING_CANDIDATE_ASSET_PRODUCER_VERSION
+            "producer_version must be " + expected
         )
     return normalized
+
+
+def _schema_version(value: object) -> str:
+    normalized = _text(value, "schema_version")
+    if normalized not in {
+        VOTING_CANDIDATE_ASSET_SCHEMA_VERSION_V1,
+        VOTING_CANDIDATE_ASSET_SCHEMA_VERSION,
+    }:
+        raise VotingCandidateAssetError("Voting candidate schema_version is invalid")
+    return normalized
+
+
+def _sample_design_ref(value: object) -> dict[str, str]:
+    try:
+        return StrategySampleDesignRef.from_value(value).to_ref_dict()
+    except StrategyError as exc:
+        raise VotingCandidateAssetError(
+            "sample_design_ref must be one exact governed development reference"
+        ) from exc
 
 
 def _canonical_condition(value: object, name: str) -> dict[str, Any]:
@@ -1514,7 +1652,9 @@ def _sha256(value: str) -> str:
 
 __all__ = [
     "VOTING_CANDIDATE_ASSET_PRODUCER_VERSION",
+    "VOTING_CANDIDATE_ASSET_PRODUCER_VERSION_V1",
     "VOTING_CANDIDATE_ASSET_SCHEMA_VERSION",
+    "VOTING_CANDIDATE_ASSET_SCHEMA_VERSION_V1",
     "VOTING_CANDIDATE_ASSET_TYPE",
     "VOTING_EFFECT_SCHEMA_VERSION",
     "VOTING_METRICS_SCHEMA_VERSION",

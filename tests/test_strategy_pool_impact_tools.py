@@ -5,13 +5,13 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 from marvis.agent.renderers import render_tool_output
 from marvis.data.backend import DataBackend
-from marvis.data.errors import NanLabelNotConfirmedError
 from marvis.data.registry import DatasetRegistry
 from marvis.data.workspace import (
     DataSemanticMapping,
@@ -31,6 +31,7 @@ from marvis.packs.strategy.pool_impact_tools import (
     run_measure_pool_impact,
     validate_measure_pool_impact_tool_output,
 )
+from marvis.packs.strategy.sample_design_tools import run_materialize_sample_design
 import marvis.packs.strategy.pool_impact_tools as impact_tools
 from marvis.packs.strategy.pool_tools import run_add_candidate_to_pool
 from marvis.packs.strategy.strategy import build_strategy
@@ -40,6 +41,44 @@ from marvis.plugins.schema_validation import validate_against_schema
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
+
+
+def _automatic_tree_sample_design_source_ref(reference: dict[str, str]) -> str:
+    return "strategy-sample-design:" + json.dumps(
+        {"kind": "strategy_sample_design", **reference},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def test_pool_impact_recovers_only_one_exact_automatic_tree_sample_design_ref() -> None:
+    reference = {
+        "artifact_id": "a" * 64,
+        "artifact_content_hash": "b" * 64,
+        "sample_design_id": "strategy-sample-design-test",
+        "sample_design_content_hash": "c" * 64,
+        "partition": "development",
+    }
+    token = _automatic_tree_sample_design_source_ref(reference)
+    lineage = SimpleNamespace(
+        tree=SimpleNamespace(asset={"source_refs": ["dataset:test", token]})
+    )
+
+    assert impact_tools._lineage_sample_design_ref(lineage).to_ref_dict() == reference
+
+    for source_refs in (
+        ["dataset:test"],
+        [token, token],
+        [token + " "],
+        ["strategy-sample-design:{not-json}"],
+    ):
+        invalid = SimpleNamespace(
+            tree=SimpleNamespace(asset={"source_refs": source_refs})
+        )
+        with pytest.raises(StrategyError, match="sample design|sample-design"):
+            impact_tools._lineage_sample_design_ref(invalid)
 
 
 def _action(action_type: str) -> dict:
@@ -60,7 +99,16 @@ def _context(settings, task_id: str) -> ToolContext:
     )
 
 
-def _setup(tmp_path: Path, *, candidate_target_col: str = "bad") -> dict:
+def _setup(
+    tmp_path: Path,
+    *,
+    candidate_target_col: str = "bad",
+    target_bad_value: int = 1,
+    partitioned: bool = False,
+    month_col: str = "apply_month",
+    loan_amount_col: str = "loan_amount",
+    overdue_amount_col: str = "overdue_amount",
+) -> dict:
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
     tasks = TaskRepository(settings.db_path)
@@ -77,7 +125,7 @@ def _setup(tmp_path: Path, *, candidate_target_col: str = "bad") -> dict:
     frame = pd.DataFrame(
         {
             "score": [100, 150, 200, 250, 300, 350, 400, 450],
-            "apply_month": [
+            month_col: [
                 "202601",
                 "202601",
                 "202601",
@@ -87,12 +135,26 @@ def _setup(tmp_path: Path, *, candidate_target_col: str = "bad") -> dict:
                 "202602",
                 "202602",
             ],
-            "loan_amount": [100, 120, None, 160, 180, 200, 220, 240],
-            "overdue_amount": [0, 5, 0, 10, 0, None, 20, 25],
+            loan_amount_col: [100, 120, None, 160, 180, 200, 220, 240],
+            overdue_amount_col: [0, 5, 0, 10, 0, None, 20, 25],
             "bad": [0, 1, 0, 1, 0, None, 1, 1],
             "alt_bad": [1, 0, 1, 0, 1, 0, 0, 1],
+            "sample_split": [
+                "development",
+                "development",
+                "development",
+                "development",
+                "development",
+                "development",
+                "validation",
+                "validation",
+            ],
         }
     )
+    if target_bad_value == 0:
+        frame["bad"] = frame["bad"].map(
+            lambda value: None if pd.isna(value) else 1 - int(value)
+        )
     source = tmp_path / "impact.parquet"
     frame.to_parquet(source, index=False)
     registry = DatasetRegistry(
@@ -114,9 +176,9 @@ def _setup(tmp_path: Path, *, candidate_target_col: str = "bad") -> dict:
         target_col="bad",
         field_roles={
             "score": "score",
-            "apply_month": "month",
-            "loan_amount": "loan_amount",
-            "overdue_amount": "overdue_amount",
+            month_col: "month",
+            loan_amount_col: "loan_amount",
+            overdue_amount_col: "overdue_amount",
             "bad": "target",
         },
     )
@@ -131,6 +193,42 @@ def _setup(tmp_path: Path, *, candidate_target_col: str = "bad") -> dict:
     )
     ctx = _context(settings, task.id)
     runtime = strategy_tools._runtime(ctx)
+    sample_request = {
+        "dataset_id": dataset.id,
+        "expected_dataset_content_hash": dataset.content_hash,
+        "workspace_revision": workspace.revision,
+        "workspace_generation": workspace.analysis_generation,
+        "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+        "target_col": "bad",
+        "target_bad_value": target_bad_value,
+        "performance_window_status": "provided",
+        "performance_window_days": 90,
+        "observation_window_status": "provided",
+        "observation_window_start": "2026-01-01",
+        "observation_window_end": "2026-06-30",
+        "maturity_status": "confirmed_matured",
+        "month_col": month_col,
+        "loan_amount_col": loan_amount_col,
+        "overdue_amount_col": overdue_amount_col,
+        "drop_nan_labels": True,
+    }
+    if partitioned:
+        sample_request.update(
+            {
+                "split_col": "sample_split",
+                "development_values": ["development"],
+                "validation_values": ["validation"],
+                "oot_values": [],
+            }
+        )
+    sample_output = run_materialize_sample_design(sample_request, ctx, runtime)
+    sample_design_ref = {
+        "artifact_id": sample_output["artifact"]["artifact_id"],
+        "artifact_content_hash": sample_output["artifact"]["content_hash"],
+        "sample_design_id": sample_output["sample_design_id"],
+        "sample_design_content_hash": sample_output["content_hash"],
+        "partition": "development",
+    }
     analysis = strategy_tools.tool_analyze_univariate_candidates(
         {
             "dataset_id": dataset.id,
@@ -139,12 +237,13 @@ def _setup(tmp_path: Path, *, candidate_target_col: str = "bad") -> dict:
             "analysis_generation": workspace.analysis_generation,
             "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
             "target_col": candidate_target_col,
+            "sample_design_ref": sample_design_ref,
             "features": ["score"],
             "methods": ["equal_width"],
             "bin_count": 3,
             "drop_nan_labels": True,
-            "loan_amount_col": "loan_amount",
-            "overdue_amount_col": "overdue_amount",
+            "loan_amount_col": loan_amount_col,
+            "overdue_amount_col": overdue_amount_col,
         },
         ctx,
     )
@@ -193,9 +292,10 @@ def _setup(tmp_path: Path, *, candidate_target_col: str = "bad") -> dict:
         "workspace_generation": workspace.analysis_generation,
         "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
         "target_col": "bad",
-        "month_col": "apply_month",
-        "loan_amount_col": "loan_amount",
-        "overdue_amount_col": "overdue_amount",
+        "sample_design_ref": sample_design_ref,
+        "month_col": month_col,
+        "loan_amount_col": loan_amount_col,
+        "overdue_amount_col": overdue_amount_col,
         "comparison_mode": "absolute",
         "drop_nan_labels": True,
     }
@@ -209,16 +309,23 @@ def _setup(tmp_path: Path, *, candidate_target_col: str = "bad") -> dict:
         "runtime": runtime,
         "pool": added["pool"],
         "request": request,
+        "sample_request": sample_request,
+        "sample_output": sample_output,
+        "sample_design_ref": sample_design_ref,
     }
 
 
-def test_measure_pool_impact_rejects_candidate_target_that_differs_from_workspace(
+def test_measure_pool_impact_rejects_target_that_differs_from_sample_design(
     tmp_path: Path,
 ) -> None:
-    fx = _setup(tmp_path, candidate_target_col="alt_bad")
+    fx = _setup(tmp_path)
 
-    with pytest.raises(StrategyError, match="candidate target.*workspace target"):
-        run_measure_pool_impact(fx["request"], fx["ctx"], fx["runtime"])
+    with pytest.raises(StrategyError, match="Workspace|sample-design.*target_col"):
+        run_measure_pool_impact(
+            {**fx["request"], "target_col": "alt_bad"},
+            fx["ctx"],
+            fx["runtime"],
+        )
     assert not [
         item
         for item in TaskArtifactRepository(fx["settings"].db_path).list_for_task(
@@ -275,6 +382,41 @@ def test_measure_pool_impact_publishes_direct_canonical_artifact_idempotently(
     ]
     assert len(artifacts) == 1
     assert fx["runtime"].strategies.list_for_task(fx["task"].id) == []
+
+
+def test_measure_pool_impact_inherits_custom_optional_columns_from_sample_design(
+    tmp_path: Path,
+) -> None:
+    optional = {
+        "month_col": "decision_vintage_month",
+        "loan_amount_col": "approved_principal_balance",
+        "overdue_amount_col": "observed_delinquent_balance",
+    }
+    fx = _setup(tmp_path, **optional)
+    request = {
+        field: value
+        for field, value in fx["request"].items()
+        if field not in optional
+    }
+
+    with pytest.raises(StrategyError, match="month_col"):
+        run_measure_pool_impact(
+            {**request, "month_col": "score"},
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    output = run_measure_pool_impact(request, fx["ctx"], fx["runtime"])
+
+    assert output["monthly_status"] == "available"
+    bindings = output["assessment"]["bindings"]
+    assert {field: bindings[field] for field in optional} == optional
+    record = TaskArtifactRepository(fx["settings"].db_path).get_for_task(
+        fx["task"].id,
+        output["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    assert {field: record["provenance"][field] for field in optional} == optional
 
 
 def test_measure_pool_impact_cached_output_tamper_fails_closed_in_renderer(
@@ -346,13 +488,14 @@ def test_measure_pool_impact_renderer_shows_action_amounts_overall_and_monthly(
     assert {row[0] for row in monthly["rows"]} == {"202601", "202602"}
 
 
-def test_measure_pool_impact_requires_missing_label_confirmation(tmp_path: Path) -> None:
+def test_measure_pool_impact_reuses_sample_design_missing_label_confirmation(
+    tmp_path: Path,
+) -> None:
     fx = _setup(tmp_path)
     request = {**fx["request"], "drop_nan_labels": False}
 
-    with pytest.raises(NanLabelNotConfirmedError) as exc_info:
+    with pytest.raises(StrategyError, match="drop_nan_labels"):
         run_measure_pool_impact(request, fx["ctx"], fx["runtime"])
-    assert exc_info.value.to_detail()["kind"] == "nan_label_not_confirmed"
     assert not [
         item
         for item in TaskArtifactRepository(fx["settings"].db_path).list_for_task(
@@ -504,3 +647,135 @@ def test_measure_pool_impact_artifact_registry_hash_is_file_sha(tmp_path: Path) 
     raw = Path(record["path"]).read_bytes()
     assert hashlib.sha256(raw).hexdigest() == record["content_hash"]
     assert json.loads(raw)["content_hash"] == output["content_hash"]
+
+
+def test_measure_pool_impact_uses_development_split_and_normalizes_bad_zero(
+    tmp_path: Path,
+) -> None:
+    bad_zero = _setup(
+        tmp_path / "bad-zero",
+        target_bad_value=0,
+        partitioned=True,
+    )
+    bad_one = _setup(
+        tmp_path / "bad-one",
+        target_bad_value=1,
+        partitioned=True,
+    )
+
+    zero_output = run_measure_pool_impact(
+        bad_zero["request"], bad_zero["ctx"], bad_zero["runtime"]
+    )
+    one_output = run_measure_pool_impact(
+        bad_one["request"], bad_one["ctx"], bad_one["runtime"]
+    )
+
+    assert zero_output["population_count"] == 6
+    assert zero_output["labeled_count"] == 5
+    assert zero_output["assessment"]["population"] == one_output["assessment"][
+        "population"
+    ]
+    assert zero_output["assessment"]["overall"] == one_output["assessment"][
+        "overall"
+    ]
+    assert [row["incremental"] for row in zero_output["assessment"]["waterfall"]] == [
+        row["incremental"] for row in one_output["assessment"]["waterfall"]
+    ]
+    assert zero_output["assessment"]["bindings"]["target_bad_value"] == 1
+    record = TaskArtifactRepository(bad_zero["settings"].db_path).get_for_task(
+        bad_zero["task"].id,
+        zero_output["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    assert record["provenance"]["source_target_bad_value"] == 0
+    assert record["provenance"]["normalized_target_bad_value"] == 1
+
+
+def test_measure_pool_impact_rejects_unmatured_or_different_sample_design(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    immature = run_materialize_sample_design(
+        {
+            **fx["sample_request"],
+            "maturity_status": "not_matured",
+        },
+        fx["ctx"],
+        fx["runtime"],
+    )
+    immature_ref = {
+        "artifact_id": immature["artifact"]["artifact_id"],
+        "artifact_content_hash": immature["artifact"]["content_hash"],
+        "sample_design_id": immature["sample_design_id"],
+        "sample_design_content_hash": immature["content_hash"],
+        "partition": "development",
+    }
+    with pytest.raises(StrategyError, match="confirmed_matured"):
+        run_measure_pool_impact(
+            {**fx["request"], "sample_design_ref": immature_ref},
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    other = run_materialize_sample_design(
+        {
+            **fx["sample_request"],
+            "observation_window_end": "2026-07-31",
+        },
+        fx["ctx"],
+        fx["runtime"],
+    )
+    other_ref = {
+        "artifact_id": other["artifact"]["artifact_id"],
+        "artifact_content_hash": other["artifact"]["content_hash"],
+        "sample_design_id": other["sample_design_id"],
+        "sample_design_content_hash": other["content_hash"],
+        "partition": "development",
+    }
+    with pytest.raises(StrategyError, match="candidate sample-design reference"):
+        run_measure_pool_impact(
+            {**fx["request"], "sample_design_ref": other_ref},
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+
+def test_measure_pool_impact_rejects_sample_artifact_drift(tmp_path: Path) -> None:
+    fx = _setup(tmp_path)
+    record = TaskArtifactRepository(fx["settings"].db_path).get_for_task(
+        fx["task"].id,
+        fx["sample_design_ref"]["artifact_id"],
+    )
+    assert record is not None
+    Path(record["path"]).write_bytes(Path(record["path"]).read_bytes() + b"drift")
+
+    with pytest.raises(StrategyError, match="sample-design.*content hash changed"):
+        run_measure_pool_impact(fx["request"], fx["ctx"], fx["runtime"])
+
+
+def test_measure_pool_impact_persists_sample_ref_in_assessment_and_provenance(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    output = run_measure_pool_impact(fx["request"], fx["ctx"], fx["runtime"])
+
+    assert output["assessment"]["bindings"]["sample_design_ref"] == fx[
+        "sample_design_ref"
+    ]
+    assert all(
+        row["source_ref"]["sample_design_ref"] == fx["sample_design_ref"]
+        for row in output["assessment"]["waterfall"]
+    )
+    record = TaskArtifactRepository(fx["settings"].db_path).get_for_task(
+        fx["task"].id,
+        output["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    assert record["provenance"]["sample_design_ref"] == fx["sample_design_ref"]
+
+    with sqlite3.connect(fx["settings"].db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute(
+                "UPDATE task_artifacts SET provenance_json = ? WHERE id = ?",
+                ("{}", output["artifacts"][0]["artifact_id"]),
+            )

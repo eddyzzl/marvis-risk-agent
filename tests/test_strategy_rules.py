@@ -20,6 +20,7 @@ import pandas as pd
 import pytest
 
 from marvis.data.backend import DataBackend
+from marvis.data.errors import NanLabelNotConfirmedError
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
@@ -34,6 +35,9 @@ from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.settings import build_settings
+from tests.strategy_tool_sample_design_support import (
+    materialize_strategy_tool_sample_design,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +191,28 @@ def _register(registry, tmp_path, frame, name, task_id):
     return registry.register_existing(path, task_id=task_id, role="strategy_sample")
 
 
+def _sample_ref(
+    tmp_path,
+    task,
+    dataset,
+    *,
+    target_bad_value=1,
+    drop_nan_labels=False,
+    with_split=False,
+):
+    return materialize_strategy_tool_sample_design(
+        build_settings(tmp_path / "workspace"),
+        task,
+        dataset,
+        target_bad_value=target_bad_value,
+        drop_nan_labels=drop_nan_labels,
+        split_col="sample_split" if with_split else None,
+        development_values=["dev"] if with_split else [],
+        validation_values=["valid"] if with_split else [],
+        field_roles={"f1": "numeric", "f2": "numeric", "leak": "numeric"},
+    )
+
+
 @pytest.mark.slow
 def test_tool_mine_rules_flags_suspect_leakage(tmp_path):
     runner, registry, task = _runtime(tmp_path)
@@ -197,9 +223,11 @@ def test_tool_mine_rules_flags_suspect_leakage(tmp_path):
         "bad":  [1, 1, 1, 1, 0, 0, 0, 0, 0, 0] * 5,
     })
     dataset = _register(registry, tmp_path, frame, "leak", task.id)
+    sample_ref = _sample_ref(tmp_path, task, dataset)
     out = runner.invoke(
         ToolRef("strategy", "mine_rules"),
-        {"dataset_id": dataset.id, "target_col": "bad", "feature_cols": ["leak"],
+        {"dataset_id": dataset.id, "target_col": "bad",
+         "sample_design_ref": sample_ref, "feature_cols": ["leak"],
          "min_lift": 1.2, "min_support": 0.05},
         task_id=task.id,
     )
@@ -216,13 +244,26 @@ def test_tool_mine_rules_gates_nan_labels(tmp_path):
         "bad": [1.0, 1.0, float("nan"), 0.0, 0.0, 0.0, 0.0, 0.0],
     })
     dataset = _register(registry, tmp_path, frame, "nan", task.id)
-    base = {"dataset_id": dataset.id, "target_col": "bad", "feature_cols": ["f1"],
-            "min_lift": 1.0, "min_support": 0.05}
-    blocked = runner.invoke(ToolRef("strategy", "mine_rules"), dict(base), task_id=task.id)
-    assert blocked.ok is False
-    assert blocked.error_kind == "nan_label_not_confirmed"
+    with pytest.raises(NanLabelNotConfirmedError):
+        _sample_ref(tmp_path, task, dataset)
+    dropping_sample_ref = _sample_ref(
+        tmp_path,
+        task,
+        dataset,
+        drop_nan_labels=True,
+    )
     confirmed = runner.invoke(
-        ToolRef("strategy", "mine_rules"), {**base, "drop_nan_labels": True}, task_id=task.id,
+        ToolRef("strategy", "mine_rules"),
+        {
+            "dataset_id": dataset.id,
+            "target_col": "bad",
+            "sample_design_ref": dropping_sample_ref,
+            "feature_cols": ["f1"],
+            "min_lift": 1.0,
+            "min_support": 0.05,
+            "drop_nan_labels": True,
+        },
+        task_id=task.id,
     )
     assert confirmed.ok is True, confirmed.error
     assert confirmed.output["nan_labels_dropped"] == 1
@@ -240,9 +281,11 @@ def test_tool_mine_rules_flags_low_support(tmp_path):
     bad = [1 if i < 3 else 0 for i in range(n)]  # 3/300 = 1% base
     frame = pd.DataFrame({"f1": f1, "bad": bad})
     dataset = _register(registry, tmp_path, frame, "lowsup", task.id)
+    sample_ref = _sample_ref(tmp_path, task, dataset)
     out = runner.invoke(
         ToolRef("strategy", "mine_rules"),
-        {"dataset_id": dataset.id, "target_col": "bad", "feature_cols": ["f1"],
+        {"dataset_id": dataset.id, "target_col": "bad",
+         "sample_design_ref": sample_ref, "feature_cols": ["f1"],
          "min_support": 0.001, "min_lift": 1.2},
         task_id=task.id,
     )
@@ -260,9 +303,11 @@ def test_tool_evaluate_rule_set_flags_shadowed_and_overlap(tmp_path):
         "bad": [1,  1,  1,  0,  0,  0,  0,  0],
     })
     dataset = _register(registry, tmp_path, frame, "eval", task.id)
+    sample_ref = _sample_ref(tmp_path, task, dataset)
     out = runner.invoke(
         ToolRef("strategy", "evaluate_rule_set"),
         {"dataset_id": dataset.id, "target_col": "bad",
+         "sample_design_ref": sample_ref,
          "rules": [{"condition": "f1 < 35"}, {"condition": "f1 < 31"}]},
         task_id=task.id,
     )
@@ -270,6 +315,70 @@ def test_tool_evaluate_rule_set_flags_shadowed_and_overlap(tmp_path):
     codes = {f["code"] for f in out.output["red_flags"]}
     assert "rule_shadowed" in codes  # rule 2 has zero incremental hits
     assert "high_overlap" in codes   # rule2 ⊂ rule1 -> Jaccard 1.0 > 0.8
+
+
+@pytest.mark.slow
+def test_rule_tools_use_bad_zero_development_only(tmp_path):
+    outputs = []
+    for name, target_bad_value, validation_values in (
+        ("bad-one", 1, ([999, 1000], [1, 1])),
+        ("bad-zero", 0, ([-999, -1000], [0, 0])),
+    ):
+        case = tmp_path / name
+        runner, registry, task = _runtime(case)
+        bad_one = [1, 1, 1, 0, 0, 0, 0, 0]
+        source_labels = (
+            bad_one
+            if target_bad_value == 1
+            else [1 - value for value in bad_one]
+        )
+        frame = pd.DataFrame(
+            {
+                "f1": [10, 20, 30, 40, 50, 60, *validation_values[0]],
+                "bad": [*source_labels[:6], *validation_values[1]],
+                "sample_split": ["dev"] * 6 + ["valid"] * 2,
+            }
+        )
+        dataset = _register(registry, case, frame, "rules", task.id)
+        sample_ref = _sample_ref(
+            case,
+            task,
+            dataset,
+            target_bad_value=target_bad_value,
+            with_split=True,
+        )
+        mined = runner.invoke(
+            ToolRef("strategy", "mine_rules"),
+            {
+                "dataset_id": dataset.id,
+                "target_col": "bad",
+                "sample_design_ref": sample_ref,
+                "feature_cols": ["f1"],
+                "min_lift": 1.0,
+                "min_support": 0.05,
+            },
+            task_id=task.id,
+        )
+        assert mined.ok, mined.error
+        evaluated = runner.invoke(
+            ToolRef("strategy", "evaluate_rule_set"),
+            {
+                "dataset_id": dataset.id,
+                "target_col": "bad",
+                "sample_design_ref": sample_ref,
+                "rules": [{"condition": "f1 < 35"}],
+            },
+            task_id=task.id,
+        )
+        assert evaluated.ok, evaluated.error
+        assert mined.output["n_rows"] == 6
+        assert mined.output["sample_design_ref"] == sample_ref
+        assert evaluated.output["sample_design_ref"] == sample_ref
+        outputs.append((mined.output, evaluated.output))
+
+    assert outputs[0][0]["candidate_rules"] == outputs[1][0]["candidate_rules"]
+    assert outputs[0][1]["waterfall"] == outputs[1][1]["waterfall"]
+    assert outputs[0][1]["combined"] == outputs[1][1]["combined"]
 
 
 @pytest.mark.slow

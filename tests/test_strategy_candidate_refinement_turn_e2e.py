@@ -10,6 +10,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from marvis.app import create_app
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 class _PayloadLLM:
@@ -82,6 +85,11 @@ def test_natural_language_candidate_refinement_emits_downloadable_unvalidated_as
     monkeypatch,
 ) -> None:
     client, task_id = _strategy_task(tmp_path)
+    sample_design_ref = materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
     llm = _RefinementLLM()
     monkeypatch.setattr(
         "marvis.agent.validation_app_service.driver_llm_client",
@@ -96,13 +104,16 @@ def test_natural_language_candidate_refinement_emits_downloadable_unvalidated_as
     assert opened.status_code == 202, opened.text
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert [plan["template_id"] for plan in plans] == [
-        "strategy_univariate_candidate_refinement"
+        "strategy_sample_design",
+        "strategy_univariate_candidate_refinement",
     ]
-    assert plans[0]["status"] == "done"
-    assert [step["status"] for step in plans[0]["steps"]] == ["done", "done"]
-    assert all(step["needs_confirmation"] is False for step in plans[0]["steps"])
+    downstream = plans[1]
+    assert downstream["status"] == "done"
+    assert [step["status"] for step in downstream["steps"]] == ["done", "done"]
+    assert all(step["needs_confirmation"] is False for step in downstream["steps"])
 
-    stored = client.app.state.plan_repo.load_plan(plans[0]["id"])
+    stored = client.app.state.plan_repo.load_plan(downstream["id"])
+    assert stored.steps[0].inputs["sample_design_ref"] == sample_design_ref
     analysis_output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
     output = client.app.state.plan_repo.load_step_output(stored.steps[1].id)
     assert output["validation_status"] == "unvalidated"
@@ -124,6 +135,8 @@ def test_natural_language_candidate_refinement_emits_downloadable_unvalidated_as
     ]
     listed = client.get(f"/api/tasks/{task_id}/task-artifacts").json()["artifacts"]
     assert {artifact["id"] for artifact in listed} == {
+        sample_design_ref["artifact_id"]
+    } | {
         artifact["artifact_id"]
         for artifact in analysis_output["artifacts"] + output["artifacts"]
     }
@@ -145,6 +158,11 @@ def test_explicit_source_bins_consume_the_exact_candidate_the_user_names(
     monkeypatch,
 ) -> None:
     client, task_id = _strategy_task(tmp_path)
+    sample_design_ref = materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
     analysis_llm = _PayloadLLM(
         {
             "request_kind": "standard_workflow",
@@ -167,7 +185,9 @@ def test_explicit_source_bins_consume_the_exact_candidate_the_user_names(
         json={"content": "分析 score 的等距单变量效果"},
     )
     assert analyzed.status_code == 202, analyzed.text
-    first_plan = client.app.state.plan_repo.list_plans_for_task(task_id)[0]
+    first_plan = client.app.state.plan_repo.list_plans_for_task(task_id)[-1]
+    assert first_plan.template_id == "strategy_univariate_candidate_analysis"
+    assert first_plan.steps[0].inputs["sample_design_ref"] == sample_design_ref
     analysis_output = client.app.state.plan_repo.load_step_output(
         first_plan.steps[0].id
     )
@@ -204,12 +224,14 @@ def test_explicit_source_bins_consume_the_exact_candidate_the_user_names(
     assert refined.status_code == 202, refined.text
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design",
         "strategy_univariate_candidate_analysis",
         "strategy_univariate_candidate_refinement_existing",
     ]
-    assert len(plans[1]["steps"]) == 1
-    assert plans[1]["steps"][0]["status"] == "done"
-    stored = client.app.state.plan_repo.load_plan(plans[1]["id"])
+    refinement_plan = plans[2]
+    assert len(refinement_plan["steps"]) == 1
+    assert refinement_plan["steps"][0]["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(refinement_plan["id"])
     output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
     assert output["parent_candidate_id"] == candidate_id
     assert output["parent_evidence_hash"] == analysis_output["evidence_hash"]

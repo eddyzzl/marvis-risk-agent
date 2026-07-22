@@ -54,6 +54,16 @@ def _sample_binding() -> dict:
     return {"task_id": "task-1", **_identity()}
 
 
+def _sample_design_ref() -> dict:
+    return {
+        "artifact_id": "e" * 64,
+        "artifact_content_hash": "f" * 64,
+        "sample_design_id": "strategy-sample-design-" + "1" * 24,
+        "sample_design_content_hash": "2" * 64,
+        "partition": "development",
+    }
+
+
 def _condition(operator: str, value: int) -> dict:
     return {
         "op": "compare",
@@ -153,7 +163,9 @@ def _build(**overrides) -> dict:
         "pool": _pool(),
         "frame": _frame(),
         "sample_binding": _sample_binding(),
+        "sample_design_ref": _sample_design_ref(),
         "target_col": "bad",
+        "target_bad_value": 1,
         "month_col": "month",
         "loan_amount_col": "loan",
         "overdue_amount_col": "overdue",
@@ -218,6 +230,50 @@ def test_pool_impact_first_match_waterfall_and_population_conserve() -> None:
     assert impact["overall"]["actions"]["metrics"]["bad_capture_rate"] == pytest.approx(
         3 / 5
     )
+    assert impact["bindings"]["sample_design_ref"] == _sample_design_ref()
+    assert impact["bindings"]["target_bad_value"] == 1
+    assert all(
+        row["source_ref"]["sample_design_ref"] == _sample_design_ref()
+        for row in impact["waterfall"]
+    )
+
+
+def test_pool_impact_normalizes_explicit_reverse_target_polarity() -> None:
+    bad_one = _build()
+    reversed_frame = _frame()
+    reversed_frame["bad"] = reversed_frame["bad"].map(
+        lambda value: None if pd.isna(value) else 1 - int(value)
+    )
+    bad_zero = _build(frame=reversed_frame, target_bad_value=0)
+
+    assert bad_zero["population"] == bad_one["population"]
+    assert bad_zero["overall"] == bad_one["overall"]
+    assert bad_zero["waterfall"] == bad_one["waterfall"]
+    assert bad_zero["monthly"] == bad_one["monthly"]
+    assert bad_zero["bindings"]["target_bad_value"] == 0
+
+
+def test_pool_impact_sample_design_reference_is_canonical_and_tamper_evident() -> None:
+    impact = _build()
+    forged = copy.deepcopy(impact)
+    forged["bindings"]["sample_design_ref"]["partition"] = "validation"
+    _rehash(forged)
+
+    with pytest.raises(StrategyError, match="partition|sample design"):
+        validate_strategy_pool_impact_assessment(forged)
+
+    mismatched_source = copy.deepcopy(impact)
+    mismatched_source["waterfall"][0]["source_ref"]["sample_design_ref"][
+        "sample_design_content_hash"
+    ] = HASH_A
+    _rehash(mismatched_source)
+    with pytest.raises(StrategyError, match="waterfall source sample design"):
+        validate_strategy_pool_impact_assessment(mismatched_source)
+
+    malformed = _sample_design_ref()
+    malformed["sample_design_content_hash"] = "not-a-hash"
+    with pytest.raises(StrategyError, match="sample design"):
+        _build(sample_design_ref=malformed)
 
 
 def test_pool_impact_reports_fully_shadowed_rule_and_reorder_changes_reach() -> None:

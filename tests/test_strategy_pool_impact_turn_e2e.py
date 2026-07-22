@@ -23,6 +23,13 @@ POOL_HASH = "a" * 64
 DATASET_HASH = "b" * 64
 SEMANTIC_HASH = "c" * 64
 SAMPLE_HASH = "d" * 64
+SAMPLE_DESIGN_REF = {
+    "artifact_id": "e" * 64,
+    "artifact_content_hash": "f" * 64,
+    "sample_design_id": "strategy-sample-design-1",
+    "sample_design_content_hash": "0" * 64,
+    "partition": "development",
+}
 
 
 class _PoolRepository:
@@ -94,6 +101,10 @@ def _install_state(monkeypatch, mapping: DataSemanticMapping) -> None:
         "marvis.agent.turn_handlers.data_semantic_mapping_hash",
         lambda mapping: SEMANTIC_HASH,
     )
+    monkeypatch.setattr(
+        "marvis.agent.turn_handlers._latest_matching_strategy_sample_design_ref",
+        lambda *args, **kwargs: dict(SAMPLE_DESIGN_REF),
+    )
 
 
 @pytest.mark.parametrize(
@@ -152,6 +163,7 @@ def test_turn_binds_pool_workspace_target_and_unique_semantic_roles(
         "workspace_generation": 9,
         "semantic_mapping_hash": SEMANTIC_HASH,
         "target_col": "bad",
+        "sample_design_ref": SAMPLE_DESIGN_REF,
         "comparison_mode": "absolute",
         "drop_nan_labels": False,
         "month_col": "month",

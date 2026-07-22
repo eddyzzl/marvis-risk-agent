@@ -10,6 +10,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from marvis.app import create_app
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 class _UnivariateLLM:
@@ -67,6 +70,11 @@ def test_natural_language_univariate_candidate_analysis_runs_without_effect_gate
     )
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
+    sample_design_ref = materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
     llm = _UnivariateLLM()
     monkeypatch.setattr(
         "marvis.agent.validation_app_service.driver_llm_client",
@@ -82,14 +90,17 @@ def test_natural_language_univariate_candidate_analysis_runs_without_effect_gate
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert plans, opened.json()["messages"][-1]["content"]
     assert [plan["template_id"] for plan in plans] == [
-        "strategy_univariate_candidate_analysis"
+        "strategy_sample_design",
+        "strategy_univariate_candidate_analysis",
     ]
-    assert plans[0]["status"] == "done"
-    assert len(plans[0]["steps"]) == 1
-    assert plans[0]["steps"][0]["status"] == "done"
-    assert plans[0]["steps"][0]["needs_confirmation"] is False
+    downstream = plans[1]
+    assert downstream["status"] == "done"
+    assert len(downstream["steps"]) == 1
+    assert downstream["steps"][0]["status"] == "done"
+    assert downstream["steps"][0]["needs_confirmation"] is False
 
-    stored = client.app.state.plan_repo.load_plan(plans[0]["id"])
+    stored = client.app.state.plan_repo.load_plan(downstream["id"])
+    assert stored.steps[0].inputs["sample_design_ref"] == sample_design_ref
     output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
     assert output["validation_status"] == "unvalidated"
     assert output["available_method_count"] == 5
@@ -99,8 +110,8 @@ def test_natural_language_univariate_candidate_analysis_runs_without_effect_gate
     }
     listed = client.get(f"/api/tasks/{task_id}/task-artifacts").json()["artifacts"]
     assert {artifact["id"] for artifact in listed} == {
-        artifact["artifact_id"] for artifact in output["artifacts"]
-    }
+        sample_design_ref["artifact_id"]
+    } | {artifact["artifact_id"] for artifact in output["artifacts"]}
     assert all(
         client.get(artifact["download_url"]).status_code == 200 for artifact in listed
     )

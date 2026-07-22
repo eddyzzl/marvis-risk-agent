@@ -27,17 +27,31 @@ import pandas as pd
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.errors import DataLayerError
 from marvis.data.labels import resolve_labeled_frame
-from marvis.feature.univariate import SCHEMA_VERSION as UNIVARIATE_SCHEMA_VERSION
 from marvis.packs.strategy.candidate_evidence import MetricObservation
 from marvis.packs.strategy.candidate_fragment import (
     sample_context_hash_from_candidate_evidence,
+)
+from marvis.packs.strategy.automatic_tree_sample_design import (
+    sample_design_ref_from_automatic_tree_source_refs,
 )
 from marvis.packs.strategy.dsl import canonicalize_expression
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.evaluator import evaluate_expression_frame
 from marvis.packs.strategy.pool import validate_strategy_pool
+from marvis.packs.strategy.sample_design_binding import (
+    StrategySampleDesignExecutionBinding,
+    StrategySampleDesignRef,
+    bind_strategy_development_frame,
+    load_strategy_sample_design_execution_binding,
+    require_strategy_sample_design_execution_binding_on_connection,
+    revalidate_strategy_sample_design_execution_binding,
+)
+from marvis.packs.strategy.sample_design_tools import (
+    load_strategy_sample_design_artifact,
+)
 from marvis.packs.strategy.voting_candidate import (
     VOTING_CANDIDATE_ASSET_TYPE,
+    VOTING_CANDIDATE_ASSET_SCHEMA_VERSION,
     build_voting_candidate_asset,
     validate_voting_candidate_asset,
     verify_voting_candidate_asset_against_pool,
@@ -45,6 +59,7 @@ from marvis.packs.strategy.voting_candidate import (
 from marvis.packs.strategy.voting_candidate_fragment import (
     VOTING_CANDIDATE_ARTIFACT_KIND,
     VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+    VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION_V1,
     VOTING_CANDIDATE_ORIGIN_TOOL,
 )
 from marvis.repositories.strategy_pool import (
@@ -60,8 +75,10 @@ from marvis.repositories.task_artifacts import (
 )
 
 
-TOOL_SCHEMA_VERSION = "strategy.build-voting-candidate-tool.v1"
-VOTING_MEASUREMENT_SCHEMA_VERSION = "strategy.voting-measurement.v1"
+TOOL_SCHEMA_VERSION_V1 = "strategy.build-voting-candidate-tool.v1"
+TOOL_SCHEMA_VERSION = "strategy.build-voting-candidate-tool.v2"
+VOTING_MEASUREMENT_SCHEMA_VERSION_V1 = "strategy.voting-measurement.v1"
+VOTING_MEASUREMENT_SCHEMA_VERSION = "strategy.voting-measurement.v2"
 
 _INPUT_FIELDS = frozenset(
     {
@@ -72,7 +89,7 @@ _INPUT_FIELDS = frozenset(
         "n",
     }
 )
-_PROVENANCE_FIELDS = frozenset(
+_PROVENANCE_FIELDS_V1 = frozenset(
     {
         "schema_version",
         "producer_version",
@@ -110,8 +127,9 @@ _PROVENANCE_FIELDS = frozenset(
         "measurement_hash",
     }
 )
+_PROVENANCE_FIELDS = _PROVENANCE_FIELDS_V1 | {"sample_design_ref"}
 _DOCUMENT_FIELDS = frozenset({"schema_version", "asset", "measurement"})
-_MEASUREMENT_FIELDS = frozenset(
+_MEASUREMENT_FIELDS_V1 = frozenset(
     {
         "schema_version",
         "target_col",
@@ -124,6 +142,7 @@ _MEASUREMENT_FIELDS = frozenset(
         "measurement_hash",
     }
 )
+_MEASUREMENT_FIELDS = _MEASUREMENT_FIELDS_V1 | {"sample_design_ref"}
 _DISTRIBUTION_FIELDS = frozenset(
     {"hit_count", "count", "share", "bad_count", "bad_rate", "lift"}
 )
@@ -196,6 +215,7 @@ class _SampleBinding:
     loan_amount_col: str | None
     overdue_amount_col: str | None
     sample_context_hash: str
+    sample_design: StrategySampleDesignExecutionBinding
 
 
 def run_build_voting_candidate(inputs: object, ctx, runtime) -> dict[str, Any]:
@@ -272,6 +292,7 @@ def run_build_voting_candidate(inputs: object, ctx, runtime) -> dict[str, Any]:
             selected_entry_ids=[entry["entry_id"] for entry in selected_entries],
             n=request["n"],
             target_col=sample.target_col,
+            sample_design_ref=sample.sample_design.to_ref_dict(),
             effect=measured["effect"],
         )
         _require_voting_mask_equivalence(
@@ -284,7 +305,7 @@ def run_build_voting_candidate(inputs: object, ctx, runtime) -> dict[str, Any]:
             target_col=sample.target_col,
             drop_nan_labels=sample.drop_nan_labels,
             nan_labels_dropped=sample.nan_labels_dropped,
-            population_count=sample.row_count,
+            population_count=sample.sample_design.development_population_count,
             labeled_count=sample.labeled_row_count,
             hit_distribution=measured["hit_distribution"],
             metric_observations=measured["metric_observations"],
@@ -388,9 +409,15 @@ def build_voting_candidate_artifact_document(
     """Build the exact downloadable artifact wrapper for asset + diagnostics."""
 
     canonical_asset = validate_voting_candidate_asset(asset)
-    measurement_body = _normalize_measurement_body(
-        {
-            "schema_version": VOTING_MEASUREMENT_SCHEMA_VERSION,
+    is_current = (
+        canonical_asset["schema_version"] == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION
+    )
+    measurement_input = {
+            "schema_version": (
+                VOTING_MEASUREMENT_SCHEMA_VERSION
+                if is_current
+                else VOTING_MEASUREMENT_SCHEMA_VERSION_V1
+            ),
             "target_col": target_col,
             "drop_nan_labels": drop_nan_labels,
             "nan_labels_dropped": nan_labels_dropped,
@@ -403,7 +430,11 @@ def build_voting_candidate_artifact_document(
                 else dict(item)
                 for item in metric_observations
             ],
-        },
+        }
+    if is_current:
+        measurement_input["sample_design_ref"] = canonical_asset["sample_design_ref"]
+    measurement_body = _normalize_measurement_body(
+        measurement_input,
         asset=canonical_asset,
     )
     measurement = {
@@ -412,7 +443,11 @@ def build_voting_candidate_artifact_document(
     }
     return validate_voting_candidate_artifact_document(
         {
-            "schema_version": VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+            "schema_version": (
+                VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION
+                if is_current
+                else VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION_V1
+            ),
             "asset": canonical_asset,
             "measurement": measurement,
         }
@@ -425,13 +460,33 @@ def validate_voting_candidate_artifact_document(
     if not isinstance(value, Mapping):
         raise StrategyError("Voting candidate artifact must be an object")
     _exact_fields(value, _DOCUMENT_FIELDS, "Voting candidate artifact")
-    if value["schema_version"] != VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION:
+    artifact_schema_version = value["schema_version"]
+    if artifact_schema_version not in {
+        VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION_V1,
+        VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+    }:
         raise StrategyError("Voting candidate artifact schema_version is invalid")
     asset = validate_voting_candidate_asset(value["asset"])
+    expected_artifact_schema = (
+        VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION
+        if asset["schema_version"] == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION
+        else VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION_V1
+    )
+    if artifact_schema_version != expected_artifact_schema:
+        raise StrategyError("Voting candidate artifact and asset schemas disagree")
     measurement_raw = value["measurement"]
     if not isinstance(measurement_raw, Mapping):
         raise StrategyError("Voting candidate measurement must be an object")
-    _exact_fields(measurement_raw, _MEASUREMENT_FIELDS, "Voting measurement")
+    expected_measurement_fields = (
+        _MEASUREMENT_FIELDS
+        if artifact_schema_version == VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION
+        else _MEASUREMENT_FIELDS_V1
+    )
+    _exact_fields(
+        measurement_raw,
+        expected_measurement_fields,
+        "Voting measurement",
+    )
     body = _normalize_measurement_body(
         {key: measurement_raw[key] for key in measurement_raw if key != "measurement_hash"},
         asset=asset,
@@ -443,7 +498,7 @@ def validate_voting_candidate_artifact_document(
     if not hmac.compare_digest(supplied_hash, expected_hash):
         raise StrategyError("Voting candidate measurement_hash changed")
     return {
-        "schema_version": VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": artifact_schema_version,
         "asset": asset,
         "measurement": {**body, "measurement_hash": supplied_hash},
     }
@@ -468,8 +523,13 @@ def voting_candidate_artifact_provenance(
     if pool_ref["task_id"] != task_id:
         raise StrategyError("Voting candidate belongs to another task")
     provenance = {
-        "schema_version": VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
-        "producer_version": TOOL_SCHEMA_VERSION,
+        "schema_version": normalized["schema_version"],
+        "producer_version": (
+            TOOL_SCHEMA_VERSION
+            if normalized["schema_version"]
+            == VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION
+            else TOOL_SCHEMA_VERSION_V1
+        ),
         "task_id": task_id,
         "kind": VOTING_CANDIDATE_ARTIFACT_KIND,
         "format": "json",
@@ -505,7 +565,14 @@ def voting_candidate_artifact_provenance(
         "k": asset["voting"]["k"],
         "measurement_hash": normalized["measurement"]["measurement_hash"],
     }
-    _exact_fields(provenance, _PROVENANCE_FIELDS, "Voting artifact provenance")
+    expected_fields = (
+        _PROVENANCE_FIELDS
+        if normalized["schema_version"] == VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION
+        else _PROVENANCE_FIELDS_V1
+    )
+    if normalized["schema_version"] == VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION:
+        provenance["sample_design_ref"] = asset["sample_design_ref"]
+    _exact_fields(provenance, expected_fields, "Voting artifact provenance")
     return provenance
 
 
@@ -691,6 +758,7 @@ def _recover_sample_binding(
         "loan_amount_col",
         "overdue_amount_col",
         "sample_context_hash",
+        "sample_design",
     )
     for item in recovered[1:]:
         if any(getattr(item, field) != getattr(first, field) for field in identity_fields):
@@ -711,6 +779,12 @@ def _recover_sample_binding(
                 raise StrategyError(
                     f"selected Pool evidence identity {field} changed"
                 )
+    revalidated = revalidate_strategy_sample_design_execution_binding(
+        runtime,
+        first.sample_design,
+    )
+    if revalidated != first.sample_design:
+        raise StrategyError("Voting sample-design binding changed")
     return first
 
 
@@ -719,17 +793,18 @@ def _sample_from_lineage(runtime, lineage: Any) -> _SampleBinding:
     # avoids importing pool_tools at module import time and therefore keeps the
     # future explicit Voting adapter free of an import cycle.
     if hasattr(lineage, "evidence") and hasattr(lineage, "asset_record"):
-        return _sample_from_univariate_lineage(lineage)
+        return _sample_from_univariate_lineage(runtime, lineage)
     if hasattr(lineage, "tree") and hasattr(lineage, "selection"):
         return _sample_from_automatic_tree_lineage(runtime, lineage)
     raise StrategyError("unsupported Voting candidate source lineage")
 
 
-def _sample_from_univariate_lineage(lineage: Any) -> _SampleBinding:
+def _sample_from_univariate_lineage(runtime, lineage: Any) -> _SampleBinding:
     evidence = lineage.evidence
     dataset = lineage.dataset
     analysis = evidence["analysis"]
     parameters = evidence["generation"]["parameters"]
+    identity = evidence["identity"]
     target_col = _required_text(analysis["target"], "candidate target_col")
     if parameters.get("target_col") != target_col:
         raise StrategyError("candidate target binding is inconsistent")
@@ -752,6 +827,27 @@ def _sample_from_univariate_lineage(lineage: Any) -> _SampleBinding:
     overdue_col = _optional_column(
         parameters.get("overdue_amount_col"), "overdue_amount_col"
     )
+    sample_design = load_strategy_sample_design_execution_binding(
+        runtime,
+        task_id=str(identity["task_id"]),
+        sample_design_ref=parameters.get("sample_design_ref"),
+        dataset_id=str(identity["dataset_id"]),
+        dataset_content_hash=str(identity["dataset_content_hash"]),
+        workspace_revision=int(identity["workspace_revision"]),
+        workspace_generation=int(identity["workspace_generation"]),
+        semantic_mapping_hash=str(identity["semantic_mapping_hash"]),
+        target_col=target_col,
+        drop_nan_labels=drop_nan_labels,
+        loan_amount_col=loan_col,
+        overdue_amount_col=overdue_col,
+    )
+    if (
+        sample_design.loan_amount_col != loan_col
+        or sample_design.overdue_amount_col != overdue_col
+    ):
+        raise StrategyError(
+            "candidate amount bindings do not match governed sample design"
+        )
     return _SampleBinding(
         dataset=dataset,
         path=Path(dataset.path),
@@ -764,9 +860,10 @@ def _sample_from_univariate_lineage(lineage: Any) -> _SampleBinding:
         drop_nan_labels=drop_nan_labels,
         nan_labels_dropped=nan_labels_dropped,
         labeled_row_count=labeled_row_count,
-        loan_amount_col=loan_col,
-        overdue_amount_col=overdue_col,
+        loan_amount_col=sample_design.loan_amount_col,
+        overdue_amount_col=sample_design.overdue_amount_col,
         sample_context_hash=sample_hash,
+        sample_design=sample_design,
     )
 
 
@@ -780,45 +877,51 @@ def _sample_from_automatic_tree_lineage(runtime, lineage: Any) -> _SampleBinding
     overdue_col = _optional_column(
         training["overdue_amount_col"], "overdue_amount_col"
     )
-    # ``drop_nan_labels`` is bound into sample_context_hash but intentionally
-    # not repeated in the full-tree asset.  Recover it by replaying the only two
-    # legal contexts against the exact source dataset counts.
-    probe = lineage.dataset
-    raw_target = runtime.backend.read_frame(lineage.dataset.path, columns=[target_col])
-    numeric_target = pd.to_numeric(raw_target[target_col], errors="raise").to_numpy(
-        dtype=float
+    sample_ref = sample_design_ref_from_automatic_tree_source_refs(
+        tree["source_refs"]
     )
-    missing = int((~np.isfinite(numeric_target)).sum())
-    labeled = int(len(raw_target) - missing)
-    if labeled != int(training["row_count"]):
-        raise StrategyError("automatic-tree labeled row count changed")
-    candidates: list[bool] = []
-    for drop in (False, True):
-        if missing and not drop:
-            continue
-        candidate_hash = _automatic_tree_sample_context_hash(
-            task_id=str(identity["task_id"]),
-            dataset_id=str(identity["dataset_id"]),
-            dataset_content_hash=str(identity["dataset_content_hash"]),
-            workspace_revision=int(identity["workspace_revision"]),
-            workspace_generation=int(identity["workspace_generation"]),
-            semantic_mapping_hash=str(identity["semantic_mapping_hash"]),
-            registry_metadata_hash=str(identity["registry_metadata_hash"]),
-            target_col=target_col,
-            labeled_row_count=labeled,
-            drop_nan_labels=drop,
-            nan_labels_dropped=missing,
-            loan_amount_col=loan_col,
-            overdue_amount_col=overdue_col,
+    provenance_ref = lineage.tree.provenance.get("sample_design_ref")
+    if StrategySampleDesignRef.from_value(provenance_ref).to_ref_dict() != sample_ref:
+        raise StrategyError(
+            "automatic-tree sample-design asset and provenance bindings disagree"
         )
-        if hmac.compare_digest(candidate_hash, identity["sample_context_hash"]):
-            candidates.append(drop)
-    if len(candidates) != 1:
-        raise StrategyError("automatic-tree drop-label sample binding cannot be replayed")
-    # Keep an explicit access to the object so accidental DatasetBinding shape
-    # drift fails in this adapter instead of silently weakening provenance.
-    if probe.dataset_id != identity["dataset_id"]:
+    weight = training["sample_weight"]
+    weight_col = weight.get("column") if weight["status"] == "available" else None
+    reference = StrategySampleDesignRef.from_value(sample_ref)
+    sample_artifact = load_strategy_sample_design_artifact(
+        runtime,
+        task_id=str(identity["task_id"]),
+        artifact_id=reference.artifact_id,
+        expected_artifact_content_hash=reference.artifact_content_hash,
+        expected_sample_design_id=reference.sample_design_id,
+        expected_sample_design_content_hash=reference.sample_design_content_hash,
+    )
+    drop_nan_labels = bool(
+        sample_artifact.bundle["sample_design"]["target_definition"][
+            "drop_nan_labels"
+        ]
+    )
+    sample_design = load_strategy_sample_design_execution_binding(
+        runtime,
+        task_id=str(identity["task_id"]),
+        sample_design_ref=sample_ref,
+        dataset_id=str(identity["dataset_id"]),
+        dataset_content_hash=str(identity["dataset_content_hash"]),
+        workspace_revision=int(identity["workspace_revision"]),
+        workspace_generation=int(identity["workspace_generation"]),
+        semantic_mapping_hash=str(identity["semantic_mapping_hash"]),
+        target_col=target_col,
+        drop_nan_labels=drop_nan_labels,
+        weight_col=weight_col,
+        loan_amount_col=loan_col,
+        overdue_amount_col=overdue_col,
+    )
+    if lineage.dataset.dataset_id != identity["dataset_id"]:
         raise StrategyError("automatic-tree dataset identity changed")
+    labeled = int(training["row_count"])
+    missing = sample_design.development_population_count - labeled
+    if missing < 0 or (missing and not sample_design.drop_nan_labels):
+        raise StrategyError("automatic-tree labelled sample changed")
     return _SampleBinding(
         dataset=dataset,
         path=Path(dataset.path),
@@ -828,43 +931,14 @@ def _sample_from_automatic_tree_lineage(runtime, lineage: Any) -> _SampleBinding
         columns=tuple(dataset.columns),
         row_count=int(dataset.row_count),
         target_col=target_col,
-        drop_nan_labels=candidates[0],
+        drop_nan_labels=sample_design.drop_nan_labels,
         nan_labels_dropped=missing,
         labeled_row_count=labeled,
         loan_amount_col=loan_col,
         overdue_amount_col=overdue_col,
         sample_context_hash=str(identity["sample_context_hash"]),
+        sample_design=sample_design,
     )
-
-
-def _automatic_tree_sample_context_hash(**values: Any) -> str:
-    context = {
-        "schema_version": "strategy.sample-context.v1",
-        "identity": {
-            "task_id": values["task_id"],
-            "dataset_id": values["dataset_id"],
-            "dataset_content_hash": values["dataset_content_hash"],
-            "workspace_revision": values["workspace_revision"],
-            "workspace_generation": values["workspace_generation"],
-            "semantic_mapping_hash": values["semantic_mapping_hash"],
-        },
-        "analysis": {
-            "schema_version": UNIVARIATE_SCHEMA_VERSION,
-            "target": values["target_col"],
-            "target_definition": {"good": 0, "bad": 1},
-            "row_count": values["labeled_row_count"],
-        },
-        "sample_parameters": {
-            "analysis_schema_version": UNIVARIATE_SCHEMA_VERSION,
-            "target_col": values["target_col"],
-            "drop_nan_labels": values["drop_nan_labels"],
-            "nan_labels_dropped": values["nan_labels_dropped"],
-            "loan_amount_col": values["loan_amount_col"],
-            "overdue_amount_col": values["overdue_amount_col"],
-            "registry_metadata_hash": values["registry_metadata_hash"],
-        },
-    }
-    return _sha256(_canonical_json(context).encode())
 
 
 def _read_exact_sample_frame(
@@ -877,6 +951,8 @@ def _read_exact_sample_frame(
     for entry in entries:
         fields.update(_expression_fields(entry["execution"]["condition"]))
     fields.add(sample.target_col)
+    if sample.sample_design.split_column is not None:
+        fields.add(sample.sample_design.split_column)
     for column in (sample.loan_amount_col, sample.overdue_amount_col):
         if column is not None:
             fields.add(column)
@@ -895,7 +971,10 @@ def _read_exact_sample_frame(
         sample.dataset_content_hash,
         "Voting source dataset content hash changed",
     )
-    return frame
+    return bind_strategy_development_frame(
+        frame,
+        binding=sample.sample_design,
+    )
 
 
 def _measure_voting(
@@ -1255,6 +1334,10 @@ def _persist_voting_candidate(
                     sample.dataset_content_hash,
                     "Voting source dataset content hash changed before registration",
                 )
+                require_strategy_sample_design_execution_binding_on_connection(
+                    conn,
+                    sample.sample_design,
+                )
                 verify_voting_candidate_asset_against_pool(asset, locked_pool)
                 _require_existing_artifact_consistent(
                     conn,
@@ -1337,6 +1420,7 @@ def _tool_output(
             for entry in asset["selected_entries"]
         ],
         "dataset_id": asset["evidence_identity"]["dataset_id"],
+        "sample_design_ref": asset["sample_design_ref"],
         "target_col": asset["measurement_context"]["target_col"],
         "drop_nan_labels": measurement["drop_nan_labels"],
         "nan_labels_dropped": measurement["nan_labels_dropped"],
@@ -1397,7 +1481,6 @@ def _load_verified_voting_record(
         if raw_provenance
         else _json_object(record.get("provenance"), "registry provenance")
     )
-    _exact_fields(provenance, _PROVENANCE_FIELDS, "Voting artifact provenance")
     _verify_artifact_file(
         expected_path,
         root=Path(tasks_dir).absolute(),
@@ -1405,6 +1488,16 @@ def _load_verified_voting_record(
     )
     raw = expected_path.read_bytes()
     document = _parse_artifact_document(raw)
+    expected_provenance_fields = (
+        _PROVENANCE_FIELDS
+        if document["schema_version"] == VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION
+        else _PROVENANCE_FIELDS_V1
+    )
+    _exact_fields(
+        provenance,
+        expected_provenance_fields,
+        "Voting artifact provenance",
+    )
     canonical = canonical_voting_candidate_artifact_json(document).encode("utf-8")
     if not hmac.compare_digest(raw, canonical):
         raise StrategyError("Voting candidate artifact is not canonical JSON")
@@ -1536,10 +1629,26 @@ def _normalize_measurement_body(
     *,
     asset: Mapping[str, Any],
 ) -> dict[str, Any]:
-    expected = _MEASUREMENT_FIELDS - {"measurement_hash"}
+    is_current = asset["schema_version"] == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION
+    fields = _MEASUREMENT_FIELDS if is_current else _MEASUREMENT_FIELDS_V1
+    expected = fields - {"measurement_hash"}
     _exact_fields(value, expected, "Voting measurement body")
-    if value["schema_version"] != VOTING_MEASUREMENT_SCHEMA_VERSION:
+    expected_schema = (
+        VOTING_MEASUREMENT_SCHEMA_VERSION
+        if is_current
+        else VOTING_MEASUREMENT_SCHEMA_VERSION_V1
+    )
+    if value["schema_version"] != expected_schema:
         raise StrategyError("Voting measurement schema_version is invalid")
+    sample_design_ref = None
+    if is_current:
+        sample_design_ref = StrategySampleDesignRef.from_value(
+            value["sample_design_ref"]
+        ).to_ref_dict()
+        if sample_design_ref != asset["sample_design_ref"]:
+            raise StrategyError(
+                "Voting measurement sample_design_ref does not match asset"
+            )
     target_col = _required_text(value["target_col"], "measurement target_col")
     if target_col != asset["measurement_context"]["target_col"]:
         raise StrategyError("Voting measurement target_col does not match asset")
@@ -1587,8 +1696,8 @@ def _normalize_measurement_body(
         effect=effect,
         distribution=distribution,
     )
-    return {
-        "schema_version": VOTING_MEASUREMENT_SCHEMA_VERSION,
+    result = {
+        "schema_version": expected_schema,
         "target_col": target_col,
         "drop_nan_labels": drop_nan_labels,
         "nan_labels_dropped": nan_labels_dropped,
@@ -1597,6 +1706,9 @@ def _normalize_measurement_body(
         "hit_distribution": distribution,
         "metric_observations": observations,
     }
+    if sample_design_ref is not None:
+        result["sample_design_ref"] = sample_design_ref
+    return result
 
 
 def _normalize_distribution(

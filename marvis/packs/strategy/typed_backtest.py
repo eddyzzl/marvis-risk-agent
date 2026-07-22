@@ -24,6 +24,7 @@ from marvis.packs.strategy.economics import (
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.evaluator import evaluate_strategy_frame
 from marvis.packs.strategy.profit import ProfitParams
+from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
 
 
 STRATEGY_BACKTEST_SCHEMA_VERSION = "strategy.backtest.v2"
@@ -319,6 +320,7 @@ _NORMALIZED_INPUT_KEYS = {
     "economics_input_evidence",
     "approval_profit_input",
 }
+_OPTIONAL_NORMALIZED_INPUT_KEYS = {"sample_design_ref"}
 _LIMIT_ECONOMICS_INPUT_KEYS = {"pd", "lgd", "utilization"}
 _PRICING_ECONOMICS_INPUT_KEYS = {
     "ead",
@@ -344,7 +346,12 @@ def _validate_backtest_semantics(result: StrategyBacktestResult) -> None:
 
 def _validate_normalized_input(result: StrategyBacktestResult) -> None:
     normalized = result.normalized_input
-    _require_exact_keys(normalized, _NORMALIZED_INPUT_KEYS, name="normalized_input")
+    expected_keys = (
+        _NORMALIZED_INPUT_KEYS | _OPTIONAL_NORMALIZED_INPUT_KEYS
+        if "sample_design_ref" in normalized
+        else _NORMALIZED_INPUT_KEYS
+    )
+    _require_exact_keys(normalized, expected_keys, name="normalized_input")
     if normalized["strategy_schema_version"] != STRATEGY_DSL_SCHEMA_VERSION:
         raise StrategyError("normalized_input.strategy_schema_version is unsupported")
     _require_sha256(
@@ -360,8 +367,13 @@ def _validate_normalized_input(result: StrategyBacktestResult) -> None:
     target_col = normalized["target_col"]
     if not isinstance(target_col, str) or not target_col.strip():
         raise StrategyError("normalized_input.target_col must be a non-empty string")
-    if normalized["target_encoding"] != {"bad": 1, "good": 0}:
+    if normalized["target_encoding"] not in (
+        {"bad": 1, "good": 0},
+        {"bad": 0, "good": 1},
+    ):
         raise StrategyError("normalized_input.target_encoding is unsupported")
+    if "sample_design_ref" in normalized:
+        StrategySampleDesignRef.from_value(normalized["sample_design_ref"])
     expected_literals = {
         "missing_label_policy": "exclude_from_label_metrics",
         "population_rate_denominator": "population_count",
@@ -1419,6 +1431,8 @@ def run_typed_backtest(
     spec: StrategySpec | Mapping[str, Any],
     *,
     target_col: str,
+    target_bad_value: int = 1,
+    sample_design_ref: Mapping[str, Any] | None = None,
     strategy_id: str | None = None,
     baseline: StrategySpec | Mapping[str, Any] | None = None,
     economics: Mapping[str, Any] | None = None,
@@ -1471,7 +1485,11 @@ def run_typed_backtest(
         raise StrategyError(
             "approval_profit_inputs is only supported for approval/reject strategies"
         )
-    target = _normalized_target(frame, target_col)
+    target = _normalized_target(
+        frame,
+        target_col,
+        target_bad_value=target_bad_value,
+    )
     evaluation = evaluate_strategy_frame(frame, parsed)
     baseline_evaluation = (
         None
@@ -1587,7 +1605,10 @@ def run_typed_backtest(
         "strategy_effect_hash": effect_hash,
         "baseline_effect_hash": baseline_hash,
         "target_col": target_col,
-        "target_encoding": {"good": 0, "bad": 1},
+        "target_encoding": {
+            "good": 1 - target_bad_value,
+            "bad": target_bad_value,
+        },
         "missing_label_policy": "exclude_from_label_metrics",
         "population_rate_denominator": "population_count",
         "bad_rate_denominator": "labeled_group_count",
@@ -1601,6 +1622,10 @@ def run_typed_backtest(
             approval_profit_inputs
         ),
     }
+    if sample_design_ref is not None:
+        normalized_input["sample_design_ref"] = (
+            StrategySampleDesignRef.from_value(sample_design_ref).to_ref_dict()
+        )
     return StrategyBacktestResult(
         strategy_id=resolved_strategy_id,
         strategy_type=parsed.strategy_type,
@@ -1621,7 +1646,12 @@ def _assert_count(value: object, *, name: str) -> None:
         raise StrategyError(f"{name} must be a non-negative integer")
 
 
-def _normalized_target(frame: pd.DataFrame, target_col: str) -> pd.Series:
+def _normalized_target(
+    frame: pd.DataFrame,
+    target_col: str,
+    *,
+    target_bad_value: int,
+) -> pd.Series:
     if target_col not in frame.columns:
         raise StrategyError(f"missing columns: {target_col}")
     raw = frame[target_col]
@@ -1631,9 +1661,19 @@ def _normalized_target(frame: pd.DataFrame, target_col: str) -> pd.Series:
     missing = raw.isna()
     numeric = pd.to_numeric(raw, errors="coerce")
     invalid = (~missing) & numeric.isna()
+    if (
+        isinstance(target_bad_value, bool)
+        or not isinstance(target_bad_value, Integral)
+        or int(target_bad_value) not in {0, 1}
+    ):
+        raise StrategyError("target_bad_value must be integer 0 or 1")
+    target_bad_value = int(target_bad_value)
     if bool(invalid.any()) or bool((~numeric.loc[~missing].isin([0, 1])).any()):
         raise StrategyError("target must contain only 0, 1, or missing")
-    return numeric.astype(float)
+    normalized = numeric.astype(float)
+    labeled = ~missing
+    normalized.loc[labeled] = normalized.loc[labeled].eq(target_bad_value).astype(float)
+    return normalized
 
 
 def _normalized_actions(action_types: pd.Series) -> pd.Series:

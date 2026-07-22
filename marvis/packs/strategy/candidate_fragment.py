@@ -27,6 +27,7 @@ from marvis.packs.strategy.candidate_asset import validate_candidate_asset
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
 from marvis.packs.strategy.dsl import canonicalize_expression
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
 
 
 VERIFIED_CANDIDATE_FRAGMENT_SCHEMA_VERSION = (
@@ -215,12 +216,9 @@ def sample_context_hash_from_candidate_evidence(
 ) -> str:
     """Bind the exact labelled sample context without binding feature/bin choices.
 
-    The current univariate evidence contract does not yet expose a first-class
-    sample object.  This projection therefore binds the immutable dataset and
-    workspace identity, label definition, labelled row count, and row-selection
-    parameters while deliberately excluding features, binning, methods, and
-    weighting choices.  Future candidate adapters may provide the same canonical
-    identity from their own evidence contracts.
+    The projection binds the immutable StrategySampleDesign reference together
+    with dataset/workspace identity, label definition, labelled row count, and
+    row-selection parameters while deliberately excluding feature/bin choices.
     """
 
     try:
@@ -236,6 +234,14 @@ def sample_context_hash_from_candidate_evidence(
         raise CandidateFragmentError(
             "univariate evidence lacks a complete sample context"
         )
+    try:
+        sample_design_ref = StrategySampleDesignRef.from_value(
+            generation.get("sample_design_ref")
+        ).to_ref_dict()
+    except StrategyError as exc:
+        raise CandidateFragmentError(
+            "univariate evidence lacks a valid sample_design_ref"
+        ) from exc
     sample_parameters = {
         key: generation.get(key)
         for key in (
@@ -249,6 +255,7 @@ def sample_context_hash_from_candidate_evidence(
         )
         if key in generation
     }
+    sample_parameters["sample_design_ref"] = sample_design_ref
     context = {
         "schema_version": "strategy.sample-context.v1",
         "identity": evidence["identity"],

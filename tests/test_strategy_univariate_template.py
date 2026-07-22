@@ -18,6 +18,7 @@ def test_univariate_candidate_analysis_is_one_governed_builtin_step():
         "expected_content_hash",
         "semantic_mapping_hash",
         "target_col",
+        "sample_design_ref",
         "bin_count",
         "min_bin_pct",
     }

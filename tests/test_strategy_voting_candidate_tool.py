@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 
@@ -18,6 +19,13 @@ from marvis.db import DatasetRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.packs.strategy import pool_tools
 from marvis.packs.strategy import tools as strategy_tools
+from marvis.packs.strategy import voting_candidate as voting_candidate_domain
+from marvis.packs.strategy.automatic_tree_leaf_fragment import (
+    AUTOMATIC_TREE_ASSET_ARTIFACT_KIND,
+)
+from marvis.packs.strategy.automatic_tree_sample_design import (
+    sample_design_ref_from_automatic_tree_source_refs,
+)
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.dsl import parse_strategy_spec
 from marvis.packs.strategy.evaluator import evaluate_strategy_frame
@@ -27,17 +35,23 @@ from marvis.packs.strategy.pool_tools import (
     run_compile_strategy_pool,
     run_reorder_strategy_pool,
 )
-from marvis.packs.strategy.voting_candidate import build_voting_candidate_asset
+from marvis.packs.strategy.voting_candidate import (
+    VOTING_CANDIDATE_ASSET_PRODUCER_VERSION_V1,
+    VOTING_CANDIDATE_ASSET_SCHEMA_VERSION_V1,
+    build_voting_candidate_asset,
+)
 from marvis.packs.strategy.voting_candidate_tools import (
     TOOL_SCHEMA_VERSION,
     VOTING_CANDIDATE_ARTIFACT_KIND,
     VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+    VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION_V1,
     VOTING_CANDIDATE_ORIGIN_TOOL,
     build_voting_candidate_artifact_document,
     canonical_voting_candidate_artifact_json,
     canonical_voting_candidate_path,
     load_verified_voting_candidate_artifact,
     run_build_voting_candidate,
+    voting_candidate_artifact_provenance,
 )
 from marvis.plugins.contracts import ToolContext
 from marvis.repositories.data_workspace import DataWorkspaceRepository
@@ -134,6 +148,34 @@ def _setup(tmp_path: Path) -> dict:
         workspace=settings.workspace,
     )
     runtime = strategy_tools._runtime(ctx)
+    sample = strategy_tools.tool_materialize_sample_design(
+        {
+            "dataset_id": dataset.id,
+            "expected_dataset_content_hash": dataset.content_hash,
+            "workspace_revision": workspace.revision,
+            "workspace_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+            "target_col": "bad",
+            "target_bad_value": 1,
+            "performance_window_status": "provided",
+            "performance_window_days": 90,
+            "observation_window_status": "provided",
+            "observation_window_start": "2025-01-01",
+            "observation_window_end": "2025-12-31",
+            "maturity_status": "confirmed_matured",
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+            "drop_nan_labels": False,
+        },
+        ctx,
+    )
+    sample_design_ref = {
+        "artifact_id": sample["artifact"]["artifact_id"],
+        "artifact_content_hash": sample["artifact"]["content_hash"],
+        "sample_design_id": sample["sample_design_id"],
+        "sample_design_content_hash": sample["content_hash"],
+        "partition": "development",
+    }
     analyzed = strategy_tools.tool_analyze_univariate_candidates(
         {
             "dataset_id": dataset.id,
@@ -142,6 +184,7 @@ def _setup(tmp_path: Path) -> dict:
             "analysis_generation": workspace.analysis_generation,
             "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
             "target_col": "bad",
+            "sample_design_ref": sample_design_ref,
             "features": ["score"],
             "methods": ["equal_width"],
             "bin_count": 3,
@@ -212,9 +255,13 @@ def _setup(tmp_path: Path) -> dict:
         "task": task,
         "ctx": ctx,
         "runtime": runtime,
+        "dataset": dataset,
+        "workspace": workspace,
+        "mapping": mapping,
         "pool": pool,
         "inputs": inputs,
         "frame": frame,
+        "sample_design_ref": sample_design_ref,
     }
 
 
@@ -251,6 +298,7 @@ def test_build_voting_candidate_replays_pool_measures_and_persists_exactly(
     assert record["provenance"]["schema_version"] == (
         VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION
     )
+    assert record["provenance"]["sample_design_ref"] == fx["sample_design_ref"]
     expected_path = canonical_voting_candidate_path(
         fx["settings"].tasks_dir,
         task_id=fx["task"].id,
@@ -258,6 +306,13 @@ def test_build_voting_candidate_replays_pool_measures_and_persists_exactly(
     )
     assert Path(record["path"]) == expected_path
     document = json.loads(expected_path.read_text("utf-8"))
+    assert document["asset"]["sample_design_ref"] == fx["sample_design_ref"]
+    assert document["asset"]["candidate_evidence"]["sample_design_ref"] == fx[
+        "sample_design_ref"
+    ]
+    assert document["measurement"]["sample_design_ref"] == fx[
+        "sample_design_ref"
+    ]
     assert expected_path.read_text("utf-8") == canonical_voting_candidate_artifact_json(
         document
     )
@@ -614,6 +669,7 @@ def test_voting_artifact_cross_checks_distribution_metrics_and_drop_contract(
         selected_entry_ids=fx["inputs"]["selected_entry_ids"],
         n=fx["inputs"]["n"],
         target_col="bad",
+        sample_design_ref=fx["sample_design_ref"],
         effect=effect_body,
     )
     with pytest.raises(StrategyError, match="cannot drop labels"):
@@ -712,3 +768,236 @@ def test_build_voting_candidate_rejects_injected_results_stale_cas_and_tamper(
         fx["task"].id, "approval"
     )
     assert current == fx["pool"]
+
+
+def test_mixed_univariate_and_automatic_tree_voting_propagates_sample_design_to_impact(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    tree = strategy_tools.tool_build_automatic_tree_candidate(
+        {
+            "dataset_id": fx["dataset"].id,
+            "expected_content_hash": fx["dataset"].content_hash,
+            "workspace_revision": fx["workspace"].revision,
+            "analysis_generation": fx["workspace"].analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(fx["mapping"]),
+            "target_col": "bad",
+            "sample_design_ref": fx["sample_design_ref"],
+            "features": ["score"],
+            "directions": {"score": "increasing"},
+            "max_depth": 2,
+            "min_leaf_count": 2,
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+            "budgets": {
+                "max_rows": 100,
+                "max_features": 5,
+                "max_cells": 500,
+                "max_nodes": 31,
+                "max_cutpoint_evaluations": 1000,
+            },
+        },
+        fx["ctx"],
+    )
+    source = next(
+        item
+        for item in tree["artifacts"]
+        if item["kind"] == AUTOMATIC_TREE_ASSET_ARTIFACT_KIND
+    )
+    selected_leaf = tree["leaf_index"][0]
+    leaf = strategy_tools.tool_materialize_automatic_tree_leaf_fragment(
+        {
+            "source_artifact_id": source["artifact_id"],
+            "expected_artifact_content_hash": source["content_hash"],
+            "expected_asset_id": tree["summary"]["asset_id"],
+            "expected_asset_hash": tree["summary"]["asset_hash"],
+            "expected_tree_result_hash": tree["summary"]["tree_result_hash"],
+            "leaf_id": selected_leaf["leaf_id"],
+        },
+        fx["ctx"],
+    )
+    leaf_artifact = leaf["artifacts"][0]
+    extended = run_add_candidate_to_pool(
+        {
+            "source_artifact_id": leaf_artifact["artifact_id"],
+            "expected_artifact_content_hash": leaf_artifact["content_hash"],
+            "expected_asset_id": leaf["tree_asset_id"],
+            "expected_asset_hash": leaf["tree_asset_hash"],
+            "strategy_type": "approval",
+            "default_action": _action("approval"),
+            "action": _action("reject", "TREE_RISK"),
+            "expected_pool_revision": fx["pool"]["revision"],
+            "expected_pool_snapshot_hash": fx["pool"]["snapshot_hash"],
+        },
+        fx["ctx"],
+        fx["runtime"],
+    )
+    selected_ids = [
+        extended["entries"][0]["entry_id"],
+        extended["entries"][-1]["entry_id"],
+    ]
+    voting = run_build_voting_candidate(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": extended["revision"],
+            "expected_pool_snapshot_hash": extended["snapshot_hash"],
+            "selected_entry_ids": selected_ids,
+            "n": 1,
+        },
+        fx["ctx"],
+        fx["runtime"],
+    )
+
+    assert voting["sample_design_ref"] == fx["sample_design_ref"]
+    [descriptor] = voting["artifacts"]
+    replaced = run_add_candidate_to_pool(
+        {
+            "source_artifact_id": descriptor["artifact_id"],
+            "expected_artifact_content_hash": descriptor["content_hash"],
+            "expected_asset_id": voting["asset_id"],
+            "expected_asset_hash": voting["asset_hash"],
+            "strategy_type": "approval",
+            "default_action": _action("approval"),
+            "action": _action("review", "MIXED_VOTING"),
+            "expected_pool_revision": extended["revision"],
+            "expected_pool_snapshot_hash": extended["snapshot_hash"],
+            "placement_mode": "replace_selected_members",
+        },
+        fx["ctx"],
+        fx["runtime"],
+    )
+    identity = extended["entries"][0]["source"]["evidence_identity"]
+    impact = strategy_tools.tool_measure_pool_impact(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": replaced["revision"],
+            "expected_pool_snapshot_hash": replaced["snapshot_hash"],
+            "dataset_id": identity["dataset_id"],
+            "expected_dataset_content_hash": identity["dataset_content_hash"],
+            "workspace_revision": identity["workspace_revision"],
+            "workspace_generation": identity["workspace_generation"],
+            "semantic_mapping_hash": identity["semantic_mapping_hash"],
+            "target_col": "bad",
+            "sample_design_ref": fx["sample_design_ref"],
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+            "comparison_mode": "absolute",
+            "drop_nan_labels": False,
+        },
+        fx["ctx"],
+    )
+    assert impact["assessment"]["bindings"]["sample_design_ref"] == fx[
+        "sample_design_ref"
+    ]
+
+
+@pytest.mark.parametrize(
+    "source_refs",
+    [
+        [],
+        ["strategy-sample-design:not-json"],
+        [
+            "strategy-sample-design:"
+            + json.dumps(
+                {
+                    "kind": "strategy_sample_design",
+                    "artifact_id": "1" * 64,
+                    "artifact_content_hash": "2" * 64,
+                    "sample_design_id": "sample-design-duplicate",
+                    "sample_design_content_hash": "3" * 64,
+                    "partition": "development",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        ]
+        * 2,
+    ],
+)
+def test_voting_rejects_missing_malformed_or_duplicate_tree_sample_refs(
+    source_refs: list[str],
+) -> None:
+    with pytest.raises(StrategyError, match="sample-design"):
+        sample_design_ref_from_automatic_tree_source_refs(source_refs)
+
+
+def test_legacy_v1_voting_artifact_remains_strictly_loadable(tmp_path: Path) -> None:
+    fx = _setup(tmp_path)
+    current = run_build_voting_candidate(fx["inputs"], fx["ctx"], fx["runtime"])
+    effect_body = {
+        key: current["effect"][key]
+        for key in (
+            "population_count",
+            "labeled_count",
+            "matched_count",
+            "matched_rate",
+            "matched_bad_count",
+            "matched_bad_rate",
+            "unmatched_count",
+            "unmatched_bad_count",
+            "unmatched_bad_rate",
+            "bad_capture_rate",
+            "lift",
+        )
+    }
+    legacy_asset = voting_candidate_domain._build_voting_candidate_asset(
+        fx["pool"],
+        selected_entry_ids=fx["inputs"]["selected_entry_ids"],
+        n=fx["inputs"]["n"],
+        target_col="bad",
+        sample_design_ref=None,
+        effect=effect_body,
+        producer_version=VOTING_CANDIDATE_ASSET_PRODUCER_VERSION_V1,
+        schema_version=VOTING_CANDIDATE_ASSET_SCHEMA_VERSION_V1,
+    )
+    document = build_voting_candidate_artifact_document(
+        legacy_asset,
+        target_col="bad",
+        drop_nan_labels=False,
+        nan_labels_dropped=0,
+        population_count=current["population_count"],
+        labeled_count=current["labeled_count"],
+        hit_distribution=current["hit_distribution"],
+        metric_observations=current["metric_observations"],
+    )
+    assert document["schema_version"] == VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION_V1
+    assert "sample_design_ref" not in document["asset"]
+    assert "sample_design_ref" not in document["measurement"]
+
+    canonical = canonical_voting_candidate_artifact_json(document).encode("utf-8")
+    path = canonical_voting_candidate_path(
+        fx["settings"].tasks_dir,
+        task_id=fx["task"].id,
+        asset_id=legacy_asset["asset_id"],
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(canonical)
+    pool_artifact = pool_tools._load_pool_artifact(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        snapshot=fx["pool"],
+    )
+    provenance = voting_candidate_artifact_provenance(
+        document,
+        task_id=fx["task"].id,
+        pool_artifact=pool_artifact,
+    )
+    assert provenance["schema_version"] == VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION_V1
+    assert "sample_design_ref" not in provenance
+    record = fx["runtime"].task_artifacts.register(
+        task_id=fx["task"].id,
+        kind=VOTING_CANDIDATE_ARTIFACT_KIND,
+        path=str(path),
+        content_hash=hashlib.sha256(canonical).hexdigest(),
+        origin_tool=VOTING_CANDIDATE_ORIGIN_TOOL,
+        provenance=provenance,
+    )
+    loaded = load_verified_voting_candidate_artifact(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        artifact_id=record["id"],
+        expected_content_hash=record["content_hash"],
+        expected_asset_id=legacy_asset["asset_id"],
+        expected_asset_hash=legacy_asset["asset_hash"],
+    )
+    assert loaded.asset == legacy_asset

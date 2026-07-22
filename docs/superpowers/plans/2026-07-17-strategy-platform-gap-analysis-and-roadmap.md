@@ -488,7 +488,11 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **报告级描述分析纵切（已完成）**：新增自然语言可达的 `dataset_descriptive_analysis` Workflow 和 `data_ops.profile_dataset`，对活动数据集做全量、确定性的概览、target、缺失、低基数频数/Top-K、高基数等宽直方图及完整 Pearson 相关矩阵；支持显式字段范围和资源预算，超限或不可安全表示时给出类型化原因，不静默截断或把不可用相关性伪装成 0。超出 JavaScript 安全整数范围的值以无损 `bigint` 字符串输出，高精度数值若无法安全进入 DOUBLE 指标则显式 unavailable。分析绑定 task、dataset hash、workspace revision、analysis generation 和 semantic mapping hash；敏感字段按数据集推断与用户语义的并集做稳定 token，并抑制数值分布和相关性。Agent 可用自然语言直接选择分析范围并展示确定性表格；手动 API 提供异步 job、显式 retry、page-only revision 缓存复用、不可变 JSON artifact 和 task-scoped 下载，数据/语义漂移、artifact/job 冒充、进程中断后的失联 job 均失败关闭并可审计恢复。
 
-**受治理变换与导出纵切（已完成）**：新增自然语言可达的 `dataset_transform` 和 `dataset_export` Workflow。变换只接受 rename/drop/cast/fill/filter/derive/dedup 的封闭 AST，不执行任意 SQL/Python；每次执行生成新 Parquet 数据集、版本化 transform run、逐边 lineage 和 task-owned JSON evidence，并以 dataset/hash、workspace revision、analysis generation、semantic hash 和规范化输入做缓存身份。字段语义随 rename/drop/cast 确定性迁移，registry 已识别但尚未写入 workspace 的 target 也纳入有效语义；删除 target、ID、手机号等受保护字段必须在 Agent 对话中绑定原请求二次确认，确认期间数据或语义漂移即失效。CSV/XLSX 导出流式读取活动数据集，自动保护敏感文本列、长整数/高精度数值和公式注入，CSV 使用 UTF-8 BOM，XLSX 固定文档与 ZIP 元数据以获得稳定内容 hash；导出 artifact 同样绑定完整数据身份、事务内复核、文件 hash、task 路径和下载权限，并拒绝 symlink 跳转。SQL connector、隔离自定义派生、风险方向、版本化 `MetricDefinition/MetricObservation`、`CurrentProjectSnapshot`、`StrategySampleDesign` 和外部历史资料映射仍是本 Phase 后续交付，不能据此把 Phase 2 整体标为完成。
+**受治理变换与导出纵切（已完成）**：新增自然语言可达的 `dataset_transform` 和 `dataset_export` Workflow。变换只接受 rename/drop/cast/fill/filter/derive/dedup 的封闭 AST，不执行任意 SQL/Python；每次执行生成新 Parquet 数据集、版本化 transform run、逐边 lineage 和 task-owned JSON evidence，并以 dataset/hash、workspace revision、analysis generation、semantic hash 和规范化输入做缓存身份。字段语义随 rename/drop/cast 确定性迁移，registry 已识别但尚未写入 workspace 的 target 也纳入有效语义；删除 target、ID、手机号等受保护字段必须在 Agent 对话中绑定原请求二次确认，确认期间数据或语义漂移即失效。CSV/XLSX 导出流式读取活动数据集，自动保护敏感文本列、长整数/高精度数值和公式注入，CSV 使用 UTF-8 BOM，XLSX 固定文档与 ZIP 元数据以获得稳定内容 hash；导出 artifact 同样绑定完整数据身份、事务内复核、文件 hash、task 路径和下载权限，并拒绝 symlink 跳转。SQL connector、隔离自定义派生、风险方向、`CurrentProjectSnapshot` 和外部历史资料映射仍是本 Phase 后续交付，不能据此把 Phase 2 整体标为完成。
+
+**`StrategySampleDesign` 与下游强绑定纵切（已完成，2026-07-22）**：用户可通过自然语言把活动 DataWorkspace、dataset/hash、明确的二元目标与 `target_bad_value=0|1`、表现窗/观察窗/成熟度、可选 development/validation/OOT 切分，以及可选月、权重、放款金额、逾期金额字段，固化为不可变、task-owned 的样本设计和版本化 `MetricDefinition`/`MetricObservation`。风险指标依赖已成熟样本；空标签只有经明确同意才从风险分母排除，未成熟设计保持 `exploration_only / unvalidated`，不能进入策略开发主链。
+
+下游单变量、automatic tree、Voting、Cross/refinement lineage、既有 candidate/tradeoff/bands/rule 工具、typed V2 Workflow backtest 和 Pool impact 现在统一要求精确的成熟 development `StrategySampleDesignRef`，其规范字段为 artifact id/hash、sample design id/hash 与 `partition=development`。平台解析并复核同一 task、活动 dataset/hash、workspace revision/generation、semantic mapping、target 与空标签策略，在落盘前再次检查漂移；`target_bad_value=0` 由确定性内核归一为同一坏样本语义。旧的未绑定 active plan 不得继续用于这些 V2 路径，必须 fail closed。底层 direct `backtest_strategy` 仍为既有 V1/外部调用保留未绑定兼容边界，但所有 V2 策略开发 Workflow 都必须解析并注入该 ref，不能借兼容入口跳过样本设计。当前样本设计仍把同一上游数据边界同时用于风险与通过率观测；风险/通过率双样本、渠道/客群纳排、历史回溯打分、泄漏/选择偏差检测、`CurrentProjectSnapshot` 和历史资料映射仍是 V2 Phase 2 待办；独立 OOT、七步最终报告和统一 Strategy Workbench 也仍分别按 Phase 4-6 继续开发，未因本纵切完成而提前标记完成。
 
 交付：
 
@@ -517,6 +521,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 **目标**：完整覆盖单规则、自动树、交互树、标准评分卡、voting 和 cross 分析，而不是只提供高层搜索内核。
 
 **报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 只产出 report-ready candidate evidence，不在报告层复制算法。
+
+**统一样本 lineage 与 automatic-tree apply 纵切（已完成，2026-07-22）**：单变量 evidence、候选选择/合并、Cross、automatic tree、Voting 及其 Pool lineage 都沿 Phase 2 的同一精确 `StrategySampleDesignRef` 传播，混用不同样本设计、旧未绑定候选或漂移后的活动计划时失败关闭。完整 automatic-tree asset 已支持自然语言触发的确定性逐行 apply；产出是带 lineage 的非活动派生数据集，状态保持 `development / unvalidated`，不会因 apply 自动入 Pool、采纳或部署。该纵切没有完成交互树、评分卡、Voting 自动搜索、Cross 自动搜索、逐月稳定性、代码生成或列写回。
 
 **单变量候选分析首个纵切（已完成，2026-07-19）**：新增自然语言可达的 `strategy_univariate_candidate_analysis` Workflow 和 `strategy.analyze_univariate_candidates`。数值字段可按等频、等距、ChiMerge 和受约束决策树分箱，类别字段使用类型保持的等值箱；统一输出缺失/哨兵箱、左闭右开 DSL 条件、count/good/bad、占比、坏率、WOE、IV、Lift、累计 KS、方法级 KS/AUC、风险方向，以及放款金额、逾期金额和配对逾期率口径。执行绑定确认时的 task、dataset/hash、workspace revision、analysis generation 和 semantic mapping hash，计算后在事务内再次复核；敏感/标识字段不会进入候选，资源超限和不可用方法显式失败或记录 typed evidence，不静默换方法。结果固化为自认证 `CandidateEvidence`，明确 `development/unvalidated`，并生成字节稳定、公式安全、task-owned 的 JSON/XLSX（Summary、Rankings、Bins、Metrics、Red Flags、Lineage）供下载和后续七步报告组装。该纵切尚不等于 Phase 3 完成；后续完成情况以下方纵切状态为准，Strategy Pool 入池、逐月稳定性、树、评分卡、Voting、Cross、代码生成与列写回仍按本 Phase 继续交付。
 
@@ -554,7 +560,7 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 实现七步报告组装和主报告 artifact，但报告失败不能回滚已完成的策略 evidence。
 
-**approval/reject Pool 影响测算首纵切（已完成，2026-07-19）**：新增自然语言可达的 `strategy_pool_impact` Workflow 和 `strategy.measure_pool_impact`。用户只需说明要测算的 approval/reject Pool、可选基线及可选精确月份/金额列；Pool revision/hash、活动 dataset/hash、workspace revision/generation、确认 target 和 semantic mapping hash 均由平台绑定，不接受 LLM 注入。Tool 在同一绑定样本上重放 canonical first-match StrategySpec，输出总体动作/风险、每条规则 standalone/incremental/shadowed/remaining、默认未命中、标签覆盖、可用放款/逾期/配对金额观测、可选逐月及同任务同类型基线件数、风险和金额 delta；逐月件数、标签、风险、金额、动作与规则 incremental 均须回卷总体。结果以 canonical、内容寻址的 `strategy.impact-assessment.v1` JSON 和通用 TaskArtifact registry hash 双层固化，计算后在写入事务内再次复核 Pool/candidate lineage、dataset registry/path/bytes、DataWorkspace 与 baseline；空标签未确认、任何漂移或守恒失败都不落盘。artifact 内 hash 用于与可信 expected hash 对账，不是数字签名；脱离原始 frame/spec 的离线 validator 只证明 schema、派生字段和内部守恒，消费持久化 evidence 时必须先核对 TaskArtifact registry 中的 content hash，不能把任意重写后再哈希的 JSON 当成平台 provenance。该纵切只产生 `development / backtested / unvalidated` 证据，不创建、修改、采纳或部署策略。它不是 Phase 4 完成：limit/pricing/segmentation 专属影响语义、分群/分群×月、swap、OOT、代码与列写回，以及七步 Excel/JSON/Markdown Report Bundle 仍须继续交付。
+**approval/reject Pool 影响测算首纵切（已完成，2026-07-19；样本强绑定于 2026-07-22 补齐）**：新增自然语言可达的 `strategy_pool_impact` Workflow 和 `strategy.measure_pool_impact`。用户只需说明要测算的 approval/reject Pool、可选基线及可选精确月份/金额列；Pool revision/hash、候选 lineage、精确且成熟的 development `StrategySampleDesignRef`、活动 dataset/hash、workspace revision/generation、确认 target 和 semantic mapping hash 均由平台绑定，不接受 LLM 注入。Tool 按样本设计的 `target_bad_value` 在同一 development 样本上重放 canonical first-match StrategySpec，输出总体动作/风险、每条规则 standalone/incremental/shadowed/remaining、默认未命中、标签覆盖、可用放款/逾期/配对金额观测、可选逐月及同任务同类型基线件数、风险和金额 delta；逐月件数、标签、风险、金额、动作与规则 incremental 均须回卷总体。结果以 canonical、内容寻址的 `strategy.impact-assessment.v2` JSON 和通用 TaskArtifact registry hash 双层固化，计算后在写入事务内再次复核 Sample Design、Pool/candidate lineage、dataset registry/path/bytes、DataWorkspace 与 baseline；空标签未确认、旧未绑定 active plan、任何漂移或守恒失败都不落盘。artifact 内 hash 用于与可信 expected hash 对账，不是数字签名；脱离原始 frame/spec 的离线 validator 只证明 schema、派生字段和内部守恒，消费持久化 evidence 时必须先核对 TaskArtifact registry 中的 content hash，不能把任意重写后再哈希的 JSON 当成平台 provenance。该纵切只产生 `development / backtested / unvalidated` 证据，不创建、修改、采纳或部署策略。它不是 Phase 4 完成：limit/pricing/segmentation 专属影响语义、分群/分群×月、swap、OOT、代码与列写回，以及七步 Excel/JSON/Markdown Report Bundle 仍须继续交付。
 
 交付：
 
@@ -732,24 +738,24 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 28. 受控填充、删列、转换、派生、过滤、重命名和历史；
 29. 隔离自定义派生 Tool 与资源/权限护栏；
 30. 字段语义、中英文/节点映射和风险方向；
-31. 描述统计、相关矩阵、分布、当前项目快照、历史资料映射和 `MetricDefinition/MetricObservation` 数据导出。
+31. 描述统计、相关矩阵、分布、当前项目快照、历史资料映射和 `MetricDefinition/MetricObservation` 数据导出（描述分析、`StrategySampleDesign`、版本化指标及其下游成熟 development 强绑定已完成；风险/通过率双样本、纳排/泄漏检测、`CurrentProjectSnapshot` 与历史资料映射待续）。
 
 ### Phase 3：Candidate Lab
 
 32. 单规则四分箱、类别箱、全指标和选箱入池（确定性分析、证据与 JSON/XLSX、证据绑定的选箱/合并、不可变候选资产及其 Strategy Pool 入池已完成；候选级逐月稳定性待续）；
-33. 加权自动规则树、方向检查、树图和写回；
+33. 加权自动规则树、方向检查、树图和写回（受限完整树、叶选择/入池及自然语言 full-tree apply 已完成；交互展示、代码和列写回待续）；
 34. 交互树节点/候选/手工分裂内核；
 35. 交互树删节点、自动续建、可视化、代码和入池；
 36. 标准 WOE-LR 评分卡 Workbench；
-37. voting 候选、自定义规则、受预算组合和 n-of-k；
-38. 2D/3D 自动 cross rules 与 2D matrix/cell；
+37. voting 候选、自定义规则、受预算组合和 n-of-k（显式 n-of-k 候选、同样本 lineage 及受治理入池已完成；自动搜索、自定义编辑、代码和列写回待续）；
+38. 2D/3D 自动 cross rules 与 2D matrix/cell（2D matrix、显式 cell group、同样本 lineage 及入池已完成；人工切点、自动搜索、代码和列写回待续）；
 39. Candidate artifact、代码、写回列和 report-ready evidence 统一到 DSL。
 
 ### Phase 4：Strategy Pool、回测与交付
 
 40. 稳定 rule id、pool CRUD 和完整 reorder（Agent 自然语言纵切已完成，Workbench 展示待续）；
 41. first-match 级联 waterfall（approval/reject 当前 Pool 的 standalone/incremental/shadowed/remaining 已完成；其余类型待专属口径）；
-42. 单规则/策略逐月、件数和金额回测（approval/reject 当前 Pool 的总体、逐月、规则 incremental、标签/金额覆盖和基线 delta 首纵切已完成；单规则独立视图、分群×月及其余类型待续）；
+42. 单规则/策略逐月、件数和金额回测（approval/reject 当前 Pool 的总体、逐月、规则 incremental、标签/金额覆盖、基线 delta、成熟 development Sample Design 强绑定及 `target_bad_value=0|1` 已完成；direct backtest 仅保留兼容边界，V2 Workflow 必须注入 ref；单规则独立视图、分群×月及其余类型待续）；
 43. 分群操作符与分群×月；
 44. 策略/漏斗/月度/分群/code tabs；
 45. `StrategyReportBundle`、七步 Workflow、模块化 Excel/JSON/Markdown、额度定价扩展与结构化 provenance；

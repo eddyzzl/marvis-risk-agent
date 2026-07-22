@@ -19,6 +19,9 @@ from marvis.packs.strategy.strategy import build_strategy_from_spec
 from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestRepository,
 )
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 class _FakeLLM:
@@ -130,6 +133,7 @@ def _standard_workflow_task(client: TestClient, tmp_path: Path) -> str:
             "score": [780, 760, 720, 700],
             "ead": [1000, 900, 2000, 1900],
             "pd": [0.02, 0.04, 0.08, 0.10],
+            "bad": [0, 0, 1, 1],
         }
     ).to_csv(source / "sample.csv", index=False)
     response = client.post(
@@ -140,6 +144,7 @@ def _standard_workflow_task(client: TestClient, tmp_path: Path) -> str:
             "source_dir": str(source),
             "task_type": "strategy",
             "run_mode": "manual",
+            "target_col": "bad",
             "score_col": "score",
         },
     )
@@ -204,6 +209,13 @@ def _last_assistant(messages: list[dict]) -> dict:
     )
 
 
+def _strategy_request_plans(client: TestClient, task_id: str) -> list[dict]:
+    """Return plans owned by the request under test, excluding its prerequisite."""
+
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    return [plan for plan in plans if plan["template_id"] != "strategy_sample_design"]
+
+
 def _seed_legacy_pending(
     client: TestClient,
     task_id: str,
@@ -255,37 +267,23 @@ def _saved_strategy(
 
 @pytest.mark.parametrize(
     "strategy_type",
-    ["approval", "reject", "limit", "pricing", "segmentation"],
+    ["approval", "reject"],
 )
 @pytest.mark.slow
 @pytest.mark.e2e
-def test_five_typed_requests_auto_run_real_typed_workflow(
+def test_llm_authored_binary_action_requests_auto_run_real_typed_workflow(
     tmp_path: Path,
     monkeypatch,
     strategy_type: str,
 ) -> None:
     client = TestClient(create_app(tmp_path / strategy_type))
     task_id = _task(client, tmp_path / strategy_type)
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
     payload = {
         "operation": "backtest",
         "strategy_type": strategy_type,
         "strategy_spec": _spec(strategy_type),
     }
-    if strategy_type == "limit":
-        payload["economics_inputs"] = {
-            "pd_col": "pd",
-            "lgd_value": 0.5,
-            "utilization_value": 0.6,
-        }
-    elif strategy_type == "pricing":
-        payload["economics_inputs"] = {
-            "ead_col": "ead",
-            "pd_col": "pd",
-            "lgd_value": 0.5,
-            "funding_rate_value": 0.03,
-            "term_months_value": 12,
-            "operating_cost_per_loan_value": 10,
-        }
     llm = _FakeLLM(payload)
     _install_llm(monkeypatch, llm)
 
@@ -301,7 +299,7 @@ def test_five_typed_requests_auto_run_real_typed_workflow(
         for message in opened.json()["messages"]
         if message.get("role") == "assistant"
     )
-    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plans = _strategy_request_plans(client, task_id)
     assert [plan["template_id"] for plan in plans] == ["typed_strategy_evaluation"]
     plan = plans[0]
     assert plan["status"] == "done"
@@ -317,13 +315,40 @@ def test_five_typed_requests_auto_run_real_typed_workflow(
     assert len(backtests) == 1
     assert backtests[0].schema_version == "strategy.backtest.v2"
     assert backtests[0].strategy_type == strategy_type
-    if strategy_type in {"limit", "pricing"}:
-        assert backtests[0].economics["expected_loss"] > 0
     artifacts = StrategyRepository(
         client.app.state.settings.db_path
     ).list_strategy_artifacts(strategies[0].id)
     assert [artifact["kind"] for artifact in artifacts] == ["strategy_doc_md"]
     assert len(llm.calls) == 1
+
+
+@pytest.mark.parametrize("strategy_type", ["limit", "pricing", "segmentation"])
+def test_llm_authored_nonbinary_actions_require_deterministic_candidate_tools(
+    tmp_path: Path,
+    monkeypatch,
+    strategy_type: str,
+) -> None:
+    client = TestClient(create_app(tmp_path / strategy_type))
+    task_id = _task(client, tmp_path / strategy_type)
+    llm = _FakeLLM(
+        {
+            "operation": "backtest",
+            "strategy_type": strategy_type,
+            "strategy_spec": _spec(strategy_type),
+        }
+    )
+    _install_llm(monkeypatch, llm)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": f"请回测这份 {strategy_type} 策略"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "clarification_required"
+    assert response.json()["code"] == "llm_strategy_spec_forbidden"
+    assert _strategy_request_plans(client, task_id) == []
+    assert len(llm.calls) == 2
 
 
 def test_hallucinated_strategy_column_clarifies_without_plan(
@@ -352,7 +377,7 @@ def test_hallucinated_strategy_column_clarifies_without_plan(
     assert "ghost_score" in last["content"]
     assert "strategy_request" not in last["metadata"]
     assert len(llm.calls) == 2
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
 
 
 @pytest.mark.parametrize(
@@ -416,7 +441,7 @@ def test_hallucinated_strategy_column_clarifies_without_plan(
         ),
     ],
 )
-def test_standard_workflow_requests_auto_run_trusted_templates_without_target(
+def test_standard_workflow_requests_auto_run_trusted_templates(
     tmp_path: Path,
     monkeypatch,
     content: str,
@@ -425,6 +450,13 @@ def test_standard_workflow_requests_auto_run_trusted_templates_without_target(
 ) -> None:
     client = TestClient(create_app(tmp_path / template_id))
     task_id = _standard_workflow_task(client, tmp_path / template_id)
+    sample_design_ref = None
+    if template_id == "strategy_limit_pricing_analysis":
+        sample_design_ref = materialize_mature_strategy_sample_design(
+            client,
+            task_id,
+            monkeypatch,
+        )
     llm = _FakeLLM(payload)
     _install_llm(monkeypatch, llm)
 
@@ -434,10 +466,16 @@ def test_standard_workflow_requests_auto_run_trusted_templates_without_target(
     )
 
     assert opened.status_code == 202, opened.text
-    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plans = _strategy_request_plans(client, task_id)
     assert [plan["template_id"] for plan in plans] == [template_id]
     assert plans[0]["status"] == "done"
     assert all(step["status"] == "done" for step in plans[0]["steps"])
+    if sample_design_ref is not None:
+        stored = client.app.state.plan_repo.load_plan(plans[0]["id"])
+        assert all(
+            step.inputs["sample_design_ref"] == sample_design_ref
+            for step in stored.steps
+        )
     assert all(
         "strategy_request" not in message.get("metadata", {})
         for message in opened.json()["messages"]
@@ -470,7 +508,7 @@ def test_target_column_is_never_available_to_llm_authored_strategy_rules(
     assert response.json()["status"] == "clarification_required"
     assert "bad" in _last_assistant(response.json()["messages"])["content"]
     assert len(llm.calls) == 2
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
 
 
 def test_unrelated_turn_does_not_invoke_strategy_compiler(
@@ -490,7 +528,7 @@ def test_unrelated_turn_does_not_invoke_strategy_compiler(
     assert response.status_code == 202, response.text
     assert response.json()["status"] == "clarification_required"
     assert llm.calls == []
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
 
 
 def test_data_question_is_not_hijacked_by_strategy_compiler(
@@ -535,6 +573,7 @@ def test_strategy_metric_question_wins_over_adhoc_routing(
         task_id,
         tmp_path / "strategy-source" / "sample.csv",
     )
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
     strategy_id = _saved_strategy(client, task_id)
     llm = _FakeLLM(
         {
@@ -556,7 +595,7 @@ def test_strategy_metric_question_wins_over_adhoc_routing(
         for message in response.json()["messages"]
         if message.get("role") == "assistant"
     )
-    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plans = _strategy_request_plans(client, task_id)
     assert [plan["template_id"] for plan in plans] == ["stored_strategy_evaluation"]
     assert plans[0]["status"] == "done"
     assert len(llm.calls) == 1
@@ -592,6 +631,7 @@ def test_legacy_confirmation_releases_claim_after_driver_start_failure(
 ) -> None:
     client = TestClient(create_app(tmp_path))
     task_id = _task(client, tmp_path)
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
     llm = _FakeLLM(
         {
             "operation": "backtest",
@@ -641,7 +681,7 @@ def test_legacy_confirmation_releases_claim_after_driver_start_failure(
     assert second.status_code == 202, second.text
     assert calls == 2
     assert pending_repo.get(task_id, record.id).status == "consumed"
-    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plans = _strategy_request_plans(client, task_id)
     assert len(plans) == 1
 
 
@@ -677,7 +717,7 @@ def test_target_guard_is_explicitly_safe_when_preview_is_none(
     assert response.status_code == 202, response.text
     assert response.json()["status"] == "clarification_required"
     assert response.json()["code"] == "strategy_target_context_required"
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
 
 
 def test_cancel_discards_pending_draft_without_execution(
@@ -725,7 +765,7 @@ def test_cancel_discards_pending_draft_without_execution(
     assert cancelled.status_code == 202, cancelled.text
     assert "没有创建计划" in _last_assistant(cancelled.json()["messages"])["content"]
     assert llm.calls == []
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
     assert (
         StrategyRepository(client.app.state.settings.db_path).list_for_task(task_id)
         == []
@@ -774,7 +814,7 @@ def test_rephrasing_invalidates_old_pending_strategy_request(
         task_id, pending_ref["request_id"]
     )
     assert record.status == "invalidated"
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
 
 
 def test_registered_dataset_mutation_invalidates_pending_confirmation(
@@ -834,7 +874,7 @@ def test_registered_dataset_mutation_invalidates_pending_confirmation(
         pending_ref["request_id"],
     )
     assert record.status == "invalidated"
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
 
 
 def test_legacy_pending_same_schema_replacement_during_binding_is_not_consumed(
@@ -903,7 +943,7 @@ def test_legacy_pending_same_schema_replacement_during_binding_is_not_consumed(
         record.id,
     )
     assert stored.status == "invalidated"
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
     assert llm.calls == []
 
 
@@ -931,7 +971,7 @@ def test_explicit_preview_only_strategy_request_never_compiles_or_executes(
     assert response.json()["status"] == "preview_only"
     assert response.json()["code"] == "strategy_execution_not_authorized"
     assert llm.calls == []
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
     assert (
         DatasetRepository(client.app.state.settings.db_path).list_datasets(task_id)
         == []
@@ -942,7 +982,7 @@ def test_explicit_preview_only_strategy_request_never_compiles_or_executes(
     )
 
 
-def test_nan_target_requires_explicit_drop_then_threads_consent_into_workflow(
+def test_nan_target_drop_consent_still_requires_mature_sample_design(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -970,7 +1010,7 @@ def test_nan_target_requires_explicit_drop_then_threads_consent_into_workflow(
         "n_total": 6,
         "n_nan": 1,
     }
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
     last = _last_assistant(opened.json()["messages"])
     assert "strategy_request" not in last["metadata"]
     assert "strategy_nan_label_confirmation" in last["metadata"]
@@ -983,7 +1023,7 @@ def test_nan_target_requires_explicit_drop_then_threads_consent_into_workflow(
     assert ambiguous.json()["code"] == (
         "strategy_drop_nan_labels_confirmation_required"
     )
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
 
     resumed = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -991,16 +1031,12 @@ def test_nan_target_requires_explicit_drop_then_threads_consent_into_workflow(
     )
 
     assert resumed.status_code == 202, resumed.text
-    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
-    assert [plan["template_id"] for plan in plans] == ["typed_strategy_evaluation"]
-    assert plans[0]["status"] == "done"
-    backtest_step = next(
-        step for step in plans[0]["steps"] if step["title"] == "回测类型化策略"
-    )
-    assert backtest_step["inputs"]["drop_nan_labels"] is True
-    output = client.app.state.plan_repo.load_step_output(backtest_step["id"])
-    assert output["nan_labels_dropped"] == 1
-    assert output["label_coverage"] == pytest.approx(5 / 6)
+    assert resumed.json()["status"] == "clarification_required"
+    assert resumed.json()["code"] == "strategy_sample_design_required"
+    assert "成熟策略样本设计" in _last_assistant(resumed.json()["messages"])[
+        "content"
+    ]
+    assert _strategy_request_plans(client, task_id) == []
     assert len(llm.calls) == 1
 
 
@@ -1032,7 +1068,7 @@ def test_univariate_candidate_analysis_requires_explicit_nan_label_policy(
     assert opened.status_code == 202, opened.text
     assert opened.json()["code"] == ("strategy_drop_nan_labels_confirmation_required")
     assert opened.json()["label_quality"]["n_nan"] == 1
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
     assert len(llm.calls) == 1
 
 
@@ -1077,7 +1113,7 @@ def test_nan_target_confirmation_is_invalidated_by_dataset_mutation(
     assert resumed.status_code == 202, resumed.text
     assert resumed.json()["status"] == "clarification_required"
     assert resumed.json()["code"] == "strategy_dataset_context_changed"
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert _strategy_request_plans(client, task_id) == []
     assert len(llm.calls) == 1
 
 
@@ -1087,6 +1123,7 @@ def test_approval_development_contract_persists_and_auto_runs_to_adoption_gate(
 ) -> None:
     client = TestClient(create_app(tmp_path))
     task_id = _task(client, tmp_path)
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
     llm = _FakeLLM(
         {
             "operation": "develop",
@@ -1106,7 +1143,7 @@ def test_approval_development_contract_persists_and_auto_runs_to_adoption_gate(
     assert strategy_input["strategy_type"] == "approval"
     assert strategy_input["objective"] == "max_approval"
     assert strategy_input["max_bad_rate"] == 0.20
-    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plans = _strategy_request_plans(client, task_id)
     assert plans[0]["template_id"] == "strategy_development"
     assert plans[0]["success_criteria"] == [
         {"metric": "approved_bad_rate", "max": 0.20}
@@ -1137,6 +1174,8 @@ def test_existing_strategy_operations_route_to_dedicated_workflows(
     client = TestClient(create_app(tmp_path))
     task_id = _task(client, tmp_path)
     strategy_id = _saved_strategy(client, task_id)
+    if operation in {"backtest", "adopt"}:
+        materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
     payload = {
         "operation": operation,
         "strategy_type": "approval",
@@ -1152,7 +1191,7 @@ def test_existing_strategy_operations_route_to_dedicated_workflows(
         json={"content": content},
     )
     assert opened.status_code == 202, opened.text
-    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plans = _strategy_request_plans(client, task_id)
     assert [plan["template_id"] for plan in plans] == [template_id]
     if operation == "adopt":
         assert plans[0]["status"] == "awaiting_confirm"
@@ -1210,6 +1249,7 @@ def test_typed_stored_adoption_routes_type_specific_evidence_inputs(
         task_id,
         strategy_type=strategy_type,
     )
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
     payload = {
         "operation": "adopt",
         "strategy_type": strategy_type,
@@ -1226,7 +1266,7 @@ def test_typed_stored_adoption_routes_type_specific_evidence_inputs(
         json={"content": f"采纳这份 {strategy_type} 策略"},
     )
     assert opened.status_code == 202, opened.text
-    plan = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][0]
+    plan = _strategy_request_plans(client, task_id)[0]
     assert plan["template_id"] == "stored_strategy_adoption"
     assert plan["status"] == "awaiting_confirm"
     assert plan["steps"][0]["status"] == "done"
@@ -1259,7 +1299,7 @@ def test_apply_existing_strategy_to_unlabeled_sample_end_to_end(
         json={"content": "把这个审批策略应用到当前生产样本并输出逐行结果"},
     )
     assert opened.status_code == 202, opened.text
-    plan = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][0]
+    plan = _strategy_request_plans(client, task_id)[0]
     assert plan["template_id"] == "typed_strategy_apply"
     assert plan["status"] == "done"
     assert [step["status"] for step in plan["steps"]] == ["done"] * 3
@@ -1284,6 +1324,7 @@ def test_compare_existing_strategy_requires_owned_same_type_baseline(
     task_id = _task(client, tmp_path)
     strategy_id = _saved_strategy(client, task_id, threshold=0)
     baseline_id = _saved_strategy(client, task_id, threshold=2)
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
     llm = _FakeLLM(
         {
             "operation": "compare",
@@ -1299,7 +1340,7 @@ def test_compare_existing_strategy_requires_owned_same_type_baseline(
         json={"content": "对比候选审批策略和基线策略"},
     )
     assert opened.status_code == 202, opened.text
-    plan = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][0]
+    plan = _strategy_request_plans(client, task_id)[0]
     assert plan["template_id"] == "stored_strategy_evaluation"
     assert plan["status"] == "done"
     assert plan["steps"][0]["inputs"]["baseline_strategy_id"] == baseline_id

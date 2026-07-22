@@ -11,6 +11,9 @@ from fastapi.testclient import TestClient
 
 from marvis.app import create_app
 from marvis.db import StrategyRepository
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 class _FakeLLM:
@@ -74,6 +77,11 @@ def test_natural_language_candidate_auto_runs_to_only_adoption_gate_and_rerender
 ) -> None:
     client = TestClient(create_app(tmp_path))
     task_id = _task(client, tmp_path)
+    sample_design_ref = materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
     llm = _FakeLLM(
         {
             "operation": "develop",
@@ -106,9 +114,10 @@ def test_natural_language_candidate_auto_runs_to_only_adoption_gate_and_rerender
 
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert [plan["template_id"] for plan in plans] == [
-        "deterministic_strategy_candidate_development"
+        "strategy_sample_design",
+        "deterministic_strategy_candidate_development",
     ]
-    plan = plans[0]
+    plan = plans[1]
     assert plan["status"] == "awaiting_confirm"
     assert [step["status"] for step in plan["steps"]] == [
         "done",
@@ -118,6 +127,9 @@ def test_natural_language_candidate_auto_runs_to_only_adoption_gate_and_rerender
         "awaiting_confirm",
         "pending",
     ]
+    stored_plan = client.app.state.plan_repo.load_plan(plan["id"])
+    assert stored_plan.steps[0].inputs["sample_design_ref"] == sample_design_ref
+    assert stored_plan.steps[2].inputs["sample_design_ref"] == sample_design_ref
     gate = _latest_kind(opened.json()["messages"], "gate")
     assert gate["metadata"]["gate_source_tool"] == "adopt_strategy"
 
@@ -148,7 +160,11 @@ def test_natural_language_candidate_auto_runs_to_only_adoption_gate_and_rerender
     )
 
     assert completed.status_code == 202, completed.text
-    final_plan = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][0]
+    final_plan = next(
+        item
+        for item in client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+        if item["id"] == plan["id"]
+    )
     assert final_plan["status"] == "done"
     assert [step["status"] for step in final_plan["steps"]] == ["done"] * 6
     final_meta = strategy_repo.get_strategy_meta(strategy_id)

@@ -22,6 +22,9 @@ from marvis.db import DatasetRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.settings import build_settings
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 class _AutomaticTreeBuildLLM:
@@ -151,6 +154,14 @@ def test_natural_language_automatic_tree_build_is_one_unranked_plan(
     )
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
+    sample_design_ref = materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
+    workspace_before_build = DataWorkspaceRepository(
+        client.app.state.settings.db_path
+    ).get_or_default(task_id)
     llm = _AutomaticTreeBuildLLM()
     monkeypatch.setattr(
         "marvis.agent.validation_app_service.driver_llm_client",
@@ -172,15 +183,17 @@ def test_natural_language_automatic_tree_build_is_one_unranked_plan(
     assert opened.status_code == 202, opened.text
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert [plan["template_id"] for plan in plans] == [
-        "strategy_automatic_tree_candidate_build"
+        "strategy_sample_design",
+        "strategy_automatic_tree_candidate_build",
     ]
-    plan = plans[0]
+    plan = plans[1]
     assert plan["status"] == "done"
     assert len(plan["steps"]) == 1
     assert plan["steps"][0]["status"] == "done"
     assert plan["steps"][0]["needs_confirmation"] is False
 
     stored = client.app.state.plan_repo.load_plan(plan["id"])
+    assert stored.steps[0].inputs["sample_design_ref"] == sample_design_ref
     output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
     assert output["summary"]["candidate_stage"] == "development"
     assert output["summary"]["observation_stage"] == "backtested"
@@ -192,7 +205,8 @@ def test_natural_language_automatic_tree_build_is_one_unranked_plan(
 
     listed = client.get(f"/api/tasks/{task_id}/task-artifacts").json()["artifacts"]
     assert {artifact["id"] for artifact in listed} == {
-        artifact["artifact_id"] for artifact in output["artifacts"]
+        sample_design_ref["artifact_id"],
+        *(artifact["artifact_id"] for artifact in output["artifacts"]),
     }
     assert all(
         client.get(artifact["download_url"]).status_code == 200
@@ -218,8 +232,7 @@ def test_natural_language_automatic_tree_build_is_one_unranked_plan(
     workspace = DataWorkspaceRepository(
         client.app.state.settings.db_path
     ).get_or_default(task_id)
-    assert workspace.revision == 1
-    assert workspace.analysis_generation == 1
+    assert workspace == workspace_before_build
     assert workspace.active_dataset_id == output["summary"]["dataset_id"]
     assert (
         workspace.active_dataset_content_hash

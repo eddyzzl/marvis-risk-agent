@@ -10,14 +10,24 @@ from marvis.agent.renderers import render_tool_output
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
+from marvis.packs.strategy.dsl import parse_strategy_spec, strategy_spec_hash
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.settings import build_settings
+from tests.strategy_tool_sample_design_support import (
+    materialize_strategy_tool_sample_design,
+)
 
 
-def _runtime(tmp_path: Path):
+def _runtime(
+    tmp_path: Path,
+    *,
+    target_bad_value: int = 1,
+    with_split: bool = False,
+    validation_offset: int = 0,
+):
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
     plugin_repo = PluginRepository(settings.db_path)
@@ -59,17 +69,30 @@ def _runtime(tmp_path: Path):
             target_col="bad",
         )
     )
-    frame = pd.DataFrame(
-        {
-            "score": [100, 200, 300, 400, 500, 600, 700, 800],
-            "income": [10, 20, 30, 40, 50, 60, 70, 80],
-            "bad": [0, 0, 0, 1, 0, 1, 1, 1],
-            "ead": [100, 200, 300, 400, 500, 600, 700, 800],
-            "pd_12m": [0.01, 0.02, 0.03, 0.04, 0.10, 0.12, 0.14, 0.16],
-            "utilization": [0.5] * 8,
-            "unused": list("abcdefgh"),
-        }
-    )
+    bad_one = [0, 0, 0, 1, 0, 1, 1, 1]
+    scores = [100, 200, 300, 400, 500, 600, 700, 800]
+    incomes = [10, 20, 30, 40, 50, 60, 70, 80]
+    ead = [100, 200, 300, 400, 500, 600, 700, 800]
+    pd_12m = [0.01, 0.02, 0.03, 0.04, 0.10, 0.12, 0.14, 0.16]
+    if with_split:
+        scores += [900 + validation_offset, 1000 + validation_offset]
+        incomes += [90 + validation_offset, 100 + validation_offset]
+        ead += [900 + validation_offset, 1000 + validation_offset]
+        pd_12m += [0.9, 0.99]
+        bad_one += [validation_offset % 2, (validation_offset + 1) % 2]
+    labels = bad_one if target_bad_value == 1 else [1 - value for value in bad_one]
+    frame_data = {
+        "score": scores,
+        "income": incomes,
+        "bad": labels,
+        "ead": ead,
+        "pd_12m": pd_12m,
+        "utilization": [0.5] * len(scores),
+        "unused": [f"row-{index}" for index in range(len(scores))],
+    }
+    if with_split:
+        frame_data["sample_split"] = ["dev"] * 8 + ["valid"] * 2
+    frame = pd.DataFrame(frame_data)
     source = tmp_path / "candidate.parquet"
     frame.to_parquet(source, index=False)
     dataset = registry.register_existing(
@@ -77,13 +100,30 @@ def _runtime(tmp_path: Path):
         task_id=task.id,
         role="strategy_sample",
     )
-    return runner, task, other_task, dataset
+    sample_design_ref = materialize_strategy_tool_sample_design(
+        settings,
+        task,
+        dataset,
+        target_bad_value=target_bad_value,
+        split_col="sample_split" if with_split else None,
+        development_values=["dev"] if with_split else [],
+        validation_values=["valid"] if with_split else [],
+        field_roles={
+            "score": "score",
+            "income": "numeric",
+            "ead": "amount",
+            "pd_12m": "numeric",
+            "utilization": "numeric",
+        },
+    )
+    return runner, task, other_task, dataset, sample_design_ref
 
 
-def _limit_inputs(dataset_id: str) -> dict:
+def _limit_inputs(dataset_id: str, sample_design_ref: dict[str, str]) -> dict:
     return {
         "dataset_id": dataset_id,
         "target_col": "bad",
+        "sample_design_ref": sample_design_ref,
         "strategy_type": "limit",
         "candidate_design": {
             "method": "score_band_limit",
@@ -102,8 +142,8 @@ def _limit_inputs(dataset_id: str) -> dict:
 
 
 def test_candidate_tool_is_task_owned_minimal_and_deterministic(tmp_path: Path) -> None:
-    runner, task, other_task, dataset = _runtime(tmp_path)
-    inputs = _limit_inputs(dataset.id)
+    runner, task, other_task, dataset, sample_design_ref = _runtime(tmp_path)
+    inputs = _limit_inputs(dataset.id, sample_design_ref)
 
     first = runner.invoke(
         ToolRef("strategy", "design_strategy_candidate"),
@@ -129,6 +169,15 @@ def test_candidate_tool_is_task_owned_minimal_and_deterministic(tmp_path: Path) 
         "pd_12m",
         "utilization",
     ]
+    assert first.output["sample_design_ref"] == sample_design_ref
+    assert first.output["design_evidence"]["sample_design_ref"] == sample_design_ref
+    assert (
+        first.output["strategy_spec"]["metadata"]["lineage"]["sample_design_ref"]
+        == sample_design_ref
+    )
+    assert first.output["strategy_effect_hash"] == strategy_spec_hash(
+        parse_strategy_spec(first.output["strategy_spec"])
+    )
     assert "unused" not in first.output["source_evidence"]["columns"]
     assert first.output["strategy_spec"]["strategy_type"] == "limit"
 
@@ -144,10 +193,10 @@ def test_candidate_tool_is_task_owned_minimal_and_deterministic(tmp_path: Path) 
 def test_candidate_renderer_surfaces_evidence_and_adoption_boundary(
     tmp_path: Path,
 ) -> None:
-    runner, task, _other_task, dataset = _runtime(tmp_path)
+    runner, task, _other_task, dataset, sample_design_ref = _runtime(tmp_path)
     result = runner.invoke(
         ToolRef("strategy", "design_strategy_candidate"),
-        _limit_inputs(dataset.id),
+        _limit_inputs(dataset.id, sample_design_ref),
         task_id=task.id,
     )
 
@@ -164,10 +213,10 @@ def test_candidate_renderer_surfaces_evidence_and_adoption_boundary(
 def test_candidate_tool_schema_rejects_caller_results_and_fixed_pricing_pd(
     tmp_path: Path,
 ) -> None:
-    runner, task, _other_task, dataset = _runtime(tmp_path)
+    runner, task, _other_task, dataset, sample_design_ref = _runtime(tmp_path)
     injected = runner.invoke(
         ToolRef("strategy", "design_strategy_candidate"),
-        {**_limit_inputs(dataset.id), "strategy_spec": {}},
+        {**_limit_inputs(dataset.id, sample_design_ref), "strategy_spec": {}},
         task_id=task.id,
     )
     assert injected.ok is False
@@ -178,6 +227,7 @@ def test_candidate_tool_schema_rejects_caller_results_and_fixed_pricing_pd(
         {
             "dataset_id": dataset.id,
             "target_col": "bad",
+            "sample_design_ref": sample_design_ref,
             "strategy_type": "pricing",
             "candidate_design": {
                 "method": "score_band_pricing",
@@ -203,12 +253,13 @@ def test_candidate_tool_schema_rejects_caller_results_and_fixed_pricing_pd(
 def test_segmentation_candidate_threads_nullable_economics_through_backtest(
     tmp_path: Path,
 ) -> None:
-    runner, task, _other_task, dataset = _runtime(tmp_path)
+    runner, task, _other_task, dataset, sample_design_ref = _runtime(tmp_path)
     designed = runner.invoke(
         ToolRef("strategy", "design_strategy_candidate"),
         {
             "dataset_id": dataset.id,
             "target_col": "bad",
+            "sample_design_ref": sample_design_ref,
             "strategy_type": "segmentation",
             "candidate_design": {
                 "method": "single_variable_segmentation",
@@ -234,9 +285,46 @@ def test_segmentation_candidate_threads_nullable_economics_through_backtest(
             "dataset_id": dataset.id,
             "strategy_id": built.output["strategy_id"],
             "target_col": "bad",
+            "sample_design_ref": sample_design_ref,
             "economics_inputs": None,
         },
         task_id=task.id,
     )
     assert backtested.ok, backtested.error
     assert backtested.output["strategy_type"] == "segmentation"
+
+
+def test_candidate_uses_bad_zero_development_only_and_ignores_validation_changes(
+    tmp_path: Path,
+) -> None:
+    first = _runtime(
+        tmp_path / "first",
+        target_bad_value=1,
+        with_split=True,
+        validation_offset=0,
+    )
+    second = _runtime(
+        tmp_path / "second",
+        target_bad_value=0,
+        with_split=True,
+        validation_offset=10_000,
+    )
+
+    outputs = []
+    for runner, task, _other, dataset, sample_ref in (first, second):
+        result = runner.invoke(
+            ToolRef("strategy", "design_strategy_candidate"),
+            _limit_inputs(dataset.id, sample_ref),
+            task_id=task.id,
+        )
+        assert result.ok, result.error
+        outputs.append(result.output)
+
+    assert outputs[0]["source_evidence"]["analyzed_row_count"] == 8
+    assert outputs[1]["source_evidence"]["analyzed_row_count"] == 8
+    assert outputs[0]["design_evidence"]["bands"] == outputs[1]["design_evidence"][
+        "bands"
+    ]
+    assert outputs[0]["strategy_spec"]["rules"] == outputs[1]["strategy_spec"][
+        "rules"
+    ]

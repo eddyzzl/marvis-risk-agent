@@ -103,7 +103,7 @@ def _assessment() -> dict:
 
 def _envelope(assessment: dict) -> dict:
     return {
-        "schema_version": "strategy.measure-pool-impact-tool.v1",
+        "schema_version": "strategy.measure-pool-impact-tool.v2",
         "nan_labels_excluded": 0,
         "assessment": assessment,
         "warnings": [],

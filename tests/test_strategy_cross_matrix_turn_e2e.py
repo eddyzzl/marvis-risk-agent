@@ -11,6 +11,9 @@ from fastapi.testclient import TestClient
 
 from marvis.app import create_app
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 class _CrossMatrixLLM:
@@ -105,6 +108,11 @@ def test_natural_language_cross_matrix_consumes_exact_first_step_json(
 ) -> None:
     client = TestClient(create_app(tmp_path))
     task_id = _task(client, tmp_path, one_nan_label=False)
+    sample_design_ref = materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
     llm = _CrossMatrixLLM()
     _install_llm(monkeypatch, llm)
 
@@ -116,13 +124,16 @@ def test_natural_language_cross_matrix_consumes_exact_first_step_json(
     assert opened.status_code == 202, opened.text
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert [plan["template_id"] for plan in plans] == [
-        "strategy_cross_matrix_analysis"
+        "strategy_sample_design",
+        "strategy_cross_matrix_analysis",
     ]
-    assert plans[0]["status"] == "done"
-    assert [step["status"] for step in plans[0]["steps"]] == ["done", "done"]
-    assert all(step["needs_confirmation"] is False for step in plans[0]["steps"])
+    downstream = plans[1]
+    assert downstream["status"] == "done"
+    assert [step["status"] for step in downstream["steps"]] == ["done", "done"]
+    assert all(step["needs_confirmation"] is False for step in downstream["steps"])
 
-    stored = client.app.state.plan_repo.load_plan(plans[0]["id"])
+    stored = client.app.state.plan_repo.load_plan(downstream["id"])
+    assert stored.steps[0].inputs["sample_design_ref"] == sample_design_ref
     first = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
     cross = client.app.state.plan_repo.load_step_output(stored.steps[1].id)
     source_json = next(
@@ -190,6 +201,12 @@ def test_cross_matrix_nan_label_consent_resumes_same_two_step_workflow(
 ) -> None:
     client = TestClient(create_app(tmp_path))
     task_id = _task(client, tmp_path, one_nan_label=True)
+    sample_design_ref = materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+        drop_nan_labels=True,
+    )
     llm = _CrossMatrixLLM()
     _install_llm(monkeypatch, llm)
 
@@ -206,7 +223,12 @@ def test_cross_matrix_nan_label_consent_resumes_same_two_step_workflow(
         "n_total": 12,
         "n_nan": 1,
     }
-    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    plans_before_confirmation = client.get(
+        f"/api/tasks/{task_id}/plans"
+    ).json()["plans"]
+    assert [plan["template_id"] for plan in plans_before_confirmation] == [
+        "strategy_sample_design"
+    ]
 
     resumed = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -216,10 +238,13 @@ def test_cross_matrix_nan_label_consent_resumes_same_two_step_workflow(
     assert resumed.status_code == 202, resumed.text
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert [plan["template_id"] for plan in plans] == [
-        "strategy_cross_matrix_analysis"
+        "strategy_sample_design",
+        "strategy_cross_matrix_analysis",
     ]
-    assert plans[0]["status"] == "done"
-    stored = client.app.state.plan_repo.load_plan(plans[0]["id"])
+    downstream = plans[1]
+    assert downstream["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(downstream["id"])
+    assert stored.steps[0].inputs["sample_design_ref"] == sample_design_ref
     first = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
     cross = client.app.state.plan_repo.load_step_output(stored.steps[1].id)
     assert first["nan_labels_dropped"] == 1

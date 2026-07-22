@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 import re
+from types import SimpleNamespace
 from typing import Callable
 
 from marvis.agent.adhoc_analysis import (
@@ -111,6 +112,7 @@ from marvis.strategy_lifecycle import ASSET_STATUS_ADOPTED_LOCAL
 from marvis.files import sha256_file
 from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
 from marvis.orchestrator.capability import auto_gate_budget, resolve_tier
+from marvis.orchestrator.contracts import Plan, PlanStatus, StepStatus
 from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.planner import Planner
 from marvis.orchestrator.validator import PlanValidator
@@ -144,6 +146,15 @@ from marvis.packs.strategy.cross_matrix_cell_selection import (
 from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
     load_verified_cross_matrix_cell_selection_artifact_on_connection,
     load_verified_cross_matrix_source_artifact_on_connection,
+)
+from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.sample_design_binding import (
+    StrategySampleDesignRef,
+    load_strategy_sample_design_execution_binding,
+)
+from marvis.packs.strategy.sample_design_tools import (
+    SAMPLE_DESIGN_ARTIFACT_KIND,
+    SAMPLE_DESIGN_ORIGIN_TOOL,
 )
 from marvis.repositories.plans import PlanRepository
 from marvis.repositories.pending_strategy_requests import (
@@ -188,6 +199,21 @@ DRIVER_AGENT_TASK_TYPES = frozenset(
 # marvis.orchestrator.capability.auto_gate_budget.
 AGENT_MAX_GATES = 8
 _TERMINAL_PLAN_STATUS_VALUES = frozenset({"done", "failed", "cancelled"})
+_STRATEGY_SAMPLE_BOUND_TOOLS = frozenset(
+    {
+        "analyze_univariate_candidates",
+        "backtest_strategy",
+        "build_automatic_tree_candidate",
+        "compare_strategies",
+        "design_cutoff_bands",
+        "design_strategy_candidate",
+        "evaluate_rule_set",
+        "limit_pricing_matrix",
+        "measure_pool_impact",
+        "mine_rules",
+        "tradeoff_view",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -419,7 +445,6 @@ def _run_driver_turn(
     expected_step_id: str | None,
     confirmation_source: str,
 ) -> dict:
-    driver = _driver(runtime)
     if user_text is not None:
         repo.add_agent_message(
             task.id,
@@ -431,6 +456,16 @@ def _run_driver_turn(
     try:
         active = _active_plan(runtime.plan_repo, task.id)
         if active is not None:
+            stale_response = _terminate_stale_strategy_sample_plan(
+                spec,
+                runtime,
+                repo,
+                task,
+                active,
+            )
+            if stale_response is not None:
+                return stale_response
+            driver = _driver(runtime)
             turn = driver.resume(
                 plan_id=active.id,
                 user_text=user_text or "",
@@ -450,6 +485,7 @@ def _run_driver_turn(
             criteria = spec.success_criteria(task)
             if criteria is not None:
                 start_kwargs = {**start_kwargs, "success_criteria": criteria}
+        driver = _driver(runtime)
         turn = driver.start(
             task_id=task.id,
             template_id=template_id,
@@ -465,6 +501,121 @@ def _run_driver_turn(
         raise
     except Exception as exc:
         return append_workflow_error(repo, task, spec, exc)
+
+
+def _terminate_stale_strategy_sample_plan(
+    spec: _TurnHandlerSpec,
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    plan: Plan,
+) -> dict | None:
+    """Fail closed before resuming pre-sample-binding strategy plans.
+
+    V2 plans are serialized, so a plan created before sample-design binding can
+    outlive a deployment and otherwise resume directly into a data-reading Tool.
+    Only unfinished sample-bound steps are migration-sensitive: completed
+    historical evidence remains readable, while newly compiled plans carry an
+    exact authenticated development-partition reference and resume unchanged.
+    """
+
+    if spec.intent != "strategy":
+        return None
+    stale_steps = _stale_strategy_sample_steps(plan)
+    if not stale_steps:
+        return None
+
+    current_status = PlanStatus(getattr(plan.status, "value", plan.status))
+    if current_status in {
+        PlanStatus.DRAFT,
+        PlanStatus.VALIDATED,
+        PlanStatus.RUNNING,
+        PlanStatus.REVIEW,
+    }:
+        terminal_status = PlanStatus.FAILED
+    elif current_status in {
+        PlanStatus.CONFIRMED,
+        PlanStatus.AWAITING_CONFIRM,
+    }:
+        # These states cannot legally transition directly to FAILED. CANCELLED
+        # is their governed terminal path and prevents any Tool invocation.
+        terminal_status = PlanStatus.CANCELLED
+    else:
+        return None
+
+    runtime.plan_repo.set_plan_status(plan.id, terminal_status)
+    stale_step_payload = [
+        {
+            "step_id": step.id,
+            "tool": step.tool_ref.tool,
+            "step_status": getattr(step.status, "value", step.status),
+        }
+        for step in stale_steps
+    ]
+    runtime.plan_repo.write_audit(
+        kind="strategy.plan.sample_design_stale",
+        target_ref=plan.id,
+        outcome="blocked",
+        detail={
+            "task_id": task.id,
+            "template_id": plan.template_id,
+            "from_status": current_status.value,
+            "to_status": terminal_status.value,
+            "clarification_code": "strategy_plan_sample_design_stale",
+            "stale_steps": stale_step_payload,
+        },
+    )
+    message = (
+        "该策略计划由旧版本创建，未完成的数据分析或回测步骤没有绑定当前成熟样本设计的"
+        "精确 sample_design_ref。平台已安全终止旧计划，且没有调用任何分析工具。"
+        "请先确认当前成熟样本设计，再基于该设计重新发起策略请求；平台会重建计划。"
+    )
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=message,
+        metadata={
+            "intent": "strategy",
+            "kind": "clarification",
+            "code": "strategy_plan_sample_design_stale",
+            "plan_id": plan.id,
+            "template_id": plan.template_id,
+            "plan_status": terminal_status.value,
+            "stale_steps": stale_step_payload,
+        },
+    )
+    return {
+        "task_id": task.id,
+        "status": "clarification_required",
+        "code": "strategy_plan_sample_design_stale",
+        "plan_id": plan.id,
+        "plan_status": terminal_status.value,
+        "messages": repo.list_agent_messages(task.id),
+    }
+
+
+def _stale_strategy_sample_steps(plan: Plan) -> list:
+    status = getattr(plan.status, "value", plan.status)
+    if status in _TERMINAL_PLAN_STATUS_VALUES:
+        return []
+    stale_steps = []
+    for step in plan.steps:
+        step_status = getattr(step.status, "value", step.status)
+        if step_status in {StepStatus.DONE.value, StepStatus.SKIPPED.value}:
+            continue
+        if (
+            step.tool_ref.plugin != "strategy"
+            or step.tool_ref.tool not in _STRATEGY_SAMPLE_BOUND_TOOLS
+        ):
+            continue
+        try:
+            StrategySampleDesignRef.from_value(
+                step.inputs.get("sample_design_ref")
+            )
+        except StrategyError:
+            stale_steps.append(step)
+    return stale_steps
 
 
 def _append_spec_messages(
@@ -673,7 +824,15 @@ def _run_strategy_setup(
                 "ingest_notices": notices,
             },
         )
-        return (proposal.template_id, proposal.template_slots(), {})
+        slots = proposal.template_slots()
+        context = _strategy_dataset_context(runtime, task, require_target=True)
+        slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+            runtime,
+            task,
+            context=context,
+            drop_nan_labels=False,
+        )
+        return (proposal.template_id, slots, {})
 
     if intent != STRATEGY_INTENT_QUICK_ANALYSIS:
         raise StrategySetupError(f"unsupported strategy intent: {intent}")
@@ -702,7 +861,15 @@ def _run_strategy_setup(
             "ingest_notices": notices,
         },
     )
-    return (proposal.template_id, proposal.template_slots(), {})
+    slots = proposal.template_slots()
+    context = _strategy_dataset_context(runtime, task, require_target=True)
+    slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+        runtime,
+        task,
+        context=context,
+        drop_nan_labels=False,
+    )
+    return (proposal.template_id, slots, {})
 
 
 def _strategy_intent_redirect_response(
@@ -864,7 +1031,15 @@ def _run_rule_strategy_setup(
             "ingest_notices": notices,
         },
     )
-    return (proposal.template_id, proposal.template_slots(), {})
+    slots = proposal.template_slots()
+    context = _strategy_dataset_context(runtime, task, require_target=True)
+    slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+        runtime,
+        task,
+        context=context,
+        drop_nan_labels=False,
+    )
+    return (proposal.template_id, slots, {})
 
 
 def _run_strategy_monitoring_setup(
@@ -1413,6 +1588,12 @@ _STRATEGY_POOL_IMPACT_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 _STRATEGY_NAN_LABEL_META_KEY = "strategy_nan_label_confirmation"
+
+
+class _StrategySampleDesignRequiredError(StrategySetupError):
+    """The current strategy request has no exact mature sample-design binding."""
+
+
 _STRATEGY_DROP_NAN_CONFIRM_RE = re.compile(
     r"(?:确认|同意|允许|可以).{0,12}(?:丢弃|排除|剔除|删除).{0,12}"
     r"(?:NaN|nan|空标签|缺失标签|无效标签)|"
@@ -1725,7 +1906,8 @@ def _prepare_and_run_validated_strategy_request(
         isinstance(draft, StandardWorkflowRequestDraft)
         and (
             draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
-            or draft.workflow == "strategy_sample_design"
+            or draft.workflow
+            in {"strategy_sample_design", "limit_pricing_matrix"}
         )
         and draft.workflow_inputs.get("drop_nan_labels") is True
     ):
@@ -1841,6 +2023,13 @@ def _prepare_and_run_validated_strategy_request(
             drop_nan_labels=drop_nan_labels,
             expected_pool_binding=expected_pool_binding,
         )
+    except _StrategySampleDesignRequiredError as exc:
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_sample_design_required",
+            message=str(exc),
+        )
     except StrategySetupError as exc:
         return append_join_error(repo, task.id, str(exc))
     except DriverError:
@@ -1873,6 +2062,28 @@ def _run_validated_strategy_request(
             task,
             template_id="stored_strategy_report",
             slots={"strategy_id": draft.strategy_id},
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "automatic_tree_apply"
+    ):
+        if context is None:
+            raise StrategySetupError(
+                "自动树全量写回需要当前活动 DataWorkspace。"
+            )
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_automatic_tree_apply",
+            slots=_automatic_tree_apply_slots(
+                runtime,
+                task_id=task.id,
+                draft=draft,
+                context=context,
+            ),
             auto_start=auto_start,
         )
 
@@ -2051,6 +2262,30 @@ def _run_validated_strategy_request(
                 )
             slots.update(binding)
             slots["target_col"] = context.target_col
+            slots["sample_design_ref"] = (
+                _latest_matching_strategy_sample_design_ref(
+                    runtime,
+                    task,
+                    context=context,
+                    drop_nan_labels=bool(drop_nan_labels),
+                    weight_col=(
+                        workflow_inputs.get("sample_weight_col")
+                        if draft.workflow == "automatic_tree_candidate_build"
+                        else None
+                    ),
+                    loan_amount_col=workflow_inputs.get("loan_amount_col"),
+                    overdue_amount_col=workflow_inputs.get("overdue_amount_col"),
+                )
+            )
+        elif draft.workflow == "limit_pricing_matrix":
+            slots["sample_design_ref"] = (
+                _latest_matching_strategy_sample_design_ref(
+                    runtime,
+                    task,
+                    context=context,
+                    drop_nan_labels=bool(drop_nan_labels),
+                )
+            )
         return _start_confirmed_strategy_plan(
             runtime,
             repo,
@@ -2061,13 +2296,20 @@ def _run_validated_strategy_request(
         )
 
     if _is_auto_candidate_draft(draft):
+        slots = _candidate_strategy_slots(context, draft)
+        slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+            runtime,
+            task,
+            context=context,
+            drop_nan_labels=bool(drop_nan_labels),
+        )
         return _start_confirmed_strategy_plan(
             runtime,
             repo,
             task,
             template_id="deterministic_strategy_candidate_development",
             slots=_strategy_slots_with_drop_nan(
-                _candidate_strategy_slots(context, draft),
+                slots,
                 drop_nan_labels,
             ),
             auto_start=auto_start,
@@ -2088,6 +2330,15 @@ def _run_validated_strategy_request(
             "analyze": "typed_strategy_evaluation",
             "backtest": "typed_strategy_evaluation",
         }[draft.operation]
+        if draft.operation in {"analyze", "backtest"}:
+            slots["sample_design_ref"] = (
+                _latest_matching_strategy_sample_design_ref(
+                    runtime,
+                    task,
+                    context=context,
+                    drop_nan_labels=bool(drop_nan_labels),
+                )
+            )
         return _start_confirmed_strategy_plan(
             runtime,
             repo,
@@ -2099,13 +2350,20 @@ def _run_validated_strategy_request(
         )
 
     if draft.operation in _STORED_EVALUATION_OPERATIONS:
+        slots = _stored_strategy_slots(context, draft)
+        slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+            runtime,
+            task,
+            context=context,
+            drop_nan_labels=bool(drop_nan_labels),
+        )
         return _start_confirmed_strategy_plan(
             runtime,
             repo,
             task,
             template_id="stored_strategy_evaluation",
             slots=_strategy_slots_with_drop_nan(
-                _stored_strategy_slots(context, draft),
+                slots,
                 drop_nan_labels,
             ),
             success_criteria=_strategy_request_success_criteria(draft),
@@ -2124,13 +2382,20 @@ def _run_validated_strategy_request(
             auto_start=auto_start,
         )
     if draft.operation == "adopt":
+        slots = _stored_strategy_slots(context, draft)
+        slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+            runtime,
+            task,
+            context=context,
+            drop_nan_labels=bool(drop_nan_labels),
+        )
         return _start_confirmed_strategy_plan(
             runtime,
             repo,
             task,
             template_id="stored_strategy_adoption",
             slots=_strategy_slots_with_drop_nan(
-                _stored_strategy_slots(context, draft),
+                slots,
                 drop_nan_labels,
             ),
             success_criteria=_strategy_request_success_criteria(draft),
@@ -2170,6 +2435,14 @@ def _run_validated_strategy_request(
     if isinstance(setup, dict):
         return setup
     template_id, slots, start_kwargs = setup
+    if template_id in {"strategy_development", "rule_strategy", "strategy_analysis"}:
+        slots = dict(slots)
+        slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+            runtime,
+            task,
+            context=context,
+            drop_nan_labels=bool(drop_nan_labels),
+        )
     if "success_criteria" not in start_kwargs:
         criteria = _strategy_request_success_criteria(draft)
         if criteria:
@@ -2371,6 +2644,26 @@ def _run_confirmed_strategy_request(
             context=context,
             auto_start=False,
             drop_nan_labels=False,
+        )
+    except _StrategySampleDesignRequiredError as exc:
+        try:
+            pending_repository.release_after_failed_start(
+                task_id=task.id,
+                request_id=request_id,
+                expected_payload_sha256=payload_sha256,
+                existing_plan_ids=existing_plan_ids,
+            )
+        except (
+            PendingStrategyRequestConflictError,
+            PendingStrategyRequestNotFoundError,
+            ValueError,
+        ):
+            pass
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_sample_design_required",
+            message=str(exc),
         )
     except StrategySetupError as exc:
         return append_join_error(repo, task.id, str(exc))
@@ -2730,6 +3023,18 @@ def _standard_workflow_request_preflight(
         except StrategySetupError as exc:
             return ("strategy_pool_impact_binding_required", str(exc))
         return None
+    if draft.workflow == "automatic_tree_apply":
+        try:
+            context = _strategy_dataset_context(runtime, task, require_target=False)
+            _automatic_tree_apply_slots(
+                runtime,
+                task_id=task.id,
+                draft=draft,
+                context=context,
+            )
+        except StrategySetupError as exc:
+            return ("automatic_tree_apply_binding_required", str(exc))
+        return None
     if draft.workflow == "automatic_tree_leaf_materialization":
         try:
             _automatic_tree_leaf_materialization_slots(
@@ -2958,6 +3263,164 @@ def _automatic_tree_leaf_materialization_slots(
     }
     if "selection_reason" in inputs:
         slots["selection_reason"] = inputs["selection_reason"]
+    return slots
+
+
+def _automatic_tree_apply_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    draft: StandardWorkflowRequestDraft,
+    context,
+) -> dict[str, object]:
+    """Bind full-tree writeback to its exact task-owned source workspace."""
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    asset_id = inputs.get("tree_asset_id")
+    if not isinstance(asset_id, str):
+        raise StrategySetupError(
+            "自动树全量写回必须提供完整 tree asset ID。"
+        )
+
+    repository = TaskArtifactRepository(runtime.settings.db_path)
+    try:
+        artifacts = repository.list_for_task(task_id)
+    except Exception as exc:
+        raise StrategySetupError(
+            "当前任务的自动树 artifact registry 无法读取，不能安全绑定来源。"
+        ) from exc
+    matches = []
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            raise StrategySetupError("当前任务的自动树 artifact 记录结构无效。")
+        provenance = artifact.get("provenance")
+        if (
+            artifact.get("kind") == AUTOMATIC_TREE_SOURCE_ARTIFACT_KIND
+            and artifact.get("origin_tool")
+            == AUTOMATIC_TREE_SOURCE_ARTIFACT_ORIGIN_TOOL
+            and isinstance(provenance, Mapping)
+            and provenance.get("asset_id") == asset_id
+        ):
+            matches.append(artifact)
+    if not matches:
+        raise StrategySetupError(
+            f"当前任务没有自动树资产 {asset_id}；请使用构建结果中展示的完整 "
+            "candidate-asset ID。"
+        )
+    if len(matches) != 1:
+        raise StrategySetupError(
+            f"自动树资产 {asset_id} 对应多个 full-tree JSON artifact，"
+            "当前不能安全选择来源。"
+        )
+
+    artifact = matches[0]
+    provenance = artifact.get("provenance")
+    assert isinstance(provenance, Mapping)
+    artifact_id = artifact.get("id")
+    content_hash = artifact.get("content_hash")
+    asset_hash = provenance.get("asset_hash")
+    tree_result_hash = provenance.get("tree_result_hash")
+    if not all(
+        isinstance(value, str) and value
+        for value in (artifact_id, content_hash, asset_hash, tree_result_hash)
+    ):
+        raise StrategySetupError(
+            f"自动树资产 {asset_id} 的 artifact 完整性绑定不完整，请重新构建。"
+        )
+
+    try:
+        with repository.transaction() as conn:
+            verified = load_verified_automatic_tree_source_artifact_on_connection(
+                conn,
+                tasks_dir=runtime.settings.tasks_dir,
+                task_id=task_id,
+                artifact_id=artifact_id,
+                expected_content_hash=content_hash,
+                expected_asset_id=asset_id,
+                expected_asset_hash=asset_hash,
+                expected_tree_result_hash=tree_result_hash,
+            )
+    except Exception as exc:
+        raise StrategySetupError(
+            f"自动树资产 {asset_id} 未通过 artifact 完整性校验，请重新构建。"
+        ) from exc
+
+    identity = verified.asset.get("identity")
+    if not isinstance(identity, Mapping):
+        raise StrategySetupError(
+            f"自动树资产 {asset_id} 缺少原始样本 lineage，请重新构建。"
+        )
+    try:
+        workspace = DataWorkspaceRepository(
+            runtime.settings.db_path
+        ).get_or_default(task_id)
+    except (DataWorkspaceDataError, KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "当前活动 DataWorkspace 无法验证，不能执行自动树写回。"
+        ) from exc
+
+    semantic_hash = data_semantic_mapping_hash(workspace.semantic_mapping)
+    expected_binding = {
+        "task_id": task_id,
+        "dataset_id": getattr(context, "dataset_id", None),
+        "dataset_content_hash": getattr(context, "dataset_content_hash", None),
+        "workspace_revision": getattr(context, "workspace_revision", None),
+        "workspace_generation": getattr(context, "analysis_generation", None),
+        "semantic_mapping_hash": getattr(context, "semantic_mapping_hash", None),
+    }
+    live_binding = {
+        "task_id": task_id,
+        "dataset_id": workspace.active_dataset_id,
+        "dataset_content_hash": workspace.active_dataset_content_hash,
+        "workspace_revision": workspace.revision,
+        "workspace_generation": workspace.analysis_generation,
+        "semantic_mapping_hash": semantic_hash,
+    }
+    if any(identity.get(field) != value for field, value in expected_binding.items()):
+        raise StrategySetupError(
+            f"自动树资产 {asset_id} 只允许写回构建时绑定的原始样本；"
+            "当前策略数据上下文已发生变化，请重新构建或切回原始 workspace。"
+        )
+    if live_binding != expected_binding:
+        raise StrategySetupError(
+            "当前 DataWorkspace 在自动树写回绑定期间发生变化；本次未执行。"
+        )
+
+    output_columns = {
+        "leaf_id_column": inputs.get(
+            "leaf_id_column", "automatic_tree_leaf_id"
+        ),
+        "rule_id_column": inputs.get(
+            "rule_id_column", "automatic_tree_rule_id"
+        ),
+    }
+    folded_source_columns = {
+        str(column).casefold() for column in getattr(context, "columns", ())
+    }
+    if any(
+        not isinstance(column, str)
+        or column.casefold() in folded_source_columns
+        for column in output_columns.values()
+    ):
+        raise StrategySetupError(
+            "自动树写回输出列与当前样本已有字段冲突，请指定新的叶节点列和规则列。"
+        )
+
+    slots: dict[str, object] = {
+        "source_artifact_id": verified.artifact_id,
+        "expected_artifact_content_hash": verified.content_hash,
+        "expected_asset_id": verified.asset["asset_id"],
+        "expected_asset_hash": verified.asset["asset_hash"],
+        "expected_tree_result_hash": verified.asset["tree_result"]["result_hash"],
+        "dataset_id": identity["dataset_id"],
+        "expected_content_hash": identity["dataset_content_hash"],
+        "workspace_revision": identity["workspace_revision"],
+        "analysis_generation": identity["workspace_generation"],
+        "semantic_mapping_hash": identity["semantic_mapping_hash"],
+    }
+    for field in ("leaf_id_column", "rule_id_column"):
+        if field in inputs:
+            slots[field] = inputs[field]
     return slots
 
 
@@ -3287,6 +3750,116 @@ def _strategy_sample_design_plan_slots(
     return slots
 
 
+def _latest_matching_strategy_sample_design_ref(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    *,
+    context,
+    drop_nan_labels: bool,
+    month_col: str | None = None,
+    weight_col: str | None = None,
+    loan_amount_col: str | None = None,
+    overdue_amount_col: str | None = None,
+) -> dict[str, str]:
+    """Bind downstream execution to the newest exact governed sample design.
+
+    The language model never supplies artifact ids or hashes.  Selection is
+    deterministic over task-owned registry rows and only considers designs
+    whose immutable provenance already matches the active data/workspace/label
+    boundary.  The selected artifact is then fully reloaded and authenticated.
+    """
+
+    if not isinstance(context.target_col, str) or not context.target_col:
+        raise StrategySetupError(
+            "策略开发需要先在 DataWorkspace 中确认二元目标列。"
+        )
+    expected = {
+        "task_id": task.id,
+        "dataset_id": context.dataset_id,
+        "dataset_content_hash": context.dataset_content_hash,
+        "workspace_revision": context.workspace_revision,
+        "workspace_generation": context.analysis_generation,
+        "semantic_mapping_hash": context.semantic_mapping_hash,
+        "target_col": context.target_col,
+    }
+    matches: list[Mapping] = []
+    try:
+        artifacts = TaskArtifactRepository(
+            runtime.settings.db_path
+        ).list_for_task(task.id)
+    except Exception as exc:
+        raise StrategySetupError(
+            "无法读取当前任务的策略样本设计登记，不能安全继续策略开发。"
+        ) from exc
+    for artifact in artifacts:
+        provenance = artifact.get("provenance")
+        if (
+            artifact.get("kind") != SAMPLE_DESIGN_ARTIFACT_KIND
+            or artifact.get("origin_tool") != SAMPLE_DESIGN_ORIGIN_TOOL
+            or not isinstance(provenance, Mapping)
+            or any(provenance.get(field) != value for field, value in expected.items())
+        ):
+            continue
+        request = provenance.get("request")
+        if (
+            not isinstance(request, Mapping)
+            or request.get("drop_nan_labels") is not bool(drop_nan_labels)
+        ):
+            continue
+        matches.append(artifact)
+    if not matches:
+        raise _StrategySampleDesignRequiredError(
+            "当前活动数据和标签口径没有可执行的成熟策略样本设计。"
+            "请先用自然语言说明坏样本值、表现窗、观察窗、成熟度及可选切分，"
+            "让 MARVIS 固化样本设计。"
+        )
+
+    artifact = matches[-1]
+    provenance = artifact["provenance"]
+    reference = {
+        "artifact_id": artifact.get("id"),
+        "artifact_content_hash": artifact.get("content_hash"),
+        "sample_design_id": provenance.get("sample_design_id"),
+        "sample_design_content_hash": provenance.get(
+            "sample_design_content_hash"
+        ),
+        "partition": "development",
+    }
+    backend = DataBackend(runtime.settings.datasets_dir)
+    read_runtime = SimpleNamespace(
+        settings=runtime.settings,
+        registry=DatasetRegistry(
+            DatasetRepository(runtime.settings.db_path),
+            backend,
+            runtime.settings.datasets_dir,
+        ),
+        task_artifacts=TaskArtifactRepository(runtime.settings.db_path),
+    )
+    try:
+        binding = load_strategy_sample_design_execution_binding(
+            read_runtime,
+            task_id=task.id,
+            sample_design_ref=reference,
+            dataset_id=context.dataset_id,
+            dataset_content_hash=context.dataset_content_hash,
+            workspace_revision=context.workspace_revision,
+            workspace_generation=context.analysis_generation,
+            semantic_mapping_hash=context.semantic_mapping_hash,
+            target_col=context.target_col,
+            drop_nan_labels=bool(drop_nan_labels),
+            month_col=month_col,
+            weight_col=weight_col,
+            loan_amount_col=loan_amount_col,
+            overdue_amount_col=overdue_amount_col,
+        )
+    except StrategyError as exc:
+        raise StrategySetupError(
+            "当前最新策略样本设计未通过完整性、成熟度或字段口径校验；"
+            "请重新固化样本设计后再执行。"
+        ) from exc
+    return binding.to_ref_dict()
+
+
 def _strategy_pool_impact_plan_slots(
     runtime: DriverTurnRuntime,
     task: TaskRecord,
@@ -3410,6 +3983,16 @@ def _strategy_pool_impact_plan_slots(
         )
         if column is not None:
             slots[field] = column
+
+    slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+        runtime,
+        task,
+        context=context,
+        drop_nan_labels=bool(drop_nan_labels),
+        month_col=slots.get("month_col"),
+        loan_amount_col=slots.get("loan_amount_col"),
+        overdue_amount_col=slots.get("overdue_amount_col"),
+    )
 
     baseline_strategy_id = inputs.get("baseline_strategy_id")
     if comparison_mode == "vs_baseline":
@@ -4865,12 +5448,9 @@ def _strategy_request_requires_target(
                 "automatic_tree_candidate_build",
                 "cross_matrix_analysis",
                 "strategy_pool_impact",
+                "limit_pricing_matrix",
             }
             or refinement_needs_current_target
-            or (
-                draft.workflow == "limit_pricing_matrix"
-                and "target_col" in draft.workflow_inputs
-            )
         )
     if draft.operation in {"apply", "report", "monitor"}:
         return False
@@ -4897,12 +5477,9 @@ def _strategy_request_requires_complete_labels(
                 "automatic_tree_candidate_build",
                 "cross_matrix_analysis",
                 "strategy_pool_impact",
+                "limit_pricing_matrix",
             }
             or refinement_needs_current_labels
-            or (
-                draft.workflow == "limit_pricing_matrix"
-                and "target_col" in draft.workflow_inputs
-            )
         )
     if draft.operation in {"apply", "report", "monitor"}:
         return False

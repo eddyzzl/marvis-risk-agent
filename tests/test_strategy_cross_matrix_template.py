@@ -30,6 +30,13 @@ def _slots() -> dict[str, object]:
         "analysis_generation": 3,
         "semantic_mapping_hash": "b" * 64,
         "target_col": "bad",
+        "sample_design_ref": {
+            "artifact_id": "c" * 64,
+            "artifact_content_hash": "d" * 64,
+            "sample_design_id": "strategy-sample-design-1",
+            "sample_design_content_hash": "e" * 64,
+            "partition": "development",
+        },
         "drop_nan_labels": False,
         "features": ["age", "score"],
         "methods": ["equal_frequency", "equal_width"],

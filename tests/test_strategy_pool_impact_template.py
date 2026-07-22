@@ -42,6 +42,7 @@ def test_pool_impact_template_passes_only_governed_measurement_slots() -> None:
         "workspace_generation",
         "semantic_mapping_hash",
         "target_col",
+        "sample_design_ref",
     }
     assert set(template.steps[0].inputs_template) == set(slot_sources)
     assert "retaining sample rows" in nan_slot.description

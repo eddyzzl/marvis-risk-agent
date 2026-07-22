@@ -23,6 +23,15 @@ from marvis.packs.strategy.voting_candidate_fragment import (
 )
 
 
+SAMPLE_DESIGN_REF = {
+    "artifact_id": "1" * 64,
+    "artifact_content_hash": "2" * 64,
+    "sample_design_id": "sample-design-voting-fragment",
+    "sample_design_content_hash": "3" * 64,
+    "partition": "development",
+}
+
+
 def _source(index: int) -> dict:
     digest = str(index + 1) * 64
     return build_verified_candidate_fragment(
@@ -80,6 +89,7 @@ def _asset() -> dict:
         selected_entry_ids=[entry["entry_id"] for entry in pool["entries"]],
         n=2,
         target_col="bad",
+        sample_design_ref=SAMPLE_DESIGN_REF,
         effect={
             "population_count": 10,
             "labeled_count": 10,
@@ -150,6 +160,7 @@ def test_voting_fragment_requires_governed_placement_and_preserves_earlier_rule(
         selected_entry_ids=selected_ids,
         n=2,
         target_col="bad",
+        sample_design_ref=SAMPLE_DESIGN_REF,
         effect={
             "population_count": 10,
             "labeled_count": 10,

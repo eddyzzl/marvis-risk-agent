@@ -27,6 +27,9 @@ from marvis.packs.strategy.automatic_tree_asset import (
     canonical_automatic_tree_asset_json,
     validate_automatic_tree_asset,
 )
+from marvis.packs.strategy.automatic_tree_sample_design import (
+    sample_design_ref_from_automatic_tree_source_refs,
+)
 from marvis.packs.strategy.automatic_tree_leaf_fragment import (
     AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_KIND,
     AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_SCHEMA_VERSION,
@@ -65,6 +68,7 @@ SOURCE_PROVENANCE_FIELDS = frozenset(
         "sample_context_hash",
     }
 )
+_SOURCE_PROVENANCE_FIELDS_WITH_SAMPLE = SOURCE_PROVENANCE_FIELDS | {"sample_design_ref"}
 SELECTION_PROVENANCE_FIELDS = frozenset(
     {
         "schema_version",
@@ -323,7 +327,17 @@ def automatic_tree_source_provenance_from_asset(
         "registry_metadata_hash": identity["registry_metadata_hash"],
         "sample_context_hash": identity["sample_context_hash"],
     }
-    if set(provenance) != SOURCE_PROVENANCE_FIELDS:
+    if any(
+        isinstance(value, str) and value.startswith("strategy-sample-design:")
+        for value in asset["source_refs"]
+    ):
+        provenance["sample_design_ref"] = (
+            sample_design_ref_from_automatic_tree_source_refs(asset["source_refs"])
+        )
+    if set(provenance) not in {
+        SOURCE_PROVENANCE_FIELDS,
+        _SOURCE_PROVENANCE_FIELDS_WITH_SAMPLE,
+    }:
         raise StrategyError("automatic-tree source provenance fields drifted")
     return provenance
 
@@ -335,8 +349,8 @@ def verify_automatic_tree_source_provenance(
     """Verify and detach exact full-tree provenance for Pool reuse."""
 
     actual = _canonical_json_object(provenance_payload, "source provenance")
-    _require_exact_fields(actual, SOURCE_PROVENANCE_FIELDS, "source provenance")
     expected = automatic_tree_source_provenance_from_asset(asset_payload)
+    _require_exact_fields(actual, frozenset(expected), "source provenance")
     if not hmac.compare_digest(_canonical_json(actual), _canonical_json(expected)):
         raise StrategyError(
             "automatic-tree source provenance does not match canonical asset"

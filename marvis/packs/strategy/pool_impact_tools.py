@@ -24,6 +24,9 @@ from marvis.data.workspace import (
     data_semantic_mapping_hash,
 )
 from marvis.files import sha256_file
+from marvis.packs.strategy.automatic_tree_sample_design import (
+    sample_design_ref_from_automatic_tree_source_refs,
+)
 from marvis.packs.strategy.dsl import strategy_spec_hash
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.pool import compile_strategy_pool, validate_strategy_pool
@@ -32,6 +35,20 @@ from marvis.packs.strategy.pool_impact import (
     build_strategy_pool_impact_assessment,
     canonical_strategy_pool_impact_json,
     validate_strategy_pool_impact_assessment,
+)
+from marvis.packs.strategy.sample_design_binding import (
+    StrategySampleDesignExecutionBinding,
+    StrategySampleDesignRef,
+    bind_strategy_development_frame,
+    load_strategy_sample_design_execution_binding,
+    revalidate_strategy_sample_design_execution_binding,
+)
+from marvis.packs.strategy.sample_design_tools import (
+    SAMPLE_DESIGN_ARTIFACT_KIND,
+    SAMPLE_DESIGN_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.voting_candidate import (
+    VOTING_CANDIDATE_ASSET_SCHEMA_VERSION,
 )
 from marvis.repositories.data_workspace import (
     DataWorkspaceDataError,
@@ -55,9 +72,9 @@ from marvis.repositories.task_artifacts import (
 )
 
 
-POOL_IMPACT_TOOL_SCHEMA_VERSION = "strategy.measure-pool-impact-tool.v1"
+POOL_IMPACT_TOOL_SCHEMA_VERSION = "strategy.measure-pool-impact-tool.v2"
 POOL_IMPACT_ARTIFACT_KIND = "strategy_pool_impact_json"
-POOL_IMPACT_ARTIFACT_SCHEMA_VERSION = "strategy.pool-impact-artifact.v1"
+POOL_IMPACT_ARTIFACT_SCHEMA_VERSION = "strategy.pool-impact-artifact.v2"
 POOL_IMPACT_ORIGIN_TOOL = "strategy.measure_pool_impact"
 
 _INPUT_FIELDS = frozenset(
@@ -77,6 +94,7 @@ _INPUT_FIELDS = frozenset(
         "loan_amount_col",
         "overdue_amount_col",
         "drop_nan_labels",
+        "sample_design_ref",
     }
 )
 _OPTIONAL_FIELDS = frozenset(
@@ -212,6 +230,26 @@ def run_measure_pool_impact(inputs, ctx, runtime) -> dict[str, Any]:
             task_id=task_id,
             sample=sample,
         )
+        sample_design = load_strategy_sample_design_execution_binding(
+            runtime,
+            task_id=task_id,
+            sample_design_ref=request["sample_design_ref"],
+            dataset_id=dataset.dataset_id,
+            dataset_content_hash=dataset.content_hash,
+            workspace_revision=dataset.workspace_revision,
+            workspace_generation=dataset.workspace_generation,
+            semantic_mapping_hash=dataset.semantic_mapping_hash,
+            target_col=dataset.target_col,
+            drop_nan_labels=request["drop_nan_labels"],
+            month_col=request.get("month_col"),
+            loan_amount_col=request.get("loan_amount_col"),
+            overdue_amount_col=request.get("overdue_amount_col"),
+        )
+        request = _resolve_sample_design_optional_bindings(request, sample_design)
+        _require_pool_sample_design_ref(
+            lineages,
+            expected=sample_design.reference,
+        )
         _require_pool_measurement_target(
             lineages,
             expected_target_col=dataset.target_col,
@@ -224,10 +262,12 @@ def run_measure_pool_impact(inputs, ctx, runtime) -> dict[str, Any]:
         frame = _read_frame(
             runtime,
             dataset=dataset,
+            sample_design=sample_design,
             strategy_spec=selected["strategy_spec"],
             baseline_spec=None if baseline is None else baseline.spec,
             request=request,
         )
+        frame = bind_strategy_development_frame(frame, binding=sample_design)
         nan_labels_excluded = require_labels_confirmed(
             frame,
             dataset.target_col,
@@ -238,7 +278,9 @@ def run_measure_pool_impact(inputs, ctx, runtime) -> dict[str, Any]:
             pool=pool,
             frame=frame,
             sample_binding=sample,
+            sample_design_ref=sample_design.to_ref_dict(),
             target_col=dataset.target_col,
+            target_bad_value=1,
             month_col=request.get("month_col"),
             loan_amount_col=request.get("loan_amount_col"),
             overdue_amount_col=request.get("overdue_amount_col"),
@@ -258,6 +300,16 @@ def run_measure_pool_impact(inputs, ctx, runtime) -> dict[str, Any]:
             raise StrategyError(
                 "source dataset changed while Pool impact was being measured"
             )
+        revalidated_sample_design = (
+            revalidate_strategy_sample_design_execution_binding(
+                runtime,
+                sample_design,
+            )
+        )
+        if revalidated_sample_design != sample_design:
+            raise StrategyError(
+                "strategy sample-design changed while Pool impact was measured"
+            )
         return _persist_assessment(
             runtime,
             repository=repository,
@@ -267,6 +319,7 @@ def run_measure_pool_impact(inputs, ctx, runtime) -> dict[str, Any]:
             pool_artifact=pool_artifact,
             lineages=lineages,
             dataset=dataset,
+            sample_design=sample_design,
             baseline=baseline,
             assessment=assessment,
             nan_labels_excluded=nan_labels_excluded,
@@ -414,10 +467,13 @@ def _validate_inputs(value: object) -> dict[str, Any]:
             value["semantic_mapping_hash"], "semantic_mapping_hash"
         ),
         "target_col": _text(value["target_col"], "target_col"),
+        "sample_design_ref": StrategySampleDesignRef.from_value(
+            value["sample_design_ref"]
+        ).to_ref_dict(),
         "comparison_mode": _text(value["comparison_mode"], "comparison_mode"),
     }
     if request["strategy_type"] not in {"approval", "reject"}:
-        raise StrategyError("Pool impact v1 supports approval/reject only")
+        raise StrategyError("Pool impact supports approval/reject only")
     if request["comparison_mode"] not in {"absolute", "vs_baseline"}:
         raise StrategyError("comparison_mode must be absolute or vs_baseline")
     for field in (
@@ -484,6 +540,116 @@ def _require_pool_measurement_target(
         raise StrategyError(
             "Strategy Pool candidate target does not match the confirmed workspace target"
         )
+
+
+def _require_pool_sample_design_ref(
+    lineages,
+    *,
+    expected: StrategySampleDesignRef,
+) -> None:
+    if not lineages:
+        raise StrategyError("Strategy Pool has no candidate lineages")
+    for lineage in lineages:
+        actual = _lineage_sample_design_ref(lineage)
+        if actual != expected:
+            raise StrategyError(
+                "Strategy Pool candidate sample-design reference does not match "
+                "the requested development sample"
+            )
+
+
+def _lineage_sample_design_ref(lineage) -> StrategySampleDesignRef:
+    candidate = getattr(lineage, "candidate", None)
+    if candidate is not None:
+        asset = getattr(candidate, "asset", None)
+        if (
+            not isinstance(asset, Mapping)
+            or asset.get("schema_version")
+            != VOTING_CANDIDATE_ASSET_SCHEMA_VERSION
+        ):
+            raise StrategyError(
+                "legacy Voting candidate is not bound to a governed sample "
+                "design; regenerate it before impact measurement"
+            )
+        actual = StrategySampleDesignRef.from_value(
+            asset.get("sample_design_ref")
+        )
+        provenance = getattr(candidate, "provenance", None)
+        if not isinstance(provenance, Mapping):
+            raise StrategyError("Voting candidate sample-design provenance is invalid")
+        if StrategySampleDesignRef.from_value(
+            provenance.get("sample_design_ref")
+        ) != actual:
+            raise StrategyError(
+                "Voting candidate sample-design asset and provenance disagree"
+            )
+        parents = getattr(lineage, "parent_lineages", ())
+        if not parents:
+            raise StrategyError("Voting candidate parent lineage is incomplete")
+        for parent in parents:
+            if _lineage_sample_design_ref(parent) != actual:
+                raise StrategyError(
+                    "Voting candidate sample-design reference does not match "
+                    "all selected parent lineages"
+                )
+        return actual
+
+    evidence = getattr(lineage, "evidence", None)
+    if isinstance(evidence, Mapping):
+        try:
+            value = evidence["generation"]["parameters"]["sample_design_ref"]
+        except (KeyError, TypeError) as exc:
+            raise StrategyError(
+                "Strategy Pool candidate is not bound to a governed sample design; "
+                "regenerate the candidate from StrategySampleDesign development"
+            ) from exc
+        return StrategySampleDesignRef.from_value(value)
+
+    tree = getattr(lineage, "tree", None)
+    asset = getattr(tree, "asset", None)
+    if isinstance(asset, Mapping):
+        try:
+            value = sample_design_ref_from_automatic_tree_source_refs(
+                asset["source_refs"]
+            )
+        except (KeyError, TypeError, StrategyError) as exc:
+            raise StrategyError(
+                "automatic-tree Strategy Pool candidate is not bound to exactly "
+                "one governed sample design; regenerate it from "
+                "StrategySampleDesign development"
+            ) from exc
+        return StrategySampleDesignRef.from_value(value)
+
+    raise StrategyError(
+        "Strategy Pool candidate type is not yet bound to a governed sample "
+        "design; regenerate it with a sample-design-aware candidate Tool"
+    )
+
+
+def _resolve_sample_design_optional_bindings(
+    request: Mapping[str, Any],
+    binding: StrategySampleDesignExecutionBinding,
+) -> dict[str, Any]:
+    """Resolve optional measurement columns through the sample-design authority.
+
+    Missing fields inherit the designed columns.  A caller-provided non-empty
+    value remains a fail-closed equality assertion against that design.
+    """
+
+    expected = {
+        "month_col": binding.month_col,
+        "loan_amount_col": binding.loan_amount_col,
+        "overdue_amount_col": binding.overdue_amount_col,
+    }
+    resolved = dict(request)
+    for field, designed in expected.items():
+        requested = request.get(field)
+        if requested is not None and requested != designed:
+            raise StrategyError(
+                f"strategy sample-design {field} does not match Pool impact binding"
+            )
+        resolved[field] = designed
+    return resolved
 
 
 def _lineage_target_col(lineage) -> str:
@@ -649,6 +815,7 @@ def _read_frame(
     runtime,
     *,
     dataset: _DatasetBinding,
+    sample_design: StrategySampleDesignExecutionBinding,
     strategy_spec: Mapping[str, Any],
     baseline_spec: Mapping[str, Any] | None,
     request: Mapping[str, Any],
@@ -657,10 +824,12 @@ def _read_frame(
     if baseline_spec is not None:
         fields.update(_expression_fields(baseline_spec))
     fields.add(dataset.target_col)
+    if sample_design.split_column is not None:
+        fields.add(sample_design.split_column)
     fields.update(
         request[field]
         for field in ("month_col", "loan_amount_col", "overdue_amount_col")
-        if field in request
+        if request.get(field) is not None
     )
     unknown = sorted(fields - set(dataset.columns))
     if unknown:
@@ -697,6 +866,7 @@ def _persist_assessment(
     pool_artifact,
     lineages,
     dataset: _DatasetBinding,
+    sample_design: StrategySampleDesignExecutionBinding,
     baseline: _BaselineBinding | None,
     assessment: Mapping[str, Any],
     nan_labels_excluded: int,
@@ -731,6 +901,13 @@ def _persist_assessment(
         "workspace_generation": dataset.workspace_generation,
         "semantic_mapping_hash": dataset.semantic_mapping_hash,
         "target_col": dataset.target_col,
+        "sample_design_ref": sample_design.to_ref_dict(),
+        "month_col": sample_design.month_col,
+        "loan_amount_col": sample_design.loan_amount_col,
+        "overdue_amount_col": sample_design.overdue_amount_col,
+        "source_target_bad_value": sample_design.target_bad_value,
+        "normalized_target_bad_value": 1,
+        "sample_partition": sample_design.reference.partition,
         "comparison_mode": request["comparison_mode"],
         "baseline_strategy_id": None if baseline is None else baseline.strategy_id,
         "baseline_spec_hash": None if baseline is None else baseline.spec_hash,
@@ -773,6 +950,11 @@ def _persist_assessment(
                         tasks_root=Path(runtime.settings.tasks_dir),
                         cache=cache,
                     )
+                _require_sample_design_on_connection(
+                    conn,
+                    task_id=task_id,
+                    binding=sample_design,
+                )
                 _require_dataset_and_workspace_on_connection(
                     conn,
                     request=request,
@@ -916,6 +1098,47 @@ def _require_dataset_and_workspace_on_connection(
         or mapping.target_col != request["target_col"]
     ):
         raise StrategyError("DataWorkspace changed before impact registration")
+
+
+def _require_sample_design_on_connection(
+    conn,
+    *,
+    task_id: str,
+    binding: StrategySampleDesignExecutionBinding,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT task_id, kind, path, content_hash, origin_tool, provenance_json
+          FROM task_artifacts
+         WHERE id = ?
+        """,
+        (binding.reference.artifact_id,),
+    ).fetchone()
+    expected_provenance = json.dumps(
+        binding.artifact.provenance,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    if (
+        row is None
+        or str(row["task_id"]) != task_id
+        or str(row["kind"]) != SAMPLE_DESIGN_ARTIFACT_KIND
+        or str(row["path"]) != str(binding.artifact.path)
+        or not hmac.compare_digest(
+            str(row["content_hash"]), binding.reference.artifact_content_hash
+        )
+        or str(row["origin_tool"]) != SAMPLE_DESIGN_ORIGIN_TOOL
+        or str(row["provenance_json"]) != expected_provenance
+    ):
+        raise StrategyError(
+            "strategy sample-design artifact changed before impact registration"
+        )
+    if sha256_file(binding.artifact.path) != binding.reference.artifact_content_hash:
+        raise StrategyError(
+            "strategy sample-design artifact bytes changed before impact registration"
+        )
 
 
 def _require_baseline_on_connection(

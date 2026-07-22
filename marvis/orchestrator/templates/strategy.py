@@ -10,6 +10,14 @@ from marvis.packs.strategy.candidate_design import CANDIDATE_POLICY_VERSION
 from marvis.plugins.manifest import ToolRef
 
 
+_STRATEGY_SAMPLE_DESIGN_REF_SLOT = SlotSpec(
+    "sample_design_ref",
+    True,
+    "task_context",
+    "Exact authenticated StrategySampleDesign development partition",
+)
+
+
 STRATEGY_ANALYSIS = WorkflowTemplate(
     id="strategy_analysis",
     title="快速策略分析与回测",
@@ -22,6 +30,7 @@ STRATEGY_ANALYSIS = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
+        _STRATEGY_SAMPLE_DESIGN_REF_SLOT,
         SlotSpec(
             "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
         ),
@@ -51,6 +60,7 @@ STRATEGY_ANALYSIS = WorkflowTemplate(
                 "dataset_id": "{slot:dataset_id}",
                 "strategy_id": "$ref:构造策略.output.strategy_id",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
             },
             depends_on_titles=("构造策略",),
@@ -76,6 +86,7 @@ STRATEGY_ANALYSIS = WorkflowTemplate(
                 "dataset_id": "{slot:dataset_id}",
                 "score_col": "{slot:score_col}",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
             },
             depends_on_titles=("回测策略",),
@@ -218,6 +229,12 @@ STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS = WorkflowTemplate(
             "target_col", True, "task_context", "Server-bound binary target column"
         ),
         SlotSpec(
+            "sample_design_ref",
+            True,
+            "task_context",
+            "Exact authenticated StrategySampleDesign development partition",
+        ),
+        SlotSpec(
             "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
         ),
         SlotSpec(
@@ -248,6 +265,7 @@ STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS = WorkflowTemplate(
                 "analysis_generation": "{slot:analysis_generation}",
                 "semantic_mapping_hash": "{slot:semantic_mapping_hash}",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
                 "features": "{slot:features}",
                 "methods": "{slot:methods}",
@@ -467,6 +485,12 @@ STRATEGY_AUTOMATIC_TREE_CANDIDATE_BUILD = WorkflowTemplate(
         SlotSpec(
             "target_col", True, "task_context", "Server-bound binary target column"
         ),
+        SlotSpec(
+            "sample_design_ref",
+            True,
+            "task_context",
+            "Exact authenticated StrategySampleDesign development partition",
+        ),
         SlotSpec("features", True, "user", "Explicit ordered tree feature fields"),
         SlotSpec(
             "drop_nan_labels",
@@ -504,6 +528,7 @@ STRATEGY_AUTOMATIC_TREE_CANDIDATE_BUILD = WorkflowTemplate(
                 "analysis_generation": "{slot:analysis_generation}",
                 "semantic_mapping_hash": "{slot:semantic_mapping_hash}",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "features": "{slot:features}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
                 "sample_weight_col": "{slot:sample_weight_col}",
@@ -533,6 +558,132 @@ STRATEGY_AUTOMATIC_TREE_CANDIDATE_BUILD = WorkflowTemplate(
                         }
                     },
                 ),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STRATEGY_AUTOMATIC_TREE_APPLY = WorkflowTemplate(
+    id="strategy_automatic_tree_apply",
+    title="自动决策树全量写回",
+    goal_patterns=(
+        "把完整自动树应用到当前样本",
+        "将自动树叶节点写回派生数据集",
+        "apply complete automatic tree",
+        "write automatic tree assignments to dataset",
+    ),
+    slots=(
+        SlotSpec(
+            "source_artifact_id",
+            True,
+            "task_context",
+            "Verified task-owned automatic-tree artifact id",
+        ),
+        SlotSpec(
+            "expected_artifact_content_hash",
+            True,
+            "task_context",
+            "Verified automatic-tree artifact content hash",
+        ),
+        SlotSpec(
+            "expected_asset_id",
+            True,
+            "task_context",
+            "Verified automatic-tree asset id",
+        ),
+        SlotSpec(
+            "expected_asset_hash",
+            True,
+            "task_context",
+            "Verified automatic-tree asset hash",
+        ),
+        SlotSpec(
+            "expected_tree_result_hash",
+            True,
+            "task_context",
+            "Verified deterministic tree result hash",
+        ),
+        SlotSpec(
+            "dataset_id",
+            True,
+            "task_context",
+            "Exact source dataset bound by the tree asset",
+        ),
+        SlotSpec(
+            "expected_content_hash",
+            True,
+            "task_context",
+            "Exact source dataset content hash",
+        ),
+        SlotSpec(
+            "workspace_revision",
+            True,
+            "task_context",
+            "Exact source data-workspace revision",
+        ),
+        SlotSpec(
+            "analysis_generation",
+            True,
+            "task_context",
+            "Exact source data-workspace generation",
+        ),
+        SlotSpec(
+            "semantic_mapping_hash",
+            True,
+            "task_context",
+            "Exact source semantic mapping hash",
+        ),
+        SlotSpec(
+            "leaf_id_column",
+            False,
+            "user",
+            "Optional output column for canonical leaf ids",
+        ),
+        SlotSpec(
+            "rule_id_column",
+            False,
+            "user",
+            "Optional output column for canonical rule ids",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="写回自动树叶节点与规则",
+            tool_ref=ToolRef("strategy", "apply_automatic_tree"),
+            inputs_template={
+                "source_artifact_id": "{slot:source_artifact_id}",
+                "expected_artifact_content_hash": (
+                    "{slot:expected_artifact_content_hash}"
+                ),
+                "expected_asset_id": "{slot:expected_asset_id}",
+                "expected_asset_hash": "{slot:expected_asset_hash}",
+                "expected_tree_result_hash": "{slot:expected_tree_result_hash}",
+                "dataset_id": "{slot:dataset_id}",
+                "expected_content_hash": "{slot:expected_content_hash}",
+                "workspace_revision": "{slot:workspace_revision}",
+                "analysis_generation": "{slot:analysis_generation}",
+                "semantic_mapping_hash": "{slot:semantic_mapping_hash}",
+                "leaf_id_column": "{slot:leaf_id_column}",
+                "rule_id_column": "{slot:rule_id_column}",
+                # Natural-language application creates an immutable derived
+                # dataset but leaves the active DataWorkspace unchanged. This
+                # reversible boundary needs no human-responsibility gate.
+                "activate_result": False,
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "run_id"}),
+                PostCheck("nonempty", {"field": "source.asset_id"}),
+                PostCheck("nonempty", {"field": "result.dataset_id"}),
+                PostCheck("nonempty", {"field": "result.dataset_content_hash"}),
+                PostCheck("nonempty", {"field": "columns.leaf_id"}),
+                PostCheck("nonempty", {"field": "columns.rule_id"}),
+                PostCheck("nonempty", {"field": "evidence.artifact_id"}),
+                PostCheck("nonempty", {"field": "evidence.content_hash"}),
             ),
             needs_confirmation=False,
         ),
@@ -1254,6 +1405,12 @@ STRATEGY_POOL_IMPACT = WorkflowTemplate(
         ),
         SlotSpec("target_col", True, "task_context", "Confirmed binary target column"),
         SlotSpec(
+            "sample_design_ref",
+            True,
+            "task_context",
+            "Exact authenticated StrategySampleDesign development partition",
+        ),
+        SlotSpec(
             "comparison_mode",
             True,
             "user",
@@ -1306,6 +1463,7 @@ STRATEGY_POOL_IMPACT = WorkflowTemplate(
                 "workspace_generation": "{slot:workspace_generation}",
                 "semantic_mapping_hash": "{slot:semantic_mapping_hash}",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "comparison_mode": "{slot:comparison_mode}",
                 "baseline_strategy_id": "{slot:baseline_strategy_id}",
                 "month_col": "{slot:month_col}",
@@ -1329,6 +1487,7 @@ STRATEGY_POOL_IMPACT = WorkflowTemplate(
 
 _LIMIT_PRICING_INPUTS = {
     "dataset_id": "{slot:dataset_id}",
+    "sample_design_ref": "{slot:sample_design_ref}",
     "score_col": "{slot:score_col}",
     "target_col": "{slot:target_col}",
     "pd_col": "{slot:pd_col}",
@@ -1354,6 +1513,7 @@ STRATEGY_LIMIT_PRICING_ANALYSIS = WorkflowTemplate(
         SlotSpec(
             "dataset_id", True, "task_context", "Registered task-owned dataset id"
         ),
+        _STRATEGY_SAMPLE_DESIGN_REF_SLOT,
         SlotSpec("score_col", True, "user", "Score column"),
         SlotSpec(
             "pd_col",
@@ -1432,6 +1592,7 @@ DETERMINISTIC_STRATEGY_CANDIDATE_DEVELOPMENT = WorkflowTemplate(
         SlotSpec(
             "target_col", True, "task_context", "Server-bound binary target column"
         ),
+        _STRATEGY_SAMPLE_DESIGN_REF_SLOT,
         SlotSpec(
             "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
         ),
@@ -1467,6 +1628,8 @@ DETERMINISTIC_STRATEGY_CANDIDATE_DEVELOPMENT = WorkflowTemplate(
             inputs_template={
                 "dataset_id": "{slot:dataset_id}",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
+                "drop_nan_labels": "{slot:drop_nan_labels}",
                 "strategy_type": "{slot:strategy_type}",
                 "candidate_design": "{slot:candidate_design}",
                 "economics_inputs": "{slot:economics_inputs}",
@@ -1498,6 +1661,7 @@ DETERMINISTIC_STRATEGY_CANDIDATE_DEVELOPMENT = WorkflowTemplate(
                 "dataset_id": "{slot:dataset_id}",
                 "strategy_id": "$ref:构造确定性候选策略.output.strategy_id",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
                 "baseline_strategy_id": "{slot:baseline_strategy_id}",
                 # Reuse the normalized bundle emitted by design so candidate
@@ -1631,6 +1795,7 @@ TYPED_STRATEGY_EVALUATION = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
+        _STRATEGY_SAMPLE_DESIGN_REF_SLOT,
         SlotSpec(
             "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
         ),
@@ -1663,6 +1828,7 @@ TYPED_STRATEGY_EVALUATION = WorkflowTemplate(
                 "dataset_id": "{slot:dataset_id}",
                 "strategy_id": "$ref:构造类型化策略.output.strategy_id",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
                 "baseline_strategy_id": "{slot:baseline_strategy_id}",
                 "economics_inputs": "{slot:economics_inputs}",
@@ -1785,6 +1951,7 @@ STORED_STRATEGY_EVALUATION = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
+        _STRATEGY_SAMPLE_DESIGN_REF_SLOT,
         SlotSpec(
             "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
         ),
@@ -1807,6 +1974,7 @@ STORED_STRATEGY_EVALUATION = WorkflowTemplate(
                 "dataset_id": "{slot:dataset_id}",
                 "strategy_id": "{slot:strategy_id}",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
                 "baseline_strategy_id": "{slot:baseline_strategy_id}",
                 "economics_inputs": "{slot:economics_inputs}",
@@ -1920,6 +2088,7 @@ STORED_STRATEGY_ADOPTION = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
+        _STRATEGY_SAMPLE_DESIGN_REF_SLOT,
         SlotSpec(
             "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
         ),
@@ -1940,6 +2109,7 @@ STORED_STRATEGY_ADOPTION = WorkflowTemplate(
                 "dataset_id": "{slot:dataset_id}",
                 "strategy_id": "{slot:strategy_id}",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
                 "economics_inputs": "{slot:economics_inputs}",
                 "profit_params": "{slot:profit_params}",
@@ -2130,6 +2300,7 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
+        _STRATEGY_SAMPLE_DESIGN_REF_SLOT,
         SlotSpec(
             "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
         ),
@@ -2173,6 +2344,7 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
                 "dataset_id": "{slot:dataset_id}",
                 "score_col": "{slot:score_col}",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
                 "score_direction": "{slot:score_direction}",
                 "objective": "{slot:objective}",
@@ -2193,6 +2365,7 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
                 "dataset_id": "{slot:dataset_id}",
                 "score_col": "{slot:score_col}",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
                 "score_direction": "{slot:score_direction}",
                 "objective": "{slot:objective}",
@@ -2229,6 +2402,7 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
                 "dataset_id": "{slot:dataset_id}",
                 "strategy_id": "$ref:构造策略.output.strategy_id",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
                 "baseline_strategy_id": "{slot:baseline_strategy_id}",
                 "ead_col": "{slot:ead_col}",
@@ -2257,6 +2431,7 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
             inputs_template={
                 "dataset_id": "{slot:dataset_id}",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
                 "strategy_id": "$ref:构造策略.output.strategy_id",
                 "baseline_strategy_id": "{slot:baseline_strategy_id}",
@@ -2333,6 +2508,7 @@ RULE_STRATEGY = WorkflowTemplate(
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),
+        _STRATEGY_SAMPLE_DESIGN_REF_SLOT,
         SlotSpec(
             "drop_nan_labels", False, "user", "Confirmed target null-row exclusion"
         ),
@@ -2360,6 +2536,7 @@ RULE_STRATEGY = WorkflowTemplate(
             inputs_template={
                 "dataset_id": "{slot:dataset_id}",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
                 "feature_cols": "{slot:feature_cols}",
                 "max_depth": "{slot:max_depth}",
@@ -2389,6 +2566,7 @@ RULE_STRATEGY = WorkflowTemplate(
             inputs_template={
                 "dataset_id": "{slot:dataset_id}",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
                 "rules": "$ref:选择规则集.output.selected_rules",
             },
@@ -2422,6 +2600,7 @@ RULE_STRATEGY = WorkflowTemplate(
                 "dataset_id": "{slot:dataset_id}",
                 "strategy_id": "$ref:构造策略.output.strategy_id",
                 "target_col": "{slot:target_col}",
+                "sample_design_ref": "{slot:sample_design_ref}",
                 "drop_nan_labels": "{slot:drop_nan_labels}",
             },
             depends_on_titles=("构造策略",),

@@ -24,6 +24,15 @@ from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 
 
+_SAMPLE_DESIGN_REF = {
+    "artifact_id": "c" * 64,
+    "artifact_content_hash": "d" * 64,
+    "sample_design_id": "strategy-sample-design-1",
+    "sample_design_content_hash": "e" * 64,
+    "partition": "development",
+}
+
+
 def _template(template_id: str, *, source: str = "builtin") -> WorkflowTemplate:
     return WorkflowTemplate(
         id=template_id,
@@ -593,6 +602,7 @@ def test_strategy_analysis_template_marks_backtest_decision_point(tmp_path):
         {
             "dataset_id": "dataset-1",
             "target_col": "bad_flag",
+            "sample_design_ref": _SAMPLE_DESIGN_REF,
             "score_col": "score",
             "strategy_type": "approval",
             "rules": [{"condition": "score < 600", "decision": "reject"}],
@@ -610,6 +620,8 @@ def test_strategy_analysis_template_marks_backtest_decision_point(tmp_path):
     assert [step.title for step in plan.steps if step.decision_point] == ["回测策略"]
     assert [step.title for step in plan.steps if step.needs_confirmation] == []
     assert plan.steps[1].policy.human_decision_gate == "none"
+    assert plan.steps[1].inputs["sample_design_ref"] == _SAMPLE_DESIGN_REF
+    assert plan.steps[2].inputs["sample_design_ref"] == _SAMPLE_DESIGN_REF
     assert all("drop_nan_labels" not in step.inputs for step in plan.steps)
 
 
@@ -654,7 +666,10 @@ def test_strategy_templates_thread_explicit_nan_label_exclusion_contract():
     load_builtin_templates()
     expected_consumers = {
         "strategy_analysis": {"backtest_strategy", "tradeoff_view"},
-        "deterministic_strategy_candidate_development": {"backtest_strategy"},
+        "deterministic_strategy_candidate_development": {
+            "design_strategy_candidate",
+            "backtest_strategy",
+        },
         "typed_strategy_evaluation": {"backtest_strategy"},
         "stored_strategy_evaluation": {"backtest_strategy"},
         "stored_strategy_adoption": {"backtest_strategy"},
@@ -716,9 +731,10 @@ def test_strategy_templates_thread_explicit_nan_label_exclusion_contract():
                 "expected_content_hash": "a" * 64,
                 "workspace_revision": 1,
                 "analysis_generation": 1,
-                "semantic_mapping_hash": "b" * 64,
-                "target_col": "bad",
-                "features": ["score", "segment"],
+                    "semantic_mapping_hash": "b" * 64,
+                    "target_col": "bad",
+                    "sample_design_ref": _SAMPLE_DESIGN_REF,
+                    "features": ["score", "segment"],
                 "methods": [],
                 "bin_count": 5,
                 "min_bin_pct": 0.02,
@@ -733,9 +749,10 @@ def test_strategy_templates_thread_explicit_nan_label_exclusion_contract():
                 "expected_content_hash": "a" * 64,
                 "workspace_revision": 1,
                 "analysis_generation": 1,
-                "semantic_mapping_hash": "b" * 64,
-                "target_col": "bad",
-                "features": ["score"],
+                    "semantic_mapping_hash": "b" * 64,
+                    "target_col": "bad",
+                    "sample_design_ref": _SAMPLE_DESIGN_REF,
+                    "features": ["score"],
                 "methods": ["equal_width"],
                 "bin_count": 5,
                 "min_bin_pct": 0.02,
@@ -770,6 +787,7 @@ def test_strategy_templates_thread_explicit_nan_label_exclusion_contract():
             "strategy_limit_pricing_analysis",
             {
                 "dataset_id": "dataset-1",
+                "sample_design_ref": _SAMPLE_DESIGN_REF,
                 "score_col": "score",
                 "pd_col": "pd",
                 "limit_grid": [1000, 2000],
@@ -797,6 +815,8 @@ def test_standard_strategy_workflow_templates_validate(
     assert PlanValidator(tool_registry).validate(plan) == []
     assert [step.tool_ref for step in plan.steps] == expected_tools
     if template_id == "strategy_limit_pricing_analysis":
+        assert plan.steps[0].inputs["sample_design_ref"] == _SAMPLE_DESIGN_REF
+        assert plan.steps[1].inputs["sample_design_ref"] == _SAMPLE_DESIGN_REF
         assert plan.steps[0].inputs["confirm"] is False
         assert plan.steps[1].inputs["confirm"] is True
         assert (
@@ -825,10 +845,14 @@ def test_deterministic_nonapproval_candidate_template_contract_is_registered() -
         ToolRef("strategy", "render_strategy_doc"),
     ]
     design, build, backtest, doc, adopt, final_doc = template.steps
+    sample_slot = next(slot for slot in template.slots if slot.name == "sample_design_ref")
+    assert sample_slot.required is True
     assert design.inputs_template["candidate_policy_version"] == (
         "strategy.candidate_policy.v1"
     )
     assert design.inputs_template["target_col"] == "{slot:target_col}"
+    assert design.inputs_template["sample_design_ref"] == "{slot:sample_design_ref}"
+    assert design.inputs_template["drop_nan_labels"] == "{slot:drop_nan_labels}"
     assert build.inputs_template["strategy_spec"] == (
         "$ref:确定性设计策略候选.output.strategy_spec"
     )
@@ -889,6 +913,7 @@ def test_segmentation_candidate_plan_validates_with_only_adoption_gate(
         {
             "dataset_id": "dataset-1",
             "target_col": "bad_flag",
+            "sample_design_ref": _SAMPLE_DESIGN_REF,
             "drop_nan_labels": True,
             "strategy_type": "segmentation",
             "candidate_design": {
@@ -905,6 +930,8 @@ def test_segmentation_candidate_plan_validates_with_only_adoption_gate(
         "采纳确定性候选策略"
     ]
     design, _build, backtest, pre_adoption_doc, adopt, final_doc = plan.steps
+    assert design.inputs["sample_design_ref"] == _SAMPLE_DESIGN_REF
+    assert backtest.inputs["sample_design_ref"] == _SAMPLE_DESIGN_REF
     assert backtest.inputs["drop_nan_labels"] is True
     assert "economics_inputs" not in design.inputs
     assert backtest.inputs["economics_inputs"].endswith(".output.economics_inputs")
@@ -961,6 +988,7 @@ def test_typed_strategy_evaluation_template_validates_all_five_types(
         {
             "dataset_id": "dataset-1",
             "target_col": "bad_flag",
+            "sample_design_ref": _SAMPLE_DESIGN_REF,
             "drop_nan_labels": True,
             "strategy_spec": strategy_spec,
         },
@@ -1076,6 +1104,7 @@ def test_stored_strategy_lifecycle_templates_validate(
     slots = {
         "dataset_id": "dataset-1",
         "target_col": "bad_flag",
+        "sample_design_ref": _SAMPLE_DESIGN_REF,
         "drop_nan_labels": True,
         "strategy_id": "strategy-1",
         "baseline_strategy_id": "strategy-0",
@@ -1113,6 +1142,7 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
         {
             "dataset_id": "dataset-1",
             "target_col": "bad_flag",
+            "sample_design_ref": _SAMPLE_DESIGN_REF,
             "drop_nan_labels": True,
             "score_col": "score",
             "strategy_type": "approval",
@@ -1159,6 +1189,7 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
         "term_months": 12,
     }
     for step in (plan.steps[0], bands_step):
+        assert step.inputs["sample_design_ref"] == _SAMPLE_DESIGN_REF
         assert step.inputs["drop_nan_labels"] is True
         assert step.inputs["objective"] == "max_profit"
         assert step.inputs["max_bad_rate"] == 0.05
@@ -1167,6 +1198,7 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
         assert step.inputs["pd_col"] == "pd"
         assert step.inputs["profit_params"] == profit_params
     for step in (backtest_step, compare_step):
+        assert step.inputs["sample_design_ref"] == _SAMPLE_DESIGN_REF
         assert step.inputs["drop_nan_labels"] is True
         assert step.inputs["ead_col"] == "ead"
         assert step.inputs["pd_col"] == "pd"
@@ -1223,6 +1255,7 @@ def test_strategy_development_preserves_reject_strategy_type(tmp_path):
         {
             "dataset_id": "dataset-1",
             "target_col": "bad_flag",
+            "sample_design_ref": _SAMPLE_DESIGN_REF,
             "score_col": "score",
             "strategy_type": "reject",
             "objective": "max_approval",
@@ -1246,6 +1279,7 @@ def test_rule_strategy_template_instantiates_and_validates(tmp_path):
         {
             "dataset_id": "dataset-1",
             "target_col": "bad_flag",
+            "sample_design_ref": _SAMPLE_DESIGN_REF,
             "drop_nan_labels": True,
         },
         task_id="task-1",
@@ -1262,6 +1296,9 @@ def test_rule_strategy_template_instantiates_and_validates(tmp_path):
         ToolRef("strategy", "render_strategy_doc"),
     ]
     mine, select, evaluate, build, backtest, adopt, doc = plan.steps
+    assert mine.inputs["sample_design_ref"] == _SAMPLE_DESIGN_REF
+    assert evaluate.inputs["sample_design_ref"] == _SAMPLE_DESIGN_REF
+    assert backtest.inputs["sample_design_ref"] == _SAMPLE_DESIGN_REF
     assert mine.inputs["drop_nan_labels"] is True
     assert evaluate.inputs["drop_nan_labels"] is True
     assert backtest.inputs["drop_nan_labels"] is True

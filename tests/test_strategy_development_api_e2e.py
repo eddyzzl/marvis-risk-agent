@@ -18,6 +18,9 @@ from marvis.app import create_app
 from marvis.db import PluginRepository
 from marvis.orchestrator.contracts import PlanStatus, StepStatus
 from marvis.repositories.strategy import StrategyRepository
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 def _strategy_source(tmp_path: Path) -> Path:
@@ -47,6 +50,7 @@ def _latest_message(payload: dict, *, kind: str) -> dict:
 @pytest.mark.e2e
 def test_strategy_development_product_entry_requires_evidence_bound_adoption_reason(
     tmp_path: Path,
+    monkeypatch,
 ):
     client = TestClient(create_app(tmp_path))
     source = _strategy_source(tmp_path)
@@ -72,6 +76,11 @@ def test_strategy_development_product_entry_requires_evidence_bound_adoption_rea
     assert created.status_code == 200, created.text
     task = created.json()
     task_id = task["id"]
+    sample_design_ref = materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
     assert task["strategy_input"] == {
         "entry_mode": "strategy_development",
         "strategy_type": "approval",
@@ -91,6 +100,13 @@ def test_strategy_development_product_entry_requires_evidence_bound_adoption_rea
     plans = plans_response.json()["plans"]
     assert plans[-1]["id"] == plan_id
     assert plans[-1]["template_id"] == "strategy_development"
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design",
+        "strategy_development",
+    ]
+    stored_plan = client.app.state.plan_repo.load_plan(plan_id)
+    assert stored_plan.steps[0].inputs["sample_design_ref"] == sample_design_ref
+    assert stored_plan.steps[3].inputs["sample_design_ref"] == sample_design_ref
 
     began = client.post(
         f"/api/tasks/{task_id}/agent/messages",

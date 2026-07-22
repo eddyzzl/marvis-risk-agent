@@ -23,6 +23,7 @@ _PLATFORM_SLOTS = {
     "analysis_generation",
     "semantic_mapping_hash",
     "target_col",
+    "sample_design_ref",
 }
 _OPTIONAL_CONTROL_SLOTS = {
     "drop_nan_labels",
@@ -56,6 +57,13 @@ def _platform_slots() -> dict[str, object]:
         "analysis_generation": 0,
         "semantic_mapping_hash": "b" * 64,
         "target_col": "bad",
+        "sample_design_ref": {
+            "artifact_id": "c" * 64,
+            "artifact_content_hash": "d" * 64,
+            "sample_design_id": "strategy-sample-design-1",
+            "sample_design_content_hash": "e" * 64,
+            "partition": "development",
+        },
     }
 
 
@@ -78,9 +86,10 @@ def test_automatic_tree_candidate_build_is_one_nongated_builtin_tool_step() -> N
     assert {slot.name for slot in template.slots if slot.required} == {
         "dataset_id",
         "expected_content_hash",
-        "semantic_mapping_hash",
-        "target_col",
-        "features",
+            "semantic_mapping_hash",
+            "target_col",
+            "sample_design_ref",
+            "features",
     }
 
     step = template.steps[0]

@@ -38,8 +38,8 @@ from marvis.packs.strategy.pool import compile_strategy_pool, validate_strategy_
 from marvis.validation.time_periods import month_key_series
 
 
-STRATEGY_POOL_IMPACT_SCHEMA_VERSION = "strategy.impact-assessment.v1"
-STRATEGY_POOL_IMPACT_PRODUCER_VERSION = "marvis.strategy.pool-impact/1"
+STRATEGY_POOL_IMPACT_SCHEMA_VERSION = "strategy.impact-assessment.v2"
+STRATEGY_POOL_IMPACT_PRODUCER_VERSION = "marvis.strategy.pool-impact/2"
 MAX_IMPACT_ROWS = 2_000_000
 MAX_IMPACT_RULES = 200
 MAX_IMPACT_WORK = 50_000_000
@@ -50,6 +50,7 @@ MAX_IMPACT_EXPRESSION_DEPTH = 64
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _ASSESSMENT_ID_RE = re.compile(r"^strategy-impact-assessment-[0-9a-f]{24}$")
+_SAMPLE_DESIGN_ID_RE = re.compile(r"^strategy-sample-design-[0-9a-f]{24}$")
 _SAMPLE_BINDING_FIELDS = frozenset(
     {
         "task_id",
@@ -59,6 +60,15 @@ _SAMPLE_BINDING_FIELDS = frozenset(
         "workspace_generation",
         "semantic_mapping_hash",
         "sample_context_hash",
+    }
+)
+_SAMPLE_DESIGN_REF_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "artifact_content_hash",
+        "sample_design_id",
+        "sample_design_content_hash",
+        "partition",
     }
 )
 _TOP_LEVEL_FIELDS = frozenset(
@@ -89,7 +99,9 @@ def build_strategy_pool_impact_assessment(
     pool: Mapping[str, Any],
     frame: pd.DataFrame,
     sample_binding: Mapping[str, Any],
+    sample_design_ref: Mapping[str, Any],
     target_col: str,
+    target_bad_value: int,
     month_col: str | None = None,
     loan_amount_col: str | None = None,
     overdue_amount_col: str | None = None,
@@ -102,13 +114,14 @@ def build_strategy_pool_impact_assessment(
     current_pool = validate_strategy_pool(pool)
     if current_pool["strategy_type"] not in {"approval", "reject"}:
         raise StrategyError(
-            "Pool impact v1 supports approval/reject only; other typed impact "
+            "Pool impact supports approval/reject only; other typed impact "
             "semantics remain explicit V2 work"
         )
     selected = compile_strategy_pool(current_pool)
     if not current_pool["entries"]:
         raise StrategyError("cannot measure an empty Strategy Pool")
     normalized_sample = _sample_binding(sample_binding)
+    normalized_sample_design_ref = _sample_design_ref(sample_design_ref)
     if normalized_sample["task_id"] != current_pool["task_id"]:
         raise StrategyError("sample binding belongs to another task")
     expected_evidence = {
@@ -128,7 +141,11 @@ def build_strategy_pool_impact_assessment(
         overdue_amount_col=overdue_amount_col,
         rule_count=len(current_pool["entries"]),
     )
-    target = _target_series(working, columns["target_col"])
+    target = _target_series(
+        working,
+        columns["target_col"],
+        target_bad_value=target_bad_value,
+    )
     amounts = _amount_series(
         working,
         loan_amount_col=columns["loan_amount_col"],
@@ -199,6 +216,7 @@ def build_strategy_pool_impact_assessment(
                     "asset_id": entry["source"]["asset_id"],
                     "asset_hash": entry["source"]["asset_hash"],
                     "fragment_id": entry["source"]["fragment_id"],
+                    "sample_design_ref": normalized_sample_design_ref,
                 },
                 "action": rule.action.to_dict(),
                 "standalone": _effect_slice(
@@ -279,7 +297,9 @@ def build_strategy_pool_impact_assessment(
         },
         "bindings": {
             "sample": normalized_sample,
+            "sample_design_ref": normalized_sample_design_ref,
             **columns,
+            "target_bad_value": target_bad_value,
             "comparison_mode": comparison_mode,
         },
         "lifecycle": {
@@ -423,7 +443,9 @@ def _validate_impact_document(document: Mapping[str, Any]) -> None:
         document["bindings"],
         {
             "sample",
+            "sample_design_ref",
             "target_col",
+            "target_bad_value",
             "month_col",
             "loan_amount_col",
             "overdue_amount_col",
@@ -432,9 +454,11 @@ def _validate_impact_document(document: Mapping[str, Any]) -> None:
         "impact bindings",
     )
     sample = _sample_binding(bindings["sample"])
+    sample_design_ref = _sample_design_ref(bindings["sample_design_ref"])
     if sample["task_id"] != identity["task_id"]:
         raise StrategyError("impact sample task does not match identity")
     target_col = _text(bindings["target_col"], "impact target_col")
+    _target_bad_value(bindings["target_bad_value"])
     bound_columns = [target_col]
     for field in ("month_col", "loan_amount_col", "overdue_amount_col"):
         value = bindings[field]
@@ -520,6 +544,7 @@ def _validate_impact_document(document: Mapping[str, Any]) -> None:
                 "asset_id",
                 "asset_hash",
                 "fragment_id",
+                "sample_design_ref",
             },
             "impact waterfall source_ref",
         )
@@ -527,6 +552,10 @@ def _validate_impact_document(document: Mapping[str, Any]) -> None:
             _text(source[field], f"impact waterfall {field}")
         for field in ("artifact_content_hash", "asset_hash"):
             _hash(source[field], f"impact waterfall {field}")
+        if _sample_design_ref(source["sample_design_ref"]) != sample_design_ref:
+            raise StrategyError(
+                "impact waterfall source sample design does not match assessment"
+            )
         action = _validate_action(row["action"], "impact waterfall action")
         waterfall_actions.append(_ACTION_NAMES[action.type])
         normalized_row = dict(row)
@@ -1554,14 +1583,58 @@ def _sample_binding(value: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _target_series(frame: pd.DataFrame, column: str) -> pd.Series:
+def _sample_design_ref(value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != _SAMPLE_DESIGN_REF_FIELDS:
+        raise StrategyError(
+            "sample design reference must contain the exact governed fields"
+        )
+    sample_design_id = _text(
+        value["sample_design_id"], "sample design sample_design_id"
+    )
+    if _SAMPLE_DESIGN_ID_RE.fullmatch(sample_design_id) is None:
+        raise StrategyError("sample design sample_design_id is invalid")
+    if value["partition"] != "development":
+        raise StrategyError("sample design partition must be development")
+    return {
+        "artifact_id": _hash(value["artifact_id"], "sample design artifact_id"),
+        "artifact_content_hash": _hash(
+            value["artifact_content_hash"],
+            "sample design artifact_content_hash",
+        ),
+        "sample_design_id": sample_design_id,
+        "sample_design_content_hash": _hash(
+            value["sample_design_content_hash"],
+            "sample design sample_design_content_hash",
+        ),
+        "partition": "development",
+    }
+
+
+def _target_bad_value(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value not in {0, 1}:
+        raise StrategyError("target_bad_value must be integer 0 or 1")
+    return value
+
+
+def _target_series(
+    frame: pd.DataFrame,
+    column: str,
+    *,
+    target_bad_value: int,
+) -> pd.Series:
+    bad_value = _target_bad_value(target_bad_value)
     raw = frame[column]
     missing = raw.isna()
     numeric = pd.to_numeric(raw, errors="coerce")
     invalid = (~missing) & (np.iscomplex(numeric) | (~np.isfinite(numeric)))
     if bool(invalid.any()) or bool((~numeric.loc[~missing].isin([0, 1])).any()):
         raise StrategyError("target must contain only 0, 1, or missing")
-    return numeric.astype(float).reset_index(drop=True)
+    normalized = numeric.astype(float)
+    if bad_value == 0:
+        normalized = normalized.map(
+            lambda value: value if pd.isna(value) else 1.0 - value
+        )
+    return normalized.reset_index(drop=True)
 
 
 def _amount_series(

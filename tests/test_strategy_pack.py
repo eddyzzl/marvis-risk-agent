@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from marvis.data.backend import DataBackend
+from marvis.data.errors import NanLabelNotConfirmedError
 from marvis.data.registry import DatasetRegistry
 from marvis.db import (
     DatasetRepository,
@@ -25,6 +26,9 @@ from marvis.plugins.runner import ToolRunner
 from marvis.plugins.schema_validation import validate_against_schema
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
+from tests.strategy_tool_sample_design_support import (
+    materialize_strategy_tool_sample_design,
+)
 
 
 def _runtime(tmp_path):
@@ -277,6 +281,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "vintage_curve",
         "roll_rate_matrix",
         "profit_calc",
+        "materialize_sample_design",
         "analyze_univariate_candidates",
         "build_automatic_tree_candidate",
         "apply_automatic_tree",
@@ -302,6 +307,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "render_strategy_doc",
         "mine_rules",
         "evaluate_rule_set",
+        "limit_pricing_matrix",
         "select_rule_set",
         "limit_pricing_matrix",
         "render_challenger_report",
@@ -480,7 +486,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     }
     assert voting_tool.output_schema["additionalProperties"] is False
     assert voting_tool.output_schema["properties"]["schema_version"] == {
-        "const": "strategy.build-voting-candidate-tool.v1"
+        "const": "strategy.build-voting-candidate-tool.v2"
     }
     assert voting_tool.output_schema["properties"]["selected_entries"][
         "items"
@@ -640,7 +646,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "read:dataset",
         "write:artifact",
     }
-    assert manifest.version == "0.9.0"
+    assert manifest.version == "0.12.0"
     assert "refined univariate asset" in add_pool_tool.summary
     assert "automatic-tree leaf selection" in add_pool_tool.summary
     assert "Voting n-of-k candidate" in add_pool_tool.summary
@@ -674,6 +680,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "workspace_generation",
         "semantic_mapping_hash",
         "target_col",
+        "sample_design_ref",
         "comparison_mode",
     }
     assert measure_pool_impact_tool.input_schema["properties"]["strategy_type"] == {
@@ -682,7 +689,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     }
     assert measure_pool_impact_tool.output_schema["additionalProperties"] is False
     assert measure_pool_impact_tool.output_schema["properties"]["schema_version"] == {
-        "const": "strategy.measure-pool-impact-tool.v1"
+        "const": "strategy.measure-pool-impact-tool.v2"
     }
     for boundary in ("not_created_strategy", "not_adopted", "not_deployed"):
         assert measure_pool_impact_tool.output_schema["properties"][boundary] == {
@@ -761,10 +768,18 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
             label="challenger report missing persisted backtest receipt",
         )
 
+    sample_design_ref = {
+        "artifact_id": "a" * 64,
+        "artifact_content_hash": "b" * 64,
+        "sample_design_id": "sample-design-1",
+        "sample_design_content_hash": "c" * 64,
+        "partition": "development",
+    }
     validate_against_schema(
         {
             "dataset_id": "dataset-1",
             "target_col": "bad",
+            "sample_design_ref": sample_design_ref,
             "strategy_type": "segmentation",
             "candidate_design": {
                 "method": "single_variable_segmentation",
@@ -780,6 +795,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
             {
                 "dataset_id": "dataset-1",
                 "target_col": "bad",
+                "sample_design_ref": sample_design_ref,
                 "strategy_type": "segmentation",
                 "candidate_design": {
                     "method": "single_variable_segmentation",
@@ -849,6 +865,78 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
             build_tool.input_schema,
             label="unsupported canonical expression",
         )
+
+
+def test_sample_bound_tool_manifests_use_one_exact_reference_schema(tmp_path):
+    manifest = _real_builtin_registry(tmp_path).get("strategy")
+    exact_ref = {
+        "type": "object",
+        "properties": {
+            "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+            },
+            "artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+            },
+            "sample_design_id": {"type": "string", "minLength": 1},
+            "sample_design_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+            },
+            "partition": {"const": "development"},
+        },
+        "required": [
+            "artifact_id",
+            "artifact_content_hash",
+            "sample_design_id",
+            "sample_design_content_hash",
+            "partition",
+        ],
+        "additionalProperties": False,
+    }
+    by_name = {tool.name: tool for tool in manifest.tools}
+    required_input_tools = {
+        "analyze_univariate_candidates",
+        "build_automatic_tree_candidate",
+        "measure_pool_impact",
+        "design_strategy_candidate",
+        "tradeoff_view",
+        "design_cutoff_bands",
+        "compare_strategies",
+        "mine_rules",
+        "evaluate_rule_set",
+    }
+    for name in required_input_tools:
+        schema = by_name[name].input_schema
+        assert "sample_design_ref" in schema["required"], name
+        assert schema["properties"]["sample_design_ref"] == exact_ref, name
+
+    # The generic backtest retains a direct legacy compatibility entrypoint,
+    # but every V2 Workflow requires the slot and its runtime shape is still exact.
+    backtest_schema = by_name["backtest_strategy"].input_schema
+    assert "sample_design_ref" not in backtest_schema["required"]
+    assert backtest_schema["properties"]["sample_design_ref"] == exact_ref
+
+    for name in {
+        "design_strategy_candidate",
+        "tradeoff_view",
+        "design_cutoff_bands",
+        "compare_strategies",
+        "mine_rules",
+        "evaluate_rule_set",
+        "limit_pricing_matrix",
+        "build_voting_candidate",
+    }:
+        schema = by_name[name].output_schema
+        assert "sample_design_ref" in schema["required"], name
+        output_ref = schema["properties"]["sample_design_ref"]
+        if "$ref" in output_ref:
+            assert output_ref == {"$ref": "#/$defs/sample_design_ref"}
+            assert schema["$defs"]["sample_design_ref"] == exact_ref
+        else:
+            assert output_ref == exact_ref, name
 
 
 def test_build_strategy_tool_accepts_and_persists_canonical_dsl(tmp_path):
@@ -989,6 +1077,11 @@ def test_build_strategy_persistence_identity_is_task_scoped_and_payload_exact(
 def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
     runner, _plugin_registry, registry, task = _runtime(tmp_path)
     dataset = _register_strategy_sample(registry, tmp_path, task.id)
+    sample_design_ref = materialize_strategy_tool_sample_design(
+        build_settings(tmp_path / "workspace"),
+        task,
+        dataset,
+    )
     params = {
         "annual_rate": 0.12,
         "funding_rate": 0.03,
@@ -1077,6 +1170,7 @@ def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
         build_settings(tmp_path / "workspace").db_path
     ).list_for_task(task.id)
     assert {record["kind"] for record in task_artifacts} == {
+        "strategy_sample_design_json",
         "roll_rate_csv",
         "roll_rate_markdown",
         "profit_csv",
@@ -1085,7 +1179,7 @@ def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
     assert {record["id"] for record in task_artifacts} == {
         item["artifact_id"]
         for item in [*roll.output["artifacts"], *profit.output["artifacts"]]
-    }
+    } | {sample_design_ref["artifact_id"]}
     assert built.ok is True, built.error
     assert built.output["strategy_id"]
     assert built.output["dsl_schema_version"] == "strategy.dsl.v1"
@@ -1113,6 +1207,7 @@ def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
             "dataset_id": dataset.id,
             "score_col": "score",
             "target_col": "bad",
+            "sample_design_ref": sample_design_ref,
             "cutoffs": [600, 700],
             "profit_params": params,
             "ead_col": "ead",
@@ -1195,23 +1290,31 @@ def _register_strategy_sample_with_nan_label(registry, tmp_path, task_id: str):
 def test_tradeoff_view_gates_nan_label(tmp_path):
     runner, _plugin_registry, registry, task = _runtime(tmp_path)
     dataset = _register_strategy_sample_with_nan_label(registry, tmp_path, task.id)
+    settings = build_settings(tmp_path / "workspace")
+    with pytest.raises(NanLabelNotConfirmedError, match="1/6 NaN labels"):
+        materialize_strategy_tool_sample_design(
+            settings,
+            task,
+            dataset,
+            drop_nan_labels=False,
+        )
+    dropping_sample_ref = materialize_strategy_tool_sample_design(
+        settings,
+        task,
+        dataset,
+        drop_nan_labels=True,
+    )
     base_inputs = {
         "dataset_id": dataset.id,
         "score_col": "score",
         "target_col": "bad",
+        "sample_design_ref": dropping_sample_ref,
         "cutoffs": [600, 700],
+        "drop_nan_labels": True,
     }
-
-    blocked = runner.invoke(
-        ToolRef("strategy", "tradeoff_view"), dict(base_inputs), task_id=task.id
-    )
-    assert blocked.ok is False
-    assert blocked.error_kind == "nan_label_not_confirmed"
-    assert blocked.error_detail["n_nan"] == 1
-
     confirmed = runner.invoke(
         ToolRef("strategy", "tradeoff_view"),
-        {**base_inputs, "drop_nan_labels": True},
+        base_inputs,
         task_id=task.id,
     )
     assert confirmed.ok is True, confirmed.error

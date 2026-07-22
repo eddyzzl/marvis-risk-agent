@@ -65,6 +65,7 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "univariate_candidate_analysis",
     "univariate_candidate_refinement",
     "automatic_tree_candidate_build",
+    "automatic_tree_apply",
     "automatic_tree_leaf_materialization",
     "voting_candidate_build",
     "cross_matrix_analysis",
@@ -337,6 +338,76 @@ _CROSS_MATRIX_CELL_ID_TOKEN_RE = re.compile(
 )
 _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])candidate-asset-[0-9a-f]{32}(?![A-Za-z0-9_-])"
+)
+_AUTOMATIC_TREE_APPLY_TARGET_RE = re.compile(
+    r"(?:自动(?:决策)?树|决策树|完整树|"
+    r"candidate-asset-[0-9a-f]{32}|"
+    r"(?<![A-Za-z0-9_])(?:automatic|decision)\s+tree(?![A-Za-z0-9_]))"
+    r"[^，,；;。.!?！？\n]{0,100}"
+    r"(?:应用|执行|写回|回写|回填|打标|"
+    r"(?<![A-Za-z0-9_])(?:apply|write[-\s]*back|assign)(?![A-Za-z0-9_]))|"
+    r"(?:应用|执行|写回|回写|回填|打标|"
+    r"(?<![A-Za-z0-9_])(?:apply|write[-\s]*back|assign)(?![A-Za-z0-9_]))"
+    r"[^，,；;。.!?！？\n]{0,100}"
+    r"(?:自动(?:决策)?树|决策树|完整树|"
+    r"candidate-asset-[0-9a-f]{32}|"
+    r"(?<![A-Za-z0-9_])(?:automatic|decision)\s+tree(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_APPLY_ACTION_RE = re.compile(
+    r"(?:应用|执行|写回|回写|回填|打标)|"
+    r"(?<![A-Za-z0-9_])(?:apply|write[-\s]*back|assign)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_APPLY_NOT_AUTHORIZED_RE = re.compile(
+    r"[?？]|"
+    r"(?:不要|不用|无需|别|禁止|取消|先不|暂不|未授权|"
+    r"能否|可否|是否|可以吗|能不能|如何|怎么|怎样|假设|假如|如果|"
+    r"以后|未来|将来|稍后|晚点|明天|下周|下月|之前|此前|过去|上次)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cancel|can\s+you|"
+    r"could\s+you|would\s+you|how\s+to|what\s+if|later|tomorrow|"
+    r"previously|in\s+the\s+future)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_APPLY_FOLLOW_UP_RE = re.compile(
+    r"(?:策略池|规则池|入池|加入[^，,；;。\n]{0,12}(?:池|Pool)|"
+    r"采纳|采用|部署|上线|投产|发布到?生产|生成报告|形成报告|出报告|"
+    r"物化[^，,；;。\n]{0,16}(?:叶|leaf)|选择[^，,；;。\n]{0,16}(?:叶|leaf)|"
+    r"(?:拒绝|审批|通过|复核)[^，,；;。\n]{0,20}(?:客户|命中)|"
+    r"(?<![A-Za-z0-9_])(?:strategy\s+pool|add\s+to\s+(?:the\s+)?pool|"
+    r"adopt|deploy|production|go[-\s]+live|generate\s+(?:a\s+)?report|"
+    r"materialize\s+(?:a\s+)?leaf|select\s+(?:a\s+)?leaf)"
+    r"(?![A-Za-z0-9_]))",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_APPLY_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:source_artifact_id|expected_(?:artifact_)?content_hash|"
+    r"expected_asset_(?:id|hash)|expected_tree_result_hash|dataset_id|"
+    r"workspace_revision|analysis_generation|semantic_mapping_hash|activate_result)"
+    r"(?![A-Za-z0-9_])|"
+    r"(?:artifact|资产|数据集|workspace|工作区|语义映射)\s*(?:hash|哈希|revision|版本)",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_APPLY_OUTPUT_COLUMN_RE = re.compile(
+    r"(?P<label>叶节点|叶子|leaf(?:\s*id)?|规则|rule(?:\s*id)?)\s*"
+    r"(?:的)?\s*(?:输出)?\s*(?:字段|列)(?:名)?\s*"
+    r"(?:为|是|叫|设为|设置为|=|:|：)?\s*"
+    r"(?P<column>[A-Za-z_][A-Za-z0-9_]{0,63})",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_APPLY_NAMED_OUTPUT_COLUMN_RE = re.compile(
+    r"(?P<field>leaf_id_column|rule_id_column)\s*(?:=|:|：)\s*"
+    r"(?P<column>[A-Za-z_][A-Za-z0-9_]{0,63})",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_APPLY_GENERIC_OUTPUT_COLUMN_RE = re.compile(
+    r"(?:输出|结果)\s*(?:字段|列)(?:名)?\s*"
+    r"(?:为|是|叫|设为|设置为|=|:|：)?\s*"
+    r"[A-Za-z_][A-Za-z0-9_]{0,63}",
+    re.IGNORECASE,
+)
+_AUTOMATIC_TREE_APPLY_OUTPUT_COLUMN_NAME_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
 )
 _AUTOMATIC_TREE_LEAF_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])leaf-[0-9a-f]{20}(?![A-Za-z0-9_-])"
@@ -2368,6 +2439,8 @@ def _validate_standard_workflow_payload(
                 whitelist,
                 target_col=target_col,
             )
+        elif workflow == "automatic_tree_apply":
+            normalized = _validate_automatic_tree_apply_inputs(raw_inputs)
         elif workflow == "automatic_tree_leaf_materialization":
             normalized = _validate_automatic_tree_leaf_materialization_inputs(
                 raw_inputs
@@ -3355,6 +3428,53 @@ def _validate_automatic_tree_leaf_materialization_inputs(
     if "selection_reason" in inputs:
         normalized["selection_reason"] = _automatic_tree_selection_reason(
             inputs["selection_reason"]
+        )
+    return normalized
+
+
+def _validate_automatic_tree_apply_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate only the explicit full-tree pointer and output column names.
+
+    The source artifact, all hashes, source dataset, workspace lineage and
+    activation policy are resolved by the platform after compilation.
+    """
+
+    workflow = "automatic_tree_apply"
+    allowed = {"tree_asset_id", "leaf_id_column", "rule_id_column"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    if "tree_asset_id" not in inputs:
+        raise _DraftValidationError(f"{workflow} 缺少字段：tree_asset_id。")
+
+    tree_asset_id = _required_text(
+        inputs["tree_asset_id"],
+        name=f"{workflow} tree_asset_id",
+    )
+    if _CANDIDATE_ASSET_ID_RE.fullmatch(tree_asset_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} tree_asset_id 必须是完整的自动树 candidate asset id。"
+        )
+
+    normalized: dict[str, Any] = {"tree_asset_id": tree_asset_id}
+    for field in ("leaf_id_column", "rule_id_column"):
+        if field not in inputs:
+            continue
+        value = _required_text(inputs[field], name=f"{workflow} {field}")
+        if _AUTOMATIC_TREE_APPLY_OUTPUT_COLUMN_NAME_RE.fullmatch(value) is None:
+            raise _DraftValidationError(
+                f"{workflow} {field} 必须是最多 64 位的 ASCII 标识符。"
+            )
+        normalized[field] = value
+
+    if (
+        "leaf_id_column" in normalized
+        and "rule_id_column" in normalized
+        and normalized["leaf_id_column"].casefold()
+        == normalized["rule_id_column"].casefold()
+    ):
+        raise _DraftValidationError(
+            f"{workflow} leaf_id_column 与 rule_id_column 必须不同（忽略大小写）。"
         )
     return normalized
 
@@ -4618,6 +4738,17 @@ def _ground_refinement_request(
             code="strategy_sample_design_workflow_required",
             fields=("workflow",),
         )
+    if _utterance_targets_automatic_tree_apply(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "automatic_tree_apply"
+    ):
+        return _clarification(
+            "原话明确要求把完整自动树写回当前样本，只能编译为 "
+            "automatic_tree_apply；不能改路由到通用策略应用、建树、叶节点"
+            "物化、入池或其他 Workflow。",
+            code="automatic_tree_apply_workflow_required",
+            fields=("workflow",),
+        )
     if _utterance_targets_strategy_pool_impact(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_pool_impact"
@@ -4689,6 +4820,12 @@ def _ground_refinement_request(
         return _ground_strategy_pool_request(utterance, result)
     if draft.workflow == "automatic_tree_candidate_build":
         return _ground_automatic_tree_candidate_build(
+            utterance,
+            result,
+            whitelist=whitelist,
+        )
+    if draft.workflow == "automatic_tree_apply":
+        return _ground_automatic_tree_apply(
             utterance,
             result,
             whitelist=whitelist,
@@ -6176,6 +6313,154 @@ def _ground_automatic_tree_leaf_materialization(
             "写回等操作拆成后续请求。",
             code="automatic_tree_leaf_single_step_required",
             fields=("next_action",),
+        )
+    return result
+
+
+def _utterance_targets_automatic_tree_apply(utterance: str) -> bool:
+    """Recognize full-tree dataset writeback without stealing build/leaf turns."""
+
+    return _AUTOMATIC_TREE_APPLY_TARGET_RE.search(utterance) is not None
+
+
+def _automatic_tree_apply_explicit_columns(
+    utterance: str,
+) -> tuple[dict[str, frozenset[str]], tuple[tuple[int, int], ...]]:
+    values: dict[str, set[str]] = {
+        "leaf_id_column": set(),
+        "rule_id_column": set(),
+    }
+    spans: list[tuple[int, int]] = []
+    for match in _AUTOMATIC_TREE_APPLY_OUTPUT_COLUMN_RE.finditer(utterance):
+        label = match.group("label").casefold()
+        field = (
+            "leaf_id_column"
+            if ("叶" in label or "leaf" in label)
+            else "rule_id_column"
+        )
+        values[field].add(match.group("column"))
+        spans.append(match.span())
+    for match in _AUTOMATIC_TREE_APPLY_NAMED_OUTPUT_COLUMN_RE.finditer(utterance):
+        field = match.group("field").casefold()
+        values[field].add(match.group("column"))
+        spans.append(match.span())
+    return (
+        {field: frozenset(columns) for field, columns in values.items()},
+        tuple(spans),
+    )
+
+
+def _automatic_tree_apply_has_unlabeled_output_column(
+    utterance: str,
+    labeled_spans: Sequence[tuple[int, int]],
+) -> bool:
+    for match in _AUTOMATIC_TREE_APPLY_GENERIC_OUTPUT_COLUMN_RE.finditer(utterance):
+        if not any(
+            start <= match.start() and match.end() <= end
+            for start, end in labeled_spans
+        ):
+            return True
+    return False
+
+
+def _ground_automatic_tree_apply(
+    utterance: str,
+    result: StrategyRequestCompilation,
+    *,
+    whitelist: tuple[str, ...],
+) -> StrategyRequestCompilation:
+    """Bind one affirmative command to one exact tree and optional columns."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+
+    if (
+        _AUTOMATIC_TREE_APPLY_ACTION_RE.search(utterance) is None
+        or _AUTOMATIC_TREE_APPLY_NOT_AUTHORIZED_RE.search(utterance) is not None
+    ):
+        return _clarification(
+            "原话没有授权一次立即、肯定的自动树全量写回。否定、问句、"
+            "假设、历史或未来描述都不会创建派生数据集；请重新发出单独的"
+            "执行命令。",
+            code="automatic_tree_apply_intent_not_authorized",
+            fields=("apply_intent",),
+        )
+    if _AUTOMATIC_TREE_APPLY_PLATFORM_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "自动树 artifact/hash、数据集与 workspace lineage 必须由平台从"
+            "当前任务重新校验并绑定，不能接受自然语言指定或覆盖。",
+            code="automatic_tree_apply_platform_binding_forbidden",
+            fields=("platform_binding",),
+        )
+    if _AUTOMATIC_TREE_APPLY_FOLLOW_UP_RE.search(utterance) is not None:
+        return _clarification(
+            "本轮只把一棵完整自动树确定性写入一个不可变派生数据集；入池、"
+            "叶节点选择、业务动作、报告、采纳和部署必须拆成后续请求。",
+            code="automatic_tree_apply_single_step_required",
+            fields=("next_action",),
+        )
+
+    asset_mentions = tuple(
+        match.group(0)
+        for match in _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE.finditer(utterance)
+    )
+    if len(asset_mentions) != 1:
+        return _clarification(
+            "请在同一条写回命令中逐字提供且只提供一个完整自动树 asset ID"
+            "（candidate-asset- 后接 32 位小写十六进制）；不能使用“刚才"
+            "那棵树”等代词。",
+            code="automatic_tree_apply_explicit_asset_required",
+            fields=("tree_asset_id",),
+        )
+    if asset_mentions[0] != inputs["tree_asset_id"]:
+        return _clarification(
+            "模型草案中的自动树 asset ID 与用户原话不一致；平台不会替换、"
+            "补全或猜测完整 tree asset ID。",
+            code="automatic_tree_apply_controls_not_grounded",
+            fields=("tree_asset_id",),
+        )
+
+    explicit_columns, labeled_spans = _automatic_tree_apply_explicit_columns(
+        utterance
+    )
+    if _automatic_tree_apply_has_unlabeled_output_column(
+        utterance,
+        labeled_spans,
+    ) or any(len(values) > 1 for values in explicit_columns.values()):
+        return _clarification(
+            "输出列必须明确标注为叶节点列或规则列，且每种角色最多一个最终"
+            "列名；仅说“输出列”不能判断要覆盖哪一种结果。",
+            code="automatic_tree_apply_output_column_ambiguous",
+            fields=("leaf_id_column", "rule_id_column"),
+        )
+
+    ungrounded: list[str] = []
+    for field, values in explicit_columns.items():
+        explicit = next(iter(values)) if values else None
+        if inputs.get(field) != explicit:
+            ungrounded.append(field)
+    if ungrounded:
+        return _clarification(
+            "模型草案中的叶节点/规则输出列必须与用户显式标注的列名逐字"
+            "一致；用户未提供时必须省略并由 Tool 使用受控默认值。",
+            code="automatic_tree_apply_controls_not_grounded",
+            fields=tuple(ungrounded),
+        )
+
+    source_columns = {column.casefold() for column in whitelist}
+    collisions = [
+        field
+        for field in ("leaf_id_column", "rule_id_column")
+        if isinstance(inputs.get(field), str)
+        and inputs[field].casefold() in source_columns
+    ]
+    if collisions:
+        return _clarification(
+            "自动树写回输出列不能覆盖当前样本已有字段，请为叶节点列和规则列"
+            "选择新的列名。",
+            code="automatic_tree_apply_output_column_conflict",
+            fields=tuple(collisions),
         )
     return result
 
@@ -8561,6 +8846,28 @@ def _standard_workflow_confirmation_text(
                 "平台不会给叶子生成“最佳”自动排名；后续操作必须由用户引用明确 leaf",
             ]
         )
+    elif draft.workflow == "automatic_tree_apply":
+        details = [
+            "已识别为〔自动树全量写回 Workflow〕",
+            f"完整树候选资产 pointer：{inputs['tree_asset_id']}",
+        ]
+        if "leaf_id_column" in inputs:
+            details.append(f"叶节点输出列：{inputs['leaf_id_column']}")
+        else:
+            details.append("叶节点输出列：由受控 Tool 使用默认列名")
+        if "rule_id_column" in inputs:
+            details.append(f"规则输出列：{inputs['rule_id_column']}")
+        else:
+            details.append("规则输出列：由受控 Tool 使用默认列名")
+        details.extend(
+            [
+                "平台将从当前任务重新校验 source artifact/hash、asset hash、"
+                "原始数据集与 workspace lineage，LLM 不得填写或覆盖",
+                "本步骤创建不可变派生数据集，但不会激活或替换当前 workspace",
+                "结果仍是 development / unvalidated；不会入池、采纳或部署，"
+                "也不生成业务动作",
+            ]
+        )
     elif draft.workflow == "automatic_tree_leaf_materialization":
         details = [
             "已识别为〔自动树精确叶节点物化 Workflow〕",
@@ -9156,6 +9463,13 @@ def _user_prompt(
         "对于 automatic_tree_candidate_build，只能抄录用户明确提供的 features、"
         "权重/金额字段、方向和树参数；不得填写平台拥有的数据绑定、目标列、标签策略、"
         "预算、结果、叶子、动作、排名或推荐，也不得串联选叶或 Strategy Pool。"
+        "对于 automatic_tree_apply，只能逐字抄录用户原话中唯一完整的 tree_asset_id；"
+        "leaf_id_column 和 rule_id_column 只有在用户分别明确标注叶节点列/规则列时才能"
+        "抄录，未提供时必须省略并由受控 Tool 使用默认值。不得填写 source artifact、"
+        "artifact hash、asset hash、tree result hash、dataset/hash、workspace lineage、"
+        "activate_result、结果或指标。它只创建 development / unvalidated 的不可变派生"
+        "数据集，不激活当前 workspace；不得串联选叶、Strategy Pool、业务动作、报告、"
+        "采纳或部署。"
         "对于 automatic_tree_leaf_materialization，只能逐字抄录用户原话中唯一的"
         "完整 tree_asset_id、唯一的完整 leaf_id，以及用户用“选择理由/理由/原因/说明”"
         "显式标注时的逐字 selection_reason；未显式标注时必须省略。它只创建"

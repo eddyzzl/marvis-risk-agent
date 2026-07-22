@@ -1470,6 +1470,257 @@ def _render_materialize_automatic_tree_leaf_fragment(o: dict):
     ]
 
 
+def _automatic_tree_apply_integrity_failure() -> tuple[str, list[dict]]:
+    return (
+        "**自动树全量写回结果完整性校验失败**：计划缓存中的 source tree、"
+        "派生数据集、行数或 evidence 绑定不一致，已停止展示结果。请重新执行写回；"
+        "下载接口仍会按 TaskArtifact 注册 hash 校验产物。",
+        [],
+    )
+
+
+def _validate_automatic_tree_apply_renderer_output(o: object) -> dict:
+    """Validate the exact Tool envelope before rendering any cached value."""
+
+    import re
+
+    if not isinstance(o, dict):
+        raise ValueError("automatic-tree apply output must be an object")
+
+    def exact(value: object, fields: set[str], name: str) -> dict:
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ValueError(f"{name} fields are invalid")
+        return value
+
+    def text(value: object, name: str) -> str:
+        if (
+            not isinstance(value, str)
+            or not value
+            or "\x00" in value
+            or "\n" in value
+            or "\r" in value
+        ):
+            raise ValueError(f"{name} is invalid")
+        return value
+
+    hash_pattern = re.compile(r"^[0-9a-f]{64}$")
+    asset_pattern = re.compile(r"^candidate-asset-[0-9a-f]{32}$")
+    run_pattern = re.compile(r"^atar_[0-9a-f]{32}$")
+    column_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+    def digest(value: object, name: str) -> str:
+        normalized = text(value, name)
+        if hash_pattern.fullmatch(normalized) is None:
+            raise ValueError(f"{name} is invalid")
+        return normalized
+
+    def count(value: object, name: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} is invalid")
+        return value
+
+    top = exact(
+        o,
+        {
+            "schema_version",
+            "run_id",
+            "input_hash",
+            "cached",
+            "activated",
+            "source",
+            "result",
+            "columns",
+            "leaf_distribution",
+            "workspace",
+            "evidence",
+        },
+        "output",
+    )
+    if top["schema_version"] != "strategy.apply-automatic-tree-tool.v1":
+        raise ValueError("schema version is invalid")
+    if run_pattern.fullmatch(text(top["run_id"], "run_id")) is None:
+        raise ValueError("run_id is invalid")
+    digest(top["input_hash"], "input_hash")
+    if type(top["cached"]) is not bool or type(top["activated"]) is not bool:
+        raise ValueError("apply flags are invalid")
+
+    source = exact(
+        top["source"],
+        {
+            "tree_artifact_id",
+            "tree_artifact_content_hash",
+            "asset_id",
+            "asset_hash",
+            "tree_result_hash",
+            "dataset_id",
+            "dataset_content_hash",
+            "row_count",
+        },
+        "source",
+    )
+    text(source["tree_artifact_id"], "source.tree_artifact_id")
+    digest(source["tree_artifact_content_hash"], "source.tree_artifact_content_hash")
+    if asset_pattern.fullmatch(text(source["asset_id"], "source.asset_id")) is None:
+        raise ValueError("source.asset_id is invalid")
+    digest(source["asset_hash"], "source.asset_hash")
+    digest(source["tree_result_hash"], "source.tree_result_hash")
+    text(source["dataset_id"], "source.dataset_id")
+    digest(source["dataset_content_hash"], "source.dataset_content_hash")
+    source_rows = count(source["row_count"], "source.row_count")
+
+    result = exact(
+        top["result"],
+        {"dataset_id", "dataset_content_hash", "row_count", "result_hash"},
+        "result",
+    )
+    text(result["dataset_id"], "result.dataset_id")
+    digest(result["dataset_content_hash"], "result.dataset_content_hash")
+    digest(result["result_hash"], "result.result_hash")
+    if (
+        count(result["row_count"], "result.row_count") != source_rows
+        or result["dataset_id"] == source["dataset_id"]
+    ):
+        raise ValueError("derived dataset identity is invalid")
+
+    columns = exact(top["columns"], {"leaf_id", "rule_id"}, "columns")
+    for field in ("leaf_id", "rule_id"):
+        if column_pattern.fullmatch(text(columns[field], f"columns.{field}")) is None:
+            raise ValueError(f"columns.{field} is invalid")
+    if columns["leaf_id"].casefold() == columns["rule_id"].casefold():
+        raise ValueError("output columns are not distinct")
+
+    distribution = top["leaf_distribution"]
+    if not isinstance(distribution, list) or not distribution:
+        raise ValueError("leaf_distribution is invalid")
+    leaf_ids: set[str] = set()
+    rule_ids: set[str] = set()
+    distributed_rows = 0
+    for index, item in enumerate(distribution):
+        row = exact(item, {"leaf_id", "rule_id", "row_count"}, f"leaf[{index}]")
+        leaf_id = text(row["leaf_id"], f"leaf[{index}].leaf_id")
+        rule_id = text(row["rule_id"], f"leaf[{index}].rule_id")
+        if leaf_id in leaf_ids or rule_id in rule_ids:
+            raise ValueError("leaf distribution identities are not unique")
+        leaf_ids.add(leaf_id)
+        rule_ids.add(rule_id)
+        distributed_rows += count(row["row_count"], f"leaf[{index}].row_count")
+    if distributed_rows != source_rows:
+        raise ValueError("leaf distribution does not conserve rows")
+
+    workspace = exact(
+        top["workspace"],
+        {
+            "source_revision",
+            "source_analysis_generation",
+            "source_semantic_mapping_hash",
+            "result_revision",
+            "result_analysis_generation",
+            "result_semantic_mapping_hash",
+            "active_dataset_id",
+        },
+        "workspace",
+    )
+    count(workspace["source_revision"], "workspace.source_revision")
+    count(
+        workspace["source_analysis_generation"],
+        "workspace.source_analysis_generation",
+    )
+    digest(
+        workspace["source_semantic_mapping_hash"],
+        "workspace.source_semantic_mapping_hash",
+    )
+    digest(
+        workspace["result_semantic_mapping_hash"],
+        "workspace.result_semantic_mapping_hash",
+    )
+    text(workspace["active_dataset_id"], "workspace.active_dataset_id")
+    if top["activated"]:
+        count(workspace["result_revision"], "workspace.result_revision")
+        count(
+            workspace["result_analysis_generation"],
+            "workspace.result_analysis_generation",
+        )
+        if workspace["active_dataset_id"] != result["dataset_id"]:
+            raise ValueError("activated workspace binding is invalid")
+    elif (
+        workspace["result_revision"] is not None
+        or workspace["result_analysis_generation"] is not None
+        or workspace["active_dataset_id"] != source["dataset_id"]
+    ):
+        raise ValueError("inactive workspace binding is invalid")
+
+    evidence = exact(
+        top["evidence"],
+        {"artifact_id", "content_hash", "download_url"},
+        "evidence",
+    )
+    text(evidence["artifact_id"], "evidence.artifact_id")
+    digest(evidence["content_hash"], "evidence.content_hash")
+    download_url = text(evidence["download_url"], "evidence.download_url")
+    if not (
+        download_url.startswith("/api/tasks/")
+        and download_url.endswith("/download")
+        and "/task-artifacts/" in download_url
+    ):
+        raise ValueError("evidence.download_url is invalid")
+    return top
+
+
+def _render_apply_automatic_tree(o: dict):
+    try:
+        o = _validate_automatic_tree_apply_renderer_output(o)
+    except (TypeError, ValueError, RecursionError):
+        return _automatic_tree_apply_integrity_failure()
+
+    source = o["source"]
+    result = o["result"]
+    columns = o["columns"]
+    evidence = o["evidence"]
+    workspace_note = (
+        f"当前 workspace 已切换到派生数据集 `{result['dataset_id']}`。"
+        if o["activated"]
+        else (
+            f"当前 workspace 未切换，仍指向原始数据集 "
+            f"`{source['dataset_id']}`。"
+        )
+    )
+    text = (
+        f"**自动树全量写回完成**：完整树资产 `{source['asset_id']}`（source "
+        f"artifact `{source['tree_artifact_id']}`）已确定性应用到原始数据集 "
+        f"`{source['dataset_id']}`，生成不可变派生数据集 `{result['dataset_id']}`；"
+        f"保留 **{source['row_count']}** 行。叶节点输出列 `{columns['leaf_id']}`，"
+        f"规则输出列 `{columns['rule_id']}`。{workspace_note}\n"
+        "结果边界为 **development / unvalidated**；这是可逆的数据派生，"
+        "**未入池、未采纳、未部署**，也未生成业务动作。\n\n"
+        f"**写回证据**：[{evidence['artifact_id']}]({evidence['download_url']})"
+    )
+    identity_rows = [
+        ["Source Tree Asset", source["asset_id"]],
+        ["Source Tree Artifact", source["tree_artifact_id"]],
+        ["Source Dataset", source["dataset_id"]],
+        ["Result Dataset", result["dataset_id"]],
+        ["Leaf ID Column", columns["leaf_id"]],
+        ["Rule ID Column", columns["rule_id"]],
+        ["Evidence Artifact", evidence["artifact_id"]],
+    ]
+    distribution_rows = [
+        [item["leaf_id"], item["rule_id"], str(item["row_count"])]
+        for item in o["leaf_distribution"]
+    ]
+    return text, [
+        {
+            "title": "自动树全量写回身份",
+            "columns": ["字段", "值"],
+            "rows": identity_rows,
+        },
+        {
+            "title": "自动树叶节点写回分布",
+            "columns": ["Leaf ID", "Rule ID", "行数"],
+            "rows": distribution_rows,
+        },
+    ]
+
+
 def _render_refine_univariate_candidate(o: dict):
     rule = o.get("rule") if isinstance(o.get("rule"), dict) else {}
     effect = o.get("effect") if isinstance(o.get("effect"), dict) else {}
@@ -5349,6 +5600,7 @@ _RENDERERS = {
     "design_strategy_candidate": _render_design_strategy_candidate,
     "analyze_univariate_candidates": _render_analyze_univariate_candidates,
     "build_automatic_tree_candidate": _render_build_automatic_tree_candidate,
+    "apply_automatic_tree": _render_apply_automatic_tree,
     "materialize_automatic_tree_leaf_fragment": (
         _render_materialize_automatic_tree_leaf_fragment
     ),
@@ -5417,6 +5669,8 @@ def render_tool_output(tool: str, output: dict):
             return _pool_impact_integrity_failure()
         if tool == "materialize_sample_design":
             return _sample_design_integrity_failure()
+        if tool == "apply_automatic_tree":
+            return _automatic_tree_apply_integrity_failure()
         return _render_generic(output or {})
 
 

@@ -128,6 +128,34 @@ def _setup(tmp_path: Path):
         workspace=settings.workspace,
     )
     runtime = strategy_tools._runtime(ctx)
+    sample = strategy_tools.tool_materialize_sample_design(
+        {
+            "dataset_id": dataset.id,
+            "expected_dataset_content_hash": dataset.content_hash,
+            "workspace_revision": workspace.revision,
+            "workspace_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+            "target_col": "bad",
+            "target_bad_value": 1,
+            "performance_window_status": "provided",
+            "performance_window_days": 30,
+            "observation_window_status": "provided",
+            "observation_window_start": "2026-01-01",
+            "observation_window_end": "2026-01-31",
+            "maturity_status": "confirmed_matured",
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+            "drop_nan_labels": False,
+        },
+        ctx,
+    )
+    sample_design_ref = {
+        "artifact_id": sample["artifact"]["artifact_id"],
+        "artifact_content_hash": sample["artifact"]["content_hash"],
+        "sample_design_id": sample["sample_design_id"],
+        "sample_design_content_hash": sample["content_hash"],
+        "partition": "development",
+    }
     tree = strategy_tools.tool_build_automatic_tree_candidate(
         {
             "dataset_id": dataset.id,
@@ -136,6 +164,7 @@ def _setup(tmp_path: Path):
             "analysis_generation": workspace.analysis_generation,
             "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
             "target_col": "bad",
+            "sample_design_ref": sample_design_ref,
             "features": ["score", "income"],
             "directions": {"score": "decreasing", "income": "decreasing"},
             "max_depth": 2,
@@ -160,6 +189,7 @@ def _setup(tmp_path: Path):
         "dataset": dataset,
         "workspace": workspace,
         "mapping": mapping,
+        "sample_design_ref": sample_design_ref,
         "tree": tree,
     }
 
@@ -265,6 +295,49 @@ def test_automatic_tree_leaf_materialize_add_compile_full_chain(tmp_path: Path) 
     assert compiled_rule["action"] == pool_action
 
 
+def test_automatic_tree_pool_impact_uses_exact_governed_sample_design(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    selected = _materialize(fx)
+    added = strategy_tools.tool_add_candidate_to_pool(
+        _add_inputs(
+            selected,
+            revision=0,
+            snapshot_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fx["ctx"],
+    )
+
+    output = strategy_tools.tool_measure_pool_impact(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": added["revision"],
+            "expected_pool_snapshot_hash": added["snapshot_hash"],
+            "dataset_id": fx["dataset"].id,
+            "expected_dataset_content_hash": fx["dataset"].content_hash,
+            "workspace_revision": fx["workspace"].revision,
+            "workspace_generation": fx["workspace"].analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(fx["mapping"]),
+            "target_col": "bad",
+            "sample_design_ref": fx["sample_design_ref"],
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+            "comparison_mode": "absolute",
+            "drop_nan_labels": False,
+        },
+        fx["ctx"],
+    )
+
+    assert output["assessment"]["bindings"]["sample_design_ref"] == fx[
+        "sample_design_ref"
+    ]
+    assert all(
+        row["source_ref"]["sample_design_ref"] == fx["sample_design_ref"]
+        for row in output["assessment"]["waterfall"]
+    )
+
+
 def _univariate_candidate(fx: dict) -> dict:
     source = strategy_tools.tool_analyze_univariate_candidates(
         {
@@ -274,6 +347,7 @@ def _univariate_candidate(fx: dict) -> dict:
             "analysis_generation": fx["workspace"].analysis_generation,
             "semantic_mapping_hash": data_semantic_mapping_hash(fx["mapping"]),
             "target_col": "bad",
+            "sample_design_ref": fx["sample_design_ref"],
             "features": ["score"],
             "methods": ["equal_width"],
             "bin_count": 3,

@@ -28,11 +28,15 @@ from marvis.packs.strategy.automatic_tree_asset import (
     canonical_automatic_tree_asset_json,
     validate_automatic_tree_asset,
 )
+from marvis.packs.strategy.automatic_tree_sample_design import (
+    sample_design_ref_from_automatic_tree_source_refs,
+)
 from marvis.packs.strategy.candidate_fragment import (
     CandidateFragmentError,
     build_verified_candidate_fragment,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
 
 
 AUTOMATIC_TREE_LEAF_FRAGMENT_SCHEMA_VERSION = "strategy.automatic-tree-leaf-fragment.v1"
@@ -96,7 +100,7 @@ _TREE_ARTIFACT_FIELDS = frozenset(
     }
 )
 _TREE_ARTIFACT_BINDING_FIELDS = _TREE_ARTIFACT_FIELDS | {"canonical_bytes"}
-_TREE_ARTIFACT_PROVENANCE_FIELDS = frozenset(
+_TREE_ARTIFACT_PROVENANCE_FIELDS_V1 = frozenset(
     {
         "schema_version",
         "producer_version",
@@ -115,6 +119,9 @@ _TREE_ARTIFACT_PROVENANCE_FIELDS = frozenset(
         "sample_context_hash",
     }
 )
+_TREE_ARTIFACT_PROVENANCE_FIELDS = _TREE_ARTIFACT_PROVENANCE_FIELDS_V1 | {
+    "sample_design_ref"
+}
 _TREE_ASSET_FIELDS = frozenset(
     {"schema_version", "asset_id", "asset_hash", "tree_result_hash"}
 )
@@ -451,7 +458,12 @@ def _verified_tree_artifact_binding(value: object) -> dict[str, Any]:
 def _tree_artifact_provenance(value: object) -> dict[str, Any]:
     name = "tree_artifact.provenance"
     normalized = _canonical_json_object(value, name)
-    _exact_fields(normalized, _TREE_ARTIFACT_PROVENANCE_FIELDS, name)
+    actual_fields = set(normalized)
+    if actual_fields not in {
+        _TREE_ARTIFACT_PROVENANCE_FIELDS_V1,
+        _TREE_ARTIFACT_PROVENANCE_FIELDS,
+    }:
+        _exact_fields(normalized, _TREE_ARTIFACT_PROVENANCE_FIELDS, name)
     schema = _canonical_text(normalized["schema_version"], f"{name}.schema_version")
     if schema != AUTOMATIC_TREE_SOURCE_ARTIFACT_SCHEMA_VERSION:
         raise AutomaticTreeLeafFragmentError(
@@ -466,7 +478,7 @@ def _tree_artifact_provenance(value: object) -> dict[str, Any]:
     artifact_format = _canonical_text(normalized["format"], f"{name}.format")
     if artifact_format != "json":
         raise AutomaticTreeLeafFragmentError(f"{name}.format must be json")
-    return {
+    result = {
         "schema_version": schema,
         "producer_version": _canonical_text(
             normalized["producer_version"],
@@ -510,6 +522,11 @@ def _tree_artifact_provenance(value: object) -> dict[str, Any]:
             f"{name}.sample_context_hash",
         ),
     }
+    if "sample_design_ref" in normalized:
+        result["sample_design_ref"] = StrategySampleDesignRef.from_value(
+            normalized["sample_design_ref"]
+        ).to_ref_dict()
+    return result
 
 
 def _tree_artifact_pointer(
@@ -759,25 +776,36 @@ def _tree_artifact_provenance_from_asset(
     asset: Mapping[str, Any],
 ) -> dict[str, Any]:
     identity = asset["identity"]
-    return _tree_artifact_provenance(
-        {
-            "schema_version": AUTOMATIC_TREE_SOURCE_ARTIFACT_SCHEMA_VERSION,
-            "producer_version": asset["producer_version"],
-            "task_id": identity["task_id"],
-            "kind": AUTOMATIC_TREE_SOURCE_ARTIFACT_KIND,
-            "format": "json",
-            "asset_id": asset["asset_id"],
-            "asset_hash": asset["asset_hash"],
-            "tree_result_hash": asset["tree_result"]["result_hash"],
-            "dataset_id": identity["dataset_id"],
-            "dataset_content_hash": identity["dataset_content_hash"],
-            "workspace_revision": identity["workspace_revision"],
-            "workspace_generation": identity["workspace_generation"],
-            "semantic_mapping_hash": identity["semantic_mapping_hash"],
-            "registry_metadata_hash": identity["registry_metadata_hash"],
-            "sample_context_hash": identity["sample_context_hash"],
-        }
-    )
+    provenance = {
+        "schema_version": AUTOMATIC_TREE_SOURCE_ARTIFACT_SCHEMA_VERSION,
+        "producer_version": asset["producer_version"],
+        "task_id": identity["task_id"],
+        "kind": AUTOMATIC_TREE_SOURCE_ARTIFACT_KIND,
+        "format": "json",
+        "asset_id": asset["asset_id"],
+        "asset_hash": asset["asset_hash"],
+        "tree_result_hash": asset["tree_result"]["result_hash"],
+        "dataset_id": identity["dataset_id"],
+        "dataset_content_hash": identity["dataset_content_hash"],
+        "workspace_revision": identity["workspace_revision"],
+        "workspace_generation": identity["workspace_generation"],
+        "semantic_mapping_hash": identity["semantic_mapping_hash"],
+        "registry_metadata_hash": identity["registry_metadata_hash"],
+        "sample_context_hash": identity["sample_context_hash"],
+    }
+    if any(
+        isinstance(value, str) and value.startswith("strategy-sample-design:")
+        for value in asset["source_refs"]
+    ):
+        try:
+            provenance["sample_design_ref"] = (
+                sample_design_ref_from_automatic_tree_source_refs(asset["source_refs"])
+            )
+        except StrategyError as exc:
+            raise AutomaticTreeLeafFragmentError(
+                "automatic-tree sample-design lineage is invalid"
+            ) from exc
+    return _tree_artifact_provenance(provenance)
 
 
 def _require_selection_binding_matches_payload(

@@ -62,16 +62,27 @@ from marvis.packs.strategy.automatic_tree_leaf_fragment import (
     AUTOMATIC_TREE_ASSET_ARTIFACT_SCHEMA_VERSION,
     AUTOMATIC_TREE_ASSET_ORIGIN_TOOL,
 )
+from marvis.packs.strategy.automatic_tree_sample_design import (
+    sample_design_ref_from_automatic_tree_source_refs,
+)
 from marvis.packs.strategy.codegen import (
     generate_automatic_tree_duckdb_sql_source,
     generate_automatic_tree_python_source,
     validate_automatic_tree_duckdb_input_frame,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.sample_design_binding import (
+    StrategySampleDesignExecutionBinding,
+    StrategySampleDesignRef,
+    bind_strategy_development_frame,
+    load_strategy_sample_design_execution_binding,
+    require_strategy_sample_design_execution_binding_on_connection,
+    revalidate_strategy_sample_design_execution_binding,
+)
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 
 
-TOOL_SCHEMA_VERSION = "strategy.automatic-tree-candidate-tool.v1"
+TOOL_SCHEMA_VERSION = "strategy.automatic-tree-candidate-tool.v2"
 ORIGIN_TOOL = AUTOMATIC_TREE_ASSET_ORIGIN_TOOL
 SAMPLE_CONTEXT_SCHEMA_VERSION = "strategy.sample-context.v1"
 EQUIVALENCE_SCHEMA_VERSION = "strategy.automatic-tree-equivalence.v1"
@@ -103,6 +114,7 @@ _INPUT_FIELDS = frozenset(
         "analysis_generation",
         "semantic_mapping_hash",
         "target_col",
+        "sample_design_ref",
         "features",
         "drop_nan_labels",
         "sample_weight_col",
@@ -124,6 +136,7 @@ _REQUIRED_INPUT_FIELDS = frozenset(
         "analysis_generation",
         "semantic_mapping_hash",
         "target_col",
+        "sample_design_ref",
         "features",
     }
 )
@@ -168,6 +181,7 @@ FULL_TREE_PROVENANCE_FIELDS = frozenset(
         "semantic_mapping_hash",
         "registry_metadata_hash",
         "sample_context_hash",
+        "sample_design_ref",
     }
 )
 DELIVERY_PROVENANCE_FIELDS = frozenset(
@@ -235,12 +249,34 @@ def run_build_automatic_tree_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         expected_generation=normalized["analysis_generation"],
         expected_semantic_hash=normalized["semantic_mapping_hash"],
     )
-    resolved = _resolve_columns(normalized, binding=binding)
+    sample_design = load_strategy_sample_design_execution_binding(
+        runtime,
+        task_id=task_id,
+        sample_design_ref=normalized["sample_design_ref"],
+        dataset_id=normalized["dataset_id"],
+        dataset_content_hash=binding.content_hash,
+        workspace_revision=binding.workspace.revision,
+        workspace_generation=binding.workspace.generation,
+        semantic_mapping_hash=binding.workspace.semantic_mapping_hash,
+        target_col=normalized["target_col"],
+        drop_nan_labels=normalized["drop_nan_labels"],
+        weight_col=normalized["sample_weight_col"],
+        loan_amount_col=normalized["loan_amount_col"],
+        overdue_amount_col=normalized["overdue_amount_col"],
+    )
+    normalized = _resolve_optional_sample_design_bindings(normalized, sample_design)
+    resolved = _resolve_columns(
+        normalized,
+        binding=binding,
+        sample_design=sample_design,
+    )
     frame = runtime.backend.read_frame(
         binding.path,
         columns=resolved["projected_columns"],
     )
     _require_binding_live(runtime, task_id=task_id, binding=binding)
+    revalidate_strategy_sample_design_execution_binding(runtime, sample_design)
+    frame = bind_strategy_development_frame(frame, binding=sample_design)
     labeled_frame, nan_labels_dropped = resolve_labeled_frame(
         frame,
         normalized["target_col"],
@@ -257,6 +293,7 @@ def run_build_automatic_tree_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         nan_labels_dropped=nan_labels_dropped,
         loan_amount_col=normalized["loan_amount_col"],
         overdue_amount_col=normalized["overdue_amount_col"],
+        sample_design_ref=sample_design.to_ref_dict(),
     )
 
     _require_binding_live(runtime, task_id=task_id, binding=binding)
@@ -292,6 +329,7 @@ def run_build_automatic_tree_candidate(inputs, ctx, runtime) -> dict[str, Any]:
                 f":generation:{binding.workspace.generation}"
             ),
             f"registry-metadata:sha256:{binding.registry_metadata_hash}",
+            sample_design.source_ref_token,
         ),
     )
     asset = validate_automatic_tree_asset(asset)
@@ -330,10 +368,12 @@ def run_build_automatic_tree_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         sql_source=sql_source,
     )
     _require_binding_live(runtime, task_id=task_id, binding=binding)
+    revalidate_strategy_sample_design_execution_binding(runtime, sample_design)
     artifacts = _write_artifacts(
         runtime,
         task_id=task_id,
         binding=binding,
+        sample_design=sample_design,
         asset=asset,
         delivery_bytes=delivery_bytes,
         equivalence=equivalence,
@@ -385,6 +425,9 @@ def _validate_inputs(inputs: object) -> dict[str, Any]:
             inputs["semantic_mapping_hash"], "semantic_mapping_hash"
         ),
         "target_col": _required_text(inputs["target_col"], "target_col"),
+        "sample_design_ref": StrategySampleDesignRef.from_value(
+            inputs["sample_design_ref"]
+        ).to_ref_dict(),
         "features": features,
         "drop_nan_labels": _optional_bool(
             inputs.get("drop_nan_labels"), default=False, field="drop_nan_labels"
@@ -671,7 +714,10 @@ def _registry_metadata_hash_on_connection(
 
 
 def _resolve_columns(
-    normalized: Mapping[str, Any], *, binding: _DatasetBinding
+    normalized: Mapping[str, Any],
+    *,
+    binding: _DatasetBinding,
+    sample_design: StrategySampleDesignExecutionBinding,
 ) -> dict[str, Any]:
     columns = list(binding.columns)
     available = set(columns)
@@ -696,6 +742,19 @@ def _resolve_columns(
     missing = sorted(required - available)
     if missing:
         raise StrategyError("unknown automatic-tree columns: " + ", ".join(missing))
+
+    if (
+        sample_design.split_column is not None
+        and sample_design.split_column in normalized["features"]
+    ):
+        raise StrategyError(
+            "sample-design split column cannot be an automatic-tree feature"
+        )
+    if (
+        sample_design.split_column is not None
+        and sample_design.split_column not in available
+    ):
+        raise StrategyError("sample-design split column is missing from the dataset")
 
     roles = {
         str(column): str(role)
@@ -748,7 +807,39 @@ def _resolve_columns(
         )
         if column is not None and column not in projected
     )
+    if (
+        sample_design.split_column is not None
+        and sample_design.split_column not in projected
+    ):
+        projected.append(sample_design.split_column)
     return {"projected_columns": projected, "field_roles": roles}
+
+
+def _resolve_optional_sample_design_bindings(
+    normalized: Mapping[str, Any],
+    sample_design: StrategySampleDesignExecutionBinding,
+) -> dict[str, Any]:
+    """Inherit omitted optional columns from the authenticated sample design.
+
+    An explicit non-empty caller binding is still an assertion and therefore
+    must match exactly.  ``None`` only means that the caller delegates the
+    binding choice to the immutable sample-design artifact.
+    """
+
+    expected = {
+        "sample_weight_col": sample_design.weight_col,
+        "loan_amount_col": sample_design.loan_amount_col,
+        "overdue_amount_col": sample_design.overdue_amount_col,
+    }
+    resolved = dict(normalized)
+    for field, designed in expected.items():
+        requested = normalized[field]
+        if requested is not None and requested != designed:
+            raise StrategyError(
+                f"strategy sample-design {field} does not match automatic-tree binding"
+            )
+        resolved[field] = designed
+    return resolved
 
 
 def automatic_tree_sample_context_hash(
@@ -761,6 +852,7 @@ def automatic_tree_sample_context_hash(
     nan_labels_dropped: int,
     loan_amount_col: str | None,
     overdue_amount_col: str | None,
+    sample_design_ref: Mapping[str, Any],
 ) -> str:
     """Return the cross-candidate labelled-sample identity projection."""
 
@@ -788,6 +880,9 @@ def automatic_tree_sample_context_hash(
             "loan_amount_col": loan_amount_col,
             "overdue_amount_col": overdue_amount_col,
             "registry_metadata_hash": binding.registry_metadata_hash,
+            "sample_design_ref": StrategySampleDesignRef.from_value(
+                sample_design_ref
+            ).to_ref_dict(),
         },
     }
     return _canonical_sha256(context)
@@ -1016,6 +1111,7 @@ def _write_artifacts(
     *,
     task_id: str,
     binding: _DatasetBinding,
+    sample_design: StrategySampleDesignExecutionBinding,
     asset: Mapping[str, Any],
     delivery_bytes: Mapping[str, bytes],
     equivalence: Mapping[str, Any],
@@ -1054,6 +1150,7 @@ def _write_artifacts(
                 "semantic_mapping_hash": asset["identity"]["semantic_mapping_hash"],
                 "registry_metadata_hash": asset["identity"]["registry_metadata_hash"],
                 "sample_context_hash": asset["identity"]["sample_context_hash"],
+                "sample_design_ref": sample_design.to_ref_dict(),
             }
             if set(provenance) != FULL_TREE_PROVENANCE_FIELDS:
                 raise StrategyError("automatic-tree JSON provenance fields drifted")
@@ -1101,6 +1198,10 @@ def _write_artifacts(
             conn.execute("BEGIN IMMEDIATE")
             try:
                 _require_binding_on_connection(conn, task_id=task_id, binding=binding)
+                require_strategy_sample_design_execution_binding_on_connection(
+                    conn,
+                    sample_design,
+                )
                 _require_artifact_directory_boundary(
                     out_dir,
                     root=Path(runtime.settings.tasks_dir),
@@ -1256,6 +1357,9 @@ def _tool_output(
             "semantic_mapping_hash": identity["semantic_mapping_hash"],
             "registry_metadata_hash": identity["registry_metadata_hash"],
             "sample_context_hash": identity["sample_context_hash"],
+            "sample_design_ref": _sample_design_ref_from_source_refs(
+                asset["source_refs"]
+            ),
             "target_col": tree_result["training"]["target_col"],
             "features": list(tree_result["training"]["feature_order"]),
             "nan_labels_dropped": int(nan_labels_dropped),
@@ -1315,6 +1419,18 @@ def _report_info_gaps(tree_result: Mapping[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def strategy_sample_design_ref_from_source_refs(
+    source_refs: object,
+) -> dict[str, str]:
+    """Recover the one exact canonical sample-design reference from an asset."""
+
+    return sample_design_ref_from_automatic_tree_source_refs(source_refs)
+
+
+def _sample_design_ref_from_source_refs(source_refs: object) -> dict[str, str]:
+    return strategy_sample_design_ref_from_source_refs(source_refs)
+
+
 def _canonical_sha256(value: object) -> str:
     try:
         payload = json.dumps(
@@ -1337,4 +1453,5 @@ __all__ = [
     "TOOL_SCHEMA_VERSION",
     "automatic_tree_sample_context_hash",
     "run_build_automatic_tree_candidate",
+    "strategy_sample_design_ref_from_source_refs",
 ]

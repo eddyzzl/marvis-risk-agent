@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from marvis.packs.strategy import voting_candidate as voting_candidate_domain
 from marvis.packs.strategy.candidate_fragment import (
     build_verified_candidate_fragment,
 )
@@ -14,6 +15,8 @@ from marvis.packs.strategy.pool import (
 )
 from marvis.packs.strategy.voting_candidate import (
     VOTING_CANDIDATE_ASSET_SCHEMA_VERSION,
+    VOTING_CANDIDATE_ASSET_SCHEMA_VERSION_V1,
+    VOTING_CANDIDATE_ASSET_PRODUCER_VERSION_V1,
     VotingCandidateAssetError,
     build_voting_candidate_asset,
     canonical_voting_candidate_asset_json,
@@ -28,6 +31,13 @@ HASH_B = "b" * 64
 HASH_C = "c" * 64
 HASH_D = "d" * 64
 HASH_E = "e" * 64
+SAMPLE_DESIGN_REF = {
+    "artifact_id": "1" * 64,
+    "artifact_content_hash": "2" * 64,
+    "sample_design_id": "sample-design-voting",
+    "sample_design_content_hash": "3" * 64,
+    "partition": "development",
+}
 
 
 def _approval(value: str = "approve") -> dict:
@@ -137,6 +147,7 @@ def _asset(*, pool: dict | None = None, selected: list[str] | None = None) -> di
         selected_entry_ids=ids if selected is None else selected,
         n=2,
         target_col="bad",
+        sample_design_ref=SAMPLE_DESIGN_REF,
         effect=_effect(),
     )
 
@@ -200,6 +211,30 @@ def test_selected_entry_ids_are_an_unordered_set_canonicalized_by_pool_position(
     assert pool == before
 
 
+def test_legacy_v1_asset_remains_strictly_readable_but_new_build_is_v2() -> None:
+    pool = _pool()
+    ids = [entry["entry_id"] for entry in pool["entries"]]
+    legacy = voting_candidate_domain._build_voting_candidate_asset(
+        pool,
+        selected_entry_ids=ids,
+        n=2,
+        target_col="bad",
+        sample_design_ref=None,
+        effect=_effect(),
+        producer_version=VOTING_CANDIDATE_ASSET_PRODUCER_VERSION_V1,
+        schema_version=VOTING_CANDIDATE_ASSET_SCHEMA_VERSION_V1,
+    )
+
+    assert legacy["schema_version"] == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION_V1
+    assert "sample_design_ref" not in legacy
+    assert validate_voting_candidate_asset(legacy) == legacy
+    assert parse_voting_candidate_asset_json(
+        canonical_voting_candidate_asset_json(legacy)
+    ) == legacy
+    assert verify_voting_candidate_asset_against_pool(legacy, pool) == legacy
+    assert _asset(pool=pool)["schema_version"] == VOTING_CANDIDATE_ASSET_SCHEMA_VERSION
+
+
 @pytest.mark.parametrize("n", [0, 4, True, 1.5])
 def test_build_rejects_invalid_n(n: object) -> None:
     pool = _pool()
@@ -211,6 +246,7 @@ def test_build_rejects_invalid_n(n: object) -> None:
             selected_entry_ids=ids,
             n=n,  # type: ignore[arg-type]
             target_col="bad",
+            sample_design_ref=SAMPLE_DESIGN_REF,
             effect=_effect(),
         )
 
@@ -231,6 +267,7 @@ def test_build_rejects_duplicate_unknown_and_non_voting_entry_sets() -> None:
             selected_entry_ids=[ids[0]],
             n=1,
             target_col="bad",
+            sample_design_ref=SAMPLE_DESIGN_REF,
             effect=_effect(),
         )
 
@@ -245,6 +282,7 @@ def test_effect_and_derived_metrics_are_strict_and_hash_authenticated() -> None:
             selected_entry_ids=ids,
             n=2,
             target_col="bad",
+            sample_design_ref=SAMPLE_DESIGN_REF,
             effect=inconsistent,
         )
 
@@ -266,6 +304,7 @@ def test_effect_and_derived_metrics_are_strict_and_hash_authenticated() -> None:
             selected_entry_ids=ids,
             n=2,
             target_col="bad",
+            sample_design_ref=SAMPLE_DESIGN_REF,
             effect=false_zero,
         )
 
@@ -282,6 +321,7 @@ def test_effect_and_derived_metrics_are_strict_and_hash_authenticated() -> None:
             selected_entry_ids=ids,
             n=2,
             target_col="bad",
+            sample_design_ref=SAMPLE_DESIGN_REF,
             effect=non_finite,
         )
 
@@ -294,6 +334,7 @@ def test_empty_denominators_are_materialized_as_null_not_false_zero() -> None:
         selected_entry_ids=ids,
         n=2,
         target_col="bad",
+        sample_design_ref=SAMPLE_DESIGN_REF,
         effect={
             "population_count": 100,
             "labeled_count": 100,
@@ -332,6 +373,18 @@ def test_validation_rejects_duplicate_refs_unknown_fields_and_hash_drift() -> No
     with pytest.raises(VotingCandidateAssetError, match="source_hash"):
         validate_voting_candidate_asset(fragment_drift)
 
+    sample_ref_drift = deepcopy(asset)
+    sample_ref_drift["sample_design_ref"]["artifact_content_hash"] = "4" * 64
+    with pytest.raises(VotingCandidateAssetError, match="candidate_id"):
+        validate_voting_candidate_asset(sample_ref_drift)
+
+    evidence_ref_drift = deepcopy(asset)
+    evidence_ref_drift["candidate_evidence"]["sample_design_ref"][
+        "artifact_content_hash"
+    ] = "4" * 64
+    with pytest.raises(VotingCandidateAssetError, match="sample_design_ref"):
+        validate_voting_candidate_asset(evidence_ref_drift)
+
 
 def test_verify_rejects_stale_pool_revision_or_snapshot() -> None:
     pool = _pool()
@@ -366,6 +419,7 @@ def test_effect_content_changes_all_dependent_ids_but_not_rule_identity() -> Non
         selected_entry_ids=ids,
         n=2,
         target_col="bad",
+        sample_design_ref=SAMPLE_DESIGN_REF,
         effect=_effect(),
     )
     second = _asset(pool=pool)
@@ -376,6 +430,7 @@ def test_effect_content_changes_all_dependent_ids_but_not_rule_identity() -> Non
         selected_entry_ids=ids,
         n=2,
         target_col="bad",
+        sample_design_ref=SAMPLE_DESIGN_REF,
         effect={
             **_effect(),
             "matched_bad_count": 9,

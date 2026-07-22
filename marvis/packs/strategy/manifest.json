@@ -1,6 +1,6 @@
 {
   "name": "strategy",
-  "version": "0.10.0",
+  "version": "0.12.0",
   "display_name": "Strategy Pack",
   "description": "Vintage, roll-rate, profitability, governed sample design, univariate, automatic-tree, Voting n-of-k, and complete two-dimensional Cross Matrix candidate development with explicit leaf and Cross cell-group materialization, Strategy Pool assembly, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
@@ -425,6 +425,33 @@
             "pattern": "^[0-9a-f]{64}$"
           },
           "target_col": {"type": "string", "minLength": 1},
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          },
           "drop_nan_labels": {"type": "boolean"},
           "features": {
             "type": "array",
@@ -464,6 +491,7 @@
           "analysis_generation",
           "semantic_mapping_hash",
           "target_col",
+          "sample_design_ref",
           "features",
           "methods",
           "bin_count",
@@ -658,6 +686,33 @@
             "pattern": "^[0-9a-f]{64}$"
           },
           "target_col": {"type": "string", "minLength": 1},
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          },
           "features": {
             "type": "array",
             "minItems": 1,
@@ -763,6 +818,7 @@
           "analysis_generation",
           "semantic_mapping_hash",
           "target_col",
+          "sample_design_ref",
           "features"
         ],
         "additionalProperties": false
@@ -865,7 +921,7 @@
         },
         "properties": {
           "schema_version": {
-            "const": "strategy.automatic-tree-candidate-tool.v1"
+            "const": "strategy.automatic-tree-candidate-tool.v2"
           },
           "summary": {
             "type": "object",
@@ -910,6 +966,33 @@
                 "type": "string",
                 "pattern": "^[0-9a-f]{64}$"
               },
+              "sample_design_ref": {
+                "type": "object",
+                "properties": {
+                  "artifact_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "artifact_content_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "sample_design_id": {"type": "string", "minLength": 1},
+                  "sample_design_content_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "partition": {"const": "development"}
+                },
+                "required": [
+                  "artifact_id",
+                  "artifact_content_hash",
+                  "sample_design_id",
+                  "sample_design_content_hash",
+                  "partition"
+                ],
+                "additionalProperties": false
+              },
               "target_col": {"type": "string", "minLength": 1},
               "features": {
                 "type": "array",
@@ -939,6 +1022,7 @@
               "semantic_mapping_hash",
               "registry_metadata_hash",
               "sample_context_hash",
+              "sample_design_ref",
               "target_col",
               "features",
               "nan_labels_dropped",
@@ -1637,7 +1721,7 @@
         "type": "object",
         "properties": {
           "schema_version": {
-            "const": "strategy.build-voting-candidate-tool.v1"
+            "const": "strategy.build-voting-candidate-tool.v2"
           },
           "asset_id": {
             "type": "string",
@@ -1677,6 +1761,7 @@
           "k": {"type": "integer", "minimum": 2, "maximum": 50},
           "dataset_id": {"type": "string", "minLength": 1},
           "target_col": {"type": "string", "minLength": 1},
+          "sample_design_ref": {"$ref": "#/$defs/sample_design_ref"},
           "drop_nan_labels": {"type": "boolean"},
           "nan_labels_dropped": {"type": "integer", "minimum": 0},
           "population_count": {"type": "integer", "minimum": 1},
@@ -1729,6 +1814,7 @@
           "k",
           "dataset_id",
           "target_col",
+          "sample_design_ref",
           "drop_nan_labels",
           "nan_labels_dropped",
           "population_count",
@@ -1751,6 +1837,24 @@
           "sha256": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
           },
           "nullable_rate": {
             "anyOf": [
@@ -3308,6 +3412,33 @@
             "pattern": "^[0-9a-f]{64}$"
           },
           "target_col": {"type": "string", "minLength": 1},
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          },
           "comparison_mode": {
             "type": "string",
             "enum": ["absolute", "vs_baseline"]
@@ -3328,6 +3459,7 @@
           "workspace_generation",
           "semantic_mapping_hash",
           "target_col",
+          "sample_design_ref",
           "comparison_mode"
         ],
         "allOf": [
@@ -3354,7 +3486,7 @@
         "type": "object",
         "properties": {
           "schema_version": {
-            "const": "strategy.measure-pool-impact-tool.v1"
+            "const": "strategy.measure-pool-impact-tool.v2"
           },
           "assessment_id": {"type": "string", "minLength": 1},
           "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -3441,6 +3573,25 @@
           },
           "candidate_design": {"type": "object"},
           "economics_inputs": {"type": ["object", "null"]},
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          },
+          "drop_nan_labels": {"type": "boolean"},
           "candidate_policy_version": {
             "const": "strategy.candidate_policy.v1"
           }
@@ -3450,6 +3601,7 @@
           "target_col",
           "strategy_type",
           "candidate_design",
+          "sample_design_ref",
           "candidate_policy_version"
         ],
         "allOf": [
@@ -3619,7 +3771,25 @@
             "pattern": "^[0-9a-f]{64}$"
           },
           "design_evidence": {"type": "object"},
-          "economics_inputs": {"type": ["object", "null"]}
+          "economics_inputs": {"type": ["object", "null"]},
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          }
         },
         "required": [
           "schema_version",
@@ -3632,7 +3802,8 @@
           "strategy_spec",
           "strategy_effect_hash",
           "design_evidence",
-          "economics_inputs"
+          "economics_inputs",
+          "sample_design_ref"
         ],
         "additionalProperties": false
       },
@@ -4206,6 +4377,33 @@
             "type": "string",
             "minLength": 1
           },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          },
           "baseline_strategy_id": {
             "type": "string",
             "minLength": 1
@@ -4770,6 +4968,24 @@
             "type": "string",
             "minLength": 1
           },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          },
           "cutoffs": {
             "type": "array",
             "items": {
@@ -4817,7 +5033,8 @@
         "required": [
           "dataset_id",
           "score_col",
-          "target_col"
+          "target_col",
+          "sample_design_ref"
         ],
         "additionalProperties": false
       },
@@ -4835,6 +5052,24 @@
               "object",
               "null"
             ]
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
           },
           "nan_labels_dropped": {
             "type": "integer",
@@ -4855,7 +5090,8 @@
         },
         "required": [
           "points",
-          "recommended"
+          "recommended",
+          "sample_design_ref"
         ],
         "additionalProperties": false
       },
@@ -4885,6 +5121,24 @@
           "target_col": {
             "type": "string",
             "minLength": 1
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
           },
           "score_direction": {
             "type": "string",
@@ -4941,7 +5195,8 @@
         "required": [
           "dataset_id",
           "score_col",
-          "target_col"
+          "target_col",
+          "sample_design_ref"
         ],
         "additionalProperties": false
       },
@@ -4978,6 +5233,24 @@
           "nan_labels_dropped": {
             "type": "integer",
             "minimum": 0
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -4986,7 +5259,8 @@
           "recommended_rules",
           "red_flags",
           "score_direction",
-          "nan_labels_dropped"
+          "nan_labels_dropped",
+          "sample_design_ref"
         ],
         "additionalProperties": false
       },
@@ -5018,6 +5292,24 @@
             "type": "string",
             "minLength": 1
           },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          },
           "strategy_id": {
             "type": "string",
             "minLength": 1
@@ -5044,6 +5336,7 @@
         "required": [
           "dataset_id",
           "target_col",
+          "sample_design_ref",
           "strategy_id"
         ],
         "additionalProperties": false
@@ -5078,6 +5371,24 @@
             "type": ["number", "null"],
             "minimum": 0,
             "maximum": 1
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -5085,7 +5396,8 @@
           "matrix_2x2",
           "deltas",
           "summary_text",
-          "red_flags"
+          "red_flags",
+          "sample_design_ref"
         ],
         "additionalProperties": false
       },
@@ -5495,6 +5807,24 @@
             "type": "string",
             "minLength": 1
           },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          },
           "feature_cols": {
             "type": "array",
             "items": {
@@ -5529,7 +5859,8 @@
         },
         "required": [
           "dataset_id",
-          "target_col"
+          "target_col",
+          "sample_design_ref"
         ],
         "additionalProperties": false
       },
@@ -5561,13 +5892,32 @@
           "nan_labels_dropped": {
             "type": "integer",
             "minimum": 0
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
           "candidate_rules",
           "n_rows",
           "red_flags",
-          "nan_labels_dropped"
+          "nan_labels_dropped",
+          "sample_design_ref"
         ],
         "additionalProperties": false
       },
@@ -5594,6 +5944,24 @@
             "type": "string",
             "minLength": 1
           },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          },
           "rules": {
             "type": "array",
             "items": {
@@ -5611,6 +5979,7 @@
         "required": [
           "dataset_id",
           "target_col",
+          "sample_design_ref",
           "rules"
         ],
         "additionalProperties": false
@@ -5651,6 +6020,24 @@
           "nan_labels_dropped": {
             "type": "integer",
             "minimum": 0
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -5660,7 +6047,8 @@
           "residual",
           "combined",
           "red_flags",
-          "nan_labels_dropped"
+          "nan_labels_dropped",
+          "sample_design_ref"
         ],
         "additionalProperties": false
       },
@@ -6291,6 +6679,33 @@
             "type": "string",
             "minLength": 1
           },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          },
           "band_edges": {
             "type": [
               "array",
@@ -6372,6 +6787,7 @@
         "required": [
           "dataset_id",
           "score_col",
+          "sample_design_ref",
           "limit_grid",
           "rate_grid",
           "funding_rate",
@@ -6410,6 +6826,33 @@
           "source_dataset_content_hash": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
           },
           "red_flags": {
             "type": "array",
@@ -6464,6 +6907,7 @@
           "assumptions",
           "source_evidence",
           "source_dataset_content_hash",
+          "sample_design_ref",
           "red_flags",
           "artifacts"
         ],

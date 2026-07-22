@@ -958,6 +958,44 @@ class StrategyRepository:
             )
             _write_audit_row(conn, **audit)
 
+    def save_backtest_with_audit_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        backtest_id: str,
+        strategy_id: str,
+        dataset_id: str,
+        result: BacktestRecord,
+        *,
+        audit: dict,
+        created_at: str | None = None,
+    ) -> None:
+        """Persist backtest evidence on a caller-owned writer transaction."""
+
+        _insert_backtest_row(
+            conn,
+            backtest_id,
+            strategy_id,
+            dataset_id,
+            result,
+            created_at or _now(),
+        )
+        _write_audit_row(conn, **audit)
+
+    def get_backtest_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        backtest_id: str,
+    ) -> BacktestRecord | None:
+        row = conn.execute(
+            """
+            SELECT id, strategy_id, dataset_id, result_json, created_at
+              FROM backtests
+             WHERE id = ?
+            """,
+            (backtest_id,),
+        ).fetchone()
+        return None if row is None else _backtest_result_from_row(row)
+
     def get_backtest(self, backtest_id: str) -> BacktestRecord | None:
         with connect(self.db_path) as conn:
             row = conn.execute(

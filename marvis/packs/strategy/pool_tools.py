@@ -92,6 +92,7 @@ from marvis.packs.strategy.voting_candidate import (
 from marvis.packs.strategy.voting_candidate_fragment import (
     VOTING_CANDIDATE_ARTIFACT_KIND,
     VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+    VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION_V1,
     VOTING_CANDIDATE_ORIGIN_TOOL,
     voting_candidate_to_verified_fragment,
 )
@@ -883,6 +884,11 @@ def _load_candidate_lineage(
         VOTING_CANDIDATE_ORIGIN_TOOL,
         VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
     )
+    legacy_voting_triple = (
+        VOTING_CANDIDATE_ARTIFACT_KIND,
+        VOTING_CANDIDATE_ORIGIN_TOOL,
+        VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION_V1,
+    )
     cross_matrix_selection_triple = (
         CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND,
         CROSS_MATRIX_CELL_SELECTION_ORIGIN_TOOL,
@@ -928,7 +934,7 @@ def _load_candidate_lineage(
             "complete Cross Matrix assets cannot be admitted directly; "
             "materialize a cell selection first"
         )
-    if triple == voting_triple:
+    if triple in {voting_triple, legacy_voting_triple}:
         return _load_voting_candidate_lineage(
             runtime,
             task_id=task_id,

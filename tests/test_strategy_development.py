@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from marvis.data.backend import DataBackend
+from marvis.data.errors import NanLabelNotConfirmedError
 from marvis.data.registry import DatasetRegistry
 from marvis.feature.binning import equal_frequency_edges
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
@@ -20,6 +21,9 @@ from marvis.plugins.manifest import GovernancePolicy, ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.settings import build_settings
+from tests.strategy_tool_sample_design_support import (
+    materialize_strategy_tool_sample_design,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -385,17 +389,31 @@ def test_tool_design_cutoff_bands_gates_nan_label(tmp_path):
         "bad":   [1.0, 0.0, float("nan"), 0.0, 0.0, 0.0],
     })
     dataset = _register(registry, tmp_path, frame, "nan_bands", task.id)
+    settings = build_settings(tmp_path / "workspace")
+    with pytest.raises(NanLabelNotConfirmedError):
+        materialize_strategy_tool_sample_design(
+            settings,
+            task,
+            dataset,
+            drop_nan_labels=False,
+            field_roles={"score": "score"},
+        )
+    dropping_sample_ref = materialize_strategy_tool_sample_design(
+        settings,
+        task,
+        dataset,
+        drop_nan_labels=True,
+        field_roles={"score": "score"},
+    )
     base = {
         "dataset_id": dataset.id, "score_col": "score", "target_col": "bad",
+        "sample_design_ref": dropping_sample_ref,
+        "drop_nan_labels": True,
         "score_direction": "higher_is_better", "band_edges": [100, 300, 600],
     }
-    blocked = runner.invoke(ToolRef("strategy", "design_cutoff_bands"), dict(base), task_id=task.id)
-    assert blocked.ok is False
-    assert blocked.error_kind == "nan_label_not_confirmed"
-
     confirmed = runner.invoke(
         ToolRef("strategy", "design_cutoff_bands"),
-        {**base, "drop_nan_labels": True},
+        base,
         task_id=task.id,
     )
     assert confirmed.ok is True, confirmed.error
@@ -412,8 +430,15 @@ def test_tool_design_cutoff_bands_direction_conflict_gate(tmp_path):
     bad = [0] * (n // 2) + [1] * (n - n // 2)
     frame = pd.DataFrame({"score": scores, "bad": bad})
     dataset = _register(registry, tmp_path, frame, "conflict_bands", task.id)
+    sample_ref = materialize_strategy_tool_sample_design(
+        build_settings(tmp_path / "workspace"),
+        task,
+        dataset,
+        field_roles={"score": "score"},
+    )
     base = {
         "dataset_id": dataset.id, "score_col": "score", "target_col": "bad",
+        "sample_design_ref": sample_ref,
         "score_direction": "higher_is_better", "n_bands": 4,
     }
     blocked = runner.invoke(ToolRef("strategy", "design_cutoff_bands"), dict(base), task_id=task.id)
@@ -430,6 +455,69 @@ def test_tool_design_cutoff_bands_direction_conflict_gate(tmp_path):
 
 
 @pytest.mark.slow
+def test_tradeoff_and_bands_use_bad_zero_development_only(tmp_path):
+    outputs = []
+    for name, target_bad_value, validation_score in (
+        ("bad-one", 1, 10_000),
+        ("bad-zero", 0, -10_000),
+    ):
+        case = tmp_path / name
+        runner, registry, task = _runtime(case)
+        bad_one = [1, 1, 0, 0, 0, 0, 1, 0]
+        labels = (
+            bad_one
+            if target_bad_value == 1
+            else [1 - value for value in bad_one]
+        )
+        frame = pd.DataFrame(
+            {
+                "score": [100, 200, 300, 400, 500, 600, validation_score, -validation_score],
+                "bad": labels,
+                "sample_split": ["dev"] * 6 + ["valid"] * 2,
+            }
+        )
+        dataset = _register(registry, case, frame, "sample", task.id)
+        sample_ref = materialize_strategy_tool_sample_design(
+            build_settings(case / "workspace"),
+            task,
+            dataset,
+            target_bad_value=target_bad_value,
+            split_col="sample_split",
+            development_values=["dev"],
+            validation_values=["valid"],
+            field_roles={"score": "score"},
+        )
+        common = {
+            "dataset_id": dataset.id,
+            "score_col": "score",
+            "target_col": "bad",
+            "sample_design_ref": sample_ref,
+            "score_direction": "higher_is_better",
+        }
+        tradeoff = runner.invoke(
+            ToolRef("strategy", "tradeoff_view"),
+            {**common, "cutoffs": [300, 500]},
+            task_id=task.id,
+        )
+        bands = runner.invoke(
+            ToolRef("strategy", "design_cutoff_bands"),
+            {**common, "band_edges": [100, 300, 500, 600]},
+            task_id=task.id,
+        )
+        assert tradeoff.ok, tradeoff.error
+        assert bands.ok, bands.error
+        assert tradeoff.output["sample_design_ref"] == sample_ref
+        assert bands.output["sample_design_ref"] == sample_ref
+        outputs.append((tradeoff.output, bands.output))
+
+    assert outputs[0][0]["points"] == outputs[1][0]["points"]
+    assert outputs[0][1]["bands"] == outputs[1][1]["bands"]
+    assert outputs[0][1]["recommended_rules"] == outputs[1][1][
+        "recommended_rules"
+    ]
+
+
+@pytest.mark.slow
 def test_tool_compare_strategies_round_trip(tmp_path):
     runner, registry, task = _runtime(tmp_path)
     frame = pd.DataFrame({
@@ -437,6 +525,12 @@ def test_tool_compare_strategies_round_trip(tmp_path):
         "bad":   [1,   0,   1,   0,   0,   0],
     })
     dataset = _register(registry, tmp_path, frame, "cmp", task.id)
+    sample_design_ref = materialize_strategy_tool_sample_design(
+        build_settings(tmp_path / "workspace"),
+        task,
+        dataset,
+        field_roles={"score": "score"},
+    )
     new = runner.invoke(
         ToolRef("strategy", "build_strategy"),
         {"strategy_type": "approval",
@@ -454,6 +548,7 @@ def test_tool_compare_strategies_round_trip(tmp_path):
     cmp = runner.invoke(
         ToolRef("strategy", "compare_strategies"),
         {"dataset_id": dataset.id, "target_col": "bad",
+         "sample_design_ref": sample_design_ref,
          "strategy_id": new.output["strategy_id"],
          "baseline_strategy_id": base.output["strategy_id"]},
         task_id=task.id,
@@ -462,6 +557,7 @@ def test_tool_compare_strategies_round_trip(tmp_path):
     assert cmp.output["matrix_2x2"]["both_approve"]["count"] == 2
     assert "summary_text" in cmp.output
     assert isinstance(cmp.output["red_flags"], list)
+    assert cmp.output["sample_design_ref"] == sample_design_ref
     # No NaN labels in this frame -> full coverage (DOM-11).
     assert cmp.output["label_coverage"] == 1.0
     _ = PluginRepository  # keep import used across slow/fast paths
@@ -477,6 +573,13 @@ def test_tool_backtest_and_compare_strategies_label_coverage_hand_computed(tmp_p
         "bad":   [1.0, 0.0, float("nan"), 0.0, 0.0, float("nan")],
     })
     dataset = _register(registry, tmp_path, frame, "coverage", task.id)
+    sample_design_ref = materialize_strategy_tool_sample_design(
+        build_settings(tmp_path / "workspace"),
+        task,
+        dataset,
+        drop_nan_labels=True,
+        field_roles={"score": "score"},
+    )
     new = runner.invoke(
         ToolRef("strategy", "build_strategy"),
         {"strategy_type": "approval",
@@ -505,6 +608,7 @@ def test_tool_backtest_and_compare_strategies_label_coverage_hand_computed(tmp_p
     cmp = runner.invoke(
         ToolRef("strategy", "compare_strategies"),
         {"dataset_id": dataset.id, "target_col": "bad",
+         "sample_design_ref": sample_design_ref,
          "strategy_id": new.output["strategy_id"],
          "baseline_strategy_id": base.output["strategy_id"],
          "drop_nan_labels": True},
@@ -513,6 +617,126 @@ def test_tool_backtest_and_compare_strategies_label_coverage_hand_computed(tmp_p
     assert cmp.ok is True, cmp.error
     assert cmp.output["nan_labels_dropped"] == 2
     assert round(cmp.output["label_coverage"], 4) == round(4 / 6, 4)
+
+
+@pytest.mark.slow
+def test_tool_compare_strategies_uses_bad_zero_development_only(tmp_path):
+    outputs = []
+    for name, target_bad_value in (("bad-one", 1), ("bad-zero", 0)):
+        case = tmp_path / name
+        runner, registry, task = _runtime(case)
+        bad_one = [1, 0, 1, 0, 0, 0, 1, 1]
+        labels = (
+            bad_one
+            if target_bad_value == 1
+            else [1 - value for value in bad_one]
+        )
+        frame = pd.DataFrame(
+            {
+                "score": [100, 200, 300, 400, 500, 600, 350, 550],
+                "bad": labels,
+                "sample_split": ["dev"] * 6 + ["valid"] * 2,
+            }
+        )
+        dataset = _register(registry, case, frame, "sample", task.id)
+        sample_design_ref = materialize_strategy_tool_sample_design(
+            build_settings(case / "workspace"),
+            task,
+            dataset,
+            target_bad_value=target_bad_value,
+            split_col="sample_split",
+            development_values=["dev"],
+            validation_values=["valid"],
+            field_roles={"score": "score"},
+        )
+        candidate = runner.invoke(
+            ToolRef("strategy", "build_strategy"),
+            {
+                "strategy_type": "approval",
+                "rules": [{"condition": "score < 250", "decision": "reject"}],
+                "score_col": "score",
+                "default_decision": "approve",
+            },
+            task_id=task.id,
+        )
+        baseline = runner.invoke(
+            ToolRef("strategy", "build_strategy"),
+            {
+                "strategy_type": "approval",
+                "rules": [{"condition": "score < 450", "decision": "reject"}],
+                "score_col": "score",
+                "default_decision": "approve",
+            },
+            task_id=task.id,
+        )
+        compared = runner.invoke(
+            ToolRef("strategy", "compare_strategies"),
+            {
+                "dataset_id": dataset.id,
+                "target_col": "bad",
+                "sample_design_ref": sample_design_ref,
+                "strategy_id": candidate.output["strategy_id"],
+                "baseline_strategy_id": baseline.output["strategy_id"],
+            },
+            task_id=task.id,
+        )
+
+        assert compared.ok, compared.error
+        assert compared.output["sample_design_ref"] == sample_design_ref
+        assert sum(
+            cell["count"] for cell in compared.output["matrix_2x2"].values()
+        ) == 6
+        outputs.append(compared.output)
+
+    assert outputs[0]["matrix_2x2"] == outputs[1]["matrix_2x2"]
+    assert outputs[0]["deltas"] == outputs[1]["deltas"]
+    assert outputs[0]["red_flags"] == outputs[1]["red_flags"]
+
+
+@pytest.mark.slow
+def test_tool_compare_strategies_no_baseline_authenticates_sample_ref(tmp_path):
+    runner, registry, task = _runtime(tmp_path)
+    frame = pd.DataFrame({"score": [100, 200], "bad": [1, 0]})
+    dataset = _register(registry, tmp_path, frame, "no_baseline", task.id)
+    sample_design_ref = materialize_strategy_tool_sample_design(
+        build_settings(tmp_path / "workspace"),
+        task,
+        dataset,
+        field_roles={"score": "score"},
+    )
+    candidate = runner.invoke(
+        ToolRef("strategy", "build_strategy"),
+        {
+            "strategy_type": "approval",
+            "rules": [{"condition": "score < 150", "decision": "reject"}],
+            "score_col": "score",
+            "default_decision": "approve",
+        },
+        task_id=task.id,
+    )
+    request = {
+        "dataset_id": dataset.id,
+        "target_col": "bad",
+        "sample_design_ref": sample_design_ref,
+        "strategy_id": candidate.output["strategy_id"],
+    }
+
+    compared = runner.invoke(
+        ToolRef("strategy", "compare_strategies"),
+        request,
+        task_id=task.id,
+    )
+    assert compared.ok, compared.error
+    assert compared.output["status"] == "no_baseline"
+    assert compared.output["sample_design_ref"] == sample_design_ref
+
+    stale_ref = {**sample_design_ref, "artifact_content_hash": "0" * 64}
+    rejected = runner.invoke(
+        ToolRef("strategy", "compare_strategies"),
+        {**request, "sample_design_ref": stale_ref},
+        task_id=task.id,
+    )
+    assert rejected.ok is False
 
 
 # ---------------------------------------------------------------------------

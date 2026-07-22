@@ -35,6 +35,9 @@ from marvis.plugins.runner import ToolRunner
 from marvis.packs.strategy.backtest_compat import approval_backtest_projection
 from marvis.repositories.strategy import StrategyRepository
 from marvis.settings import build_settings
+from tests.strategy_tool_sample_design_support import (
+    materialize_strategy_tool_sample_design,
+)
 
 
 class FakeLLM:
@@ -133,6 +136,12 @@ def _strategy_backtest_approval_rate(strategies: StrategyRepository, strategy_id
 def test_strategy_development_runs_reversible_steps_to_only_adoption_gate(tmp_path):
     driver, registry, plan_repo, settings, task = _strategy_driver(tmp_path)
     dataset = _register_dataset(registry, tmp_path, task.id)
+    sample_design_ref = materialize_strategy_tool_sample_design(
+        settings,
+        task,
+        dataset,
+        field_roles={"score": "score"},
+    )
 
     turn = driver.start(
         task_id=task.id,
@@ -141,6 +150,8 @@ def test_strategy_development_runs_reversible_steps_to_only_adoption_gate(tmp_pa
             "dataset_id": dataset.id,
             "target_col": "bad",
             "score_col": "score",
+            "sample_design_ref": sample_design_ref,
+            "strategy_type": "approval",
             "score_direction": "higher_is_better",
             # A max_bad_rate constraint is required for a max_profit-objective
             # scan with no profit_params (every prefix ties at 0 expected
@@ -231,6 +242,12 @@ def test_strategy_development_double_adopt_confirm_conflicts_gracefully(tmp_path
     double-adopt (the ConflictError guard from Commit 1, exercised end-to-end)."""
     driver, registry, plan_repo, settings, task = _strategy_driver(tmp_path)
     dataset = _register_dataset(registry, tmp_path, task.id)
+    sample_design_ref = materialize_strategy_tool_sample_design(
+        settings,
+        task,
+        dataset,
+        field_roles={"score": "score"},
+    )
     turn = driver.start(
         task_id=task.id,
         template_id="strategy_development",
@@ -238,6 +255,8 @@ def test_strategy_development_double_adopt_confirm_conflicts_gracefully(tmp_path
             "dataset_id": dataset.id,
             "target_col": "bad",
             "score_col": "score",
+            "sample_design_ref": sample_design_ref,
+            "strategy_type": "approval",
             "score_direction": "higher_is_better",
             "max_bad_rate": 0.05,
         },

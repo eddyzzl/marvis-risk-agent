@@ -137,6 +137,32 @@ def scenario(tmp_path: Path) -> _Scenario:
         datasets_root=settings.datasets_dir,
         workspace=settings.workspace,
     )
+    sample_design = strategy_tools.tool_materialize_sample_design(
+        {
+            "dataset_id": dataset.id,
+            "expected_dataset_content_hash": dataset.content_hash,
+            "workspace_revision": workspace.revision,
+            "workspace_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+            "target_col": "bad",
+            "target_bad_value": 1,
+            "performance_window_status": "provided",
+            "performance_window_days": 90,
+            "observation_window_status": "provided",
+            "observation_window_start": "2025-01-01",
+            "observation_window_end": "2025-12-31",
+            "maturity_status": "confirmed_matured",
+            "drop_nan_labels": False,
+        },
+        ctx,
+    )
+    sample_design_ref = {
+        "artifact_id": sample_design["artifact"]["artifact_id"],
+        "artifact_content_hash": sample_design["artifact"]["content_hash"],
+        "sample_design_id": sample_design["sample_design_id"],
+        "sample_design_content_hash": sample_design["content_hash"],
+        "partition": "development",
+    }
     strategy_tools.tool_build_automatic_tree_candidate(
         {
             "dataset_id": dataset.id,
@@ -145,6 +171,7 @@ def scenario(tmp_path: Path) -> _Scenario:
             "analysis_generation": workspace.analysis_generation,
             "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
             "target_col": "bad",
+            "sample_design_ref": sample_design_ref,
             "features": ["score", "income"],
             "drop_nan_labels": False,
             "sample_weight_col": None,

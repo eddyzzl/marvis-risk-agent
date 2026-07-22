@@ -49,6 +49,7 @@ from marvis.packs.strategy.codegen import (
     generate_automatic_tree_python_source,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.sample_design_tools import SAMPLE_DESIGN_ARTIFACT_KIND
 from marvis.plugins.contracts import ToolContext
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
@@ -59,7 +60,19 @@ from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
 
 
-def _runtime(tmp_path: Path):
+_SAMPLE_DESIGN_REFS: dict[str, dict[str, str]] = {}
+
+
+def _runtime(
+    tmp_path: Path,
+    *,
+    target_bad_value: int = 1,
+    with_split: bool = False,
+    include_optional_fields: bool = True,
+    weight_col: str = "weight",
+    loan_amount_col: str = "loan_amount",
+    overdue_amount_col: str = "overdue_amount",
+):
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
     plugin_repo = PluginRepository(settings.db_path)
@@ -101,22 +114,28 @@ def _runtime(tmp_path: Path):
             target_col="bad",
         )
     )
-    frame = pd.DataFrame(
-        {
-            "customer_id": [f"C{index:03d}" for index in range(24)],
-            "phone": [f"1380000{index:04d}" for index in range(24)],
-            "score": [360 + index * 20 for index in range(24)],
-            "income": [3000 + (index % 8) * 800 for index in range(24)],
-            "weight": [1.0 + (index % 3) * 0.25 for index in range(24)],
-            "loan_amount": [1000.0 + index * 50 for index in range(24)],
-            "overdue_amount": [
-                0.0 if index >= 12 else 50.0 + index for index in range(24)
-            ],
-            "ignore_me": [index for index in range(24)],
-            "unused_text": [f"unused-{index}" for index in range(24)],
-            "bad": [1 if index < 12 else 0 for index in range(24)],
-        }
-    )
+    bad_one_labels = [1 if index < 12 else 0 for index in range(24)]
+    frame_data = {
+        "customer_id": [f"C{index:03d}" for index in range(24)],
+        "phone": [f"1380000{index:04d}" for index in range(24)],
+        "score": [360 + index * 20 for index in range(24)],
+        "income": [3000 + (index % 8) * 800 for index in range(24)],
+        weight_col: [1.0 + (index % 3) * 0.25 for index in range(24)],
+        loan_amount_col: [1000.0 + index * 50 for index in range(24)],
+        overdue_amount_col: [
+            0.0 if index >= 12 else 50.0 + index for index in range(24)
+        ],
+        "ignore_me": [index for index in range(24)],
+        "unused_text": [f"unused-{index}" for index in range(24)],
+        "bad": (
+            bad_one_labels
+            if target_bad_value == 1
+            else [1 - value for value in bad_one_labels]
+        ),
+    }
+    if with_split:
+        frame_data["sample_split"] = ["dev"] * 16 + ["validation"] * 4 + ["oot"] * 4
+    frame = pd.DataFrame(frame_data)
     source = tmp_path / "automatic-tree.parquet"
     frame.to_parquet(source, index=False)
     dataset = registry.register_existing(source, task_id=task.id, role="derived")
@@ -136,11 +155,12 @@ def _runtime(tmp_path: Path):
             "phone": "phone",
             "score": "score",
             "income": "numeric",
-            "weight": "weight",
-            "loan_amount": "loan_amount",
-            "overdue_amount": "overdue_amount",
+            weight_col: "weight",
+            loan_amount_col: "loan_amount",
+            overdue_amount_col: "overdue_amount",
             "ignore_me": "ignore",
             "bad": "target",
+            **({"sample_split": "segment"} if with_split else {}),
         },
     )
     workspace = workspace_repo.save(
@@ -152,10 +172,26 @@ def _runtime(tmp_path: Path):
         ),
         expected_revision=activated.revision,
     )
+    sample_design_ref = _materialize_sample_design_ref(
+        settings,
+        task,
+        dataset,
+        workspace,
+        mapping,
+        target_bad_value=target_bad_value,
+        with_split=with_split,
+        include_optional_fields=include_optional_fields,
+        weight_col=weight_col,
+        loan_amount_col=loan_amount_col,
+        overdue_amount_col=overdue_amount_col,
+    )
+    _SAMPLE_DESIGN_REFS[dataset.id] = sample_design_ref
     return settings, runner, registry, task, other_task, dataset, workspace, mapping
 
 
-def _inputs(dataset, workspace, mapping) -> dict:
+def _inputs(dataset, workspace, mapping, sample_design_ref=None) -> dict:
+    if sample_design_ref is None:
+        sample_design_ref = _SAMPLE_DESIGN_REFS[dataset.id]
     return {
         "dataset_id": dataset.id,
         "expected_content_hash": dataset.content_hash,
@@ -163,6 +199,7 @@ def _inputs(dataset, workspace, mapping) -> dict:
         "analysis_generation": workspace.analysis_generation,
         "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
         "target_col": "bad",
+        "sample_design_ref": sample_design_ref,
         "features": ["score", "income"],
         "drop_nan_labels": False,
         "sample_weight_col": "weight",
@@ -180,6 +217,67 @@ def _inputs(dataset, workspace, mapping) -> dict:
             "max_nodes": 31,
             "max_cutpoint_evaluations": 1000,
         },
+    }
+
+
+def _materialize_sample_design_ref(
+    settings,
+    task,
+    dataset,
+    workspace,
+    mapping,
+    *,
+    target_bad_value: int = 1,
+    with_split: bool = False,
+    include_optional_fields: bool = True,
+    drop_nan_labels: bool = False,
+    weight_col: str = "weight",
+    loan_amount_col: str = "loan_amount",
+    overdue_amount_col: str = "overdue_amount",
+) -> dict[str, str]:
+    request = {
+        "dataset_id": dataset.id,
+        "expected_dataset_content_hash": dataset.content_hash,
+        "workspace_revision": workspace.revision,
+        "workspace_generation": workspace.analysis_generation,
+        "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+        "target_col": "bad",
+        "target_bad_value": target_bad_value,
+        "performance_window_status": "provided",
+        "performance_window_days": 30,
+        "observation_window_status": "provided",
+        "observation_window_start": "2026-01-01",
+        "observation_window_end": "2026-01-31",
+        "maturity_status": "confirmed_matured",
+        "drop_nan_labels": drop_nan_labels,
+    }
+    if include_optional_fields:
+        request.update(
+            {
+                "weight_col": weight_col,
+                "loan_amount_col": loan_amount_col,
+                "overdue_amount_col": overdue_amount_col,
+            }
+        )
+    if with_split:
+        request.update(
+            {
+                "split_col": "sample_split",
+                "development_values": ["dev"],
+                "validation_values": ["validation"],
+                "oot_values": ["oot"],
+            }
+        )
+    output = strategy_tools.tool_materialize_sample_design(
+        request,
+        _tool_context(settings, task),
+    )
+    return {
+        "artifact_id": output["artifact"]["artifact_id"],
+        "artifact_content_hash": output["artifact"]["content_hash"],
+        "sample_design_id": output["sample_design_id"],
+        "sample_design_content_hash": output["content_hash"],
+        "partition": "development",
     }
 
 
@@ -228,9 +326,16 @@ def _activate_frame(
 
 def _record_by_kind(settings, task) -> dict[str, dict]:
     return {
-        record["kind"]: record
-        for record in TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+        record["kind"]: record for record in _automatic_tree_records(settings, task)
     }
+
+
+def _automatic_tree_records(settings, task) -> list[dict]:
+    return [
+        record
+        for record in TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+        if record["origin_tool"] == "strategy.build_automatic_tree_candidate"
+    ]
 
 
 def _all_mapping_keys(value: object) -> set[str]:
@@ -267,10 +372,11 @@ def test_automatic_tree_tool_happy_path_is_six_artifact_idempotent(
         "equivalence",
         "artifacts",
     }
-    assert first["schema_version"] == "strategy.automatic-tree-candidate-tool.v1"
+    assert first["schema_version"] == "strategy.automatic-tree-candidate-tool.v2"
     assert first["summary"]["candidate_stage"] == "development"
     assert first["summary"]["observation_stage"] == "backtested"
     assert first["summary"]["validation_status"] == "unvalidated"
+    assert first["summary"]["sample_design_ref"] == _SAMPLE_DESIGN_REFS[dataset.id]
     assert first["equivalence"]["matched"] is True
     assert first["equivalence"]["sample_count"] == 24
     assert (
@@ -299,7 +405,7 @@ def test_automatic_tree_tool_happy_path_is_six_artifact_idempotent(
         }
         for artifact in first["artifacts"]
     )
-    records = TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+    records = _automatic_tree_records(settings, task)
     assert len(records) == 6
     assert {record["id"] for record in records} == {
         artifact["artifact_id"] for artifact in first["artifacts"]
@@ -356,6 +462,14 @@ def test_automatic_tree_tool_happy_path_is_six_artifact_idempotent(
         AUTOMATIC_TREE_ASSET_ARTIFACT_SCHEMA_VERSION
     )
     assert json_record["provenance"]["asset_hash"] == asset["asset_hash"]
+    assert (
+        json_record["provenance"]["sample_design_ref"]
+        == _SAMPLE_DESIGN_REFS[dataset.id]
+    )
+    assert (
+        auto_tools.strategy_sample_design_ref_from_source_refs(asset["source_refs"])
+        == _SAMPLE_DESIGN_REFS[dataset.id]
+    )
     selected_leaf = build_automatic_tree_leaf_fragment(
         asset,
         tree_artifact_binding={
@@ -454,11 +568,53 @@ def test_automatic_tree_tool_happy_path_is_six_artifact_idempotent(
     assert not (_all_mapping_keys(first) & forbidden)
 
 
+def test_automatic_tree_inherits_custom_optional_columns_from_sample_design(
+    tmp_path: Path,
+) -> None:
+    optional = {
+        "sample_weight_col": "development_exposure_weight",
+        "loan_amount_col": "booked_principal_balance",
+        "overdue_amount_col": "observed_delinquent_balance",
+    }
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path,
+        weight_col=optional["sample_weight_col"],
+        loan_amount_col=optional["loan_amount_col"],
+        overdue_amount_col=optional["overdue_amount_col"],
+    )
+    inputs = _inputs(dataset, workspace, mapping)
+    for field in optional:
+        inputs.pop(field)
+
+    with pytest.raises(StrategyError, match="weight_col"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            {**inputs, "sample_weight_col": "score"},
+            _tool_context(settings, task),
+        )
+
+    output = strategy_tools.tool_build_automatic_tree_candidate(
+        inputs,
+        _tool_context(settings, task),
+    )
+
+    assert output["report_info_gaps"] == []
+    record = _record_by_kind(settings, task)[AUTOMATIC_TREE_ASSET_ARTIFACT_KIND]
+    asset = json.loads(Path(record["path"]).read_text(encoding="utf-8"))
+    training = asset["tree_result"]["training"]
+    assert training["sample_weight"] == {
+        "status": "available",
+        "column": optional["sample_weight_col"],
+    }
+    assert training["loan_amount_col"] == optional["loan_amount_col"]
+    assert training["overdue_amount_col"] == optional["overdue_amount_col"]
+
+
 def test_automatic_tree_tool_reports_only_nonblocking_optional_context_gaps(
     tmp_path: Path,
 ) -> None:
     _settings, runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
-        tmp_path
+        tmp_path,
+        include_optional_fields=False,
     )
     inputs = {
         **_inputs(dataset, workspace, mapping),
@@ -553,6 +709,74 @@ def test_manifest_runner_accepts_the_exact_automatic_tree_contract(
     assert len(result.output["artifacts"]) == 6
 
 
+def test_automatic_tree_tool_requires_exact_sample_design_ref(tmp_path: Path) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    inputs = _inputs(dataset, workspace, mapping)
+    del inputs["sample_design_ref"]
+
+    with pytest.raises(StrategyError, match="sample_design_ref"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            inputs,
+            _tool_context(settings, task),
+        )
+    assert _automatic_tree_records(settings, task) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("artifact_id", "0" * 64),
+        ("artifact_content_hash", "0" * 64),
+        ("sample_design_id", "strategy-sample-design-forged"),
+        ("sample_design_content_hash", "0" * 64),
+        ("partition", "validation"),
+    ],
+)
+def test_automatic_tree_tool_rejects_sample_design_reference_tamper(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    reference = _SAMPLE_DESIGN_REFS[dataset.id]
+
+    with pytest.raises(StrategyError, match="sample.design|artifact"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            {
+                **_inputs(dataset, workspace, mapping),
+                "sample_design_ref": {**reference, field: replacement},
+            },
+            _tool_context(settings, task),
+        )
+    assert _automatic_tree_records(settings, task) == []
+
+
+def test_automatic_tree_tool_rejects_sample_design_artifact_drift(
+    tmp_path: Path,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path
+    )
+    record = next(
+        item
+        for item in TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+        if item["kind"] == SAMPLE_DESIGN_ARTIFACT_KIND
+    )
+    path = Path(record["path"])
+    path.write_bytes(path.read_bytes() + b"drift")
+
+    with pytest.raises(StrategyError, match="content hash|binding changed"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            _inputs(dataset, workspace, mapping),
+            _tool_context(settings, task),
+        )
+    assert _automatic_tree_records(settings, task) == []
+
+
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
@@ -577,7 +801,7 @@ def test_automatic_tree_tool_rejects_stale_confirmed_binding(
             inputs,
             _tool_context(settings, task),
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
 
 
 def test_automatic_tree_tool_rejects_foreign_and_nonactive_datasets(
@@ -612,7 +836,7 @@ def test_automatic_tree_tool_rejects_foreign_and_nonactive_datasets(
             inputs,
             _tool_context(settings, task),
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
 
 
 def test_automatic_tree_tool_rejects_physical_content_drift(
@@ -628,7 +852,7 @@ def test_automatic_tree_tool_rejects_physical_content_drift(
             _inputs(dataset, workspace, mapping),
             _tool_context(settings, task),
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
 
 
 def test_automatic_tree_tool_enforces_nan_label_confirmation(
@@ -648,14 +872,24 @@ def test_automatic_tree_tool_enforces_nan_label_confirmation(
         frame=frame,
         mapping=mapping,
     )
-    inputs = _inputs(nan_dataset, nan_workspace, mapping)
-
     with pytest.raises(NanLabelNotConfirmedError):
-        strategy_tools.tool_build_automatic_tree_candidate(
-            inputs,
-            _tool_context(settings, task),
+        _materialize_sample_design_ref(
+            settings,
+            task,
+            nan_dataset,
+            nan_workspace,
+            mapping,
+            drop_nan_labels=False,
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    sample_design_ref = _materialize_sample_design_ref(
+        settings,
+        task,
+        nan_dataset,
+        nan_workspace,
+        mapping,
+        drop_nan_labels=True,
+    )
+    inputs = _inputs(nan_dataset, nan_workspace, mapping, sample_design_ref)
 
     output = strategy_tools.tool_build_automatic_tree_candidate(
         {**inputs, "drop_nan_labels": True},
@@ -683,7 +917,7 @@ def test_automatic_tree_tool_rejects_sensitive_or_ignored_features(
             },
             _tool_context(settings, task),
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
 
 
 def test_registry_sensitive_role_cannot_be_downgraded_by_workspace(
@@ -723,11 +957,18 @@ def test_registry_sensitive_role_cannot_be_downgraded_by_workspace(
         ),
         expected_revision=workspace.revision,
     )
+    sample_design_ref = _materialize_sample_design_ref(
+        settings,
+        task,
+        dataset,
+        changed,
+        downgraded,
+    )
 
     with pytest.raises(StrategyError, match="personal-data"):
         strategy_tools.tool_build_automatic_tree_candidate(
             {
-                **_inputs(dataset, changed, downgraded),
+                **_inputs(dataset, changed, downgraded, sample_design_ref),
                 "features": ["customer_id"],
                 "directions": {"customer_id": "unordered"},
             },
@@ -743,7 +984,9 @@ def test_automatic_tree_tool_requires_workspace_target_match(
     )
     inputs = {**_inputs(dataset, workspace, mapping), "target_col": "score"}
 
-    with pytest.raises(StrategyError, match="semantic target"):
+    with pytest.raises(
+        StrategyError, match="sample-design.*target_col|semantic target"
+    ):
         strategy_tools.tool_build_automatic_tree_candidate(
             inputs,
             _tool_context(settings, task),
@@ -767,7 +1010,7 @@ def test_automatic_tree_tool_rejects_caller_supplied_results_and_actions(
             {**_inputs(dataset, workspace, mapping), injected: {}},
             _tool_context(settings, task),
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
 
 
 def test_duckdb_preflight_is_immediately_before_same_frame_registration(
@@ -866,7 +1109,7 @@ def test_generated_python_mismatch_fails_before_any_write(
             _inputs(dataset, workspace, mapping),
             _tool_context(settings, task),
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
     output_dir = settings.tasks_dir / task.id / "strategy_automatic_trees"
     assert not output_dir.exists() or not any(output_dir.rglob("*"))
 
@@ -896,7 +1139,7 @@ def test_generated_sql_mismatch_fails_before_any_write(
             _inputs(dataset, workspace, mapping),
             _tool_context(settings, task),
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
 
 
 def test_render_failure_occurs_before_staging_or_registration(
@@ -917,7 +1160,7 @@ def test_render_failure_occurs_before_staging_or_registration(
             _inputs(dataset, workspace, mapping),
             _tool_context(settings, task),
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
     output_dir = settings.tasks_dir / task.id / "strategy_automatic_trees"
     assert not output_dir.exists()
 
@@ -942,7 +1185,7 @@ def test_automatic_tree_artifact_directory_rejects_symlink_escape(
             _inputs(dataset, workspace, mapping),
             _tool_context(settings, task),
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
     assert list(outside.iterdir()) == []
 
 
@@ -971,7 +1214,7 @@ def test_source_drift_after_compute_is_rejected_before_write(
             _inputs(dataset, workspace, mapping),
             _tool_context(settings, task),
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
 
 
 def test_workspace_change_after_compute_is_preserved_and_blocks_write(
@@ -1017,7 +1260,7 @@ def test_workspace_change_after_compute_is_preserved_and_blocks_write(
         )
     assert changed is not None
     assert repository.get_or_default(task.id).revision == changed.revision
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
 
 
 @pytest.mark.parametrize("failed_registration", [2, 3, 4, 5, 6])
@@ -1050,7 +1293,7 @@ def test_any_late_registration_failure_rolls_back_all_six_artifacts(
             _inputs(dataset, workspace, mapping),
             _tool_context(settings, task),
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
     output_dir = settings.tasks_dir / task.id / "strategy_automatic_trees"
     assert not output_dir.exists() or not any(output_dir.rglob("*"))
 
@@ -1100,7 +1343,7 @@ def test_concurrent_identical_writers_leave_exactly_six_intact_artifacts(
     assert all(not writer.is_alive() for writer in writers)
     assert failures == {}
     assert outputs["a"] == outputs["b"]
-    records = TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+    records = _automatic_tree_records(settings, task)
     assert len(records) == 6
     assert len({record["path"] for record in records}) == 6
     for record in records:
@@ -1180,7 +1423,7 @@ def test_failed_writer_rolls_back_before_identical_peer_can_promote(
     assert not failing.is_alive()
     assert isinstance(failures.get("failing"), RuntimeError)
     assert outputs["peer"]["summary"]["validation_status"] == "unvalidated"
-    records = TaskArtifactRepository(settings.db_path).list_for_task(task.id)
+    records = _automatic_tree_records(settings, task)
     assert len(records) == 6
     for record in records:
         path = Path(record["path"])
@@ -1244,7 +1487,7 @@ def test_writer_lock_precedes_promotion_for_identical_final_paths(
     assert isinstance(failures.get("late"), StrategyError)
     assert "peer" not in failures
     assert outputs["peer"]["summary"]["validation_status"] == "unvalidated"
-    assert len(TaskArtifactRepository(settings.db_path).list_for_task(task.id)) == 6
+    assert len(_automatic_tree_records(settings, task)) == 6
 
 
 def test_sample_context_hash_matches_actual_univariate_candidate_same_sample(
@@ -1266,6 +1509,7 @@ def test_sample_context_hash_matches_actual_univariate_candidate_same_sample(
             "analysis_generation": workspace.analysis_generation,
             "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
             "target_col": "bad",
+            "sample_design_ref": _SAMPLE_DESIGN_REFS[dataset.id],
             "drop_nan_labels": False,
             "features": ["score"],
             "methods": ["equal_width"],
@@ -1281,6 +1525,106 @@ def test_sample_context_hash_matches_actual_univariate_candidate_same_sample(
     assert automatic["summary"]["sample_context_hash"] == (
         sample_context_hash_from_candidate_evidence(univariate["candidate_evidence"])
     )
+
+
+def test_automatic_tree_normalizes_bad_zero_to_same_measured_tree(
+    tmp_path: Path,
+) -> None:
+    first = _runtime(tmp_path / "bad-one", target_bad_value=1)
+    second = _runtime(tmp_path / "bad-zero", target_bad_value=0)
+    (
+        settings_one,
+        _runner,
+        _registry,
+        task_one,
+        _other,
+        dataset_one,
+        workspace_one,
+        mapping_one,
+    ) = first
+    (
+        settings_zero,
+        _runner,
+        _registry,
+        task_zero,
+        _other,
+        dataset_zero,
+        workspace_zero,
+        mapping_zero,
+    ) = second
+
+    output_one = strategy_tools.tool_build_automatic_tree_candidate(
+        _inputs(dataset_one, workspace_one, mapping_one),
+        _tool_context(settings_one, task_one),
+    )
+    output_zero = strategy_tools.tool_build_automatic_tree_candidate(
+        _inputs(dataset_zero, workspace_zero, mapping_zero),
+        _tool_context(settings_zero, task_zero),
+    )
+
+    measured_one = [
+        (item["condition"], item["measurements"], item["metric_basis"])
+        for item in output_one["leaf_index"]
+    ]
+    measured_zero = [
+        (item["condition"], item["measurements"], item["metric_basis"])
+        for item in output_zero["leaf_index"]
+    ]
+    assert measured_zero == measured_one
+    assert output_zero["summary"]["training_row_count"] == 24
+
+
+def test_automatic_tree_uses_only_sample_design_development_partition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path,
+        with_split=True,
+    )
+    original = DataBackend.read_frame
+    projections: list[list[str] | None] = []
+
+    def tracked_read(self, path, *, columns=None, nrows=None):
+        projections.append(None if columns is None else list(columns))
+        return original(self, path, columns=columns, nrows=nrows)
+
+    monkeypatch.setattr(DataBackend, "read_frame", tracked_read)
+    output = strategy_tools.tool_build_automatic_tree_candidate(
+        _inputs(dataset, workspace, mapping),
+        _tool_context(settings, task),
+    )
+
+    assert projections == [
+        [
+            "income",
+            "score",
+            "weight",
+            "loan_amount",
+            "overdue_amount",
+            "bad",
+            "sample_split",
+        ]
+    ]
+    assert output["summary"]["training_row_count"] == 16
+    assert output["equivalence"]["source_row_count"] == 16
+
+
+def test_automatic_tree_rejects_split_column_as_feature(tmp_path: Path) -> None:
+    settings, _runner, _registry, task, _other, dataset, workspace, mapping = _runtime(
+        tmp_path,
+        with_split=True,
+    )
+
+    with pytest.raises(StrategyError, match="split column"):
+        strategy_tools.tool_build_automatic_tree_candidate(
+            {
+                **_inputs(dataset, workspace, mapping),
+                "features": ["sample_split"],
+                "directions": {"sample_split": "unordered"},
+            },
+            _tool_context(settings, task),
+        )
 
 
 def test_sample_context_hash_excludes_tree_generation_choices(
@@ -1383,6 +1727,14 @@ def test_full_duckdb_domain_validation_catches_value_omitted_by_sample(
         frame=frame,
         mapping=mapping,
     )
+    sample_design_ref = _materialize_sample_design_ref(
+        settings,
+        task,
+        dataset,
+        active,
+        mapping,
+        include_optional_fields=False,
+    )
 
     def bounded_sampling_must_not_start(*_args, **_kwargs):
         pytest.fail("bounded equivalence sampling must follow full-frame validation")
@@ -1399,6 +1751,7 @@ def test_full_duckdb_domain_validation_catches_value_omitted_by_sample(
         "analysis_generation": active.analysis_generation,
         "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
         "target_col": "bad",
+        "sample_design_ref": sample_design_ref,
         "features": ["score"],
         "directions": {"score": "unordered"},
         "max_depth": 2,
@@ -1417,7 +1770,7 @@ def test_full_duckdb_domain_validation_catches_value_omitted_by_sample(
             inputs,
             _tool_context(settings, task),
         )
-    assert TaskArtifactRepository(settings.db_path).list_for_task(task.id) == []
+    assert _automatic_tree_records(settings, task) == []
     output_dir = settings.tasks_dir / task.id / "strategy_automatic_trees"
     assert not output_dir.exists()
 
@@ -1448,6 +1801,14 @@ def test_valid_large_frame_keeps_equivalence_bounded(
         frame=frame,
         mapping=mapping,
     )
+    sample_design_ref = _materialize_sample_design_ref(
+        settings,
+        task,
+        dataset,
+        active,
+        mapping,
+        include_optional_fields=False,
+    )
 
     output = strategy_tools.tool_build_automatic_tree_candidate(
         {
@@ -1457,6 +1818,7 @@ def test_valid_large_frame_keeps_equivalence_bounded(
             "analysis_generation": active.analysis_generation,
             "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
             "target_col": "bad",
+            "sample_design_ref": sample_design_ref,
             "features": ["score"],
             "directions": {"score": "unordered"},
             "max_depth": 2,

@@ -19,6 +19,7 @@ def test_candidate_refinement_is_one_governed_two_step_builtin_workflow():
         "expected_content_hash",
         "semantic_mapping_hash",
         "target_col",
+        "sample_design_ref",
         "bin_count",
         "min_bin_pct",
         "feature",

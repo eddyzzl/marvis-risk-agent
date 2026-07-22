@@ -94,6 +94,16 @@ def _breakdown(result: StrategyBacktestResult, key: str, value: object) -> dict:
     return next(row for row in result.breakdown if row[key] == value)
 
 
+def _sample_design_ref() -> dict[str, str]:
+    return {
+        "artifact_id": "a" * 64,
+        "artifact_content_hash": "b" * 64,
+        "sample_design_id": "strategy-sample-design-" + "c" * 24,
+        "sample_design_content_hash": "d" * 64,
+        "partition": "development",
+    }
+
+
 def test_approval_backtest_keeps_population_and_labeled_denominators_separate() -> None:
     frame = pd.DataFrame(
         {
@@ -161,6 +171,52 @@ def test_reject_backtest_adds_capture_metrics_without_counting_nan_as_good() -> 
     assert result.metrics["good_reject_rate"] == 0.5
     assert result.metrics["reject_bad_count"] == 2
     assert result.metrics["reject_labeled_count"] == 3
+
+
+def test_backtest_normalizes_explicit_reverse_bad_label_without_changing_metrics() -> None:
+    bad_one = pd.DataFrame(
+        {
+            "score": [800, 650, 500, 750, 400, 600],
+            "target": [0, 1, 1, None, math.nan, 0],
+        }
+    )
+    bad_zero = bad_one.copy()
+    bad_zero["target"] = bad_zero["target"].map(
+        lambda value: value if pd.isna(value) else 1 - value
+    )
+
+    first = run_typed_backtest(
+        bad_one,
+        _decision_spec("reject"),
+        target_col="target",
+        target_bad_value=1,
+    )
+    second = run_typed_backtest(
+        bad_zero,
+        _decision_spec("reject"),
+        target_col="target",
+        target_bad_value=0,
+        sample_design_ref=_sample_design_ref(),
+    )
+
+    assert second.metrics == first.metrics
+    assert second.breakdown == first.breakdown
+    assert second.normalized_input["target_encoding"] == {"good": 1, "bad": 0}
+    assert second.normalized_input["sample_design_ref"] == _sample_design_ref()
+
+    restored = StrategyBacktestResult.from_dict(second.to_dict())
+    assert restored.to_dict() == second.to_dict()
+
+
+@pytest.mark.parametrize("bad_value", [True, False, -1, 2, 1.0, 1.5, "1"])
+def test_backtest_rejects_non_integer_binary_bad_label(bad_value) -> None:
+    with pytest.raises(StrategyError, match="target_bad_value"):
+        run_typed_backtest(
+            pd.DataFrame({"score": [800, 600], "target": [0, 1]}),
+            _decision_spec(),
+            target_col="target",
+            target_bad_value=bad_value,
+        )
 
 
 def test_approval_profit_uses_the_already_evaluated_approved_population() -> None:

@@ -33,6 +33,13 @@ from marvis.packs.strategy.candidate_asset import (
 )
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.sample_design_binding import (
+    StrategySampleDesignExecutionBinding,
+    bind_strategy_development_frame,
+    load_strategy_sample_design_execution_binding,
+    require_strategy_sample_design_execution_binding_on_connection,
+    revalidate_strategy_sample_design_execution_binding,
+)
 
 
 TOOL_SCHEMA_VERSION = "strategy.refine-univariate-candidate-tool.v1"
@@ -151,8 +158,30 @@ def run_refine_univariate_candidate(inputs, ctx, runtime) -> dict[str, Any]:
             method=method,
         )
     )
+    identity = evidence["identity"]
+    generation_parameters = evidence["generation"]["parameters"]
+    sample_binding = load_strategy_sample_design_execution_binding(
+        runtime,
+        task_id=task_id,
+        sample_design_ref=generation_parameters.get("sample_design_ref"),
+        dataset_id=dataset.dataset_id,
+        dataset_content_hash=dataset.content_hash,
+        workspace_revision=identity["workspace_revision"],
+        workspace_generation=identity["workspace_generation"],
+        semantic_mapping_hash=identity["semantic_mapping_hash"],
+        target_col=target_col,
+        drop_nan_labels=drop_nan_labels,
+        loan_amount_col=generation_parameters.get("loan_amount_col"),
+        overdue_amount_col=generation_parameters.get("overdue_amount_col"),
+    )
+    if (
+        sample_binding.split_column is not None
+        and sample_binding.split_column not in projected_columns
+    ):
+        projected_columns.append(sample_binding.split_column)
     frame = runtime.backend.read_frame(dataset.path, columns=projected_columns)
     _require_dataset_unchanged(runtime, dataset)
+    frame = bind_strategy_development_frame(frame, binding=sample_binding)
     frame, dropped = resolve_labeled_frame(
         frame,
         target_col,
@@ -173,6 +202,7 @@ def run_refine_univariate_candidate(inputs, ctx, runtime) -> dict[str, Any]:
     # checks run after calculation and once more under the SQLite writer lock.
     _require_source_unchanged(runtime, source)
     _require_dataset_unchanged(runtime, dataset)
+    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
     asset = refine_univariate_candidate(
         evidence,
         frame,
@@ -197,6 +227,7 @@ def run_refine_univariate_candidate(inputs, ctx, runtime) -> dict[str, Any]:
     )
     _require_source_unchanged(runtime, source)
     _require_dataset_unchanged(runtime, dataset)
+    revalidate_strategy_sample_design_execution_binding(runtime, sample_binding)
 
     canonical_asset = canonical_candidate_asset_json(normalized_asset)
     if not isinstance(canonical_asset, str):
@@ -214,6 +245,7 @@ def run_refine_univariate_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         task_id=task_id,
         source=source,
         dataset=dataset,
+        sample_design_binding=sample_binding,
         asset=normalized_asset,
         content=content,
     )
@@ -613,9 +645,14 @@ def _write_candidate_asset(
     task_id: str,
     source: _SourceArtifactBinding,
     dataset: _DatasetBinding,
+    sample_design_binding: StrategySampleDesignExecutionBinding,
     asset: Mapping[str, Any],
     content: bytes,
 ) -> dict[str, Any]:
+    revalidate_strategy_sample_design_execution_binding(
+        runtime,
+        sample_design_binding,
+    )
     asset_id = _required_text(asset["asset_id"], "candidate asset_id")
     if _SAFE_ASSET_ID_RE.fullmatch(asset_id) is None:
         raise StrategyError("candidate asset_id is not safe for persistence")
@@ -652,6 +689,10 @@ def _write_candidate_asset(
             try:
                 _require_source_on_connection(conn, source)
                 _require_dataset_on_connection(conn, dataset)
+                require_strategy_sample_design_execution_binding_on_connection(
+                    conn,
+                    sample_design_binding,
+                )
                 _require_regular_artifact_path(
                     source.path, root=Path(runtime.settings.tasks_dir)
                 )

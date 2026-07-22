@@ -20,6 +20,9 @@ from marvis.app import create_app
 from marvis.db import StrategyRepository
 from marvis.repositories.strategy_pool import StrategyCandidatePoolRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 class _PayloadLLM:
@@ -62,6 +65,11 @@ def built_automatic_tree(
     )
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
+    sample_design_ref = materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
     llm = _PayloadLLM(
         {
             "request_kind": "standard_workflow",
@@ -82,8 +90,9 @@ def built_automatic_tree(
         json={"content": ("用 score 和 income 建树，max_depth 2，min_leaf_count 2。")},
     )
     assert built.status_code == 202, built.text
-    plan = client.app.state.plan_repo.list_plans_for_task(task_id)[0]
+    plan = client.app.state.plan_repo.list_plans_for_task(task_id)[-1]
     assert plan.template_id == "strategy_automatic_tree_candidate_build"
+    assert plan.steps[0].inputs["sample_design_ref"] == sample_design_ref
     output = client.app.state.plan_repo.load_step_output(plan.steps[0].id)
     return {
         "client": client,
@@ -139,6 +148,7 @@ def test_natural_language_exact_leaf_materialization_is_pointer_only(
     assert materialized.status_code == 202, materialized.text
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design",
         "strategy_automatic_tree_candidate_build",
         "strategy_automatic_tree_leaf_materialization",
     ]
@@ -289,6 +299,7 @@ def test_natural_language_tree_leaf_selection_enters_pool_on_third_turn(
     assert added.status_code == 202, added.text
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design",
         "strategy_automatic_tree_candidate_build",
         "strategy_automatic_tree_leaf_materialization",
         "strategy_pool_add_candidate",

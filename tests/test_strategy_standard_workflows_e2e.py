@@ -10,6 +10,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from marvis.app import create_app
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 class _WorkflowLLM:
@@ -49,6 +52,7 @@ def _task(client: TestClient, tmp_path: Path) -> str:
             "score": [780, 760, 720, 700, 660, 620],
             "ead": [1000, 900, 2000, 1900, 800, 700],
             "pd": [0.02, 0.04, 0.08, 0.10, 0.16, 0.22],
+            "bad": [0, 0, 0, 1, 1, 1],
         }
     ).to_csv(source / "sample.csv", index=False)
     response = client.post(
@@ -59,6 +63,7 @@ def _task(client: TestClient, tmp_path: Path) -> str:
             "source_dir": str(source),
             "task_type": "strategy",
             "run_mode": "manual",
+            "target_col": "bad",
             "score_col": "score",
         },
     )
@@ -142,6 +147,13 @@ def test_natural_language_standard_workflow_executes_and_exports(
 ) -> None:
     client = TestClient(create_app(tmp_path / template_id))
     task_id = _task(client, tmp_path / template_id)
+    sample_design_ref = None
+    if template_id == "strategy_limit_pricing_analysis":
+        sample_design_ref = materialize_mature_strategy_sample_design(
+            client,
+            task_id,
+            monkeypatch,
+        )
     llm = _WorkflowLLM(payload)
     _install_llm(monkeypatch, llm)
 
@@ -150,13 +162,19 @@ def test_natural_language_standard_workflow_executes_and_exports(
         json={"content": utterance},
     )
     assert opened.status_code == 202, opened.text
-    plan = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][0]
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plan = next(item for item in plans if item["template_id"] == template_id)
     assert plan["template_id"] == template_id
     assert plan["status"] == "done"
     assert all(step["status"] == "done" for step in plan["steps"])
 
     stored_plan = client.app.state.plan_repo.load_plan(plan["id"])
     assert stored_plan.status.value == "done"
+    if sample_design_ref is not None:
+        assert all(
+            step.inputs["sample_design_ref"] == sample_design_ref
+            for step in stored_plan.steps
+        )
     output = client.app.state.plan_repo.load_step_output(stored_plan.steps[-1].id)
     artifacts = output["artifacts"]
     assert {artifact["kind"] for artifact in artifacts} == artifact_kinds
@@ -165,10 +183,12 @@ def test_natural_language_standard_workflow_executes_and_exports(
     listed = client.get(f"/api/tasks/{task_id}/task-artifacts")
     assert listed.status_code == 200, listed.text
     registered = listed.json()["artifacts"]
-    assert {artifact["kind"] for artifact in registered} == artifact_kinds
-    assert {artifact["id"] for artifact in registered} == {
-        artifact["artifact_id"] for artifact in artifacts
-    }
+    output_ids = {artifact["artifact_id"] for artifact in artifacts}
+    registered_outputs = [
+        artifact for artifact in registered if artifact["id"] in output_ids
+    ]
+    assert {artifact["kind"] for artifact in registered_outputs} == artifact_kinds
+    assert {artifact["id"] for artifact in registered_outputs} == output_ids
     assert str(client.app.state.settings.tasks_dir) not in listed.text
     for artifact in registered:
         downloaded = client.get(artifact["download_url"])

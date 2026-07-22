@@ -322,7 +322,7 @@ def test_sample_design_compiler_grounds_every_explicit_control() -> None:
     assert result.draft is not None
     assert result.draft.to_dict() == reply
     assert len(llm.calls) == 1
-    assert llm.calls[0]["prompt_version"] == 25
+    assert llm.calls[0]["prompt_version"] == 26
     assert "strategy_sample_design" in llm.calls[0]["system_prompt"]
     assert "平台字段" in llm.calls[0]["system_prompt"]
 

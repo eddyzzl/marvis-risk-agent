@@ -29,6 +29,16 @@ HASH_B = "b" * 64
 HASH_C = "c" * 64
 
 
+def _sample_design_ref() -> dict[str, str]:
+    return {
+        "artifact_id": "d" * 64,
+        "artifact_content_hash": "e" * 64,
+        "sample_design_id": "strategy-sample-design-test",
+        "sample_design_content_hash": "f" * 64,
+        "partition": "development",
+    }
+
+
 def _frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
@@ -63,6 +73,7 @@ def _evidence() -> dict:
             "methods": ["equal_width"],
             "loan_amount_col": None,
             "overdue_amount_col": None,
+            "sample_design_ref": _sample_design_ref(),
         },
         seed=0,
         budget=100_000,
@@ -151,6 +162,61 @@ def test_univariate_adapter_preserves_asset_bytes_and_projects_strict_fragment()
         sample_context_hash_from_candidate_evidence(evidence)
     )
     assert validate_verified_candidate_fragment(fragment) == fragment
+
+
+def test_sample_context_requires_and_hashes_exact_sample_design_ref() -> None:
+    evidence = _evidence()
+    original_hash = sample_context_hash_from_candidate_evidence(evidence)
+
+    changed = deepcopy(evidence)
+    changed["generation"]["parameters"]["sample_design_ref"] = {
+        **_sample_design_ref(),
+        "sample_design_content_hash": "0" * 64,
+    }
+    changed.pop("candidate_id")
+    changed.pop("evidence_hash")
+    changed = build_candidate_evidence(
+        task_id=changed["identity"]["task_id"],
+        dataset_id=changed["identity"]["dataset_id"],
+        dataset_content_hash=changed["identity"]["dataset_content_hash"],
+        workspace_revision=changed["identity"]["workspace_revision"],
+        workspace_generation=changed["identity"]["workspace_generation"],
+        semantic_mapping_hash=changed["identity"]["semantic_mapping_hash"],
+        generation_parameters=changed["generation"]["parameters"],
+        seed=changed["generation"]["seed"],
+        budget=changed["generation"]["budget"],
+        truncated=changed["generation"]["truncated"],
+        analysis=changed["analysis"],
+        metrics=changed["metrics"],
+        source_refs=changed["source_refs"],
+        red_flags=changed["red_flags"],
+        producer_version=changed["producer_version"],
+    )
+    assert sample_context_hash_from_candidate_evidence(changed) != original_hash
+
+    missing = _evidence()
+    del missing["generation"]["parameters"]["sample_design_ref"]
+    missing.pop("candidate_id")
+    missing.pop("evidence_hash")
+    missing = build_candidate_evidence(
+        task_id=missing["identity"]["task_id"],
+        dataset_id=missing["identity"]["dataset_id"],
+        dataset_content_hash=missing["identity"]["dataset_content_hash"],
+        workspace_revision=missing["identity"]["workspace_revision"],
+        workspace_generation=missing["identity"]["workspace_generation"],
+        semantic_mapping_hash=missing["identity"]["semantic_mapping_hash"],
+        generation_parameters=missing["generation"]["parameters"],
+        seed=missing["generation"]["seed"],
+        budget=missing["generation"]["budget"],
+        truncated=missing["generation"]["truncated"],
+        analysis=missing["analysis"],
+        metrics=missing["metrics"],
+        source_refs=missing["source_refs"],
+        red_flags=missing["red_flags"],
+        producer_version=missing["producer_version"],
+    )
+    with pytest.raises(CandidateFragmentError, match="sample_design_ref"):
+        sample_context_hash_from_candidate_evidence(missing)
 
 
 def test_fragment_hash_and_nested_tampering_fail_closed() -> None:
