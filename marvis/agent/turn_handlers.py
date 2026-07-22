@@ -1363,6 +1363,7 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
         "strategy_pool_compile",
     }
 )
+_STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
     r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
     r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
@@ -1402,10 +1403,20 @@ _STRATEGY_POOL_COMPILE_REQUEST_RE = re.compile(
     r"(?=.*(?:编译|预览|compile|preview))",
     re.IGNORECASE,
 )
+_STRATEGY_POOL_IMPACT_REQUEST_RE = re.compile(
+    r"(?=.*(?:策略池|规则池|strategy(?:\s|-|_)*pool|\bpool\b))"
+    r"(?=.*(?:影响|效果|瀑布|逐月|通过率|坏账率|风险率|测算|评估|计算|回测|"
+    r"impact|effect|waterfall|monthly|approval\s+rate|bad\s+rate|risk\s+rate|"
+    r"measure|assess|evaluat|calculate|backtest))",
+    re.IGNORECASE,
+)
 _STRATEGY_NAN_LABEL_META_KEY = "strategy_nan_label_confirmation"
 _STRATEGY_DROP_NAN_CONFIRM_RE = re.compile(
     r"(?:确认|同意|允许|可以).{0,12}(?:丢弃|排除|剔除|删除).{0,12}"
     r"(?:NaN|nan|空标签|缺失标签|无效标签)|"
+    r"(?:确认|同意|允许|可以).{0,12}"
+    r"(?:NaN|nan|空标签|缺失标签|无效标签).{0,24}"
+    r"(?:风险|坏账).{0,8}分母.{0,8}(?:排除|剔除)|"
     r"(?:confirm|allow).{0,12}(?:drop|exclude).{0,12}(?:nan|missing)\s+labels?",
     re.IGNORECASE,
 )
@@ -1617,7 +1628,11 @@ def _maybe_handle_strategy_request_turn(
     preview = None
     preview_error = None
     try:
-        preview = _strategy_dataset_preview(runtime, task)
+        preview = (
+            _strategy_pool_impact_dataset_preview(runtime, task)
+            if _STRATEGY_POOL_IMPACT_REQUEST_RE.search(text)
+            else _strategy_dataset_preview(runtime, task)
+        )
     except StrategySetupError as exc:
         preview_error = str(exc)
 
@@ -1683,17 +1698,34 @@ def _prepare_and_run_validated_strategy_request(
     preview,
     auto_start: bool,
     drop_nan_labels: bool = False,
+    expected_pool_binding: Mapping | None = None,
 ) -> dict:
     """Bind current evidence, resolve the NaN policy, then instantiate once."""
 
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
+        and draft.workflow_inputs.get("drop_nan_labels") is True
+    ):
+        # This boolean has already passed exact utterance grounding in the
+        # compiler; it is the user's explicit authorization, not an LLM default.
+        drop_nan_labels = True
     requires_dataset = _strategy_request_requires_dataset(draft)
+    is_pool_impact = (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
+    )
     context = None
     if requires_dataset:
         try:
-            context = _strategy_dataset_context(
-                runtime,
-                task,
-                require_target=_strategy_request_requires_target(draft),
+            context = (
+                _strategy_pool_impact_dataset_context(runtime, task)
+                if is_pool_impact
+                else _strategy_dataset_context(
+                    runtime,
+                    task,
+                    require_target=_strategy_request_requires_target(draft),
+                )
             )
         except StrategySetupError as exc:
             return append_join_error(repo, task.id, str(exc))
@@ -1732,6 +1764,7 @@ def _prepare_and_run_validated_strategy_request(
             task,
             preview=preview,
             context=context,
+            use_confirmed_workspace_target=is_pool_impact,
         ):
             return _strategy_request_clarification_response(
                 repo,
@@ -1775,6 +1808,7 @@ def _prepare_and_run_validated_strategy_request(
             context=context,
             auto_start=auto_start,
             drop_nan_labels=drop_nan_labels,
+            expected_pool_binding=expected_pool_binding,
         )
     except StrategySetupError as exc:
         return append_join_error(repo, task.id, str(exc))
@@ -1793,6 +1827,7 @@ def _run_validated_strategy_request(
     context,
     auto_start: bool,
     drop_nan_labels: bool,
+    expected_pool_binding: Mapping | None = None,
 ) -> dict:
     """Route one already-validated draft without another execution confirmation."""
 
@@ -1854,6 +1889,30 @@ def _run_validated_strategy_request(
             task,
             template_id="strategy_voting_candidate_build",
             slots=_strategy_voting_candidate_plan_slots(runtime, task, draft),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_pool_impact"
+    ):
+        if context is None:
+            raise StrategySetupError(
+                "Strategy Pool 影响测算需要活动 DataWorkspace 和确认的目标列。"
+            )
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_pool_impact",
+            slots=_strategy_pool_impact_plan_slots(
+                runtime,
+                task,
+                draft,
+                context=context,
+                drop_nan_labels=drop_nan_labels,
+                expected_pool_binding=expected_pool_binding,
+            ),
             auto_start=auto_start,
         )
 
@@ -2587,6 +2646,21 @@ def _standard_workflow_request_preflight(
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> tuple[str, str] | None:
+    if draft.workflow == "strategy_pool_impact":
+        try:
+            context = _strategy_pool_impact_dataset_context(runtime, task)
+            _strategy_pool_impact_plan_slots(
+                runtime,
+                task,
+                draft,
+                context=context,
+                drop_nan_labels=bool(
+                    draft.workflow_inputs.get("drop_nan_labels", False)
+                ),
+            )
+        except StrategySetupError as exc:
+            return ("strategy_pool_impact_binding_required", str(exc))
+        return None
     if draft.workflow == "automatic_tree_leaf_materialization":
         try:
             _automatic_tree_leaf_materialization_slots(
@@ -3027,6 +3101,240 @@ def _strategy_voting_candidate_plan_slots(
         "selected_entry_ids": [str(entry["entry_id"]) for entry in selected],
         "n": n,
     }
+
+
+def _strategy_pool_impact_pool_binding(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    strategy_type: str,
+) -> tuple[Mapping, dict[str, object]]:
+    """Load one non-empty Pool and return its exact confirmation binding."""
+
+    if strategy_type not in {"approval", "reject"}:
+        raise StrategySetupError(
+            "Strategy Pool 影响测算首个 V2 纵切只支持 approval/reject；"
+            "其他策略类型需要后续类型专属口径。"
+        )
+    try:
+        pool = StrategyCandidatePoolRepository(
+            runtime.settings.db_path
+        ).get_current(task.id, strategy_type)
+    except Exception as exc:
+        raise StrategySetupError(
+            "当前 Strategy Pool 状态无法通过完整性校验，不能执行影响测算。"
+        ) from exc
+    if pool is None:
+        raise StrategySetupError(
+            f"当前任务没有 {strategy_type} Strategy Pool，无法测算影响。"
+        )
+    if not _strategy_pool_entries(pool):
+        raise StrategySetupError(
+            f"当前 {strategy_type} Strategy Pool 为空；请先加入候选规则再测算影响。"
+        )
+    try:
+        binding = {
+            "strategy_type": strategy_type,
+            "expected_pool_revision": int(pool["revision"]),
+            "expected_pool_snapshot_hash": strategy_pool_snapshot_hash(pool),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "当前 Strategy Pool revision/hash 绑定不完整，不能执行影响测算。"
+        ) from exc
+    return pool, binding
+
+
+def _strategy_pool_impact_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+    *,
+    context,
+    drop_nan_labels: bool,
+    expected_pool_binding: Mapping | None = None,
+) -> dict[str, object]:
+    """Bind one read-only impact request to exact Pool and workspace evidence."""
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    strategy_type = str(inputs.get("strategy_type") or "")
+    pool, pool_binding = _strategy_pool_impact_pool_binding(
+        runtime,
+        task,
+        strategy_type,
+    )
+    if expected_pool_binding is not None and dict(expected_pool_binding) != pool_binding:
+        raise StrategySetupError(
+            "Strategy Pool 在用户确认期间已变化；旧确认不会绑定新的 Pool revision，"
+            "请基于当前 Pool 重新发起影响测算。"
+        )
+    entries = _strategy_pool_entries(pool)
+
+    try:
+        workspace = DataWorkspaceRepository(
+            runtime.settings.db_path
+        ).get_or_default(task.id)
+    except (DataWorkspaceDataError, KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "Strategy Pool 影响测算需要有效的活动 DataWorkspace。"
+        ) from exc
+    if workspace.active_dataset_id is None:
+        raise StrategySetupError(
+            "Strategy Pool 影响测算要求先在 DataWorkspace 选择活动数据集；"
+            "不会从 source_dir 或多个样本中猜测。"
+        )
+    if (
+        workspace.active_dataset_id != context.dataset_id
+        or workspace.active_dataset_content_hash != context.dataset_content_hash
+    ):
+        raise StrategySetupError(
+            "活动 DataWorkspace 与策略数据上下文不一致，请重新选择活动数据集后重试。"
+        )
+    target_col = workspace.semantic_mapping.target_col
+    if (
+        not isinstance(target_col, str)
+        or not target_col
+        or target_col not in context.columns
+        or target_col != context.target_col
+    ):
+        raise StrategySetupError(
+            "Strategy Pool 影响测算只能使用 DataWorkspace 中已确认的二元 target；"
+            "不会采用 LLM、任务旧字段或列名猜测。"
+        )
+    content_hash = workspace.active_dataset_content_hash
+    semantic_hash = data_semantic_mapping_hash(workspace.semantic_mapping)
+    if not isinstance(content_hash, str) or not content_hash:
+        raise StrategySetupError("活动数据集缺少内容 hash，不能绑定影响测算。")
+    sample_identities: list[dict] = []
+    for entry in entries:
+        source = entry.get("source")
+        evidence_identity = (
+            source.get("evidence_identity")
+            if isinstance(source, Mapping)
+            else None
+        )
+        if not isinstance(evidence_identity, Mapping):
+            raise StrategySetupError(
+                "当前 Strategy Pool 条目缺少受治理样本身份，不能执行影响测算。"
+            )
+        sample_identities.append(dict(evidence_identity))
+    if any(identity != sample_identities[0] for identity in sample_identities[1:]):
+        raise StrategySetupError(
+            "当前 Strategy Pool 条目并非来自同一受治理样本，不能执行影响测算。"
+        )
+    expected_sample = {
+        "dataset_id": workspace.active_dataset_id,
+        "dataset_content_hash": content_hash,
+        "workspace_revision": workspace.revision,
+        "workspace_generation": workspace.analysis_generation,
+        "semantic_mapping_hash": semantic_hash,
+    }
+    if any(
+        sample_identities[0].get(field) != expected
+        for field, expected in expected_sample.items()
+    ):
+        raise StrategySetupError(
+            "当前活动 DataWorkspace 与 Strategy Pool 创建时绑定的样本或语义版本不同；"
+            "请切回该 Pool 的绑定数据，或基于当前数据重建候选与 Pool 后再测算。"
+        )
+
+    comparison_mode = str(inputs.get("comparison_mode") or "absolute")
+    slots: dict[str, object] = {
+        "strategy_type": strategy_type,
+        "expected_pool_revision": pool_binding["expected_pool_revision"],
+        "expected_pool_snapshot_hash": pool_binding[
+            "expected_pool_snapshot_hash"
+        ],
+        "dataset_id": workspace.active_dataset_id,
+        "expected_dataset_content_hash": content_hash,
+        "workspace_revision": workspace.revision,
+        "workspace_generation": workspace.analysis_generation,
+        "semantic_mapping_hash": semantic_hash,
+        "target_col": target_col,
+        "comparison_mode": comparison_mode,
+        "drop_nan_labels": bool(drop_nan_labels),
+    }
+    for field, role in (
+        ("month_col", "month"),
+        ("loan_amount_col", "loan_amount"),
+        ("overdue_amount_col", "overdue_amount"),
+    ):
+        column = _strategy_pool_impact_column(
+            inputs,
+            field=field,
+            role=role,
+            columns=tuple(context.columns),
+            field_roles=workspace.semantic_mapping.field_roles,
+        )
+        if column is not None:
+            slots[field] = column
+
+    baseline_strategy_id = inputs.get("baseline_strategy_id")
+    if comparison_mode == "vs_baseline":
+        if not isinstance(baseline_strategy_id, str) or not baseline_strategy_id:
+            raise StrategySetupError(
+                "相对基线测算需要用户明确提供完整 baseline_strategy_id。"
+            )
+        repository = StrategyRepository(runtime.settings.db_path)
+        try:
+            baseline_meta = repository.get_strategy_meta(baseline_strategy_id)
+            baseline = repository.get_strategy(baseline_strategy_id)
+            baseline_hash = repository.get_strategy_spec_hash(baseline_strategy_id)
+        except Exception as exc:
+            raise StrategySetupError(
+                "基线策略的 canonical StrategySpec 无法通过完整性校验。"
+            ) from exc
+        if (
+            baseline_meta is None
+            or baseline is None
+            or baseline.spec is None
+            or not isinstance(baseline_hash, str)
+            or baseline_meta.get("task_id") != task.id
+        ):
+            raise StrategySetupError(
+                "当前任务中没有带 canonical StrategySpec 的该基线策略，"
+                "不能跨任务或用不完整策略做对比。"
+            )
+        if (
+            baseline_meta.get("strategy_type") != strategy_type
+            or baseline.strategy_type != strategy_type
+        ):
+            raise StrategySetupError(
+                "baseline_strategy_id 的策略类型与当前 Strategy Pool 不一致。"
+            )
+        slots["baseline_strategy_id"] = baseline_strategy_id
+    elif baseline_strategy_id is not None:
+        raise StrategySetupError("absolute 影响测算禁止绑定 baseline_strategy_id。")
+    return slots
+
+
+def _strategy_pool_impact_column(
+    inputs: Mapping,
+    *,
+    field: str,
+    role: str,
+    columns: tuple[str, ...],
+    field_roles: Mapping,
+) -> str | None:
+    """Prefer an explicit validated column, else require a unique semantic role."""
+
+    explicit = inputs.get(field)
+    if explicit is not None:
+        if not isinstance(explicit, str) or explicit not in columns:
+            raise StrategySetupError(
+                f"影响测算显式字段 {field} 不在当前活动数据集中。"
+            )
+        return explicit
+    matches = [
+        column
+        for column, assigned_role in field_roles.items()
+        if assigned_role == role and column in columns
+    ]
+    if len(matches) > 1:
+        raise StrategySetupError(
+            f"DataWorkspace 有多个 `{role}` 语义字段：{'、'.join(sorted(matches))}；"
+            f"请在请求中明确指定 {field}，平台不会任意选择。"
+        )
+    return matches[0] if matches else None
 
 
 def _strategy_pool_plan_slots(
@@ -3753,6 +4061,24 @@ def _strategy_dataset_context(
     )
 
 
+def _strategy_pool_impact_dataset_context(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+):
+    """Resolve target only from confirmed DataWorkspace semantics for impact."""
+
+    _require_strategy_pool_impact_workspace(runtime, task)
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    return build_strategy_dataset_context(
+        registry,
+        backend,
+        task.id,
+        task.source_dir,
+        target_col=None,
+        require_target=True,
+    )
+
+
 def _strategy_dataset_preview(runtime: DriverTurnRuntime, task: TaskRecord):
     backend, registry = _modeling_data_runtime(runtime.settings)
     return preview_strategy_dataset_context(
@@ -3764,12 +4090,53 @@ def _strategy_dataset_preview(runtime: DriverTurnRuntime, task: TaskRecord):
     )
 
 
+def _strategy_pool_impact_dataset_preview(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+):
+    """Preview the active sample using only its confirmed workspace target."""
+
+    _require_strategy_pool_impact_workspace(runtime, task)
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    return preview_strategy_dataset_context(
+        registry,
+        backend,
+        task.id,
+        task.source_dir,
+        target_col=None,
+    )
+
+
+def _require_strategy_pool_impact_workspace(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+):
+    try:
+        snapshot = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
+            task.id
+        )
+    except (DataWorkspaceDataError, KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "Strategy Pool 影响测算需要有效的活动 DataWorkspace。"
+        ) from exc
+    if snapshot.active_dataset_id is None:
+        raise StrategySetupError(
+            "Strategy Pool 影响测算要求先在 DataWorkspace 选择活动数据集。"
+        )
+    if not snapshot.semantic_mapping.target_col:
+        raise StrategySetupError(
+            "Strategy Pool 影响测算要求先在 DataWorkspace 确认二元目标列。"
+        )
+    return snapshot
+
+
 def _strategy_dataset_binding_matches(
     runtime: DriverTurnRuntime,
     task: TaskRecord,
     *,
     preview,
     context,
+    use_confirmed_workspace_target: bool = False,
 ) -> bool:
     """Verify the registered snapshot still represents the compiled preview."""
 
@@ -3779,7 +4146,11 @@ def _strategy_dataset_binding_matches(
     ):
         return False
     try:
-        refreshed = _strategy_dataset_preview(runtime, task)
+        refreshed = (
+            _strategy_pool_impact_dataset_preview(runtime, task)
+            if use_confirmed_workspace_target
+            else _strategy_dataset_preview(runtime, task)
+        )
     except StrategySetupError:
         return False
     if (
@@ -3852,7 +4223,15 @@ def _strategy_nan_label_clarification_response(
     n_total: int,
     n_nan: int,
 ) -> dict:
-    refreshed = _strategy_dataset_preview(runtime, task)
+    is_pool_impact = (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
+    )
+    refreshed = (
+        _strategy_pool_impact_dataset_preview(runtime, task)
+        if is_pool_impact
+        else _strategy_dataset_preview(runtime, task)
+    )
     state = {
         "draft": draft.to_dict(),
         "dataset_id": context.dataset_id,
@@ -3861,6 +4240,21 @@ def _strategy_nan_label_clarification_response(
         "n_total": int(n_total),
         "n_nan": int(n_nan),
     }
+    if is_pool_impact:
+        try:
+            _pool, pool_binding = _strategy_pool_impact_pool_binding(
+                runtime,
+                task,
+                str(draft.workflow_inputs.get("strategy_type") or ""),
+            )
+        except StrategySetupError as exc:
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_pool_impact_binding_required",
+                message=str(exc),
+            )
+        state["pool_binding"] = pool_binding
     return _append_strategy_nan_label_clarification(repo, task, state)
 
 
@@ -3872,12 +4266,26 @@ def _append_strategy_nan_label_clarification(
     n_nan = int(state.get("n_nan") or 0)
     n_total = int(state.get("n_total") or 0)
     target_col = str(state.get("target_col") or "")
-    message = (
-        f"目标列 `{target_col}` 有 {n_nan}/{n_total} 行空或非有限标签。"
-        "本次尚未创建计划，平台不会默认丢弃。"
-        "如果确实允许，请明确回复「确认丢弃空标签并继续」；"
-        "仅回复「确认」不会执行。"
+    payload = state.get("draft")
+    is_pool_impact = (
+        isinstance(payload, Mapping)
+        and payload.get("workflow") in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
     )
+    if is_pool_impact:
+        message = (
+            f"目标列 `{target_col}` 有 {n_nan}/{n_total} 行空或非有限标签。"
+            "这些样本行仍会保留在总体、动作和金额统计中，只从坏账率/风险率分母中排除；"
+            "本次尚未创建计划，平台不会默认采用该口径。"
+            "如果确实允许，请明确回复「确认将空标签仅从风险分母排除并继续」；"
+            "仅回复「确认」不会执行。"
+        )
+    else:
+        message = (
+            f"目标列 `{target_col}` 有 {n_nan}/{n_total} 行空或非有限标签。"
+            "本次尚未创建计划，平台不会默认丢弃。"
+            "如果确实允许，请明确回复「确认丢弃空标签并继续」；"
+            "仅回复「确认」不会执行。"
+        )
     repo.add_agent_message(
         task.id,
         role="assistant",
@@ -3929,8 +4337,57 @@ def _resume_strategy_after_nan_label_confirmation(
             code="strategy_request_stale_confirmation",
             message="任务状态已变化，空标签处理确认已失效；请完成当前计划后重新发起。",
         )
+    payload = state.get("draft")
+    if not isinstance(payload, dict):
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_request_invalidated",
+            message="空标签确认缺少已校验策略口径，请重新描述策略请求。",
+        )
+    is_pool_impact = payload.get("workflow") in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
+    expected_pool_binding = None
+    if is_pool_impact:
+        expected_pool_binding = state.get("pool_binding")
+        if not isinstance(expected_pool_binding, Mapping):
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_pool_context_changed",
+                message=(
+                    "旧的空标签确认没有绑定 Strategy Pool revision/hash；"
+                    "为避免误用当前 Pool，请重新发起影响测算。"
+                ),
+            )
+        try:
+            _pool, current_pool_binding = _strategy_pool_impact_pool_binding(
+                runtime,
+                task,
+                str(expected_pool_binding.get("strategy_type") or ""),
+            )
+        except StrategySetupError as exc:
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_pool_context_changed",
+                message=str(exc),
+            )
+        if dict(expected_pool_binding) != current_pool_binding:
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_pool_context_changed",
+                message=(
+                    "Strategy Pool 在等待空标签确认期间已变化；旧确认未执行，"
+                    "请基于当前 Pool 重新发起影响测算。"
+                ),
+            )
     try:
-        preview = _strategy_dataset_preview(runtime, task)
+        preview = (
+            _strategy_pool_impact_dataset_preview(runtime, task)
+            if is_pool_impact
+            else _strategy_dataset_preview(runtime, task)
+        )
     except StrategySetupError as exc:
         return _strategy_request_clarification_response(
             repo,
@@ -3950,14 +4407,6 @@ def _resume_strategy_after_nan_label_confirmation(
             task,
             code="strategy_dataset_context_changed",
             message="策略样本或目标列已变化；空标签确认未执行，请重新描述策略请求。",
-        )
-    payload = state.get("draft")
-    if not isinstance(payload, dict):
-        return _strategy_request_clarification_response(
-            repo,
-            task,
-            code="strategy_request_invalidated",
-            message="空标签确认缺少已校验策略口径，请重新描述策略请求。",
         )
     compilation = validate_strategy_request(
         payload,
@@ -3988,6 +4437,7 @@ def _resume_strategy_after_nan_label_confirmation(
         preview=preview,
         auto_start=True,
         drop_nan_labels=True,
+        expected_pool_binding=expected_pool_binding,
     )
 
 
@@ -4125,6 +4575,7 @@ def _strategy_request_requires_target(
                 "univariate_candidate_analysis",
                 "automatic_tree_candidate_build",
                 "cross_matrix_analysis",
+                "strategy_pool_impact",
             }
             or refinement_needs_current_target
             or (
@@ -4155,6 +4606,7 @@ def _strategy_request_requires_complete_labels(
                 "univariate_candidate_analysis",
                 "automatic_tree_candidate_build",
                 "cross_matrix_analysis",
+                "strategy_pool_impact",
             }
             or refinement_needs_current_labels
             or (

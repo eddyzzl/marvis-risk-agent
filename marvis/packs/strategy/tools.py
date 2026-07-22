@@ -73,6 +73,7 @@ from marvis.packs.strategy.pool_tools import (
     run_reorder_strategy_pool,
     run_set_pool_entry_action,
 )
+from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
 from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.contracts import Strategy
 from marvis.packs.strategy.deliverables import decision_table_csv
@@ -790,6 +791,12 @@ def tool_compile_strategy_pool(inputs: dict, ctx) -> dict:
     """Compile an exact pool revision to a canonical, unexecuted design."""
 
     return run_compile_strategy_pool(inputs, ctx, _runtime(ctx))
+
+
+def tool_measure_pool_impact(inputs: dict, ctx) -> dict:
+    """Measure governed first-match and monthly impact for the current Pool."""
+
+    return run_measure_pool_impact(inputs, ctx, _runtime(ctx))
 
 
 def tool_design_strategy_candidate(inputs: dict, ctx) -> dict:

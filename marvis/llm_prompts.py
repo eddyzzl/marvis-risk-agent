@@ -247,7 +247,7 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=20,
+    version=22,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
@@ -259,7 +259,8 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "automatic_tree_leaf_materialization/voting_candidate_build/cross_matrix_analysis/"
         "cross_matrix_cell_selection/"
         "strategy_pool_add_candidate/strategy_pool_remove_entry/"
-        "strategy_pool_set_action/strategy_pool_reorder/strategy_pool_compile。"
+        "strategy_pool_set_action/strategy_pool_reorder/strategy_pool_compile/"
+        "strategy_pool_impact。"
         "profit_calc 需要 ead_col、pd_col、"
         "可选 segment_col 及完整 profit_params。roll_rate_matrix 需要 id_col、time_col、status_col、"
         "有序且不重复的 states，可选 balance_col，observation_semantics 固定为 adjacent_observation；"
@@ -379,6 +380,20 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "完整、无重复 rule_id/entry_id 顺序；用户只说把某条放前面，或要求按效果/坏率/最好自动排序时，"
         "必须 clarification，不能补全或推荐顺序。strategy_pool_compile 只需要 strategy_type，表示只读编译"
         "当前 Pool 的 StrategySpec 草案；它不是 build/adopt/deploy。"
+        "strategy_pool_impact 表示对当前 task 的非空 approval/reject Strategy Pool 做只读影响测算。"
+        "workflow_inputs 只允许用户拥有的 strategy_type、comparison_mode、baseline_strategy_id、"
+        "month_col、loan_amount_col、overdue_amount_col 和 drop_nan_labels；comparison_mode 只能是"
+        " absolute/vs_baseline，普通肯定式请求默认 absolute。vs_baseline 必须逐字抄录用户原话中的"
+        "完整 baseline_strategy_id；absolute 禁止 baseline ID。三个可选列名只能逐字来自列白名单，"
+        "用户未提供时必须省略，不能猜列；平台稍后只会绑定唯一确认的 month/loan_amount/"
+        "overdue_amount 语义角色，没有角色时相应指标明确 unavailable，多个角色时澄清。只有用户"
+        "明确授权将空/NaN 标签仅从风险分母排除且保留样本行时，才能输出 "
+        "drop_nan_labels=true，否则省略或 false。禁止输出"
+        "dataset/target、Pool revision/hash、workspace 引用、sample binding、semantic hash、metrics、"
+        "conditions、strategy_spec 或任何测算结果。limit/pricing/segmentation 的影响测算属于 V2"
+        "后续纵切，当前必须 clarification，不能套用 approval/reject。否定、问句、历史/未来描述、"
+        "仅报告请求和同轮串联 Pool 修改、策略创建、写回、采纳或部署都必须 clarification。"
+        "该 Workflow 只产生只读 evidence/artifact，不修改 Pool，也不采纳、不部署。"
         "最大化利润开发审批 cutoff 属于 strategy_lifecycle，不是独立 profit_calc；定价规则开发、应用或采纳"
         "也属于 strategy_lifecycle，不是 limit_pricing_matrix。\n"
         "operation 与 strategy_type 是两个正交字段，必须分别判断。operation 只能是："

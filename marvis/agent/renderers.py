@@ -2057,6 +2057,569 @@ def _render_compile_strategy_pool(o: dict):
     ]
 
 
+def _pool_impact_amount_delta_rows(
+    amount_deltas: object,
+    *,
+    period: str | None = None,
+) -> list[list[str]]:
+    """Format Tool-owned amount deltas; never derive unavailable values."""
+
+    if not isinstance(amount_deltas, dict):
+        return []
+    rows: list[list[str]] = []
+    for action, amounts in amount_deltas.items():
+        if not isinstance(amounts, dict):
+            continue
+        for amount_name, item in amounts.items():
+            if not isinstance(item, dict) or item.get("status") != "available":
+                continue
+            row = [
+                str(action),
+                str(amount_name),
+                "available",
+                _num(item.get("coverage_count")),
+                _pct(item.get("coverage_rate")),
+                _num(item.get("sum")),
+                _num(item.get("loan_amount_sum")),
+                _num(item.get("overdue_amount_sum")),
+                _pct(item.get("overdue_rate")),
+            ]
+            rows.append(([period] if period is not None else []) + row)
+    return rows
+
+
+def _pool_impact_action_amount_rows(
+    action_breakdown: object,
+    *,
+    period: str | None = None,
+) -> list[list[str]]:
+    """Format Tool-owned per-action amounts without deriving any observation."""
+
+    if not isinstance(action_breakdown, list):
+        return []
+    rows: list[list[str]] = []
+    for action_row in action_breakdown:
+        if not isinstance(action_row, dict):
+            continue
+        action = str(action_row.get("action") or "")
+        amounts = action_row.get("amounts")
+        if not isinstance(amounts, dict):
+            continue
+        for amount_name in ("loan_amount", "overdue_amount", "paired"):
+            item = amounts.get(amount_name)
+            if not isinstance(item, dict) or item.get("status") != "available":
+                continue
+            row = [
+                action,
+                amount_name,
+                "available",
+                _num(item.get("coverage_count")),
+                _pct(item.get("coverage_rate")),
+                _num(item.get("sum")),
+                _num(item.get("loan_amount_sum")),
+                _num(item.get("overdue_amount_sum")),
+                _pct(item.get("overdue_rate")),
+            ]
+            rows.append(([period] if period is not None else []) + row)
+    return rows
+
+
+def _pool_impact_integrity_failure() -> tuple[str, list[dict]]:
+    return (
+        "**Strategy Pool 影响测算结果完整性校验失败**：计划缓存与 canonical "
+        "assessment/artifact 摘要不一致，已停止展示指标。请重新运行测算；"
+        "下载接口仍会按 TaskArtifact 注册 hash 校验产物。",
+        [],
+    )
+
+
+def _render_measure_pool_impact(o: dict):
+    """Render immutable Pool impact evidence without deriving any new metric."""
+
+    from marvis.packs.strategy.errors import StrategyError
+    from marvis.packs.strategy.pool_impact_tools import (
+        validate_measure_pool_impact_tool_output,
+    )
+
+    try:
+        o = validate_measure_pool_impact_tool_output(o)
+    except (StrategyError, RecursionError):
+        return _pool_impact_integrity_failure()
+
+    assessment = o.get("assessment") if isinstance(o.get("assessment"), dict) else {}
+    identity = (
+        assessment.get("identity")
+        if isinstance(assessment.get("identity"), dict)
+        else {}
+    )
+    population = (
+        assessment.get("population")
+        if isinstance(assessment.get("population"), dict)
+        else {}
+    )
+    overall = (
+        assessment.get("overall")
+        if isinstance(assessment.get("overall"), dict)
+        else {}
+    )
+    effect = overall.get("effect") if isinstance(overall.get("effect"), dict) else {}
+    actions = (
+        overall.get("actions")
+        if isinstance(overall.get("actions"), dict)
+        else {}
+    )
+    action_rows = [
+        item
+        for item in (actions.get("breakdown") or [])
+        if isinstance(item, dict)
+    ]
+    red_flags = [
+        item
+        for item in (assessment.get("red_flags") or [])
+        if isinstance(item, dict)
+    ]
+    warnings = [str(item) for item in (o.get("warnings") or []) if str(item)]
+    text = (
+        f"**Strategy Pool 影响测算完成**：`{identity.get('strategy_type', '')}` Pool "
+        f"`{identity.get('pool_id', '')}` revision {identity.get('revision')}，"
+        f"assessment `{assessment.get('assessment_id', '')}`。"
+        f"总体样本 **{_num(population.get('population_count'))}**，"
+        f"`unlabeled_rows` **{_num(population.get('unlabelled_count'))}**，"
+        f"`nan_labels_excluded` **{_num(o.get('nan_labels_excluded'))}**，"
+        f"标签覆盖率 **{_pct(population.get('label_coverage'))}**，"
+        f"观测坏账率 **{_pct((actions.get('metrics') or {}).get('overall_bad_rate'))}**。"
+    )
+    if action_rows:
+        text += "\n\n**动作影响**：" + "；".join(
+            f"{row.get('action', '')} {_num(row.get('count'))} 笔 / "
+            f"{_pct(row.get('rate'))}，坏账率 {_pct(row.get('bad_rate'))}"
+            for row in action_rows
+        )
+
+    amounts = effect.get("amounts") if isinstance(effect.get("amounts"), dict) else {}
+    unavailable: list[str] = []
+    amount_rows: list[list[str]] = []
+    for key, label in (
+        ("loan_amount", "放款金额"),
+        ("overdue_amount", "逾期金额"),
+        ("paired", "配对逾期金额率"),
+    ):
+        item = amounts.get(key)
+        if isinstance(item, dict) and item.get("status") == "unavailable":
+            unavailable.append(f"{label} unavailable（未绑定对应确认语义列）")
+        elif isinstance(item, dict) and item.get("status") == "available":
+            amount_rows.append(
+                [
+                    label,
+                    "available",
+                    _num(item.get("coverage_count")),
+                    _pct(item.get("coverage_rate")),
+                    (
+                        _pct(item.get("overdue_rate"))
+                        if key == "paired"
+                        else _num(item.get("sum"))
+                    ),
+                ]
+            )
+    monthly = (
+        assessment.get("monthly")
+        if isinstance(assessment.get("monthly"), dict)
+        else {}
+    )
+    if monthly.get("status") != "available":
+        unavailable.append(
+            "逐月结果 unavailable（"
+            + str(monthly.get("reason") or "month column unavailable")
+            + "）"
+        )
+    if unavailable:
+        text += "\n\n**不可用项**：" + "；".join(unavailable) + "。"
+    if red_flags:
+        text += "\n\n**Assessment red flags**：" + "；".join(
+            f"[{str(item.get('level') or '')}/{str(item.get('code') or '')}] "
+            f"{str(item.get('message') or '')}"
+            for item in red_flags
+        )
+        text += "。"
+    if warnings:
+        text += "\n\n**Tool warnings**：" + "；".join(warnings) + "。"
+
+    baseline = (
+        assessment.get("baseline")
+        if isinstance(assessment.get("baseline"), dict)
+        else {}
+    )
+    baseline_status = str(baseline.get("status") or "unavailable")
+    if baseline_status == "available":
+        binding = (
+            baseline.get("binding")
+            if isinstance(baseline.get("binding"), dict)
+            else {}
+        )
+        text += (
+            f"\n\n**基线对比 available**：`{binding.get('strategy_id', '')}`；"
+            "下表中的 delta 均为 Tool 已计算的当前 Pool 减基线值。"
+        )
+    elif baseline_status == "not_requested":
+        text += "\n\n**基线对比**：未请求（absolute）。"
+    else:
+        text += (
+            "\n\n**基线对比 unavailable**："
+            + str(baseline.get("reason") or "baseline evidence unavailable")
+            + "。"
+        )
+
+    lifecycle = (
+        assessment.get("lifecycle")
+        if isinstance(assessment.get("lifecycle"), dict)
+        else {}
+    )
+    text += (
+        "\n\n这是只读 `development / backtested / unvalidated` 影响证据；"
+        f"creates_strategy={lifecycle.get('creates_strategy', False)}，"
+        f"adopted={lifecycle.get('adopted', False)}，"
+        f"deployed={lifecycle.get('deployed', False)}。"
+        "**未创建或修改策略、未采纳、未部署。**"
+    )
+
+    artifact = o.get("artifact") if isinstance(o.get("artifact"), dict) else None
+    artifacts = [
+        item for item in (o.get("artifacts") or []) if isinstance(item, dict)
+    ]
+    if artifact is not None:
+        artifacts.insert(0, artifact)
+    links = [
+        f"[{str(item.get('filename') or item.get('kind') or '影响测算 JSON')}]"
+        f"({str(item.get('download_url'))})"
+        for item in artifacts
+        if item.get("download_url")
+    ]
+    if links:
+        text += "\n\n**影响测算 artifact**：" + "；".join(links)
+
+    tables: list[dict] = []
+    if red_flags:
+        tables.append(
+            {
+                "title": "Pool Impact 红旗",
+                "columns": ["等级", "code", "说明"],
+                "rows": [
+                    [
+                        str(item.get("level") or ""),
+                        str(item.get("code") or ""),
+                        str(item.get("message") or ""),
+                    ]
+                    for item in red_flags
+                ],
+            }
+        )
+    if warnings:
+        tables.append(
+            {
+                "title": "Pool Impact Tool 警告",
+                "columns": ["警告"],
+                "rows": [[warning] for warning in warnings],
+            }
+        )
+    if action_rows:
+        tables.append(
+            {
+                "title": "总体动作与风险影响",
+                "columns": ["action", "count", "rate", "labelled", "bad", "bad_rate"],
+                "rows": [
+                    [
+                        str(row.get("action") or ""),
+                        _num(row.get("count")),
+                        _pct(row.get("rate")),
+                        _num(row.get("labelled_count")),
+                        _num(row.get("bad_count")),
+                        _pct(row.get("bad_rate")),
+                    ]
+                    for row in action_rows
+                ],
+            }
+        )
+        action_amount_rows = _pool_impact_action_amount_rows(action_rows)
+        if action_amount_rows:
+            tables.append(
+                {
+                    "title": "总体动作金额影响",
+                    "columns": [
+                        "action",
+                        "amount",
+                        "status",
+                        "coverage_count",
+                        "coverage_rate",
+                        "sum",
+                        "loan_amount_sum",
+                        "overdue_amount_sum",
+                        "overdue_rate",
+                    ],
+                    "rows": action_amount_rows,
+                }
+            )
+    if amount_rows:
+        tables.append(
+            {
+                "title": "整体金额影响",
+                "columns": ["口径", "状态", "覆盖样本", "覆盖率", "观测值"],
+                "rows": amount_rows,
+            }
+        )
+
+    waterfall = [
+        item
+        for item in (assessment.get("waterfall") or [])
+        if isinstance(item, dict)
+    ]
+    default_unmatched = (
+        assessment.get("default_unmatched")
+        if isinstance(assessment.get("default_unmatched"), dict)
+        else {}
+    )
+    default_effect = (
+        default_unmatched.get("effect")
+        if isinstance(default_unmatched.get("effect"), dict)
+        else {}
+    )
+    if waterfall or default_unmatched:
+        waterfall_rows = [
+            [
+                _num(row.get("position")),
+                str(row.get("rule_id") or ""),
+                str(
+                    (row.get("action") or {}).get("type")
+                    if isinstance(row.get("action"), dict)
+                    else ""
+                ),
+                _num((row.get("standalone") or {}).get("population_count")),
+                _num((row.get("incremental") or {}).get("population_count")),
+                _pct((row.get("incremental") or {}).get("population_share")),
+                _pct((row.get("incremental") or {}).get("bad_rate")),
+                _num((row.get("shadowed") or {}).get("population_count")),
+                _num((row.get("remaining_after") or {}).get("population_count")),
+            ]
+            for row in waterfall
+        ]
+        if default_unmatched:
+            default_action = (
+                default_unmatched.get("action")
+                if isinstance(default_unmatched.get("action"), dict)
+                else {}
+            )
+            waterfall_rows.append(
+                [
+                    "default",
+                    "default_unmatched",
+                    str(default_action.get("type") or ""),
+                    "n/a",
+                    _num(default_effect.get("population_count")),
+                    _pct(default_effect.get("population_share")),
+                    _pct(default_effect.get("bad_rate")),
+                    "n/a",
+                    "n/a",
+                ]
+            )
+        tables.append(
+            {
+                "title": "Strategy Pool 级联 Waterfall",
+                "columns": [
+                    "#",
+                    "rule_id",
+                    "action",
+                    "standalone",
+                    "incremental",
+                    "incremental_share",
+                    "incremental_bad_rate",
+                    "shadowed",
+                    "remaining_after",
+                ],
+                "rows": waterfall_rows,
+            }
+        )
+
+    if monthly.get("status") == "available":
+        period_rows = [
+            item
+            for item in (monthly.get("periods") or [])
+            if isinstance(item, dict)
+        ]
+        tables.append(
+            {
+                "title": "逐月影响",
+                "columns": [
+                    "period",
+                    "population",
+                    "label_coverage",
+                    "bad_rate",
+                    "approve_rate",
+                    "reject_rate",
+                    "review_rate",
+                ],
+                "rows": [
+                    [
+                        str(row.get("period") or ""),
+                        _num((row.get("effect") or {}).get("population_count")),
+                        _pct((row.get("effect") or {}).get("label_coverage")),
+                        _pct(
+                            ((row.get("actions") or {}).get("metrics") or {}).get(
+                                "overall_bad_rate"
+                            )
+                        ),
+                        _pct(
+                            ((row.get("actions") or {}).get("metrics") or {}).get(
+                                "approve_rate"
+                            )
+                        ),
+                        _pct(
+                            ((row.get("actions") or {}).get("metrics") or {}).get(
+                                "reject_rate"
+                            )
+                        ),
+                        _pct(
+                            ((row.get("actions") or {}).get("metrics") or {}).get(
+                                "review_rate"
+                            )
+                        ),
+                    ]
+                    for row in period_rows
+                ],
+            }
+        )
+        monthly_action_amount_rows: list[list[str]] = []
+        for row in period_rows:
+            period_actions = row.get("actions")
+            breakdown = (
+                period_actions.get("breakdown")
+                if isinstance(period_actions, dict)
+                else None
+            )
+            monthly_action_amount_rows.extend(
+                _pool_impact_action_amount_rows(
+                    breakdown,
+                    period=str(row.get("period") or ""),
+                )
+            )
+        if monthly_action_amount_rows:
+            tables.append(
+                {
+                    "title": "逐月动作金额影响",
+                    "columns": [
+                        "period",
+                        "action",
+                        "amount",
+                        "status",
+                        "coverage_count",
+                        "coverage_rate",
+                        "sum",
+                        "loan_amount_sum",
+                        "overdue_amount_sum",
+                        "overdue_rate",
+                    ],
+                    "rows": monthly_action_amount_rows,
+                }
+            )
+
+    baseline_overall = (
+        baseline.get("overall")
+        if isinstance(baseline.get("overall"), dict)
+        else {}
+    )
+    deltas = (
+        baseline_overall.get("metric_deltas")
+        if isinstance(baseline_overall.get("metric_deltas"), dict)
+        else {}
+    )
+    if baseline_status == "available" and deltas:
+        tables.append(
+            {
+                "title": "相对基线指标变化（当前 - 基线）",
+                "columns": ["metric", "delta"],
+                "rows": [
+                    [key, _pct(value) if key.endswith("_rate") else _num(value)]
+                    for key, value in deltas.items()
+                ],
+            }
+        )
+    overall_amount_delta_rows = _pool_impact_amount_delta_rows(
+        baseline_overall.get("amount_deltas")
+    )
+    if baseline_status == "available" and overall_amount_delta_rows:
+        tables.append(
+            {
+                "title": "相对基线金额变化（当前 - 基线）",
+                "columns": [
+                    "action",
+                    "amount",
+                    "status",
+                    "coverage_count_delta",
+                    "coverage_rate_delta",
+                    "sum_delta",
+                    "loan_amount_sum_delta",
+                    "overdue_amount_sum_delta",
+                    "overdue_rate_delta",
+                ],
+                "rows": overall_amount_delta_rows,
+            }
+        )
+    baseline_monthly = (
+        baseline.get("monthly")
+        if isinstance(baseline.get("monthly"), dict)
+        else {}
+    )
+    baseline_monthly_deltas: list[list[str]] = []
+    baseline_monthly_amount_deltas: list[list[str]] = []
+    if baseline_monthly.get("status") == "available":
+        for row in baseline_monthly.get("periods") or []:
+            if not isinstance(row, dict):
+                continue
+            period = str(row.get("period") or "")
+            period_deltas = row.get("metric_deltas")
+            if isinstance(period_deltas, dict):
+                baseline_monthly_deltas.extend(
+                    [
+                        period,
+                        str(key),
+                        _pct(value) if str(key).endswith("_rate") else _num(value),
+                    ]
+                    for key, value in period_deltas.items()
+                )
+            baseline_monthly_amount_deltas.extend(
+                _pool_impact_amount_delta_rows(
+                    row.get("amount_deltas"),
+                    period=period,
+                )
+            )
+    if baseline_status == "available" and baseline_monthly_deltas:
+        tables.append(
+            {
+                "title": "逐月相对基线指标变化（当前 - 基线）",
+                "columns": ["period", "metric", "delta"],
+                "rows": baseline_monthly_deltas,
+            }
+        )
+    if baseline_status == "available" and baseline_monthly_amount_deltas:
+        tables.append(
+            {
+                "title": "逐月相对基线金额变化（当前 - 基线）",
+                "columns": [
+                    "period",
+                    "action",
+                    "amount",
+                    "status",
+                    "coverage_count_delta",
+                    "coverage_rate_delta",
+                    "sum_delta",
+                    "loan_amount_sum_delta",
+                    "overdue_amount_sum_delta",
+                    "overdue_rate_delta",
+                ],
+                "rows": baseline_monthly_amount_deltas,
+            }
+        )
+    return text, tables
+
+
 def _render_decision_backtest(
     o: dict,
     *,
@@ -4649,6 +5212,7 @@ _RENDERERS = {
     "set_pool_entry_action": _render_strategy_pool_mutation,
     "reorder_strategy_pool": _render_strategy_pool_mutation,
     "compile_strategy_pool": _render_compile_strategy_pool,
+    "measure_pool_impact": _render_measure_pool_impact,
     "backtest_strategy": _render_backtest_strategy,
     "tradeoff_view": _render_tradeoff_view,
     "design_cutoff_bands": _render_design_cutoff_bands,
@@ -4697,6 +5261,8 @@ def render_tool_output(tool: str, output: dict):
     try:
         return renderer(output or {})
     except Exception:
+        if tool == "measure_pool_impact":
+            return _pool_impact_integrity_failure()
         return _render_generic(output or {})
 
 

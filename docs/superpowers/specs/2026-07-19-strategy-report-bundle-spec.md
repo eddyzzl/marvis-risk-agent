@@ -550,6 +550,8 @@ LimitPricingReportExtension
 - Phase 6：Manual/Agent 共用追问、状态、证据和报告生成 Workflow，完成浏览器/API E2E。
 - Phase 7：把 post-launch monitoring observation 追加到新 revision，不能回写或覆盖原开发报告。
 
+**实施进度（2026-07-19）**：Phase 4 已先交付可供报告复用的 `strategy.impact-assessment.v1` approval/reject Pool 影响证据，包含 first-match waterfall、总体/逐月动作与风险、标签/金额覆盖、可选基线件数/风险/金额 delta 和不可变 TaskArtifact。持久化 evidence 的真实性以 TaskArtifact registry 中的 expected content hash 为可信锚点；artifact 内 hash 只做 canonical 内容对账，不是离线签名。它完成的是第 6 步的首个确定性 evidence vertical，不等于 `StrategyReportBundle` 或最终 Excel/Markdown 已完成；分群×月、swap、OOT、limit/pricing/segmentation 专属影响表和最终七步组装继续留在 V2.x。
+
 ## 十三、参考工作簿
 
 以下工作簿仅用于内容模块、指标口径和业务表达参考。MARVIS 不复制其全局状态、固定布局或无法审计的公式；新实现必须使用统一契约、确定性 Tool 和结构化 provenance。

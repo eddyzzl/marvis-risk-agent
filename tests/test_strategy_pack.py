@@ -260,6 +260,9 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     compile_pool_tool = next(
         tool for tool in manifest.tools if tool.name == "compile_strategy_pool"
     )
+    measure_pool_impact_tool = next(
+        tool for tool in manifest.tools if tool.name == "measure_pool_impact"
+    )
     run_monitoring_tool = next(
         tool for tool in manifest.tools if tool.name == "run_strategy_monitoring"
     )
@@ -287,6 +290,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "set_pool_entry_action",
         "reorder_strategy_pool",
         "compile_strategy_pool",
+        "measure_pool_impact",
         "design_strategy_candidate",
         "build_strategy",
         "apply_strategy",
@@ -651,6 +655,39 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         } <= required
     assert compile_pool_tool.policy.human_decision_gate == "none"
     assert compile_pool_tool.policy.effect_authorization == "none"
+    assert measure_pool_impact_tool.determinism == "deterministic"
+    assert measure_pool_impact_tool.policy.human_decision_gate == "none"
+    assert measure_pool_impact_tool.policy.effect_authorization == "none"
+    assert set(measure_pool_impact_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+    }
+    assert measure_pool_impact_tool.input_schema["additionalProperties"] is False
+    assert set(measure_pool_impact_tool.input_schema["required"]) == {
+        "strategy_type",
+        "expected_pool_revision",
+        "expected_pool_snapshot_hash",
+        "dataset_id",
+        "expected_dataset_content_hash",
+        "workspace_revision",
+        "workspace_generation",
+        "semantic_mapping_hash",
+        "target_col",
+        "comparison_mode",
+    }
+    assert measure_pool_impact_tool.input_schema["properties"]["strategy_type"] == {
+        "type": "string",
+        "enum": ["approval", "reject"],
+    }
+    assert measure_pool_impact_tool.output_schema["additionalProperties"] is False
+    assert measure_pool_impact_tool.output_schema["properties"]["schema_version"] == {
+        "const": "strategy.measure-pool-impact-tool.v1"
+    }
+    for boundary in ("not_created_strategy", "not_adopted", "not_deployed"):
+        assert measure_pool_impact_tool.output_schema["properties"][boundary] == {
+            "const": True
+        }
     assert set(run_monitoring_tool.side_effects) == {
         "read:task",
         "read:dataset",

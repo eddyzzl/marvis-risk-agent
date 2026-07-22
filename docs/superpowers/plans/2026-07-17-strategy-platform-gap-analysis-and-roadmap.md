@@ -116,13 +116,13 @@ MARVIS 已经具备较扎实的策略确定性内核和治理底座，包括策�
 
 ### 3.1 已有确定性内核
 
-`marvis/packs/strategy/manifest.json` 当前注册 18 个 Tool：
+`marvis/packs/strategy/manifest.json` 当前注册 34 个 Tool：
 
 | 能力族 | 已实现 Tool | 当前情况 |
 |---|---|---|
 | 组合风险 | `vintage_curve`、`roll_rate_matrix` | Vintage 有入口；roll-rate 无内置策略 Workflow |
 | 收益 | `profit_calc` | Tool 可用；标准策略任务的利润输入契约未完整接通 |
-| 策略构造、应用与回测 | `build_strategy`、`apply_strategy`、`backtest_strategy`、`tradeoff_view`、`design_cutoff_bands` | 五类 DSL 可确定性构造、逐行应用和回测；更完整的月度/金额/分群回测仍在 Phase 4 |
+| 策略构造、应用与回测 | `build_strategy`、`apply_strategy`、`backtest_strategy`、`tradeoff_view`、`design_cutoff_bands`、`measure_pool_impact` | 五类 DSL 可确定性构造、逐行应用和回测；approval/reject Pool 已有 first-match、整体/逐月及可用金额影响证据；类型化额度/定价/分群、分群×月和 OOT 仍在 Phase 4/5 |
 | 版本与挑战者 | `compare_strategies`、`adopt_strategy`、`render_challenger_report`、`render_strategy_doc` | 完整模板可用；普通入口与下载消费面不足 |
 | 规则策略 | `mine_rules`、`evaluate_rule_set`、`select_rule_set` | 有独立规则策略 Workflow，包含 waterfall/overlap 和确认门 |
 | 监控 | `run_strategy_monitoring`、`render_monitoring_report` | 可人工发起一次监控；未形成调度和处置闭环 |
@@ -176,9 +176,9 @@ MARVIS 已经具备较扎实的策略确定性内核和治理底座，包括策�
 | 评分卡 | 简化评分卡、写回和代码 | modeling 已有更规范的 scorecard/打分/PMML | **平台覆盖、策略集成部分**；需 scorecard-to-strategy bridge |
 | 投票池 | 单规则候选、组合搜索、自定义规则、命中分 | 无独立 n-of-k/voting 工具和 Workflow | **缺失** |
 | 交叉分析 | 2D/3D 自动交叉规则；2D 切点矩阵和 cell 选择入池 | 有 cross feature，但无等价规则枚举、规则矩阵和 cell 选择 | **缺失**；3D matrix 若实现属于 MARVIS 扩展，不是对标必需项 |
-| 策略池手工编排 | 增删、排序、单条回测、级联规则 | 有 versioned repository、规则 AST、first-match 执行 | **部分**；缺人工 pool CRUD/order UI 和稳定 rule id |
+| 策略池手工编排 | 增删、排序、单条回测、级联规则 | 已有稳定 rule/entry id、task-scoped Pool、自然语言增删/改动作/完整重排、CAS 和只读编译 | **主体覆盖**；不要求照抄手工 UI，仍缺单规则独立回测视图和完整 Workbench 展示 |
 | 规则挖掘与规则集评估 | 多页面人工组合 | `mine/evaluate/select_rule_set`、waterfall、overlap、确定性排序 | **覆盖/优势**；候选空间仍小于参考交互面 |
-| 策略回测 | 整体、漏斗、逐月、分群、金额 | 审批率、坏率、swap、分群、利润和覆盖率 | **部分**；缺逐月、金额、分群×月和完整漏斗报告 |
+| 策略回测 | 整体、漏斗、逐月、分群、金额 | approval/reject Pool 已有 first-match waterfall、总体/逐月动作风险、标签覆盖、可用金额和同任务基线 delta；另有既有 swap、分群、利润能力 | **部分**；缺分群×月、策略专用 OOT、类型化额度/定价/分群影响和完整报告 |
 | 独立验证集 | 策略池、已应用交互树、评分卡、已应用 voting 组合、2D cross matrix group；PSI、月度/分群 | 有通用模型验证和监控底座 | **部分**；缺策略专用 OOT、多 artifact 一致应用和持久化复现 Workflow |
 | Excel/代码交付 | 多 sheet Excel、Python/SQL | CSV/JSON/Markdown 和 artifact 下载底座 | **部分**；缺 Excel 以及 Python/SQL/JSON 等价性测试包 |
 | champion/version/monitor/pricing | 参考平台较弱 | compare、adopt、version、monitor、limit/pricing Tool | **MARVIS 优势但产品未闭环**；入口、阈值、调度和发布仍缺 |
@@ -295,8 +295,8 @@ MARVIS 已经具备较扎实的策略确定性内核和治理底座，包括策�
 - 交互树；
 - voting/n-of-k 组合；
 - 二维/三维交叉规则、二维矩阵切点和 cell 选择；
-- 手工策略池 CRUD/order；
-- 逐月、金额、分群、分群逐月和漏斗回测；
+- Agent 自然语言 Strategy Pool CRUD/order 已完成；后续补完整 Workbench 展示，不以复制参考平台手工页面为目标；
+- approval/reject Pool 的 first-match、逐月、件数和可用金额首纵切已完成；后续补分群、分群逐月、swap、OOT 和其余类型化口径；
 - 策略专用 OOT 验证；
 - Excel 和等价代码交付；
 - 分析产物列写回与修改后数据集导出；
@@ -554,6 +554,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 实现七步报告组装和主报告 artifact，但报告失败不能回滚已完成的策略 evidence。
 
+**approval/reject Pool 影响测算首纵切（已完成，2026-07-19）**：新增自然语言可达的 `strategy_pool_impact` Workflow 和 `strategy.measure_pool_impact`。用户只需说明要测算的 approval/reject Pool、可选基线及可选精确月份/金额列；Pool revision/hash、活动 dataset/hash、workspace revision/generation、确认 target 和 semantic mapping hash 均由平台绑定，不接受 LLM 注入。Tool 在同一绑定样本上重放 canonical first-match StrategySpec，输出总体动作/风险、每条规则 standalone/incremental/shadowed/remaining、默认未命中、标签覆盖、可用放款/逾期/配对金额观测、可选逐月及同任务同类型基线件数、风险和金额 delta；逐月件数、标签、风险、金额、动作与规则 incremental 均须回卷总体。结果以 canonical、内容寻址的 `strategy.impact-assessment.v1` JSON 和通用 TaskArtifact registry hash 双层固化，计算后在写入事务内再次复核 Pool/candidate lineage、dataset registry/path/bytes、DataWorkspace 与 baseline；空标签未确认、任何漂移或守恒失败都不落盘。artifact 内 hash 用于与可信 expected hash 对账，不是数字签名；脱离原始 frame/spec 的离线 validator 只证明 schema、派生字段和内部守恒，消费持久化 evidence 时必须先核对 TaskArtifact registry 中的 content hash，不能把任意重写后再哈希的 JSON 当成平台 provenance。该纵切只产生 `development / backtested / unvalidated` 证据，不创建、修改、采纳或部署策略。它不是 Phase 4 完成：limit/pricing/segmentation 专属影响语义、分群/分群×月、swap、OOT、代码与列写回，以及七步 Excel/JSON/Markdown Report Bundle 仍须继续交付。
+
 交付：
 
 1. 单规则、组合规则、n-of-k、稳定 rule id、增删、删除、完整 reorder、指标预览和单规则回测；
@@ -734,7 +736,7 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 ### Phase 3：Candidate Lab
 
-32. 单规则四分箱、类别箱、全指标和选箱入池（确定性分析、证据与 JSON/XLSX，以及证据绑定的选箱/合并和不可变候选资产纵切已完成；Strategy Pool 入池和逐月稳定性待续）；
+32. 单规则四分箱、类别箱、全指标和选箱入池（确定性分析、证据与 JSON/XLSX、证据绑定的选箱/合并、不可变候选资产及其 Strategy Pool 入池已完成；候选级逐月稳定性待续）；
 33. 加权自动规则树、方向检查、树图和写回；
 34. 交互树节点/候选/手工分裂内核；
 35. 交互树删节点、自动续建、可视化、代码和入池；
@@ -745,9 +747,9 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 ### Phase 4：Strategy Pool、回测与交付
 
-40. 稳定 rule id、pool CRUD 和完整 reorder；
-41. first-match 级联 waterfall；
-42. 单规则/策略逐月、件数和金额回测；
+40. 稳定 rule id、pool CRUD 和完整 reorder（Agent 自然语言纵切已完成，Workbench 展示待续）；
+41. first-match 级联 waterfall（approval/reject 当前 Pool 的 standalone/incremental/shadowed/remaining 已完成；其余类型待专属口径）；
+42. 单规则/策略逐月、件数和金额回测（approval/reject 当前 Pool 的总体、逐月、规则 incremental、标签/金额覆盖和基线 delta 首纵切已完成；单规则独立视图、分群×月及其余类型待续）；
 43. 分群操作符与分群×月；
 44. 策略/漏斗/月度/分群/code tabs；
 45. `StrategyReportBundle`、七步 Workflow、模块化 Excel/JSON/Markdown、额度定价扩展与结构化 provenance；

@@ -72,6 +72,7 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_pool_set_action",
     "strategy_pool_reorder",
     "strategy_pool_compile",
+    "strategy_pool_impact",
 )
 UNIVARIATE_BINNING_METHODS = (
     "equal_frequency",
@@ -652,6 +653,7 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
         "strategy_pool_compile",
     }
 )
+_STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
 _POOL_MUTATION_WORKFLOWS = _STRATEGY_POOL_WORKFLOWS - {"strategy_pool_compile"}
 _POOL_ACTION_TYPES = {
     "approval": frozenset({"approval", "reject", "review"}),
@@ -723,6 +725,94 @@ _POOL_STRATEGY_TYPE_VALUE_GROUNDING = {
         r"(?<![A-Za-z0-9_])segmentation(?![A-Za-z0-9_])|(?:分群|分层)"
     ),
 }
+_POOL_IMPACT_TARGET_RE = re.compile(
+    r"(?=.*(?:策略池|规则池|strategy(?:\s|-|_)*pool|\bpool\b))"
+    r"(?=.*(?:影响|效果|瀑布|逐月|通过率|坏账率|风险率|测算|评估|回测|"
+    r"impact|effect|waterfall|monthly|approval\s+rate|bad\s+rate|risk\s+rate|"
+    r"measure|assess|evaluat|backtest))",
+    re.IGNORECASE,
+)
+_POOL_IMPACT_POSITIVE_INTENT_RE = re.compile(
+    r"(?:测算|评估|分析|回测|计算|查看|看一下|看下)"
+    r"[^；;。.!?？\n]{0,160}?(?:影响|效果|瀑布|逐月|策略池|规则池)|"
+    r"(?:策略池|规则池)[^；;。.!?？\n]{0,160}?"
+    r"(?:测算|评估|分析|回测|计算|查看|看一下|看下)|"
+    r"(?<![A-Za-z0-9_])(?:measure|assess|evaluate|analy[sz]e|calculate|backtest)"
+    r"[^;.!?\n]{0,160}?(?:impact|effect|waterfall|monthly|pool)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_IMPACT_NEGATED_RE = re.compile(
+    r"(?:不要|不用|无需|先别|先不|暂不|取消|停止|禁止)"
+    r"[^；;。.!?？\n]{0,64}(?:测算|评估|分析|回测|影响|效果)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cancel|stop)"
+    r"[^;.!?\n]{0,64}(?:measure|assess|evaluate|analy[sz]e|calculate|backtest)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_IMPACT_NONCOMMAND_RE = re.compile(
+    r"[?？]|(?:能否|可否|是否|可以吗|能不能|如何|怎么|怎样|假设|假如|"
+    r"如果|若|演示|示范|举例|说明|解释|介绍|昨天|之前|此前|过去|上次|"
+    r"曾经|历史上|未来|以后|稍后|明天|下周|下月)"
+    r"[^；;。\n]{0,180}(?:策略池|规则池|影响|效果|测算|评估|回测)|"
+    r"(?<![A-Za-z0-9_])(?:can\s+you|could\s+you|would\s+you|what\s+if|"
+    r"how\s+to|example|demo|previously|yesterday|historically|later|tomorrow)"
+    r"[^;.!?\n]{0,180}(?:pool|impact|effect|measure|assess|backtest)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_IMPACT_REPORT_ONLY_RE = re.compile(
+    r"(?:只|仅)\s*(?:生成|出|写|整理|汇总)?\s*(?:报告|文档|汇报|总结)|"
+    r"(?:报告|文档|汇报|总结)\s*(?:即可|就行|only)|"
+    r"(?<![A-Za-z0-9_])(?:report|document|summary)\s+only"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_IMPACT_SECOND_OPERATION_RE = re.compile(
+    r"(?:加入|添加|入池|删除|移除|改动作|修改动作|重排|排序|编译|预览|"
+    r"采纳|采用|部署|上线|投产|生效|写回|回写|创建策略|生成策略|"
+    r"Vintage|迁徙率|迁徙矩阵|利润|收益|导出|下载)|"
+    r"(?<![A-Za-z0-9_])(?:add|insert|remove|delete|reorder|compile|preview|"
+    r"adopt|deploy|promote|activate|write[-\s]*back|create\s+strategy|"
+    r"vintage|roll[-\s]*rate|profit|export|download)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_IMPACT_BASELINE_MODE_RE = re.compile(
+    r"(?:相对|相较(?:于)?|相比(?:于)?|对比|比较| versus |\bvs\.?\b)"
+    r"[^；;。.!?？\n]{0,80}(?:基线|baseline|strategy[-_A-Za-z0-9]+)|"
+    r"(?:基线|baseline)[^；;。.!?？\n]{0,80}(?:对比|比较|影响|效果|vs)",
+    re.IGNORECASE,
+)
+_POOL_IMPACT_ABSOLUTE_MODE_RE = re.compile(
+    r"(?:绝对(?:效果|影响|口径)?|不(?:做|要|用)?(?:基线)?(?:对比|比较)|"
+    r"无需(?:基线)?(?:对比|比较))|"
+    r"(?<![A-Za-z0-9_])absolute(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])(?:without|no)\s+baseline(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_IMPACT_STRATEGY_ID_RE = re.compile(
+    r"(?<![A-Za-z0-9_])strategy-[A-Za-z0-9][A-Za-z0-9_-]*"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_IMPACT_DROP_NAN_TRUE_RE = re.compile(
+    r"(?:明确|确认|允许|同意)?\s*(?:丢弃|排除|剔除|删除)"
+    r"[^；;。.!?？\n]{0,24}(?:NaN|nan|空标签|缺失标签|无效标签)|"
+    r"drop[_\s-]*nan[_\s-]*labels?\s*(?:=|:)?\s*true|"
+    r"(?<![A-Za-z0-9_])(?:drop|exclude)[^;.!?\n]{0,24}"
+    r"(?:nan|missing)\s+labels?(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_IMPACT_DROP_NAN_NEGATED_RE = re.compile(
+    r"(?:不要|不|禁止|拒绝|不同意|未授权|不能)\s*"
+    r"(?:允许|确认|同意)?\s*(?:丢弃|排除|剔除|删除)"
+    r"[^；;。.!?？\n]{0,24}(?:NaN|nan|空标签|缺失标签|无效标签)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never)\s+(?:drop|exclude)"
+    r"[^;.!?\n]{0,24}(?:nan|missing)\s+labels?(?![A-Za-z0-9_])|"
+    r"drop[_\s-]*nan[_\s-]*labels?\s*(?:=|:)?\s*false",
+    re.IGNORECASE,
+)
 _POOL_PARTIAL_REORDER_RE = re.compile(
     r"(?:放|移|挪|排|调)(?:到|至|在)?(?:前面|后面|最前|末尾|最后|"
     r"第[一二三四五六七八九十百0-9]+(?:位|个|条))|"
@@ -2197,6 +2287,11 @@ def _validate_standard_workflow_payload(
             )
         elif workflow == "cross_matrix_cell_selection":
             normalized = _validate_cross_matrix_cell_selection_inputs(raw_inputs)
+        elif workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS:
+            normalized = _validate_strategy_pool_impact_inputs(
+                raw_inputs,
+                whitelist,
+            )
         elif workflow in _STRATEGY_POOL_WORKFLOWS:
             normalized = _validate_strategy_pool_workflow_inputs(
                 workflow,
@@ -3430,6 +3525,80 @@ def _validate_strategy_pool_workflow_inputs(
     return normalized
 
 
+def _validate_strategy_pool_impact_inputs(
+    inputs: Mapping[str, Any],
+    whitelist: tuple[str, ...],
+) -> dict[str, Any]:
+    """Validate only user-owned controls for read-only Pool impact evidence."""
+
+    workflow = "strategy_pool_impact"
+    allowed = {
+        "strategy_type",
+        "comparison_mode",
+        "baseline_strategy_id",
+        "month_col",
+        "loan_amount_col",
+        "overdue_amount_col",
+        "drop_nan_labels",
+    }
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    if "strategy_type" not in inputs:
+        raise _DraftValidationError(f"{workflow} 缺少 strategy_type。")
+    strategy_type = _required_text(
+        inputs["strategy_type"], name=f"{workflow} strategy_type"
+    )
+    if strategy_type not in {"approval", "reject"}:
+        raise _DraftValidationError(
+            "strategy_pool_impact 首个 V2 纵切只支持 approval 或 reject Pool；"
+            "limit、pricing 与 segmentation 的专属影响口径将在 V2 后续纵切交付，"
+            "当前不会套用准入/拒绝口径。"
+        )
+
+    comparison_mode = inputs.get("comparison_mode", "absolute")
+    if not isinstance(comparison_mode, str) or comparison_mode not in {
+        "absolute",
+        "vs_baseline",
+    }:
+        raise _DraftValidationError(
+            f"{workflow} comparison_mode 只能是 absolute 或 vs_baseline。"
+        )
+    baseline_strategy_id = None
+    if "baseline_strategy_id" in inputs:
+        baseline_strategy_id = _required_text(
+            inputs["baseline_strategy_id"],
+            name=f"{workflow} baseline_strategy_id",
+        )
+    if comparison_mode == "vs_baseline" and baseline_strategy_id is None:
+        raise _DraftValidationError(
+            f"{workflow} 使用 vs_baseline 时必须提供 baseline_strategy_id。"
+        )
+    if comparison_mode == "absolute" and baseline_strategy_id is not None:
+        raise _DraftValidationError(
+            f"{workflow} 使用 absolute 时禁止提供 baseline_strategy_id。"
+        )
+
+    normalized: dict[str, Any] = {
+        "strategy_type": strategy_type,
+        "comparison_mode": comparison_mode,
+    }
+    if baseline_strategy_id is not None:
+        normalized["baseline_strategy_id"] = baseline_strategy_id
+    for field in ("month_col", "loan_amount_col", "overdue_amount_col"):
+        if field in inputs:
+            normalized[field] = _workflow_column(
+                inputs[field],
+                name=f"{workflow} {field}",
+                whitelist=whitelist,
+            )
+    drop_nan_labels = inputs.get("drop_nan_labels", False)
+    if not isinstance(drop_nan_labels, bool):
+        raise _DraftValidationError(
+            f"{workflow} drop_nan_labels 必须是布尔值。"
+        )
+    normalized["drop_nan_labels"] = drop_nan_labels
+    return normalized
+
+
 def _strategy_pool_action(
     value: object,
     *,
@@ -4104,6 +4273,16 @@ def _ground_refinement_request(
     whitelist: tuple[str, ...],
 ) -> StrategyRequestCompilation:
     draft = result.draft
+    if _utterance_targets_strategy_pool_impact(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_pool_impact"
+    ):
+        return _clarification(
+            "原话明确要求 Strategy Pool 影响测算，只能编译为 strategy_pool_impact；"
+            "不能改路由到 Pool 修改、通用策略生命周期、报告或其他 Workflow。",
+            code="strategy_pool_impact_workflow_required",
+            fields=("workflow",),
+        )
     if (
         _utterance_targets_cross_matrix_cell_selection(utterance)
         and not (
@@ -4149,6 +4328,12 @@ def _ground_refinement_request(
         )
     if not isinstance(draft, StandardWorkflowRequestDraft):
         return result
+    if draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS:
+        return _ground_strategy_pool_impact_request(
+            utterance,
+            result,
+            whitelist=whitelist,
+        )
     if draft.workflow in _STRATEGY_POOL_WORKFLOWS:
         return _ground_strategy_pool_request(utterance, result)
     if draft.workflow == "automatic_tree_candidate_build":
@@ -4355,6 +4540,265 @@ def _ground_voting_candidate_build(
             fields=("n",),
         )
     return result
+
+
+def _utterance_targets_strategy_pool_impact(utterance: str) -> bool:
+    if _POOL_IMPACT_TARGET_RE.search(utterance) is None:
+        return False
+    signals = tuple(
+        match
+        for pattern in (
+            _POOL_IMPACT_POSITIVE_INTENT_RE,
+            _POOL_IMPACT_NEGATED_RE,
+            _POOL_IMPACT_NONCOMMAND_RE,
+            _POOL_IMPACT_REPORT_ONLY_RE,
+        )
+        for match in pattern.finditer(utterance)
+    )
+    if not signals:
+        return False
+    other_operations = tuple(_POOL_IMPACT_SECOND_OPERATION_RE.finditer(utterance))
+    if not other_operations:
+        return True
+    if _POOL_IMPACT_NEGATED_RE.search(utterance) is not None:
+        # A negated impact clause followed by a separate positive operation
+        # (for example "不要回测，只编译") must not hijack that operation.
+        return False
+    # "评估把 X 加入策略池的影响" describes one hypothetical add: its impact
+    # phrase encloses the add verb and must stay on the existing add guardrail.
+    # A standalone "测算 Pool 影响，然后编译/部署" span does not overlap the
+    # second operation and must still force the impact-specific clarification.
+    return any(
+        all(
+            signal.end() <= operation.start()
+            or operation.end() <= signal.start()
+            for operation in other_operations
+        )
+        for signal in signals
+    )
+
+
+def _ground_strategy_pool_impact_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+    *,
+    whitelist: tuple[str, ...],
+) -> StrategyRequestCompilation:
+    """Prove every executable measurement control came from this utterance."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if (
+        _POOL_IMPACT_NEGATED_RE.search(utterance)
+        or _POOL_IMPACT_NONCOMMAND_RE.search(utterance)
+        or _POOL_IMPACT_REPORT_ONLY_RE.search(utterance)
+    ):
+        return _clarification(
+            "请用当前轮、肯定式的单一命令明确要求 Strategy Pool 影响测算；"
+            "否定、问句、历史/未来描述或仅生成报告不会执行测算。",
+            code="strategy_pool_impact_positive_command_required",
+            fields=("measurement_intent",),
+        )
+    if _POOL_IMPACT_POSITIVE_INTENT_RE.search(utterance) is None:
+        return _clarification(
+            "原话没有明确授权执行 Strategy Pool 影响测算。请明确说出要测算的"
+            " approval 或 reject Pool；本 Workflow 只生成只读证据。",
+            code="strategy_pool_impact_positive_command_required",
+            fields=("measurement_intent",),
+        )
+    if _POOL_IMPACT_SECOND_OPERATION_RE.search(utterance):
+        return _clarification(
+            "Strategy Pool 影响测算必须是当前轮唯一操作；入池、删除、改动作、重排、"
+            "编译、创建策略、写回、采纳或部署必须拆成后续请求。",
+            code="strategy_pool_impact_single_operation_required",
+            fields=("workflow",),
+        )
+
+    missing_controls: list[str] = []
+    strategy_type = str(inputs.get("strategy_type") or "")
+    strategy_type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    strategy_type_mentions = _voting_strategy_type_mentions(utterance)
+    mentioned_strategy_types = {item[0] for item in strategy_type_mentions}
+    selected_type_is_negated = any(
+        item[0] == strategy_type
+        and _pool_impact_span_is_negated(utterance, start=item[1])
+        for item in strategy_type_mentions
+    )
+    if (
+        strategy_type_pattern is None
+        or strategy_type_pattern.search(utterance) is None
+        or mentioned_strategy_types != {strategy_type}
+        or selected_type_is_negated
+    ):
+        missing_controls.append(f"strategy_type {strategy_type or 'unknown'}")
+
+    comparison_mode = str(inputs.get("comparison_mode") or "absolute")
+    mentions_baseline_comparison = (
+        _POOL_IMPACT_BASELINE_MODE_RE.search(utterance) is not None
+    )
+    mentions_absolute = _POOL_IMPACT_ABSOLUTE_MODE_RE.search(utterance) is not None
+    if comparison_mode == "vs_baseline":
+        if not mentions_baseline_comparison or mentions_absolute:
+            missing_controls.append("comparison_mode vs_baseline")
+        baseline_strategy_id = str(inputs.get("baseline_strategy_id") or "")
+        baseline_id_mentions = tuple(
+            _POOL_IMPACT_STRATEGY_ID_RE.finditer(utterance)
+        )
+        positively_mentioned_ids = {
+            match.group(0).casefold()
+            for match in baseline_id_mentions
+            if not _pool_impact_span_is_negated(utterance, start=match.start())
+        }
+        negated_ids = {
+            match.group(0).casefold()
+            for match in baseline_id_mentions
+            if _pool_impact_span_is_negated(utterance, start=match.start())
+        }
+        selected_id = baseline_strategy_id.casefold()
+        if (
+            not baseline_strategy_id
+            or not _utterance_contains_token(utterance, baseline_strategy_id)
+            or positively_mentioned_ids != {selected_id}
+            or selected_id in negated_ids
+        ):
+            missing_controls.append(
+                baseline_strategy_id or "baseline_strategy_id"
+            )
+    elif mentions_baseline_comparison or (
+        _POOL_IMPACT_STRATEGY_ID_RE.search(utterance) is not None
+    ):
+        missing_controls.append("comparison_mode vs_baseline")
+
+    mentioned_columns = tuple(
+        column for column in whitelist if _utterance_contains_token(utterance, column)
+    )
+    explicit_column_bindings = _pool_impact_explicit_column_bindings(
+        utterance,
+        whitelist,
+    )
+    for field, values in explicit_column_bindings.items():
+        selected = inputs.get(field)
+        if len(values) != 1 or selected not in values:
+            expected = "/".join(sorted(values)) or field
+            missing_controls.append(f"{field} {expected}")
+    for field in ("month_col", "loan_amount_col", "overdue_amount_col"):
+        value = inputs.get(field)
+        if isinstance(value, str):
+            if (
+                not _utterance_contains_token(utterance, value)
+                or _pool_impact_token_is_negated(utterance, value)
+                or any(
+                    other != value
+                    and _pool_impact_tokens_are_alternatives(
+                        utterance, value, other
+                    )
+                    for other in mentioned_columns
+                )
+            ):
+                missing_controls.append(f"{field} {value}")
+    if inputs.get("drop_nan_labels") is True and (
+        _POOL_IMPACT_DROP_NAN_TRUE_RE.search(utterance) is None
+        or _POOL_IMPACT_DROP_NAN_NEGATED_RE.search(utterance) is not None
+    ):
+        missing_controls.append("drop_nan_labels=true")
+    if missing_controls:
+        rendered = "、".join(dict.fromkeys(missing_controls))
+        return _clarification(
+            "Strategy Pool 影响测算只能使用用户原话中的 Pool 类型、基线模式/完整 ID、"
+            "精确列名和空标签授权；当前无法核对："
+            f"{rendered}。平台不会采用 LLM 猜测的数据绑定、列、hash、指标或策略。",
+            code="strategy_pool_impact_controls_not_grounded",
+            fields=tuple(dict.fromkeys(missing_controls)),
+        )
+    return result
+
+
+def _pool_impact_span_is_negated(utterance: str, *, start: int) -> bool:
+    prefix = utterance[max(0, start - 32) : start]
+    return re.search(
+        r"(?:不要|别|不用|不使用|禁止|排除|剔除|而非|不是|并非)"
+        r"[^，,；;。.!?？\n]{0,16}$|"
+        r"(?<![A-Za-z0-9_])(?:do\s+not|don't|not|exclude|without)"
+        r"[^,;.!?\n]{0,16}$",
+        prefix,
+        re.IGNORECASE,
+    ) is not None
+
+
+def _pool_impact_token_is_negated(utterance: str, token: str) -> bool:
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    )
+    return any(
+        _pool_impact_span_is_negated(utterance, start=match.start())
+        for match in pattern.finditer(utterance)
+    )
+
+
+def _pool_impact_explicit_column_bindings(
+    utterance: str,
+    whitelist: tuple[str, ...],
+) -> dict[str, set[str]]:
+    labels = {
+        "month_col": (
+            r"(?:月份|月度|申请月|观察月)(?:字段|列)|"
+            r"(?<![A-Za-z0-9_])month(?:_col|\s+column)(?![A-Za-z0-9_])"
+        ),
+        "loan_amount_col": (
+            r"(?:放款|贷款|借款)金额(?:字段|列)|"
+            r"(?<![A-Za-z0-9_])loan(?:_amount_col|\s+amount\s+column)"
+            r"(?![A-Za-z0-9_])"
+        ),
+        "overdue_amount_col": (
+            r"逾期金额(?:字段|列)|"
+            r"(?<![A-Za-z0-9_])overdue(?:_amount_col|\s+amount\s+column)"
+            r"(?![A-Za-z0-9_])"
+        ),
+    }
+    bindings = {field: set() for field in labels}
+    for column in sorted(whitelist, key=len, reverse=True):
+        token = (
+            rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])"
+        )
+        for field, label in labels.items():
+            before = re.compile(
+                rf"(?:{label})\s*(?:(?:为|是|用|使用|选择|指定)\s*)?"
+                rf"(?:=|:|：)?\s*{token}",
+                re.IGNORECASE,
+            )
+            after = re.compile(
+                rf"{token}\s*(?:(?:作为|用作|是|为)\s*)?(?:{label})",
+                re.IGNORECASE,
+            )
+            if before.search(utterance) or after.search(utterance):
+                bindings[field].add(column)
+    return {field: values for field, values in bindings.items() if values}
+
+
+def _pool_impact_tokens_are_alternatives(
+    utterance: str,
+    left_token: str,
+    right_token: str,
+) -> bool:
+    token_patterns = (
+        re.compile(
+            rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        )
+        for token in (left_token, right_token)
+    )
+    left_matches, right_matches = (tuple(pattern.finditer(utterance)) for pattern in token_patterns)
+    for left in left_matches:
+        for right in right_matches:
+            first, second = sorted((left, right), key=lambda item: item.start())
+            between = utterance[first.end() : second.start()]
+            if len(between) <= 24 and re.search(
+                r"(?:或者|或是|还是|或|/|\bor\b)", between, re.IGNORECASE
+            ):
+                return True
+    return False
 
 
 def _voting_n_bindings(utterance: str) -> tuple[tuple[int, int | None], ...]:
@@ -7227,6 +7671,39 @@ def _standard_workflow_confirmation_text(
             "平台只读编译当前 task Pool 为 canonical StrategySpec 并计算 design hash",
             "结果只是草案预览，不会创建已采纳策略，也不会采纳或部署",
         ]
+    elif draft.workflow == "strategy_pool_impact":
+        mode_label = (
+            "相对基线"
+            if inputs["comparison_mode"] == "vs_baseline"
+            else "绝对效果"
+        )
+        details = [
+            "已识别为〔Strategy Pool 影响测算 Workflow〕",
+            f"策略类型：{inputs['strategy_type']}",
+            f"比较口径：{mode_label}",
+            "平台将绑定当前非空 Pool、活动 DataWorkspace、数据 hash、"
+            "确认的目标列和语义版本，确定性计算级联 waterfall 与风险影响",
+            "月份/放款金额/逾期金额列未显式提供时只会采用唯一确认的语义角色；"
+            "没有角色则对应结果 unavailable，多个角色会先澄清",
+            "本步骤只生成可下载的只读影响证据；不会创建、修改、采纳或部署策略",
+        ]
+        if "baseline_strategy_id" in inputs:
+            details.append(f"基线策略 ID：{inputs['baseline_strategy_id']}")
+        for field, label in (
+            ("month_col", "月份列"),
+            ("loan_amount_col", "放款金额列"),
+            ("overdue_amount_col", "逾期金额列"),
+        ):
+            if field in inputs:
+                details.append(f"{label}：{inputs[field]}")
+        details.append(
+            "空标签处理："
+            + (
+                "用户明确允许保留样本行、仅从风险分母排除"
+                if inputs["drop_nan_labels"]
+                else "不默认从风险分母排除"
+            )
+        )
     else:  # pragma: no cover - validated workflow exhaustiveness
         raise ValueError(f"unsupported standard workflow {draft.workflow}")
     details.append(
@@ -7740,6 +8217,14 @@ def _user_prompt(
         "不能直接入池。source ID 必须与唯一正向入池命令位于同一子句，不能从否定子句、"
         "reason、引用或代词上下文借用；未来/条件指令、问句、how-to、演示和测试也"
         "必须澄清。"
+        "对于 strategy_pool_impact，只能抄录用户明确的 approval/reject Pool 类型，"
+        "可选 absolute/vs_baseline 比较模式、完整 baseline_strategy_id、精确 month_col/"
+        "loan_amount_col/overdue_amount_col 和明确的 drop_nan_labels 布尔授权。普通肯定式"
+        "请求可默认 absolute；vs_baseline 必须同时有原话中的比较表达和完整基线 ID。"
+        "禁止输出 dataset/target、Pool revision/hash、workspace、sample binding、semantic hash、"
+        "metrics、conditions 或 strategy_spec。用户未指定月份/金额列时必须省略，平台只会"
+        "使用唯一确认的语义角色；没有角色则 unavailable，多个角色则澄清，Agent 不得猜列。"
+        "limit/pricing/segmentation、否定/问句/历史/仅报告或同轮修改/采纳/部署必须澄清。"
     )
 
 

@@ -1046,6 +1046,128 @@ STRATEGY_POOL_COMPILE = WorkflowTemplate(
 )
 
 
+STRATEGY_POOL_IMPACT = WorkflowTemplate(
+    id="strategy_pool_impact",
+    title="测算 Strategy Pool 影响",
+    goal_patterns=(
+        "测算策略池影响",
+        "策略池 waterfall 回测",
+        "measure strategy pool impact",
+    ),
+    slots=(
+        SlotSpec("strategy_type", True, "user", "Explicit approval/reject Pool type"),
+        SlotSpec(
+            "expected_pool_revision",
+            True,
+            "task_context",
+            "Current nonempty Pool revision",
+        ),
+        SlotSpec(
+            "expected_pool_snapshot_hash",
+            True,
+            "task_context",
+            "Current Pool snapshot hash",
+        ),
+        SlotSpec("dataset_id", True, "task_context", "Active task-owned dataset id"),
+        SlotSpec(
+            "expected_dataset_content_hash",
+            True,
+            "task_context",
+            "Active dataset content hash",
+        ),
+        SlotSpec(
+            "workspace_revision",
+            True,
+            "task_context",
+            "Current DataWorkspace revision",
+        ),
+        SlotSpec(
+            "workspace_generation",
+            True,
+            "task_context",
+            "Current DataWorkspace analysis generation",
+        ),
+        SlotSpec(
+            "semantic_mapping_hash",
+            True,
+            "task_context",
+            "Confirmed semantic mapping hash",
+        ),
+        SlotSpec("target_col", True, "task_context", "Confirmed binary target column"),
+        SlotSpec(
+            "comparison_mode",
+            True,
+            "user",
+            "Absolute or explicitly requested baseline comparison",
+        ),
+        SlotSpec(
+            "baseline_strategy_id",
+            False,
+            "user",
+            "Task-owned same-type canonical baseline strategy",
+        ),
+        SlotSpec(
+            "month_col",
+            False,
+            "user",
+            "Explicit column or unique confirmed month semantic role",
+        ),
+        SlotSpec(
+            "loan_amount_col",
+            False,
+            "user",
+            "Explicit column or unique confirmed loan amount role",
+        ),
+        SlotSpec(
+            "overdue_amount_col",
+            False,
+            "user",
+            "Explicit column or unique confirmed overdue amount role",
+        ),
+        SlotSpec(
+            "drop_nan_labels",
+            False,
+            "user",
+            "Explicitly authorized risk-denominator exclusion retaining sample rows",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="测算策略池影响",
+            tool_ref=ToolRef("strategy", "measure_pool_impact"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "expected_pool_revision": "{slot:expected_pool_revision}",
+                "expected_pool_snapshot_hash": "{slot:expected_pool_snapshot_hash}",
+                "dataset_id": "{slot:dataset_id}",
+                "expected_dataset_content_hash": (
+                    "{slot:expected_dataset_content_hash}"
+                ),
+                "workspace_revision": "{slot:workspace_revision}",
+                "workspace_generation": "{slot:workspace_generation}",
+                "semantic_mapping_hash": "{slot:semantic_mapping_hash}",
+                "target_col": "{slot:target_col}",
+                "comparison_mode": "{slot:comparison_mode}",
+                "baseline_strategy_id": "{slot:baseline_strategy_id}",
+                "month_col": "{slot:month_col}",
+                "loan_amount_col": "{slot:loan_amount_col}",
+                "overdue_amount_col": "{slot:overdue_amount_col}",
+                "drop_nan_labels": "{slot:drop_nan_labels}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "assessment_id"}),
+                PostCheck("nonempty", {"field": "content_hash"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 _LIMIT_PRICING_INPUTS = {
     "dataset_id": "{slot:dataset_id}",
     "score_col": "{slot:score_col}",

@@ -50,6 +50,13 @@ from marvis.packs.strategy.pricing import (
     PricingParams,
     limit_pricing_matrix,
 )
+from marvis.packs.strategy.pool_impact import (
+    STRATEGY_POOL_IMPACT_PRODUCER_VERSION,
+    STRATEGY_POOL_IMPACT_SCHEMA_VERSION,
+    build_strategy_pool_impact_assessment,
+    canonical_strategy_pool_impact_json,
+    validate_strategy_pool_impact_assessment,
+)
 from marvis.packs.strategy.profit import ProfitParams, profit_calc, vintage_profit
 from marvis.packs.strategy.roll_rate import roll_rate_matrix
 from marvis.packs.strategy.rules import CandidateRule, evaluate_rule_set, mine_rules
@@ -86,6 +93,8 @@ __all__ = [
     "ScoreBand",
     "STRATEGY_DSL_SCHEMA_VERSION",
     "STRATEGY_BACKTEST_SCHEMA_VERSION",
+    "STRATEGY_POOL_IMPACT_PRODUCER_VERSION",
+    "STRATEGY_POOL_IMPACT_SCHEMA_VERSION",
     "Strategy",
     "StrategyAction",
     "StrategyBacktestResult",
@@ -102,7 +111,9 @@ __all__ = [
     "backtest_record_payload",
     "build_strategy",
     "build_strategy_from_spec",
+    "build_strategy_pool_impact_assessment",
     "canonical_strategy_json",
+    "canonical_strategy_pool_impact_json",
     "compare_strategies",
     "limit_pricing_matrix",
     "limit_metrics",
@@ -117,6 +128,7 @@ __all__ = [
     "roll_rate_matrix",
     "run_typed_backtest",
     "tradeoff_view",
+    "validate_strategy_pool_impact_assessment",
     "vintage_curve",
     "vintage_summary",
     "CandidateRule",
