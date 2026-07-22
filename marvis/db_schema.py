@@ -46,6 +46,8 @@ _MIGRATION_TABLES = frozenset({
     "strategy_candidate_pool_revisions_v1_archive",
     "strategy_candidate_pool_items_v1_archive",
     "strategy_automatic_tree_apply_runs",
+    "strategy_project_context_heads",
+    "strategy_project_context_revisions",
 })
 
 # ARCH-10: schema_version mechanism.
@@ -158,7 +160,12 @@ _MIGRATION_TABLES = frozenset({
 # complete canonical Strategy DSL.  Legacy compatibility columns cannot encode
 # both typed action values and optional row-output aliases, so they cannot prove
 # full DSL integrity by themselves.
-SCHEMA_VERSION = 18
+#
+# _migration_019_strategy_project_context adds one task-scoped mutable head and
+# an append-only revision chain for the governed StrategyProjectContext.  The
+# database owns lineage/head integrity while the repository revalidates the
+# canonical contract and its content hashes on every read and write.
+SCHEMA_VERSION = 19
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -2666,6 +2673,222 @@ def _migration_018_strategy_dsl_content_hash(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_019_strategy_project_context(conn: sqlite3.Connection) -> None:
+    """Add the immutable StrategyProjectContext revision ledger and CAS head."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_project_context_revisions (
+            revision_id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL,
+            producer_version TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            parent_revision_id TEXT,
+            parent_state_hash TEXT,
+            operation_kind TEXT NOT NULL,
+            operation_hash TEXT NOT NULL
+                CHECK(length(operation_hash) = 64)
+                CHECK(operation_hash NOT GLOB '*[^0-9a-f]*'),
+            revision_json TEXT NOT NULL CHECK(json_valid(revision_json)),
+            state_hash TEXT NOT NULL
+                CHECK(length(state_hash) = 64)
+                CHECK(state_hash NOT GLOB '*[^0-9a-f]*'),
+            content_hash TEXT NOT NULL
+                CHECK(length(content_hash) = 64)
+                CHECK(content_hash NOT GLOB '*[^0-9a-f]*'),
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, revision),
+            UNIQUE(revision_id, task_id),
+            CHECK(
+                (revision = 1
+                 AND parent_revision_id IS NULL
+                 AND parent_state_hash IS NULL)
+                OR
+                (revision > 1
+                 AND parent_revision_id IS NOT NULL
+                 AND length(parent_state_hash) = 64
+                 AND parent_state_hash NOT GLOB '*[^0-9a-f]*')
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(parent_revision_id, task_id)
+                REFERENCES strategy_project_context_revisions(revision_id, task_id)
+                DEFERRABLE INITIALLY DEFERRED
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_project_context_revisions_latest
+            ON strategy_project_context_revisions(
+                task_id, revision DESC, created_at DESC, revision_id DESC
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_strategy_project_context_revisions_operation
+            ON strategy_project_context_revisions(
+                task_id, COALESCE(parent_revision_id, ''), operation_hash
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_project_context_heads (
+            task_id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.project-context-head.v1'),
+            current_revision INTEGER NOT NULL DEFAULT 0
+                CHECK(current_revision >= 0),
+            current_revision_id TEXT,
+            current_state_hash TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK(
+                (current_revision = 0
+                 AND current_revision_id IS NULL
+                 AND current_state_hash IS NULL)
+                OR
+                (current_revision >= 1
+                 AND current_revision_id IS NOT NULL
+                 AND length(current_state_hash) = 64
+                 AND current_state_hash NOT GLOB '*[^0-9a-f]*')
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(current_revision_id, task_id)
+                REFERENCES strategy_project_context_revisions(revision_id, task_id)
+                DEFERRABLE INITIALLY DEFERRED
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_revisions_parent
+        BEFORE INSERT ON strategy_project_context_revisions
+        WHEN (
+            (NEW.revision = 1
+             AND (NEW.parent_revision_id IS NOT NULL
+                  OR NEW.parent_state_hash IS NOT NULL))
+            OR
+            (NEW.revision > 1 AND NOT EXISTS (
+                SELECT 1
+                  FROM strategy_project_context_revisions AS parent
+                 WHERE parent.revision_id = NEW.parent_revision_id
+                   AND parent.task_id = NEW.task_id
+                   AND parent.revision = NEW.revision - 1
+                   AND parent.state_hash = NEW.parent_state_hash
+            ))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy project context parent mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_revisions_head_parent
+        BEFORE INSERT ON strategy_project_context_revisions
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategy_project_context_heads AS head
+             WHERE head.task_id = NEW.task_id
+               AND head.current_revision = NEW.revision - 1
+               AND head.current_revision_id IS NEW.parent_revision_id
+               AND head.current_state_hash IS NEW.parent_state_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy project context revision is not based on head');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_heads_target_insert
+        BEFORE INSERT ON strategy_project_context_heads
+        WHEN NEW.current_revision > 0 AND NOT EXISTS (
+            SELECT 1
+              FROM strategy_project_context_revisions AS revision
+             WHERE revision.revision_id = NEW.current_revision_id
+               AND revision.task_id = NEW.task_id
+               AND revision.revision = NEW.current_revision
+               AND revision.state_hash = NEW.current_state_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy project context head mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_heads_target_update
+        BEFORE UPDATE ON strategy_project_context_heads
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategy_project_context_revisions AS revision
+             WHERE revision.revision_id = NEW.current_revision_id
+               AND revision.task_id = NEW.task_id
+               AND revision.revision = NEW.current_revision
+               AND revision.state_hash = NEW.current_state_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy project context head mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_heads_immutable_fields
+        BEFORE UPDATE ON strategy_project_context_heads
+        WHEN NEW.task_id IS NOT OLD.task_id
+          OR NEW.schema_version IS NOT OLD.schema_version
+          OR NEW.created_at IS NOT OLD.created_at
+          OR NEW.current_revision <> OLD.current_revision + 1
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy project context head is append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_revisions_immutable_update
+        BEFORE UPDATE ON strategy_project_context_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_project_context_revisions are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_revisions_immutable_delete
+        BEFORE DELETE ON strategy_project_context_revisions
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_project_context_revisions are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_project_context_heads_immutable_delete
+        BEFORE DELETE ON strategy_project_context_heads
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_project_context_heads are task-owned');
+        END
+        """
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -2692,6 +2915,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (16, _migration_016_strategy_candidate_pool_v2),
     (17, _migration_017_automatic_tree_apply_runs),
     (18, _migration_018_strategy_dsl_content_hash),
+    (19, _migration_019_strategy_project_context),
 ]
 
 

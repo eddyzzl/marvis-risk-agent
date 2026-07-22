@@ -610,7 +610,10 @@ def test_migration_017_is_additive_idempotent_and_guards_column_collision(tmp_pa
     init_db(db_path)
     init_db(db_path)
     with connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0]
+            == db_schema_module.SCHEMA_VERSION
+        )
         assert conn.execute(
             "SELECT id FROM tasks WHERE id = 'preserved-task'"
         ).fetchone()
@@ -668,7 +671,7 @@ def test_migration_017_is_additive_idempotent_and_guards_column_collision(tmp_pa
 
 
 def test_schema_version_registry_includes_migration_017():
-    assert db_schema_module.SCHEMA_VERSION == 18
+    assert db_schema_module.SCHEMA_VERSION >= 17
     assert (
         17,
         db_schema_module._migration_017_automatic_tree_apply_runs,
@@ -676,7 +679,7 @@ def test_schema_version_registry_includes_migration_017():
 
 
 def test_schema_version_registry_includes_migration_018():
-    assert db_schema_module._MIGRATIONS[-1] == (
+    assert (
         18,
         db_schema_module._migration_018_strategy_dsl_content_hash,
-    )
+    ) in db_schema_module._MIGRATIONS

@@ -522,9 +522,9 @@ def test_schema_v17_and_initial_snapshot_are_immutable_and_idempotent(
     tmp_path: Path,
 ) -> None:
     db_path, _tasks, task, _other, artifacts, source = _seed(tmp_path)
-    assert SCHEMA_VERSION == 18
+    assert SCHEMA_VERSION >= 16
     with connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
     entries = [
         _entry(source, suffix="a", position=0),
@@ -655,7 +655,7 @@ def test_migration_016_archives_real_v15_draft_and_starts_v2_cas_chain(
     assert legacy["pool_path"].read_bytes() == legacy["pool_bytes"]
 
     with connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert (
             conn.execute(
                 "SELECT COUNT(*) FROM strategy_candidate_pools_v1_archive"

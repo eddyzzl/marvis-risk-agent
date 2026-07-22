@@ -1166,7 +1166,7 @@ def test_init_db_migration_009_backfills_canonical_strategy_asset_status(tmp_pat
             "SELECT id, status, asset_status FROM strategies ORDER BY id"
         ).fetchall()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 18
+    assert version == db_schema_module.SCHEMA_VERSION
     assert "asset_status" in columns
     assert [tuple(row) for row in rows] == [
         ("adopted-strategy", "adopted", "adopted_local"),
@@ -1228,7 +1228,7 @@ def test_init_db_migration_010_adds_task_artifact_registry_to_v9_database(tmp_pa
             row[1] for row in conn.execute("PRAGMA index_list(task_artifacts)")
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 18
+    assert version == db_schema_module.SCHEMA_VERSION
     assert columns == {
         "id",
         "task_id",
@@ -1264,7 +1264,7 @@ def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
         }
         task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 18
+    assert version == db_schema_module.SCHEMA_VERSION
     assert columns == {
         "task_id",
         "schema_version",
@@ -1312,7 +1312,7 @@ def test_init_db_migration_013_adds_data_analysis_runs_to_v12_database(tmp_path)
         }
         task = conn.execute("SELECT id FROM tasks WHERE id = 'task-1'").fetchone()
 
-    assert version == db_schema_module.SCHEMA_VERSION == 18
+    assert version == db_schema_module.SCHEMA_VERSION
     assert columns == {
         "id",
         "schema_version",
@@ -1386,7 +1386,7 @@ def test_init_db_migration_014_adds_transform_runs_and_lineage_to_v13_database(
             )
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 18
+    assert version == db_schema_module.SCHEMA_VERSION
     assert run_columns == {
         "id",
         "schema_version",
@@ -1486,7 +1486,7 @@ def test_init_db_migration_016_upgrades_candidate_pool_ledger_from_v14_database(
             )
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 18
+    assert version == db_schema_module.SCHEMA_VERSION
     assert {
         "strategy_candidate_pools",
         "strategy_candidate_pool_revisions",
