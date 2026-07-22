@@ -28,19 +28,51 @@ from marvis.packs.strategy.dsl import (
     semantic_expression_key,
 )
 from marvis.packs.strategy.errors import StrategyError
-from marvis.repositories.strategy_pool import (
-    ABSENT_POOL_REVISION,
-    ABSENT_POOL_SNAPSHOT_HASH,
-    strategy_pool_id,
-    strategy_pool_operation_hash,
-    strategy_pool_revision_id,
-    strategy_pool_snapshot_hash as _repository_snapshot_hash,
-)
 
 
 POOL_SCHEMA_VERSION = "strategy.candidate-pool.v2"
 POOL_PRODUCER_VERSION = "strategy.candidate-pool/2"
 SELECTED_STRATEGY_DESIGN_SCHEMA_VERSION = "strategy.selected-strategy-design.v2"
+ABSENT_POOL_REVISION = 0
+ABSENT_POOL_SNAPSHOT_HASH = hashlib.sha256(
+    b"strategy.candidate-pool.absent.v2"
+).hexdigest()
+
+
+# Keep persistence imports behind the pure pool boundary.  The repository must
+# import candidate-fragment validation, which first executes this package's
+# ``__init__``; importing the repository eagerly here therefore made isolated
+# repository tests depend on unrelated prior import order.
+def strategy_pool_id(task_id: str, strategy_type: str) -> str:
+    from marvis.repositories.strategy_pool import strategy_pool_id as repository_id
+
+    return repository_id(task_id, strategy_type)
+
+
+def strategy_pool_operation_hash(**kwargs) -> str:
+    from marvis.repositories.strategy_pool import (
+        strategy_pool_operation_hash as repository_operation_hash,
+    )
+
+    return repository_operation_hash(**kwargs)
+
+
+def strategy_pool_revision_id(
+    pool_id: str,
+    parent_revision_id: str | None,
+    operation_hash: str,
+) -> str:
+    from marvis.repositories.strategy_pool import (
+        strategy_pool_revision_id as repository_revision_id,
+    )
+
+    return repository_revision_id(pool_id, parent_revision_id, operation_hash)
+
+
+def _repository_snapshot_hash(snapshot: Mapping[str, Any]) -> str:
+    from marvis.repositories.strategy_pool import strategy_pool_snapshot_hash
+
+    return strategy_pool_snapshot_hash(snapshot)
 
 _STATUS = "draft"
 _VALIDATION_STATUS = "unvalidated"
