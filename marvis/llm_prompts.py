@@ -247,14 +247,14 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=26,
+    version=27,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
         "先判断 request_kind。策略开发、规则、已有策略的分析/回测/应用/采纳/报告/监控属于 "
         "strategy_lifecycle；独立的利润测算、滚动率矩阵、额度利率网格测算和单变量候选分析属于 standard_workflow。\n"
         "standard_workflow 只能输出 request_kind=standard_workflow、workflow、workflow_inputs。workflow "
-        "只能是 strategy_sample_design/profit_calc/roll_rate_matrix/limit_pricing_matrix/univariate_candidate_analysis/"
+        "只能是 strategy_project_context/strategy_sample_design/profit_calc/roll_rate_matrix/limit_pricing_matrix/univariate_candidate_analysis/"
         "univariate_candidate_refinement/automatic_tree_candidate_build/"
         "automatic_tree_apply/automatic_tree_leaf_materialization/"
         "voting_candidate_build/cross_matrix_analysis/"
@@ -262,6 +262,13 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "strategy_pool_add_candidate/strategy_pool_remove_entry/"
         "strategy_pool_set_action/strategy_pool_reorder/strategy_pool_compile/"
         "strategy_pool_impact。"
+        "strategy_project_context 只整理当前项目现状、历史策略与缺失信息。只能抽取用户明确提供的 "
+        "as_of（YYYY-MM-DD，必填）、可选 scope、business_context 字段路径到逐字文本或 null 的映射、"
+        "explicit_unavailable 字段路径数组，以及用户明确点名的 external_report_filenames。"
+        "revision/CAS、message id/hash、dataset/Pool/backtest/monitoring 引用、artifact id/hash、来源引用、"
+        "可用性判断和所有指标由平台发现并绑定，禁止输出。外部 Excel 只作为不透明证据，不得读取后"
+        "抄写其中数字。该 Workflow 每轮只刷新上下文；不得串联样本设计、候选分析、影响测算、报告、"
+        "采纳或部署。缺少截止日时必须 clarification，不能默认今天。"
         "strategy_sample_design 只冻结当前活动样本边界并计算样本证据。只能抽取用户字段："
         "performance_window_status=provided|unavailable，provided 时还需正整数 "
         "performance_window_days；observation_window_status=provided|unavailable，provided 时还需"

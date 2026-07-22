@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -71,6 +72,7 @@ from marvis.agent.strategy_request_compiler import (
     StandardWorkflowRequestDraft,
     StrategyRequestDraft,
     compile_strategy_request,
+    utterance_targets_strategy_project_context,
     utterance_targets_strategy_sample_design,
     validate_strategy_request,
 )
@@ -168,6 +170,10 @@ from marvis.repositories.strategy_pool import (
     ABSENT_POOL_SNAPSHOT_HASH,
     StrategyCandidatePoolRepository,
     strategy_pool_snapshot_hash,
+)
+from marvis.repositories.strategy_project_context import (
+    StrategyProjectContextDataError,
+    StrategyProjectContextRepository,
 )
 from marvis.packs.strategy.candidate_asset import (
     canonical_candidate_asset_json,
@@ -1542,7 +1548,7 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
 )
 _STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
-    r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|冻结|探索|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
+    r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|冻结|探索|整理|梳理|收集|刷新|更新|复盘|盘点|记录|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
     r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
     r"添加|加入|入池|删除|移除|排序|重排|改为|编译|预览|"
     r"develop|design|create|build|train|materialize|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
@@ -1550,7 +1556,7 @@ _STRATEGY_REQUEST_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_SUBJECT_RE = re.compile(
-    r"(?:策略|策略样本|样本设计|样本边界|策略池|规则池|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|自动树|决策树|叶子|叶节点|投票|Voting|n[-_ ]?of[-_ ]?k|(?:二维|2\s*[dD])?\s*(?:交叉|cross)\s*(?:矩阵|matrix)|cutoff|利润|收益|"
+    r"(?:策略|策略项目上下文|项目上下文|当前项目(?:现状|情况)|历史(?:版本)?策略|策略样本|样本设计|样本边界|策略池|规则池|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|自动树|决策树|叶子|叶节点|投票|Voting|n[-_ ]?of[-_ ]?k|(?:二维|2\s*[dD])?\s*(?:交叉|cross)\s*(?:矩阵|matrix)|cutoff|利润|收益|"
     r"催收|滚动率|迁徙率|迁徙矩阵|定价矩阵|额度矩阵|网格|ROA|"
     r"roll(?:\s|-|_)*rate|strategy(?:\s|-|_)*pool|pool|strategy|approval|reject|limit|pricing|segment|rule|candidate|automatic(?:\s|-|_)*tree|decision(?:\s|-|_)*tree|leaf|"
     r"candidate\s+bins?|\bbins?\b|univariate|binning|sample(?:\s|-|_)*design|profit|collection)",
@@ -1588,6 +1594,36 @@ _STRATEGY_POOL_IMPACT_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 _STRATEGY_NAN_LABEL_META_KEY = "strategy_nan_label_confirmation"
+_PROJECT_CONTEXT_UNAVAILABLE_ANSWER_RE = re.compile(
+    r"(?:暂时没有|暂缺|暂无|没有|未提供|不可用|不知道|未知|待补充|"
+    r"unavailable|not\s+available|unknown|missing)",
+    re.IGNORECASE,
+)
+_PROJECT_CONTEXT_ALL_PENDING_RE = re.compile(
+    r"(?:这些|上述|以上|全部|所有|都|all\s+of\s+them|all)",
+    re.IGNORECASE,
+)
+_PROJECT_CONTEXT_ANSWER_PATTERNS = {
+    "current.status_fields.volume": re.compile(
+        r"申请量|进件量|放款量|业务量|规模|volume", re.IGNORECASE
+    ),
+    "current.status_fields.approval": re.compile(
+        r"通过率|审批率|准入率|approval", re.IGNORECASE
+    ),
+    "current.status_fields.risk": re.compile(
+        r"坏账率|风险率|逾期率|risk|bad\s+rate", re.IGNORECASE
+    ),
+    "current.status_fields.economics": re.compile(
+        r"收益|利润|成本|经济|economics|profit", re.IGNORECASE
+    ),
+    "current.maturity_summary": re.compile(
+        r"成熟度|表现窗|观察窗|maturity|performance\s+window", re.IGNORECASE
+    ),
+    "historical_strategy_reviews": re.compile(
+        r"历史(?:版本)?策略|历史材料|旧版策略|上一版策略|history|historical",
+        re.IGNORECASE,
+    ),
+}
 
 
 class _StrategySampleDesignRequiredError(StrategySetupError):
@@ -1727,7 +1763,7 @@ def _maybe_handle_strategy_request_turn(
                 task.id,
                 role="assistant",
                 stage="chat",
-            content="已取消本次策略执行；未应用任何空标签排除口径，也没有创建计划。",
+                content="已取消本次策略执行；未应用任何空标签排除口径，也没有创建计划。",
                 metadata={
                     "intent": "strategy_drop_nan_labels_cancelled",
                     "kind": "clarification",
@@ -1762,6 +1798,27 @@ def _maybe_handle_strategy_request_turn(
                 task,
                 nan_confirmation,
             )
+
+    # An explicit project-context command is a new workflow request, even when
+    # it also happens to answer one pending field.  Only bare follow-up answers
+    # use the shortcut below; otherwise a refresh could be mistaken for an
+    # answer and silently skip the newly supplied as-of/scope controls.
+    project_context_answer = (
+        None
+        if (
+            utterance_targets_strategy_project_context(text)
+            or _is_strategy_request_intent(text)
+        )
+        else _maybe_handle_project_context_missing_answer(
+            runtime,
+            repo,
+            task,
+            text=text,
+            conversation=conversation,
+        )
+    )
+    if project_context_answer is not None:
+        return project_context_answer
 
     if not _is_strategy_request_intent(text):
         return None
@@ -1801,7 +1858,7 @@ def _maybe_handle_strategy_request_turn(
             "messages": repo.list_agent_messages(task.id),
         }
 
-    repo.add_agent_message(
+    source_message = repo.add_agent_message(
         task.id,
         role="user",
         stage="chat",
@@ -1810,15 +1867,20 @@ def _maybe_handle_strategy_request_turn(
     )
     preview = None
     preview_error = None
+    is_project_context_request = utterance_targets_strategy_project_context(text)
     is_sample_design_request = utterance_targets_strategy_sample_design(text)
     try:
         preview = (
-            _strategy_pool_impact_dataset_preview(runtime, task)
-            if _STRATEGY_POOL_IMPACT_REQUEST_RE.search(text)
+            None
+            if is_project_context_request
             else (
-                _strategy_sample_design_dataset_preview(runtime, task)
-                if is_sample_design_request
-                else _strategy_dataset_preview(runtime, task)
+                _strategy_pool_impact_dataset_preview(runtime, task)
+                if _STRATEGY_POOL_IMPACT_REQUEST_RE.search(text)
+                else (
+                    _strategy_sample_design_dataset_preview(runtime, task)
+                    if is_sample_design_request
+                    else _strategy_dataset_preview(runtime, task)
+                )
             )
         )
     except StrategySetupError as exc:
@@ -1886,6 +1948,109 @@ def _maybe_handle_strategy_request_turn(
         compilation.draft,
         preview=preview,
         auto_start=True,
+        source_message=source_message,
+    )
+
+
+def _maybe_handle_project_context_missing_answer(
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    text: str,
+    conversation: Sequence[Mapping],
+) -> dict | None:
+    """Turn a direct answer to a pending context question into an audited refresh.
+
+    The answer is retained as user evidence.  It is never parsed into a
+    deterministic metric here; the Tool labels such values as user-provided
+    and unverified, while an explicit unavailable answer remains null.
+    """
+
+    if (
+        _active_plan(runtime.plan_repo, task.id) is not None
+        or latest_open_gate(list(conversation)) is not None
+    ):
+        return None
+    try:
+        current = StrategyProjectContextRepository(
+            runtime.settings.db_path
+        ).get_current(task.id)
+    except (StrategyProjectContextDataError, KeyError, TypeError, ValueError):
+        return None
+    if current is None:
+        return None
+    pending = [
+        record
+        for record in current["state"]["missing_information_records"]
+        if record["status"] == "pending"
+    ]
+    if not pending:
+        return None
+    pending_paths = {record["field_path"] for record in pending}
+    mentioned = [
+        field_path
+        for field_path, pattern in _PROJECT_CONTEXT_ANSWER_PATTERNS.items()
+        if field_path in pending_paths and pattern.search(text)
+    ]
+    unavailable = _PROJECT_CONTEXT_UNAVAILABLE_ANSWER_RE.search(text) is not None
+    if not mentioned and unavailable:
+        if _PROJECT_CONTEXT_ALL_PENDING_RE.search(text):
+            mentioned = sorted(pending_paths)
+        elif len(pending_paths) == 1:
+            mentioned = list(pending_paths)
+        else:
+            repo.add_agent_message(
+                task.id,
+                role="user",
+                stage="chat",
+                content=text,
+                metadata={"intent": "strategy_project_context_answer_ambiguous"},
+            )
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_project_context_answer_field_required",
+                message=(
+                    "请说明哪些字段暂时没有；可点名通过率、风险率、业务量、"
+                    "收益成本、样本成熟度或历史策略，也可以明确说“以上全部暂时没有”。"
+                ),
+                fields=tuple(sorted(pending_paths)),
+            )
+    if not mentioned:
+        return None
+
+    source_message = repo.add_agent_message(
+        task.id,
+        role="user",
+        stage="chat",
+        content=text,
+        metadata={
+            "intent": "strategy_project_context_answer",
+            "field_paths": list(mentioned),
+            "answer_status": "unavailable" if unavailable else "provided",
+        },
+    )
+    workflow_inputs = {
+        "as_of": current["state"]["as_of"],
+        "business_context": (
+            {} if unavailable else {field_path: text for field_path in mentioned}
+        ),
+        "explicit_unavailable": list(mentioned) if unavailable else [],
+        "external_report_filenames": [],
+    }
+    draft = StandardWorkflowRequestDraft(
+        workflow="strategy_project_context",
+        workflow_inputs=workflow_inputs,
+    )
+    return _prepare_and_run_validated_strategy_request(
+        runtime,
+        repo,
+        task,
+        draft,
+        preview=None,
+        auto_start=True,
+        source_message=source_message,
     )
 
 
@@ -1899,6 +2064,7 @@ def _prepare_and_run_validated_strategy_request(
     auto_start: bool,
     drop_nan_labels: bool = False,
     expected_pool_binding: Mapping | None = None,
+    source_message: Mapping | None = None,
 ) -> dict:
     """Bind current evidence, resolve the NaN policy, then instantiate once."""
 
@@ -2022,6 +2188,7 @@ def _prepare_and_run_validated_strategy_request(
             auto_start=auto_start,
             drop_nan_labels=drop_nan_labels,
             expected_pool_binding=expected_pool_binding,
+            source_message=source_message,
         )
     except _StrategySampleDesignRequiredError as exc:
         return _strategy_request_clarification_response(
@@ -2048,6 +2215,7 @@ def _run_validated_strategy_request(
     auto_start: bool,
     drop_nan_labels: bool,
     expected_pool_binding: Mapping | None = None,
+    source_message: Mapping | None = None,
 ) -> dict:
     """Route one already-validated draft without another execution confirmation."""
 
@@ -2062,6 +2230,24 @@ def _run_validated_strategy_request(
             task,
             template_id="stored_strategy_report",
             slots={"strategy_id": draft.strategy_id},
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_project_context"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_project_context",
+            slots=_strategy_project_context_plan_slots(
+                runtime,
+                task,
+                draft,
+                source_message=source_message,
+            ),
             auto_start=auto_start,
         )
 
@@ -2993,6 +3179,11 @@ def _standard_workflow_request_preflight(
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> tuple[str, str] | None:
+    if draft.workflow == "strategy_project_context":
+        # The exact persisted user message is request-local evidence.  It is
+        # bound when the validated request starts, not reconstructed here from
+        # whichever message happens to be latest during preflight.
+        return None
     if draft.workflow == "strategy_sample_design":
         try:
             context = _strategy_sample_design_dataset_context(runtime, task)
@@ -3674,6 +3865,68 @@ def _strategy_pool_impact_pool_binding(
             "当前 Strategy Pool revision/hash 绑定不完整，不能执行影响测算。"
         ) from exc
     return pool, binding
+
+
+def _strategy_project_context_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+    *,
+    source_message: Mapping | None,
+) -> dict:
+    if draft.workflow != "strategy_project_context":
+        raise StrategySetupError("项目上下文 slots 收到了错误的 Workflow。")
+    try:
+        current = StrategyProjectContextRepository(
+            runtime.settings.db_path
+        ).get_current(task.id)
+    except (StrategyProjectContextDataError, KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "当前策略项目上下文 revision 无法通过完整性校验，请先修复持久化证据。"
+        ) from exc
+
+    if (
+        not isinstance(source_message, Mapping)
+        or source_message.get("task_id") != task.id
+        or source_message.get("role") != "user"
+        or (source_message.get("metadata") or {}).get("intent")
+        not in {"strategy_request", "strategy_project_context_answer"}
+    ):
+        raise StrategySetupError(
+            "项目上下文刷新必须绑定本轮已持久化的用户消息；请重新发送整理请求。"
+        )
+    message_id = source_message.get("id")
+    content = source_message.get("content")
+    if not isinstance(message_id, str) or not message_id or not isinstance(content, str):
+        raise StrategySetupError("项目上下文无法绑定有效的用户消息证据。")
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    new_business = dict(inputs.get("business_context") or {})
+    explicit_unavailable = set(inputs.get("explicit_unavailable") or [])
+    explicit_unavailable.update(
+        field_path for field_path, value in new_business.items() if value is None
+    )
+    explicit_unavailable.difference_update(
+        field_path for field_path, value in new_business.items() if value is not None
+    )
+    return {
+        "expected_revision": 0 if current is None else current["revision"],
+        "expected_revision_id": (
+            None if current is None else current["revision_id"]
+        ),
+        "expected_state_hash": None if current is None else current["state_hash"],
+        "user_message_ref": {
+            "message_id": message_id,
+            "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        },
+        "as_of": inputs["as_of"],
+        "scope": inputs.get("scope"),
+        "business_context": new_business,
+        "explicit_unavailable": sorted(explicit_unavailable),
+        "external_report_filenames": list(
+            inputs.get("external_report_filenames") or []
+        ),
+    }
 
 
 def _strategy_sample_design_plan_slots(
@@ -5326,6 +5579,7 @@ def _strategy_request_requires_dataset(
     if isinstance(draft, StandardWorkflowRequestDraft):
         if draft.workflow in {
             *_STRATEGY_POOL_WORKFLOWS,
+            "strategy_project_context",
             "automatic_tree_leaf_materialization",
             "cross_matrix_cell_selection",
             "voting_candidate_build",
@@ -5436,6 +5690,8 @@ def _strategy_request_requires_target(
     draft: CompiledStrategyRequestDraft,
 ) -> bool:
     if isinstance(draft, StandardWorkflowRequestDraft):
+        if draft.workflow == "strategy_project_context":
+            return False
         refinement_needs_current_target = (
             draft.workflow == "univariate_candidate_refinement"
             and "source_candidate_id" not in draft.workflow_inputs
@@ -5465,6 +5721,8 @@ def _strategy_request_requires_complete_labels(
     """Whether execution would otherwise exclude missing supervision rows."""
 
     if isinstance(draft, StandardWorkflowRequestDraft):
+        if draft.workflow == "strategy_project_context":
+            return False
         refinement_needs_current_labels = (
             draft.workflow == "univariate_candidate_refinement"
             and "source_candidate_id" not in draft.workflow_inputs

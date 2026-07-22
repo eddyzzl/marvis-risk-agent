@@ -74,6 +74,7 @@ from marvis.packs.strategy.pool_tools import (
     run_set_pool_entry_action,
 )
 from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
+from marvis.packs.strategy.project_context_tools import run_materialize_project_context
 from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignExecutionBinding,
     StrategySampleDesignRef,
@@ -848,6 +849,20 @@ def tool_measure_pool_impact(inputs: dict, ctx) -> dict:
     """Measure governed first-match and monthly impact for the current Pool."""
 
     return run_measure_pool_impact(inputs, ctx, _runtime(ctx))
+
+
+def tool_materialize_project_context(inputs: dict, ctx) -> dict:
+    """Refresh governed current-project, history and missing-information evidence."""
+
+    # Template slots intentionally omit ``None``. Restore the three nullable
+    # values here so the governed Tool receives its exact closed contract.
+    normalized = {
+        **inputs,
+        "expected_revision_id": inputs.get("expected_revision_id"),
+        "expected_state_hash": inputs.get("expected_state_hash"),
+        "scope": inputs.get("scope"),
+    }
+    return run_materialize_project_context(normalized, ctx, _runtime(ctx))
 
 
 def tool_materialize_sample_design(inputs: dict, ctx) -> dict:

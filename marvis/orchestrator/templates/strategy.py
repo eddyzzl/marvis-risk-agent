@@ -693,6 +693,92 @@ STRATEGY_AUTOMATIC_TREE_APPLY = WorkflowTemplate(
 )
 
 
+STRATEGY_PROJECT_CONTEXT = WorkflowTemplate(
+    id="strategy_project_context",
+    title="整理策略项目现状与历史证据",
+    goal_patterns=(
+        "整理策略项目现状",
+        "梳理当前项目和历史策略",
+        "刷新策略项目上下文",
+        "materialize strategy project context",
+        "refresh strategy project context",
+    ),
+    slots=(
+        SlotSpec(
+            "expected_revision",
+            True,
+            "task_context",
+            "Current project-context CAS revision; zero means absent",
+        ),
+        SlotSpec(
+            "expected_revision_id",
+            False,
+            "task_context",
+            "Current immutable project-context revision id",
+        ),
+        SlotSpec(
+            "expected_state_hash",
+            False,
+            "task_context",
+            "Current immutable project-context state hash",
+        ),
+        SlotSpec(
+            "user_message_ref",
+            True,
+            "task_context",
+            "Exact persisted user message id and content hash",
+        ),
+        SlotSpec("as_of", True, "user", "Explicit project-status cutoff date"),
+        SlotSpec("scope", False, "user", "Optional explicit project scope or null"),
+        SlotSpec(
+            "business_context",
+            True,
+            "user",
+            "Explicit user-owned project context fields",
+        ),
+        SlotSpec(
+            "explicit_unavailable",
+            True,
+            "user",
+            "Fields the user explicitly marked unavailable",
+        ),
+        SlotSpec(
+            "external_report_filenames",
+            True,
+            "user",
+            "Task-source-relative opaque external evidence filenames",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="固化项目现状与历史证据",
+            tool_ref=ToolRef("strategy", "materialize_project_context"),
+            inputs_template={
+                "expected_revision": "{slot:expected_revision}",
+                "expected_revision_id": "{slot:expected_revision_id}",
+                "expected_state_hash": "{slot:expected_state_hash}",
+                "user_message_ref": "{slot:user_message_ref}",
+                "as_of": "{slot:as_of}",
+                "scope": "{slot:scope}",
+                "business_context": "{slot:business_context}",
+                "explicit_unavailable": "{slot:explicit_unavailable}",
+                "external_report_filenames": (
+                    "{slot:external_report_filenames}"
+                ),
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "revision"}),
+                PostCheck("nonempty", {"field": "context_artifact"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_SAMPLE_DESIGN = WorkflowTemplate(
     id="strategy_sample_design",
     title="策略样本设计固化",

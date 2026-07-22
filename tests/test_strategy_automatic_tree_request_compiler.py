@@ -259,7 +259,7 @@ def test_automatic_tree_build_compilation_requires_all_explicit_controls_in_sour
     assert result.draft.to_dict() == reply
     assert len(llm.calls) == 1
     call = llm.calls[0]
-    assert call["prompt_version"] == 26
+    assert call["prompt_version"] == 27
     assert "automatic_tree_candidate_build" in call["system_prompt"]
     assert "不能串联" in call["system_prompt"]
     assert "最好叶子" in call["system_prompt"]

@@ -58,6 +58,7 @@ STRATEGY_REQUEST_KINDS = (
     "standard_workflow",
 )
 STANDARD_STRATEGY_WORKFLOWS = (
+    "strategy_project_context",
     "strategy_sample_design",
     "profit_calc",
     "roll_rate_matrix",
@@ -76,6 +77,31 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_pool_reorder",
     "strategy_pool_compile",
     "strategy_pool_impact",
+)
+
+_PROJECT_CONTEXT_SUBJECT_RE = re.compile(
+    r"(?:策略)?项目(?:上下文|现状|背景|情况)|当前项目(?:现状|情况)|"
+    r"历史(?:版本)?策略(?:效果|复盘|回顾)?|project\s+context|"
+    r"current\s+project\s+(?:status|context)|historical\s+strateg(?:y|ies)",
+    re.IGNORECASE,
+)
+_PROJECT_CONTEXT_ACTION_RE = re.compile(
+    r"(?:整理|梳理|汇总|收集|建立|创建|生成|固化|刷新|更新|补充|记录|盘点|复盘|"
+    r"materialize|collect|build|create|refresh|update|record|review)",
+    re.IGNORECASE,
+)
+_PROJECT_CONTEXT_NONCOMMAND_RE = re.compile(
+    r"[?？]|(?:不要|不用|无需|先不|暂不|取消|假设|如果|以后|稍后|未来)|"
+    r"(?:do\s+not|don't|never|cancel|what\s+if|later|in\s+the\s+future)",
+    re.IGNORECASE,
+)
+_PROJECT_CONTEXT_CHAINED_ACTION_RE = re.compile(
+    r"(?:然后|接着|随后|并且|并|再).{0,24}"
+    r"(?:样本设计|单变量|建模|建树|决策树|入池|策略开发|影响测算|报告|采纳|部署|上线)",
+    re.IGNORECASE,
+)
+_PROJECT_CONTEXT_FIELD_PATH_RE = re.compile(
+    r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){0,7}$"
 )
 
 _SAMPLE_DESIGN_STATUS_VALUES = {
@@ -2405,7 +2431,9 @@ def _validate_standard_workflow_payload(
     if any(not isinstance(key, str) for key in raw_inputs):
         return _invalid("workflow_inputs 的字段名必须是文本。")
     try:
-        if workflow == "strategy_sample_design":
+        if workflow == "strategy_project_context":
+            normalized = _validate_strategy_project_context_inputs(raw_inputs)
+        elif workflow == "strategy_sample_design":
             normalized = _validate_strategy_sample_design_inputs(
                 raw_inputs,
                 whitelist,
@@ -2482,6 +2510,138 @@ def _validate_standard_workflow_payload(
         ),
         True,
     )
+
+
+def _validate_strategy_project_context_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate only user-owned project-context facts.
+
+    Repository heads, message identities, evidence references, metrics and
+    availability conclusions remain platform-owned and are injected later by
+    the Agent/Tool boundary.
+    """
+
+    workflow = "strategy_project_context"
+    allowed = {
+        "as_of",
+        "scope",
+        "business_context",
+        "explicit_unavailable",
+        "external_report_filenames",
+    }
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    if "as_of" not in inputs:
+        raise _DraftValidationError(
+            f"{workflow} 缺少 as_of；请明确本次项目现状的截止日期。"
+        )
+    as_of = _required_text(inputs["as_of"], name=f"{workflow} as_of")
+    try:
+        parsed_as_of = date.fromisoformat(as_of)
+    except ValueError as exc:
+        raise _DraftValidationError(
+            f"{workflow} as_of 必须是 YYYY-MM-DD ISO 日期。"
+        ) from exc
+    if parsed_as_of.isoformat() != as_of:
+        raise _DraftValidationError(
+            f"{workflow} as_of 必须是 YYYY-MM-DD ISO 日期。"
+        )
+
+    normalized: dict[str, Any] = {"as_of": as_of}
+    if "scope" in inputs:
+        raw_scope = inputs["scope"]
+        if raw_scope is None:
+            normalized["scope"] = None
+        else:
+            scope = _required_text(raw_scope, name=f"{workflow} scope")
+            if len(scope) > 4000:
+                raise _DraftValidationError(f"{workflow} scope 最多 4000 个字符。")
+            normalized["scope"] = scope
+
+    raw_context = inputs.get("business_context", {})
+    if not isinstance(raw_context, Mapping) or len(raw_context) > 50:
+        raise _DraftValidationError(
+            f"{workflow} business_context 必须是最多 50 个字段的对象。"
+        )
+    context: dict[str, str | None] = {}
+    for raw_path, raw_value in raw_context.items():
+        if not isinstance(raw_path, str):
+            raise _DraftValidationError(
+                f"{workflow} business_context 字段名必须是文本路径。"
+            )
+        field_path = raw_path.strip()
+        if (
+            not _PROJECT_CONTEXT_FIELD_PATH_RE.fullmatch(field_path)
+            or len(field_path) > 256
+        ):
+            raise _DraftValidationError(
+                f"{workflow} business_context 字段路径无效：{raw_path!r}。"
+            )
+        if raw_value is None:
+            context[field_path] = None
+            continue
+        value = _required_text(
+            raw_value,
+            name=f"{workflow} business_context.{field_path}",
+        )
+        if len(value) > 4000:
+            raise _DraftValidationError(
+                f"{workflow} business_context.{field_path} 最多 4000 个字符。"
+            )
+        context[field_path] = value
+    normalized["business_context"] = context
+
+    normalized["explicit_unavailable"] = _project_context_text_list(
+        inputs.get("explicit_unavailable", []),
+        name=f"{workflow} explicit_unavailable",
+        maximum=100,
+        field_paths=True,
+    )
+    normalized["external_report_filenames"] = _project_context_text_list(
+        inputs.get("external_report_filenames", []),
+        name=f"{workflow} external_report_filenames",
+        maximum=20,
+        field_paths=False,
+    )
+    return normalized
+
+
+def _project_context_text_list(
+    value: object,
+    *,
+    name: str,
+    maximum: int,
+    field_paths: bool,
+) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        raise _DraftValidationError(f"{name} 必须是数组。")
+    if len(value) > maximum:
+        raise _DraftValidationError(f"{name} 最多包含 {maximum} 项。")
+    normalized: list[str] = []
+    for raw_item in value:
+        item = _required_text(raw_item, name=name)
+        if len(item) > 512:
+            raise _DraftValidationError(f"{name} 每项最多 512 个字符。")
+        if field_paths:
+            if (
+                len(item) > 256
+                or not _PROJECT_CONTEXT_FIELD_PATH_RE.fullmatch(item)
+            ):
+                raise _DraftValidationError(f"{name} 包含无效字段路径：{item!r}。")
+        else:
+            normalized_path = item.replace("\\", "/")
+            parts = normalized_path.split("/")
+            if (
+                normalized_path.startswith("/")
+                or any(part in {"", ".", ".."} for part in parts)
+                or "\x00" in item
+            ):
+                raise _DraftValidationError(f"{name} 包含不安全的相对文件名。")
+            item = normalized_path
+        normalized.append(item)
+    if len(set(normalized)) != len(normalized):
+        raise _DraftValidationError(f"{name} 不能包含重复项。")
+    return normalized
 
 
 def _validate_strategy_sample_design_inputs(
@@ -4728,6 +4888,16 @@ def _ground_refinement_request(
     whitelist: tuple[str, ...],
 ) -> StrategyRequestCompilation:
     draft = result.draft
+    if utterance_targets_strategy_project_context(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_project_context"
+    ):
+        return _clarification(
+            "原话明确要求整理当前项目现状或历史策略，只能编译为 "
+            "strategy_project_context；不能改路由到样本、候选分析、报告或通用策略生命周期。",
+            code="strategy_project_context_workflow_required",
+            fields=("workflow",),
+        )
     if utterance_targets_strategy_sample_design(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_sample_design"
@@ -4804,6 +4974,8 @@ def _ground_refinement_request(
         )
     if not isinstance(draft, StandardWorkflowRequestDraft):
         return result
+    if draft.workflow == "strategy_project_context":
+        return _ground_strategy_project_context_request(utterance, result)
     if draft.workflow == "strategy_sample_design":
         return _ground_strategy_sample_design_request(
             utterance,
@@ -4888,6 +5060,118 @@ def _ground_refinement_request(
         "我不会根据“最好”等模糊表述自行生成门槛或重绑分箱。",
         code="strategy_refinement_controls_not_grounded",
         fields=tuple(dict.fromkeys(missing_controls)),
+    )
+
+
+def _ground_strategy_project_context_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if (
+        not utterance_targets_strategy_project_context(utterance)
+        or _PROJECT_CONTEXT_NONCOMMAND_RE.search(utterance)
+    ):
+        return _clarification(
+            "请单独发出一次立即整理项目现状/历史策略上下文的肯定命令；"
+            "问句、否定、假设或未来描述不会刷新项目证据。",
+            code="strategy_project_context_positive_command_required",
+            fields=("materialize_intent",),
+        )
+    if _PROJECT_CONTEXT_CHAINED_ACTION_RE.search(utterance):
+        return _clarification(
+            "本轮只固化项目现状和历史证据；样本设计、候选分析、影响测算、"
+            "报告、采纳或部署必须在后续受治理步骤中执行。",
+            code="strategy_project_context_single_step_required",
+            fields=("next_action",),
+        )
+
+    missing: list[str] = []
+    if not _project_context_date_is_grounded(utterance, inputs["as_of"]):
+        missing.append("as_of")
+    scope = inputs.get("scope")
+    if isinstance(scope, str) and scope not in utterance:
+        missing.append("scope")
+    for field_path, value in inputs["business_context"].items():
+        if isinstance(value, str):
+            if value not in utterance:
+                missing.append(f"business_context.{field_path}")
+        elif not _project_context_unavailable_is_grounded(utterance, field_path):
+            missing.append(f"business_context.{field_path}")
+    for field_path in inputs["explicit_unavailable"]:
+        if not _project_context_unavailable_is_grounded(utterance, field_path):
+            missing.append(f"explicit_unavailable.{field_path}")
+    for filename in inputs["external_report_filenames"]:
+        # Preserve the exact relative path the user supplied.  Accepting only
+        # its basename would let an LLM silently select a different same-name
+        # file from a subdirectory of the task source boundary.
+        if filename not in utterance:
+            missing.append(f"external_report_filenames.{filename}")
+    if missing:
+        return _clarification(
+            "截止日期、项目文字、明确不可用字段和外部报告文件名只能采用用户原话；"
+            "平台不会让模型补写背景、缺失状态或证据文件。请补充或删除不在原话中的字段。",
+            code="strategy_project_context_controls_not_grounded",
+            fields=tuple(missing),
+        )
+    return result
+
+
+def _project_context_date_is_grounded(utterance: str, iso_date: str) -> bool:
+    if iso_date in utterance:
+        return True
+    year, month, day = (int(part) for part in iso_date.split("-"))
+    return re.search(
+        rf"(?<!\d){year}\s*年\s*0?{month}\s*月\s*0?{day}\s*日(?!\d)",
+        utterance,
+    ) is not None
+
+
+_PROJECT_CONTEXT_UNAVAILABLE_RE = re.compile(
+    r"(?:暂时没有|暂缺|暂无|没有|未提供|不可用|不知道|未知|待补充|"
+    r"unavailable|not\s+available|unknown|missing)",
+    re.IGNORECASE,
+)
+_PROJECT_CONTEXT_FIELD_LABELS = {
+    "approval": re.compile(r"通过率|审批率|准入率|approval", re.IGNORECASE),
+    "risk": re.compile(r"坏账率|风险率|逾期率|risk|bad\s+rate", re.IGNORECASE),
+    "volume": re.compile(r"申请量|进件量|放款量|业务量|规模|volume", re.IGNORECASE),
+    "economics": re.compile(r"收益|利润|成本|经济|economics|profit", re.IGNORECASE),
+    "background": re.compile(r"背景|background", re.IGNORECASE),
+    "scope": re.compile(r"范围|客群|渠道|产品|scope", re.IGNORECASE),
+    "history": re.compile(r"历史|旧版|上一版|history|historical", re.IGNORECASE),
+    "historical_strategy_reviews": re.compile(
+        r"历史(?:版本)?策略|历史材料|旧版策略|history|historical",
+        re.IGNORECASE,
+    ),
+    "sample": re.compile(r"样本|sample", re.IGNORECASE),
+}
+
+
+def _project_context_unavailable_is_grounded(
+    utterance: str,
+    field_path: str,
+) -> bool:
+    if _PROJECT_CONTEXT_UNAVAILABLE_RE.search(utterance) is None:
+        return False
+    if field_path in utterance:
+        return True
+    components = tuple(reversed(field_path.split(".")))
+    return any(
+        label.search(utterance) is not None
+        for component in components
+        if (label := _PROJECT_CONTEXT_FIELD_LABELS.get(component)) is not None
+    )
+
+
+def utterance_targets_strategy_project_context(utterance: str) -> bool:
+    """Recognize an explicit project-context materialization request."""
+
+    return bool(
+        _PROJECT_CONTEXT_SUBJECT_RE.search(utterance)
+        and _PROJECT_CONTEXT_ACTION_RE.search(utterance)
     )
 
 
@@ -8584,7 +8868,34 @@ def _standard_workflow_confirmation_text(
     draft: StandardWorkflowRequestDraft,
 ) -> str:
     inputs = draft.workflow_inputs
-    if draft.workflow == "strategy_sample_design":
+    if draft.workflow == "strategy_project_context":
+        details = [
+            "已识别为〔策略项目上下文 Workflow〕",
+            f"现状截止日：{inputs['as_of']}",
+            "本步骤只收集并绑定项目现状、历史策略和缺失信息，不计算或复制业务指标",
+        ]
+        if inputs.get("scope"):
+            details.append(f"分析范围：{inputs['scope']}")
+        if inputs["business_context"]:
+            details.append(
+                "用户提供字段：" + "、".join(inputs["business_context"].keys())
+            )
+        if inputs["explicit_unavailable"]:
+            details.append(
+                "明确暂缺字段：" + "、".join(inputs["explicit_unavailable"])
+            )
+        if inputs["external_report_filenames"]:
+            details.append(
+                "外部报告仅作为不透明证据复制并绑定："
+                + "、".join(inputs["external_report_filenames"])
+            )
+        details.extend(
+            [
+                "当前样本、Pool、回测、监控与内部历史由平台自动发现并校验",
+                "revision/CAS、消息哈希、artifact id、来源引用和所有指标由平台拥有",
+            ]
+        )
+    elif draft.workflow == "strategy_sample_design":
         performance = (
             f"已提供 {inputs['performance_window_days']} 天"
             if inputs["performance_window_status"] == "provided"
@@ -9452,6 +9763,12 @@ def _user_prompt(
         "对于 limit/pricing/segmentation 的 develop 请求，只能抽取 candidate_design "
         "搜索空间与用户明确给出的 economics_inputs；禁止输出 strategy_spec、规则、"
         "动作、默认动作、推荐值或计算指标。缺少必要经济口径时只返回 clarification。"
+        "对于 strategy_project_context，只能逐字抄录用户明确提供的截止日 as_of、"
+        "可选 scope、business_context 文本/null、明确暂缺字段路径和任务 source_dir 下"
+        "用户点名的外部报告相对文件名。禁止输出 revision/CAS、message id/hash、"
+        "dataset/Pool/backtest/monitoring 引用、artifact id/hash、来源引用、可用性结论或指标。"
+        "一次只刷新项目上下文，不得串联样本、候选、影响、报告、采纳或部署；没有 as_of"
+        "必须 clarification，不能默认今天。"
         "对于 strategy_sample_design，只能抄录用户明确提供的表现窗状态/天数、观察窗"
         "状态/ISO 起止日期、成熟度、代表坏样本的整数 0/1、完整三路 split 及可选"
         "月份/权重/金额列和明确的"
@@ -9603,5 +9920,7 @@ __all__ = [
     "StandardWorkflowRequestDraft",
     "compile_strategy_request",
     "strategy_request_confirmation_text",
+    "utterance_targets_strategy_project_context",
+    "utterance_targets_strategy_sample_design",
     "validate_strategy_request",
 ]

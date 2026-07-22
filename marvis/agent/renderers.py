@@ -2393,6 +2393,116 @@ def _sample_design_integrity_failure() -> tuple[str, list[dict]]:
     )
 
 
+def _project_context_integrity_failure() -> tuple[str, list[dict]]:
+    return (
+        "**策略项目上下文完整性校验失败**：计划缓存与 immutable revision/artifact "
+        "不一致，已停止展示项目现状、历史和缺失信息。请重新刷新项目上下文。",
+        [],
+    )
+
+
+def _render_materialize_project_context(o: dict):
+    """Render only the authenticated project-context revision projection."""
+
+    from marvis.packs.strategy.errors import StrategyError
+    from marvis.packs.strategy.project_context_tools import (
+        validate_materialize_project_context_tool_output,
+    )
+
+    try:
+        o = validate_materialize_project_context_tool_output(o)
+    except (StrategyError, RecursionError):
+        return _project_context_integrity_failure()
+
+    revision = o["revision"]
+    state = revision["state"]
+    current = state["current_project_snapshot"]
+    histories = state["historical_strategy_reviews"]
+    missing = state["missing_information_records"]
+    artifact = o["context_artifact"]
+    action = "已创建" if o["created"] else "未变化，已复用"
+    text = (
+        f"**策略项目上下文{action}**：revision **{revision['revision']}**，"
+        f"截止 `{state['as_of']}`；绑定 {len(state['source_refs'])} 个可校验证据引用、"
+        f"{len(histories)} 个历史策略版本，当前有 {len(missing)} 项缺失信息。\n"
+        f"上下文 artifact：[{artifact['filename']}]({artifact['download_url']})，"
+        f"content hash `{artifact['content_hash']}`。"
+    )
+    if o["external_artifacts"]:
+        text += (
+            f"\n- 已将 {len(o['external_artifacts'])} 份外部材料按原始字节快照；"
+            "平台未从中提取或猜测任何业务指标。"
+        )
+    if missing:
+        text += (
+            "\n- 需要补充的问题已按字段和阻断级别记录；用户说明“暂时没有”后，"
+            "报告会保留为空并标记 unavailable，不会填成 0。"
+        )
+
+    status_rows = []
+    for field_name in ("volume", "approval", "risk", "economics"):
+        field = current["status_fields"][field_name]
+        status_rows.append(
+            [
+                field_name,
+                field["availability"],
+                _fmt(field["value"]) if field["availability"] == "present" else "—",
+                field.get("as_of") or "—",
+                field.get("note") or "",
+            ]
+        )
+    tables = [
+        {
+            "title": "当前项目状态证据",
+            "columns": ["字段", "状态", "值", "截至", "说明"],
+            "rows": status_rows,
+        }
+    ]
+    if histories:
+        def history_value(item, field_name):
+            field = item[field_name]
+            return field["value"] if field["availability"] == "present" else "—"
+
+        tables.append(
+            {
+                "title": "历史策略版本",
+                "columns": ["版本", "资产状态", "生效期", "可用性", "范围"],
+                "rows": [
+                    [
+                        item.get("version") if item.get("version") is not None else "—",
+                        history_value(item, "asset_status"),
+                        (
+                            f"{history_value(item, 'effective_period')['start']} ~ "
+                            f"{history_value(item, 'effective_period')['end'] or '持续'}"
+                            if history_value(item, "effective_period") != "—"
+                            else "—"
+                        ),
+                        item["availability"],
+                        history_value(item, "scope"),
+                    ]
+                    for item in histories
+                ],
+            }
+        )
+    if missing:
+        tables.append(
+            {
+                "title": "待补充信息",
+                "columns": ["字段", "阻断级别", "状态", "问题"],
+                "rows": [
+                    [
+                        item["field_path"],
+                        item["blocking"],
+                        item["status"],
+                        item["question"],
+                    ]
+                    for item in missing
+                ],
+            }
+        )
+    return text, tables
+
+
 def _sample_design_metric_value(value: object, *, unit: str, status: str) -> str:
     if status != "present":
         return "n/a"
@@ -5616,6 +5726,7 @@ _RENDERERS = {
     "reorder_strategy_pool": _render_strategy_pool_mutation,
     "compile_strategy_pool": _render_compile_strategy_pool,
     "measure_pool_impact": _render_measure_pool_impact,
+    "materialize_project_context": _render_materialize_project_context,
     "materialize_sample_design": _render_materialize_sample_design,
     "backtest_strategy": _render_backtest_strategy,
     "tradeoff_view": _render_tradeoff_view,
@@ -5669,6 +5780,8 @@ def render_tool_output(tool: str, output: dict):
             return _pool_impact_integrity_failure()
         if tool == "materialize_sample_design":
             return _sample_design_integrity_failure()
+        if tool == "materialize_project_context":
+            return _project_context_integrity_failure()
         if tool == "apply_automatic_tree":
             return _automatic_tree_apply_integrity_failure()
         return _render_generic(output or {})
