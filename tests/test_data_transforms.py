@@ -466,6 +466,46 @@ def test_resource_caps_fail_before_writing_output(tmp_path):
         TransformConfig(max_operations=101)
 
 
+def test_expression_budgets_keep_transform_error_contract(tmp_path):
+    source = _write_parquet(tmp_path, "SELECT 1 AS value")
+    comparison = {
+        "op": "eq",
+        "left": {"column": "value"},
+        "right": {"literal": 1},
+    }
+
+    with pytest.raises(TransformBudgetError) as nodes:
+        _run(
+            tmp_path,
+            source,
+            [{"op": "filter_rows", "predicate": comparison}],
+            config=TransformConfig(max_ast_nodes=2),
+        )
+    assert (nodes.value.dimension, nodes.value.actual, nodes.value.limit) == (
+        "expression_nodes",
+        3,
+        2,
+    )
+
+    with pytest.raises(TransformBudgetError) as depth:
+        _run(
+            tmp_path,
+            source,
+            [
+                {
+                    "op": "filter_rows",
+                    "predicate": {"op": "not", "arg": comparison},
+                }
+            ],
+            config=TransformConfig(max_ast_depth=2),
+        )
+    assert (depth.value.dimension, depth.value.actual, depth.value.limit) == (
+        "expression_depth",
+        3,
+        2,
+    )
+
+
 def test_existing_output_is_never_overwritten(tmp_path):
     source = _write_parquet(tmp_path, "SELECT 1 AS x")
     output = tmp_path / "result.parquet"

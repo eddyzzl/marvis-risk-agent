@@ -32,6 +32,13 @@ from marvis.data.backend import (
     sql_string_literal,
 )
 from marvis.data.errors import DataLayerError
+from marvis.data.predicate_ast import (
+    CompiledExpression,
+    ExpressionAstBudget,
+    PredicateAstBudgetError,
+    PredicateAstError,
+    compile_expression,
+)
 from marvis.files import sha256_file
 
 
@@ -128,35 +135,6 @@ class _Column:
     duckdb_type: str
 
 
-@dataclass
-class _AstBudget:
-    maximum_nodes: int
-    maximum_depth: int
-    nodes: int = 0
-
-    def consume(self, depth: int) -> None:
-        if depth > self.maximum_depth:
-            raise TransformBudgetError(
-                dimension="expression_depth",
-                actual=depth,
-                limit=self.maximum_depth,
-            )
-        self.nodes += 1
-        if self.nodes > self.maximum_nodes:
-            raise TransformBudgetError(
-                dimension="expression_nodes",
-                actual=self.nodes,
-                limit=self.maximum_nodes,
-            )
-
-
-@dataclass(frozen=True)
-class _CompiledExpression:
-    sql: str
-    parameters: tuple[object, ...]
-    canonical: dict[str, object]
-
-
 @dataclass(frozen=True)
 class _PreparedOperation:
     op: str
@@ -197,7 +175,7 @@ def transform_parquet(
     configure_duckdb_defaults(temp_root)
     output.parent.mkdir(parents=True, exist_ok=True)
     scratch = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
-    ast_budget = _AstBudget(
+    ast_budget = ExpressionAstBudget(
         maximum_nodes=effective_config.max_ast_nodes,
         maximum_depth=effective_config.max_ast_depth,
     )
@@ -392,7 +370,7 @@ def _prepare_operation(
     raw: Mapping[str, object],
     *,
     config: TransformConfig,
-    ast_budget: _AstBudget,
+    ast_budget: ExpressionAstBudget,
 ) -> _PreparedOperation:
     op = raw.get("op")
     if not isinstance(op, str) or not op.strip():
@@ -705,7 +683,7 @@ def _prepare_filter(
     columns: list[_Column],
     raw: Mapping[str, object],
     *,
-    ast_budget: _AstBudget,
+    ast_budget: ExpressionAstBudget,
     **_kwargs,
 ) -> _PreparedOperation:
     del conn
@@ -734,7 +712,7 @@ def _prepare_derive(
     raw: Mapping[str, object],
     *,
     config: TransformConfig,
-    ast_budget: _AstBudget,
+    ast_budget: ExpressionAstBudget,
     **_kwargs,
 ) -> _PreparedOperation:
     _strict_fields(raw, required={"op", "derivations"}, optional=set(), label="derive_columns")
@@ -742,7 +720,7 @@ def _prepare_derive(
     _enforce_budget("operation_items", len(items), config.max_items_per_operation)
     existing = {column.name for column in columns}
     derived_names: set[str] = set()
-    compiled_items: list[tuple[str, _CompiledExpression, str | None]] = []
+    compiled_items: list[tuple[str, CompiledExpression, str | None]] = []
     canonical_items: list[dict[str, object]] = []
     for item in items:
         _strict_fields(
@@ -889,229 +867,28 @@ def _prepare_deduplicate(
 def _compile_expression(
     value: object,
     columns: list[_Column],
-    budget: _AstBudget,
+    budget: ExpressionAstBudget,
     *,
     depth: int,
     predicate: bool,
-) -> _CompiledExpression:
-    budget.consume(depth)
-    if not isinstance(value, Mapping):
-        raise TransformInputError("expression node must be an object")
-    if "column" in value:
-        _strict_fields(value, required={"column"}, optional=set(), label="column expression")
-        if predicate:
-            raise TransformInputError("predicate must use an explicit comparison or null test")
-        name = _existing_column_name(
-            value["column"],
-            {column.name for column in columns},
-            label="expression column",
-        )
-        return _CompiledExpression(
-            sql=_column_identifier(name, columns),
-            parameters=(),
-            canonical={"column": name},
-        )
-    if "literal" in value:
-        _strict_fields(
+) -> CompiledExpression:
+    if depth != 1:
+        raise TransformInputError("expression compilation must start at depth 1")
+    try:
+        return compile_expression(
             value,
-            required={"literal"},
-            optional={"type"},
-            label="literal expression",
+            columns=[column.name for column in columns],
+            predicate=predicate,
+            budget=budget,
         )
-        if predicate:
-            raise TransformInputError("predicate must not be a bare literal")
-        literal = _validate_literal_value(value["literal"])
-        literal_sql = "?"
-        canonical: dict[str, object] = {"literal": literal}
-        if "type" in value:
-            type_name = _normalize_type(value["type"])
-            literal_sql = f"CAST(? AS {type_name})"
-            canonical["type"] = type_name
-        return _CompiledExpression(
-            sql=literal_sql,
-            parameters=(literal,),
-            canonical=canonical,
-        )
-
-    op = value.get("op")
-    if not isinstance(op, str):
-        raise TransformInputError("expression must contain column, literal, or op")
-    binary_arithmetic = {
-        "add": "+",
-        "subtract": "-",
-        "multiply": "*",
-        "divide": "/",
-        "modulo": "%",
-    }
-    comparisons = {"eq": "=", "ne": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
-    if op in binary_arithmetic or op in comparisons:
-        _strict_fields(
-            value,
-            required={"op", "left", "right"},
-            optional=set(),
-            label=f"{op} expression",
-        )
-        if predicate and op not in comparisons:
-            raise TransformInputError("predicate root must be boolean")
-        left = _compile_expression(
-            value["left"], columns, budget, depth=depth + 1, predicate=False
-        )
-        right = _compile_expression(
-            value["right"], columns, budget, depth=depth + 1, predicate=False
-        )
-        operator = comparisons.get(op, binary_arithmetic.get(op))
-        return _CompiledExpression(
-            sql=f"({left.sql} {operator} {right.sql})",
-            parameters=left.parameters + right.parameters,
-            canonical={
-                "op": op,
-                "left": left.canonical,
-                "right": right.canonical,
-            },
-        )
-    if op in {"and", "or"}:
-        _strict_fields(
-            value,
-            required={"op", "args"},
-            optional=set(),
-            label=f"{op} expression",
-        )
-        args_value = value["args"]
-        if isinstance(args_value, (str, bytes)) or not isinstance(args_value, Sequence):
-            raise TransformInputError(f"{op} args must be a list")
-        args = list(args_value)
-        if len(args) < 2:
-            raise TransformInputError(f"{op} requires at least two arguments")
-        compiled_args = [
-            _compile_expression(
-                arg,
-                columns,
-                budget,
-                depth=depth + 1,
-                predicate=True,
-            )
-            for arg in args
-        ]
-        operator = f" {op.upper()} "
-        return _CompiledExpression(
-            sql="(" + operator.join(item.sql for item in compiled_args) + ")",
-            parameters=tuple(
-                parameter
-                for item in compiled_args
-                for parameter in item.parameters
-            ),
-            canonical={"op": op, "args": [item.canonical for item in compiled_args]},
-        )
-    if op in {"not", "is_null", "is_not_null", "negate"}:
-        _strict_fields(
-            value,
-            required={"op", "arg"},
-            optional=set(),
-            label=f"{op} expression",
-        )
-        if predicate and op == "negate":
-            raise TransformInputError("predicate root must be boolean")
-        child = _compile_expression(
-            value["arg"],
-            columns,
-            budget,
-            depth=depth + 1,
-            predicate=(op == "not"),
-        )
-        sql = {
-            "not": f"(NOT {child.sql})",
-            "is_null": f"({child.sql} IS NULL)",
-            "is_not_null": f"({child.sql} IS NOT NULL)",
-            "negate": f"(-{child.sql})",
-        }[op]
-        return _CompiledExpression(
-            sql=sql,
-            parameters=child.parameters,
-            canonical={"op": op, "arg": child.canonical},
-        )
-    if op == "coalesce":
-        _strict_fields(
-            value,
-            required={"op", "args"},
-            optional=set(),
-            label="coalesce expression",
-        )
-        if predicate:
-            raise TransformInputError("predicate root must be boolean")
-        args_value = value["args"]
-        if isinstance(args_value, (str, bytes)) or not isinstance(args_value, Sequence):
-            raise TransformInputError("coalesce args must be a list")
-        args = list(args_value)
-        if len(args) < 2:
-            raise TransformInputError("coalesce requires at least two arguments")
-        compiled_args = [
-            _compile_expression(
-                arg, columns, budget, depth=depth + 1, predicate=False
-            )
-            for arg in args
-        ]
-        return _CompiledExpression(
-            sql="COALESCE(" + ", ".join(item.sql for item in compiled_args) + ")",
-            parameters=tuple(
-                parameter
-                for item in compiled_args
-                for parameter in item.parameters
-            ),
-            canonical={"op": "coalesce", "args": [item.canonical for item in compiled_args]},
-        )
-    if op == "case":
-        _strict_fields(
-            value,
-            required={"op", "cases", "else"},
-            optional=set(),
-            label="case expression",
-        )
-        if predicate:
-            raise TransformInputError("predicate root must be boolean")
-        cases = _object_list(value["cases"], label="case cases")
-        compiled_cases = []
-        parameters: list[object] = []
-        sql_parts = ["CASE"]
-        for case in cases:
-            _strict_fields(
-                case,
-                required={"when", "then"},
-                optional=set(),
-                label="case branch",
-            )
-            when = _compile_expression(
-                case["when"],
-                columns,
-                budget,
-                depth=depth + 1,
-                predicate=True,
-            )
-            then = _compile_expression(
-                case["then"],
-                columns,
-                budget,
-                depth=depth + 1,
-                predicate=False,
-            )
-            sql_parts.append(f"WHEN {when.sql} THEN {then.sql}")
-            parameters.extend(when.parameters)
-            parameters.extend(then.parameters)
-            compiled_cases.append({"when": when.canonical, "then": then.canonical})
-        otherwise = _compile_expression(
-            value["else"],
-            columns,
-            budget,
-            depth=depth + 1,
-            predicate=False,
-        )
-        sql_parts.append(f"ELSE {otherwise.sql} END")
-        parameters.extend(otherwise.parameters)
-        return _CompiledExpression(
-            sql=" ".join(sql_parts),
-            parameters=tuple(parameters),
-            canonical={"op": "case", "cases": compiled_cases, "else": otherwise.canonical},
-        )
-    raise TransformInputError(f"unsupported expression operation: {op}")
+    except PredicateAstBudgetError as exc:
+        raise TransformBudgetError(
+            dimension=exc.dimension,
+            actual=exc.actual,
+            limit=exc.limit,
+        ) from exc
+    except PredicateAstError as exc:
+        raise TransformInputError(str(exc)) from exc
 
 
 def _operation_impact(
