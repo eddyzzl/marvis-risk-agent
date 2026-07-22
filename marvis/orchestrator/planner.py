@@ -120,7 +120,7 @@ class Planner:
         missing = [
             slot.name
             for slot in template.slots
-            if slot.required and not slots.get(slot.name)
+            if slot.required and (slot.name not in slots or slots[slot.name] is None)
         ]
         if missing:
             raise PlanningError(f"missing required slots: {', '.join(missing)}")

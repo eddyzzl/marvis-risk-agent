@@ -195,12 +195,20 @@ def download_task_artifact(
     task_id: str,
     artifact_id: str,
     request: Request,
+    expected_content_hash: str | None = None,
 ) -> StreamingResponse:
     settings = request.app.state.settings
     get_task_or_404(TaskRepository(settings.db_path), task_id)
     row = TaskArtifactRepository(settings.db_path).get_for_task(task_id, artifact_id)
     if row is None:
         raise not_found("task artifact not found")
+    if expected_content_hash is not None and (
+        len(expected_content_hash) != 64
+        or any(character not in "0123456789abcdef" for character in expected_content_hash)
+        or not isinstance(row.get("content_hash"), str)
+        or not hmac.compare_digest(expected_content_hash, row["content_hash"])
+    ):
+        raise conflict("task artifact expected content hash changed")
     path = _available_task_artifact_path(
         settings=settings,
         task_id=task_id,

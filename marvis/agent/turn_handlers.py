@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 import json
+import math
 from pathlib import Path
 import re
 from typing import Callable
@@ -69,6 +70,7 @@ from marvis.agent.strategy_request_compiler import (
     StandardWorkflowRequestDraft,
     StrategyRequestDraft,
     compile_strategy_request,
+    utterance_targets_strategy_sample_design,
     validate_strategy_request,
 )
 from marvis.agent.vintage_setup import VintageSetupError, build_vintage_proposal
@@ -1365,7 +1367,7 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
 )
 _STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
-    r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
+    r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|冻结|探索|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
     r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
     r"添加|加入|入池|删除|移除|排序|重排|改为|编译|预览|"
     r"develop|design|create|build|train|materialize|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
@@ -1373,10 +1375,10 @@ _STRATEGY_REQUEST_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 _STRATEGY_REQUEST_SUBJECT_RE = re.compile(
-    r"(?:策略|策略池|规则池|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|自动树|决策树|叶子|叶节点|投票|Voting|n[-_ ]?of[-_ ]?k|(?:二维|2\s*[dD])?\s*(?:交叉|cross)\s*(?:矩阵|matrix)|cutoff|利润|收益|"
+    r"(?:策略|策略样本|样本设计|样本边界|策略池|规则池|准入|审批|拒绝|额度|授信|定价|利率|分群|分层|规则|候选|候选箱|单变量|分箱|自动树|决策树|叶子|叶节点|投票|Voting|n[-_ ]?of[-_ ]?k|(?:二维|2\s*[dD])?\s*(?:交叉|cross)\s*(?:矩阵|matrix)|cutoff|利润|收益|"
     r"催收|滚动率|迁徙率|迁徙矩阵|定价矩阵|额度矩阵|网格|ROA|"
     r"roll(?:\s|-|_)*rate|strategy(?:\s|-|_)*pool|pool|strategy|approval|reject|limit|pricing|segment|rule|candidate|automatic(?:\s|-|_)*tree|decision(?:\s|-|_)*tree|leaf|"
-    r"candidate\s+bins?|\bbins?\b|univariate|binning|profit|collection)",
+    r"candidate\s+bins?|\bbins?\b|univariate|binning|sample(?:\s|-|_)*design|profit|collection)",
     re.IGNORECASE,
 )
 _STRATEGY_AUTOMATIC_TREE_SHORTHAND_RE = re.compile(
@@ -1544,7 +1546,7 @@ def _maybe_handle_strategy_request_turn(
                 task.id,
                 role="assistant",
                 stage="chat",
-                content="已取消本次策略执行；空标签行未被丢弃，也没有创建计划。",
+            content="已取消本次策略执行；未应用任何空标签排除口径，也没有创建计划。",
                 metadata={
                     "intent": "strategy_drop_nan_labels_cancelled",
                     "kind": "clarification",
@@ -1627,14 +1629,31 @@ def _maybe_handle_strategy_request_turn(
     )
     preview = None
     preview_error = None
+    is_sample_design_request = utterance_targets_strategy_sample_design(text)
     try:
         preview = (
             _strategy_pool_impact_dataset_preview(runtime, task)
             if _STRATEGY_POOL_IMPACT_REQUEST_RE.search(text)
-            else _strategy_dataset_preview(runtime, task)
+            else (
+                _strategy_sample_design_dataset_preview(runtime, task)
+                if is_sample_design_request
+                else _strategy_dataset_preview(runtime, task)
+            )
         )
     except StrategySetupError as exc:
         preview_error = str(exc)
+
+    if is_sample_design_request and preview is None:
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code=(
+                "strategy_sample_design_target_invalid"
+                if preview_error and "必须是数值 0/1 或真实空值" in preview_error
+                else "strategy_sample_design_workspace_required"
+            ),
+            message=preview_error or "样本设计要求先确认活动 DataWorkspace。",
+        )
 
     compilation = compile_strategy_request(
         text,
@@ -1704,7 +1723,10 @@ def _prepare_and_run_validated_strategy_request(
 
     if (
         isinstance(draft, StandardWorkflowRequestDraft)
-        and draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
+        and (
+            draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
+            or draft.workflow == "strategy_sample_design"
+        )
         and draft.workflow_inputs.get("drop_nan_labels") is True
     ):
         # This boolean has already passed exact utterance grounding in the
@@ -1715,16 +1737,24 @@ def _prepare_and_run_validated_strategy_request(
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
     )
+    is_sample_design = (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_sample_design"
+    )
     context = None
     if requires_dataset:
         try:
             context = (
                 _strategy_pool_impact_dataset_context(runtime, task)
                 if is_pool_impact
-                else _strategy_dataset_context(
-                    runtime,
-                    task,
-                    require_target=_strategy_request_requires_target(draft),
+                else (
+                    _strategy_sample_design_dataset_context(runtime, task)
+                    if is_sample_design
+                    else _strategy_dataset_context(
+                        runtime,
+                        task,
+                        require_target=_strategy_request_requires_target(draft),
+                    )
                 )
             )
         except StrategySetupError as exc:
@@ -1765,6 +1795,7 @@ def _prepare_and_run_validated_strategy_request(
             preview=preview,
             context=context,
             use_confirmed_workspace_target=is_pool_impact,
+            use_sample_design_workspace=is_sample_design,
         ):
             return _strategy_request_clarification_response(
                 repo,
@@ -1912,6 +1943,29 @@ def _run_validated_strategy_request(
                 context=context,
                 drop_nan_labels=drop_nan_labels,
                 expected_pool_binding=expected_pool_binding,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_sample_design"
+    ):
+        if context is None:
+            raise StrategySetupError(
+                "策略样本设计需要确认的活动 DataWorkspace 和二元目标列。"
+            )
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_sample_design",
+            slots=_strategy_sample_design_plan_slots(
+                runtime,
+                task,
+                draft,
+                context=context,
+                drop_nan_labels=drop_nan_labels,
             ),
             auto_start=auto_start,
         )
@@ -2646,6 +2700,21 @@ def _standard_workflow_request_preflight(
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
 ) -> tuple[str, str] | None:
+    if draft.workflow == "strategy_sample_design":
+        try:
+            context = _strategy_sample_design_dataset_context(runtime, task)
+            _strategy_sample_design_plan_slots(
+                runtime,
+                task,
+                draft,
+                context=context,
+                drop_nan_labels=bool(
+                    draft.workflow_inputs.get("drop_nan_labels", False)
+                ),
+            )
+        except StrategySetupError as exc:
+            return ("strategy_sample_design_workspace_required", str(exc))
+        return None
     if draft.workflow == "strategy_pool_impact":
         try:
             context = _strategy_pool_impact_dataset_context(runtime, task)
@@ -3142,6 +3211,80 @@ def _strategy_pool_impact_pool_binding(
             "当前 Strategy Pool revision/hash 绑定不完整，不能执行影响测算。"
         ) from exc
     return pool, binding
+
+
+def _strategy_sample_design_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+    *,
+    context,
+    drop_nan_labels: bool,
+) -> dict[str, object]:
+    """Bind user-owned sample facts to the exact active workspace snapshot."""
+
+    try:
+        workspace = _require_strategy_sample_design_workspace(runtime, task)
+    except StrategySetupError:
+        raise
+    if (
+        workspace.active_dataset_id != context.dataset_id
+        or workspace.active_dataset_content_hash != context.dataset_content_hash
+        or workspace.revision != context.workspace_revision
+        or workspace.analysis_generation != context.analysis_generation
+    ):
+        raise StrategySetupError(
+            "活动 DataWorkspace 在样本设计计划创建前发生变化；请基于当前版本重试。"
+        )
+    target_col = workspace.semantic_mapping.target_col
+    if (
+        not isinstance(target_col, str)
+        or not target_col
+        or target_col != context.target_col
+        or target_col not in context.columns
+    ):
+        raise StrategySetupError(
+            "策略样本设计只能使用 DataWorkspace 中已确认的二元目标列。"
+        )
+    content_hash = workspace.active_dataset_content_hash
+    semantic_hash = data_semantic_mapping_hash(workspace.semantic_mapping)
+    if not isinstance(content_hash, str) or not content_hash:
+        raise StrategySetupError("活动数据集缺少内容 hash，不能固化样本设计。")
+    if semantic_hash != context.semantic_mapping_hash:
+        raise StrategySetupError(
+            "活动 DataWorkspace 的语义映射已变化；请重新发起样本设计。"
+        )
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    for field in (
+        "split_col",
+        "month_col",
+        "weight_col",
+        "loan_amount_col",
+        "overdue_amount_col",
+    ):
+        column = inputs.get(field)
+        if column is not None and column not in context.columns:
+            raise StrategySetupError(
+                f"策略样本设计显式字段 {field} 不在当前活动数据集中。"
+            )
+    slots: dict[str, object] = {
+        "dataset_id": workspace.active_dataset_id,
+        "expected_dataset_content_hash": content_hash,
+        "workspace_revision": workspace.revision,
+        "workspace_generation": workspace.analysis_generation,
+        "semantic_mapping_hash": semantic_hash,
+        "target_col": target_col,
+        "drop_nan_labels": bool(drop_nan_labels),
+    }
+    slots.update(
+        {
+            key: value
+            for key, value in inputs.items()
+            if key != "drop_nan_labels"
+        }
+    )
+    return slots
 
 
 def _strategy_pool_impact_plan_slots(
@@ -4107,6 +4250,128 @@ def _strategy_pool_impact_dataset_preview(
     )
 
 
+def _strategy_sample_design_dataset_context(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+):
+    """Resolve the sample-design source only from confirmed workspace state."""
+
+    _require_strategy_sample_design_workspace(runtime, task)
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    context = build_strategy_dataset_context(
+        registry,
+        backend,
+        task.id,
+        task.source_dir,
+        target_col=None,
+        require_target=True,
+    )
+    _validate_strategy_sample_design_target(
+        registry,
+        backend,
+        dataset_id=context.dataset_id,
+        target_col=context.target_col,
+    )
+    return context
+
+
+def _strategy_sample_design_dataset_preview(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+):
+    """Preview the exact active sample and its confirmed workspace target."""
+
+    _require_strategy_sample_design_workspace(runtime, task)
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    preview = preview_strategy_dataset_context(
+        registry,
+        backend,
+        task.id,
+        task.source_dir,
+        target_col=None,
+    )
+    _validate_strategy_sample_design_target(
+        registry,
+        backend,
+        dataset_id=preview.dataset_id,
+        target_col=preview.target_col,
+    )
+    return preview
+
+
+def _validate_strategy_sample_design_target(
+    registry,
+    backend,
+    *,
+    dataset_id: object,
+    target_col: object,
+) -> tuple[int, int]:
+    """Accept only native numeric 0/1 plus genuine null labels.
+
+    Numeric strings are intentionally rejected even when pandas could coerce
+    them. Infinite values and other finite numbers are hard errors, never NaN
+    confirmation candidates.
+    """
+
+    if not isinstance(dataset_id, str) or not dataset_id:
+        raise StrategySetupError(
+            "策略样本设计必须绑定已注册的活动数据集后才能校验目标列。"
+        )
+    if not isinstance(target_col, str) or not target_col:
+        raise StrategySetupError("策略样本设计要求已确认的二元目标列。")
+    try:
+        path = registry.resolve_path(dataset_id)
+        frame = backend.read_frame(path, columns=[target_col])
+        target = frame[target_col]
+    except Exception as exc:
+        raise StrategySetupError(
+            f"目标列 `{target_col}` 无法从当前活动数据集读取。"
+        ) from exc
+    dtype_kind = getattr(target.dtype, "kind", None)
+    if dtype_kind not in {"i", "u", "f"}:
+        raise StrategySetupError(
+            f"目标列 `{target_col}` 必须是数值 0/1 或真实空值；"
+            "字符串 '0'/'1'、布尔值和其他编码不接受。"
+        )
+    null_mask = target.isna()
+    for value in target.loc[~null_mask].tolist():
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise StrategySetupError(
+                f"目标列 `{target_col}` 必须是数值 0/1 或真实空值。"
+            ) from exc
+        if not math.isfinite(number) or number not in {0.0, 1.0}:
+            raise StrategySetupError(
+                f"目标列 `{target_col}` 必须是数值 0/1 或真实空值；"
+                "inf、-inf 和 0/1 之外的值不能进入样本设计。"
+            )
+    return int(len(target)), int(null_mask.sum())
+
+
+def _require_strategy_sample_design_workspace(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+):
+    try:
+        snapshot = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
+            task.id
+        )
+    except (DataWorkspaceDataError, KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "策略样本设计需要有效且已确认的活动 DataWorkspace。"
+        ) from exc
+    if snapshot.active_dataset_id is None:
+        raise StrategySetupError(
+            "策略样本设计要求先在 DataWorkspace 选择并保存活动数据集。"
+        )
+    if not snapshot.semantic_mapping.target_col:
+        raise StrategySetupError(
+            "策略样本设计要求先在 DataWorkspace 确认二元目标列。"
+        )
+    return snapshot
+
+
 def _require_strategy_pool_impact_workspace(
     runtime: DriverTurnRuntime,
     task: TaskRecord,
@@ -4137,6 +4402,7 @@ def _strategy_dataset_binding_matches(
     preview,
     context,
     use_confirmed_workspace_target: bool = False,
+    use_sample_design_workspace: bool = False,
 ) -> bool:
     """Verify the registered snapshot still represents the compiled preview."""
 
@@ -4146,11 +4412,12 @@ def _strategy_dataset_binding_matches(
     ):
         return False
     try:
-        refreshed = (
-            _strategy_pool_impact_dataset_preview(runtime, task)
-            if use_confirmed_workspace_target
-            else _strategy_dataset_preview(runtime, task)
-        )
+        if use_sample_design_workspace:
+            refreshed = _strategy_sample_design_dataset_preview(runtime, task)
+        elif use_confirmed_workspace_target:
+            refreshed = _strategy_pool_impact_dataset_preview(runtime, task)
+        else:
+            refreshed = _strategy_dataset_preview(runtime, task)
     except StrategySetupError:
         return False
     if (
@@ -4227,10 +4494,18 @@ def _strategy_nan_label_clarification_response(
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
     )
+    is_sample_design = (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_sample_design"
+    )
     refreshed = (
         _strategy_pool_impact_dataset_preview(runtime, task)
         if is_pool_impact
-        else _strategy_dataset_preview(runtime, task)
+        else (
+            _strategy_sample_design_dataset_preview(runtime, task)
+            if is_sample_design
+            else _strategy_dataset_preview(runtime, task)
+        )
     )
     state = {
         "draft": draft.to_dict(),
@@ -4271,10 +4546,18 @@ def _append_strategy_nan_label_clarification(
         isinstance(payload, Mapping)
         and payload.get("workflow") in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
     )
-    if is_pool_impact:
+    is_sample_design = (
+        isinstance(payload, Mapping)
+        and payload.get("workflow") == "strategy_sample_design"
+    )
+    if is_pool_impact or is_sample_design:
+        missing_description = "空标签" if is_sample_design else "空或非有限标签"
+        retained_statistics = (
+            "总体、金额和权重统计" if is_sample_design else "总体、动作和金额统计"
+        )
         message = (
-            f"目标列 `{target_col}` 有 {n_nan}/{n_total} 行空或非有限标签。"
-            "这些样本行仍会保留在总体、动作和金额统计中，只从坏账率/风险率分母中排除；"
+            f"目标列 `{target_col}` 有 {n_nan}/{n_total} 行{missing_description}。"
+            f"这些样本行仍会保留在{retained_statistics}中，只从坏账率/风险率分母中排除；"
             "本次尚未创建计划，平台不会默认采用该口径。"
             "如果确实允许，请明确回复「确认将空标签仅从风险分母排除并继续」；"
             "仅回复「确认」不会执行。"
@@ -4346,6 +4629,7 @@ def _resume_strategy_after_nan_label_confirmation(
             message="空标签确认缺少已校验策略口径，请重新描述策略请求。",
         )
     is_pool_impact = payload.get("workflow") in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
+    is_sample_design = payload.get("workflow") == "strategy_sample_design"
     expected_pool_binding = None
     if is_pool_impact:
         expected_pool_binding = state.get("pool_binding")
@@ -4386,7 +4670,11 @@ def _resume_strategy_after_nan_label_confirmation(
         preview = (
             _strategy_pool_impact_dataset_preview(runtime, task)
             if is_pool_impact
-            else _strategy_dataset_preview(runtime, task)
+            else (
+                _strategy_sample_design_dataset_preview(runtime, task)
+                if is_sample_design
+                else _strategy_dataset_preview(runtime, task)
+            )
         )
     except StrategySetupError as exc:
         return _strategy_request_clarification_response(
@@ -4572,6 +4860,7 @@ def _strategy_request_requires_target(
         return (
             draft.workflow
             in {
+                "strategy_sample_design",
                 "univariate_candidate_analysis",
                 "automatic_tree_candidate_build",
                 "cross_matrix_analysis",
@@ -4603,6 +4892,7 @@ def _strategy_request_requires_complete_labels(
         return (
             draft.workflow
             in {
+                "strategy_sample_design",
                 "univariate_candidate_analysis",
                 "automatic_tree_candidate_build",
                 "cross_matrix_analysis",

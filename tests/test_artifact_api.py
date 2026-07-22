@@ -714,11 +714,21 @@ def test_task_artifact_list_is_path_free_and_downloads_by_owned_id(tmp_path):
     downloaded = client.get(
         f"/api/tasks/{task_id}/task-artifacts/{record['id']}/download"
     )
+    hash_bound_download = client.get(
+        f"/api/tasks/{task_id}/task-artifacts/{record['id']}/download"
+        f"?expected_content_hash={record['content_hash']}"
+    )
+    wrong_hash_download = client.get(
+        f"/api/tasks/{task_id}/task-artifacts/{record['id']}/download"
+        f"?expected_content_hash={'0' * 64}"
+    )
     relative_path = artifact.relative_to(app.state.settings.workspace).as_posix()
     generic_download = client.get(
         f"/api/artifacts/{quote(relative_path, safe='')}"
     )
     assert downloaded.status_code == 200
+    assert hash_bound_download.status_code == 200
+    assert wrong_hash_download.status_code == 409
     assert downloaded.text == "segment,net_profit\nA,12.5\n"
     assert downloaded.headers["content-type"].startswith("text/csv")
     assert generic_download.status_code == 200

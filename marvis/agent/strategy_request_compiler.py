@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal, InvalidOperation
 import json
 import math
@@ -57,6 +58,7 @@ STRATEGY_REQUEST_KINDS = (
     "standard_workflow",
 )
 STANDARD_STRATEGY_WORKFLOWS = (
+    "strategy_sample_design",
     "profit_calc",
     "roll_rate_matrix",
     "limit_pricing_matrix",
@@ -73,6 +75,93 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_pool_reorder",
     "strategy_pool_compile",
     "strategy_pool_impact",
+)
+
+_SAMPLE_DESIGN_STATUS_VALUES = {
+    "performance_window_status": frozenset({"provided", "unavailable"}),
+    "observation_window_status": frozenset({"provided", "unavailable"}),
+    "maturity_status": frozenset(
+        {"confirmed_matured", "not_matured", "unknown"}
+    ),
+}
+_SAMPLE_DESIGN_SUBJECT_RE = re.compile(
+    r"(?:策略)?样本(?:设计|边界|方案)|sample(?:\s|-|_)*design|"
+    r"performance\s+window|表现(?:窗|期).{0,20}(?:成熟|观察|样本)",
+    re.IGNORECASE,
+)
+_SAMPLE_DESIGN_ACTION_RE = re.compile(
+    r"(?:创建|生成|构建|设计|固化|冻结|物化|计算|分析|探索|先做)|"
+    r"(?<![A-Za-z0-9_])(?:create|build|design|freeze|materialize|"
+    r"compute|analy[sz]e|explore)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_SAMPLE_DESIGN_NEGATED_ACTION_RE = re.compile(
+    r"(?:不要|不用|无需|别|禁止|取消|暂不|先不)\s*"
+    r"(?:创建|生成|构建|设计|固化|冻结|物化|计算|分析|探索)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cancel)\s+"
+    r"(?:create|build|design|freeze|materialize|compute|analy[sz]e|explore)",
+    re.IGNORECASE,
+)
+_SAMPLE_DESIGN_NONCOMMAND_RE = re.compile(
+    r"[?？]|(?:能否|可否|是否|可以吗|能不能|如何|怎么|怎样|假设|假如|如果|"
+    r"昨天|之前|此前|过去|上次|历史上|未来|将来|以后|稍后|明天|下周|下月)|"
+    r"(?<![A-Za-z0-9_])(?:can\s+you|could\s+you|would\s+you|what\s+if|"
+    r"how\s+to|yesterday|previously|earlier|in\s+the\s+future|later|"
+    r"tomorrow|next\s+(?:week|month))(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_SAMPLE_DESIGN_EXPLORATION_RE = re.compile(
+    r"(?:先|仅|只).{0,12}(?:探索|分析|看|检查)|探索(?:性|阶段)?|"
+    r"explor(?:e|ation|atory)|analysis\s+only",
+    re.IGNORECASE,
+)
+_SAMPLE_DESIGN_PERFORMANCE_UNAVAILABLE_RE = re.compile(
+    r"(?:表现(?:窗|期)|performance\s+window).{0,18}"
+    r"(?:暂时没有|暂无|没有|未提供|不可用|不知道|未知|unavailable|not\s+available|unknown)|"
+    r"(?:暂时没有|暂无|没有|未提供|不可用|不知道|未知|unavailable|not\s+available|unknown)"
+    r".{0,18}(?:表现(?:窗|期)|performance\s+window)",
+    re.IGNORECASE,
+)
+_SAMPLE_DESIGN_OBSERVATION_UNAVAILABLE_RE = re.compile(
+    r"(?:观察(?:窗|期)|observation\s+window).{0,18}"
+    r"(?:暂时没有|暂无|没有|未提供|不可用|不知道|未知|unavailable|not\s+available|unknown)|"
+    r"(?:暂时没有|暂无|没有|未提供|不可用|不知道|未知|unavailable|not\s+available|unknown)"
+    r".{0,18}(?:观察(?:窗|期)|observation\s+window)",
+    re.IGNORECASE,
+)
+_SAMPLE_DESIGN_MATURITY_PATTERNS = {
+    "confirmed_matured": re.compile(
+        r"(?:确认(?:为)?|已经|已|明确(?:为)?)(?:完全)?成熟|"
+        r"成熟度.{0,10}(?:确认(?:为)?(?:已)?成熟|已成熟)|"
+        r"(?:confirmed|fully)\s+matured",
+        re.IGNORECASE,
+    ),
+    "not_matured": re.compile(
+        r"(?:尚未|还没|未|不)(?:完全)?成熟|not\s+(?:yet\s+)?matured?",
+        re.IGNORECASE,
+    ),
+    "unknown": re.compile(
+        r"(?:成熟度|maturity).{0,12}(?:未知|不确定|不知道|unknown)|"
+        r"(?:未知|不确定|不知道|unknown).{0,12}(?:成熟度|maturity)",
+        re.IGNORECASE,
+    ),
+}
+_SAMPLE_DESIGN_PLATFORM_CONTROL_RE = re.compile(
+    r"\b(?:dataset_id|expected_(?:content_)?hash|workspace_(?:revision|generation)|"
+    r"analysis_generation|semantic_mapping_hash|target_col|sample_context_hash)\b|"
+    r"(?:数据集|样本)\s*(?:ID|id|hash|哈希)|工作区\s*(?:revision|版本)|"
+    r"语义(?:映射)?\s*(?:hash|哈希)|目标列",
+    re.IGNORECASE,
+)
+_SAMPLE_DESIGN_OTHER_OPERATION_RE = re.compile(
+    r"(?:建模|训练模型|评分卡|自动树|决策树|叶节点|策略池|入池|采纳|采用|部署|"
+    r"投产|上线|生成报告|形成报告|出报告|模型报告|过滤|筛选|纳入|排除|"
+    r"仅保留|只保留|删(?:除)?行|删除(?:异常)?行|清洗|派生(?:字段|列|变量)|"
+    r"新增(?:字段|列|变量))|"
+    r"(?<![A-Za-z0-9_])(?:model(?:ing)?|scorecard|automatic\s+tree|decision\s+tree|"
+    r"strategy\s+pool|adopt|deploy|production|report|filter|clean|derive|"
+    r"drop\s+rows?|keep\s+only)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
 )
 UNIVARIATE_BINNING_METHODS = (
     "equal_frequency",
@@ -2245,7 +2334,13 @@ def _validate_standard_workflow_payload(
     if any(not isinstance(key, str) for key in raw_inputs):
         return _invalid("workflow_inputs 的字段名必须是文本。")
     try:
-        if workflow == "profit_calc":
+        if workflow == "strategy_sample_design":
+            normalized = _validate_strategy_sample_design_inputs(
+                raw_inputs,
+                whitelist,
+                target_col=target_col,
+            )
+        elif workflow == "profit_calc":
             normalized = _validate_profit_workflow_inputs(raw_inputs, whitelist)
         elif workflow == "roll_rate_matrix":
             normalized = _validate_roll_rate_workflow_inputs(raw_inputs, whitelist)
@@ -2314,6 +2409,246 @@ def _validate_standard_workflow_payload(
         ),
         True,
     )
+
+
+def _validate_strategy_sample_design_inputs(
+    inputs: Mapping[str, Any],
+    whitelist: tuple[str, ...],
+    *,
+    target_col: str | None,
+) -> dict[str, Any]:
+    """Validate only the sample-boundary facts explicitly owned by the user."""
+
+    workflow = "strategy_sample_design"
+    allowed = {
+        "performance_window_status",
+        "performance_window_days",
+        "observation_window_status",
+        "observation_start",
+        "observation_end",
+        "maturity_status",
+        "target_bad_value",
+        "split_col",
+        "development_values",
+        "validation_values",
+        "oot_values",
+        "month_col",
+        "weight_col",
+        "loan_amount_col",
+        "overdue_amount_col",
+        "drop_nan_labels",
+    }
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    required_controls = {*_SAMPLE_DESIGN_STATUS_VALUES, "target_bad_value"}
+    missing_controls = sorted(required_controls - set(inputs))
+    if missing_controls:
+        raise _DraftValidationError(
+            f"{workflow} 缺少必需口径：" + "、".join(missing_controls) + "。"
+        )
+
+    normalized: dict[str, Any] = {}
+    for field, values in _SAMPLE_DESIGN_STATUS_VALUES.items():
+        value = inputs[field]
+        if not isinstance(value, str) or value not in values:
+            raise _DraftValidationError(
+                f"{workflow} {field} 只能是：" + "、".join(sorted(values)) + "。"
+            )
+        normalized[field] = value
+
+    target_bad_value = inputs["target_bad_value"]
+    if (
+        isinstance(target_bad_value, bool)
+        or not isinstance(target_bad_value, (int, float))
+        or not math.isfinite(float(target_bad_value))
+        or float(target_bad_value) not in {0.0, 1.0}
+    ):
+        raise _DraftValidationError(
+            f"{workflow} target_bad_value 必须是整数 0 或 1，不能是布尔值。"
+        )
+    normalized["target_bad_value"] = int(target_bad_value)
+
+    performance_status = normalized["performance_window_status"]
+    if performance_status == "provided":
+        days = inputs.get("performance_window_days")
+        if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
+            raise _DraftValidationError(
+                f"{workflow} performance_window_days 必须是正整数。"
+            )
+        normalized["performance_window_days"] = days
+    elif "performance_window_days" in inputs:
+        raise _DraftValidationError(
+            f"{workflow} 表现窗 unavailable 时不能填写 performance_window_days。"
+        )
+
+    observation_status = normalized["observation_window_status"]
+    observation_fields = {"observation_start", "observation_end"}
+    if observation_status == "provided":
+        missing = sorted(observation_fields - set(inputs))
+        if missing:
+            raise _DraftValidationError(
+                f"{workflow} 观察窗 provided 时缺少：" + "、".join(missing) + "。"
+            )
+        parsed_dates: dict[str, date] = {}
+        for field in sorted(observation_fields):
+            value = inputs[field]
+            if not isinstance(value, str):
+                raise _DraftValidationError(f"{workflow} {field} 必须是 ISO 日期。")
+            try:
+                parsed = date.fromisoformat(value)
+            except ValueError as exc:
+                raise _DraftValidationError(
+                    f"{workflow} {field} 必须是 YYYY-MM-DD ISO 日期。"
+                ) from exc
+            if parsed.isoformat() != value:
+                raise _DraftValidationError(
+                    f"{workflow} {field} 必须是 YYYY-MM-DD ISO 日期。"
+                )
+            parsed_dates[field] = parsed
+            normalized[field] = value
+        if parsed_dates["observation_start"] > parsed_dates["observation_end"]:
+            raise _DraftValidationError(
+                f"{workflow} observation_start 不能晚于 observation_end。"
+            )
+    else:
+        unexpected = sorted(observation_fields & set(inputs))
+        if unexpected:
+            raise _DraftValidationError(
+                f"{workflow} 观察窗 unavailable 时不能填写："
+                + "、".join(unexpected)
+                + "。"
+            )
+
+    split_fields = {
+        "split_col",
+        "development_values",
+        "validation_values",
+        "oot_values",
+    }
+    supplied_split_fields = split_fields & set(inputs)
+    if supplied_split_fields and supplied_split_fields != split_fields:
+        missing = sorted(split_fields - supplied_split_fields)
+        raise _DraftValidationError(
+            f"{workflow} 指定切分时必须同时提供 split_col 与三组值；缺少："
+            + "、".join(missing)
+            + "。"
+        )
+    if supplied_split_fields:
+        split_col = _workflow_column(
+            inputs["split_col"],
+            name=f"{workflow} split_col",
+            whitelist=whitelist,
+        )
+        if target_col is not None and split_col == target_col:
+            raise _DraftValidationError(f"{workflow} split_col 不能使用目标列。")
+        normalized["split_col"] = split_col
+        value_sets: dict[str, set[tuple[str, object]]] = {}
+        for field in (
+            "development_values",
+            "validation_values",
+            "oot_values",
+        ):
+            values = _sample_design_value_sequence(
+                inputs[field],
+                name=field,
+                minimum_items=1 if field == "development_values" else 0,
+            )
+            normalized[field] = values
+            value_sets[field] = {_sample_design_value_identity(item) for item in values}
+        overlaps: list[str] = []
+        for left, right in (
+            ("development_values", "validation_values"),
+            ("development_values", "oot_values"),
+            ("validation_values", "oot_values"),
+        ):
+            if value_sets[left] & value_sets[right]:
+                overlaps.append(f"{left}/{right}")
+        if overlaps:
+            raise _DraftValidationError(
+                f"{workflow} 三组 split values 必须互不重叠："
+                + "、".join(overlaps)
+                + "。"
+            )
+
+    for field in (
+        "month_col",
+        "weight_col",
+        "loan_amount_col",
+        "overdue_amount_col",
+    ):
+        if field not in inputs:
+            continue
+        column = _workflow_column(
+            inputs[field],
+            name=f"{workflow} {field}",
+            whitelist=whitelist,
+        )
+        if target_col is not None and column == target_col:
+            raise _DraftValidationError(f"{workflow} {field} 不能使用目标列。")
+        normalized[field] = column
+
+    bound_columns = [
+        normalized[field]
+        for field in (
+            "split_col",
+            "month_col",
+            "weight_col",
+            "loan_amount_col",
+            "overdue_amount_col",
+        )
+        if field in normalized
+    ]
+    if len(bound_columns) != len(set(bound_columns)):
+        raise _DraftValidationError(
+            f"{workflow} 切分、月份、权重和金额字段必须彼此不同。"
+        )
+
+    if "drop_nan_labels" in inputs:
+        value = inputs["drop_nan_labels"]
+        if not isinstance(value, bool):
+            raise _DraftValidationError(
+                f"{workflow} drop_nan_labels 必须是布尔值。"
+            )
+        normalized["drop_nan_labels"] = value
+    return normalized
+
+
+def _sample_design_value_sequence(
+    value: object,
+    *,
+    name: str,
+    minimum_items: int,
+) -> list[object]:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, str | bytes | bytearray)
+        or not minimum_items <= len(value) <= 100
+    ):
+        raise _DraftValidationError(
+            f"{name} 必须是包含 {minimum_items} 到 100 个标量值的数组。"
+        )
+    normalized: list[object] = []
+    identities: set[tuple[str, object]] = set()
+    for item in value:
+        if item is None or not isinstance(item, str | int | float | bool):
+            raise _DraftValidationError(f"{name} 只能包含文本、布尔值或有限数字。")
+        if isinstance(item, float) and not math.isfinite(item):
+            raise _DraftValidationError(f"{name} 只能包含文本、布尔值或有限数字。")
+        if isinstance(item, int) and not isinstance(item, bool) and abs(item) > 2**53 - 1:
+            raise _DraftValidationError(f"{name} 中的整数超出精确 JSON 范围。")
+        identity = _sample_design_value_identity(item)
+        if identity in identities:
+            raise _DraftValidationError(f"{name} 不能包含重复值。")
+        identities.add(identity)
+        normalized.append(item)
+    return normalized
+
+
+def _sample_design_value_identity(value: object) -> tuple[str, object]:
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, int | float):
+        return ("number", Decimal(str(value)).normalize())
+    return ("string", value)
 
 
 def _validate_profit_workflow_inputs(
@@ -4273,6 +4608,16 @@ def _ground_refinement_request(
     whitelist: tuple[str, ...],
 ) -> StrategyRequestCompilation:
     draft = result.draft
+    if utterance_targets_strategy_sample_design(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_sample_design"
+    ):
+        return _clarification(
+            "原话明确要求固化策略样本设计，只能编译为 strategy_sample_design；"
+            "不能改路由到建模、建树、Strategy Pool、报告或通用策略生命周期。",
+            code="strategy_sample_design_workflow_required",
+            fields=("workflow",),
+        )
     if _utterance_targets_strategy_pool_impact(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_pool_impact"
@@ -4328,6 +4673,12 @@ def _ground_refinement_request(
         )
     if not isinstance(draft, StandardWorkflowRequestDraft):
         return result
+    if draft.workflow == "strategy_sample_design":
+        return _ground_strategy_sample_design_request(
+            utterance,
+            result,
+            whitelist=whitelist,
+        )
     if draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS:
         return _ground_strategy_pool_impact_request(
             utterance,
@@ -4401,6 +4752,550 @@ def _ground_refinement_request(
         code="strategy_refinement_controls_not_grounded",
         fields=tuple(dict.fromkeys(missing_controls)),
     )
+
+
+def utterance_targets_strategy_sample_design(utterance: str) -> bool:
+    """Return true only when a build verb targets the sample-design subject.
+
+    References such as ``基于已固化的样本设计构建自动树`` must remain with
+    their downstream workflow, so co-occurrence anywhere in a clause is not
+    sufficient authorization to materialize a new sample design.
+    """
+
+    before_subject_actions = {
+        "创建",
+        "生成",
+        "构建",
+        "设计",
+        "固化",
+        "冻结",
+        "物化",
+        "create",
+        "build",
+        "design",
+        "freeze",
+        "materialize",
+    }
+    after_subject_actions = {
+        "创建",
+        "生成",
+        "固化",
+        "冻结",
+        "物化",
+        "create",
+        "freeze",
+        "materialize",
+    }
+    reference_prefix = re.compile(
+        r"(?:基于|使用|参考|依据|按照|依赖|沿用|using|based\s+on|refer(?:ring)?\s+to)\s*$",
+        re.I,
+    )
+    past_prefix = re.compile(
+        r"(?:已|已经|曾|曾经|此前|历史|already|previously)\s*$",
+        re.I,
+    )
+    for clause in _sample_design_clauses(utterance):
+        subjects = tuple(_SAMPLE_DESIGN_SUBJECT_RE.finditer(clause))
+        actions = tuple(_SAMPLE_DESIGN_ACTION_RE.finditer(clause))
+        for subject in subjects:
+            subject_prefix = clause[max(0, subject.start() - 14) : subject.start()]
+            subject_is_reference = reference_prefix.search(subject_prefix) is not None
+            for action in actions:
+                if action.start() < subject.end() and subject.start() < action.end():
+                    continue
+                token = action.group(0).lower()
+                action_prefix = clause[max(0, action.start() - 12) : action.start()]
+                if _SAMPLE_DESIGN_NEGATED_ACTION_RE.search(
+                    clause[max(0, action.start() - 12) : action.end()]
+                ):
+                    continue
+                if action.end() <= subject.start():
+                    gap = clause[action.end() : subject.start()]
+                    if (
+                        token in before_subject_actions
+                        and len(gap) <= 24
+                        and "的" not in gap
+                        and past_prefix.search(action_prefix) is None
+                    ):
+                        return True
+                elif subject.end() <= action.start():
+                    gap = clause[subject.end() : action.start()]
+                    if (
+                        not subject_is_reference
+                        and token in after_subject_actions
+                        and len(gap) <= 8
+                    ):
+                        return True
+    return False
+
+
+def _sample_design_build_intent_negated(utterance: str) -> bool:
+    subject = r"(?:(?:策略)?样本(?:设计|边界|方案)|sample(?:\s|-|_)*design)"
+    action = (
+        r"(?:创建|生成|构建|设计|固化|冻结|物化|计算|分析|探索|"
+        r"create|build|design|freeze|materialize|compute|analy[sz]e|explore)"
+    )
+    negation = (
+        r"(?:不要|不用|无需|别|禁止|取消|暂不|先不|"
+        r"do\s+not|don't|never|cancel)"
+    )
+    clauses = re.split(r"[；;。.!?？\n，,、/]+", utterance)
+    return any(
+        re.search(rf"{negation}\s*{action}.{{0,16}}{subject}", clause, re.I)
+        or re.search(rf"{negation}\s*{subject}.{{0,12}}{action}", clause, re.I)
+        for clause in clauses
+    )
+
+
+def _ground_strategy_sample_design_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+    *,
+    whitelist: tuple[str, ...],
+) -> StrategyRequestCompilation:
+    """Ground the small, user-owned sample-boundary contract in one command."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if _sample_design_build_intent_negated(utterance):
+        return _clarification(
+            "原话否定或取消了样本设计固化，本轮不会创建计划。",
+            code="strategy_sample_design_intent_negated",
+            fields=("build_intent",),
+        )
+    if (
+        not utterance_targets_strategy_sample_design(utterance)
+        or _SAMPLE_DESIGN_NONCOMMAND_RE.search(utterance)
+    ):
+        return _clarification(
+            "请用一条当前、肯定式命令说明要固化策略样本设计；问句、假设、历史或"
+            "未来描述不会被当成立即执行授权。",
+            code="strategy_sample_design_positive_command_required",
+            fields=("build_intent",),
+        )
+    if _sample_design_has_forbidden_operation(utterance):
+        return _clarification(
+            "本轮只能冻结当前活动样本边界并计算样本证据；建模、建树、入池、"
+            "采纳、部署和报告必须拆成后续请求。",
+            code="strategy_sample_design_single_step_required",
+            fields=("next_action",),
+        )
+    if _SAMPLE_DESIGN_PLATFORM_CONTROL_RE.search(utterance):
+        return _clarification(
+            "数据集/hash、workspace、语义映射和目标列都由平台从当前活动 "
+            "DataWorkspace 绑定，不能由自然语言注入。",
+            code="strategy_sample_design_platform_binding_forbidden",
+            fields=("dataset_binding",),
+        )
+
+    missing: list[str] = []
+    performance_status = inputs["performance_window_status"]
+    if not _sample_design_performance_grounded(
+        utterance,
+        status=performance_status,
+        days=inputs.get("performance_window_days"),
+    ):
+        missing.append(
+            f"performance_window_days={inputs['performance_window_days']}"
+            if performance_status == "provided"
+            else "performance_window_status=unavailable"
+        )
+
+    observation_status = inputs["observation_window_status"]
+    if not _sample_design_observation_grounded(
+        utterance,
+        status=observation_status,
+        start=inputs.get("observation_start"),
+        end=inputs.get("observation_end"),
+    ):
+        if observation_status == "provided":
+            missing.extend(
+                (
+                    f"observation_start={inputs['observation_start']}",
+                    f"observation_end={inputs['observation_end']}",
+                )
+            )
+        else:
+            missing.append("observation_window_status=unavailable")
+
+    maturity_status = inputs["maturity_status"]
+    if not _sample_design_maturity_grounded(utterance, maturity_status):
+        missing.append(f"maturity_status={maturity_status}")
+    if (
+        performance_status == "unavailable"
+        or maturity_status == "unknown"
+    ) and _SAMPLE_DESIGN_EXPLORATION_RE.search(utterance) is None:
+        missing.append("exploration_only")
+
+    target_bad_value = inputs["target_bad_value"]
+    if not _sample_design_target_bad_value_grounded(
+        utterance,
+        target_bad_value,
+    ):
+        missing.append(f"target_bad_value={target_bad_value}")
+
+    column_roles = {
+        "split_col": ("切分列", "拆分列", "split_col", "split column"),
+        "month_col": ("月份列", "月度列", "month_col", "month column"),
+        "weight_col": ("权重列", "weight_col", "weight column"),
+        "loan_amount_col": (
+            "放款金额列",
+            "贷款金额列",
+            "loan_amount_col",
+            "loan amount column",
+        ),
+        "overdue_amount_col": (
+            "逾期金额列",
+            "overdue_amount_col",
+            "overdue amount column",
+        ),
+    }
+    for field, labels in column_roles.items():
+        supplied = inputs.get(field)
+        if isinstance(supplied, str) and not _sample_design_column_role_grounded(
+            utterance,
+            column=supplied,
+            labels=labels,
+        ):
+            missing.append(f"{field}={supplied}")
+        for candidate in whitelist:
+            if _sample_design_column_role_grounded(
+                utterance,
+                column=candidate,
+                labels=labels,
+            ) and supplied != candidate:
+                missing.append(f"{field}={candidate}")
+
+    if "split_col" in inputs:
+        split_labels = {
+            "development_values": ("开发", "development", "dev"),
+            "validation_values": ("验证", "validation", "valid"),
+            "oot_values": ("oot", "时间外"),
+        }
+        for field, labels in split_labels.items():
+            if not _sample_design_split_values_grounded(
+                utterance,
+                values=inputs[field],
+                labels=labels,
+            ):
+                missing.append(field)
+
+    drop_true = re.search(
+        r"(?:丢弃|排除|剔除|删除).{0,12}(?:NaN|nan|空标签|缺失标签)|"
+        r"(?:drop|exclude).{0,12}(?:nan|missing)\s+labels?",
+        utterance,
+        re.I,
+    )
+    drop_false = re.search(
+        r"(?:不丢弃|不排除|保留).{0,12}(?:NaN|nan|空标签|缺失标签)|"
+        r"(?:do\s+not|don't)\s+(?:drop|exclude).{0,12}"
+        r"(?:nan|missing)\s+labels?",
+        utterance,
+        re.I,
+    )
+    if drop_false is not None:
+        drop_true = None
+    if drop_true is not None and inputs.get("drop_nan_labels") is not True:
+        missing.append("drop_nan_labels=true")
+    if drop_false is not None and inputs.get("drop_nan_labels") is not False:
+        missing.append("drop_nan_labels=false")
+    if "drop_nan_labels" in inputs and drop_true is None and drop_false is None:
+        missing.append(f"drop_nan_labels={str(inputs['drop_nan_labels']).lower()}")
+
+    if missing:
+        unique = tuple(dict.fromkeys(missing))
+        return _clarification(
+            "样本设计草案中的表现窗、观察窗、成熟度、标签语义、切分或可选列无法逐字与"
+            "原话核对：" + "、".join(unique) + "。平台不会猜测或补写口径。",
+            code="strategy_sample_design_controls_not_grounded",
+            fields=unique,
+        )
+    return result
+
+
+def _sample_design_clauses(utterance: str) -> tuple[str, ...]:
+    return tuple(
+        clause.strip()
+        for clause in re.split(r"[；;。.!?？\n]+", utterance)
+        if clause.strip()
+    )
+
+
+def _sample_design_has_forbidden_operation(utterance: str) -> bool:
+    """Reject every second operation unless that operation is explicitly negated."""
+
+    boundaries = "；;。.!?？\n，,、/"
+    for match in _SAMPLE_DESIGN_OTHER_OPERATION_RE.finditer(utterance):
+        left = max(utterance.rfind(mark, 0, match.start()) for mark in boundaries) + 1
+        right_candidates = [
+            position
+            for mark in boundaries
+            if (position := utterance.find(mark, match.end())) >= 0
+        ]
+        right = min(right_candidates) if right_candidates else len(utterance)
+        prefix = utterance[left : match.start()]
+        suffix = utterance[match.end() : right]
+        # Explicit target-null handling is a supported sample-design control,
+        # not a user-authored filter or row-mutation operation.
+        if match.group(0) == "排除" and re.search(
+            r"(?:NaN|nan|空标签|缺失标签)", suffix, re.I
+        ):
+            continue
+        if re.search(
+            r"(?:不|不要|不再|不做|无需|不需要|别|禁止|不会|未|没有)\s*$|"
+            r"(?:\bdo\s+not|\bdon't|\bwithout|\bno)\s*$",
+            prefix,
+            re.I,
+        ):
+            continue
+        return True
+    return False
+
+
+def _sample_design_performance_grounded(
+    utterance: str,
+    *,
+    status: str,
+    days: object,
+) -> bool:
+    labels = re.compile(r"表现(?:窗|期)|performance\s+window", re.I)
+    clauses = tuple(
+        clause for clause in _sample_design_clauses(utterance) if labels.search(clause)
+    )
+    if not clauses:
+        return False
+    unavailable = any(
+        re.search(
+            r"(?:暂时没有|暂无|没有|未提供|不可用|不知道|未知|"
+            r"unavailable|not\s+available|unknown)",
+            clause,
+            re.I,
+        )
+        for clause in clauses
+    )
+    explicit_days = {
+        int(match.group(1))
+        for clause in clauses
+        for match in re.finditer(r"(?<!\d)(\d{1,6})\s*(?:天|days?)(?!\w)", clause, re.I)
+    }
+    negated_days = any(
+        re.search(
+            r"(?:不是|并非|不为|not)\s*\d{1,6}\s*(?:天|days?)",
+            clause,
+            re.I,
+        )
+        for clause in clauses
+    )
+    if status == "unavailable":
+        return unavailable and not explicit_days and not negated_days
+    return (
+        isinstance(days, int)
+        and not isinstance(days, bool)
+        and not unavailable
+        and not negated_days
+        and explicit_days == {days}
+    )
+
+
+def _sample_design_observation_grounded(
+    utterance: str,
+    *,
+    status: str,
+    start: object,
+    end: object,
+) -> bool:
+    label = r"(?:观察(?:窗|期)|observation\s+window)"
+    clauses = tuple(
+        clause
+        for clause in _sample_design_clauses(utterance)
+        if re.search(label, clause, re.I)
+    )
+    if not clauses:
+        return False
+    unavailable = any(
+        re.search(
+            r"(?:暂时没有|暂无|没有|未提供|不可用|不知道|未知|"
+            r"unavailable|not\s+available|unknown)",
+            clause,
+            re.I,
+        )
+        for clause in clauses
+    )
+    date_pattern = r"\d{4}-\d{2}-\d{2}"
+    dates = {
+        token
+        for clause in clauses
+        for token in re.findall(date_pattern, clause)
+    }
+    if status == "unavailable":
+        return unavailable and not dates
+    if not isinstance(start, str) or not isinstance(end, str) or unavailable:
+        return False
+
+    pairs: set[tuple[str, str]] = set()
+    for clause in clauses:
+        range_patterns = (
+            rf"{label}.{{0,32}}?({date_pattern})\s*(?:至|到|~|—|–|to|through)\s*({date_pattern})",
+            rf"({date_pattern})\s*(?:至|到|~|—|–|to|through)\s*({date_pattern}).{{0,20}}?{label}",
+        )
+        for pattern in range_patterns:
+            pairs.update(re.findall(pattern, clause, re.I))
+        starts = re.findall(
+            rf"(?:开始|起始|start)\s*(?:为|是|=|:|：)?\s*({date_pattern})",
+            clause,
+            re.I,
+        )
+        ends = re.findall(
+            rf"(?:结束|截止|end)\s*(?:为|是|=|:|：)?\s*({date_pattern})",
+            clause,
+            re.I,
+        )
+        if len(starts) == 1 and len(ends) == 1:
+            pairs.add((starts[0], ends[0]))
+    return pairs == {(start, end)} and dates == {start, end}
+
+
+def _sample_design_maturity_grounded(utterance: str, status: str) -> bool:
+    if re.search(
+        r"(?:成熟度|maturity).{0,16}(?:未|不)(?:能)?确认(?:已经|已)?成熟|"
+        r"(?:未|不)(?:能)?确认(?:已经|已)?成熟|"
+        r"(?:不是|并非)(?:已经|已)?成熟|not\s+confirmed\s+matured",
+        utterance,
+        re.I,
+    ):
+        return False
+    observed = {
+        candidate
+        for candidate, pattern in _SAMPLE_DESIGN_MATURITY_PATTERNS.items()
+        if pattern.search(utterance) is not None
+    }
+    return observed == {status}
+
+
+def _sample_design_target_bad_value_grounded(
+    utterance: str,
+    target_bad_value: int,
+) -> bool:
+    bad_values = _sample_design_binary_role_values(
+        utterance,
+        label=r"(?:坏(?:样本|客户|标签|类)?|坏账|bad(?:\s+(?:sample|label|class))?)",
+    )
+    bad_values.update(
+        int(value)
+        for value in re.findall(
+            r"(?<![A-Za-z0-9_])target_bad_value\s*(?:=|:|：)\s*([01])(?!\d)",
+            utterance,
+            re.I,
+        )
+    )
+    good_values = _sample_design_binary_role_values(
+        utterance,
+        label=r"(?:好(?:样本|客户|标签|类)?|正常样本|good(?:\s+(?:sample|label|class))?)",
+    )
+    return bad_values == {target_bad_value} and (
+        not good_values or good_values == {1 - target_bad_value}
+    )
+
+
+def _sample_design_binary_role_values(
+    utterance: str,
+    *,
+    label: str,
+) -> set[int]:
+    values: set[int] = set()
+    patterns = (
+        rf"(?<!\d)([01])(?!\d)\s*(?:也\s*)?(?:是|为|代表|表示|标记为|编码为)\s*{label}",
+        rf"{label}\s*(?:值|标签值|编码)?\s*(?:是|为|=|:|：)\s*([01])(?!\d)",
+    )
+    for pattern in patterns:
+        values.update(int(value) for value in re.findall(pattern, utterance, re.I))
+    return values
+
+
+def _sample_design_column_role_grounded(
+    utterance: str,
+    *,
+    column: str,
+    labels: Sequence[str],
+) -> bool:
+    column_pattern = re.escape(column)
+    label_pattern = "|".join(re.escape(label) for label in labels)
+    for match in re.finditer(
+        rf"(?<![A-Za-z0-9_]){column_pattern}(?![A-Za-z0-9_])",
+        utterance,
+        re.I,
+    ):
+        left = max(
+            utterance.rfind(separator, 0, match.start())
+            for separator in ("；", ";", "。", "\n")
+        ) + 1
+        right_candidates = [
+            position
+            for separator in ("；", ";", "。", "\n")
+            if (position := utterance.find(separator, match.end())) >= 0
+        ]
+        right = min(right_candidates) if right_candidates else len(utterance)
+        if re.search(label_pattern, utterance[left:right], re.I):
+            return True
+    return False
+
+
+def _sample_design_split_values_grounded(
+    utterance: str,
+    *,
+    values: Sequence[object],
+    labels: Sequence[str],
+) -> bool:
+    label_pattern = "|".join(
+        re.escape(label) for label in sorted(labels, key=len, reverse=True)
+    )
+    matches: list[tuple[str, re.Match[str]]] = []
+    for clause in _sample_design_clauses(utterance):
+        match = re.search(rf"(?:{label_pattern})", clause, re.I)
+        if match is not None:
+            matches.append((clause, match))
+    if len(matches) != 1:
+        return False
+    clause, role_match = matches[0]
+    remainder = clause[role_match.end() :]
+    remainder = re.sub(
+        r"^\s*(?:样本)?\s*(?:取?值|values?)?\s*(?:为|是|=|:|：)?\s*",
+        "",
+        remainder,
+        flags=re.I,
+    ).strip()
+    if not values:
+        return bool(
+            re.search(
+                r"(?:暂无|没有|未提供|不可用|为空|空数组|unavailable|none|empty)",
+                remainder,
+                re.I,
+            )
+        )
+    if re.search(
+        r"(?:暂无|没有|未提供|不可用|为空|空数组|unavailable|none|empty)",
+        remainder,
+        re.I,
+    ):
+        return False
+    raw_tokens = re.split(r"\s*(?:、|，|,|和|及|与)\s*", remainder)
+    tokens = {
+        token.strip().strip("[]()（）{}\"'` ").casefold()
+        for token in raw_tokens
+        if token.strip().strip("[]()（）{}\"'` ")
+    }
+    expected = {
+        _sample_design_scalar_text(value).casefold()
+        for value in values
+    }
+    return tokens == expected
+
+
+def _sample_design_scalar_text(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 def _ground_voting_candidate_build(
@@ -7404,7 +8299,80 @@ def _standard_workflow_confirmation_text(
     draft: StandardWorkflowRequestDraft,
 ) -> str:
     inputs = draft.workflow_inputs
-    if draft.workflow == "profit_calc":
+    if draft.workflow == "strategy_sample_design":
+        performance = (
+            f"已提供 {inputs['performance_window_days']} 天"
+            if inputs["performance_window_status"] == "provided"
+            else "unavailable"
+        )
+        observation = (
+            f"{inputs['observation_start']} 至 {inputs['observation_end']}"
+            if inputs["observation_window_status"] == "provided"
+            else "unavailable"
+        )
+        maturity_labels = {
+            "confirmed_matured": "已确认成熟",
+            "not_matured": "尚未成熟",
+            "unknown": "未知",
+        }
+        details = [
+            "已识别为〔策略样本设计 Workflow〕",
+            f"表现窗：{performance}",
+            f"观察窗：{observation}",
+            f"成熟度：{maturity_labels[inputs['maturity_status']]}",
+            f"坏样本值：{inputs['target_bad_value']}；"
+            f"好样本值：{1 - inputs['target_bad_value']}",
+        ]
+        if "split_col" in inputs:
+            validation_values = (
+                "、".join(str(value) for value in inputs["validation_values"])
+                if inputs["validation_values"]
+                else "unavailable"
+            )
+            oot_values = (
+                "、".join(str(value) for value in inputs["oot_values"])
+                if inputs["oot_values"]
+                else "unavailable"
+            )
+            details.append(
+                f"切分列 {inputs['split_col']}；开发样本值 "
+                + "、".join(str(value) for value in inputs["development_values"])
+                + f"；验证样本值 {validation_values}；OOT 样本值 {oot_values}"
+            )
+        else:
+            details.append("未声明开发/验证/OOT 切分，平台只冻结 overall 样本边界")
+        for field, label in (
+            ("month_col", "月份列"),
+            ("weight_col", "权重列"),
+            ("loan_amount_col", "放款金额列"),
+            ("overdue_amount_col", "逾期金额列"),
+        ):
+            if field in inputs:
+                details.append(f"{label}：{inputs[field]}")
+        if inputs.get("drop_nan_labels") is True:
+            details.append(
+                "标签缺失处理：保留总体样本行，仅从好坏/风险分母排除空标签"
+            )
+        elif inputs.get("drop_nan_labels") is False:
+            details.append("标签缺失处理：保留 NaN 标签行，遇到缺失时不会自动排除")
+        if (
+            inputs["performance_window_status"] == "unavailable"
+            or inputs["observation_window_status"] == "unavailable"
+            or inputs["maturity_status"] != "confirmed_matured"
+        ):
+            details.append(
+                "本次仅按 exploration-only 降级固化；不能据此声称样本已成熟、"
+                "完成独立验证或晋级"
+            )
+        details.extend(
+            [
+                "数据集/hash、workspace、语义映射和目标列由平台绑定",
+                "本步骤只冻结活动样本/派生数据边界并计算样本证据；"
+                "不做自由文本过滤或派生，不建模、不建树、不入池、不采纳、不部署、"
+                "不生成最终报告",
+            ]
+        )
+    elif draft.workflow == "profit_calc":
         params = inputs["profit_params"]
         details = [
             "已识别为〔标准利润分析 Workflow〕",
@@ -8177,6 +9145,14 @@ def _user_prompt(
         "对于 limit/pricing/segmentation 的 develop 请求，只能抽取 candidate_design "
         "搜索空间与用户明确给出的 economics_inputs；禁止输出 strategy_spec、规则、"
         "动作、默认动作、推荐值或计算指标。缺少必要经济口径时只返回 clarification。"
+        "对于 strategy_sample_design，只能抄录用户明确提供的表现窗状态/天数、观察窗"
+        "状态/ISO 起止日期、成熟度、代表坏样本的整数 0/1、完整三路 split 及可选"
+        "月份/权重/金额列和明确的"
+        "空标签处理授权。没有表现窗和成熟度时不得猜；只有用户明确说暂时没有/未知"
+        "并要求先探索，才可写 unavailable/unknown。不得填写 dataset/hash/workspace/"
+        "semantic/target 等平台绑定，也不得串联过滤、筛选、纳排、仅保留、删行、"
+        "清洗、派生列、建模、建树、Strategy Pool、"
+        "采纳、部署或报告。"
         "对于 automatic_tree_candidate_build，只能抄录用户明确提供的 features、"
         "权重/金额字段、方向和树参数；不得填写平台拥有的数据绑定、目标列、标签策略、"
         "预算、结果、叶子、动作、排名或推荐，也不得串联选叶或 Strategy Pool。"

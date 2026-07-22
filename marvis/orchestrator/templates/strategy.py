@@ -542,6 +542,165 @@ STRATEGY_AUTOMATIC_TREE_CANDIDATE_BUILD = WorkflowTemplate(
 )
 
 
+STRATEGY_SAMPLE_DESIGN = WorkflowTemplate(
+    id="strategy_sample_design",
+    title="策略样本设计固化",
+    goal_patterns=(
+        "固化策略样本设计",
+        "冻结策略样本边界",
+        "创建策略样本设计",
+        "materialize strategy sample design",
+        "freeze strategy sample boundary",
+    ),
+    slots=(
+        SlotSpec(
+            "dataset_id", True, "task_context", "Confirmed active dataset id"
+        ),
+        SlotSpec(
+            "expected_dataset_content_hash",
+            True,
+            "task_context",
+            "Confirmed immutable active dataset hash",
+        ),
+        SlotSpec(
+            "workspace_revision",
+            True,
+            "task_context",
+            "Confirmed DataWorkspace revision; zero is valid",
+        ),
+        SlotSpec(
+            "workspace_generation",
+            True,
+            "task_context",
+            "Confirmed active dataset generation; zero is valid",
+        ),
+        SlotSpec(
+            "semantic_mapping_hash",
+            True,
+            "task_context",
+            "Confirmed semantic mapping hash",
+        ),
+        SlotSpec(
+            "target_col", True, "task_context", "Confirmed binary target column"
+        ),
+        SlotSpec(
+            "performance_window_status",
+            True,
+            "user",
+            "Whether the performance window was provided",
+        ),
+        SlotSpec(
+            "performance_window_days",
+            False,
+            "user",
+            "Positive performance-window days when provided",
+        ),
+        SlotSpec(
+            "observation_window_status",
+            True,
+            "user",
+            "Whether the observation window was provided",
+        ),
+        SlotSpec(
+            "observation_start",
+            False,
+            "user",
+            "ISO observation-window start when provided",
+        ),
+        SlotSpec(
+            "observation_end",
+            False,
+            "user",
+            "ISO observation-window end when provided",
+        ),
+        SlotSpec(
+            "maturity_status",
+            True,
+            "user",
+            "Confirmed sample maturity status",
+        ),
+        SlotSpec(
+            "target_bad_value",
+            True,
+            "user",
+            "Explicit integer 0/1 value representing a bad sample",
+        ),
+        SlotSpec("split_col", False, "user", "Optional explicit split column"),
+        SlotSpec(
+            "development_values",
+            False,
+            "user",
+            "Explicit development split values",
+        ),
+        SlotSpec(
+            "validation_values",
+            False,
+            "user",
+            "Explicit validation split values",
+        ),
+        SlotSpec("oot_values", False, "user", "Explicit OOT split values"),
+        SlotSpec("month_col", False, "user", "Optional month column"),
+        SlotSpec("weight_col", False, "user", "Optional sample weight column"),
+        SlotSpec("loan_amount_col", False, "user", "Optional loan amount column"),
+        SlotSpec(
+            "overdue_amount_col", False, "user", "Optional overdue amount column"
+        ),
+        SlotSpec(
+            "drop_nan_labels",
+            True,
+            "user",
+            "Explicit or confirmed target-null exclusion policy",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="固化策略样本设计",
+            tool_ref=ToolRef("strategy", "materialize_sample_design"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "expected_dataset_content_hash": (
+                    "{slot:expected_dataset_content_hash}"
+                ),
+                "workspace_revision": "{slot:workspace_revision}",
+                "workspace_generation": "{slot:workspace_generation}",
+                "semantic_mapping_hash": "{slot:semantic_mapping_hash}",
+                "target_col": "{slot:target_col}",
+                "performance_window_status": (
+                    "{slot:performance_window_status}"
+                ),
+                "performance_window_days": "{slot:performance_window_days}",
+                "observation_window_status": (
+                    "{slot:observation_window_status}"
+                ),
+                "observation_window_start": "{slot:observation_start}",
+                "observation_window_end": "{slot:observation_end}",
+                "maturity_status": "{slot:maturity_status}",
+                "target_bad_value": "{slot:target_bad_value}",
+                "split_col": "{slot:split_col}",
+                "development_values": "{slot:development_values}",
+                "validation_values": "{slot:validation_values}",
+                "oot_values": "{slot:oot_values}",
+                "month_col": "{slot:month_col}",
+                "weight_col": "{slot:weight_col}",
+                "loan_amount_col": "{slot:loan_amount_col}",
+                "overdue_amount_col": "{slot:overdue_amount_col}",
+                "drop_nan_labels": "{slot:drop_nan_labels}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "sample_design_id"}),
+                PostCheck("nonempty", {"field": "content_hash"}),
+                PostCheck("nonempty", {"field": "bundle"}),
+                PostCheck("nonempty", {"field": "artifact"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_VOTING_CANDIDATE_BUILD = WorkflowTemplate(
     id="strategy_voting_candidate_build",
     title="Voting n-of-k 策略候选构建",

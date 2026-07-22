@@ -253,8 +253,13 @@ StrategySampleDesign
   inclusion_rules[] / exclusion_rules[] / time_range / scope
   split_definition? / weight_definition? / month_field?
   amount_field_refs[] / maturity_rule?
-  sample_metric_observation_refs[] / red_flags[]
+  red_flags[]
   tool_run_refs[] / producer_version
+
+StrategySampleDesignBundle
+  schema_version / bundle_id / content_hash / producer_version
+  sample_design / metric_definitions[] / metric_observations[]
+  每个 MetricObservation 反向引用 sample_design_id/content_hash 与 dataset ref
 
 CandidateEvidence
   schema_version / candidate_id / evidence_hash / candidate_type
@@ -278,6 +283,12 @@ StrategyImpactAssessment
   conservation_checks[] / maturity_summary / red_flags[]
   tool_run_refs[] / producer_version
 ```
+
+`StrategySampleDesignBundle` 是样本设计与其指标对象的 canonical 聚合边界。这里刻意不让
+`StrategySampleDesign` 再正向持有 observation hash 列表：observation 已反向引用 sample design，
+若双方 content hash 互相包含会形成不可计算的循环。Bundle 的 content hash 同时覆盖 sample
+design、全部 definition 和 observation；下游通过 bundle artifact 的 registry hash 验证整组证据，
+再使用其中的稳定对象 id/hash 引用。
 
 `CandidateEvidence` 是公共 envelope；单变量、自动树、交互树、评分卡、Voting 和 Cross 仍各自拥有严格的类型专属 asset/validator，不能把公共 envelope 变成允许任意 JSON 的宽松候选格式。
 
@@ -551,6 +562,8 @@ LimitPricingReportExtension
 - Phase 7：把 post-launch monitoring observation 追加到新 revision，不能回写或覆盖原开发报告。
 
 **实施进度（2026-07-19）**：Phase 4 已先交付可供报告复用的 `strategy.impact-assessment.v1` approval/reject Pool 影响证据，包含 first-match waterfall、总体/逐月动作与风险、标签/金额覆盖、可选基线件数/风险/金额 delta 和不可变 TaskArtifact。持久化 evidence 的真实性以 TaskArtifact registry 中的 expected content hash 为可信锚点；artifact 内 hash 只做 canonical 内容对账，不是离线签名。它完成的是第 6 步的首个确定性 evidence vertical，不等于 `StrategyReportBundle` 或最终 Excel/Markdown 已完成；分群×月、swap、OOT、limit/pricing/segmentation 专属影响表和最终七步组装继续留在 V2.x。
+
+**实施进度（2026-07-22）**：Phase 2 已交付 `strategy.sample-design-bundle.v1` 首个确定性 evidence vertical。自然语言 Workflow 只抽取用户拥有的目标坏样本值（0/1）、表现窗、观察窗、成熟度、切分和可选业务字段；dataset/hash/workspace/semantic/target column 由平台绑定。Bundle 内含严格、版本化并逐对象 content-addressed 的 `StrategySampleDesign`、`MetricDefinition[]` 与 `MetricObservation[]`，覆盖 overall 及可选 development/validation/OOT 的件数、好坏样本、坏率、标签覆盖、金额覆盖/汇总与权重观测，并注册不可变 task-owned JSON。未声明的 validation/OOT 不生成假 0 observation；已绑定但全缺失的金额/权重汇总返回 `insufficient_data/null`，不把空白解释成零。该纵切不执行自由文本过滤；纳排必须先由 DataWorkspace 物化为派生数据集。表现窗或观察窗缺失、成熟度未确认时结果强制 `exploration_only / development / unvalidated`，依赖成熟度的风险指标返回 `unavailable/not_matured`，不能声称 OOT 或独立验证。当前风险样本与通过率样本仍共用活动数据集边界；双样本定义、渠道/客群纳排、历史回溯打分、泄漏/选择偏差/样本不足检测、下游 Candidate/Impact 的强引用以及最终报告渲染仍待后续纵切，因此本进度不等于第 3 步或七步报告已经完整完成。
 
 ## 十三、参考工作簿
 

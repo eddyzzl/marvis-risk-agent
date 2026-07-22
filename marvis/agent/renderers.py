@@ -2133,6 +2133,157 @@ def _pool_impact_integrity_failure() -> tuple[str, list[dict]]:
     )
 
 
+def _sample_design_integrity_failure() -> tuple[str, list[dict]]:
+    return (
+        "**策略样本设计结果完整性校验失败**：计划缓存与 canonical sample-design "
+        "bundle/artifact 摘要不一致，已停止展示任何样本指标。请重新运行样本设计；"
+        "下载接口仍会按 TaskArtifact 注册 hash 校验产物。",
+        [],
+    )
+
+
+def _sample_design_metric_value(value: object, *, unit: str, status: str) -> str:
+    if status != "present":
+        return "n/a"
+    if unit == "ratio":
+        return _pct(value)
+    return _num(value)
+
+
+def _render_materialize_sample_design(o: dict):
+    """Render only observations from the strictly validated Tool envelope."""
+
+    from marvis.packs.strategy.errors import StrategyError
+    from marvis.packs.strategy.sample_design_tools import (
+        validate_materialize_sample_design_tool_output,
+    )
+
+    try:
+        o = validate_materialize_sample_design_tool_output(o)
+    except (StrategyError, RecursionError):
+        return _sample_design_integrity_failure()
+
+    bundle = o["bundle"]
+    design = bundle["sample_design"]
+    boundary = design["active_dataset_boundary"]
+    performance = design["performance_window"]
+    observation = design["observation_window"]
+    target = design["target_definition"]
+    split = design["split_definition"]
+    optional = design["optional_fields"]
+    lifecycle = design["lifecycle"]
+    artifact = o["artifact"]
+    performance_text = (
+        f"provided / {performance['days']} 天"
+        if performance["status"] == "provided"
+        else "unavailable"
+    )
+    observation_text = (
+        f"provided / {observation['start']} 至 {observation['end']}"
+        if observation["status"] == "provided"
+        else "unavailable"
+    )
+    text = (
+        f"**策略样本设计已固化**：`{o['sample_design_id']}`，content hash "
+        f"`{o['content_hash']}`；活动样本 **{_num(boundary['population_count'])}** 行。"
+        f"表现窗 `{performance_text}`，观察窗 `{observation_text}`，"
+        f"成熟度 `{design['maturity']}`，目标列 `{target['column']}`（坏样本值 "
+        f"`{target['bad_value']}`，好样本值 `{target['good_value']}`），"
+        f"样本切分 `{split['status']}`。\n"
+        f"当前生命周期 `{lifecycle['candidate_stage']} / "
+        f"{lifecycle['validation_status']}`；**只生成样本证据，未创建或修改策略、"
+        "未建模、未建树、未入池、未采纳、未部署。**"
+    )
+    if design["scope"] == "exploration_only":
+        text += "\n- 当前为 `exploration-only`：不能声称样本已成熟或已完成独立验证。"
+    if split["status"] == "unavailable":
+        text += "\n- 开发/验证/OOT 切分 unavailable；仅展示 overall 样本证据。"
+    missing_optional = [
+        label
+        for field, label in (
+            ("month_field", "月份列"),
+            ("weight_field", "权重列"),
+            ("loan_amount_field", "放款金额列"),
+            ("overdue_amount_field", "逾期金额列"),
+        )
+        if optional[field] is None
+    ]
+    if missing_optional:
+        text += "\n- 可选口径 unavailable：" + "、".join(missing_optional) + "。"
+    if artifact.get("download_url"):
+        text += (
+            "\n\n**样本设计证据**："
+            f"[{artifact['filename']}]({artifact['download_url']})"
+        )
+
+    definitions = {
+        item["metric_definition_id"]: item
+        for item in bundle["metric_definitions"]
+    }
+    rows_by_kind: dict[str, list[list[str]]] = {"overall": [], "split": []}
+    for item in bundle["metric_observations"]:
+        definition = definitions[item["metric_definition_ref"]["metric_definition_id"]]
+        dimension = item["dimension"]
+        rows_by_kind[dimension["kind"]].append(
+            [
+                str(dimension["value"]),
+                str(definition["metric_key"]),
+                str(definition["display_name"]),
+                str(item["status"]),
+                _sample_design_metric_value(
+                    item["value"],
+                    unit=str(definition["unit"]),
+                    status=str(item["status"]),
+                ),
+                _num(item["numerator"]),
+                _num(item["denominator"]),
+                _num(item["sample_count"]),
+            ]
+        )
+    columns = [
+        "样本维度",
+        "指标键",
+        "指标",
+        "状态",
+        "值",
+        "分子",
+        "分母",
+        "维度样本数",
+    ]
+    tables: list[dict] = []
+    if rows_by_kind["overall"]:
+        tables.append(
+            {
+                "title": "策略样本设计 Overall 指标",
+                "columns": columns,
+                "rows": rows_by_kind["overall"],
+            }
+        )
+    if rows_by_kind["split"]:
+        tables.append(
+            {
+                "title": "策略样本设计开发/验证/OOT 指标",
+                "columns": columns,
+                "rows": rows_by_kind["split"],
+            }
+        )
+    red_flags = design["red_flags"]
+    if red_flags:
+        tables.append(
+            {
+                "title": "策略样本设计红旗",
+                "columns": ["级别", "代码", "说明"],
+                "rows": [
+                    [flag["level"], flag["code"], flag["message"]]
+                    for flag in red_flags
+                ],
+            }
+        )
+    if o["warnings"]:
+        text += "\n\n**样本设计提示**：" + "；".join(o["warnings"])
+    return text, tables
+
+
 def _render_measure_pool_impact(o: dict):
     """Render immutable Pool impact evidence without deriving any new metric."""
 
@@ -5213,6 +5364,7 @@ _RENDERERS = {
     "reorder_strategy_pool": _render_strategy_pool_mutation,
     "compile_strategy_pool": _render_compile_strategy_pool,
     "measure_pool_impact": _render_measure_pool_impact,
+    "materialize_sample_design": _render_materialize_sample_design,
     "backtest_strategy": _render_backtest_strategy,
     "tradeoff_view": _render_tradeoff_view,
     "design_cutoff_bands": _render_design_cutoff_bands,
@@ -5263,6 +5415,8 @@ def render_tool_output(tool: str, output: dict):
     except Exception:
         if tool == "measure_pool_impact":
             return _pool_impact_integrity_failure()
+        if tool == "materialize_sample_design":
+            return _sample_design_integrity_failure()
         return _render_generic(output or {})
 
 

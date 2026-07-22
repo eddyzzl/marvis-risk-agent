@@ -1,8 +1,8 @@
 {
   "name": "strategy",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "display_name": "Strategy Pack",
-  "description": "Vintage, roll-rate, profitability, governed univariate, automatic-tree, Voting n-of-k, and complete two-dimensional Cross Matrix candidate development with explicit leaf and Cross cell-group materialization, Strategy Pool assembly, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
+  "description": "Vintage, roll-rate, profitability, governed sample design, univariate, automatic-tree, Voting n-of-k, and complete two-dimensional Cross Matrix candidate development with explicit leaf and Cross cell-group materialization, Strategy Pool assembly, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
   "python_requires": ">=3.10,<3.14",
   "tools": [
@@ -3053,6 +3053,232 @@
         "effect_authorization": "none"
       },
       "side_effects": ["read:task", "read:dataset"],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "materialize_sample_design",
+      "summary": "Freeze the exact active task dataset, target semantics, windows, maturity, optional split, and metric coverage as an immutable development-only StrategySampleDesign artifact.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "expected_dataset_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "workspace_revision": {"type": "integer", "minimum": 0},
+          "workspace_generation": {"type": "integer", "minimum": 0},
+          "semantic_mapping_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "target_col": {"type": "string", "minLength": 1},
+          "target_bad_value": {"type": "integer", "enum": [0, 1]},
+          "performance_window_status": {
+            "type": "string",
+            "enum": ["provided", "unavailable"]
+          },
+          "performance_window_days": {"type": "integer", "minimum": 1},
+          "observation_window_status": {
+            "type": "string",
+            "enum": ["provided", "unavailable"]
+          },
+          "observation_window_start": {
+            "type": "string",
+            "format": "date",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+          },
+          "observation_window_end": {
+            "type": "string",
+            "format": "date",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+          },
+          "maturity_status": {
+            "type": "string",
+            "enum": ["confirmed_matured", "not_matured", "unknown"]
+          },
+          "split_col": {"type": "string", "minLength": 1, "maxLength": 256},
+          "development_values": {
+            "type": "array",
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": {
+              "type": ["string", "number", "boolean"],
+              "minLength": 1,
+              "maxLength": 256,
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "validation_values": {
+            "type": "array",
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": {
+              "type": ["string", "number", "boolean"],
+              "minLength": 1,
+              "maxLength": 256,
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "oot_values": {
+            "type": "array",
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": {
+              "type": ["string", "number", "boolean"],
+              "minLength": 1,
+              "maxLength": 256,
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "month_col": {"type": "string", "minLength": 1},
+          "weight_col": {"type": "string", "minLength": 1},
+          "loan_amount_col": {"type": "string", "minLength": 1},
+          "overdue_amount_col": {"type": "string", "minLength": 1},
+          "drop_nan_labels": {"type": "boolean"}
+        },
+        "required": [
+          "dataset_id",
+          "expected_dataset_content_hash",
+          "workspace_revision",
+          "workspace_generation",
+          "semantic_mapping_hash",
+          "target_col",
+          "target_bad_value",
+          "performance_window_status",
+          "observation_window_status",
+          "maturity_status",
+          "drop_nan_labels"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {"performance_window_status": {"const": "provided"}},
+              "required": ["performance_window_status"]
+            },
+            "then": {"required": ["performance_window_days"]},
+            "else": {"not": {"required": ["performance_window_days"]}}
+          },
+          {
+            "if": {
+              "properties": {"observation_window_status": {"const": "provided"}},
+              "required": ["observation_window_status"]
+            },
+            "then": {
+              "required": ["observation_window_start", "observation_window_end"]
+            },
+            "else": {
+              "not": {
+                "anyOf": [
+                  {"required": ["observation_window_start"]},
+                  {"required": ["observation_window_end"]}
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "anyOf": [
+                {"required": ["split_col"]},
+                {"required": ["development_values"]},
+                {"required": ["validation_values"]},
+                {"required": ["oot_values"]}
+              ]
+            },
+            "then": {
+              "required": [
+                "split_col",
+                "development_values",
+                "validation_values",
+                "oot_values"
+              ],
+              "properties": {
+                "development_values": {"minItems": 1}
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.materialize-sample-design-tool.v1"
+          },
+          "sample_design_id": {
+            "type": "string",
+            "pattern": "^strategy-sample-design-[0-9a-f]{24}$"
+          },
+          "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "bundle": {"type": "object", "minProperties": 1},
+          "warnings": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "artifact": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "kind": {"const": "strategy_sample_design_json"},
+              "format": {"const": "json"},
+              "filename": {"type": "string", "minLength": 1},
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "download_url": {"type": "string", "minLength": 1}
+            },
+            "required": [
+              "artifact_id",
+              "kind",
+              "format",
+              "filename",
+              "content_hash",
+              "download_url"
+            ],
+            "additionalProperties": false
+          },
+          "development": {"const": true},
+          "unvalidated": {"const": true},
+          "not_created_strategy": {"const": true},
+          "not_adopted": {"const": true},
+          "not_deployed": {"const": true}
+        },
+        "required": [
+          "schema_version",
+          "sample_design_id",
+          "content_hash",
+          "bundle",
+          "warnings",
+          "artifact",
+          "development",
+          "unvalidated",
+          "not_created_strategy",
+          "not_adopted",
+          "not_deployed"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_materialize_sample_design",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:artifact"],
       "memory_limit_mb": 2048
     },
     {

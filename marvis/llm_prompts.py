@@ -247,20 +247,34 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=22,
+    version=25,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
         "先判断 request_kind。策略开发、规则、已有策略的分析/回测/应用/采纳/报告/监控属于 "
         "strategy_lifecycle；独立的利润测算、滚动率矩阵、额度利率网格测算和单变量候选分析属于 standard_workflow。\n"
         "standard_workflow 只能输出 request_kind=standard_workflow、workflow、workflow_inputs。workflow "
-        "只能是 profit_calc/roll_rate_matrix/limit_pricing_matrix/univariate_candidate_analysis/"
+        "只能是 strategy_sample_design/profit_calc/roll_rate_matrix/limit_pricing_matrix/univariate_candidate_analysis/"
         "univariate_candidate_refinement/automatic_tree_candidate_build/"
         "automatic_tree_leaf_materialization/voting_candidate_build/cross_matrix_analysis/"
         "cross_matrix_cell_selection/"
         "strategy_pool_add_candidate/strategy_pool_remove_entry/"
         "strategy_pool_set_action/strategy_pool_reorder/strategy_pool_compile/"
         "strategy_pool_impact。"
+        "strategy_sample_design 只冻结当前活动样本边界并计算样本证据。只能抽取用户字段："
+        "performance_window_status=provided|unavailable，provided 时还需正整数 "
+        "performance_window_days；observation_window_status=provided|unavailable，provided 时还需"
+        " ISO observation_start/observation_end 且开始不晚于结束；maturity_status 只能是 "
+        "confirmed_matured/not_matured/unknown；target_bad_value 必填，只能逐字抄录用户明确"
+        "说明代表坏样本的整数 0 或 1（不能猜测默认编码）。可选 split_col，但一旦提供，必须同时逐字抄录"
+        "development_values/validation_values/oot_values；development_values 必须非空，"
+        "validation_values/oot_values 可为空但必须由用户明确说 unavailable，三组值互不重叠。可选列只有 month_col、"
+        "weight_col、loan_amount_col、overdue_amount_col；只有用户明确授权保留总体样本行、仅从好坏/风险分母"
+        "排除空标签时才可输出 drop_nan_labels=true。没有表现窗、观察窗或成熟度时不得猜；只有用户明确说暂时没有/未知且要求"
+        "先探索，才可输出 unavailable 与 unknown。dataset/hash/workspace/semantic/target 等平台字段"
+        "禁止输出。该 Workflow 不得串联过滤、筛选、纳排、仅保留、删行、清洗、派生列、"
+        "建模、建树、Strategy Pool、"
+        "采纳、部署或报告；问句、否定、历史/未来描述必须 clarification。"
         "profit_calc 需要 ead_col、pd_col、"
         "可选 segment_col 及完整 profit_params。roll_rate_matrix 需要 id_col、time_col、status_col、"
         "有序且不重复的 states，可选 balance_col，observation_semantics 固定为 adjacent_observation；"

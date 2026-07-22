@@ -74,6 +74,7 @@ from marvis.packs.strategy.pool_tools import (
     run_set_pool_entry_action,
 )
 from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
+from marvis.packs.strategy.sample_design_tools import run_materialize_sample_design
 from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.contracts import Strategy
 from marvis.packs.strategy.deliverables import decision_table_csv
@@ -797,6 +798,12 @@ def tool_measure_pool_impact(inputs: dict, ctx) -> dict:
     """Measure governed first-match and monthly impact for the current Pool."""
 
     return run_measure_pool_impact(inputs, ctx, _runtime(ctx))
+
+
+def tool_materialize_sample_design(inputs: dict, ctx) -> dict:
+    """Freeze the exact active strategy sample boundary as immutable evidence."""
+
+    return run_materialize_sample_design(inputs, ctx, _runtime(ctx))
 
 
 def tool_design_strategy_candidate(inputs: dict, ctx) -> dict:
