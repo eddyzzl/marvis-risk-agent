@@ -113,6 +113,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
         "tune_hyperparameters",
         "train_model",
         "train_model_with_evidence_v2",
+        "materialize_model_score_evidence_v2",
         "train_models",
         "compare_experiments",
         "select_experiment",

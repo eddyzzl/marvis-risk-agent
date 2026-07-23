@@ -108,6 +108,14 @@ from marvis.packs.modeling.evidence_tools import (  # noqa: F401
     tool_train_model_with_evidence_v2,
     validate_train_model_with_evidence_v2_tool_output,
 )
+from marvis.packs.modeling.score_evidence_tools import (  # noqa: F401
+    ModelScoreEvidenceArtifactBinding,
+    load_model_score_evidence_artifacts,
+    require_model_score_evidence_artifact_binding_on_connection,
+    run_materialize_model_score_evidence_v2,
+    tool_materialize_model_score_evidence_v2,
+    validate_materialize_model_score_evidence_v2_tool_output,
+)
 from marvis.packs.modeling.report_tools import (  # noqa: F401
     REPORT_NARRATIVE_KEYS,
     REPORT_NARRATIVE_SYS,
@@ -273,7 +281,11 @@ from marvis.packs.modeling.select_tools import (  # noqa: F401
 
 __all__ = [
     "build_training_evidence_ref",
+    "load_model_score_evidence_artifacts",
+    "ModelScoreEvidenceArtifactBinding",
+    "require_model_score_evidence_artifact_binding_on_connection",
     "require_modeling_training_evidence_artifact_binding_on_connection",
+    "run_materialize_model_score_evidence_v2",
     "tool_calibrate_model",
     "tool_check_data_quality",
     "tool_compare_experiments",
@@ -282,6 +294,7 @@ __all__ = [
     "tool_generate_model_report",
     "tool_generate_model_reports",
     "tool_make_split",
+    "tool_materialize_model_score_evidence_v2",
     "tool_modeling_readiness",
     "tool_monitor_run",
     "tool_prepare_modeling_frame",
@@ -291,4 +304,5 @@ __all__ = [
     "tool_select_features",
     "tool_train_model",
     "tool_train_model_with_evidence_v2",
+    "validate_materialize_model_score_evidence_v2_tool_output",
 ]
