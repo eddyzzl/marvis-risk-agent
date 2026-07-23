@@ -171,7 +171,12 @@ _MIGRATION_TABLES = frozenset({
 # _migration_020_strategy_report_revisions adds one immutable report ledger per
 # task/strategy scope.  Three task-owned rendered artifacts are bound to every
 # revision, while a CAS head and database triggers enforce exact N-1 lineage.
-SCHEMA_VERSION = 20
+#
+# _migration_021_strategy_report_docx adds an optional DOCX artifact pair to
+# the frozen migration-20 ledger.  Rows created by migration 20 retain NULLs
+# and remain readable as three-output legacy evidence; every new row is guarded
+# by rebuilt triggers that require all four exact, task-owned output artifacts.
+SCHEMA_VERSION = 21
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -3178,6 +3183,114 @@ def _migration_020_strategy_report_revisions(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_021_strategy_report_docx(conn: sqlite3.Connection) -> None:
+    """Extend report revisions with governed DOCX while preserving v20 rows."""
+
+    _ensure_column(
+        conn,
+        table="strategy_report_revisions",
+        column="docx_artifact_id",
+        definition="TEXT REFERENCES task_artifacts(id)",
+    )
+    _ensure_column(
+        conn,
+        table="strategy_report_revisions",
+        column="docx_artifact_hash",
+        definition=(
+            "TEXT CHECK("
+            "docx_artifact_hash IS NULL OR "
+            "(length(docx_artifact_hash) = 64 "
+            "AND docx_artifact_hash NOT GLOB '*[^0-9a-f]*'))"
+        ),
+    )
+
+    incomplete = conn.execute(
+        """
+        SELECT report_id
+          FROM strategy_report_revisions
+         WHERE (docx_artifact_id IS NULL) <> (docx_artifact_hash IS NULL)
+         LIMIT 1
+        """
+    ).fetchone()
+    if incomplete is not None:
+        raise RuntimeError(
+            "strategy report DOCX artifact pair is incomplete before migration 21"
+        )
+
+    # Migration 20 is frozen.  Replace only the two triggers whose predicates
+    # must know about the new output; all lineage/head/immutability guards keep
+    # their original definitions.
+    conn.execute("DROP TRIGGER IF EXISTS trg_strategy_report_revisions_artifacts")
+    conn.execute(
+        """
+        CREATE TRIGGER trg_strategy_report_revisions_artifacts
+        BEFORE INSERT ON strategy_report_revisions
+        WHEN NOT (
+            EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.json_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_bundle_json'
+                   AND artifact.content_hash = NEW.json_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+            AND EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.markdown_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_markdown'
+                   AND artifact.content_hash = NEW.markdown_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+            AND EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.xlsx_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_xlsx'
+                   AND artifact.content_hash = NEW.xlsx_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+            AND NEW.docx_artifact_id IS NOT NULL
+            AND NEW.docx_artifact_hash IS NOT NULL
+            AND EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.docx_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_docx'
+                   AND artifact.content_hash = NEW.docx_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report output artifact mismatch');
+        END
+        """
+    )
+
+    conn.execute(
+        "DROP TRIGGER IF EXISTS "
+        "trg_strategy_report_output_artifacts_immutable_delete"
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER trg_strategy_report_output_artifacts_immutable_delete
+        BEFORE DELETE ON task_artifacts
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+         AND EXISTS (
+            SELECT 1
+              FROM strategy_report_revisions AS revision
+             WHERE revision.json_artifact_id = OLD.id
+                OR revision.markdown_artifact_id = OLD.id
+                OR revision.xlsx_artifact_id = OLD.id
+                OR revision.docx_artifact_id = OLD.id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'published strategy report artifacts are immutable');
+        END
+        """
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -3206,6 +3319,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (18, _migration_018_strategy_dsl_content_hash),
     (19, _migration_019_strategy_project_context),
     (20, _migration_020_strategy_report_revisions),
+    (21, _migration_021_strategy_report_docx),
 ]
 
 

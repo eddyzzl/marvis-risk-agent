@@ -2,9 +2,10 @@
 
 The pure report contract proves internal consistency.  This repository proves
 publication lineage: every revision is based on the current task/strategy head
-and is bound to three immutable task-artifact rows produced by the governed
-report tool.  Canonical report bytes and artifact provenance are revalidated at
-every read and write boundary.
+and is bound to four immutable task-artifact rows produced by the governed
+report tool.  Migration-20 revisions with exactly the original three outputs
+remain verifiable, but are never mutated or silently upgraded.  Canonical report
+bytes and artifact provenance are revalidated at every read and write boundary.
 """
 
 from __future__ import annotations
@@ -42,9 +43,11 @@ STRATEGY_REPORT_OUTPUT_KINDS = {
     "json": "strategy_report_bundle_json",
     "markdown": "strategy_report_markdown",
     "xlsx": "strategy_report_xlsx",
+    "docx": "strategy_report_docx",
 }
 
-_OUTPUT_FORMATS = ("json", "markdown", "xlsx")
+_LEGACY_OUTPUT_FORMATS = ("json", "markdown", "xlsx")
+_OUTPUT_FORMATS = (*_LEGACY_OUTPUT_FORMATS, "docx")
 _DRAFT_SCOPE = "task-draft"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ARTIFACT_PROVENANCE_FIELDS = frozenset(
@@ -352,6 +355,11 @@ class StrategyReportRepository:
         ).fetchone()
         if existing is not None:
             persisted = _record_from_row(conn, existing)
+            if set(persisted["artifacts"]) == set(_LEGACY_OUTPUT_FORMATS):
+                raise StrategyReportConflictError(
+                    "legacy three-output report cannot be upgraded in place; "
+                    "publish a new report revision"
+                )
             if (
                 persisted["bundle"] != report
                 or persisted["artifacts"] != output_records
@@ -429,8 +437,9 @@ class StrategyReportRepository:
                 bundle_content_hash,
                 json_artifact_id, json_artifact_hash,
                 markdown_artifact_id, markdown_artifact_hash,
-                xlsx_artifact_id, xlsx_artifact_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                xlsx_artifact_id, xlsx_artifact_hash,
+                docx_artifact_id, docx_artifact_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 report["report_id"],
@@ -450,6 +459,8 @@ class StrategyReportRepository:
                 output_records["markdown"]["content_hash"],
                 output_records["xlsx"]["id"],
                 output_records["xlsx"]["content_hash"],
+                output_records["docx"]["id"],
+                output_records["docx"]["content_hash"],
                 timestamp,
             ),
         )
@@ -491,13 +502,17 @@ def _verify_output_artifacts_on_connection(
     *,
     report: Mapping[str, Any],
     artifacts: Mapping[str, Mapping[str, Any]],
+    output_formats: tuple[str, ...] = _OUTPUT_FORMATS,
 ) -> dict[str, dict[str, Any]]:
-    if not isinstance(artifacts, Mapping) or set(artifacts) != set(_OUTPUT_FORMATS):
+    if output_formats not in (_LEGACY_OUTPUT_FORMATS, _OUTPUT_FORMATS):
+        raise StrategyReportDataError("unsupported report output format set")
+    if not isinstance(artifacts, Mapping) or set(artifacts) != set(output_formats):
+        expected = ", ".join(output_formats)
         raise StrategyReportDataError(
-            "artifacts must contain exactly json, markdown, and xlsx"
+            f"artifacts must contain exactly {expected}"
         )
     normalized: dict[str, dict[str, Any]] = {}
-    for output_format in _OUTPUT_FORMATS:
+    for output_format in output_formats:
         supplied = artifacts[output_format]
         if not isinstance(supplied, Mapping):
             raise StrategyReportDataError(
@@ -559,15 +574,27 @@ def _verify_output_artifacts_on_connection(
 
     try:
         from marvis.output.strategy_report_bundle import (
-            render_strategy_report_bundle,
+            render_strategy_report_bundle_docx,
+            render_strategy_report_bundle_json,
+            render_strategy_report_bundle_markdown,
+            render_strategy_report_bundle_xlsx,
         )
 
-        expected_outputs = render_strategy_report_bundle(report)
+        renderers = {
+            "json": render_strategy_report_bundle_json,
+            "markdown": render_strategy_report_bundle_markdown,
+            "xlsx": render_strategy_report_bundle_xlsx,
+            "docx": render_strategy_report_bundle_docx,
+        }
+        expected_outputs = {
+            output_format: renderers[output_format](report)
+            for output_format in output_formats
+        }
     except Exception as exc:
         raise StrategyReportDataError(
             "strategy report outputs could not be reproduced"
         ) from exc
-    for output_format in _OUTPUT_FORMATS:
+    for output_format in output_formats:
         expected = expected_outputs[output_format]
         persisted = normalized[output_format]
         expected_hash = hashlib.sha256(expected).hexdigest()
@@ -700,11 +727,24 @@ def _record_from_row(
             raise StrategyReportDataError(
                 f"persisted strategy report {field} does not match report_json"
             )
+    docx_artifact_id = row["docx_artifact_id"]
+    docx_artifact_hash = row["docx_artifact_hash"]
+    if (docx_artifact_id is None) != (docx_artifact_hash is None):
+        raise StrategyReportDataError(
+            "persisted DOCX report artifact pair is incomplete"
+        )
+    output_formats = (
+        _LEGACY_OUTPUT_FORMATS
+        if docx_artifact_id is None
+        else _OUTPUT_FORMATS
+    )
     artifact_ids = {
         "json": row["json_artifact_id"],
         "markdown": row["markdown_artifact_id"],
         "xlsx": row["xlsx_artifact_id"],
     }
+    if docx_artifact_id is not None:
+        artifact_ids["docx"] = docx_artifact_id
     supplied: dict[str, dict[str, Any]] = {}
     for output_format, artifact_id in artifact_ids.items():
         artifact_row = conn.execute(
@@ -716,7 +756,10 @@ def _record_from_row(
                 f"persisted {output_format} report artifact is missing"
             )
         supplied[output_format] = _artifact_from_row(artifact_row)
-        expected_hash = row[f"{output_format}_artifact_hash"]
+        expected_hash = _sha256(
+            row[f"{output_format}_artifact_hash"],
+            field=f"{output_format}_artifact_hash",
+        )
         if supplied[output_format]["content_hash"] != expected_hash:
             raise StrategyReportDataError(
                 f"persisted {output_format} report artifact hash drifted"
@@ -725,6 +768,7 @@ def _record_from_row(
         conn,
         report=report,
         artifacts=supplied,
+        output_formats=output_formats,
     )
     return {
         "bundle": report,

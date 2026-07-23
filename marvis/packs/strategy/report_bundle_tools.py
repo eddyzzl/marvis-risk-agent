@@ -3,7 +3,7 @@
 Callers may select only immutable evidence references and report controls.  The
 Tool reloads every metric-bearing source from its governed repository/artifact
 boundary, projects those authenticated bindings through the pure report
-adapter, renders all three deterministic formats, and publishes files,
+adapter, renders all four deterministic formats, and publishes files,
 TaskArtifact rows, the report revision, and one audit row in a shared
 filesystem/database unit of work.
 """
@@ -104,13 +104,13 @@ from marvis.repositories.task_artifacts import (
 
 
 BUILD_STRATEGY_REPORT_BUNDLE_V2_TOOL_SCHEMA_VERSION = (
-    "strategy.build-report-bundle-v2-tool.v2"
+    "strategy.build-report-bundle-v2-tool.v3"
 )
 BUILD_STRATEGY_REPORT_BUNDLE_V2_AUDIT_KIND = (
     "strategy.report_bundle.published"
 )
 
-_OUTPUT_FORMATS = ("json", "markdown", "xlsx")
+_OUTPUT_FORMATS = ("json", "markdown", "xlsx", "docx")
 _INPUT_FIELDS = frozenset(
     {
         "title",
@@ -421,7 +421,7 @@ def validate_build_strategy_report_bundle_v2_tool_output(
     artifacts = normalized["artifacts"]
     if not isinstance(artifacts, list) or len(artifacts) != len(_OUTPUT_FORMATS):
         raise StrategyError(
-            "build_report_bundle_v2 output needs three canonical artifacts"
+            "build_report_bundle_v2 output needs four canonical artifacts"
         )
     for output_format, artifact in zip(_OUTPUT_FORMATS, artifacts, strict=True):
         if not isinstance(artifact, dict) or set(artifact) != _OUTPUT_ARTIFACT_FIELDS:

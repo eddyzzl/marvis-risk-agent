@@ -5448,7 +5448,7 @@
     },
     {
       "name": "build_report_bundle_v2",
-      "summary": "Build and atomically publish deterministic JSON, Markdown, and Excel StrategyReportBundle projections with exact ImpactCube-first evidence and approval/reject-only legacy PoolImpact fallback.",
+      "summary": "Build and atomically publish deterministic JSON, Markdown, Excel, and Word StrategyReportBundle projections with exact ImpactCube-first evidence and approval/reject-only legacy PoolImpact fallback.",
       "input_schema": {
         "type": "object",
         "$defs": {
@@ -5778,7 +5778,7 @@
         "type": "object",
         "properties": {
           "schema_version": {
-            "const": "strategy.build-report-bundle-v2-tool.v2"
+            "const": "strategy.build-report-bundle-v2-tool.v3"
           },
           "report_id": {
             "type": "string",
@@ -5809,8 +5809,8 @@
           "bundle": {"type": "object", "minProperties": 1},
           "artifacts": {
             "type": "array",
-            "minItems": 3,
-            "maxItems": 3,
+            "minItems": 4,
+            "maxItems": 4,
             "items": {
               "type": "object",
               "properties": {
@@ -5823,16 +5823,22 @@
                   "enum": [
                     "strategy_report_bundle_json",
                     "strategy_report_markdown",
-                    "strategy_report_xlsx"
+                    "strategy_report_xlsx",
+                    "strategy_report_docx"
                   ]
                 },
                 "format": {
                   "type": "string",
-                  "enum": ["json", "markdown", "xlsx"]
+                  "enum": ["json", "markdown", "xlsx", "docx"]
                 },
                 "filename": {
                   "type": "string",
-                  "enum": ["report.json", "report.md", "report.xlsx"]
+                  "enum": [
+                    "report.json",
+                    "report.md",
+                    "report.xlsx",
+                    "report.docx"
+                  ]
                 },
                 "content_hash": {
                   "type": "string",

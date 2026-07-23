@@ -2,22 +2,34 @@
 
 This module is intentionally a renderer, not an analysis layer.  It validates
 the self-authenticating bundle and projects the exact same facts to canonical
-JSON, Markdown, and a formula-free XLSX workbook.  Missing values remain blank;
-their typed availability and reason stay adjacent to the blank presentation
-cell and in the evidence index.
+JSON, Markdown, a formula-free XLSX workbook, and a macro-free DOCX review
+brief.  Missing values remain blank; their typed availability and reason stay
+adjacent to the blank presentation cell and in the evidence index.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
+from itertools import islice
 import json
 import re
 import unicodedata
 from typing import Any
+from xml.etree import ElementTree
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
+from docx import Document
+from docx.enum.table import (
+    WD_CELL_VERTICAL_ALIGNMENT,
+    WD_TABLE_ALIGNMENT,
+)
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt, RGBColor, Twips
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -86,18 +98,61 @@ _REPORT_STATUS_LABELS = {
 }
 
 _FIXED_WORKBOOK_DATETIME = datetime(2000, 1, 1)
+_FIXED_DOCX_DATETIME = datetime(2000, 1, 1)
 _FIXED_ZIP_DATETIME = (1980, 1, 1, 0, 0, 0)
+_FIXED_ZIP_EXTERNAL_ATTR = 0o600 << 16
 _FORMULA_PREFIXES = frozenset("=+-@")
 _ILLEGAL_PRESENTATION_CONTROL = re.compile(
     r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff\ufffe\uffff]"
 )
 _MARKDOWN_INLINE_META = re.compile(r"([`*_{}\[\]()!])")
+_DOCX_CJK_TEXT = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _CORE_MODIFIED_TIMESTAMP = re.compile(
     rb"(<dcterms:modified\b[^>]*>)[^<]*(</dcterms:modified>)"
 )
 _MAX_XLSX_CELL_CHARACTERS = 32_767
 _MAX_XLSX_ROWS = 1_048_576
 _MAX_XLSX_COLUMNS = 16_384
+
+_DOCX_TABLE_WIDTH_DXA = 9_360
+_DOCX_TABLE_INDENT_DXA = 120
+_DOCX_CJK_FONT = "Microsoft YaHei"
+_DOCX_CELL_MARGINS_DXA = {
+    "top": 80,
+    "bottom": 80,
+    "start": 120,
+    "end": 120,
+}
+_DOCX_RELATIONSHIP_NAMESPACE = (
+    "http://schemas.openxmlformats.org/package/2006/relationships"
+)
+_DOCX_WORDPROCESSINGML_NAMESPACE = (
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+)
+_DOCX_FORBIDDEN_FIELD_LOCAL_NAMES = frozenset(
+    {"fldChar", "fldSimple", "instrText"}
+)
+_DOCX_MAX_CELL_CHARACTERS = 2_048
+_DOCX_MAX_REFS_PER_CELL = 16
+_DOCX_MAX_SUMMARY_FIELDS_PER_SECTION = 60
+_DOCX_MAX_SUMMARY_FIELDS_TOTAL = 200
+_DOCX_MAX_STAGE_ROWS_PER_SECTION = 30
+_DOCX_MAX_STAGE_ROWS_TOTAL = 50
+_DOCX_MAX_REPORT_TABLES = 20
+_DOCX_MAX_FACT_ROWS_PER_TABLE = 120
+_DOCX_MAX_FACT_ROWS_TOTAL = 360
+_DOCX_MAX_RED_FLAGS_PER_SECTION = 30
+_DOCX_MAX_RED_FLAGS_TOTAL = 80
+_DOCX_MAX_MISSING_INFORMATION_ROWS = 100
+_DOCX_MAX_EVIDENCE_ROWS = 300
+_DOCX_TRUNCATION_SUFFIX = "…[内容已截断；完整内容见 JSON/XLSX]"
+_DOCX_SUMMARY_WIDTHS = (1_600, 1_800, 1_200, 2_000, 2_760)
+_DOCX_STAGE_WIDTHS = (1_450, 1_300, 1_300, 5_310)
+_DOCX_FACT_WIDTHS = (1_200, 1_600, 1_400, 1_300, 2_100, 1_760)
+_DOCX_FLAG_WIDTHS = (1_150, 1_700, 4_150, 2_360)
+_DOCX_COMPLETENESS_WIDTHS = (2_100, 4_000, 3_260)
+_DOCX_MISSING_WIDTHS = (1_850, 1_150, 1_150, 4_050, 1_160)
+_DOCX_EVIDENCE_WIDTHS = (2_500, 1_200, 2_200, 3_460)
 
 _NAVY = "18324A"
 _BLUE = "235A7A"
@@ -110,6 +165,15 @@ _GRID = Side(style="thin", color="D9E1E8")
 _BORDER = Border(left=_GRID, right=_GRID, top=_GRID, bottom=_GRID)
 
 
+@dataclass
+class _DocxRenderBudget:
+    summary_fields_remaining: int = _DOCX_MAX_SUMMARY_FIELDS_TOTAL
+    stage_rows_remaining: int = _DOCX_MAX_STAGE_ROWS_TOTAL
+    report_tables_remaining: int = _DOCX_MAX_REPORT_TABLES
+    fact_rows_remaining: int = _DOCX_MAX_FACT_ROWS_TOTAL
+    red_flags_remaining: int = _DOCX_MAX_RED_FLAGS_TOTAL
+
+
 class StrategyReportOutputError(StrategyError):
     """A valid report bundle cannot be safely projected to an output format."""
 
@@ -117,13 +181,14 @@ class StrategyReportOutputError(StrategyError):
 def render_strategy_report_bundle(
     bundle: Mapping[str, Any],
 ) -> dict[str, bytes]:
-    """Render canonical JSON, Markdown, and deterministic XLSX bytes."""
+    """Render all four deterministic projections of one validated bundle."""
 
     canonical = validate_strategy_report_bundle(bundle)
     return {
         "json": canonical_strategy_report_bundle_json(canonical).encode("utf-8"),
         "markdown": _render_markdown(canonical).encode("utf-8"),
         "xlsx": _render_xlsx(canonical),
+        "docx": _render_docx(canonical),
     }
 
 
@@ -143,6 +208,12 @@ def render_strategy_report_bundle_xlsx(bundle: Mapping[str, Any]) -> bytes:
     """Return a deterministic, formula-free multi-sheet workbook."""
 
     return _render_xlsx(validate_strategy_report_bundle(bundle))
+
+
+def render_strategy_report_bundle_docx(bundle: Mapping[str, Any]) -> bytes:
+    """Return a deterministic, macro-free formal strategy review brief."""
+
+    return _render_docx(validate_strategy_report_bundle(bundle))
 
 
 def _render_markdown(bundle: Mapping[str, Any]) -> str:
@@ -355,6 +426,936 @@ def _markdown_table(table: Mapping[str, Any]) -> list[str]:
         ]
     )
     return lines
+
+
+def _render_docx(bundle: Mapping[str, Any]) -> bytes:
+    document = Document()
+    budget = _DocxRenderBudget()
+    _configure_docx_styles(document)
+    _configure_docx_section(document, bundle=bundle)
+    _configure_docx_properties(document, bundle=bundle)
+    _write_docx_masthead(document, bundle=bundle)
+
+    for index, section in enumerate(bundle["sections"], start=1):
+        _write_docx_section(
+            document,
+            index=index,
+            section=section,
+            budget=budget,
+        )
+    _write_docx_evidence_appendix(document, bundle=bundle)
+
+    raw = BytesIO()
+    document.save(raw)
+    canonical = _canonicalize_docx_bytes(raw.getvalue())
+    _assert_safe_docx_package(canonical)
+    return canonical
+
+
+def _configure_docx_styles(document: Any) -> None:
+    styles = document.styles
+    normal = styles["Normal"]
+    _configure_docx_style(
+        normal,
+        font_name="Calibri",
+        size=11,
+        color="000000",
+        before=0,
+        after=6,
+        line_spacing=1.10,
+    )
+    _configure_docx_style(
+        styles["Title"],
+        font_name="Calibri",
+        size=23,
+        color="000000",
+        before=0,
+        after=4,
+        line_spacing=1.0,
+        bold=True,
+    )
+    _configure_docx_style(
+        styles["Subtitle"],
+        font_name="Calibri",
+        size=14,
+        color="373737",
+        before=0,
+        after=16,
+        line_spacing=1.0,
+    )
+    _configure_docx_style(
+        styles["Heading 1"],
+        font_name="Calibri",
+        size=16,
+        color="2E74B5",
+        before=16,
+        after=8,
+        line_spacing=1.0,
+        bold=True,
+        keep_with_next=True,
+    )
+    _configure_docx_style(
+        styles["Heading 2"],
+        font_name="Calibri",
+        size=13,
+        color="2E74B5",
+        before=12,
+        after=6,
+        line_spacing=1.0,
+        bold=True,
+        keep_with_next=True,
+    )
+    _configure_docx_style(
+        styles["Heading 3"],
+        font_name="Calibri",
+        size=12,
+        color="1F4D78",
+        before=8,
+        after=4,
+        line_spacing=1.0,
+        bold=True,
+        keep_with_next=True,
+    )
+    _configure_docx_style(
+        styles["Header"],
+        font_name="Calibri",
+        size=9,
+        color="536878",
+        before=0,
+        after=0,
+        line_spacing=1.0,
+    )
+    _configure_docx_style(
+        styles["Footer"],
+        font_name="Calibri",
+        size=9,
+        color="536878",
+        before=0,
+        after=0,
+        line_spacing=1.0,
+    )
+
+
+def _configure_docx_style(
+    style: Any,
+    *,
+    font_name: str,
+    size: float,
+    color: str,
+    before: float,
+    after: float,
+    line_spacing: float,
+    bold: bool = False,
+    keep_with_next: bool = False,
+) -> None:
+    style.font.name = font_name
+    style.font.size = Pt(size)
+    style.font.color.rgb = RGBColor.from_string(color)
+    style.font.bold = bold
+    _set_docx_font_family(style.element, font_name)
+    paragraph = style.paragraph_format
+    paragraph.space_before = Pt(before)
+    paragraph.space_after = Pt(after)
+    paragraph.line_spacing = line_spacing
+    paragraph.keep_with_next = keep_with_next
+
+
+def _set_docx_font_family(element: Any, font_name: str) -> None:
+    run_properties = element.get_or_add_rPr()
+    fonts = run_properties.rFonts
+    if fonts is None:
+        fonts = OxmlElement("w:rFonts")
+        run_properties.insert(0, fonts)
+    for attribute in ("ascii", "hAnsi", "cs"):
+        fonts.set(qn(f"w:{attribute}"), font_name)
+    # Named glyph-coverage override: Calibri remains the prescribed Latin
+    # business font while the explicit CJK face prevents Chinese report labels
+    # from degrading to tofu boxes in Word/LibreOffice.
+    fonts.set(qn("w:eastAsia"), _DOCX_CJK_FONT)
+
+
+def _configure_docx_section(document: Any, *, bundle: Mapping[str, Any]) -> None:
+    section = document.sections[0]
+    section.page_width = Inches(8.5)
+    section.page_height = Inches(11)
+    section.top_margin = Inches(1)
+    section.right_margin = Inches(1)
+    section.bottom_margin = Inches(1)
+    section.left_margin = Inches(1)
+    section.header_distance = Inches(0.492)
+    section.footer_distance = Inches(0.492)
+
+    header = section.header.paragraphs[0]
+    header.style = document.styles["Header"]
+    header.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    _add_docx_run(
+        header,
+        "MARVIS | 策略评审 | "
+        f"{bundle['report_id']} | 修订 {bundle['report_revision']}",
+    )
+
+    footer = section.footer.paragraphs[0]
+    footer.style = document.styles["Footer"]
+    footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    _add_docx_run(
+        footer,
+        f"{bundle['data_classification']} | {bundle['generated_at']}",
+    )
+
+
+def _configure_docx_properties(
+    document: Any,
+    *,
+    bundle: Mapping[str, Any],
+) -> None:
+    properties = document.core_properties
+    properties.title = _docx_text(_field_display_value(bundle["title"]))
+    properties.subject = "MARVIS 策略迭代评审"
+    properties.author = "MARVIS"
+    properties.last_modified_by = "MARVIS"
+    properties.keywords = "MARVIS;策略评审;受治理证据"
+    properties.comments = STRATEGY_REPORT_OUTPUT_SCHEMA_VERSION
+    properties.category = "Strategy Review"
+    properties.identifier = bundle["report_id"]
+    properties.created = _FIXED_DOCX_DATETIME
+    properties.modified = _FIXED_DOCX_DATETIME
+    properties.revision = 1
+
+
+def _write_docx_masthead(document: Any, *, bundle: Mapping[str, Any]) -> None:
+    title = document.add_paragraph(style="Title")
+    _add_docx_run(title, _field_display_value(bundle["title"]))
+
+    subtitle = document.add_paragraph(style="Subtitle")
+    _add_docx_run(subtitle, "策略迭代评审报告 | 受治理证据投影")
+
+    metadata = (
+        ("报告 ID", bundle["report_id"]),
+        ("修订", bundle["report_revision"]),
+        ("前一修订", bundle["previous_report_id"]),
+        ("状态", _REPORT_STATUS_LABELS[bundle["status"]]),
+        ("策略 ID", bundle["strategy_id"]),
+        ("策略版本", bundle["strategy_version"]),
+        ("策略类型", bundle["strategy_type"]),
+        ("效果阶段", _stage_labels(bundle["effect_stages"])),
+        ("生成时间", bundle["generated_at"]),
+        ("数据分级", bundle["data_classification"]),
+        ("内容 SHA-256", bundle["content_sha256"]),
+    )
+    for label, value in metadata:
+        paragraph = document.add_paragraph()
+        paragraph.paragraph_format.space_after = Pt(2)
+        paragraph.paragraph_format.line_spacing = 1.0
+        _add_docx_run(paragraph, f"{label}: ", bold=True)
+        _add_docx_run(paragraph, value)
+
+    rule = document.add_paragraph()
+    rule.paragraph_format.space_before = Pt(10)
+    rule.paragraph_format.space_after = Pt(10)
+    _set_docx_paragraph_bottom_border(rule, color="2E74B5", size=10)
+
+    notice = document.add_paragraph()
+    _add_docx_run(
+        notice,
+        "本报告是受治理结构化证据的投影。"
+        "空白不等于 0，效果阶段不自动升级。",
+        italic=True,
+        color="536878",
+    )
+
+
+def _set_docx_paragraph_bottom_border(
+    paragraph: Any,
+    *,
+    color: str,
+    size: int,
+) -> None:
+    paragraph_properties = paragraph._p.get_or_add_pPr()
+    borders = paragraph_properties.find(qn("w:pBdr"))
+    if borders is None:
+        borders = OxmlElement("w:pBdr")
+        paragraph_properties.append(borders)
+    bottom = borders.find(qn("w:bottom"))
+    if bottom is None:
+        bottom = OxmlElement("w:bottom")
+        borders.append(bottom)
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), str(size))
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), color)
+
+
+def _write_docx_section(
+    document: Any,
+    *,
+    index: int,
+    section: Mapping[str, Any],
+    budget: _DocxRenderBudget,
+) -> None:
+    _add_docx_heading(
+        document,
+        f"{index}. {section['title']}",
+        level=1,
+    )
+    stages = sorted(
+        {item["effect_stage"] for item in section["stage_evidence"]},
+        key=("estimated", "backtested", "oot_validated", "post_launch_observed").index,
+    )
+    state = document.add_paragraph()
+    _add_docx_run(state, "状态: ", bold=True)
+    _add_docx_run(
+        state,
+        _AVAILABILITY_LABELS[section["availability"]],
+    )
+    if stages:
+        _add_docx_run(state, "    效果阶段: ", bold=True)
+        _add_docx_run(state, _stage_labels(stages))
+
+    summary_total = len(section["summary_fields"])
+    summary_shown = min(
+        summary_total,
+        _DOCX_MAX_SUMMARY_FIELDS_PER_SECTION,
+        budget.summary_fields_remaining,
+    )
+    if summary_total:
+        _add_docx_heading(document, "摘要字段", level=2)
+        rows = []
+        for item in islice(section["summary_fields"], summary_shown):
+            field = item["field"]
+            rows.append(
+                (
+                    item["label"],
+                    _field_display_value(field),
+                    _AVAILABILITY_LABELS[field["availability"]],
+                    field["note"],
+                    _docx_compact_refs(field["source_refs"]),
+                )
+            )
+        if rows:
+            _add_docx_table(
+                document,
+                headers=("字段", "值", "状态", "说明", "来源"),
+                rows=rows,
+                widths=_DOCX_SUMMARY_WIDTHS,
+                centered_columns=frozenset({2}),
+            )
+        budget.summary_fields_remaining -= summary_shown
+        if summary_shown < summary_total:
+            _write_docx_truncation_notice(
+                document,
+                scope=f"{section['title']}摘要字段",
+                shown=summary_shown,
+                total=summary_total,
+            )
+
+    stage_total = len(section["stage_evidence"])
+    stage_shown = min(
+        stage_total,
+        _DOCX_MAX_STAGE_ROWS_PER_SECTION,
+        budget.stage_rows_remaining,
+    )
+    if stage_total:
+        _add_docx_heading(document, "效果证据绑定", level=2)
+        rows = [
+            (
+                _EFFECT_STAGE_LABELS[item["effect_stage"]],
+                item["population"],
+                item["partition"],
+                item["binding"],
+            )
+            for item in islice(section["stage_evidence"], stage_shown)
+        ]
+        if rows:
+            _add_docx_table(
+                document,
+                headers=("效果阶段", "样本口径", "分区", "绑定"),
+                rows=rows,
+                widths=_DOCX_STAGE_WIDTHS,
+                centered_columns=frozenset({0, 1, 2}),
+            )
+        budget.stage_rows_remaining -= stage_shown
+        if stage_shown < stage_total:
+            _write_docx_truncation_notice(
+                document,
+                scope=f"{section['title']}效果证据",
+                shown=stage_shown,
+                total=stage_total,
+            )
+
+    tables_total = len(section["tables"])
+    tables_shown = min(tables_total, budget.report_tables_remaining)
+    for table in islice(section["tables"], tables_shown):
+        stage = (
+            ""
+            if table["effect_stage"] is None
+            else f"（{_EFFECT_STAGE_LABELS[table['effect_stage']]}）"
+        )
+        _add_docx_heading(
+            document,
+            f"{table['title']}{stage}",
+            level=2,
+        )
+        metadata = document.add_paragraph()
+        metadata.paragraph_format.space_before = Pt(4)
+        metadata.paragraph_format.space_after = Pt(4)
+        _add_docx_run(metadata, "Table ID: ", bold=True)
+        _add_docx_run(metadata, table["table_id"])
+        _add_docx_run(metadata, "    粒度: ", bold=True)
+        _add_docx_run(metadata, table["granularity"])
+        _add_docx_run(metadata, "    内容类型: ", bold=True)
+        _add_docx_run(metadata, table["content_class"])
+
+        fact_total = len(table["rows"]) * len(table["columns"])
+        fact_limit = min(
+            fact_total,
+            _DOCX_MAX_FACT_ROWS_PER_TABLE,
+            budget.fact_rows_remaining,
+        )
+        fact_rows = []
+        for row in table["rows"]:
+            for column in table["columns"]:
+                if len(fact_rows) >= fact_limit:
+                    break
+                field = row["cells"][column["key"]]
+                fact_rows.append(
+                    (
+                        row["row_id"],
+                        column["label"],
+                        _table_field_display_value(field, column=column),
+                        _AVAILABILITY_LABELS[field["availability"]],
+                        field["note"],
+                        _docx_compact_refs(field["source_refs"]),
+                    )
+                )
+            if len(fact_rows) >= fact_limit:
+                break
+        _add_docx_table(
+            document,
+            headers=("行 ID", "字段", "值", "状态", "说明", "来源"),
+            rows=fact_rows,
+            widths=_DOCX_FACT_WIDTHS,
+            centered_columns=frozenset({2, 3}),
+        )
+        budget.fact_rows_remaining -= len(fact_rows)
+        if len(fact_rows) < fact_total:
+            _write_docx_truncation_notice(
+                document,
+                scope=f"表 {table['table_id']} 事实行",
+                shown=len(fact_rows),
+                total=fact_total,
+            )
+        source = document.add_paragraph()
+        source.paragraph_format.space_before = Pt(4)
+        source.paragraph_format.space_after = Pt(4)
+        _add_docx_run(source, "来源: ", bold=True)
+        _add_docx_run(source, _docx_compact_refs(table["source_refs"]))
+    budget.report_tables_remaining -= tables_shown
+    if tables_shown < tables_total:
+        _write_docx_truncation_notice(
+            document,
+            scope=f"{section['title']}结构化表",
+            shown=tables_shown,
+            total=tables_total,
+        )
+
+    flags_total = len(section["red_flags"])
+    flags_shown = min(
+        flags_total,
+        _DOCX_MAX_RED_FLAGS_PER_SECTION,
+        budget.red_flags_remaining,
+    )
+    if flags_total:
+        _add_docx_heading(document, "红旗与限制", level=2)
+        rows = [
+            (
+                flag["level"],
+                flag["code"],
+                flag["message"],
+                _docx_compact_refs(flag["source_refs"]),
+            )
+            for flag in islice(section["red_flags"], flags_shown)
+        ]
+        if rows:
+            _add_docx_table(
+                document,
+                headers=("级别", "编码", "说明", "来源"),
+                rows=rows,
+                widths=_DOCX_FLAG_WIDTHS,
+                centered_columns=frozenset({0}),
+            )
+        budget.red_flags_remaining -= flags_shown
+        if flags_shown < flags_total:
+            _write_docx_truncation_notice(
+                document,
+                scope=f"{section['title']}红旗",
+                shown=flags_shown,
+                total=flags_total,
+            )
+
+    if (
+        not section["summary_fields"]
+        and not section["tables"]
+        and not section["stage_evidence"]
+        and not section["red_flags"]
+    ):
+        paragraph = document.add_paragraph()
+        _add_docx_run(paragraph, "该部分当前没有可展示的结构化事实。")
+
+
+def _write_docx_evidence_appendix(
+    document: Any,
+    *,
+    bundle: Mapping[str, Any],
+) -> None:
+    _add_docx_heading(document, "证据、缺失信息与完整度", level=1)
+    _add_docx_heading(document, "完整度", level=2)
+    completeness = bundle["completeness_summary"]
+    rows = []
+    for category, counts in (
+        ("字段", completeness["field_counts"]),
+        ("Section", completeness["section_counts"]),
+        ("缺失信息", completeness["missing_information_counts"]),
+        ("阻塞", completeness["blocking_counts"]),
+    ):
+        rows.extend((category, key, count) for key, count in counts.items())
+    _add_docx_table(
+        document,
+        headers=("类别", "状态", "数量"),
+        rows=rows,
+        widths=_DOCX_COMPLETENESS_WIDTHS,
+        centered_columns=frozenset({2}),
+    )
+
+    _add_docx_heading(document, "缺失信息", level=2)
+    missing_total = len(bundle["missing_information"])
+    missing_shown = min(
+        missing_total,
+        _DOCX_MAX_MISSING_INFORMATION_ROWS,
+    )
+    missing_rows = [
+        (
+            item["field_path"],
+            item["blocking"],
+            item["status"],
+            item["reason"],
+            item["asked_count"],
+        )
+        for item in islice(bundle["missing_information"], missing_shown)
+    ]
+    _add_docx_table(
+        document,
+        headers=("字段", "阻塞级别", "状态", "原因", "已询问次数"),
+        rows=missing_rows,
+        widths=_DOCX_MISSING_WIDTHS,
+        centered_columns=frozenset({1, 2, 4}),
+    )
+    if not missing_rows:
+        paragraph = document.add_paragraph()
+        _add_docx_run(paragraph, "当前没有缺失信息记录。")
+    if missing_shown < missing_total:
+        _write_docx_truncation_notice(
+            document,
+            scope="缺失信息",
+            shown=missing_shown,
+            total=missing_total,
+        )
+
+    _add_docx_heading(document, "来源索引", level=2)
+    bounded_sources = list(
+        islice(
+            _source_locations(bundle),
+            _DOCX_MAX_EVIDENCE_ROWS + 1,
+        )
+    )
+    evidence_was_truncated = len(bounded_sources) > _DOCX_MAX_EVIDENCE_ROWS
+    evidence_rows = [
+        (
+            location,
+            ref["kind"],
+            ref["ref_id"],
+            ref["content_hash"],
+        )
+        for location, ref in bounded_sources[:_DOCX_MAX_EVIDENCE_ROWS]
+    ]
+    _add_docx_table(
+        document,
+        headers=("位置", "类型", "引用 ID", "内容 SHA-256"),
+        rows=evidence_rows,
+        widths=_DOCX_EVIDENCE_WIDTHS,
+    )
+    if evidence_was_truncated:
+        _write_docx_truncation_notice(
+            document,
+            scope="来源索引",
+            shown=_DOCX_MAX_EVIDENCE_ROWS,
+            total=None,
+        )
+
+
+def _write_docx_truncation_notice(
+    document: Any,
+    *,
+    scope: object,
+    shown: int,
+    total: int | None,
+) -> None:
+    paragraph = document.add_paragraph()
+    if total is None:
+        message = (
+            f"已截断：{scope}仅展示前 {shown} 项，仍有更多内容。"
+            "完整内容见同一报告修订的 JSON/XLSX 输出。"
+        )
+    else:
+        message = (
+            f"已截断：{scope}仅展示前 {shown} 项，共 {total} 项。"
+            "完整内容见同一报告修订的 JSON/XLSX 输出。"
+        )
+    _add_docx_run(
+        paragraph,
+        message,
+        bold=True,
+        color="7A5A00",
+    )
+
+
+def _add_docx_table(
+    document: Any,
+    *,
+    headers: Sequence[str],
+    rows: Sequence[Sequence[object]],
+    widths: Sequence[int],
+    centered_columns: frozenset[int] = frozenset(),
+) -> Any:
+    if len(headers) != len(widths):
+        raise StrategyReportOutputError(
+            "DOCX table header and geometry column counts differ"
+        )
+    if sum(widths) != _DOCX_TABLE_WIDTH_DXA:
+        raise StrategyReportOutputError(
+            "DOCX table geometry does not equal 9360 DXA"
+        )
+    if any(len(row) != len(headers) for row in rows):
+        raise StrategyReportOutputError(
+            "DOCX table row and header column counts differ"
+        )
+
+    table = document.add_table(rows=1, cols=len(headers))
+    table.autofit = False
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    _set_docx_table_geometry(table, widths=widths)
+    _set_docx_header_repeat(table.rows[0])
+
+    for column, value in enumerate(headers):
+        cell = table.rows[0].cells[column]
+        _set_docx_cell_text(
+            cell,
+            value,
+            bold=True,
+            fill="F2F4F7",
+            centered=True,
+        )
+    for values in rows:
+        cells = table.add_row().cells
+        for column, value in enumerate(values):
+            _set_docx_cell_width(cells[column], widths[column])
+            _set_docx_cell_text(
+                cells[column],
+                value,
+                centered=column in centered_columns,
+            )
+    return table
+
+
+def _set_docx_table_geometry(
+    table: Any,
+    *,
+    widths: Sequence[int],
+) -> None:
+    table_properties = table._tbl.tblPr
+    _set_docx_width_element(
+        table_properties,
+        "w:tblW",
+        _DOCX_TABLE_WIDTH_DXA,
+    )
+    _set_docx_width_element(
+        table_properties,
+        "w:tblInd",
+        _DOCX_TABLE_INDENT_DXA,
+    )
+    layout = table_properties.find(qn("w:tblLayout"))
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        table_properties.append(layout)
+    layout.set(qn("w:type"), "fixed")
+
+    borders = table_properties.find(qn("w:tblBorders"))
+    if borders is None:
+        borders = OxmlElement("w:tblBorders")
+        table_properties.append(borders)
+    for side in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        border = borders.find(qn(f"w:{side}"))
+        if border is None:
+            border = OxmlElement(f"w:{side}")
+            borders.append(border)
+        border.set(qn("w:val"), "single")
+        border.set(qn("w:sz"), "4")
+        border.set(qn("w:space"), "0")
+        border.set(qn("w:color"), "D9E1E8")
+
+    margins = table_properties.find(qn("w:tblCellMar"))
+    if margins is None:
+        margins = OxmlElement("w:tblCellMar")
+        table_properties.append(margins)
+    for side, width in _DOCX_CELL_MARGINS_DXA.items():
+        element = margins.find(qn(f"w:{side}"))
+        if element is None:
+            element = OxmlElement(f"w:{side}")
+            margins.append(element)
+        element.set(qn("w:w"), str(width))
+        element.set(qn("w:type"), "dxa")
+
+    grid = table._tbl.tblGrid
+    for child in tuple(grid):
+        grid.remove(child)
+    for width in widths:
+        column = OxmlElement("w:gridCol")
+        column.set(qn("w:w"), str(width))
+        grid.append(column)
+    for row in table.rows:
+        for cell, width in zip(row.cells, widths, strict=True):
+            _set_docx_cell_width(cell, width)
+
+
+def _set_docx_width_element(
+    parent: Any,
+    tag: str,
+    width: int,
+) -> None:
+    element = parent.find(qn(tag))
+    if element is None:
+        element = OxmlElement(tag)
+        parent.append(element)
+    element.set(qn("w:w"), str(width))
+    element.set(qn("w:type"), "dxa")
+
+
+def _set_docx_cell_width(cell: Any, width: int) -> None:
+    cell.width = Twips(width)
+    properties = cell._tc.get_or_add_tcPr()
+    _set_docx_width_element(properties, "w:tcW", width)
+
+
+def _set_docx_header_repeat(row: Any) -> None:
+    properties = row._tr.get_or_add_trPr()
+    repeat = properties.find(qn("w:tblHeader"))
+    if repeat is None:
+        repeat = OxmlElement("w:tblHeader")
+        properties.append(repeat)
+    repeat.set(qn("w:val"), "true")
+
+
+def _set_docx_cell_text(
+    cell: Any,
+    value: object,
+    *,
+    bold: bool = False,
+    fill: str | None = None,
+    centered: bool = False,
+) -> None:
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    paragraph = cell.paragraphs[0]
+    paragraph.style = "Normal"
+    paragraph.alignment = (
+        WD_ALIGN_PARAGRAPH.CENTER
+        if centered
+        else WD_ALIGN_PARAGRAPH.LEFT
+    )
+    _add_docx_run(paragraph, value, bold=bold)
+    if fill is not None:
+        properties = cell._tc.get_or_add_tcPr()
+        shading = properties.find(qn("w:shd"))
+        if shading is None:
+            shading = OxmlElement("w:shd")
+            properties.append(shading)
+        shading.set(qn("w:val"), "clear")
+        shading.set(qn("w:color"), "auto")
+        shading.set(qn("w:fill"), fill)
+
+
+def _docx_text(value: object) -> str:
+    presentation = _presentation_value(value)
+    text = _safe_text_projection("" if presentation is None else presentation)
+    if len(text) <= _DOCX_MAX_CELL_CHARACTERS:
+        return text
+    prefix_characters = (
+        _DOCX_MAX_CELL_CHARACTERS - len(_DOCX_TRUNCATION_SUFFIX)
+    )
+    return text[:prefix_characters] + _DOCX_TRUNCATION_SUFFIX
+
+
+def _add_docx_heading(
+    document: Any,
+    value: object,
+    *,
+    level: int,
+) -> Any:
+    paragraph = document.add_paragraph(style=f"Heading {level}")
+    _add_docx_run(paragraph, value)
+    return paragraph
+
+
+def _add_docx_run(
+    paragraph: Any,
+    value: object,
+    *,
+    bold: bool = False,
+    italic: bool = False,
+    color: str | None = None,
+) -> Any:
+    text = _docx_text(value)
+    run = paragraph.add_run(text)
+    run.bold = bold
+    run.italic = italic
+    if color is not None:
+        run.font.color.rgb = RGBColor.from_string(color)
+    if _DOCX_CJK_TEXT.search(text):
+        run.font.name = _DOCX_CJK_FONT
+        properties = run._element.get_or_add_rPr()
+        fonts = properties.rFonts
+        if fonts is None:
+            fonts = OxmlElement("w:rFonts")
+            properties.insert(0, fonts)
+        for attribute in ("ascii", "hAnsi", "eastAsia", "cs"):
+            fonts.set(qn(f"w:{attribute}"), _DOCX_CJK_FONT)
+        language = properties.find(qn("w:lang"))
+        if language is None:
+            language = OxmlElement("w:lang")
+            properties.append(language)
+        language.set(qn("w:val"), "zh-CN")
+        language.set(qn("w:eastAsia"), "zh-CN")
+    return run
+
+
+def _canonicalize_docx_bytes(raw: bytes) -> bytes:
+    _assert_safe_docx_package(raw)
+    source = BytesIO(raw)
+    destination = BytesIO()
+    with ZipFile(source, "r") as input_archive:
+        members = sorted(input_archive.infolist(), key=lambda item: item.filename)
+        if len({item.filename for item in members}) != len(members):
+            raise StrategyReportOutputError(
+                "generated DOCX contains duplicate package members"
+            )
+        with ZipFile(
+            destination,
+            "w",
+            compression=ZIP_DEFLATED,
+            compresslevel=9,
+            allowZip64=True,
+        ) as output_archive:
+            output_archive.comment = b""
+            for source_member in members:
+                member = ZipInfo(
+                    source_member.filename,
+                    date_time=_FIXED_ZIP_DATETIME,
+                )
+                member.compress_type = ZIP_DEFLATED
+                member.create_system = 0
+                member.create_version = 20
+                member.extract_version = 20
+                member.external_attr = _FIXED_ZIP_EXTERNAL_ATTR
+                member.internal_attr = 0
+                member.flag_bits = 0
+                member.volume = 0
+                member.comment = b""
+                member.extra = b""
+                output_archive.writestr(
+                    member,
+                    input_archive.read(source_member.filename),
+                    compress_type=ZIP_DEFLATED,
+                    compresslevel=9,
+                )
+    return destination.getvalue()
+
+
+def _assert_safe_docx_package(raw: bytes) -> None:
+    try:
+        archive = ZipFile(BytesIO(raw), "r")
+    except Exception as exc:
+        raise StrategyReportOutputError(
+            "generated DOCX is not a readable OOXML package"
+        ) from exc
+    with archive:
+        names = archive.namelist()
+        if len(set(names)) != len(names):
+            raise StrategyReportOutputError(
+                "generated DOCX contains duplicate package members"
+            )
+        for name in names:
+            pieces = name.replace("\\", "/").split("/")
+            if (
+                name.startswith(("/", "\\"))
+                or "\\" in name
+                or any(piece in {"", ".", ".."} for piece in pieces)
+            ):
+                raise StrategyReportOutputError(
+                    "generated DOCX contains an unsafe package member path"
+                )
+            lowered = name.lower()
+            if (
+                lowered.endswith("vbaproject.bin")
+                or "macros" in lowered
+                or lowered.startswith("word/media/")
+            ):
+                raise StrategyReportOutputError(
+                    "generated DOCX contains forbidden active or image content"
+                )
+
+        content_types = archive.read("[Content_Types].xml").lower()
+        if b"macroenabled" in content_types or b"vbaproject" in content_types:
+            raise StrategyReportOutputError(
+                "generated DOCX contains a macro-enabled content type"
+            )
+
+        for name in names:
+            payload = archive.read(name)
+            if name.endswith(".rels"):
+                try:
+                    relationships = ElementTree.fromstring(payload)
+                except ElementTree.ParseError as exc:
+                    raise StrategyReportOutputError(
+                        "generated DOCX contains invalid relationships XML"
+                    ) from exc
+                for relationship in relationships.findall(
+                    f"{{{_DOCX_RELATIONSHIP_NAMESPACE}}}Relationship"
+                ):
+                    if (
+                        relationship.attrib.get("TargetMode", "").lower()
+                        == "external"
+                    ):
+                        raise StrategyReportOutputError(
+                            "generated DOCX contains an external relationship"
+                        )
+            if name.endswith(".xml"):
+                try:
+                    root = ElementTree.fromstring(payload)
+                except ElementTree.ParseError as exc:
+                    raise StrategyReportOutputError(
+                        "generated DOCX contains invalid OOXML"
+                    ) from exc
+                for element in root.iter():
+                    tag = element.tag
+                    if not isinstance(tag, str) or not tag.startswith("{"):
+                        continue
+                    namespace, _, local_name = tag[1:].partition("}")
+                    if (
+                        namespace == _DOCX_WORDPROCESSINGML_NAMESPACE
+                        and local_name
+                        in _DOCX_FORBIDDEN_FIELD_LOCAL_NAMES
+                    ):
+                        raise StrategyReportOutputError(
+                            "generated DOCX contains a forbidden field code"
+                        )
 
 
 def _render_xlsx(bundle: Mapping[str, Any]) -> bytes:
@@ -1071,6 +2072,18 @@ def _compact_refs(refs: Sequence[Mapping[str, str]]) -> str:
     )
 
 
+def _docx_compact_refs(refs: Sequence[Mapping[str, str]]) -> str:
+    shown = min(len(refs), _DOCX_MAX_REFS_PER_CELL)
+    text = "; ".join(
+        f"{item['kind']}:{item['ref_id']}@{item['content_hash']}"
+        for item in islice(refs, shown)
+    )
+    if shown < len(refs):
+        suffix = "…[引用已截断；完整内容见 JSON/XLSX]"
+        return f"{text}; {suffix}" if text else suffix
+    return text
+
+
 def _stage_labels(stages: Sequence[str]) -> str:
     return " / ".join(_EFFECT_STAGE_LABELS[item] for item in stages)
 
@@ -1219,6 +2232,7 @@ __all__ = [
     "STRATEGY_REPORT_SHEET_TITLES",
     "StrategyReportOutputError",
     "render_strategy_report_bundle",
+    "render_strategy_report_bundle_docx",
     "render_strategy_report_bundle_json",
     "render_strategy_report_bundle_markdown",
     "render_strategy_report_bundle_xlsx",

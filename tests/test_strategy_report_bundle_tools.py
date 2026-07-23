@@ -363,7 +363,7 @@ def _measurement_audit_rows(fixture: dict) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def test_build_report_bundle_publishes_three_exact_governed_outputs(
+def test_build_report_bundle_publishes_four_exact_governed_outputs(
     tmp_path: Path,
 ) -> None:
     fixture = _setup(tmp_path)
@@ -376,9 +376,18 @@ def test_build_report_bundle_publishes_three_exact_governed_outputs(
     assert validate_build_strategy_report_bundle_v2_tool_output(output) == output
     rendered = render_strategy_report_bundle(output["bundle"])
     rows = _report_rows(fixture)
-    assert {row["kind"] for row in rows} == set(
-        STRATEGY_REPORT_OUTPUT_KINDS.values()
-    )
+    assert [artifact["format"] for artifact in output["artifacts"]] == [
+        "json",
+        "markdown",
+        "xlsx",
+        "docx",
+    ]
+    assert {row["kind"] for row in rows} == {
+        "strategy_report_bundle_json",
+        "strategy_report_markdown",
+        "strategy_report_xlsx",
+        "strategy_report_docx",
+    }
     assert all(row["origin_tool"] == STRATEGY_REPORT_ORIGIN_TOOL for row in rows)
     for artifact in output["artifacts"]:
         row = next(item for item in rows if item["id"] == artifact["artifact_id"])
@@ -396,6 +405,16 @@ def test_build_report_bundle_publishes_three_exact_governed_outputs(
     audits = _audit_rows(fixture)
     assert len(audits) == 1
     assert audits[0]["target_ref"] == output["report_id"]
+    audit_detail = json.loads(str(audits[0]["detail_json"]))
+    assert set(audit_detail["output_artifacts"]) == {
+        "json",
+        "markdown",
+        "xlsx",
+        "docx",
+    }
+    assert audit_detail["output_artifacts"]["docx"]["kind"] == (
+        "strategy_report_docx"
+    )
 
     tool = next(
         item
@@ -540,7 +559,8 @@ def test_build_report_bundle_prefers_authenticated_impact_cube_v2(
         "json"
     ]
     assert rendered["xlsx"].startswith(b"PK")
-    assert len(_report_rows(fixture)) == 3
+    assert rendered["docx"].startswith(b"PK")
+    assert len(_report_rows(fixture)) == 4
     audit = _audit_rows(fixture)[0]
     detail = json.loads(str(audit["detail_json"]))
     assert detail["source_artifacts"]["impact_cube"] == {
@@ -723,7 +743,7 @@ def test_build_report_bundle_exact_retry_is_idempotent_and_validator_is_strict(
     replay = _run(fixture)
 
     assert replay == first
-    assert len(_report_rows(fixture)) == 3
+    assert len(_report_rows(fixture)) == 4
     assert len(_audit_rows(fixture)) == 1
     with fixture["runtime"].task_artifacts.transaction() as conn:
         assert conn.execute(
@@ -747,6 +767,50 @@ def test_build_report_bundle_exact_retry_is_idempotent_and_validator_is_strict(
     )
     with pytest.raises(StrategyError, match="artifact"):
         validate_build_strategy_report_bundle_v2_tool_output(forged_url)
+    missing_docx = deepcopy(first)
+    missing_docx["artifacts"] = [
+        item
+        for item in missing_docx["artifacts"]
+        if item["format"] != "docx"
+    ]
+    with pytest.raises(StrategyError, match="four canonical artifacts"):
+        validate_build_strategy_report_bundle_v2_tool_output(missing_docx)
+    forged_docx = deepcopy(first)
+    docx = next(
+        item for item in forged_docx["artifacts"] if item["format"] == "docx"
+    )
+    docx["content_hash"] = "f" * 64
+    with pytest.raises(StrategyError, match="artifact"):
+        validate_build_strategy_report_bundle_v2_tool_output(forged_docx)
+
+
+def test_build_report_bundle_missing_docx_render_rolls_back_every_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    original_render = report_tools.render_strategy_report_bundle
+
+    def omit_docx(bundle):
+        rendered = original_render(bundle)
+        rendered.pop("docx")
+        return rendered
+
+    monkeypatch.setattr(
+        report_tools,
+        "render_strategy_report_bundle",
+        omit_docx,
+    )
+
+    with pytest.raises(StrategyError, match="invalid output set"):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+    with fixture["runtime"].task_artifacts.transaction() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM strategy_report_revisions"
+        ).fetchone()[0] == 0
 
 
 def test_build_report_bundle_rolls_back_files_rows_publication_and_audit(
@@ -797,7 +861,7 @@ def test_build_report_bundle_identical_concurrent_writers_share_one_revision(
         results = list(executor.map(lambda _: execute(), range(2)))
 
     assert results[0] == results[1]
-    assert len(_report_rows(fixture)) == 3
+    assert len(_report_rows(fixture)) == 4
     assert len(_audit_rows(fixture)) == 1
     with fixture["runtime"].task_artifacts.transaction() as conn:
         assert conn.execute(
@@ -954,19 +1018,16 @@ def test_build_report_bundle_never_rebinds_a_planned_project_context(
     assert _audit_rows(fixture) == []
 
 
-def test_build_report_bundle_detects_output_tamper_and_rolls_back(
+def test_build_report_bundle_detects_docx_output_tamper_and_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture = _setup(tmp_path)
     original_register = fixture["runtime"].task_artifacts.register_on_connection
-    calls = 0
 
     def tampering_register(*args, **kwargs):
-        nonlocal calls
         record = original_register(*args, **kwargs)
-        calls += 1
-        if calls == 3:
+        if record["kind"] == "strategy_report_docx":
             Path(record["path"]).write_bytes(b"tampered")
         return record
 
@@ -983,6 +1044,35 @@ def test_build_report_bundle_detects_output_tamper_and_rolls_back(
 
     assert _report_rows(fixture) == []
     assert _audit_rows(fixture) == []
+
+
+def test_build_report_bundle_fourth_registration_failure_leaves_no_partial_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    original_register = fixture["runtime"].task_artifacts.register_on_connection
+
+    def fail_docx_registration(*args, **kwargs):
+        if kwargs["kind"] == "strategy_report_docx":
+            raise RuntimeError("DOCX registry unavailable")
+        return original_register(*args, **kwargs)
+
+    monkeypatch.setattr(
+        fixture["runtime"].task_artifacts,
+        "register_on_connection",
+        fail_docx_registration,
+    )
+
+    with pytest.raises(RuntimeError, match="DOCX registry unavailable"):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+    with fixture["runtime"].task_artifacts.transaction() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM strategy_report_revisions"
+        ).fetchone()[0] == 0
 
 
 def test_build_report_bundle_never_follows_existing_output_symlink(

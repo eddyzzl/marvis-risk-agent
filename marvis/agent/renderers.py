@@ -2388,7 +2388,7 @@ def _pool_impact_integrity_failure() -> tuple[str, list[dict]]:
 def _strategy_report_integrity_failure() -> tuple[str, list[dict]]:
     return (
         "**StrategyReportBundle V2 结果完整性校验失败**：计划缓存与 canonical "
-        "report bundle、状态或三个 TaskArtifact 摘要不一致，已停止展示报告"
+        "report bundle、状态或四个 TaskArtifact 摘要不一致，已停止展示报告"
         "身份、警告和下载链接。请重新生成报告。",
         [],
     )
@@ -3394,6 +3394,7 @@ def _render_build_strategy_report_bundle_v2(o: dict):
         "json": "JSON",
         "markdown": "Markdown",
         "xlsx": "XLSX",
+        "docx": "DOCX",
     }
     downloads = " · ".join(
         f"[{download_labels[artifact['format']]}]({artifact['download_url']})"

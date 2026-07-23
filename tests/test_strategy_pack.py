@@ -322,6 +322,9 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     delivery_tool = next(
         tool for tool in manifest.tools if tool.name == "export_strategy_delivery"
     )
+    report_bundle_tool = next(
+        tool for tool in manifest.tools if tool.name == "build_report_bundle_v2"
+    )
     run_monitoring_tool = next(
         tool for tool in manifest.tools if tool.name == "run_strategy_monitoring"
     )
@@ -399,6 +402,27 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     }
     assert delivery_tool.input_schema["additionalProperties"] is False
     assert delivery_tool.output_schema["additionalProperties"] is False
+    report_output_schema = report_bundle_tool.output_schema
+    assert report_output_schema["properties"]["schema_version"] == {
+        "const": "strategy.build-report-bundle-v2-tool.v3"
+    }
+    report_artifacts = report_output_schema["properties"]["artifacts"]
+    assert report_artifacts["minItems"] == 4
+    assert report_artifacts["maxItems"] == 4
+    assert set(
+        report_artifacts["items"]["properties"]["kind"]["enum"]
+    ) == {
+        "strategy_report_bundle_json",
+        "strategy_report_markdown",
+        "strategy_report_xlsx",
+        "strategy_report_docx",
+    }
+    assert set(
+        report_artifacts["items"]["properties"]["format"]["enum"]
+    ) == {"json", "markdown", "xlsx", "docx"}
+    assert set(
+        report_artifacts["items"]["properties"]["filename"]["enum"]
+    ) == {"report.json", "report.md", "report.xlsx", "report.docx"}
     for tool in (project_context_tool, sample_v2_tool, model_evidence_v2_tool):
         assert tool.determinism == "deterministic"
         assert tool.failure_policy == "fail"

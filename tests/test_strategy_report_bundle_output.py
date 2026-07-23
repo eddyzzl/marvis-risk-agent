@@ -10,6 +10,7 @@ from marvis.output.strategy_report_bundle import (
     STRATEGY_REPORT_SHEET_TITLES,
     StrategyReportOutputError,
     render_strategy_report_bundle,
+    render_strategy_report_bundle_docx,
     render_strategy_report_bundle_markdown,
     render_strategy_report_bundle_xlsx,
 )
@@ -37,7 +38,7 @@ def _find_row(sheet, first_value):
     raise AssertionError(f"row {first_value!r} not found in {sheet.title}")
 
 
-def test_all_three_projections_are_deterministic_and_share_one_manifest():
+def test_all_four_projections_are_deterministic_and_share_one_manifest():
     bundle = _bundle()
 
     first = render_strategy_report_bundle(bundle)
@@ -48,6 +49,8 @@ def test_all_three_projections_are_deterministic_and_share_one_manifest():
         "utf-8"
     )
     assert first["xlsx"].startswith(b"PK")
+    assert first["docx"] == render_strategy_report_bundle_docx(bundle)
+    assert first["docx"].startswith(b"PK")
     markdown = first["markdown"].decode("utf-8")
     assert markdown.startswith("# 风险策略迭代评审\n")
     assert "开发回测" in markdown

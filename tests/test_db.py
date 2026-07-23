@@ -1248,6 +1248,10 @@ def test_init_db_migration_012_adds_data_workspace_to_v11_database(tmp_path):
     with connect(db_path) as conn:
         conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
         conn.execute("CREATE TABLE datasets (id TEXT PRIMARY KEY)")
+        # A database stamped at migration 11 necessarily already owns the
+        # migration-10 artifact registry.  Later report migrations attach
+        # integrity triggers to that real predecessor table.
+        db_schema_module._migration_010_task_artifact_registry(conn)
         conn.execute("INSERT INTO tasks(id) VALUES ('task-1')")
         conn.execute("PRAGMA user_version = 11")
 

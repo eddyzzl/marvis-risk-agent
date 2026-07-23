@@ -18,6 +18,7 @@ from marvis.packs.strategy.report_bundle import (
     REPORT_SECTION_KEYS,
     build_strategy_report_bundle,
     build_strategy_report_section,
+    canonical_strategy_report_bundle_json,
 )
 from marvis.repositories.strategy_reports import (
     STRATEGY_REPORT_HEAD_SCHEMA_VERSION,
@@ -40,8 +41,10 @@ def _seed_strategy_task(
     *,
     task_id: str = "strategy-task-1",
     strategy_id: str = "strategy-1",
+    initialize_schema: bool = True,
 ) -> tuple[str, str]:
-    init_db(db_path)
+    if initialize_schema:
+        init_db(db_path)
     with connect(db_path) as conn:
         conn.execute(
             """
@@ -111,8 +114,11 @@ def _bundle(
 def _register_outputs(
     db_path: Path,
     bundle: dict,
+    *,
+    output_formats: tuple[str, ...] | None = None,
 ) -> dict[str, dict]:
     rendered = render_strategy_report_bundle(bundle)
+    selected_formats = tuple(rendered) if output_formats is None else output_formats
     artifact_repo = TaskArtifactRepository(db_path)
     records = {}
     output_dir = (
@@ -123,7 +129,8 @@ def _register_outputs(
         / bundle["report_id"]
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    for output_format, payload in rendered.items():
+    for output_format in selected_formats:
+        payload = rendered[output_format]
         suffix = "md" if output_format == "markdown" else output_format
         path = output_dir / f"report.{suffix}"
         path.write_bytes(payload)
@@ -142,7 +149,103 @@ def _register_outputs(
     return records
 
 
-def test_migration_020_is_registered_and_builds_guarded_report_ledger(tmp_path):
+def _init_db_through_migration_020(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with connect(db_path) as conn:
+        for version, migration in db_schema_module._MIGRATIONS:
+            if version > 20:
+                break
+            conn.execute("BEGIN IMMEDIATE")
+            migration(conn)
+            conn.execute(f"PRAGMA user_version = {version}")
+            conn.commit()
+
+
+def _publish_legacy_migration_020_report(
+    db_path: Path,
+) -> tuple[str, str, dict, dict[str, dict]]:
+    _init_db_through_migration_020(db_path)
+    task_id, strategy_id = _seed_strategy_task(
+        db_path,
+        initialize_schema=False,
+    )
+    bundle = _bundle(task_id=task_id, strategy_id=strategy_id)
+    artifacts = _register_outputs(
+        db_path,
+        bundle,
+        output_formats=("json", "markdown", "xlsx"),
+    )
+    scope = f"strategy:{strategy_id}"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO strategy_report_heads(
+                task_id, strategy_scope, strategy_id, schema_version,
+                current_revision, current_report_id, current_content_hash,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 0, NULL, NULL, ?, ?)
+            """,
+            (
+                task_id,
+                scope,
+                strategy_id,
+                STRATEGY_REPORT_HEAD_SCHEMA_VERSION,
+                _CREATED_AT,
+                _CREATED_AT,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO strategy_report_revisions(
+                report_id, schema_version, producer_version, task_id,
+                strategy_scope, strategy_id, strategy_version,
+                report_revision, previous_report_id, report_json,
+                bundle_content_hash,
+                json_artifact_id, json_artifact_hash,
+                markdown_artifact_id, markdown_artifact_hash,
+                xlsx_artifact_id, xlsx_artifact_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                bundle["report_id"],
+                bundle["schema_version"],
+                bundle["producer_version"],
+                task_id,
+                scope,
+                strategy_id,
+                bundle["strategy_version"],
+                bundle["report_revision"],
+                bundle["previous_report_id"],
+                canonical_strategy_report_bundle_json(bundle),
+                bundle["content_sha256"],
+                artifacts["json"]["id"],
+                artifacts["json"]["content_hash"],
+                artifacts["markdown"]["id"],
+                artifacts["markdown"]["content_hash"],
+                artifacts["xlsx"]["id"],
+                artifacts["xlsx"]["content_hash"],
+                _CREATED_AT,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE strategy_report_heads
+               SET current_revision = 1, current_report_id = ?,
+                   current_content_hash = ?, updated_at = ?
+             WHERE task_id = ? AND strategy_scope = ?
+            """,
+            (
+                bundle["report_id"],
+                bundle["content_sha256"],
+                _CREATED_AT,
+                task_id,
+                scope,
+            ),
+        )
+    return task_id, strategy_id, bundle, artifacts
+
+
+def test_migration_021_is_registered_and_builds_guarded_report_ledger(tmp_path):
     db_path = tmp_path / "migration.sqlite"
     _seed_strategy_task(db_path)
     init_db(db_path)
@@ -163,10 +266,10 @@ def test_migration_020_is_registered_and_builds_guarded_report_ledger(tmp_path):
             )
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 20
+    assert version == db_schema_module.SCHEMA_VERSION == 21
     assert db_schema_module._MIGRATIONS[-1] == (
-        20,
-        db_schema_module._migration_020_strategy_report_revisions,
+        21,
+        db_schema_module._migration_021_strategy_report_docx,
     )
     assert {"strategy_report_heads", "strategy_report_revisions"} <= tables
     assert {
@@ -179,6 +282,119 @@ def test_migration_020_is_registered_and_builds_guarded_report_ledger(tmp_path):
         "trg_strategy_report_revisions_immutable_delete",
         "trg_strategy_report_output_artifacts_immutable_delete",
     } <= triggers
+    with connect(db_path) as conn:
+        columns = {
+            row["name"]: row
+            for row in conn.execute(
+                "PRAGMA table_info(strategy_report_revisions)"
+            )
+        }
+    assert columns["docx_artifact_id"]["notnull"] == 0
+    assert columns["docx_artifact_hash"]["notnull"] == 0
+
+
+def test_migration_021_preserves_and_revalidates_legacy_three_output_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "legacy-upgrade.sqlite"
+    task_id, strategy_id, bundle, legacy_artifacts = (
+        _publish_legacy_migration_020_report(db_path)
+    )
+    with connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert "docx_artifact_id" not in {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(strategy_report_revisions)"
+            )
+        }
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM strategy_report_revisions WHERE report_id = ?",
+            (bundle["report_id"],),
+        ).fetchone()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 21
+    assert row["docx_artifact_id"] is None
+    assert row["docx_artifact_hash"] is None
+
+    def _unexpected_docx_render(_bundle: dict) -> bytes:
+        raise AssertionError("legacy three-output reads must not render DOCX")
+
+    monkeypatch.setattr(
+        "marvis.output.strategy_report_bundle.render_strategy_report_bundle_docx",
+        _unexpected_docx_render,
+    )
+    current = StrategyReportRepository(db_path).get_current(
+        task_id=task_id,
+        strategy_id=strategy_id,
+    )
+    assert current is not None
+    assert current["bundle"] == bundle
+    assert current["artifacts"] == legacy_artifacts
+    assert set(current["artifacts"]) == {"json", "markdown", "xlsx"}
+
+
+def test_legacy_exact_retry_requires_new_four_output_revision(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "legacy-retry.sqlite"
+    task_id, strategy_id, first_bundle, _ = (
+        _publish_legacy_migration_020_report(db_path)
+    )
+    init_db(db_path)
+    four_output_retry = _register_outputs(db_path, first_bundle)
+    repo = StrategyReportRepository(db_path)
+
+    with pytest.raises(
+        StrategyReportConflictError,
+        match="cannot be upgraded in place",
+    ):
+        repo.publish(
+            bundle=first_bundle,
+            artifacts=four_output_retry,
+            expected_revision=0,
+            expected_report_id=None,
+            expected_content_hash=None,
+        )
+
+    second_bundle = _bundle(
+        task_id=task_id,
+        strategy_id=strategy_id,
+        report_revision=2,
+        previous_report_id=first_bundle["report_id"],
+        title="迁移后四产物报告",
+    )
+    second_artifacts = _register_outputs(db_path, second_bundle)
+    second = repo.publish(
+        bundle=second_bundle,
+        artifacts=second_artifacts,
+        expected_revision=1,
+        expected_report_id=first_bundle["report_id"],
+        expected_content_hash=first_bundle["content_sha256"],
+    )
+
+    assert set(second["artifacts"]) == {
+        "json",
+        "markdown",
+        "xlsx",
+        "docx",
+    }
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT report_revision, docx_artifact_id, docx_artifact_hash
+              FROM strategy_report_revisions
+             ORDER BY report_revision
+            """
+        ).fetchall()
+    assert rows[0]["docx_artifact_id"] is None
+    assert rows[0]["docx_artifact_hash"] is None
+    assert rows[1]["docx_artifact_id"] == second_artifacts["docx"]["id"]
+    assert rows[1]["docx_artifact_hash"] == second_artifacts["docx"]["content_hash"]
 
 
 def test_publish_roundtrips_and_exact_current_retry_is_idempotent(tmp_path):
@@ -206,6 +422,7 @@ def test_publish_roundtrips_and_exact_current_retry_is_idempotent(tmp_path):
     )
 
     assert first == replay
+    assert set(first["artifacts"]) == {"json", "markdown", "xlsx", "docx"}
     assert repo.get_current(task_id=task_id, strategy_id=strategy_id) == first
     assert repo.get_revision(
         task_id=task_id,
@@ -227,7 +444,13 @@ def test_publish_roundtrips_and_exact_current_retry_is_idempotent(tmp_path):
             "SELECT * FROM strategy_report_heads WHERE task_id = ?",
             (task_id,),
         ).fetchone()
+        revision_row = conn.execute(
+            "SELECT * FROM strategy_report_revisions WHERE report_id = ?",
+            (bundle["report_id"],),
+        ).fetchone()
     assert row["schema_version"] == STRATEGY_REPORT_HEAD_SCHEMA_VERSION
+    assert revision_row["docx_artifact_id"] == artifacts["docx"]["id"]
+    assert revision_row["docx_artifact_hash"] == artifacts["docx"]["content_hash"]
 
 
 def test_revision_chain_requires_exact_parent_and_rejects_stale_retry(tmp_path):
@@ -308,7 +531,7 @@ def test_publish_reloads_registry_and_rejects_forged_or_cross_task_artifacts(tmp
     repo = StrategyReportRepository(db_path)
 
     forged = deepcopy(artifacts)
-    forged["xlsx"]["content_hash"] = "f" * 64
+    forged["docx"]["content_hash"] = "f" * 64
     with pytest.raises(StrategyReportDataError, match="does not match registry"):
         repo.publish(
             bundle=bundle,
@@ -323,7 +546,7 @@ def test_publish_reloads_registry_and_rejects_forged_or_cross_task_artifacts(tmp
         strategy_id="strategy-2",
     )
     other_artifacts = _register_outputs(db_path, other_bundle)
-    mixed = {**artifacts, "xlsx": other_artifacts["xlsx"]}
+    mixed = {**artifacts, "docx": other_artifacts["docx"]}
     with pytest.raises(StrategyReportDataError, match="another task"):
         repo.publish(
             bundle=bundle,
@@ -334,7 +557,7 @@ def test_publish_reloads_registry_and_rejects_forged_or_cross_task_artifacts(tmp
         )
 
 
-@pytest.mark.parametrize("output_format", ["json", "markdown", "xlsx"])
+@pytest.mark.parametrize("output_format", ["json", "markdown", "xlsx", "docx"])
 def test_publish_reproduces_and_reads_exact_physical_output_bytes(
     tmp_path: Path,
     output_format: str,
@@ -391,8 +614,144 @@ def test_database_guards_report_rows_heads_and_published_artifacts(tmp_path):
         with pytest.raises(sqlite3.IntegrityError, match="immutable"):
             conn.execute(
                 "DELETE FROM task_artifacts WHERE id = ?",
-                (artifacts["json"]["id"],),
+                (artifacts["docx"]["id"],),
             )
+
+
+def test_database_rejects_new_three_output_revision_after_migration_021(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "four-output-trigger.sqlite"
+    task_id, strategy_id = _seed_strategy_task(db_path)
+    first_bundle = _bundle(task_id=task_id, strategy_id=strategy_id)
+    first_artifacts = _register_outputs(db_path, first_bundle)
+    StrategyReportRepository(db_path).publish(
+        bundle=first_bundle,
+        artifacts=first_artifacts,
+        expected_revision=0,
+        expected_report_id=None,
+        expected_content_hash=None,
+    )
+    second_bundle = _bundle(
+        task_id=task_id,
+        strategy_id=strategy_id,
+        report_revision=2,
+        previous_report_id=first_bundle["report_id"],
+        title="不完整三产物报告",
+    )
+    legacy_outputs = _register_outputs(
+        db_path,
+        second_bundle,
+        output_formats=("json", "markdown", "xlsx"),
+    )
+    with connect(db_path) as conn:
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="output artifact mismatch",
+        ):
+            conn.execute(
+                """
+                INSERT INTO strategy_report_revisions(
+                    report_id, schema_version, producer_version, task_id,
+                    strategy_scope, strategy_id, strategy_version,
+                    report_revision, previous_report_id, report_json,
+                    bundle_content_hash,
+                    json_artifact_id, json_artifact_hash,
+                    markdown_artifact_id, markdown_artifact_hash,
+                    xlsx_artifact_id, xlsx_artifact_hash,
+                    docx_artifact_id, docx_artifact_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          NULL, NULL, ?)
+                """,
+                (
+                    second_bundle["report_id"],
+                    second_bundle["schema_version"],
+                    second_bundle["producer_version"],
+                    task_id,
+                    f"strategy:{strategy_id}",
+                    strategy_id,
+                    second_bundle["strategy_version"],
+                    second_bundle["report_revision"],
+                    second_bundle["previous_report_id"],
+                    canonical_strategy_report_bundle_json(second_bundle),
+                    second_bundle["content_sha256"],
+                    legacy_outputs["json"]["id"],
+                    legacy_outputs["json"]["content_hash"],
+                    legacy_outputs["markdown"]["id"],
+                    legacy_outputs["markdown"]["content_hash"],
+                    legacy_outputs["xlsx"]["id"],
+                    legacy_outputs["xlsx"]["content_hash"],
+                    _CREATED_AT,
+                ),
+            )
+
+
+def test_read_fails_closed_for_half_null_docx_pair(tmp_path: Path) -> None:
+    db_path = tmp_path / "half-null.sqlite"
+    task_id, strategy_id = _seed_strategy_task(db_path)
+    bundle = _bundle(task_id=task_id, strategy_id=strategy_id)
+    artifacts = _register_outputs(db_path, bundle)
+    repo = StrategyReportRepository(db_path)
+    repo.publish(
+        bundle=bundle,
+        artifacts=artifacts,
+        expected_revision=0,
+        expected_report_id=None,
+        expected_content_hash=None,
+    )
+    with connect(db_path) as conn:
+        conn.execute(
+            "DROP TRIGGER trg_strategy_report_revisions_immutable_update"
+        )
+        conn.execute(
+            """
+            UPDATE strategy_report_revisions
+               SET docx_artifact_hash = NULL
+             WHERE report_id = ?
+            """,
+            (bundle["report_id"],),
+        )
+
+    with pytest.raises(StrategyReportDataError, match="pair is incomplete"):
+        repo.get_current(task_id=task_id, strategy_id=strategy_id)
+
+
+def test_read_fails_closed_when_published_docx_registry_row_is_missing(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "missing-docx.sqlite"
+    task_id, strategy_id = _seed_strategy_task(db_path)
+    bundle = _bundle(task_id=task_id, strategy_id=strategy_id)
+    artifacts = _register_outputs(db_path, bundle)
+    repo = StrategyReportRepository(db_path)
+    repo.publish(
+        bundle=bundle,
+        artifacts=artifacts,
+        expected_revision=0,
+        expected_report_id=None,
+        expected_content_hash=None,
+    )
+
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.execute("PRAGMA foreign_keys = OFF")
+        raw.execute(
+            "DROP TRIGGER "
+            "trg_strategy_report_output_artifacts_immutable_delete"
+        )
+        raw.execute(
+            "DELETE FROM task_artifacts WHERE id = ?",
+            (artifacts["docx"]["id"],),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(
+        StrategyReportDataError,
+        match="persisted docx report artifact is missing",
+    ):
+        repo.get_current(task_id=task_id, strategy_id=strategy_id)
 
 
 def test_task_deletion_cascades_report_ledger_and_output_artifacts(tmp_path):
