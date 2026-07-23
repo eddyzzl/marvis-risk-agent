@@ -322,6 +322,16 @@ def _compare_series(
                 values = _coerce_numeric_series(values)
             matched = values.isin(candidates)
             return matched if operator == "in" else ~matched
+        if expected is None and operator in {"==", "!="}:
+            # Missing rows were already removed and handled by the explicit
+            # missing policy.  Pandas nullable dtypes otherwise propagate
+            # ``pd.NA`` for ``series != None``, unlike the canonical row
+            # evaluator's ordinary Python scalar comparison.
+            return pd.Series(
+                operator == "!=",
+                index=values.index,
+                dtype=bool,
+            )
         if _numeric_literal(expected):
             values = _coerce_numeric_series(values)
         if operator == "<":

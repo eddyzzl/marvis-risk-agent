@@ -271,19 +271,111 @@ def test_equivalence_validator_rejects_reauthored_or_incomplete_evidence() -> No
         _approval_spec(),
         pd.DataFrame({"risk_score": [500, 750]}),
     )
+    trusted = {
+        "expected_strategy_spec_hash": evidence["strategy_spec_hash"],
+        "expected_sample_hash": evidence["sample_hash"],
+        "expected_content_hash": evidence["content_hash"],
+    }
 
-    assert validate_strategy_delivery_equivalence(evidence) == evidence
+    assert validate_strategy_delivery_equivalence(evidence, **trusted) == evidence
     reauthored = deepcopy(evidence)
     reauthored["sample_count"] = 1
     with pytest.raises(StrategyDeliveryError, match="content_hash"):
-        validate_strategy_delivery_equivalence(reauthored)
+        validate_strategy_delivery_equivalence(reauthored, **trusted)
     incomplete = deepcopy(evidence)
     del incomplete["result_hashes"]["python"]
     with pytest.raises(StrategyDeliveryError, match="result_hashes"):
-        validate_strategy_delivery_equivalence(incomplete)
+        validate_strategy_delivery_equivalence(incomplete, **trusted)
     over_budget = deepcopy(evidence)
     over_budget["source_row_count"] = 4097
     over_budget["sample_count"] = 4097
     _rehash_equivalence(over_budget)
     with pytest.raises(StrategyDeliveryError, match="sample_count.*budget"):
-        validate_strategy_delivery_equivalence(over_budget)
+        validate_strategy_delivery_equivalence(over_budget, **trusted)
+
+    fabricated = deepcopy(evidence)
+    fabricated["strategy_spec_hash"] = "0" * 64
+    fabricated["sample_hash"] = "0" * 64
+    fabricated["result_hashes"] = {
+        engine: "0" * 64 for engine in fabricated["engines"]
+    }
+    _rehash_equivalence(fabricated)
+    with pytest.raises(StrategyDeliveryError, match="trusted binding"):
+        validate_strategy_delivery_equivalence(fabricated, **trusted)
+
+
+def test_delivery_preflight_rejects_unsafe_auto_numeric_text() -> None:
+    spec = {
+        "schema_version": "strategy.dsl.v1",
+        "strategy_type": "approval",
+        "match_policy": "first_match",
+        "default_action": {"type": "approval"},
+        "rules": [
+            {
+                "rule_id": "unsafe-double",
+                "priority": 10,
+                "condition": {
+                    "op": "compare",
+                    "field": "x",
+                    "operator": "==",
+                    "value": 9007199254740992,
+                    "missing": "no_match",
+                },
+                "action": {"type": "reject"},
+            }
+        ],
+        "metadata": {"lineage": {}},
+    }
+    frame = pd.DataFrame(
+        {"x": ["0"] * 4096 + ["9007199254740993"]}
+    )
+
+    with pytest.raises(StrategyDeliveryError, match="exact comparison range"):
+        verify_strategy_delivery_equivalence(spec, frame)
+
+
+def test_bounded_equivalence_sample_always_binds_the_final_source_row() -> None:
+    spec = _approval_spec()
+    baseline = pd.DataFrame({"risk_score": [0] * 4097})
+    changed_tail = baseline.copy()
+    changed_tail.loc[4096, "risk_score"] = 750
+
+    first = verify_strategy_delivery_equivalence(spec, baseline)
+    second = verify_strategy_delivery_equivalence(spec, changed_tail)
+
+    assert first["bounded"] is True
+    assert first["sample_count"] == 4096
+    assert first["sample_hash"] != second["sample_hash"]
+
+
+def test_auto_not_equal_null_has_row_and_frame_delivery_parity() -> None:
+    spec = {
+        "schema_version": "strategy.dsl.v1",
+        "strategy_type": "approval",
+        "match_policy": "first_match",
+        "default_action": {"type": "approval"},
+        "rules": [
+            {
+                "rule_id": "present",
+                "priority": 10,
+                "condition": {
+                    "op": "compare",
+                    "field": "x",
+                    "operator": "!=",
+                    "value": None,
+                    "missing": "no_match",
+                },
+                "action": {"type": "reject"},
+            }
+        ],
+        "metadata": {"lineage": {}},
+    }
+
+    evidence = verify_strategy_delivery_equivalence(
+        spec,
+        pd.DataFrame(
+            {"x": pd.Series(["present", None], dtype="string")}
+        ),
+    )
+
+    assert evidence["matched"] is True

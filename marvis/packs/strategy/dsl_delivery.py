@@ -9,6 +9,7 @@ delivery.  The generated module contains no MARVIS import and exposes stable
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
@@ -283,6 +284,11 @@ def validate_strategy_duckdb_input_frame(
                 for field in _expression_fields(rule.condition)
             }
         )
+        auto_numeric_fields = {
+            field
+            for rule in parsed.rules
+            for field in _auto_numeric_fields(rule.condition)
+        }
     except (AutomaticTreeCodegenError, StrategyError) as exc:
         raise StrategyDeliveryError(str(exc)) from exc
     if not isinstance(frame, pd.DataFrame):
@@ -316,7 +322,11 @@ def validate_strategy_duckdb_input_frame(
             )
         folded[column.casefold()] = column
     for field in fields:
-        _validate_scalar_series(frame[field], field=field)
+        _validate_scalar_series(
+            frame[field],
+            field=field,
+            auto_numeric=field in auto_numeric_fields,
+        )
 
     relation_name = "__marvis_strategy_delivery_preflight"
     try:
@@ -441,13 +451,22 @@ def verify_strategy_delivery_equivalence(
     )[:24]
     document = {**body, "equivalence_id": equivalence_id}
     document["content_hash"] = _sha256(_canonical_json(document))
-    return document
+    return validate_strategy_delivery_equivalence(
+        document,
+        expected_strategy_spec_hash=document["strategy_spec_hash"],
+        expected_sample_hash=document["sample_hash"],
+        expected_content_hash=document["content_hash"],
+    )
 
 
 def validate_strategy_delivery_equivalence(
     value: object,
+    *,
+    expected_strategy_spec_hash: str,
+    expected_sample_hash: str,
+    expected_content_hash: str,
 ) -> dict[str, Any]:
-    """Validate a cached aggregate equivalence report without rerunning code."""
+    """Validate cached evidence against caller-authenticated source bindings."""
 
     if not isinstance(value, Mapping) or set(value) != _EQUIVALENCE_FIELDS:
         raise StrategyDeliveryError(
@@ -560,7 +579,33 @@ def validate_strategy_delivery_equivalence(
         raise StrategyDeliveryError(
             "strategy delivery equivalence bounded flag is inconsistent"
         )
+    trusted = {
+        "strategy_spec_hash": _trusted_hash(
+            expected_strategy_spec_hash,
+            "expected_strategy_spec_hash",
+        ),
+        "sample_hash": _trusted_hash(
+            expected_sample_hash,
+            "expected_sample_hash",
+        ),
+        "content_hash": _trusted_hash(
+            expected_content_hash,
+            "expected_content_hash",
+        ),
+    }
+    if any(normalized[field] != expected for field, expected in trusted.items()):
+        raise StrategyDeliveryError(
+            "strategy delivery equivalence does not match its trusted binding"
+        )
     return normalized
+
+
+def _trusted_hash(value: object, name: str) -> str:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise StrategyDeliveryError(
+            f"strategy delivery equivalence {name} is invalid"
+        )
+    return value
 
 
 def _non_negative_int(value: object, name: str) -> int:
@@ -633,8 +678,10 @@ def _canonical_result(value: object) -> dict[str, Any]:
 def _sample_positions(row_count: int, *, maximum_rows: int) -> list[int]:
     if row_count <= maximum_rows:
         return list(range(row_count))
+    if maximum_rows == 1:
+        return [row_count - 1]
     return [
-        (index * row_count) // maximum_rows
+        (index * (row_count - 1)) // (maximum_rows - 1)
         for index in range(maximum_rows)
     ]
 
@@ -773,7 +820,12 @@ def _json_scalar(value: Any) -> str:
     )
 
 
-def _validate_scalar_series(series: pd.Series, *, field: str) -> None:
+def _validate_scalar_series(
+    series: pd.Series,
+    *,
+    field: str,
+    auto_numeric: bool,
+) -> None:
     kinds: set[str] = set()
     for value in series.tolist():
         if _is_missing(value):
@@ -792,6 +844,8 @@ def _validate_scalar_series(series: pd.Series, *, field: str) -> None:
             kinds.add("numeric")
             continue
         if isinstance(value, str):
+            if auto_numeric:
+                _validate_auto_numeric_text(value, field=field)
             kinds.add("text")
             continue
         raise StrategyDeliveryError(
@@ -802,6 +856,74 @@ def _validate_scalar_series(series: pd.Series, *, field: str) -> None:
             "DuckDB input strategy field mixes scalar domains and could be "
             f"coerced during registration: {field}"
         )
+
+
+def _validate_auto_numeric_text(value: str, *, field: str) -> None:
+    try:
+        numeric = Decimal(value.strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise StrategyDeliveryError(
+            "DuckDB input auto-numeric text is not numeric: " + field
+        ) from exc
+    if not numeric.is_finite():
+        raise StrategyDeliveryError(
+            "DuckDB input auto-numeric text must be finite: " + field
+        )
+    if (
+        numeric == numeric.to_integral_value()
+        and abs(numeric) > _MAX_EXACT_DOUBLE_INTEGER
+    ):
+        raise StrategyDeliveryError(
+            f"DuckDB input integer exceeds exact comparison range: {field}"
+        )
+    try:
+        converted = float(numeric)
+    except (OverflowError, ValueError) as exc:
+        raise StrategyDeliveryError(
+            "DuckDB input auto-numeric text exceeds finite DOUBLE range: "
+            + field
+        ) from exc
+    if not math.isfinite(converted):
+        raise StrategyDeliveryError(
+            "DuckDB input auto-numeric text exceeds finite DOUBLE range: "
+            + field
+        )
+
+
+def _auto_numeric_fields(expression: Mapping[str, Any]) -> set[str]:
+    op = expression["op"]
+    if op == "compare":
+        if expression.get("coercion", "auto") == "strict":
+            return set()
+        expected = expression["value"]
+        if expression["operator"] in {"in", "not_in"}:
+            candidates = list(expected)
+            numeric = bool(candidates) and all(
+                _numeric_literal(item) for item in candidates
+            )
+        else:
+            numeric = _numeric_literal(expected)
+        return {str(expression["field"])} if numeric else set()
+    if op == "between":
+        numeric = _numeric_literal(expression["lower"]) and _numeric_literal(
+            expression["upper"]
+        )
+        return {str(expression["field"])} if numeric else set()
+    if op in {"and", "or", "n_of_k"}:
+        return {
+            field
+            for argument in expression["args"]
+            for field in _auto_numeric_fields(argument)
+        }
+    if op == "not":
+        return _auto_numeric_fields(expression["arg"])
+    if op in {"is_null", "is_not_null"}:
+        return set()
+    raise StrategyDeliveryError(f"unsupported Strategy DSL expression op: {op}")
+
+
+def _numeric_literal(value: object) -> bool:
+    return isinstance(value, Real) and not isinstance(value, bool)
 
 
 def _is_missing(value: Any) -> bool:
