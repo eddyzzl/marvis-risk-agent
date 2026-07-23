@@ -63,9 +63,12 @@ def _artifact_rows(runtime, task_id: str) -> list[dict]:
     ]
 
 
-def _artifact_ids(output: dict) -> dict[str, str]:
+def _artifact_projections(output: dict) -> dict[str, dict[str, str]]:
     return {
-        name: output["artifacts"][index]["artifact_id"]
+        name: {
+            "artifact_id": output["artifacts"][index]["artifact_id"],
+            "content_hash": output["artifacts"][index]["content_hash"],
+        }
         for index, name in enumerate(
             ("python", "sql", "strategy_json", "equivalence_json")
         )
@@ -100,7 +103,7 @@ def test_export_strategy_delivery_publishes_authenticated_code_and_equivalence(
         expected_task_id=fixture[1].id,
         expected_strategy_ref=request["strategy_ref"],
         expected_dataset_ref=request["dataset_ref"],
-        expected_artifact_ids=_artifact_ids(output),
+        expected_artifacts=_artifact_projections(output),
     ) == output
     assert output["strategy_type"] == strategy_type
     assert output["not_applied"] is True
@@ -213,6 +216,88 @@ def test_export_strategy_delivery_recovers_exact_promoted_orphan_set(
     assert all(Path(path).read_bytes() == raw for path, raw in original.items())
 
 
+def test_export_strategy_delivery_recovers_exact_partial_orphan_set(
+    tmp_path: Path,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    first, runtime = _run(fixture, request)
+    rows = _artifact_rows(runtime, fixture[1].id)
+    original = {
+        str(row["path"]): Path(row["path"]).read_bytes()
+        for row in rows
+    }
+    retained_path = Path(rows[0]["path"])
+    with sqlite3.connect(fixture[0].db_path) as conn:
+        conn.executemany(
+            "DELETE FROM task_artifacts WHERE id = ?",
+            [(row["id"],) for row in rows],
+        )
+    for row in rows[1:]:
+        Path(row["path"]).unlink()
+
+    replay, _runtime_again = _run(fixture, request)
+
+    assert replay == first
+    assert retained_path.read_bytes() == original[str(retained_path)]
+    assert len(_artifact_rows(runtime, fixture[1].id)) == 4
+    assert all(Path(path).read_bytes() == raw for path, raw in original.items())
+
+
+def test_export_strategy_delivery_rejects_drifted_partial_orphan_set(
+    tmp_path: Path,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    _first, runtime = _run(fixture, request)
+    rows = _artifact_rows(runtime, fixture[1].id)
+    retained_path = Path(rows[0]["path"])
+    with sqlite3.connect(fixture[0].db_path) as conn:
+        conn.executemany(
+            "DELETE FROM task_artifacts WHERE id = ?",
+            [(row["id"],) for row in rows],
+        )
+    for row in rows[1:]:
+        Path(row["path"]).unlink()
+    retained_path.write_text("tampered\n", encoding="utf-8")
+
+    with pytest.raises(StrategyDeliveryToolError, match="artifact bytes changed"):
+        _run(fixture, request)
+
+    assert retained_path.read_text(encoding="utf-8") == "tampered\n"
+    assert _artifact_rows(runtime, fixture[1].id) == []
+
+
+def test_export_strategy_delivery_rejects_symlinked_partial_orphan_set(
+    tmp_path: Path,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    _first, runtime = _run(fixture, request)
+    rows = _artifact_rows(runtime, fixture[1].id)
+    retained_path = Path(rows[0]["path"])
+    outside = tmp_path / "outside-delivery.py"
+    outside.write_bytes(retained_path.read_bytes())
+    with sqlite3.connect(fixture[0].db_path) as conn:
+        conn.executemany(
+            "DELETE FROM task_artifacts WHERE id = ?",
+            [(row["id"],) for row in rows],
+        )
+    for row in rows[1:]:
+        Path(row["path"]).unlink()
+    retained_path.unlink()
+    retained_path.symlink_to(outside)
+
+    with pytest.raises(
+        StrategyDeliveryToolError,
+        match="regular file|unavailable|must stay under",
+    ):
+        _run(fixture, request)
+
+    assert retained_path.is_symlink()
+    assert _artifact_rows(runtime, fixture[1].id) == []
+
+
 def test_export_strategy_delivery_rejects_drifted_audit_on_retry(
     tmp_path: Path,
 ) -> None:
@@ -231,6 +316,139 @@ def test_export_strategy_delivery_rejects_drifted_audit_on_retry(
 
     with pytest.raises(StrategyDeliveryToolError, match="audit.*changed"):
         _run(fixture, request)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (("actor", "operator"), ("outcome", "failed")),
+)
+def test_export_strategy_delivery_rejects_drifted_audit_outcome_on_retry(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    first, _runtime_value = _run(fixture, request)
+    with sqlite3.connect(fixture[0].db_path) as conn:
+        conn.execute(
+            f"UPDATE audit SET {field} = ? "
+            "WHERE kind = ? AND target_ref = ?",
+            (replacement, DELIVERY_AUDIT_KIND, first["delivery_id"]),
+        )
+
+    with pytest.raises(StrategyDeliveryToolError, match="audit.*changed"):
+        _run(fixture, request)
+
+
+def test_export_strategy_delivery_rejects_drifted_audit_inputs_hash_on_retry(
+    tmp_path: Path,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    first, _runtime_value = _run(fixture, request)
+    with sqlite3.connect(fixture[0].db_path) as conn:
+        conn.execute(
+            """
+            UPDATE audit
+               SET inputs_hash = ?
+             WHERE kind = ? AND target_ref = ?
+            """,
+            ("0" * 64, DELIVERY_AUDIT_KIND, first["delivery_id"]),
+        )
+
+    with pytest.raises(StrategyDeliveryToolError, match="audit.*changed"):
+        _run(fixture, request)
+
+    assert _audit_count(
+        fixture[0],
+        delivery_id=first["delivery_id"],
+    ) == 1
+
+
+@pytest.mark.parametrize("field", ("kind", "target_ref"))
+def test_export_strategy_delivery_rejects_drifted_audit_identity_on_retry(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    first, _runtime_value = _run(fixture, request)
+    replacement = (
+        f"{DELIVERY_AUDIT_KIND}.tampered"
+        if field == "kind"
+        else f"{first['delivery_id']}-tampered"
+    )
+    with sqlite3.connect(fixture[0].db_path) as conn:
+        conn.execute(
+            f"UPDATE audit SET {field} = ? "
+            "WHERE kind = ? AND target_ref = ?",
+            (replacement, DELIVERY_AUDIT_KIND, first["delivery_id"]),
+        )
+
+    with pytest.raises(StrategyDeliveryToolError, match="audit.*changed"):
+        _run(fixture, request)
+
+    with sqlite3.connect(fixture[0].db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM audit").fetchone()[0] == 1
+
+
+def test_export_strategy_delivery_rejects_joint_audit_identity_drift_on_retry(
+    tmp_path: Path,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    first, _runtime_value = _run(fixture, request)
+    with sqlite3.connect(fixture[0].db_path) as conn:
+        conn.execute(
+            """
+            UPDATE audit
+               SET kind = ?, target_ref = ?
+             WHERE kind = ? AND target_ref = ?
+            """,
+            (
+                f"{DELIVERY_AUDIT_KIND}.tampered",
+                f"{first['delivery_id']}-tampered",
+                DELIVERY_AUDIT_KIND,
+                first["delivery_id"],
+            ),
+        )
+
+    with pytest.raises(StrategyDeliveryToolError, match="audit.*changed"):
+        _run(fixture, request)
+
+    with sqlite3.connect(fixture[0].db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM audit").fetchone()[0] == 1
+
+
+def test_export_strategy_delivery_rejects_duplicate_audit_on_retry(
+    tmp_path: Path,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    first, _runtime_value = _run(fixture, request)
+    with sqlite3.connect(fixture[0].db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO audit(
+                id, kind, actor, target_ref, inputs_hash, outcome,
+                detail_json, at
+            )
+            SELECT lower(hex(randomblob(16))), kind, actor, target_ref,
+                   inputs_hash, outcome, detail_json, at
+              FROM audit
+             WHERE kind = ? AND target_ref = ?
+            """,
+            (DELIVERY_AUDIT_KIND, first["delivery_id"]),
+        )
+
+    with pytest.raises(StrategyDeliveryToolError, match="audit.*changed"):
+        _run(fixture, request)
+
+    assert _audit_count(
+        fixture[0],
+        delivery_id=first["delivery_id"],
+    ) == 2
 
 
 def test_export_strategy_delivery_rejects_strategy_or_dataset_drift(
@@ -294,6 +512,47 @@ def test_export_strategy_delivery_rolls_back_all_files_and_rows_on_failure(
         )
 
 
+def test_export_strategy_delivery_rejects_symlink_swap_after_promotion_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    runtime = _runtime(fixture[-1])
+    outside = tmp_path / "outside-strategy.py"
+    original = delivery_tools._require_exact_delivery_file
+    swapped = False
+
+    def swap_after_first_check(path, *, root, expected, expected_hash):
+        nonlocal swapped
+        original(
+            path,
+            root=root,
+            expected=expected,
+            expected_hash=expected_hash,
+        )
+        if not swapped and Path(path).name == "strategy.py":
+            outside.write_bytes(expected)
+            Path(path).unlink()
+            Path(path).symlink_to(outside)
+            swapped = True
+
+    monkeypatch.setattr(
+        delivery_tools,
+        "_require_exact_delivery_file",
+        swap_after_first_check,
+    )
+
+    with pytest.raises(
+        StrategyDeliveryToolError,
+        match="regular file|unavailable|bytes changed",
+    ):
+        run_export_strategy_delivery(request, fixture[-1], runtime)
+
+    assert swapped is True
+    assert _artifact_rows(runtime, fixture[1].id) == []
+
+
 def test_delivery_output_validator_requires_external_exact_refs(
     tmp_path: Path,
 ) -> None:
@@ -335,7 +594,125 @@ def test_delivery_output_validator_requires_external_exact_refs(
             expected_task_id=fixture[1].id,
             expected_strategy_ref=request["strategy_ref"],
             expected_dataset_ref=request["dataset_ref"],
-            expected_artifact_ids=_artifact_ids(output),
+            expected_artifacts=_artifact_projections(output),
+        )
+
+
+def test_delivery_output_validator_rejects_sample_count_above_declared_budget(
+    tmp_path: Path,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    output, _runtime_value = _run(fixture, request)
+    forged = deepcopy(output)
+    forged["maximum_equivalence_rows"] = 1
+    forged["delivery_id"] = delivery_tools._delivery_id(
+        strategy_ref=forged["strategy_ref"],
+        dataset_ref=forged["dataset_ref"],
+        maximum_equivalence_rows=1,
+        equivalence=forged["equivalence"],
+        content_hashes={
+            name: forged["artifacts"][index]["content_hash"]
+            for index, name in enumerate(
+                ("python", "sql", "strategy_json", "equivalence_json")
+            )
+        },
+    )
+
+    with pytest.raises(StrategyDeliveryToolError, match="sample_count.*budget"):
+        validate_export_strategy_delivery_tool_output(
+            forged,
+            expected_task_id=fixture[1].id,
+            expected_strategy_ref=request["strategy_ref"],
+            expected_dataset_ref=request["dataset_ref"],
+            expected_artifacts=_artifact_projections(output),
+        )
+
+
+@pytest.mark.parametrize(
+    ("artifact_index", "artifact_name"),
+    tuple(enumerate(("python", "sql", "strategy_json", "equivalence_json"))),
+)
+def test_delivery_output_validator_binds_all_published_artifact_content(
+    tmp_path: Path,
+    artifact_index: int,
+    artifact_name: str,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    output, _runtime_value = _run(fixture, request)
+    forged = deepcopy(output)
+    forged_hash = "0" * 64
+    assert forged_hash != forged["artifacts"][artifact_index]["content_hash"]
+    forged["artifacts"][artifact_index]["content_hash"] = forged_hash
+    forged["artifacts"][artifact_index]["download_url"] = (
+        forged["artifacts"][artifact_index]["download_url"].rsplit("=", 1)[0]
+        + f"={forged_hash}"
+    )
+    forged["delivery_id"] = delivery_tools._delivery_id(
+        strategy_ref=forged["strategy_ref"],
+        dataset_ref=forged["dataset_ref"],
+        maximum_equivalence_rows=forged["maximum_equivalence_rows"],
+        equivalence=forged["equivalence"],
+        content_hashes={
+            name: forged["artifacts"][index]["content_hash"]
+            for index, name in enumerate(
+                ("python", "sql", "strategy_json", "equivalence_json")
+            )
+        },
+    )
+
+    with pytest.raises(
+        StrategyDeliveryToolError,
+        match=f"artifacts.*{artifact_name}|authenticated publication",
+    ):
+        validate_export_strategy_delivery_tool_output(
+            forged,
+            expected_task_id=fixture[1].id,
+            expected_strategy_ref=request["strategy_ref"],
+            expected_dataset_ref=request["dataset_ref"],
+            expected_artifacts=_artifact_projections(output),
+        )
+
+
+def test_delivery_output_validator_binds_equivalence_artifact_to_document_bytes(
+    tmp_path: Path,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    output, _runtime_value = _run(fixture, request)
+    forged = deepcopy(output)
+    equivalence_artifact = forged["artifacts"][3]
+    forged_hash = "0" * 64
+    assert forged_hash != equivalence_artifact["content_hash"]
+    equivalence_artifact["content_hash"] = forged_hash
+    equivalence_artifact["download_url"] = (
+        equivalence_artifact["download_url"].rsplit("=", 1)[0]
+        + f"={forged_hash}"
+    )
+    forged["delivery_id"] = delivery_tools._delivery_id(
+        strategy_ref=forged["strategy_ref"],
+        dataset_ref=forged["dataset_ref"],
+        maximum_equivalence_rows=forged["maximum_equivalence_rows"],
+        equivalence=forged["equivalence"],
+        content_hashes={
+            name: forged["artifacts"][index]["content_hash"]
+            for index, name in enumerate(
+                ("python", "sql", "strategy_json", "equivalence_json")
+            )
+        },
+    )
+
+    with pytest.raises(
+        StrategyDeliveryToolError,
+        match="equivalence.*artifact.*content",
+    ):
+        validate_export_strategy_delivery_tool_output(
+            forged,
+            expected_task_id=fixture[1].id,
+            expected_strategy_ref=request["strategy_ref"],
+            expected_dataset_ref=request["dataset_ref"],
+            expected_artifacts=_artifact_projections(forged),
         )
 
 
@@ -392,5 +769,43 @@ def test_export_strategy_delivery_authenticates_snapshot_and_artifact_ids(
             expected_task_id=fixture[1].id,
             expected_strategy_ref=request["strategy_ref"],
             expected_dataset_ref=request["dataset_ref"],
-            expected_artifact_ids=_artifact_ids(output),
+            expected_artifacts=_artifact_projections(output),
         )
+
+
+def test_export_strategy_delivery_revalidates_source_without_path_hash_follow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    runtime = _runtime(fixture[-1])
+    dataset_path = Path(runtime.registry.resolve_path(fixture[3].id))
+    original_hash = delivery_tools.sha256_file
+    original_authenticate = delivery_tools._require_authenticated_file_hash
+    authenticated: list[Path] = []
+
+    def reject_dataset_path_hash(path):
+        if Path(path) == dataset_path:
+            raise AssertionError("delivery must not follow the live dataset path")
+        return original_hash(path)
+
+    def record_authenticated(path, *, root, expected_hash):
+        authenticated.append(Path(path))
+        return original_authenticate(
+            path,
+            root=root,
+            expected_hash=expected_hash,
+        )
+
+    monkeypatch.setattr(delivery_tools, "sha256_file", reject_dataset_path_hash)
+    monkeypatch.setattr(
+        delivery_tools,
+        "_require_authenticated_file_hash",
+        record_authenticated,
+    )
+
+    output = run_export_strategy_delivery(request, fixture[-1], runtime)
+
+    assert output["dataset_ref"] == request["dataset_ref"]
+    assert authenticated == [dataset_path]

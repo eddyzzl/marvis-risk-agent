@@ -24,6 +24,7 @@ from urllib.parse import quote
 import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.artifacts.transactional import ArtifactTransactionError
 from marvis.data.errors import DatasetContentDriftError
 from marvis.files import sha256_file
 from marvis.packs.strategy.dsl import (
@@ -135,6 +136,7 @@ _SAFE_TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MAX_INPUT_BYTES = 64 * 1024
 _MAX_DELIVERY_ARTIFACT_BYTES = 64 * 1024 * 1024
 _BOUNDARY_ERRORS = (
+    ArtifactTransactionError,
     DatasetContentDriftError,
     TaskArtifactConflictError,
     TaskArtifactDataError,
@@ -159,7 +161,7 @@ def run_export_strategy_delivery(inputs, ctx, runtime) -> dict[str, Any]:
         )
         frame = _read_authenticated_parquet_snapshot(
             source["dataset_path"],
-            root=Path(runtime.settings.datasets_dir).absolute(),
+            root=source["dataset_root"],
             expected_content_hash=request["dataset_ref"][
                 "expected_content_hash"
             ],
@@ -205,7 +207,7 @@ def validate_export_strategy_delivery_tool_output(
     expected_task_id: str,
     expected_strategy_ref: Mapping[str, Any],
     expected_dataset_ref: Mapping[str, Any],
-    expected_artifact_ids: Mapping[str, Any],
+    expected_artifacts: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Validate a Tool output against the exact refs held by its caller."""
 
@@ -215,7 +217,7 @@ def validate_export_strategy_delivery_tool_output(
     dataset_ref = _dataset_ref(obj["dataset_ref"])
     trusted_strategy = _strategy_ref(expected_strategy_ref)
     trusted_dataset = _dataset_ref(expected_dataset_ref)
-    trusted_artifact_ids = _artifact_ids(expected_artifact_ids)
+    trusted_artifacts = _artifact_projections(expected_artifacts)
     task_id = _task_id(expected_task_id)
     if strategy_ref != trusted_strategy:
         raise StrategyDeliveryToolError(
@@ -254,6 +256,11 @@ def validate_export_strategy_delivery_tool_output(
             "equivalence.content_hash",
         ),
     )
+    if equivalence["sample_count"] > maximum_rows:
+        raise StrategyDeliveryToolError(
+            "export_strategy_delivery equivalence sample_count exceeds its "
+            "declared budget"
+        )
     source_row_count = _non_negative_int(
         obj["source_row_count"],
         "source_row_count",
@@ -267,15 +274,30 @@ def validate_export_strategy_delivery_tool_output(
         task_id=task_id,
     )
     for index, name in enumerate(_FILE_CONTRACT):
-        if artifacts[index]["artifact_id"] != trusted_artifact_ids[name]:
+        artifact_projection = {
+            "artifact_id": artifacts[index]["artifact_id"],
+            "content_hash": artifacts[index]["content_hash"],
+        }
+        if artifact_projection != trusted_artifacts[name]:
             raise StrategyDeliveryToolError(
-                f"export_strategy_delivery artifacts[{index}] artifact_id "
+                f"export_strategy_delivery artifacts[{index}] {name} "
                 "does not match its authenticated publication"
             )
     content_hashes = {
         name: artifacts[index]["content_hash"]
         for index, name in enumerate(_FILE_CONTRACT)
     }
+    expected_equivalence_artifact_hash = hashlib.sha256(
+        (_canonical_json(equivalence) + "\n").encode("utf-8")
+    ).hexdigest()
+    if (
+        content_hashes["equivalence_json"]
+        != expected_equivalence_artifact_hash
+    ):
+        raise StrategyDeliveryToolError(
+            "export_strategy_delivery equivalence artifact content does not "
+            "match its canonical document bytes"
+        )
     expected_id = _delivery_id(
         strategy_ref=strategy_ref,
         dataset_ref=dataset_ref,
@@ -411,13 +433,10 @@ def _load_exact_sources(
         raise StrategyDeliveryToolError(
             "dataset no longer matches the exact delivery request"
         ) from exc
-    if sha256_file(dataset_path) != dataset_ref["expected_content_hash"]:
-        raise StrategyDeliveryToolError(
-            "dataset no longer matches the exact delivery request"
-        )
     return {
         "spec": spec,
         "dataset_path": dataset_path,
+        "dataset_root": Path(runtime.settings.datasets_dir).absolute(),
         "dataset_source_path": str(dataset.source_path),
     }
 
@@ -672,10 +691,12 @@ def _publish_delivery(
             )
             records = []
             for name, contract in _FILE_CONTRACT.items():
-                if sha256_file(staged[name].final_path) != content_hashes[name]:
-                    raise StrategyDeliveryToolError(
-                        f"promoted strategy delivery {name} hash drifted"
-                    )
+                _require_exact_delivery_file(
+                    staged[name].final_path,
+                    root=tasks_root,
+                    expected=contents[name],
+                    expected_hash=content_hashes[name],
+                )
                 records.append(
                     runtime.task_artifacts.register_on_connection(
                         conn,
@@ -701,6 +722,13 @@ def _publish_delivery(
                 equivalence=equivalence,
                 records=records,
             )
+            for name in _FILE_CONTRACT:
+                _require_exact_delivery_file(
+                    staged[name].final_path,
+                    root=tasks_root,
+                    expected=contents[name],
+                    expected_hash=content_hashes[name],
+                )
         if not reused:
             uow.commit()
     except Exception:
@@ -740,8 +768,11 @@ def _publish_delivery(
         expected_task_id=task_id,
         expected_strategy_ref=request["strategy_ref"],
         expected_dataset_ref=request["dataset_ref"],
-        expected_artifact_ids={
-            name: record["id"]
+        expected_artifacts={
+            name: {
+                "artifact_id": record["id"],
+                "content_hash": record["content_hash"],
+            }
             for name, record in zip(
                 _FILE_CONTRACT,
                 records,
@@ -817,19 +848,16 @@ def _prepare_delivery_outputs_under_lock(
         )
     ]
     if existing_files:
-        if len(existing_files) != len(_FILE_CONTRACT):
-            raise StrategyDeliveryToolError(
-                "existing strategy delivery orphan set is incomplete"
-            )
-        for name in _FILE_CONTRACT:
+        for name in existing_files:
             _require_exact_delivery_file(
                 staged[name].final_path,
                 root=tasks_root,
                 expected=contents[name],
                 expected_hash=content_hashes[name],
             )
-        uow.rollback()
-        return True
+        if len(existing_files) == len(_FILE_CONTRACT):
+            uow.rollback()
+            return True
 
     uow.promote_all()
     for name in _FILE_CONTRACT:
@@ -957,6 +985,73 @@ def _require_exact_delivery_file(
             os.close(descriptor)
 
 
+def _require_authenticated_file_hash(
+    path: Path,
+    *,
+    root: Path,
+    expected_hash: str,
+) -> None:
+    """Authenticate one live regular file without following its leaf path."""
+
+    descriptor = -1
+    try:
+        resolved_root = root.resolve(strict=True)
+        if (
+            not path.is_absolute()
+            or path.is_symlink()
+            or not path.resolve(strict=True).is_relative_to(resolved_root)
+        ):
+            raise StrategyDeliveryToolError(
+                "dataset path escaped governed dataset storage"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        current = os.lstat(path)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(current.st_mode)
+            or _file_identity(current) != _file_identity(before)
+        ):
+            raise StrategyDeliveryToolError(
+                "dataset must remain a regular governed file"
+            )
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+        if (
+            _stable_file_stat(after) != _stable_file_stat(before)
+            or stat.S_ISLNK(current.st_mode)
+            or _file_identity(current) != _file_identity(before)
+            or total != int(before.st_size)
+            or not hmac.compare_digest(digest.hexdigest(), expected_hash)
+        ):
+            raise StrategyDeliveryToolError(
+                "dataset bytes changed during delivery publication"
+            )
+    except StrategyDeliveryToolError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise StrategyDeliveryToolError(
+            "dataset is unavailable for delivery publication"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _revalidate_sources_on_connection(
     conn,
     *,
@@ -1011,12 +1106,15 @@ def _revalidate_sources_on_connection(
         or str(dataset["source_path"]) != source["dataset_source_path"]
         or str(dataset["content_hash"])
         != dataset_ref["expected_content_hash"]
-        or sha256_file(source["dataset_path"])
-        != dataset_ref["expected_content_hash"]
     ):
         raise StrategyDeliveryToolError(
             "dataset no longer matches the exact delivery request"
         )
+    _require_authenticated_file_hash(
+        source["dataset_path"],
+        root=source["dataset_root"],
+        expected_hash=dataset_ref["expected_content_hash"],
+    )
 
 
 def _artifact_output(
@@ -1087,17 +1185,37 @@ def _validate_artifacts(value: object, *, task_id: str | None) -> list[dict]:
     return normalized
 
 
-def _artifact_ids(value: object) -> dict[str, str]:
-    obj = _canonical_object(value, "expected_artifact_ids")
+def _artifact_projections(
+    value: object,
+) -> dict[str, dict[str, str]]:
+    obj = _canonical_object(value, "expected_artifacts")
     _exact_fields(
         obj,
         frozenset(_FILE_CONTRACT),
-        "expected_artifact_ids",
+        "expected_artifacts",
     )
-    return {
-        name: _hash(obj[name], f"expected_artifact_ids.{name}")
-        for name in _FILE_CONTRACT
-    }
+    projections: dict[str, dict[str, str]] = {}
+    for name in _FILE_CONTRACT:
+        projection = _canonical_object(
+            obj[name],
+            f"expected_artifacts.{name}",
+        )
+        _exact_fields(
+            projection,
+            frozenset({"artifact_id", "content_hash"}),
+            f"expected_artifacts.{name}",
+        )
+        projections[name] = {
+            "artifact_id": _hash(
+                projection["artifact_id"],
+                f"expected_artifacts.{name}.artifact_id",
+            ),
+            "content_hash": _hash(
+                projection["content_hash"],
+                f"expected_artifacts.{name}.content_hash",
+            ),
+        }
+    return projections
 
 
 def _write_or_require_delivery_audit(
@@ -1122,12 +1240,13 @@ def _write_or_require_delivery_audit(
     }
     rows = conn.execute(
         """
-        SELECT actor, outcome, detail_json
+        SELECT kind, target_ref, inputs_hash, actor, outcome, detail_json
           FROM audit
-         WHERE kind = ? AND target_ref = ? AND inputs_hash = ?
+         WHERE target_ref = ?
+            OR inputs_hash = ?
          ORDER BY at, id
         """,
-        (DELIVERY_AUDIT_KIND, delivery_id, request_hash),
+        (delivery_id, request_hash),
     ).fetchall()
     if not rows:
         _write_audit_row(
@@ -1149,6 +1268,9 @@ def _write_or_require_delivery_audit(
         persisted_detail = None
     if (
         len(rows) != 1
+        or str(rows[0]["kind"]) != DELIVERY_AUDIT_KIND
+        or str(rows[0]["target_ref"]) != delivery_id
+        or str(rows[0]["inputs_hash"]) != request_hash
         or str(rows[0]["actor"]) != "system"
         or str(rows[0]["outcome"]) != "succeeded"
         or persisted_detail != detail
