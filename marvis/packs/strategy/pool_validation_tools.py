@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import tempfile
 from typing import Any
 from urllib.parse import quote
 
@@ -241,10 +242,18 @@ def run_measure_strategy_pool_validation(inputs, ctx, runtime) -> dict[str, Any]
 
 def validate_measure_strategy_pool_validation_tool_output(
     value: object,
+    *,
+    expected_task_id: str,
+    expected_artifact_id: str,
 ) -> dict[str, Any]:
-    """Reconstruct every display scalar from canonical embedded evidence."""
+    """Reconstruct scalars and authenticate the task-artifact binding."""
 
     obj = _json_object(value, "measure_strategy_pool_validation output")
+    trusted_task_id = _text(expected_task_id, "expected_task_id")
+    trusted_artifact_id = _hash(
+        expected_artifact_id,
+        "expected_artifact_id",
+    )
     _exact_fields(
         obj,
         _OUTPUT_FIELDS,
@@ -252,6 +261,10 @@ def validate_measure_strategy_pool_validation_tool_output(
     )
     evidence = validate_strategy_pool_validation_evidence(obj["evidence"])
     identity = evidence["identity"]
+    if identity["task_id"] != trusted_task_id:
+        raise StrategyError(
+            "measure_strategy_pool_validation output task_id drifted"
+        )
     population = evidence["population_metrics"]
     expected = {
         "schema_version": POOL_VALIDATION_TOOL_SCHEMA_VERSION,
@@ -305,6 +318,10 @@ def validate_measure_strategy_pool_validation_tool_output(
         "measure_strategy_pool_validation artifact",
     )
     artifact_id = _hash(artifact["artifact_id"], "artifact_id")
+    if artifact_id != trusted_artifact_id:
+        raise StrategyError(
+            "measure_strategy_pool_validation artifact_id drifted"
+        )
     canonical = canonical_strategy_pool_validation_json(evidence).encode(
         "utf-8"
     )
@@ -604,14 +621,12 @@ def _read_selected_partition(
             "Strategy Pool rules reference missing V2 dataset columns: "
             + ", ".join(unknown)
         )
-    if (
-        sha256_file(path)
-        != sample.source_binding.dataset_content_hash
-    ):
-        raise StrategyError(
-            "Strategy Pool validation dataset bytes changed before replay"
-        )
-    frame = runtime.backend.read_frame(path, columns=sorted(fields))
+    frame = _read_authenticated_parquet_snapshot(
+        path,
+        root=Path(runtime.settings.datasets_dir).absolute(),
+        expected_content_hash=sample.source_binding.dataset_content_hash,
+        columns=sorted(fields),
+    )
     if not isinstance(frame, pd.DataFrame) or len(frame) != (
         sample.source_binding.row_count
     ):
@@ -650,11 +665,125 @@ def _read_selected_partition(
         raise StrategyError(
             "Strategy Pool validation selected partition count changed"
         )
-    if sha256_file(path) != sample.source_binding.dataset_content_hash:
-        raise StrategyError(
-            "Strategy Pool validation dataset bytes changed during replay"
-        )
     return selected
+
+
+def _read_authenticated_parquet_snapshot(
+    path: Path,
+    *,
+    root: Path,
+    expected_content_hash: str,
+    columns: list[str],
+) -> pd.DataFrame:
+    """Read only bytes copied from one authenticated, retained source fd."""
+
+    _require_dataset_path(path, root=root)
+    source_fd = -1
+    snapshot = None
+    try:
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+            raise StrategyError(
+                "Strategy Pool validation dataset must be a regular file"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        source_fd = os.open(path, flags)
+        opened = os.fstat(source_fd)
+        after_open = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(after_open.st_mode)
+            or _file_identity(before) != _file_identity(opened)
+            or _file_identity(opened) != _file_identity(after_open)
+            or _stable_file_stat(before) != _stable_file_stat(opened)
+            or _stable_file_stat(opened) != _stable_file_stat(after_open)
+        ):
+            raise StrategyError(
+                "Strategy Pool validation dataset changed while opening"
+            )
+
+        snapshot = tempfile.TemporaryFile(mode="w+b", dir=root)
+        digest = hashlib.sha256()
+        copied = 0
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            copied += len(chunk)
+            snapshot.write(chunk)
+        snapshot.flush()
+        source_after_copy = os.fstat(source_fd)
+        if (
+            _stable_file_stat(source_after_copy)
+            != _stable_file_stat(opened)
+            or copied != int(opened.st_size)
+            or not hmac.compare_digest(
+                digest.hexdigest(),
+                expected_content_hash,
+            )
+        ):
+            raise StrategyError(
+                "Strategy Pool validation dataset bytes changed before replay"
+            )
+
+        snapshot_stat = os.fstat(snapshot.fileno())
+        if int(snapshot_stat.st_size) != copied:
+            raise StrategyError(
+                "Strategy Pool validation private snapshot is incomplete"
+            )
+        snapshot.seek(0)
+        frame = pd.read_parquet(snapshot, columns=columns)
+        snapshot_after_read = os.fstat(snapshot.fileno())
+        current = os.lstat(path)
+        if (
+            _stable_file_stat(snapshot_after_read)
+            != _stable_file_stat(snapshot_stat)
+            or _stable_file_stat(os.fstat(source_fd))
+            != _stable_file_stat(opened)
+            or stat.S_ISLNK(current.st_mode)
+            or _stable_file_stat(current) != _stable_file_stat(opened)
+        ):
+            raise StrategyError(
+                "Strategy Pool validation dataset changed during replay"
+            )
+        return frame
+    except StrategyError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        raise StrategyError(
+            "Strategy Pool validation dataset could not be read"
+        ) from exc
+    finally:
+        if snapshot is not None:
+            snapshot.close()
+        if source_fd >= 0:
+            os.close(source_fd)
+
+
+def _file_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(stat.S_IFMT(value.st_mode)),
+    )
+
+
+def _stable_file_stat(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(stat.S_IFMT(value.st_mode)),
+        int(value.st_nlink),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+    )
 
 
 def _expression_fields(value: object) -> set[str]:
@@ -799,17 +928,26 @@ def _persist_evidence(
                     reused = True
                 else:
                     if final_path.exists() or final_path.is_symlink():
-                        raise StrategyError(
-                            "Strategy Pool validation artifact path exists "
-                            "without a registry row"
+                        _require_exact_file(
+                            final_path,
+                            root=Path(
+                                runtime.settings.tasks_dir
+                            ).absolute(),
+                            canonical=canonical,
+                            content_hash=artifact_hash,
                         )
-                    uow.promote_all()
-                    _require_exact_file(
-                        final_path,
-                        root=Path(runtime.settings.tasks_dir).absolute(),
-                        canonical=canonical,
-                        content_hash=artifact_hash,
-                    )
+                        uow.rollback()
+                        reused = True
+                    else:
+                        uow.promote_all()
+                        _require_exact_file(
+                            final_path,
+                            root=Path(
+                                runtime.settings.tasks_dir
+                            ).absolute(),
+                            canonical=canonical,
+                            content_hash=artifact_hash,
+                        )
                 _require_bindings_on_connection(
                     conn,
                     pool=pool,
@@ -846,7 +984,9 @@ def _persist_evidence(
             evidence=evidence,
             record=record,
             task_id=task_id,
-        )
+        ),
+        expected_task_id=task_id,
+        expected_artifact_id=record["id"],
     )
 
 

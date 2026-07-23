@@ -227,7 +227,14 @@ def test_measure_pool_validation_publishes_exact_independent_evidence(
         population_count
     )
     assert output["evidence"]["source_bindings"]["target"]["bad_value"] == 1
-    assert validate_measure_strategy_pool_validation_tool_output(output) == output
+    assert (
+        validate_measure_strategy_pool_validation_tool_output(
+            output,
+            expected_task_id=fx["task"].id,
+            expected_artifact_id=output["artifact"]["artifact_id"],
+        )
+        == output
+    )
     assert output["not_mutated_pool"] is True
     assert output["not_created_strategy"] is True
     assert output["not_adopted"] is True
@@ -267,7 +274,100 @@ def test_measure_pool_validation_is_idempotent_and_cache_scalars_fail_closed(
     tampered = copy.deepcopy(first)
     tampered["population_count"] = 999
     with pytest.raises(StrategyError, match="population_count drifted"):
-        validate_measure_strategy_pool_validation_tool_output(tampered)
+        validate_measure_strategy_pool_validation_tool_output(
+            tampered,
+            expected_task_id=fx["task"].id,
+            expected_artifact_id=first["artifact"]["artifact_id"],
+        )
+
+    forged_binding = copy.deepcopy(first)
+    forged_binding["artifact"]["artifact_id"] = "0" * 64
+    forged_binding["artifact"]["download_url"] = (
+        f"/api/tasks/{fx['task'].id}/task-artifacts/{'0' * 64}/download"
+    )
+    with pytest.raises(StrategyError, match="artifact_id drifted"):
+        validate_measure_strategy_pool_validation_tool_output(
+            forged_binding,
+            expected_task_id=fx["task"].id,
+            expected_artifact_id=first["artifact"]["artifact_id"],
+        )
+
+
+def test_measure_pool_validation_recovers_an_exact_promoted_orphan(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    first = run_measure_strategy_pool_validation(
+        fx["validation_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    record = _validation_artifacts(fx)[0]
+    path = Path(record["path"])
+    original_bytes = path.read_bytes()
+    with sqlite3.connect(fx["settings"].db_path) as conn:
+        conn.execute(
+            "DELETE FROM task_artifacts WHERE id = ?",
+            (record["id"],),
+        )
+
+    replay = run_measure_strategy_pool_validation(
+        fx["validation_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+
+    assert replay == first
+    assert path.read_bytes() == original_bytes
+    recovered = _validation_artifacts(fx)
+    assert len(recovered) == 1
+    assert recovered[0]["id"] == record["id"]
+
+
+def test_measure_pool_validation_reads_an_authenticated_private_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fx = _setup(tmp_path)
+    reads: list[object] = []
+    live_reads = 0
+    original_live_read = fx["runtime"].backend.read_frame
+    original_read_parquet = validation_tools.pd.read_parquet
+
+    def allow_sample_load_only(*args, **kwargs):
+        nonlocal live_reads
+        live_reads += 1
+        if live_reads > 1:
+            raise AssertionError(
+                "Pool replay must not reopen the live dataset path"
+            )
+        return original_live_read(*args, **kwargs)
+
+    def record_snapshot_read(source, *args, **kwargs):
+        if not isinstance(source, (str, Path)):
+            reads.append(source)
+        return original_read_parquet(source, *args, **kwargs)
+
+    monkeypatch.setattr(
+        fx["runtime"].backend,
+        "read_frame",
+        allow_sample_load_only,
+    )
+    monkeypatch.setattr(
+        validation_tools.pd,
+        "read_parquet",
+        record_snapshot_read,
+    )
+
+    output = run_measure_strategy_pool_validation(
+        fx["validation_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+
+    assert output["population_count"] == 2
+    assert live_reads == 1
+    assert len(reads) == 1
 
 
 def test_measure_pool_validation_uses_v2_bad_zero_polarity(
