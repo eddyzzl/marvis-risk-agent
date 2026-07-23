@@ -1763,6 +1763,92 @@ STRATEGY_POOL_IMPACT = WorkflowTemplate(
 )
 
 
+STRATEGY_IMPACT_CUBE = WorkflowTemplate(
+    id="strategy_impact_cube",
+    title="测算统一策略影响",
+    goal_patterns=(
+        "测算策略影响",
+        "验证策略池效果",
+        "measure strategy impact cube",
+    ),
+    slots=(
+        SlotSpec(
+            "strategy_type",
+            True,
+            "user",
+            "Explicit approval/reject/limit/pricing/segmentation Pool type",
+        ),
+        SlotSpec(
+            "pool_ref",
+            True,
+            "task_context",
+            "Exact current Candidate Pool artifact and revision binding",
+        ),
+        SlotSpec(
+            "sample_design_ref",
+            True,
+            "task_context",
+            "Exact authenticated StrategySampleDesign V2 artifact binding",
+        ),
+        SlotSpec(
+            "partitions",
+            True,
+            "task_context",
+            "Explicit available development/validation/OOT partitions",
+        ),
+        SlotSpec(
+            "population",
+            True,
+            "task_context",
+            "Governed risk population",
+        ),
+        SlotSpec(
+            "dimension_bindings",
+            True,
+            "user",
+            "Explicit or uniquely confirmed month/group/segment columns",
+        ),
+        SlotSpec(
+            "current_strategy_ref",
+            True,
+            "user",
+            "Optional exact same-type current strategy comparison",
+        ),
+        SlotSpec(
+            "economics_inputs",
+            True,
+            "user",
+            "Optional typed column/scalar economics bindings",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="测算统一策略影响",
+            tool_ref=ToolRef("strategy", "measure_strategy_impact_cube"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "pool_ref": "{slot:pool_ref}",
+                "sample_design_ref": "{slot:sample_design_ref}",
+                "partitions": "{slot:partitions}",
+                "population": "{slot:population}",
+                "dimension_bindings": "{slot:dimension_bindings}",
+                "current_strategy_ref": "{slot:current_strategy_ref}",
+                "economics_inputs": "{slot:economics_inputs}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "cube_id"}),
+                PostCheck("nonempty", {"field": "content_hash"}),
+                PostCheck("nonempty", {"field": "artifact"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
     id="strategy_report_bundle_v2",
     title="生成 StrategyReportBundle V2",
