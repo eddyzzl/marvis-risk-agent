@@ -14,8 +14,10 @@ from dataclasses import dataclass
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 import re
+import stat
 from typing import Any
 from urllib.parse import quote
 
@@ -231,6 +233,7 @@ _ORIGIN_BY_OPERATION = {
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_VOTING_ANCESTRY_DEPTH = 16
 _MAX_VOTING_ANCESTRY_NODES = 256
+_MAX_POOL_ARTIFACT_BYTES = 64 * 1024 * 1024
 _BOUNDARY_ERRORS = (
     StrategyCandidatePoolConflictError,
     StrategyCandidatePoolDataError,
@@ -300,6 +303,45 @@ _CandidateLineage = (
     | _CrossMatrixCandidateLineage
     | _VotingCandidateLineage
 )
+
+
+@dataclass(frozen=True)
+class StrategyCandidatePoolArtifactBinding:
+    """Authenticated current Pool, compiled design, and all source lineages.
+
+    The nested domain payloads remain ordinary canonical JSON objects so the
+    deterministic kernels can consume them directly.  Downstream writers must
+    call :func:`require_strategy_candidate_pool_artifact_binding_on_connection`
+    while holding their own transaction; that seam detects any in-memory,
+    registry, file, head, or upstream-lineage drift.
+    """
+
+    task_id: str
+    strategy_type: str
+    pool: dict[str, Any]
+    compiled_design: dict[str, Any]
+    artifact_id: str
+    artifact_path: Path
+    artifact_content_hash: str
+    artifact_origin_tool: str
+    artifact_provenance: dict[str, Any]
+    artifact_provenance_json: str
+    lineages: tuple[_CandidateLineage, ...]
+    tasks_root: Path
+    datasets_root: Path
+    db_path: Path
+
+
+@dataclass(frozen=True)
+class _PoolArtifactSourceBinding:
+    artifact_id: str
+    task_id: str
+    kind: str
+    path: Path
+    content_hash: str
+    origin_tool: str
+    provenance: dict[str, Any]
+    provenance_json: str
 
 
 @dataclass
@@ -665,6 +707,230 @@ def run_compile_strategy_pool(inputs, ctx, runtime) -> dict[str, Any]:
         raise
     except _BOUNDARY_ERRORS as exc:
         raise StrategyError(str(exc)) from exc
+
+
+def load_current_strategy_candidate_pool_artifact(
+    runtime,
+    *,
+    task_id: str,
+    strategy_type: str,
+    expected_pool_revision: int | None = None,
+    expected_pool_snapshot_hash: str | None = None,
+    expected_artifact_id: str | None = None,
+    expected_artifact_content_hash: str | None = None,
+) -> StrategyCandidatePoolArtifactBinding:
+    """Load the exact current V2 Pool as a downstream-safe immutable binding."""
+
+    try:
+        normalized_task = _required_text(task_id, "task_id")
+        normalized_type = _required_text(strategy_type, "strategy_type")
+        revision = (
+            None
+            if expected_pool_revision is None
+            else _non_negative_int(
+                expected_pool_revision,
+                "expected_pool_revision",
+            )
+        )
+        snapshot_hash = (
+            None
+            if expected_pool_snapshot_hash is None
+            else _required_hash(
+                expected_pool_snapshot_hash,
+                "expected_pool_snapshot_hash",
+            )
+        )
+        artifact_id = (
+            None
+            if expected_artifact_id is None
+            else _required_hash(expected_artifact_id, "expected_artifact_id")
+        )
+        artifact_content_hash = (
+            None
+            if expected_artifact_content_hash is None
+            else _required_hash(
+                expected_artifact_content_hash,
+                "expected_artifact_content_hash",
+            )
+        )
+        tasks_root = Path(runtime.settings.tasks_dir).absolute()
+        datasets_root = Path(runtime.settings.datasets_dir).absolute()
+        db_path = Path(runtime.settings.db_path).absolute()
+        repository = StrategyCandidatePoolRepository(db_path)
+        current = repository.get_current(normalized_task, normalized_type)
+        if current is None:
+            raise StrategyError("strategy candidate pool not found")
+        pool = validate_strategy_pool(current)
+        if revision is not None and pool["revision"] != revision:
+            raise StrategyError("stale strategy candidate pool revision")
+        if snapshot_hash is not None and not hmac.compare_digest(
+            pool["snapshot_hash"],
+            snapshot_hash,
+        ):
+            raise StrategyError("stale strategy candidate pool snapshot hash")
+
+        lineages = tuple(
+            _load_pool_lineages(
+                runtime,
+                task_id=normalized_task,
+                pool=pool,
+            )
+        )
+        artifact_record = _normalize_source_record(
+            _load_pool_artifact(
+                runtime,
+                task_id=normalized_task,
+                snapshot=pool,
+            )
+        )
+        if artifact_id is not None and artifact_record.artifact_id != artifact_id:
+            raise StrategyError("current strategy pool artifact id changed")
+        if artifact_content_hash is not None and not hmac.compare_digest(
+            artifact_record.content_hash,
+            artifact_content_hash,
+        ):
+            raise StrategyError("current strategy pool artifact content hash changed")
+        compiled_design = compile_strategy_pool(pool)
+        binding = StrategyCandidatePoolArtifactBinding(
+            task_id=normalized_task,
+            strategy_type=normalized_type,
+            pool=pool,
+            compiled_design=compiled_design,
+            artifact_id=artifact_record.artifact_id,
+            artifact_path=artifact_record.path,
+            artifact_content_hash=artifact_record.content_hash,
+            artifact_origin_tool=artifact_record.origin_tool,
+            artifact_provenance=artifact_record.provenance,
+            artifact_provenance_json=artifact_record.provenance_json,
+            lineages=lineages,
+            tasks_root=tasks_root,
+            datasets_root=datasets_root,
+            db_path=db_path,
+        )
+        with repository.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_strategy_candidate_pool_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+            conn.commit()
+        return binding
+    except StrategyError:
+        raise
+    except _BOUNDARY_ERRORS as exc:
+        raise StrategyError(str(exc)) from exc
+
+
+def require_strategy_candidate_pool_artifact_binding_on_connection(
+    conn,
+    binding: StrategyCandidatePoolArtifactBinding,
+) -> None:
+    """Re-authenticate one current Pool while a downstream writer owns the lock."""
+
+    if not isinstance(binding, StrategyCandidatePoolArtifactBinding):
+        raise StrategyError("strategy candidate pool artifact binding is invalid")
+    _require_binding_connection(
+        conn,
+        db_path=binding.db_path,
+        name="strategy candidate pool",
+    )
+    task_id = _required_text(binding.task_id, "pool binding.task_id")
+    strategy_type = _required_text(
+        binding.strategy_type,
+        "pool binding.strategy_type",
+    )
+    task = conn.execute(
+        "SELECT id, task_type FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if (
+        task is None
+        or str(task["id"]) != task_id
+        or str(task["task_type"]) != "strategy"
+    ):
+        raise StrategyError("strategy candidate pool task ownership changed")
+
+    repository = StrategyCandidatePoolRepository(binding.db_path)
+    current = repository.get_current_on_connection(
+        conn,
+        task_id,
+        strategy_type,
+    )
+    if current is None:
+        raise StrategyError("strategy candidate pool is no longer current")
+    pool = validate_strategy_pool(current)
+    bound_pool = validate_strategy_pool(binding.pool)
+    if pool != bound_pool:
+        raise StrategyError("strategy candidate pool revision is no longer current")
+    if bound_pool["task_id"] != task_id or bound_pool["strategy_type"] != strategy_type:
+        raise StrategyError("strategy candidate pool binding identity changed")
+    if not isinstance(binding.lineages, tuple) or len(binding.lineages) != len(
+        bound_pool["entries"]
+    ):
+        raise StrategyError("strategy candidate pool lineage binding changed")
+    if binding.tasks_root != binding.tasks_root.absolute():
+        raise StrategyError("strategy candidate pool task root changed")
+    if binding.datasets_root != binding.datasets_root.absolute():
+        raise StrategyError("strategy candidate pool dataset root changed")
+
+    artifact_binding = _pool_artifact_source_binding(binding)
+    expected_origin = _ORIGIN_BY_OPERATION[bound_pool["operation"]["kind"]]
+    expected_provenance = _pool_provenance(bound_pool)
+    expected_path = (
+        binding.tasks_root
+        / task_id
+        / "strategy_candidate_pools"
+        / _pool_filename(bound_pool)
+    )
+    expected_content_hash = strategy_pool_artifact_content_hash(bound_pool)
+    if (
+        binding.artifact_path != expected_path
+        or binding.artifact_origin_tool != expected_origin
+        or binding.artifact_provenance != expected_provenance
+        or binding.artifact_provenance_json != _canonical_json(expected_provenance)
+        or not hmac.compare_digest(
+            binding.artifact_content_hash,
+            expected_content_hash,
+        )
+    ):
+        raise StrategyError("strategy candidate pool artifact binding changed")
+    _require_pool_revision_artifact_link_on_connection(
+        conn,
+        pool=bound_pool,
+        artifact_id=binding.artifact_id,
+        artifact_content_hash=binding.artifact_content_hash,
+    )
+    _require_parent_pool_artifact_on_connection(
+        conn,
+        artifact_binding,
+        snapshot=bound_pool,
+        tasks_root=binding.tasks_root,
+    )
+
+    cache = _LineageCache.empty()
+    for entry, lineage in zip(
+        bound_pool["entries"],
+        binding.lineages,
+        strict=True,
+    ):
+        if lineage.source_binding != entry["source"]:
+            raise StrategyError(
+                f"pool source binding drifted for rule_id: {entry['rule_id']}"
+            )
+        _require_lineage_on_connection(
+            conn,
+            lineage,
+            tasks_root=binding.tasks_root,
+            cache=cache,
+        )
+        _require_lineage_dataset_paths(
+            lineage,
+            datasets_root=binding.datasets_root,
+        )
+    _require_cross_matrix_groups_disjoint(binding.lineages)
+    compiled = compile_strategy_pool(bound_pool)
+    if compiled != binding.compiled_design:
+        raise StrategyError("strategy candidate pool compiled design changed")
 
 
 def _validate_add_inputs(inputs: object) -> dict[str, Any]:
@@ -2020,14 +2286,14 @@ def _require_parent_pool_artifact_on_connection(
     """Replay the immutable parent Pool artifact under the mutation DB lock."""
 
     _require_source_on_connection(conn, binding)
-    _require_regular_artifact_path(binding.path, root=tasks_root)
-    _require_file_content_hash(
+    raw_bytes = _read_verified_pool_file(
         binding.path,
-        binding.content_hash,
-        "parent strategy pool artifact content hash drifted",
+        root=tasks_root,
+        expected_content_hash=binding.content_hash,
+        error_message="parent strategy pool artifact content hash drifted",
     )
     try:
-        raw = binding.path.read_text("utf-8")
+        raw = raw_bytes.decode("utf-8")
         persisted = validate_strategy_pool(
             json.loads(raw, object_pairs_hook=_object_without_duplicate_keys)
         )
@@ -2073,14 +2339,14 @@ def _load_pool_artifact(runtime, *, task_id: str, snapshot: Mapping[str, Any]):
     if record["provenance"] != _pool_provenance(snapshot):
         raise StrategyError("current strategy pool artifact provenance changed")
     path = Path(record["path"])
-    _require_regular_artifact_path(path, root=Path(runtime.settings.tasks_dir))
-    _require_file_content_hash(
+    raw_bytes = _read_verified_pool_file(
         path,
-        expected_hash,
-        "current strategy pool artifact content hash drifted",
+        root=Path(runtime.settings.tasks_dir),
+        expected_content_hash=expected_hash,
+        error_message="current strategy pool artifact content hash drifted",
     )
     try:
-        raw = path.read_text("utf-8")
+        raw = raw_bytes.decode("utf-8")
         persisted = validate_strategy_pool(
             json.loads(raw, object_pairs_hook=_object_without_duplicate_keys)
         )
@@ -2238,9 +2504,206 @@ def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _require_binding_connection(conn, *, db_path: Path, name: str) -> None:
+    if not conn.in_transaction:
+        raise StrategyError(f"{name} binding requires a caller-owned transaction")
+    database = conn.execute(
+        "SELECT file FROM pragma_database_list WHERE name = 'main'"
+    ).fetchone()
+    if (
+        database is None
+        or not str(database["file"])
+        or Path(str(database["file"])).absolute() != db_path
+    ):
+        raise StrategyError(f"{name} binding database changed")
+
+
+def _pool_artifact_source_binding(
+    binding: StrategyCandidatePoolArtifactBinding,
+) -> _PoolArtifactSourceBinding:
+    return _PoolArtifactSourceBinding(
+        artifact_id=_required_hash(binding.artifact_id, "pool binding.artifact_id"),
+        task_id=_required_text(binding.task_id, "pool binding.task_id"),
+        kind=POOL_ARTIFACT_KIND,
+        path=binding.artifact_path,
+        content_hash=_required_hash(
+            binding.artifact_content_hash,
+            "pool binding.artifact_content_hash",
+        ),
+        origin_tool=_required_text(
+            binding.artifact_origin_tool,
+            "pool binding.artifact_origin_tool",
+        ),
+        provenance=_json_object(
+            binding.artifact_provenance,
+            "pool binding.artifact_provenance",
+        ),
+        provenance_json=_required_text(
+            binding.artifact_provenance_json,
+            "pool binding.artifact_provenance_json",
+        ),
+    )
+
+
+def _require_pool_revision_artifact_link_on_connection(
+    conn,
+    *,
+    pool: Mapping[str, Any],
+    artifact_id: str,
+    artifact_content_hash: str,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT revision.artifact_id, revision.artifact_content_hash
+          FROM strategy_candidate_pool_revisions AS revision
+          JOIN strategy_candidate_pools AS head
+            ON head.id = revision.pool_id
+         WHERE head.task_id = ?
+           AND head.strategy_type = ?
+           AND revision.id = ?
+           AND revision.revision = ?
+        """,
+        (
+            pool["task_id"],
+            pool["strategy_type"],
+            pool["revision_id"],
+            pool["revision"],
+        ),
+    ).fetchone()
+    if (
+        row is None
+        or str(row["artifact_id"]) != artifact_id
+        or not hmac.compare_digest(
+            str(row["artifact_content_hash"]),
+            artifact_content_hash,
+        )
+    ):
+        raise StrategyError("strategy candidate pool revision artifact link changed")
+
+
+def _require_lineage_dataset_paths(
+    lineage: _CandidateLineage,
+    *,
+    datasets_root: Path,
+) -> None:
+    stack: list[_CandidateLineage] = [lineage]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        identity = id(current)
+        if identity in seen:
+            raise StrategyError("strategy candidate pool lineage graph changed")
+        seen.add(identity)
+        if len(seen) > _MAX_VOTING_ANCESTRY_NODES:
+            raise StrategyError("strategy candidate pool lineage graph is too large")
+        if isinstance(current, _VotingCandidateLineage):
+            stack.extend(current.parent_lineages)
+            continue
+        dataset = current.dataset
+        path = getattr(dataset, "path", None)
+        source_path = getattr(dataset, "source_path", None)
+        if not isinstance(path, Path) or not isinstance(source_path, str):
+            raise StrategyError("strategy candidate pool dataset binding changed")
+        _require_regular_dataset_path(path, root=datasets_root)
+        try:
+            expected_path = (datasets_root / source_path).resolve(strict=True)
+        except OSError as exc:
+            raise StrategyError(
+                "strategy candidate pool dataset binding changed"
+            ) from exc
+        if path != expected_path:
+            raise StrategyError("strategy candidate pool dataset path changed")
+
+
+def _require_regular_dataset_path(path: Path, *, root: Path) -> None:
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise StrategyError("strategy candidate pool dataset path changed")
+    try:
+        path.resolve(strict=True).relative_to(root.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise StrategyError(
+            "strategy candidate pool dataset escaped dataset storage"
+        ) from exc
+
+
+def _read_verified_pool_file(
+    path: Path,
+    *,
+    root: Path,
+    expected_content_hash: str,
+    error_message: str,
+) -> bytes:
+    """Read a bounded Pool snapshot without following or racing a path swap."""
+
+    _require_regular_artifact_path(path, root=root)
+    descriptor = -1
+    chunks: list[bytes] = []
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise StrategyError(error_message)
+        if before.st_size < 0 or before.st_size > _MAX_POOL_ARTIFACT_BYTES:
+            raise StrategyError("strategy candidate pool artifact exceeds byte budget")
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_POOL_ARTIFACT_BYTES:
+                raise StrategyError(
+                    "strategy candidate pool artifact exceeds byte budget"
+                )
+            digest.update(chunk)
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise StrategyError(error_message)
+        live_path = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(live_path.st_mode)
+            or (live_path.st_dev, live_path.st_ino)
+            != (after.st_dev, after.st_ino)
+        ):
+            raise StrategyError(error_message)
+    except OSError as exc:
+        raise StrategyError(error_message) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    raw = b"".join(chunks)
+    if (
+        len(raw) != before.st_size
+        or not hmac.compare_digest(digest.hexdigest(), expected_content_hash)
+    ):
+        raise StrategyError(error_message)
+    return raw
+
+
 __all__ = [
     "POOL_ARTIFACT_KIND",
     "POOL_ARTIFACT_SCHEMA_VERSION",
+    "StrategyCandidatePoolArtifactBinding",
+    "load_current_strategy_candidate_pool_artifact",
+    "require_strategy_candidate_pool_artifact_binding_on_connection",
     "run_add_candidate_to_pool",
     "run_compile_strategy_pool",
     "run_remove_pool_entry",

@@ -7,9 +7,11 @@ from dataclasses import dataclass
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 import re
-from typing import Any
+import stat
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from marvis.artifacts import ArtifactUnitOfWork
@@ -41,11 +43,13 @@ from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignRef,
     bind_strategy_development_frame,
     load_strategy_sample_design_execution_binding,
+    require_strategy_sample_design_execution_binding_on_connection,
     revalidate_strategy_sample_design_execution_binding,
 )
 from marvis.packs.strategy.sample_design_tools import (
     SAMPLE_DESIGN_ARTIFACT_KIND,
     SAMPLE_DESIGN_ORIGIN_TOOL,
+    load_strategy_sample_design_artifact,
 )
 from marvis.packs.strategy.voting_candidate import (
     VOTING_CANDIDATE_ASSET_SCHEMA_VERSION,
@@ -70,6 +74,11 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
 )
+
+if TYPE_CHECKING:
+    from marvis.packs.strategy.pool_tools import (
+        StrategyCandidatePoolArtifactBinding,
+    )
 
 
 POOL_IMPACT_TOOL_SCHEMA_VERSION = "strategy.measure-pool-impact-tool.v2"
@@ -151,6 +160,51 @@ _TASK_ARTIFACT_ROW_FIELDS = (
     "provenance_json",
     "created_at",
 )
+_TASK_ARTIFACT_RECORD_FIELDS = frozenset(
+    {
+        "id",
+        "task_id",
+        "kind",
+        "path",
+        "content_hash",
+        "origin_tool",
+        "provenance",
+        "created_at",
+    }
+)
+_MAX_POOL_IMPACT_ARTIFACT_BYTES = 64 * 1024 * 1024
+_POOL_IMPACT_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "producer_version",
+        "task_id",
+        "assessment_id",
+        "assessment_content_hash",
+        "pool_id",
+        "pool_revision",
+        "pool_revision_id",
+        "pool_snapshot_hash",
+        "design_hash",
+        "strategy_spec_hash",
+        "dataset_id",
+        "dataset_content_hash",
+        "registry_metadata_hash",
+        "workspace_revision",
+        "workspace_generation",
+        "semantic_mapping_hash",
+        "target_col",
+        "sample_design_ref",
+        "month_col",
+        "loan_amount_col",
+        "overdue_amount_col",
+        "source_target_bad_value",
+        "normalized_target_bad_value",
+        "sample_partition",
+        "comparison_mode",
+        "baseline_strategy_id",
+        "baseline_spec_hash",
+    }
+)
 _BOUNDARY_ERRORS = (
     DataLayerError,
     DataWorkspaceDataError,
@@ -187,6 +241,28 @@ class _BaselineBinding:
     strategy_type: str
     spec: dict[str, Any]
     spec_hash: str
+
+
+@dataclass(frozen=True)
+class StrategyPoolImpactArtifactBinding:
+    """Authenticated development-backtest impact and all exact source inputs."""
+
+    task_id: str
+    artifact_id: str
+    artifact_path: Path
+    artifact_content_hash: str
+    artifact_provenance: dict[str, Any]
+    artifact_provenance_json: str
+    assessment: dict[str, Any]
+    request: dict[str, Any]
+    pool: StrategyCandidatePoolArtifactBinding
+    dataset: _DatasetBinding
+    sample_design: StrategySampleDesignExecutionBinding
+    baseline: _BaselineBinding | None
+    stage: str
+    validation_status: str
+    tasks_root: Path
+    db_path: Path
 
 
 def run_measure_pool_impact(inputs, ctx, runtime) -> dict[str, Any]:
@@ -431,6 +507,657 @@ def validate_measure_pool_impact_tool_output(value: object) -> dict[str, Any]:
             raise StrategyError(f"measure_pool_impact artifact {field} drifted")
     normalized["assessment"] = assessment
     return normalized
+
+
+def load_strategy_pool_impact_artifact(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+    expected_assessment_id: str | None = None,
+    expected_assessment_content_hash: str | None = None,
+) -> StrategyPoolImpactArtifactBinding:
+    """Load one authenticated legacy PoolImpact as development backtest only."""
+
+    try:
+        from marvis.packs.strategy import pool_tools
+
+        normalized_task = _text(task_id, "task_id")
+        normalized_artifact_id = _hash(artifact_id, "artifact_id")
+        artifact_hash = _hash(
+            expected_artifact_content_hash,
+            "expected_artifact_content_hash",
+        )
+        assessment_id = (
+            None
+            if expected_assessment_id is None
+            else _text(expected_assessment_id, "expected_assessment_id")
+        )
+        assessment_content_hash = (
+            None
+            if expected_assessment_content_hash is None
+            else _hash(
+                expected_assessment_content_hash,
+                "expected_assessment_content_hash",
+            )
+        )
+        tasks_root = Path(runtime.settings.tasks_dir).absolute()
+        db_path = Path(runtime.settings.db_path).absolute()
+        record = _load_impact_artifact_record(
+            runtime,
+            task_id=normalized_task,
+            artifact_id=normalized_artifact_id,
+            expected_content_hash=artifact_hash,
+        )
+        provenance = _validate_impact_provenance(record["provenance"])
+        path = Path(str(record["path"]))
+        raw = _read_impact_artifact(
+            path,
+            root=tasks_root,
+            expected_content_hash=artifact_hash,
+        )
+        assessment = _impact_assessment_from_bytes(raw)
+        canonical = canonical_strategy_pool_impact_json(assessment).encode("utf-8")
+        if raw != canonical:
+            raise StrategyError("Pool impact artifact bytes are not canonical")
+        if assessment_id is not None and assessment["assessment_id"] != assessment_id:
+            raise StrategyError("Pool impact assessment id changed")
+        if assessment_content_hash is not None and not hmac.compare_digest(
+            assessment["content_hash"],
+            assessment_content_hash,
+        ):
+            raise StrategyError("Pool impact assessment content hash changed")
+        expected_path = (
+            tasks_root
+            / normalized_task
+            / "strategy_pool_impacts"
+            / f"{assessment['assessment_id']}.json"
+        )
+        if path != expected_path:
+            raise StrategyError("Pool impact artifact path is not canonical")
+
+        identity = assessment["identity"]
+        pool = pool_tools.load_current_strategy_candidate_pool_artifact(
+            runtime,
+            task_id=normalized_task,
+            strategy_type=identity["strategy_type"],
+            expected_pool_revision=identity["revision"],
+            expected_pool_snapshot_hash=identity["snapshot_hash"],
+        )
+        sample_ref = StrategySampleDesignRef.from_value(
+            provenance["sample_design_ref"]
+        )
+        sample_artifact = load_strategy_sample_design_artifact(
+            runtime,
+            task_id=normalized_task,
+            artifact_id=sample_ref.artifact_id,
+            expected_artifact_content_hash=sample_ref.artifact_content_hash,
+            expected_sample_design_id=sample_ref.sample_design_id,
+            expected_sample_design_content_hash=sample_ref.sample_design_content_hash,
+        )
+        designed_drop_nan = sample_artifact.bundle["sample_design"][
+            "target_definition"
+        ]["drop_nan_labels"]
+        if not isinstance(designed_drop_nan, bool):
+            raise StrategyError("Pool impact sample-design label policy is invalid")
+        request = _impact_request_from_provenance(
+            provenance,
+            strategy_type=identity["strategy_type"],
+            drop_nan_labels=designed_drop_nan,
+        )
+        sample = _pool_sample_binding(pool.pool, task_id=normalized_task)
+        dataset = _load_dataset_binding(
+            runtime,
+            request=request,
+            task_id=normalized_task,
+            sample=sample,
+        )
+        sample_design = load_strategy_sample_design_execution_binding(
+            runtime,
+            task_id=normalized_task,
+            sample_design_ref=request["sample_design_ref"],
+            dataset_id=dataset.dataset_id,
+            dataset_content_hash=dataset.content_hash,
+            workspace_revision=dataset.workspace_revision,
+            workspace_generation=dataset.workspace_generation,
+            semantic_mapping_hash=dataset.semantic_mapping_hash,
+            target_col=dataset.target_col,
+            drop_nan_labels=request["drop_nan_labels"],
+            month_col=request.get("month_col"),
+            loan_amount_col=request.get("loan_amount_col"),
+            overdue_amount_col=request.get("overdue_amount_col"),
+        )
+        request = _resolve_sample_design_optional_bindings(request, sample_design)
+        baseline = _load_baseline(
+            runtime,
+            request=request,
+            task_id=normalized_task,
+        )
+        binding = StrategyPoolImpactArtifactBinding(
+            task_id=normalized_task,
+            artifact_id=normalized_artifact_id,
+            artifact_path=path,
+            artifact_content_hash=artifact_hash,
+            artifact_provenance=provenance,
+            artifact_provenance_json=_canonical_json(provenance),
+            assessment=assessment,
+            request=request,
+            pool=pool,
+            dataset=dataset,
+            sample_design=sample_design,
+            baseline=baseline,
+            stage="development_backtest",
+            validation_status="unvalidated",
+            tasks_root=tasks_root,
+            db_path=db_path,
+        )
+        _require_impact_binding_relationships(binding)
+        with runtime.task_artifacts.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_strategy_pool_impact_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+            conn.commit()
+        return binding
+    except StrategyError:
+        raise
+    except _BOUNDARY_ERRORS as exc:
+        raise StrategyError(str(exc)) from exc
+
+
+def require_strategy_pool_impact_artifact_binding_on_connection(
+    conn,
+    binding: StrategyPoolImpactArtifactBinding,
+) -> None:
+    """Re-authenticate PoolImpact while a downstream writer owns the lock."""
+
+    from marvis.packs.strategy import pool_tools
+
+    if not isinstance(binding, StrategyPoolImpactArtifactBinding):
+        raise StrategyError("Pool impact artifact binding is invalid")
+    _require_binding_connection(
+        conn,
+        db_path=binding.db_path,
+        name="Pool impact",
+    )
+    if binding.tasks_root != binding.tasks_root.absolute():
+        raise StrategyError("Pool impact task root changed")
+    _require_impact_binding_relationships(binding)
+    pool_tools.require_strategy_candidate_pool_artifact_binding_on_connection(
+        conn,
+        binding.pool,
+    )
+    require_strategy_sample_design_execution_binding_on_connection(
+        conn,
+        binding.sample_design,
+    )
+    _require_dataset_and_workspace_on_connection(
+        conn,
+        request=binding.request,
+        task_id=binding.task_id,
+        dataset=binding.dataset,
+    )
+    _require_baseline_on_connection(
+        conn,
+        request=binding.request,
+        task_id=binding.task_id,
+        baseline=binding.baseline,
+    )
+    _require_impact_artifact_on_connection(conn, binding)
+    canonical = canonical_strategy_pool_impact_json(binding.assessment).encode("utf-8")
+    _verify_file(
+        binding.artifact_path,
+        root=binding.tasks_root,
+        canonical=canonical,
+        content_hash=binding.artifact_content_hash,
+    )
+
+
+def _load_impact_artifact_record(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+) -> dict[str, Any]:
+    record = runtime.task_artifacts.get_for_task(task_id, artifact_id)
+    if record is None:
+        raise StrategyError("Pool impact artifact not found")
+    if not isinstance(record, Mapping) or set(record) != _TASK_ARTIFACT_RECORD_FIELDS:
+        raise StrategyError("Pool impact artifact registry row is invalid")
+    if (
+        record["id"] != artifact_id
+        or record["task_id"] != task_id
+        or record["kind"] != POOL_IMPACT_ARTIFACT_KIND
+        or record["origin_tool"] != POOL_IMPACT_ORIGIN_TOOL
+        or not hmac.compare_digest(
+            str(record["content_hash"]),
+            expected_content_hash,
+        )
+    ):
+        raise StrategyError("Pool impact artifact registry binding changed")
+    return dict(record)
+
+
+def _validate_impact_provenance(value: object) -> dict[str, Any]:
+    provenance = _json_object(value, "Pool impact artifact provenance")
+    if set(provenance) != _POOL_IMPACT_PROVENANCE_FIELDS:
+        raise StrategyError("Pool impact artifact provenance fields are invalid")
+    expected_text = {
+        "schema_version": POOL_IMPACT_ARTIFACT_SCHEMA_VERSION,
+        "producer_version": STRATEGY_POOL_IMPACT_PRODUCER_VERSION,
+        "sample_partition": "development",
+    }
+    for field, expected in expected_text.items():
+        if provenance[field] != expected:
+            raise StrategyError(f"Pool impact artifact provenance {field} is invalid")
+    for field in (
+        "task_id",
+        "assessment_id",
+        "pool_id",
+        "pool_revision_id",
+        "dataset_id",
+        "target_col",
+    ):
+        if provenance[field] != _text(provenance[field], f"provenance.{field}"):
+            raise StrategyError(f"Pool impact artifact provenance {field} is invalid")
+    for field in (
+        "assessment_content_hash",
+        "pool_snapshot_hash",
+        "design_hash",
+        "strategy_spec_hash",
+        "dataset_content_hash",
+        "registry_metadata_hash",
+        "semantic_mapping_hash",
+    ):
+        _hash(provenance[field], f"provenance.{field}")
+    _positive_int(provenance["pool_revision"], "provenance.pool_revision")
+    _non_negative_int(
+        provenance["workspace_revision"],
+        "provenance.workspace_revision",
+    )
+    _non_negative_int(
+        provenance["workspace_generation"],
+        "provenance.workspace_generation",
+    )
+    sample_ref = StrategySampleDesignRef.from_value(
+        provenance["sample_design_ref"]
+    )
+    provenance["sample_design_ref"] = sample_ref.to_ref_dict()
+    for field in ("month_col", "loan_amount_col", "overdue_amount_col"):
+        value = provenance[field]
+        if value is not None and value != _text(value, f"provenance.{field}"):
+            raise StrategyError(f"Pool impact artifact provenance {field} is invalid")
+    source_bad = provenance["source_target_bad_value"]
+    normalized_bad = provenance["normalized_target_bad_value"]
+    if (
+        isinstance(source_bad, bool)
+        or not isinstance(source_bad, int)
+        or source_bad not in {0, 1}
+        or isinstance(normalized_bad, bool)
+        or not isinstance(normalized_bad, int)
+        or normalized_bad != 1
+    ):
+        raise StrategyError("Pool impact artifact target polarity is invalid")
+    comparison_mode = provenance["comparison_mode"]
+    if comparison_mode not in {"absolute", "vs_baseline"}:
+        raise StrategyError("Pool impact artifact comparison_mode is invalid")
+    baseline_id = provenance["baseline_strategy_id"]
+    baseline_hash = provenance["baseline_spec_hash"]
+    if comparison_mode == "absolute":
+        if baseline_id is not None or baseline_hash is not None:
+            raise StrategyError("absolute Pool impact provenance forbids baseline")
+    else:
+        if baseline_id != _text(baseline_id, "provenance.baseline_strategy_id"):
+            raise StrategyError("Pool impact baseline strategy id is invalid")
+        _hash(baseline_hash, "provenance.baseline_spec_hash")
+    return provenance
+
+
+def _impact_request_from_provenance(
+    provenance: Mapping[str, Any],
+    *,
+    strategy_type: str,
+    drop_nan_labels: bool,
+) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "strategy_type": strategy_type,
+        "expected_pool_revision": provenance["pool_revision"],
+        "expected_pool_snapshot_hash": provenance["pool_snapshot_hash"],
+        "dataset_id": provenance["dataset_id"],
+        "expected_dataset_content_hash": provenance["dataset_content_hash"],
+        "workspace_revision": provenance["workspace_revision"],
+        "workspace_generation": provenance["workspace_generation"],
+        "semantic_mapping_hash": provenance["semantic_mapping_hash"],
+        "target_col": provenance["target_col"],
+        "sample_design_ref": provenance["sample_design_ref"],
+        "comparison_mode": provenance["comparison_mode"],
+        "drop_nan_labels": drop_nan_labels,
+    }
+    for field in ("month_col", "loan_amount_col", "overdue_amount_col"):
+        value = provenance[field]
+        if value is not None:
+            request[field] = value
+    if provenance["baseline_strategy_id"] is not None:
+        request["baseline_strategy_id"] = provenance["baseline_strategy_id"]
+    return _validate_inputs(request)
+
+
+def _require_impact_binding_relationships(
+    binding: StrategyPoolImpactArtifactBinding,
+) -> None:
+    from marvis.packs.strategy import pool_tools
+
+    task_id = _text(binding.task_id, "Pool impact binding.task_id")
+    _hash(binding.artifact_id, "Pool impact binding.artifact_id")
+    artifact_hash = _hash(
+        binding.artifact_content_hash,
+        "Pool impact binding.artifact_content_hash",
+    )
+    if not isinstance(
+        binding.pool,
+        pool_tools.StrategyCandidatePoolArtifactBinding,
+    ):
+        raise StrategyError("Pool impact Pool binding is invalid")
+    if not isinstance(binding.dataset, _DatasetBinding) or not isinstance(
+        binding.sample_design,
+        StrategySampleDesignExecutionBinding,
+    ):
+        raise StrategyError("Pool impact dataset/sample binding is invalid")
+    if binding.baseline is not None and not isinstance(
+        binding.baseline,
+        _BaselineBinding,
+    ):
+        raise StrategyError("Pool impact baseline binding is invalid")
+    pool_tools._require_regular_dataset_path(
+        binding.dataset.path,
+        root=binding.pool.datasets_root,
+    )
+    try:
+        expected_dataset_path = (
+            binding.pool.datasets_root / binding.dataset.source_path
+        ).resolve(strict=True)
+    except OSError as exc:
+        raise StrategyError("Pool impact dataset binding changed") from exc
+    if binding.dataset.path != expected_dataset_path:
+        raise StrategyError("Pool impact dataset path changed")
+    registered_dataset = binding.dataset.dataset
+    if (
+        binding.pool.task_id != task_id
+        or binding.sample_design.task_id != task_id
+        or getattr(registered_dataset, "task_id", None) != task_id
+    ):
+        raise StrategyError("Pool impact source belongs to another task")
+    if binding.stage != "development_backtest":
+        raise StrategyError("Pool impact stage must remain development_backtest")
+    if binding.validation_status != "unvalidated":
+        raise StrategyError("Pool impact validation status must remain unvalidated")
+
+    provenance = _validate_impact_provenance(binding.artifact_provenance)
+    provenance_json = _canonical_json(provenance)
+    if (
+        provenance != binding.artifact_provenance
+        or provenance_json != binding.artifact_provenance_json
+    ):
+        raise StrategyError("Pool impact artifact provenance binding changed")
+    expected_request = _impact_request_from_provenance(
+        provenance,
+        strategy_type=binding.pool.strategy_type,
+        drop_nan_labels=binding.sample_design.drop_nan_labels,
+    )
+    expected_request = _resolve_sample_design_optional_bindings(
+        expected_request,
+        binding.sample_design,
+    )
+    if expected_request != binding.request:
+        raise StrategyError("Pool impact exact input binding changed")
+
+    assessment = validate_strategy_pool_impact_assessment(binding.assessment)
+    if assessment != binding.assessment:
+        raise StrategyError("Pool impact canonical assessment changed")
+    canonical = canonical_strategy_pool_impact_json(assessment).encode("utf-8")
+    if not hmac.compare_digest(
+        hashlib.sha256(canonical).hexdigest(),
+        artifact_hash,
+    ):
+        raise StrategyError("Pool impact artifact hash changed")
+    expected_path = (
+        binding.tasks_root
+        / task_id
+        / "strategy_pool_impacts"
+        / f"{assessment['assessment_id']}.json"
+    )
+    if binding.artifact_path != expected_path:
+        raise StrategyError("Pool impact artifact path changed")
+
+    pool = validate_strategy_pool(binding.pool.pool)
+    compiled = compile_strategy_pool(pool)
+    if compiled != binding.pool.compiled_design:
+        raise StrategyError("Pool impact compiled Pool design changed")
+    if compiled["requirements"]:
+        raise StrategyError("Pool impact cannot bind unresolved candidate requirements")
+    identity = assessment["identity"]
+    identity_expected = {
+        "pool_id": pool["pool_id"],
+        "task_id": task_id,
+        "strategy_type": pool["strategy_type"],
+        "revision": pool["revision"],
+        "revision_id": pool["revision_id"],
+        "snapshot_hash": pool["snapshot_hash"],
+        "design_hash": compiled["design_hash"],
+        "strategy_spec_hash": strategy_spec_hash(compiled["strategy_spec"]),
+    }
+    if identity != identity_expected:
+        raise StrategyError("Pool impact Pool identity changed")
+
+    dataset = binding.dataset
+    if (
+        getattr(registered_dataset, "id", None) != dataset.dataset_id
+        or getattr(registered_dataset, "source_path", None) != dataset.source_path
+        or getattr(registered_dataset, "content_hash", None) != dataset.content_hash
+        or getattr(registered_dataset, "row_count", None) != dataset.row_count
+        or tuple(
+            str(column.name)
+            for column in getattr(registered_dataset, "columns", ())
+        )
+        != dataset.columns
+    ):
+        raise StrategyError("Pool impact dataset binding changed")
+    dataset_expected = {
+        "dataset_id": dataset.dataset_id,
+        "dataset_content_hash": dataset.content_hash,
+        "registry_metadata_hash": dataset.registry_metadata_hash,
+        "workspace_revision": dataset.workspace_revision,
+        "workspace_generation": dataset.workspace_generation,
+        "semantic_mapping_hash": dataset.semantic_mapping_hash,
+        "target_col": dataset.target_col,
+    }
+    if any(provenance[field] != value for field, value in dataset_expected.items()):
+        raise StrategyError("Pool impact dataset/workspace provenance changed")
+    sample_binding = _pool_sample_binding(pool, task_id=task_id)
+    assessment_bindings = assessment["bindings"]
+    if (
+        assessment_bindings["sample"] != sample_binding
+        or assessment_bindings["sample_design_ref"]
+        != binding.sample_design.to_ref_dict()
+        or assessment_bindings["target_col"] != dataset.target_col
+        or assessment_bindings["target_bad_value"] != 1
+        or assessment_bindings["comparison_mode"] != binding.request["comparison_mode"]
+    ):
+        raise StrategyError("Pool impact assessment source binding changed")
+    optional_columns = {
+        "month_col": binding.sample_design.month_col,
+        "loan_amount_col": binding.sample_design.loan_amount_col,
+        "overdue_amount_col": binding.sample_design.overdue_amount_col,
+    }
+    if any(
+        provenance[field] != value
+        or assessment_bindings[field] != value
+        or binding.request[field] != value
+        for field, value in optional_columns.items()
+    ):
+        raise StrategyError("Pool impact optional column binding changed")
+    if (
+        provenance["task_id"] != task_id
+        or provenance["assessment_id"] != assessment["assessment_id"]
+        or provenance["assessment_content_hash"] != assessment["content_hash"]
+        or provenance["pool_id"] != pool["pool_id"]
+        or provenance["pool_revision"] != pool["revision"]
+        or provenance["pool_revision_id"] != pool["revision_id"]
+        or provenance["pool_snapshot_hash"] != pool["snapshot_hash"]
+        or provenance["design_hash"] != compiled["design_hash"]
+        or provenance["strategy_spec_hash"] != identity["strategy_spec_hash"]
+        or provenance["sample_design_ref"] != binding.sample_design.to_ref_dict()
+        or provenance["source_target_bad_value"]
+        != binding.sample_design.target_bad_value
+        or provenance["normalized_target_bad_value"] != 1
+    ):
+        raise StrategyError("Pool impact artifact provenance source binding changed")
+    _require_pool_sample_design_ref(
+        binding.pool.lineages,
+        expected=binding.sample_design.reference,
+    )
+    _require_pool_measurement_target(
+        binding.pool.lineages,
+        expected_target_col=dataset.target_col,
+    )
+    _require_waterfall_pool_binding(assessment, pool=pool, compiled=compiled)
+    _require_assessment_baseline_binding(
+        assessment,
+        request=binding.request,
+        baseline=binding.baseline,
+        provenance=provenance,
+    )
+
+
+def _require_waterfall_pool_binding(
+    assessment: Mapping[str, Any],
+    *,
+    pool: Mapping[str, Any],
+    compiled: Mapping[str, Any],
+) -> None:
+    rules = compiled["strategy_spec"]["rules"]
+    if len(assessment["waterfall"]) != len(pool["entries"]) or len(rules) != len(
+        pool["entries"]
+    ):
+        raise StrategyError("Pool impact waterfall no longer matches the Pool")
+    sample_ref = assessment["bindings"]["sample_design_ref"]
+    for row, entry, rule in zip(
+        assessment["waterfall"],
+        pool["entries"],
+        rules,
+        strict=True,
+    ):
+        source = entry["source"]
+        expected_source = {
+            "artifact_id": source["artifact_id"],
+            "artifact_content_hash": source["artifact_content_hash"],
+            "asset_id": source["asset_id"],
+            "asset_hash": source["asset_hash"],
+            "fragment_id": source["fragment_id"],
+            "sample_design_ref": sample_ref,
+        }
+        if (
+            row["position"] != entry["position"] + 1
+            or row["entry_id"] != entry["entry_id"]
+            or row["rule_id"] != entry["rule_id"]
+            or row["source_ref"] != expected_source
+            or row["action"] != entry["action"]
+            or rule["rule_id"] != entry["rule_id"]
+            or rule["action"] != entry["action"]
+        ):
+            raise StrategyError("Pool impact waterfall source binding changed")
+
+
+def _require_assessment_baseline_binding(
+    assessment: Mapping[str, Any],
+    *,
+    request: Mapping[str, Any],
+    baseline: _BaselineBinding | None,
+    provenance: Mapping[str, Any],
+) -> None:
+    if baseline is None:
+        if (
+            request["comparison_mode"] != "absolute"
+            or provenance["baseline_strategy_id"] is not None
+            or provenance["baseline_spec_hash"] is not None
+        ):
+            raise StrategyError("Pool impact baseline binding changed")
+        return
+    expected = {
+        "strategy_id": baseline.strategy_id,
+        "strategy_type": baseline.strategy_type,
+        "spec_hash": baseline.spec_hash,
+    }
+    if (
+        request.get("baseline_strategy_id") != baseline.strategy_id
+        or provenance["baseline_strategy_id"] != baseline.strategy_id
+        or provenance["baseline_spec_hash"] != baseline.spec_hash
+        or assessment["baseline"]["binding"] != expected
+    ):
+        raise StrategyError("Pool impact baseline binding changed")
+
+
+def _require_impact_artifact_on_connection(
+    conn,
+    binding: StrategyPoolImpactArtifactBinding,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT id, task_id, kind, path, content_hash, origin_tool,
+               provenance_json
+          FROM task_artifacts
+         WHERE task_id = ? AND id = ?
+        """,
+        (binding.task_id, binding.artifact_id),
+    ).fetchone()
+    if row is None:
+        raise StrategyError("Pool impact artifact is no longer registered")
+    if (
+        str(row["id"]) != binding.artifact_id
+        or str(row["task_id"]) != binding.task_id
+        or str(row["kind"]) != POOL_IMPACT_ARTIFACT_KIND
+        or str(row["path"]) != str(binding.artifact_path)
+        or not hmac.compare_digest(
+            str(row["content_hash"]),
+            binding.artifact_content_hash,
+        )
+        or str(row["origin_tool"]) != POOL_IMPACT_ORIGIN_TOOL
+        or str(row["provenance_json"]) != binding.artifact_provenance_json
+    ):
+        raise StrategyError("Pool impact artifact registry binding changed")
+
+
+def _read_impact_artifact(
+    path: Path,
+    *,
+    root: Path,
+    expected_content_hash: str,
+) -> bytes:
+    return _read_regular_nofollow(
+        path,
+        root=root,
+        expected_content_hash=expected_content_hash,
+    )
+
+
+def _impact_assessment_from_bytes(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicate_keys,
+        )
+        return validate_strategy_pool_impact_assessment(value)
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+    ) as exc:
+        raise StrategyError("Pool impact artifact JSON is invalid") from exc
 
 
 def _validate_inputs(value: object) -> dict[str, Any]:
@@ -1241,17 +1968,93 @@ def _verify_file(
     canonical: bytes,
     content_hash: str,
 ) -> None:
-    if path.is_symlink() or not path.is_file():
+    raw = _read_regular_nofollow(
+        path,
+        root=root,
+        expected_content_hash=content_hash,
+    )
+    if raw != canonical:
+        raise StrategyError("Pool impact artifact bytes changed")
+
+
+def _read_regular_nofollow(
+    path: Path,
+    *,
+    root: Path,
+    expected_content_hash: str,
+) -> bytes:
+    """Read one bounded regular file without following or racing a path swap."""
+
+    if not path.is_absolute() or path.is_symlink():
         raise StrategyError("Pool impact artifact must be a regular file")
     try:
         path.resolve(strict=True).relative_to(root.resolve(strict=True))
     except (OSError, ValueError) as exc:
         raise StrategyError("Pool impact artifact escaped task storage") from exc
-    raw = path.read_bytes()
-    if raw != canonical or not hmac.compare_digest(
-        hashlib.sha256(raw).hexdigest(), content_hash
+
+    descriptor = -1
+    chunks: list[bytes] = []
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise StrategyError("Pool impact artifact must be a regular file")
+        if (
+            before.st_size < 0
+            or before.st_size > _MAX_POOL_IMPACT_ARTIFACT_BYTES
+        ):
+            raise StrategyError("Pool impact artifact exceeds byte budget")
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_POOL_IMPACT_ARTIFACT_BYTES:
+                raise StrategyError("Pool impact artifact exceeds byte budget")
+            digest.update(chunk)
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise StrategyError("Pool impact artifact changed while being read")
+        live_path = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(live_path.st_mode)
+            or (live_path.st_dev, live_path.st_ino)
+            != (after.st_dev, after.st_ino)
+        ):
+            raise StrategyError(
+                "Pool impact artifact path changed while being read"
+            )
+    except OSError as exc:
+        raise StrategyError("Pool impact artifact is unavailable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    raw = b"".join(chunks)
+    if (
+        len(raw) != before.st_size
+        or not hmac.compare_digest(digest.hexdigest(), expected_content_hash)
     ):
         raise StrategyError("Pool impact artifact bytes changed")
+    return raw
 
 
 def _tool_output(
@@ -1329,11 +2132,57 @@ def _non_negative_int(value: object, name: str) -> int:
     return value
 
 
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _json_object(value: object, name: str) -> dict[str, Any]:
+    try:
+        normalized = json.loads(_canonical_json(value))
+    except (TypeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
+        raise StrategyError(f"{name} must be a finite JSON object") from exc
+    if not isinstance(normalized, dict):
+        raise StrategyError(f"{name} must be an object")
+    return normalized
+
+
+def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise StrategyError(f"JSON contains duplicate key: {key}")
+        result[key] = value
+    return result
+
+
+def _require_binding_connection(conn, *, db_path: Path, name: str) -> None:
+    if not conn.in_transaction:
+        raise StrategyError(f"{name} binding requires a caller-owned transaction")
+    database = conn.execute(
+        "SELECT file FROM pragma_database_list WHERE name = 'main'"
+    ).fetchone()
+    if (
+        database is None
+        or not str(database["file"])
+        or Path(str(database["file"])).absolute() != db_path
+    ):
+        raise StrategyError(f"{name} binding database changed")
+
+
 __all__ = [
     "POOL_IMPACT_ARTIFACT_KIND",
     "POOL_IMPACT_ARTIFACT_SCHEMA_VERSION",
     "POOL_IMPACT_ORIGIN_TOOL",
     "POOL_IMPACT_TOOL_SCHEMA_VERSION",
+    "StrategyPoolImpactArtifactBinding",
+    "load_strategy_pool_impact_artifact",
+    "require_strategy_pool_impact_artifact_binding_on_connection",
     "run_measure_pool_impact",
     "validate_measure_pool_impact_tool_output",
 ]
