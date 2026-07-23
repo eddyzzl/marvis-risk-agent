@@ -22,6 +22,7 @@ from marvis.packs.modeling.evidence import (
     MAX_TRAINING_MASK_ROWS,
     MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
     MODELING_TRAINING_EVIDENCE_SCHEMA_VERSION,
+    NON_FINITE_BOUNDARY_TAG,
     SAMPLE_DESIGN_BUNDLE_ARTIFACT_KIND,
     SAMPLE_MEMBERSHIP_ARTIFACT_KIND,
     ModelingTrainingEvidenceError,
@@ -30,6 +31,8 @@ from marvis.packs.modeling.evidence import (
     build_task_artifact_ref,
     build_training_split_mask_hashes,
     canonical_modeling_training_evidence_json,
+    decode_modeling_scoring_woe_maps_boundaries,
+    modeling_scoring_metadata_from_artifact,
     modeling_training_evidence_from_json,
     validate_modeling_training_evidence,
 )
@@ -753,6 +756,112 @@ def test_accepts_every_authoritative_binary_modeling_recipe(algorithm):
     )
 
     assert evidence["model_artifact"]["algorithm"] == algorithm
+
+
+def test_scorecard_woe_boundaries_are_tagged_strict_json_and_reversible():
+    config = _config(recipe_id="scorecard")
+    artifact = _artifact(
+        algorithm="scorecard",
+        points_direction="higher_is_better",
+        woe_maps={
+            "income": {
+                "feature": "income",
+                "edges": (float("-inf"), 0.0, float("inf")),
+                "woe_by_bin": (-0.25, 0.4),
+                "na_woe": 0.05,
+            },
+            "age": {
+                "feature": "age",
+                "edges": (float("-inf"), 35.0, float("inf")),
+                "woe_by_bin": (0.3, -0.2),
+                "na_woe": 0.0,
+            },
+        },
+    )
+    evidence = _evidence(
+        experiment=_experiment(recipe_id="scorecard", config=config),
+        artifact=artifact,
+    )
+    metadata = evidence["model_artifact"]["scoring_metadata"]
+    income_edges = metadata["woe_maps"]["income"]["edges"]
+
+    assert income_edges == [
+        {NON_FINITE_BOUNDARY_TAG: "negative_infinity"},
+        0.0,
+        {NON_FINITE_BOUNDARY_TAG: "positive_infinity"},
+    ]
+    assert modeling_scoring_metadata_from_artifact(artifact) == metadata
+
+    raw = canonical_modeling_training_evidence_json(
+        evidence,
+        sample_design_bundle=build_sample_design_v2_fixture(),
+    )
+    assert "Infinity" not in raw
+    assert "-Infinity" not in raw
+    assert (
+        modeling_training_evidence_from_json(
+            raw,
+            sample_design_bundle=build_sample_design_v2_fixture(),
+        )
+        == evidence
+    )
+
+    decoded = decode_modeling_scoring_woe_maps_boundaries(
+        metadata["woe_maps"]
+    )
+    assert np.isneginf(decoded["income"]["edges"][0])
+    assert decoded["income"]["edges"][1] == 0.0
+    assert np.isposinf(decoded["income"]["edges"][-1])
+    assert decoded["income"]["woe_by_bin"] == [-0.25, 0.4]
+
+
+@pytest.mark.parametrize(
+    "woe_maps",
+    [
+        {
+            "income": {
+                "edges": (float("-inf"), float("nan"), float("inf")),
+                "woe_by_bin": (0.1, 0.2),
+            }
+        },
+        {
+            "income": {
+                "edges": (float("-inf"), 0.0, float("inf")),
+                "woe_by_bin": (float("inf"), 0.2),
+            }
+        },
+        {
+            "income": {
+                "edges": (
+                    {
+                        NON_FINITE_BOUNDARY_TAG: "not_a_supported_boundary",
+                    },
+                    0.0,
+                    {NON_FINITE_BOUNDARY_TAG: "positive_infinity"},
+                ),
+                "woe_by_bin": (0.1, 0.2),
+            }
+        },
+    ],
+)
+def test_scorecard_woe_boundary_tags_reject_ambiguous_non_finite_values(
+    woe_maps,
+):
+    config = _config(recipe_id="scorecard")
+    artifact = _artifact(
+        algorithm="scorecard",
+        points_direction="higher_is_better",
+        woe_maps=woe_maps,
+    )
+
+    with pytest.raises(
+        ModelingTrainingEvidenceError,
+        match="unsupported non-finite|invalid numeric-boundary tag",
+    ):
+        _evidence(
+            experiment=_experiment(recipe_id="scorecard", config=config),
+            artifact=artifact,
+        )
 
 
 def test_rejects_non_raw_score_metadata_and_non_task_model_binary_ref():

@@ -14,9 +14,18 @@ class ExperimentStore:
         self._repo = ModelingRepository(Path(db_path))
 
     def create(self, task_id: str, recipe_id: str, config: TrainConfig) -> str:
-        experiment_id = f"experiment_{uuid.uuid4().hex}"
-        experiment = Experiment(
-            id=experiment_id,
+        experiment = self.prepare(task_id, recipe_id, config)
+        self._repo.create_experiment_with_audit(
+            experiment,
+            audit=_create_experiment_audit(experiment),
+        )
+        return experiment.id
+
+    def prepare(self, task_id: str, recipe_id: str, config: TrainConfig) -> Experiment:
+        """Build an unpersisted experiment for a caller-owned transaction."""
+
+        return Experiment(
+            id=f"experiment_{uuid.uuid4().hex}",
             task_id=task_id,
             recipe_id=recipe_id,
             config=config,
@@ -25,20 +34,13 @@ class ExperimentStore:
             status="created",
             created_at=datetime.now(UTC).isoformat(),
         )
-        self._repo.create_experiment_with_audit(
+
+    def create_on_connection(self, conn, experiment: Experiment) -> None:
+        self._repo.create_experiment_with_audit_on_connection(
+            conn,
             experiment,
-            audit={
-                "kind": "modeling.experiment.create",
-                "target_ref": experiment_id,
-                "outcome": "succeeded",
-                "detail": {
-                    "task_id": task_id,
-                    "recipe_id": recipe_id,
-                    "dataset_id": config.dataset_id,
-                },
-            },
+            audit=_create_experiment_audit(experiment),
         )
-        return experiment_id
 
     def transaction(self):
         return self._repo.transaction()
@@ -54,12 +56,17 @@ class ExperimentStore:
             audit=_attach_result_audit(experiment_id, artifact),
         )
 
-    def attach_result_on_connection(self, conn, experiment_id: str, result: TrainResult) -> None:
+    def attach_result_on_connection(self, conn, experiment_id: str, result: TrainResult):
         """Connection-scoped counterpart of ``attach_result`` (LT-5): lets a caller
         share this DB write with an ``ArtifactUnitOfWork.finalize_with_connection``
         call so the artifact-row insert/experiment update/audit write commit or
         roll back together with whatever else runs on ``conn``."""
-        self.get(experiment_id)
+        row = conn.execute(
+            "SELECT 1 FROM experiments WHERE id = ?",
+            (experiment_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(experiment_id)
         artifact = self._prepare_result_artifact(experiment_id, result)
         self._repo.attach_experiment_result_with_artifact_and_audit_on_connection(
             conn,
@@ -69,6 +76,7 @@ class ExperimentStore:
             status="trained",
             audit=_attach_result_audit(experiment_id, artifact),
         )
+        return artifact
 
     def _prepare_result_artifact(self, experiment_id: str, result: TrainResult):
         return replace(
@@ -128,6 +136,19 @@ def _attach_result_audit(experiment_id: str, artifact) -> dict:
             "artifact_id": artifact.id,
             "algorithm": artifact.algorithm,
             "feature_count": len(artifact.feature_list),
+        },
+    }
+
+
+def _create_experiment_audit(experiment: Experiment) -> dict:
+    return {
+        "kind": "modeling.experiment.create",
+        "target_ref": experiment.id,
+        "outcome": "succeeded",
+        "detail": {
+            "task_id": experiment.task_id,
+            "recipe_id": experiment.recipe_id,
+            "dataset_id": experiment.config.dataset_id,
         },
     }
 

@@ -129,6 +129,10 @@ _SCORING_METADATA_FIELDS = frozenset(
         "calibration_status",
     }
 )
+NON_FINITE_BOUNDARY_TAG = "$marvis.numeric_boundary"
+_NON_FINITE_BOUNDARY_VALUES = frozenset(
+    {"negative_infinity", "positive_infinity"}
+)
 _TASK_ARTIFACT_REF_FIELDS = frozenset(
     {"artifact_id", "kind", "content_hash"}
 )
@@ -808,13 +812,46 @@ def _scoring_metadata_from_model_artifact(
             "calibration_status": "not_applied",
         },
         algorithm=model_artifact.algorithm,
+        encode_live_boundaries=True,
     )
+
+
+def modeling_scoring_metadata_from_artifact(
+    model_artifact: ModelArtifact,
+) -> dict[str, Any]:
+    """Return the strict canonical scoring snapshot used by evidence hashes."""
+
+    if not isinstance(model_artifact, ModelArtifact):
+        raise ModelingTrainingEvidenceError(
+            "model_artifact must be a ModelArtifact"
+        )
+    return _scoring_metadata_from_model_artifact(model_artifact)
+
+
+def decode_modeling_scoring_woe_maps_boundaries(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reverse tagged WOE boundary values back to Python infinities.
+
+    Evidence itself always remains strict JSON.  This decoder exists for
+    deterministic replay/verification consumers that need the numerical edge
+    values represented by the canonical tagged objects.
+    """
+
+    canonical = _canonical_woe_maps(
+        _object(value, "model scoring_metadata.woe_maps"),
+        encode_live_boundaries=False,
+    )
+    decoded = _decode_tagged_boundaries(canonical)
+    assert isinstance(decoded, dict)
+    return decoded
 
 
 def _scoring_metadata(
     value: object,
     *,
     algorithm: str,
+    encode_live_boundaries: bool = False,
 ) -> dict[str, Any]:
     obj = _object(value, "model scoring_metadata")
     _exact_fields(obj, _SCORING_METADATA_FIELDS, "model scoring_metadata")
@@ -834,9 +871,9 @@ def _scoring_metadata(
     woe_maps = (
         None
         if obj["woe_maps"] is None
-        else _json_value(
+        else _canonical_woe_maps(
             _object(obj["woe_maps"], "model scoring_metadata.woe_maps"),
-            "model scoring_metadata.woe_maps",
+            encode_live_boundaries=encode_live_boundaries,
         )
     )
     scorecard_table = _json_value(
@@ -2380,6 +2417,142 @@ def _json_scalar(value: object, name: str) -> str | bool | int | float:
     )
 
 
+def _canonical_woe_maps(
+    value: Mapping[str, Any],
+    *,
+    encode_live_boundaries: bool,
+) -> dict[str, Any]:
+    nodes = [0]
+    active: set[int] = set()
+    normalized = _canonical_woe_value(
+        value,
+        name="model scoring_metadata.woe_maps",
+        boundary_sequence=False,
+        encode_live_boundaries=encode_live_boundaries,
+        depth=0,
+        nodes=nodes,
+        active=active,
+    )
+    assert isinstance(normalized, dict)
+    return normalized
+
+
+def _canonical_woe_value(
+    value: object,
+    *,
+    name: str,
+    boundary_sequence: bool,
+    encode_live_boundaries: bool,
+    depth: int,
+    nodes: list[int],
+    active: set[int],
+) -> Any:
+    nodes[0] += 1
+    if nodes[0] > MAX_TRAINING_EVIDENCE_JSON_NODES:
+        raise ModelingTrainingEvidenceError(
+            "model scoring_metadata.woe_maps exceeds node budget"
+        )
+    if depth > MAX_TRAINING_EVIDENCE_JSON_DEPTH:
+        raise ModelingTrainingEvidenceError(
+            "model scoring_metadata.woe_maps exceeds depth budget"
+        )
+    if isinstance(value, float) and not math.isfinite(value):
+        if (
+            not encode_live_boundaries
+            or not boundary_sequence
+            or math.isnan(value)
+        ):
+            raise ModelingTrainingEvidenceError(
+                f"{name} contains unsupported non-finite value"
+            )
+        marker = (
+            "negative_infinity" if value < 0 else "positive_infinity"
+        )
+        return {NON_FINITE_BOUNDARY_TAG: marker}
+    if isinstance(value, Mapping):
+        identity = id(value)
+        if identity in active:
+            raise ModelingTrainingEvidenceError(f"{name} contains a cycle")
+        if NON_FINITE_BOUNDARY_TAG in value:
+            if (
+                not boundary_sequence
+                or set(value) != {NON_FINITE_BOUNDARY_TAG}
+                or value[NON_FINITE_BOUNDARY_TAG]
+                not in _NON_FINITE_BOUNDARY_VALUES
+            ):
+                raise ModelingTrainingEvidenceError(
+                    f"{name} contains an invalid numeric-boundary tag"
+                )
+            return {
+                NON_FINITE_BOUNDARY_TAG: str(value[NON_FINITE_BOUNDARY_TAG])
+            }
+        active.add(identity)
+        try:
+            normalized: dict[str, Any] = {}
+            if any(not isinstance(raw_key, str) for raw_key in value):
+                raise ModelingTrainingEvidenceError(
+                    f"{name} keys must be strings"
+                )
+            for raw_key in sorted(value):
+                key = _text(raw_key, f"{name} key")
+                normalized[key] = _canonical_woe_value(
+                    value[raw_key],
+                    name=f"{name}.{key}",
+                    boundary_sequence=key == "edges",
+                    encode_live_boundaries=encode_live_boundaries,
+                    depth=depth + 1,
+                    nodes=nodes,
+                    active=active,
+                )
+            return normalized
+        finally:
+            active.discard(identity)
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        identity = id(value)
+        if identity in active:
+            raise ModelingTrainingEvidenceError(f"{name} contains a cycle")
+        active.add(identity)
+        try:
+            return [
+                _canonical_woe_value(
+                    item,
+                    name=f"{name}[{index}]",
+                    boundary_sequence=boundary_sequence,
+                    encode_live_boundaries=encode_live_boundaries,
+                    depth=depth + 1,
+                    nodes=nodes,
+                    active=active,
+                )
+                for index, item in enumerate(value)
+            ]
+        finally:
+            active.discard(identity)
+    return _json_value(value, name)
+
+
+def _decode_tagged_boundaries(value: object) -> Any:
+    if isinstance(value, Mapping):
+        if set(value) == {NON_FINITE_BOUNDARY_TAG}:
+            return (
+                float("-inf")
+                if value[NON_FINITE_BOUNDARY_TAG] == "negative_infinity"
+                else float("inf")
+            )
+        return {
+            str(key): _decode_tagged_boundaries(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return [_decode_tagged_boundaries(child) for child in value]
+    return value
+
+
 def _json_value(value: object, name: str) -> Any:
     _preflight_json_tree(value, name=name)
     if value is None or isinstance(value, bool):
@@ -2500,6 +2673,7 @@ __all__ = [
     "MODELING_TRAINING_EVIDENCE_PRODUCER_VERSION",
     "MODELING_TRAINING_EVIDENCE_SCHEMA_VERSION",
     "MODEL_BINARY_REF_KIND",
+    "NON_FINITE_BOUNDARY_TAG",
     "RAW_SCORE_PRODUCT",
     "SAMPLE_DESIGN_BUNDLE_ARTIFACT_KIND",
     "SAMPLE_MEMBERSHIP_ARTIFACT_KIND",
@@ -2510,6 +2684,8 @@ __all__ = [
     "build_task_artifact_ref",
     "build_training_split_mask_hashes",
     "canonical_modeling_training_evidence_json",
+    "decode_modeling_scoring_woe_maps_boundaries",
+    "modeling_scoring_metadata_from_artifact",
     "modeling_training_evidence_from_json",
     "validate_modeling_training_evidence",
 ]

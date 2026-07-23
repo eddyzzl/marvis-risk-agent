@@ -31,8 +31,30 @@ class ModelingRepository:
 
     def create_experiment_with_audit(self, experiment: Experiment, *, audit: dict) -> None:
         with connect(self.db_path) as conn:
-            _insert_experiment_row(conn, experiment)
-            _write_audit_row(conn, **audit)
+            self.create_experiment_with_audit_on_connection(
+                conn,
+                experiment,
+                audit=audit,
+            )
+
+    def create_experiment_with_audit_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        experiment: Experiment,
+        *,
+        audit: dict,
+    ) -> None:
+        """Create an experiment inside a caller-owned transaction.
+
+        The governed training-evidence Tool must not publish an experiment
+        independently from its model binary and evidence artifacts.  Keeping
+        this connection-scoped counterpart next to the historical method lets
+        that Tool share one ``BEGIN IMMEDIATE`` boundary without changing the
+        legacy ``create`` path.
+        """
+
+        _insert_experiment_row(conn, experiment)
+        _write_audit_row(conn, **audit)
 
     def get_experiment(self, experiment_id: str) -> Experiment | None:
         with connect(self.db_path) as conn:

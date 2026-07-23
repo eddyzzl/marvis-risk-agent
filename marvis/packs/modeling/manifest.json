@@ -1,6 +1,6 @@
 {
   "name": "modeling",
-  "version": "0.4.6",
+  "version": "0.5.0",
   "display_name": "Modeling Pack",
   "description": "Modeling readiness, frame preparation, feature selection, training, experiment comparison, probability calibration, PMML export, and V1 validation handoff tools.",
   "module": "marvis.packs.modeling.tools",
@@ -1347,6 +1347,332 @@
         "write:model",
         "write:dataset",
         "write:experiment"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "train_model_with_evidence_v2",
+      "summary": "Train one governed native binary model on the exact StrategySampleDesign V2 risk population and atomically publish its immutable model binary plus canonical training evidence. This does not select, calibrate, adopt, or deploy the model.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "membership_artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_membership_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "bundle_artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_bundle_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_bundle_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "membership_artifact_id",
+              "expected_membership_artifact_content_hash",
+              "bundle_artifact_id",
+              "expected_bundle_artifact_content_hash",
+              "expected_bundle_id",
+              "expected_sample_design_id",
+              "expected_sample_design_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "recipe": {
+            "type": "string",
+            "enum": [
+              "lgb",
+              "xgb",
+              "catboost",
+              "lr",
+              "scorecard",
+              "mlp"
+            ]
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 10000,
+            "uniqueItems": true
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_values": {
+            "type": "object",
+            "properties": {
+              "train": {
+                "type": "string",
+                "minLength": 1
+              },
+              "test": {
+                "type": "string",
+                "minLength": 1
+              },
+              "oot": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "train",
+              "test",
+              "oot"
+            ],
+            "additionalProperties": false
+          },
+          "params": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "early_stopping_rounds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          }
+        },
+        "required": [
+          "sample_design_ref",
+          "recipe",
+          "features",
+          "split_col",
+          "split_values",
+          "params",
+          "seed",
+          "early_stopping_rounds"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "modeling.train-model-with-evidence-v2-tool.v1"
+          },
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model_artifact_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "score_product": {
+            "type": "string",
+            "const": "raw_native_uncalibrated_probability_p_class_1"
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "membership_artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_membership_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "bundle_artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_bundle_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "expected_bundle_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "membership_artifact_id",
+              "expected_membership_artifact_content_hash",
+              "bundle_artifact_id",
+              "expected_bundle_artifact_content_hash",
+              "expected_bundle_id",
+              "expected_sample_design_id",
+              "expected_sample_design_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "artifacts": {
+            "type": "object",
+            "properties": {
+              "model_binary": {
+                "type": "object",
+                "properties": {
+                  "artifact_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "modeling_model_binary"
+                  },
+                  "filename": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "content_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "download_url": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "artifact_id",
+                  "kind",
+                  "filename",
+                  "content_hash",
+                  "download_url"
+                ],
+                "additionalProperties": false
+              },
+              "training_evidence": {
+                "type": "object",
+                "properties": {
+                  "artifact_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "modeling_training_evidence_json"
+                  },
+                  "filename": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "content_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "download_url": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "artifact_id",
+                  "kind",
+                  "filename",
+                  "content_hash",
+                  "download_url"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "model_binary",
+              "training_evidence"
+            ],
+            "additionalProperties": false
+          },
+          "governance": {
+            "type": "object",
+            "properties": {
+              "not_selected": {
+                "type": "boolean",
+                "const": true
+              },
+              "not_calibrated": {
+                "type": "boolean",
+                "const": true
+              },
+              "not_adopted": {
+                "type": "boolean",
+                "const": true
+              },
+              "not_deployed": {
+                "type": "boolean",
+                "const": true
+              }
+            },
+            "required": [
+              "not_selected",
+              "not_calibrated",
+              "not_adopted",
+              "not_deployed"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "schema_version",
+          "experiment_id",
+          "model_artifact_id",
+          "evidence_id",
+          "evidence_content_hash",
+          "score_product",
+          "sample_design_ref",
+          "artifacts",
+          "governance"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 1800,
+      "failure_policy": "fail",
+      "entrypoint": "tool_train_model_with_evidence_v2",
+      "side_effects": [
+        "read:dataset",
+        "read:model",
+        "write:model",
+        "write:experiment",
+        "write:task"
       ],
       "memory_limit_mb": 4096
     },

@@ -100,6 +100,12 @@ from marvis.packs.modeling.train_tools import (  # noqa: F401
     tool_train_models,
     tool_tune_hyperparameters,
 )
+from marvis.packs.modeling.evidence_tools import (  # noqa: F401
+    load_modeling_training_evidence_artifacts,
+    run_train_model_with_evidence_v2,
+    tool_train_model_with_evidence_v2,
+    validate_train_model_with_evidence_v2_tool_output,
+)
 from marvis.packs.modeling.report_tools import (  # noqa: F401
     REPORT_NARRATIVE_KEYS,
     REPORT_NARRATIVE_SYS,
@@ -280,4 +286,5 @@ __all__ = [
     "tool_segment_value_evaluation",
     "tool_select_features",
     "tool_train_model",
+    "tool_train_model_with_evidence_v2",
 ]

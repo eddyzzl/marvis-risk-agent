@@ -8,6 +8,7 @@ from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.training_dataset import TrainingDataset
 from marvis.plugins.sdk import PackRuntime
+from marvis.repositories.task_artifacts import TaskArtifactRepository
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ class _Runtime(PackRuntime):
     def _extend(self, ctx) -> None:
         self.experiments = ExperimentStore(self.settings.db_path)
         self.modeling_repo = ModelingRepository(self.settings.db_path)
+        self.task_artifacts = TaskArtifactRepository(self.settings.db_path)
 
 
 def _runtime(ctx) -> _Runtime:
