@@ -402,6 +402,7 @@ def validate_build_strategy_report_bundle_v2_tool_output(
             "download_url": (
                 f"/api/tasks/{quote(bundle['task_id'], safe='')}"
                 f"/task-artifacts/{quote(artifact_id, safe='')}/download"
+                f"?expected_content_hash={quote(expected_hash, safe='')}"
             ),
         }
         for field, expected_value in expected.items():
@@ -909,6 +910,8 @@ def _tool_output(publication: Mapping[str, Any]) -> dict[str, Any]:
                 "download_url": (
                     f"/api/tasks/{quote(bundle['task_id'], safe='')}"
                     f"/task-artifacts/{quote(artifact_id, safe='')}/download"
+                    "?expected_content_hash="
+                    f"{quote(str(record['content_hash']), safe='')}"
                 ),
             }
         )

@@ -26,6 +26,11 @@ def test_report_renderer_shows_governed_identity_warnings_and_three_downloads(
     assert "[JSON]" in text
     assert "[Markdown]" in text
     assert "[XLSX]" in text
+    for artifact in output["artifacts"]:
+        assert (
+            f"expected_content_hash={artifact['content_hash']}"
+            in text
+        )
     assert tables == []
 
 
@@ -54,4 +59,19 @@ def test_report_renderer_fails_closed_on_unknown_envelope_fields(
 
     assert "结果完整性校验失败" in text
     assert "0.99" not in text
+    assert tables == []
+
+
+def test_report_renderer_fails_closed_on_unpinned_download_link(
+    tmp_path: Path,
+) -> None:
+    output = _run(_setup(tmp_path))
+    output["artifacts"][0]["download_url"] = output["artifacts"][0][
+        "download_url"
+    ].split("?", 1)[0]
+
+    text, tables = render_tool_output("build_report_bundle_v2", output)
+
+    assert "结果完整性校验失败" in text
+    assert "/task-artifacts/" not in text
     assert tables == []

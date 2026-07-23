@@ -275,6 +275,9 @@ def test_build_report_bundle_publishes_three_exact_governed_outputs(
         assert Path(row["path"]).read_bytes() == rendered[artifact["format"]]
         assert row["provenance"]["report_id"] == output["report_id"]
         assert row["provenance"]["bundle_content_sha256"] == output["content_hash"]
+        assert artifact["download_url"].endswith(
+            f"?expected_content_hash={artifact['content_hash']}"
+        )
     current = StrategyReportRepository(
         fixture["settings"].db_path
     ).get_current(task_id=fixture["task"].id, strategy_id=None)
@@ -351,6 +354,15 @@ def test_build_report_bundle_exact_retry_is_idempotent_and_validator_is_strict(
     forged["artifacts"][0]["content_hash"] = "f" * 64
     with pytest.raises(StrategyError, match="artifact"):
         validate_build_strategy_report_bundle_v2_tool_output(forged)
+    forged_url = deepcopy(first)
+    forged_url["artifacts"][0]["download_url"] = forged_url["artifacts"][0][
+        "download_url"
+    ].replace(
+        forged_url["artifacts"][0]["content_hash"],
+        "0" * 64,
+    )
+    with pytest.raises(StrategyError, match="artifact"):
+        validate_build_strategy_report_bundle_v2_tool_output(forged_url)
 
 
 def test_build_report_bundle_rolls_back_files_rows_publication_and_audit(
