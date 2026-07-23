@@ -510,6 +510,10 @@ def validate_strategy_delivery_equivalence(
         raise StrategyDeliveryError(
             "strategy delivery equivalence sample counts are invalid"
         )
+    if sample_count > MAX_EQUIVALENCE_ROWS:
+        raise StrategyDeliveryError(
+            "strategy delivery equivalence sample_count exceeds its budget"
+        )
     if normalized["matched"] is not True:
         raise StrategyDeliveryError(
             "strategy delivery equivalence matched must be true"

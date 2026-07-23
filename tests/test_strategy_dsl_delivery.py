@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import types
 from copy import deepcopy
+import hashlib
 
 import duckdb
 import pandas as pd
@@ -22,6 +23,37 @@ def _load_generated_python(source: str) -> types.ModuleType:
     module = types.ModuleType("generated_strategy_delivery")
     exec(compile(source, "<generated-strategy>", "exec"), module.__dict__)
     return module
+
+
+def _rehash_equivalence(evidence: dict) -> dict:
+    body = {
+        key: value
+        for key, value in evidence.items()
+        if key not in {"equivalence_id", "content_hash"}
+    }
+    body_hash = hashlib.sha256(
+        json.dumps(
+            body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    evidence["equivalence_id"] = (
+        "strategy-dsl-equivalence-" + body_hash[:24]
+    )
+    without_hash = {
+        key: value for key, value in evidence.items() if key != "content_hash"
+    }
+    evidence["content_hash"] = hashlib.sha256(
+        json.dumps(
+            without_hash,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return evidence
 
 
 def _approval_spec() -> dict:
@@ -249,3 +281,9 @@ def test_equivalence_validator_rejects_reauthored_or_incomplete_evidence() -> No
     del incomplete["result_hashes"]["python"]
     with pytest.raises(StrategyDeliveryError, match="result_hashes"):
         validate_strategy_delivery_equivalence(incomplete)
+    over_budget = deepcopy(evidence)
+    over_budget["source_row_count"] = 4097
+    over_budget["sample_count"] = 4097
+    _rehash_equivalence(over_budget)
+    with pytest.raises(StrategyDeliveryError, match="sample_count.*budget"):
+        validate_strategy_delivery_equivalence(over_budget)
