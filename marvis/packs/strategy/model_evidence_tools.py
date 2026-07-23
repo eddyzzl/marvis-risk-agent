@@ -14,8 +14,10 @@ from dataclasses import dataclass
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 import re
+import stat
 from typing import Any
 
 from marvis.artifacts import ArtifactUnitOfWork
@@ -280,6 +282,8 @@ class StrategyModelEvidenceV2ArtifactBinding:
     sample_design_binding: StrategySampleDesignV2ArtifactBinding
     sources: tuple[_CandidateSourceBinding, ...]
     warnings: tuple[str, ...]
+    tasks_root: Path
+    db_path: Path
 
 
 def run_materialize_model_evidence_v2(inputs, ctx, runtime) -> dict[str, Any]:
@@ -494,52 +498,182 @@ def load_strategy_model_evidence_v2_artifact(
             )
         with runtime.task_artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            require_strategy_sample_design_v2_artifact_binding_on_connection(
-                conn, sample_binding
-            )
-            for source in sources:
-                _require_source_on_connection(conn, source)
-                _require_exact_file(
-                    source.path,
-                    root=Path(runtime.settings.tasks_dir),
-                    canonical=canonical_strategy_candidate_report_json(
-                        source.report["candidate_evidence"],
-                        source.report["univariate_analysis"],
-                    ),
-                    content_hash=source.content_hash,
-                    maximum_bytes=_MAX_CANDIDATE_REPORT_BYTES,
-                )
-            _require_output_on_connection(
-                conn,
+            loaded_binding = StrategyModelEvidenceV2ArtifactBinding(
                 task_id=normalized_task,
                 artifact_id=normalized_artifact_id,
                 path=path,
-                content_hash=artifact_hash,
+                artifact_content_hash=artifact_hash,
                 provenance=provenance,
+                bundle=bundle,
+                sample_design_binding=sample_binding,
+                sources=tuple(sources),
+                warnings=tuple(warnings),
+                tasks_root=Path(runtime.settings.tasks_dir).absolute(),
+                db_path=Path(runtime.settings.db_path).absolute(),
             )
-            _require_exact_file(
-                path,
-                root=Path(runtime.settings.tasks_dir),
-                canonical=canonical,
-                content_hash=artifact_hash,
-                maximum_bytes=MAX_MODEL_EVIDENCE_JSON_BYTES,
+            require_strategy_model_evidence_v2_artifact_binding_on_connection(
+                conn,
+                loaded_binding,
             )
             conn.commit()
-        return StrategyModelEvidenceV2ArtifactBinding(
-            task_id=normalized_task,
-            artifact_id=normalized_artifact_id,
-            path=path,
-            artifact_content_hash=artifact_hash,
-            provenance=provenance,
-            bundle=bundle,
-            sample_design_binding=sample_binding,
-            sources=sources,
-            warnings=warnings,
-        )
+        return loaded_binding
     except StrategyError:
         raise
     except _BOUNDARY_ERRORS as exc:
         raise StrategyError(str(exc)) from exc
+
+
+def require_strategy_model_evidence_v2_artifact_binding_on_connection(
+    conn,
+    binding: StrategyModelEvidenceV2ArtifactBinding,
+) -> None:
+    """Re-authenticate model evidence while a downstream writer owns the lock."""
+
+    if not isinstance(binding, StrategyModelEvidenceV2ArtifactBinding):
+        raise StrategyError("model-evidence V2 artifact binding is invalid")
+    if not conn.in_transaction:
+        raise StrategyError(
+            "model-evidence V2 binding requires a caller-owned transaction"
+        )
+    database = conn.execute(
+        "SELECT file FROM pragma_database_list WHERE name = 'main'"
+    ).fetchone()
+    if (
+        database is None
+        or not str(database["file"])
+        or Path(str(database["file"])).absolute() != binding.db_path
+    ):
+        raise StrategyError("model-evidence V2 binding database changed")
+    task_id = _text(binding.task_id, "model-evidence binding.task_id")
+    artifact_id = _hash(
+        binding.artifact_id,
+        "model-evidence binding.artifact_id",
+    )
+    artifact_content_hash = _hash(
+        binding.artifact_content_hash,
+        "model-evidence binding.artifact_content_hash",
+    )
+    if binding.sample_design_binding.task_id != task_id:
+        raise StrategyError("model-evidence V2 sample belongs to another task")
+    if not isinstance(binding.sources, tuple) or not isinstance(binding.warnings, tuple):
+        raise StrategyError("model-evidence V2 binding is not immutable")
+    if not all(isinstance(source, _CandidateSourceBinding) for source in binding.sources):
+        raise StrategyError("model-evidence V2 source binding changed")
+    provenance = _validate_provenance(binding.provenance)
+    if _canonical_json(provenance) != _canonical_json(binding.provenance):
+        raise StrategyError("model-evidence V2 binding provenance changed")
+    request = _validate_inputs(
+        {
+            "sample_design_ref": provenance["sample_design_ref"],
+            "univariate_sources": [source.request for source in binding.sources],
+        }
+    )
+    if request["univariate_sources"] != provenance["univariate_sources"]:
+        raise StrategyError("model-evidence V2 binding source requests changed")
+    bundle = validate_strategy_model_evidence_bundle(
+        binding.bundle,
+        sample_design_bundle=binding.sample_design_binding.bundle,
+    )
+    if bundle != binding.bundle:
+        raise StrategyError("model-evidence V2 binding bundle changed")
+    expected_output_path = (
+        binding.tasks_root
+        / task_id
+        / "strategy_model_evidence"
+        / f"{bundle['bundle_id']}.json"
+    )
+    if (
+        not binding.tasks_root.is_absolute()
+        or binding.path != expected_output_path
+    ):
+        raise StrategyError("model-evidence V2 governed task root changed")
+    canonical = canonical_strategy_model_evidence_bundle_json(
+        bundle,
+        sample_design_bundle=binding.sample_design_binding.bundle,
+    ).encode("utf-8")
+    if not hmac.compare_digest(_sha256(canonical), artifact_content_hash):
+        raise StrategyError("model-evidence V2 binding artifact hash changed")
+    _require_provenance_binding(
+        provenance,
+        task_id=task_id,
+        request=request,
+        sample_binding=binding.sample_design_binding,
+        artifact_content_hash=artifact_content_hash,
+        expected_bundle_id=bundle["bundle_id"],
+        expected_bundle_content_hash=bundle["content_hash"],
+    )
+    if tuple(provenance["translation_warnings"]) != tuple(binding.warnings):
+        raise StrategyError("model-evidence V2 binding warnings changed")
+
+    require_strategy_sample_design_v2_artifact_binding_on_connection(
+        conn,
+        binding.sample_design_binding,
+    )
+    normalized_sources = {
+        item["artifact_id"]: item for item in request["univariate_sources"]
+    }
+    for source in binding.sources:
+        normalized_source = normalized_sources.get(source.artifact_id)
+        if (
+            source.task_id != task_id
+            or normalized_source is None
+            or source.request != normalized_source
+            or source.dataset_source_path
+            != binding.sample_design_binding.provenance["dataset_source_path"]
+        ):
+            raise StrategyError("model-evidence V2 source binding changed")
+        _require_regular_path(source.path, root=binding.tasks_root)
+        source_provenance = _validate_source_provenance(source.provenance)
+        if (
+            _canonical_json(source_provenance) != _canonical_json(source.provenance)
+            or source.provenance_json != _canonical_json(source_provenance)
+        ):
+            raise StrategyError("model-evidence V2 source provenance changed")
+        _require_candidate_binding(
+            source.report["candidate_evidence"],
+            provenance=source_provenance,
+            request=normalized_source,
+            task_id=task_id,
+            sample_binding=binding.sample_design_binding,
+        )
+        source_canonical = canonical_strategy_candidate_report_json(
+            source.report["candidate_evidence"],
+            source.report["univariate_analysis"],
+        )
+        if source.canonical_bytes != len(source_canonical):
+            raise StrategyError("model-evidence V2 source byte binding changed")
+        _require_source_on_connection(conn, source)
+        _require_exact_file(
+            source.path,
+            root=binding.tasks_root,
+            canonical=source_canonical,
+            content_hash=source.content_hash,
+            maximum_bytes=_MAX_CANDIDATE_REPORT_BYTES,
+        )
+
+    rebuilt, warnings = _translate_sources(
+        sample_binding=binding.sample_design_binding,
+        sources=binding.sources,
+    )
+    if rebuilt != bundle or warnings != tuple(binding.warnings):
+        raise StrategyError(
+            "model-evidence V2 artifact no longer matches deterministic sources"
+        )
+    _require_output_on_connection(
+        conn,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        path=binding.path,
+        content_hash=artifact_content_hash,
+        provenance=provenance,
+    )
+    _require_exact_file(
+        binding.path,
+        root=binding.tasks_root,
+        canonical=canonical,
+        content_hash=artifact_content_hash,
+        maximum_bytes=MAX_MODEL_EVIDENCE_JSON_BYTES,
+    )
 
 
 def _validate_inputs(value: object) -> dict[str, Any]:
@@ -1922,14 +2056,61 @@ def _read_verified(
     budget_error: str = "artifact exceeds byte budget",
 ) -> bytes:
     _require_regular_path(path, root=root)
+    descriptor = -1
     try:
-        size = path.stat().st_size
-        if size > maximum_bytes:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise StrategyError("artifact path is not a regular file")
+        if before.st_size < 0 or before.st_size > maximum_bytes:
             raise StrategyError(budget_error)
-        raw = path.read_bytes()
+        chunks: list[bytes] = []
+        total = 0
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum_bytes:
+                raise StrategyError(budget_error)
+            digest.update(chunk)
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise StrategyError("artifact changed while being read")
+        live_path = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(live_path.st_mode)
+            or (live_path.st_dev, live_path.st_ino)
+            != (after.st_dev, after.st_ino)
+        ):
+            raise StrategyError("artifact registry path changed while being read")
     except OSError as exc:
         raise StrategyError("artifact could not be read") from exc
-    if len(raw) != size or not hmac.compare_digest(_sha256(raw), expected_hash):
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    raw = b"".join(chunks)
+    if (
+        len(raw) != before.st_size
+        or not hmac.compare_digest(digest.hexdigest(), expected_hash)
+    ):
         raise StrategyError("artifact content hash drifted")
     return raw
 
@@ -2128,6 +2309,7 @@ __all__ = [
     "MODEL_EVIDENCE_V2_TOOL_SCHEMA_VERSION",
     "StrategyModelEvidenceV2ArtifactBinding",
     "load_strategy_model_evidence_v2_artifact",
+    "require_strategy_model_evidence_v2_artifact_binding_on_connection",
     "run_materialize_model_evidence_v2",
     "validate_materialize_model_evidence_v2_tool_output",
 ]

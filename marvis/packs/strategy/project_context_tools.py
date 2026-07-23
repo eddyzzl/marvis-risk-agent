@@ -74,6 +74,8 @@ from marvis.packs.strategy.typed_backtest import (
 from marvis.repositories.audit import _write_audit_row
 from marvis.repositories.strategy_monitoring import (
     StrategyMonitoringRepository,
+    _plan_record_from_row,
+    _run_record_from_row,
 )
 from marvis.repositories.strategy_project_context import (
     StrategyProjectContextConflictError,
@@ -229,6 +231,21 @@ class _ExternalSnapshot:
     suffix: str
     content_hash: str
     content_size: int
+
+
+@dataclass(frozen=True)
+class StrategyProjectContextArtifactBinding:
+    """Authenticated current project-context revision for downstream writers."""
+
+    task_id: str
+    artifact_id: str
+    artifact_path: Path
+    artifact_content_hash: str
+    provenance: dict[str, Any]
+    revision: dict[str, Any]
+    tasks_root: Path
+    datasets_root: Path
+    db_path: Path
 
 
 def run_materialize_project_context(inputs, ctx, runtime) -> dict[str, Any]:
@@ -537,8 +554,25 @@ def load_current_strategy_project_context(
 ) -> dict[str, Any] | None:
     """Load current context, verifying its artifact and every still-live source."""
 
+    binding = load_current_strategy_project_context_artifact(
+        runtime,
+        task_id=task_id,
+    )
+    return None if binding is None else binding.revision
+
+
+def load_current_strategy_project_context_artifact(
+    runtime,
+    *,
+    task_id: str,
+) -> StrategyProjectContextArtifactBinding | None:
+    """Load and authenticate the current context as a downstream-safe binding."""
+
     normalized_task = _text(task_id, "task_id")
-    repository = StrategyProjectContextRepository(runtime.settings.db_path)
+    tasks_root = Path(runtime.settings.tasks_dir).absolute()
+    datasets_root = Path(runtime.settings.datasets_dir).absolute()
+    db_path = Path(runtime.settings.db_path).absolute()
+    repository = StrategyProjectContextRepository(db_path)
     with repository.transaction() as conn:
         conn.execute("BEGIN IMMEDIATE")
         current = StrategyProjectContextRepository.get_current_on_connection(
@@ -546,20 +580,108 @@ def load_current_strategy_project_context(
         )
         if current is None:
             return None
+        record = _context_artifact_record_on_connection(
+            conn,
+            tasks_root=tasks_root,
+            task_id=normalized_task,
+            revision_id=current["revision_id"],
+        )
         loaded = _load_revision_artifact_on_connection(
             conn,
-            tasks_root=Path(runtime.settings.tasks_dir),
+            tasks_root=tasks_root,
             task_id=normalized_task,
             revision=current,
         )
         _verify_live_refs(
             conn,
-            runtime=runtime,
-            tasks_root=Path(runtime.settings.tasks_dir),
+            tasks_root=tasks_root,
+            datasets_root=datasets_root,
             task_id=normalized_task,
             source_refs=loaded["state"]["source_refs"],
         )
-        return loaded
+        return StrategyProjectContextArtifactBinding(
+            task_id=normalized_task,
+            artifact_id=record["id"],
+            artifact_path=Path(record["path"]),
+            artifact_content_hash=record["content_hash"],
+            provenance=record["provenance"],
+            revision=loaded,
+            tasks_root=tasks_root,
+            datasets_root=datasets_root,
+            db_path=db_path,
+        )
+
+
+def require_strategy_project_context_artifact_binding_on_connection(
+    conn,
+    binding: StrategyProjectContextArtifactBinding,
+) -> None:
+    """Re-authenticate a current context while a downstream writer owns the lock."""
+
+    if not isinstance(binding, StrategyProjectContextArtifactBinding):
+        raise StrategyError("strategy project context artifact binding is invalid")
+    if not conn.in_transaction:
+        raise StrategyError(
+            "strategy project context binding requires a caller-owned transaction"
+        )
+    database = conn.execute(
+        "SELECT file FROM pragma_database_list WHERE name = 'main'"
+    ).fetchone()
+    if (
+        database is None
+        or not str(database["file"])
+        or Path(str(database["file"])).absolute() != binding.db_path
+    ):
+        raise StrategyError("strategy project context binding database changed")
+    task = conn.execute(
+        "SELECT id, task_type FROM tasks WHERE id = ?",
+        (binding.task_id,),
+    ).fetchone()
+    if (
+        task is None
+        or str(task["id"]) != binding.task_id
+        or str(task["task_type"]) != "strategy"
+    ):
+        raise StrategyError("strategy project context task ownership changed")
+    current = StrategyProjectContextRepository.get_current_on_connection(
+        conn, binding.task_id
+    )
+    if current is None or current != binding.revision:
+        raise StrategyError("strategy project context revision is no longer current")
+    record = _context_artifact_record_on_connection(
+        conn,
+        tasks_root=binding.tasks_root,
+        task_id=binding.task_id,
+        revision_id=binding.revision["revision_id"],
+    )
+    expected_record = {
+        "id": binding.artifact_id,
+        "task_id": binding.task_id,
+        "kind": PROJECT_CONTEXT_ARTIFACT_KIND,
+        "path": str(binding.artifact_path),
+        "content_hash": binding.artifact_content_hash,
+        "origin_tool": PROJECT_CONTEXT_ORIGIN_TOOL,
+        "provenance": binding.provenance,
+    }
+    if any(record[field] != value for field, value in expected_record.items()):
+        raise StrategyError(
+            "strategy project context artifact registry binding changed"
+        )
+    loaded = _load_revision_artifact_on_connection(
+        conn,
+        tasks_root=binding.tasks_root,
+        task_id=binding.task_id,
+        revision=current,
+    )
+    if loaded != binding.revision:
+        raise StrategyError("strategy project context canonical payload changed")
+    _verify_live_refs(
+        conn,
+        tasks_root=binding.tasks_root,
+        datasets_root=binding.datasets_root,
+        task_id=binding.task_id,
+        source_refs=loaded["state"]["source_refs"],
+    )
 
 
 def validate_materialize_project_context_tool_output(
@@ -2609,8 +2731,8 @@ def _external_records_on_connection(
 def _verify_live_refs(
     conn,
     *,
-    runtime,
     tasks_root: Path,
+    datasets_root: Path,
     task_id: str,
     source_refs: Sequence[Mapping[str, Any]],
 ) -> None:
@@ -2631,8 +2753,8 @@ def _verify_live_refs(
             if row is not None and str(row["task_id"]) == task_id:
                 actual = _hash(row["content_hash"], "dataset.content_hash")
                 _verify_regular_file(
-                    Path(runtime.settings.datasets_dir) / str(row["source_path"]),
-                    root=Path(runtime.settings.datasets_dir),
+                    datasets_root / str(row["source_path"]),
+                    root=datasets_root,
                     expected_hash=actual,
                 )
         elif kind == "workspace":
@@ -2643,7 +2765,7 @@ def _verify_live_refs(
                 datasets, by_id = _discover_datasets(
                     conn,
                     task_id=task_id,
-                    datasets_root=Path(runtime.settings.datasets_dir),
+                    datasets_root=datasets_root,
                 )
                 workspace = _discover_workspace(
                     conn, task_id=task_id, dataset_by_id=by_id
@@ -2670,15 +2792,19 @@ def _verify_live_refs(
                 ).to_dict()
                 actual = _sha256_json(payload)
         elif kind == "monitoring_plan":
-            record = StrategyMonitoringRepository(runtime.settings.db_path).get_plan(
-                ref_id
+            row = conn.execute(
+                "SELECT * FROM strategy_monitoring_plans WHERE id = ?",
+                (ref_id,),
+            ).fetchone()
+            actual = (
+                None if row is None else _plan_record_from_row(row).payload_hash
             )
-            actual = None if record is None else record.payload_hash
         elif kind == "monitoring_run":
-            record = StrategyMonitoringRepository(runtime.settings.db_path).get_run(
-                ref_id
-            )
-            actual = None if record is None else record.result_hash
+            row = conn.execute(
+                "SELECT * FROM strategy_monitoring_runs WHERE id = ?",
+                (ref_id,),
+            ).fetchone()
+            actual = None if row is None else _run_record_from_row(row).result_hash
         elif kind in {
             "task_artifact",
             "external_report",
@@ -2957,8 +3083,11 @@ __all__ = [
     "PROJECT_CONTEXT_EXTERNAL_ARTIFACT_KIND",
     "PROJECT_CONTEXT_ORIGIN_TOOL",
     "PROJECT_CONTEXT_TOOL_SCHEMA_VERSION",
+    "StrategyProjectContextArtifactBinding",
     "load_current_strategy_project_context",
+    "load_current_strategy_project_context_artifact",
     "load_strategy_project_context_revision_for_audit",
+    "require_strategy_project_context_artifact_binding_on_connection",
     "run_materialize_project_context",
     "validate_materialize_project_context_tool_output",
 ]
