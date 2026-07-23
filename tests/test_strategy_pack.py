@@ -385,7 +385,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         assert tool.input_schema["additionalProperties"] is False
         assert tool.output_schema["additionalProperties"] is False
     assert sample_v2_tool.output_schema["properties"]["schema_version"] == {
-        "const": "strategy.materialize-sample-design-v2-tool.v1"
+        "const": "strategy.materialize-sample-design-v2-tool.v2"
     }
     assert sample_v2_tool.input_schema["properties"]["partitioning"]["oneOf"]
     assert sample_v2_tool.input_schema["$defs"]["predicate"]["oneOf"]
@@ -737,7 +737,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "read:dataset",
         "write:artifact",
     }
-    assert manifest.version == "0.13.0"
+    assert manifest.version == "0.14.0"
     assert "refined univariate asset" in add_pool_tool.summary
     assert "automatic-tree leaf selection" in add_pool_tool.summary
     assert "Voting n-of-k candidate" in add_pool_tool.summary
