@@ -4902,8 +4902,6 @@
           "title",
           "status",
           "report_revision",
-          "previous_report_id",
-          "previous_report_content_hash",
           "generated_at",
           "project_context_ref",
           "sample_design_ref",

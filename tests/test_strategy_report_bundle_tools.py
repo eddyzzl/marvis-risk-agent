@@ -17,6 +17,7 @@ from marvis.packs.strategy.pool_tools import (
     load_current_strategy_candidate_pool_artifact,
 )
 from marvis.packs.strategy.project_context_tools import (
+    load_current_strategy_project_context_artifact,
     run_materialize_project_context,
 )
 from marvis.packs.strategy.report_bundle_tools import (
@@ -166,6 +167,11 @@ def _setup(tmp_path: Path) -> dict:
     )
     impact_artifact = impact_output["artifacts"][0]
     design = v2_output["bundle"]["sample_design"]
+    project_context = load_current_strategy_project_context_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+    )
+    assert project_context is not None
     request = {
         "title": "准入策略迭代报告",
         "status": "partial",
@@ -173,6 +179,15 @@ def _setup(tmp_path: Path) -> dict:
         "previous_report_id": None,
         "previous_report_content_hash": None,
         "generated_at": "2026-07-23T08:00:00+00:00",
+        "project_context_ref": {
+            "artifact_id": project_context.artifact_id,
+            "expected_artifact_content_hash": (
+                project_context.artifact_content_hash
+            ),
+            "expected_revision": project_context.revision["revision"],
+            "expected_revision_id": project_context.revision["revision_id"],
+            "expected_state_hash": project_context.revision["state_hash"],
+        },
         "sample_design_ref": {
             "membership_artifact_id": membership_record["id"],
             "expected_membership_artifact_content_hash": membership_record[
@@ -285,6 +300,33 @@ def test_build_report_bundle_publishes_three_exact_governed_outputs(
     validate_against_schema(output, tool.output_schema, label="report bundle output")
 
 
+def test_first_report_revision_defaults_omitted_previous_head_to_null(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    fixture["request"].pop("previous_report_id")
+    fixture["request"].pop("previous_report_content_hash")
+
+    output = _run(fixture)
+
+    assert output["report_revision"] == 1
+    assert output["bundle"]["previous_report_id"] is None
+    assert validate_build_strategy_report_bundle_v2_tool_output(output) == output
+    tool = next(
+        item
+        for item in load_manifest(
+            Path(__file__).parents[1] / "marvis" / "packs" / "strategy",
+            builtin=True,
+        ).tools
+        if item.name == "build_report_bundle_v2"
+    )
+    validate_against_schema(
+        fixture["request"],
+        tool.input_schema,
+        label="report bundle input without previous head",
+    )
+
+
 def test_build_report_bundle_exact_retry_is_idempotent_and_validator_is_strict(
     tmp_path: Path,
 ) -> None:
@@ -395,6 +437,54 @@ def test_build_report_bundle_revalidates_source_tamper_before_commit(
         tampering_render,
     )
     with pytest.raises(StrategyError, match="impact|artifact|hash|bytes"):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
+def test_build_report_bundle_never_rebinds_a_planned_project_context(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    previous = load_current_strategy_project_context_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+    )
+    assert previous is not None
+    message = TaskRepository(fixture["settings"].db_path).add_agent_message(
+        fixture["task"].id,
+        role="user",
+        stage="chat",
+        content="补充项目目标：控制准入风险并保持通过率稳定。",
+    )
+    run_materialize_project_context(
+        {
+            "expected_revision": previous.revision["revision"],
+            "expected_revision_id": previous.revision["revision_id"],
+            "expected_state_hash": previous.revision["state_hash"],
+            "user_message_ref": {
+                "message_id": message["id"],
+                "content_hash": hashlib.sha256(
+                    message["content"].encode("utf-8")
+                ).hexdigest(),
+            },
+            "as_of": "2026-07-23",
+            "scope": "贷前准入策略",
+            "business_context": {
+                "project.goal": "控制准入风险并保持通过率稳定"
+            },
+            "explicit_unavailable": [],
+            "external_report_filenames": [],
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    with pytest.raises(
+        StrategyError,
+        match="project context.*exact planned revision",
+    ):
         _run(fixture)
 
     assert _report_rows(fixture) == []

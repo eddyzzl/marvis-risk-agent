@@ -92,7 +92,7 @@ from marvis.repositories.task_artifacts import (
 
 
 BUILD_STRATEGY_REPORT_BUNDLE_V2_TOOL_SCHEMA_VERSION = (
-    "strategy.build-report-bundle-v2-tool.v1"
+    "strategy.build-report-bundle-v2-tool.v2"
 )
 BUILD_STRATEGY_REPORT_BUNDLE_V2_AUDIT_KIND = (
     "strategy.report_bundle.published"
@@ -107,6 +107,7 @@ _INPUT_FIELDS = frozenset(
         "previous_report_id",
         "previous_report_content_hash",
         "generated_at",
+        "project_context_ref",
         "sample_design_ref",
         "candidate_pool_ref",
         "pool_impact_ref",
@@ -121,15 +122,23 @@ _REQUIRED_INPUT_FIELDS = frozenset(
         "title",
         "status",
         "report_revision",
-        "previous_report_id",
-        "previous_report_content_hash",
         "generated_at",
+        "project_context_ref",
         "sample_design_ref",
         "candidate_pool_ref",
         "pool_impact_ref",
     }
 )
 _OPTIONAL_INPUT_FIELDS = _INPUT_FIELDS - _REQUIRED_INPUT_FIELDS
+_PROJECT_CONTEXT_REF_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "expected_artifact_content_hash",
+        "expected_revision",
+        "expected_revision_id",
+        "expected_state_hash",
+    }
+)
 _SAMPLE_REF_FIELDS = frozenset(
     {
         "membership_artifact_id",
@@ -417,6 +426,20 @@ def _load_sources(
     )
     if project_context is None:
         raise StrategyError("current strategy project context not found")
+    expected_project_context = {
+        "artifact_id": project_context.artifact_id,
+        "expected_artifact_content_hash": (
+            project_context.artifact_content_hash
+        ),
+        "expected_revision": project_context.revision["revision"],
+        "expected_revision_id": project_context.revision["revision_id"],
+        "expected_state_hash": project_context.revision["state_hash"],
+    }
+    if expected_project_context != request["project_context_ref"]:
+        raise StrategyError(
+            "current strategy project context no longer matches the exact "
+            "planned revision"
+        )
     sample_design = load_strategy_sample_design_v2_artifacts(
         runtime,
         task_id=task_id,
@@ -972,6 +995,9 @@ def _validate_inputs(value: object) -> dict[str, Any]:
         )
     request["previous_report_id"] = previous_id
     request["previous_report_content_hash"] = previous_hash
+    request["project_context_ref"] = _project_context_ref(
+        request["project_context_ref"]
+    )
     request["sample_design_ref"] = _sample_ref(request["sample_design_ref"])
     request["candidate_pool_ref"] = _pool_ref(request["candidate_pool_ref"])
     request["pool_impact_ref"] = _impact_ref(request["pool_impact_ref"])
@@ -1004,6 +1030,44 @@ def _validate_inputs(value: object) -> dict[str, Any]:
             "training evidence must reference the selected sample-design V2"
         )
     return request
+
+
+def _project_context_ref(value: object) -> dict[str, Any]:
+    obj = _exact_object(
+        value,
+        _PROJECT_CONTEXT_REF_FIELDS,
+        "project_context_ref",
+    )
+    revision_id = _text(
+        obj["expected_revision_id"],
+        "project_context_ref.expected_revision_id",
+    )
+    if re.fullmatch(
+        r"strategy-project-context-revision-[0-9a-f]{24}",
+        revision_id,
+    ) is None:
+        raise StrategyError(
+            "project_context_ref.expected_revision_id is not canonical"
+        )
+    return {
+        "artifact_id": _hash(
+            obj["artifact_id"],
+            "project_context_ref.artifact_id",
+        ),
+        "expected_artifact_content_hash": _hash(
+            obj["expected_artifact_content_hash"],
+            "project_context_ref.expected_artifact_content_hash",
+        ),
+        "expected_revision": _positive_int(
+            obj["expected_revision"],
+            "project_context_ref.expected_revision",
+        ),
+        "expected_revision_id": revision_id,
+        "expected_state_hash": _hash(
+            obj["expected_state_hash"],
+            "project_context_ref.expected_state_hash",
+        ),
+    }
 
 
 def _sample_ref(value: object) -> dict[str, Any]:
