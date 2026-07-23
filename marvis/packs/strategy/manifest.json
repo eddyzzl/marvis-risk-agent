@@ -1,8 +1,8 @@
 {
   "name": "strategy",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "display_name": "Strategy Pack",
-  "description": "Vintage, roll-rate, profitability, governed sample design, univariate, automatic-tree, Voting n-of-k, and complete two-dimensional Cross Matrix candidate development with explicit leaf and Cross cell-group materialization, Strategy Pool assembly, independent validation/OOT replay evidence, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
+  "description": "Vintage, roll-rate, profitability, governed sample design, univariate, automatic-tree, Voting n-of-k, and complete two-dimensional Cross Matrix candidate development with explicit leaf and Cross cell-group materialization, Strategy Pool assembly, unified deterministic ImpactCube and independent validation/OOT replay evidence, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
   "python_requires": ">=3.10,<3.14",
   "tools": [
@@ -4622,6 +4622,307 @@
         "write:artifact"
       ],
       "memory_limit_mb": 2048
+    },
+    {
+      "name": "measure_strategy_impact_cube",
+      "summary": "Measure one exact current Strategy Pool across governed risk partitions and publish immutable aggregate-only ImpactSlice and ImpactCube evidence for all five typed strategy families.",
+      "input_schema": {
+        "type": "object",
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "pool_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_pool_id": {
+                "type": "string",
+                "pattern": "^strategy-pool-[0-9a-f]{32}$"
+              },
+              "expected_revision": {"type": "integer", "minimum": 1},
+              "expected_revision_id": {
+                "type": "string",
+                "pattern": "^strategy-pool-revision-[0-9a-f]{32}$"
+              },
+              "expected_snapshot_hash": {"$ref": "#/$defs/sha256"}
+            },
+            "required": [
+              "artifact_id",
+              "expected_artifact_content_hash",
+              "expected_pool_id",
+              "expected_revision",
+              "expected_revision_id",
+              "expected_snapshot_hash"
+            ],
+            "additionalProperties": false
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "membership_artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_membership_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "bundle_artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_bundle_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_bundle_id": {"type": "string", "minLength": 1},
+              "expected_sample_design_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "membership_artifact_id",
+              "expected_membership_artifact_content_hash",
+              "bundle_artifact_id",
+              "expected_bundle_artifact_content_hash",
+              "expected_bundle_id",
+              "expected_sample_design_id",
+              "expected_sample_design_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "column_binding": {
+            "type": "object",
+            "properties": {
+              "kind": {"const": "column"},
+              "column": {"type": "string", "minLength": 1}
+            },
+            "required": ["kind", "column"],
+            "additionalProperties": false
+          },
+          "scalar_binding": {
+            "type": "object",
+            "properties": {
+              "kind": {"const": "scalar"},
+              "value": {"type": "number"}
+            },
+            "required": ["kind", "value"],
+            "additionalProperties": false
+          }
+        },
+        "properties": {
+          "strategy_type": {
+            "type": "string",
+            "enum": [
+              "approval",
+              "reject",
+              "limit",
+              "pricing",
+              "segmentation"
+            ]
+          },
+          "pool_ref": {"$ref": "#/$defs/pool_ref"},
+          "sample_design_ref": {"$ref": "#/$defs/sample_design_ref"},
+          "partitions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["development", "validation", "oot"]
+            },
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": true
+          },
+          "population": {"const": "risk"},
+          "dimension_bindings": {
+            "type": "object",
+            "properties": {
+              "month_col": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "group_col": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "segment_col": {
+                "type": ["string", "null"],
+                "minLength": 1
+              }
+            },
+            "required": ["month_col", "group_col", "segment_col"],
+            "additionalProperties": false
+          },
+          "current_strategy_ref": {
+            "oneOf": [
+              {"type": "null"},
+              {
+                "type": "object",
+                "properties": {
+                  "strategy_id": {"type": "string", "minLength": 1},
+                  "expected_strategy_spec_hash": {
+                    "$ref": "#/$defs/sha256"
+                  }
+                },
+                "required": [
+                  "strategy_id",
+                  "expected_strategy_spec_hash"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "economics_inputs": {
+            "oneOf": [
+              {"type": "null"},
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "oneOf": [
+                    {"$ref": "#/$defs/column_binding"},
+                    {"$ref": "#/$defs/scalar_binding"}
+                  ]
+                },
+                "maxProperties": 16
+              }
+            ]
+          }
+        },
+        "required": [
+          "strategy_type",
+          "pool_ref",
+          "sample_design_ref",
+          "partitions",
+          "population",
+          "dimension_bindings",
+          "current_strategy_ref",
+          "economics_inputs"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.measure-impact-cube-tool.v1"
+          },
+          "cube_id": {
+            "type": "string",
+            "pattern": "^strategy-impact-cube-[0-9a-f]{24}$"
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "pool_id": {
+            "type": "string",
+            "pattern": "^strategy-pool-[0-9a-f]{32}$"
+          },
+          "pool_revision": {"type": "integer", "minimum": 1},
+          "pool_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "strategy_type": {
+            "type": "string",
+            "enum": [
+              "approval",
+              "reject",
+              "limit",
+              "pricing",
+              "segmentation"
+            ]
+          },
+          "partitions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["development", "validation", "oot"]
+            },
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": true
+          },
+          "slice_count": {"type": "integer", "minimum": 1},
+          "cube": {"type": "object", "minProperties": 1},
+          "warnings": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "artifact": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "kind": {"const": "strategy_impact_cube_json"},
+              "format": {"const": "json"},
+              "filename": {
+                "type": "string",
+                "pattern": "^strategy-impact-cube-[0-9a-f]{24}\\.json$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "download_url": {"type": "string", "minLength": 1}
+            },
+            "required": [
+              "artifact_id",
+              "kind",
+              "format",
+              "filename",
+              "content_hash",
+              "download_url"
+            ],
+            "additionalProperties": false
+          },
+          "not_mutated_pool": {"const": true},
+          "not_created_strategy": {"const": true},
+          "not_adopted": {"const": true},
+          "not_promoted": {"const": true},
+          "not_deployed": {"const": true}
+        },
+        "required": [
+          "schema_version",
+          "cube_id",
+          "content_hash",
+          "pool_id",
+          "pool_revision",
+          "pool_snapshot_hash",
+          "strategy_type",
+          "partitions",
+          "slice_count",
+          "cube",
+          "warnings",
+          "artifact",
+          "not_mutated_pool",
+          "not_created_strategy",
+          "not_adopted",
+          "not_promoted",
+          "not_deployed"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_measure_strategy_impact_cube",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:artifacts",
+        "read:task",
+        "read:dataset",
+        "read:strategy",
+        "write:artifact"
+      ],
+      "memory_limit_mb": 4096
     },
     {
       "name": "build_report_bundle_v2",

@@ -44,6 +44,14 @@ from marvis.packs.strategy.evaluator import (
     evaluate_strategy_rows,
 )
 from marvis.packs.strategy.economics import limit_metrics, pricing_metrics
+from marvis.packs.strategy.impact_cube import (
+    STRATEGY_IMPACT_CUBE_PRODUCER_VERSION,
+    STRATEGY_IMPACT_CUBE_SCHEMA_VERSION,
+    STRATEGY_IMPACT_SLICE_SCHEMA_VERSION,
+    build_strategy_impact_cube,
+    canonical_strategy_impact_cube_json,
+    validate_strategy_impact_cube,
+)
 from marvis.packs.strategy.pricing import (
     LimitPricingResult,
     PricingCell,
@@ -100,6 +108,9 @@ __all__ = [
     "ScoreBand",
     "STRATEGY_DSL_SCHEMA_VERSION",
     "STRATEGY_BACKTEST_SCHEMA_VERSION",
+    "STRATEGY_IMPACT_CUBE_PRODUCER_VERSION",
+    "STRATEGY_IMPACT_CUBE_SCHEMA_VERSION",
+    "STRATEGY_IMPACT_SLICE_SCHEMA_VERSION",
     "STRATEGY_POOL_IMPACT_PRODUCER_VERSION",
     "STRATEGY_POOL_IMPACT_SCHEMA_VERSION",
     "STRATEGY_POOL_VALIDATION_PRODUCER_VERSION",
@@ -120,9 +131,11 @@ __all__ = [
     "backtest_record_payload",
     "build_strategy",
     "build_strategy_from_spec",
+    "build_strategy_impact_cube",
     "build_strategy_pool_impact_assessment",
     "build_strategy_pool_validation_evidence",
     "canonical_strategy_json",
+    "canonical_strategy_impact_cube_json",
     "canonical_strategy_pool_impact_json",
     "canonical_strategy_pool_validation_json",
     "compare_strategies",
@@ -141,6 +154,7 @@ __all__ = [
     "tradeoff_view",
     "validate_strategy_pool_impact_assessment",
     "validate_strategy_pool_validation_evidence",
+    "validate_strategy_impact_cube",
     "vintage_curve",
     "vintage_summary",
     "CandidateRule",

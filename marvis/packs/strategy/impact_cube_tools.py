@@ -1,0 +1,1795 @@
+"""Governed Tool boundary for unified deterministic Strategy ImpactCube evidence."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+import hashlib
+import hmac
+import json
+import math
+from numbers import Integral, Real
+import os
+from pathlib import Path
+import re
+import stat
+import tempfile
+from typing import Any
+from urllib.parse import quote
+
+import numpy as np
+import pandas as pd
+
+from marvis.artifacts import ArtifactUnitOfWork
+from marvis.artifacts.transactional import ArtifactTransactionError
+from marvis.packs.strategy.dsl import (
+    StrategySpec,
+    strategy_spec_hash,
+)
+from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.impact_cube import (
+    MAX_IMPACT_CUBE_JSON_BYTES,
+    STRATEGY_IMPACT_CUBE_PRODUCER_VERSION,
+    build_strategy_impact_cube,
+    canonical_strategy_impact_cube_json,
+    validate_strategy_impact_cube,
+)
+from marvis.packs.strategy.pool_tools import (
+    StrategyCandidatePoolArtifactBinding,
+    load_current_strategy_candidate_pool_artifact,
+    require_strategy_candidate_pool_artifact_binding_on_connection,
+)
+from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
+from marvis.packs.strategy.sample_design_v2_tools import (
+    StrategySampleDesignV2ArtifactBinding,
+    load_strategy_sample_design_v2_artifacts,
+    require_strategy_sample_design_v2_artifact_binding_on_connection,
+)
+from marvis.repositories.strategy import (
+    _strategy_from_row,
+    _strategy_spec_hash_from_row,
+)
+from marvis.repositories.task_artifacts import (
+    TaskArtifactConflictError,
+    TaskArtifactDataError,
+    TaskArtifactNotFoundError,
+)
+
+
+IMPACT_CUBE_TOOL_SCHEMA_VERSION = "strategy.measure-impact-cube-tool.v1"
+IMPACT_CUBE_ARTIFACT_KIND = "strategy_impact_cube_json"
+IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION = "strategy.impact-cube-artifact.v1"
+IMPACT_CUBE_ORIGIN_TOOL = "strategy.measure_strategy_impact_cube"
+
+_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_POOL_ID_RE = re.compile(r"^strategy-pool-[0-9a-f]{32}$")
+_POOL_REVISION_ID_RE = re.compile(
+    r"^strategy-pool-revision-[0-9a-f]{32}$"
+)
+_PARTITION_ORDER = ("development", "validation", "oot")
+_PARTITIONS = frozenset(_PARTITION_ORDER)
+_STRATEGY_TYPES = frozenset(
+    {"approval", "reject", "limit", "pricing", "segmentation"}
+)
+_INPUT_FIELDS = frozenset(
+    {
+        "strategy_type",
+        "pool_ref",
+        "sample_design_ref",
+        "partitions",
+        "population",
+        "dimension_bindings",
+        "current_strategy_ref",
+        "economics_inputs",
+    }
+)
+_POOL_REF_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "expected_artifact_content_hash",
+        "expected_pool_id",
+        "expected_revision",
+        "expected_revision_id",
+        "expected_snapshot_hash",
+    }
+)
+_SAMPLE_DESIGN_REF_FIELDS = frozenset(
+    {
+        "membership_artifact_id",
+        "expected_membership_artifact_content_hash",
+        "bundle_artifact_id",
+        "expected_bundle_artifact_content_hash",
+        "expected_bundle_id",
+        "expected_sample_design_id",
+        "expected_sample_design_content_hash",
+    }
+)
+_DIMENSION_FIELDS = frozenset(
+    {"month_col", "group_col", "segment_col"}
+)
+_DATASET_BINDING_FIELDS = frozenset(
+    {
+        "task_id",
+        "dataset_id",
+        "dataset_content_hash",
+        "dataset_source_path",
+        "dataset_registry_metadata_hash",
+        "workspace_revision",
+        "workspace_generation",
+        "semantic_mapping_hash",
+    }
+)
+_TARGET_BINDING_FIELDS = frozenset(
+    {"column", "good_value", "bad_value", "missing_policy"}
+)
+_CURRENT_REQUEST_FIELDS = frozenset(
+    {"strategy_id", "expected_strategy_spec_hash"}
+)
+_OUTPUT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "cube_id",
+        "content_hash",
+        "pool_id",
+        "pool_revision",
+        "pool_snapshot_hash",
+        "strategy_type",
+        "partitions",
+        "slice_count",
+        "cube",
+        "warnings",
+        "artifact",
+        "not_mutated_pool",
+        "not_created_strategy",
+        "not_adopted",
+        "not_promoted",
+        "not_deployed",
+    }
+)
+_OUTPUT_ARTIFACT_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "kind",
+        "format",
+        "filename",
+        "content_hash",
+        "download_url",
+    }
+)
+_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "producer_version",
+        "task_id",
+        "cube_id",
+        "cube_content_hash",
+        "pool_ref",
+        "sample_design_ref",
+        "dataset_binding",
+        "target_binding",
+        "dimension_bindings",
+        "current_strategy_ref",
+        "economics_inputs",
+        "partitions",
+        "population",
+        "lifecycle",
+    }
+)
+_LIFECYCLE = {
+    "mutates_pool": False,
+    "creates_strategy": False,
+    "adopts_strategy": False,
+    "promotes_strategy": False,
+    "deploys_strategy": False,
+}
+_TASK_ARTIFACT_ROW_FIELDS = (
+    "id",
+    "task_id",
+    "kind",
+    "path",
+    "content_hash",
+    "origin_tool",
+    "provenance_json",
+    "created_at",
+)
+_MAX_ECONOMIC_COMPONENTS = 16
+_BOUNDARY_ERRORS = (
+    ArtifactTransactionError,
+    TaskArtifactConflictError,
+    TaskArtifactDataError,
+    TaskArtifactNotFoundError,
+)
+
+
+@dataclass(frozen=True)
+class _CurrentStrategyBinding:
+    strategy_id: str
+    strategy_type: str
+    spec: StrategySpec
+    spec_hash: str
+
+
+def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
+    """Build and atomically publish one exact, aggregate-only ImpactCube."""
+
+    try:
+        request = _validate_inputs(inputs)
+        task_id = _text(ctx.task_id, "task_id")
+        pool = _load_pool_binding(
+            runtime,
+            task_id=task_id,
+            request=request,
+        )
+        sample = _load_sample_design_binding(
+            runtime,
+            task_id=task_id,
+            request=request,
+        )
+        semantics = _require_sample_contract(
+            pool=pool,
+            sample=sample,
+            partitions=request["partitions"],
+        )
+        current = _load_current_strategy(
+            runtime,
+            task_id=task_id,
+            strategy_type=request["strategy_type"],
+            value=request["current_strategy_ref"],
+        )
+        _require_bindings_under_lock(
+            runtime,
+            pool=pool,
+            sample=sample,
+            current=current,
+            task_id=task_id,
+        )
+        frames = _read_partition_frames(
+            runtime,
+            pool=pool,
+            sample=sample,
+            current=current,
+            request=request,
+            target_col=semantics["target_col"],
+        )
+        cube = build_strategy_impact_cube(
+            pool=pool.pool,
+            partition_frames=frames,
+            pool_artifact_ref={
+                "artifact_id": pool.artifact_id,
+                "artifact_content_hash": pool.artifact_content_hash,
+            },
+            sample_design_v2_ref=_sample_design_evidence_ref(
+                sample,
+                partitions=request["partitions"],
+            ),
+            dataset_binding=_dataset_evidence_binding(sample),
+            legacy_development_ref=semantics["legacy_development_ref"],
+            target_col=semantics["target_col"],
+            target_bad_value=semantics["target_bad_value"],
+            month_col=request["dimension_bindings"]["month_col"],
+            group_col=request["dimension_bindings"]["group_col"],
+            segment_col=request["dimension_bindings"]["segment_col"],
+            current_strategy_spec=(
+                None if current is None else current.spec
+            ),
+            current_strategy_ref=(
+                None
+                if current is None
+                else {
+                    "strategy_id": current.strategy_id,
+                    "strategy_type": current.strategy_type,
+                    "strategy_spec_hash": current.spec_hash,
+                }
+            ),
+            economics_bindings=request["economics_inputs"],
+        )
+        _require_dataset_unchanged(sample)
+        return _persist_cube(
+            runtime,
+            task_id=task_id,
+            request=request,
+            pool=pool,
+            sample=sample,
+            current=current,
+            cube=cube,
+        )
+    except StrategyError:
+        raise
+    except _BOUNDARY_ERRORS as exc:
+        raise StrategyError(str(exc)) from exc
+
+
+def validate_measure_strategy_impact_cube_tool_output(
+    value: object,
+) -> dict[str, Any]:
+    """Validate every cached scalar against the canonical embedded cube."""
+
+    obj = _json_object(value, "measure_strategy_impact_cube output")
+    _exact_fields(
+        obj,
+        _OUTPUT_FIELDS,
+        "measure_strategy_impact_cube output",
+    )
+    cube = validate_strategy_impact_cube(obj["cube"])
+    identity = cube["identity"]
+    expected = {
+        "schema_version": IMPACT_CUBE_TOOL_SCHEMA_VERSION,
+        "cube_id": cube["cube_id"],
+        "content_hash": cube["content_hash"],
+        "pool_id": identity["pool_id"],
+        "pool_revision": identity["revision"],
+        "pool_snapshot_hash": identity["snapshot_hash"],
+        "strategy_type": identity["strategy_type"],
+        "partitions": [row["name"] for row in cube["partitions"]],
+        "slice_count": len(cube["slices"]),
+    }
+    for field, expected_value in expected.items():
+        if obj[field] != expected_value:
+            raise StrategyError(
+                f"measure_strategy_impact_cube output {field} drifted"
+            )
+    warnings = [
+        str(flag["message"])
+        for flag in cube["red_flags"]
+        if flag["level"] in {"amber", "red"}
+    ]
+    if obj["warnings"] != warnings:
+        raise StrategyError(
+            "measure_strategy_impact_cube output warnings drifted"
+        )
+    for field in (
+        "not_mutated_pool",
+        "not_created_strategy",
+        "not_adopted",
+        "not_promoted",
+        "not_deployed",
+    ):
+        if obj[field] is not True:
+            raise StrategyError(
+                f"measure_strategy_impact_cube output {field} must be true"
+            )
+
+    artifact = _json_object(
+        obj["artifact"],
+        "measure_strategy_impact_cube artifact",
+    )
+    _exact_fields(
+        artifact,
+        _OUTPUT_ARTIFACT_FIELDS,
+        "measure_strategy_impact_cube artifact",
+    )
+    artifact_id = _hash(artifact["artifact_id"], "artifact_id")
+    canonical = canonical_strategy_impact_cube_json(cube).encode("utf-8")
+    expected_artifact = {
+        "artifact_id": artifact_id,
+        "kind": IMPACT_CUBE_ARTIFACT_KIND,
+        "format": "json",
+        "filename": f"{cube['cube_id']}.json",
+        "content_hash": hashlib.sha256(canonical).hexdigest(),
+        "download_url": (
+            f"/api/tasks/{quote(identity['task_id'], safe='')}"
+            f"/task-artifacts/{quote(artifact_id, safe='')}/download"
+            f"?expected_content_hash={hashlib.sha256(canonical).hexdigest()}"
+        ),
+    }
+    if artifact != expected_artifact:
+        raise StrategyError(
+            "measure_strategy_impact_cube artifact binding drifted"
+        )
+    obj["cube"] = cube
+    return obj
+
+
+def _validate_inputs(value: object) -> dict[str, Any]:
+    obj = _json_object(value, "measure_strategy_impact_cube inputs")
+    _exact_fields(
+        obj,
+        _INPUT_FIELDS,
+        "measure_strategy_impact_cube inputs",
+    )
+    strategy_type = _text(obj["strategy_type"], "strategy_type")
+    if strategy_type not in _STRATEGY_TYPES:
+        raise StrategyError("strategy_type is unsupported")
+    partitions = _partition_list(obj["partitions"])
+    if obj["population"] != "risk":
+        raise StrategyError("population must be risk")
+    return {
+        "strategy_type": strategy_type,
+        "pool_ref": _validate_pool_ref(obj["pool_ref"]),
+        "sample_design_ref": _validate_sample_design_ref(
+            obj["sample_design_ref"]
+        ),
+        "partitions": partitions,
+        "population": "risk",
+        "dimension_bindings": _validate_dimension_bindings(
+            obj["dimension_bindings"]
+        ),
+        "current_strategy_ref": _validate_current_strategy_ref(
+            obj["current_strategy_ref"]
+        ),
+        "economics_inputs": _validate_economics_inputs(
+            obj["economics_inputs"]
+        ),
+    }
+
+
+def _partition_list(value: object) -> list[str]:
+    rows = _list(value, "partitions")
+    if not rows or len(rows) > len(_PARTITION_ORDER):
+        raise StrategyError("partitions must select one to three partitions")
+    normalized = [_text(row, "partitions item") for row in rows]
+    if any(row not in _PARTITIONS for row in normalized):
+        raise StrategyError("partitions contain an unsupported partition")
+    if len(normalized) != len(set(normalized)):
+        raise StrategyError("partitions must not contain duplicates")
+    return [
+        partition
+        for partition in _PARTITION_ORDER
+        if partition in set(normalized)
+    ]
+
+
+def _validate_pool_ref(value: object) -> dict[str, Any]:
+    obj = _json_object(value, "pool_ref")
+    _exact_fields(obj, _POOL_REF_FIELDS, "pool_ref")
+    pool_id = _text(obj["expected_pool_id"], "pool_ref.expected_pool_id")
+    if _POOL_ID_RE.fullmatch(pool_id) is None:
+        raise StrategyError("pool_ref.expected_pool_id is invalid")
+    revision_id = _text(
+        obj["expected_revision_id"],
+        "pool_ref.expected_revision_id",
+    )
+    if _POOL_REVISION_ID_RE.fullmatch(revision_id) is None:
+        raise StrategyError("pool_ref.expected_revision_id is invalid")
+    return {
+        "artifact_id": _hash(
+            obj["artifact_id"],
+            "pool_ref.artifact_id",
+        ),
+        "expected_artifact_content_hash": _hash(
+            obj["expected_artifact_content_hash"],
+            "pool_ref.expected_artifact_content_hash",
+        ),
+        "expected_pool_id": pool_id,
+        "expected_revision": _positive_int(
+            obj["expected_revision"],
+            "pool_ref.expected_revision",
+        ),
+        "expected_revision_id": revision_id,
+        "expected_snapshot_hash": _hash(
+            obj["expected_snapshot_hash"],
+            "pool_ref.expected_snapshot_hash",
+        ),
+    }
+
+
+def _validate_sample_design_ref(value: object) -> dict[str, str]:
+    obj = _json_object(value, "sample_design_ref")
+    _exact_fields(
+        obj,
+        _SAMPLE_DESIGN_REF_FIELDS,
+        "sample_design_ref",
+    )
+    result: dict[str, str] = {}
+    for field in (
+        "membership_artifact_id",
+        "expected_membership_artifact_content_hash",
+        "bundle_artifact_id",
+        "expected_bundle_artifact_content_hash",
+        "expected_sample_design_content_hash",
+    ):
+        result[field] = _hash(obj[field], f"sample_design_ref.{field}")
+    for field in ("expected_bundle_id", "expected_sample_design_id"):
+        result[field] = _text(obj[field], f"sample_design_ref.{field}")
+    return result
+
+
+def _validate_dimension_bindings(value: object) -> dict[str, str | None]:
+    obj = _json_object(value, "dimension_bindings")
+    _exact_fields(obj, _DIMENSION_FIELDS, "dimension_bindings")
+    result = {
+        field: _optional_text(obj[field], f"dimension_bindings.{field}")
+        for field in sorted(_DIMENSION_FIELDS)
+    }
+    bound = [field for field in result.values() if field is not None]
+    if len(bound) != len(set(bound)):
+        raise StrategyError("dimension bindings must use distinct columns")
+    return result
+
+
+def _validate_current_strategy_ref(
+    value: object,
+) -> dict[str, str] | None:
+    if value is None:
+        return None
+    obj = _json_object(value, "current_strategy_ref")
+    _exact_fields(
+        obj,
+        _CURRENT_REQUEST_FIELDS,
+        "current_strategy_ref",
+    )
+    return {
+        "strategy_id": _text(
+            obj["strategy_id"],
+            "current_strategy_ref.strategy_id",
+        ),
+        "expected_strategy_spec_hash": _hash(
+            obj["expected_strategy_spec_hash"],
+            "current_strategy_ref.expected_strategy_spec_hash",
+        ),
+    }
+
+
+def _validate_economics_inputs(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    obj = _json_object(value, "economics_inputs")
+    if len(obj) > _MAX_ECONOMIC_COMPONENTS:
+        raise StrategyError("economics_inputs component budget exceeded")
+    result: dict[str, Any] = {}
+    for raw_name, raw_binding in obj.items():
+        name = _text(raw_name, "economics_inputs component")
+        binding = _json_object(
+            raw_binding,
+            f"economics_inputs.{name}",
+        )
+        kind = _text(
+            binding.get("kind"),
+            f"economics_inputs.{name}.kind",
+        )
+        if kind == "column":
+            _exact_fields(
+                binding,
+                frozenset({"kind", "column"}),
+                f"economics_inputs.{name}",
+            )
+            result[name] = {
+                "kind": "column",
+                "column": _text(
+                    binding["column"],
+                    f"economics_inputs.{name}.column",
+                ),
+            }
+        elif kind == "scalar":
+            _exact_fields(
+                binding,
+                frozenset({"kind", "value"}),
+                f"economics_inputs.{name}",
+            )
+            result[name] = {
+                "kind": "scalar",
+                "value": _finite_number(
+                    binding["value"],
+                    f"economics_inputs.{name}.value",
+                ),
+            }
+        else:
+            raise StrategyError(
+                f"economics_inputs.{name}.kind must be column or scalar"
+            )
+    return {name: result[name] for name in sorted(result)}
+
+
+def _load_pool_binding(
+    runtime,
+    *,
+    task_id: str,
+    request: Mapping[str, Any],
+) -> StrategyCandidatePoolArtifactBinding:
+    ref = request["pool_ref"]
+    binding = load_current_strategy_candidate_pool_artifact(
+        runtime,
+        task_id=task_id,
+        strategy_type=request["strategy_type"],
+        expected_pool_revision=ref["expected_revision"],
+        expected_pool_snapshot_hash=ref["expected_snapshot_hash"],
+        expected_artifact_id=ref["artifact_id"],
+        expected_artifact_content_hash=ref[
+            "expected_artifact_content_hash"
+        ],
+    )
+    if (
+        binding.pool["pool_id"] != ref["expected_pool_id"]
+        or binding.pool["revision_id"] != ref["expected_revision_id"]
+    ):
+        raise StrategyError("current Strategy Pool identity changed")
+    if not binding.pool["entries"]:
+        raise StrategyError("cannot measure an empty Strategy Pool")
+    if binding.compiled_design["requirements"]:
+        raise StrategyError(
+            "ImpactCube cannot execute unresolved Pool requirements"
+        )
+    return binding
+
+
+def _load_sample_design_binding(
+    runtime,
+    *,
+    task_id: str,
+    request: Mapping[str, Any],
+) -> StrategySampleDesignV2ArtifactBinding:
+    ref = request["sample_design_ref"]
+    return load_strategy_sample_design_v2_artifacts(
+        runtime,
+        task_id=task_id,
+        membership_artifact_id=ref["membership_artifact_id"],
+        expected_membership_artifact_content_hash=ref[
+            "expected_membership_artifact_content_hash"
+        ],
+        bundle_artifact_id=ref["bundle_artifact_id"],
+        expected_bundle_artifact_content_hash=ref[
+            "expected_bundle_artifact_content_hash"
+        ],
+        expected_bundle_id=ref["expected_bundle_id"],
+        expected_sample_design_id=ref["expected_sample_design_id"],
+        expected_sample_design_content_hash=ref[
+            "expected_sample_design_content_hash"
+        ],
+    )
+
+
+def _require_sample_contract(
+    *,
+    pool: StrategyCandidatePoolArtifactBinding,
+    sample: StrategySampleDesignV2ArtifactBinding,
+    partitions: Sequence[str],
+) -> dict[str, Any]:
+    from marvis.packs.strategy import pool_impact_tools
+
+    design = sample.bundle["sample_design"]
+    target = design["target_selector"]
+    if target["status"] != "resolved":
+        raise StrategyError(
+            "ImpactCube requires a resolved V2 target selector"
+        )
+    if design["sample_semantics"]["scope"] != "strategy_development":
+        raise StrategyError("ImpactCube requires governed strategy scope")
+    risk = next(
+        item
+        for item in sample.bundle["populations"]
+        if item["role"] == "risk"
+    )
+    if risk["maturity_evidence"]["status"] != "confirmed_matured":
+        raise StrategyError(
+            "ImpactCube requires confirmed_matured risk outcomes"
+        )
+    counts = sample.membership["header"]["counts"]["risk"]
+    for partition in partitions:
+        if counts[partition] == 0:
+            raise StrategyError(
+                f"ImpactCube {partition} partition is empty"
+            )
+
+    legacy_ref = StrategySampleDesignRef.from_value(
+        design["compatibility"]["legacy_development_ref"]
+    )
+    if legacy_ref != sample.source_binding.legacy.reference:
+        raise StrategyError(
+            "StrategySampleDesign V2 legacy development mapping changed"
+        )
+    for lineage in pool.lineages:
+        if pool_impact_tools._lineage_sample_design_ref(
+            lineage
+        ) != legacy_ref:
+            raise StrategyError(
+                "Strategy Pool source lineage does not match the exact "
+                "StrategySampleDesign V2 legacy development ref"
+            )
+        if pool_impact_tools._lineage_target_col(lineage) != target["column"]:
+            raise StrategyError(
+                "Strategy Pool source target does not match "
+                "StrategySampleDesign V2"
+            )
+    if (
+        sample.source_binding.legacy.target_col != target["column"]
+        or sample.source_binding.legacy.target_bad_value
+        != target["bad_value"]
+    ):
+        raise StrategyError(
+            "StrategySampleDesign V2 target polarity changed from legacy lineage"
+        )
+    return {
+        "legacy_development_ref": legacy_ref.to_ref_dict(),
+        "target_col": target["column"],
+        "target_bad_value": target["bad_value"],
+    }
+
+
+def _load_current_strategy(
+    runtime,
+    *,
+    task_id: str,
+    strategy_type: str,
+    value: Mapping[str, str] | None,
+) -> _CurrentStrategyBinding | None:
+    if value is None:
+        return None
+    strategy_id = value["strategy_id"]
+    strategy = runtime.strategies.get_strategy(strategy_id)
+    meta = runtime.strategies.get_strategy_meta(strategy_id)
+    stored_hash = runtime.strategies.get_strategy_spec_hash(strategy_id)
+    if (
+        strategy is None
+        or meta is None
+        or strategy.spec is None
+        or not isinstance(stored_hash, str)
+        or meta.get("task_id") != task_id
+    ):
+        raise StrategyError(
+            "current strategy is not owned by the current task"
+        )
+    if (
+        strategy.strategy_type != strategy_type
+        or meta.get("strategy_type") != strategy_type
+    ):
+        raise StrategyError("current strategy type must match the Pool")
+    calculated = strategy_spec_hash(strategy.spec)
+    if (
+        not hmac.compare_digest(stored_hash, calculated)
+        or not hmac.compare_digest(
+            stored_hash,
+            value["expected_strategy_spec_hash"],
+        )
+    ):
+        raise StrategyError("current strategy spec hash changed")
+    return _CurrentStrategyBinding(
+        strategy_id=strategy.id,
+        strategy_type=strategy.strategy_type,
+        spec=strategy.spec,
+        spec_hash=stored_hash,
+    )
+
+
+def _require_bindings_under_lock(
+    runtime,
+    *,
+    pool: StrategyCandidatePoolArtifactBinding,
+    sample: StrategySampleDesignV2ArtifactBinding,
+    current: _CurrentStrategyBinding | None,
+    task_id: str,
+) -> None:
+    with runtime.task_artifacts.transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _require_bindings_on_connection(
+            conn,
+            pool=pool,
+            sample=sample,
+            current=current,
+            task_id=task_id,
+        )
+        _require_dataset_unchanged(sample)
+        conn.commit()
+
+
+def _require_bindings_on_connection(
+    conn,
+    *,
+    pool: StrategyCandidatePoolArtifactBinding,
+    sample: StrategySampleDesignV2ArtifactBinding,
+    current: _CurrentStrategyBinding | None,
+    task_id: str,
+) -> None:
+    require_strategy_candidate_pool_artifact_binding_on_connection(conn, pool)
+    require_strategy_sample_design_v2_artifact_binding_on_connection(
+        conn,
+        sample,
+    )
+    _require_current_on_connection(
+        conn,
+        current=current,
+        task_id=task_id,
+    )
+
+
+def _require_current_on_connection(
+    conn,
+    *,
+    current: _CurrentStrategyBinding | None,
+    task_id: str,
+) -> None:
+    if current is None:
+        return
+    row = conn.execute(
+        """
+        SELECT id, task_id, strategy_type, rules_json, score_col,
+               default_decision_json, description, created_at,
+               dsl_json, dsl_schema_version, dsl_content_hash
+          FROM strategies
+         WHERE id = ?
+        """,
+        (current.strategy_id,),
+    ).fetchone()
+    if row is None or str(row["task_id"]) != task_id:
+        raise StrategyError(
+            "current strategy changed before ImpactCube publication"
+        )
+    strategy = _strategy_from_row(row)
+    stored_hash = _strategy_spec_hash_from_row(row)
+    if (
+        strategy.strategy_type != current.strategy_type
+        or strategy.spec is None
+        or strategy.spec.to_dict() != current.spec.to_dict()
+        or not hmac.compare_digest(stored_hash, current.spec_hash)
+    ):
+        raise StrategyError(
+            "current strategy changed before ImpactCube publication"
+        )
+
+
+def _read_partition_frames(
+    runtime,
+    *,
+    pool: StrategyCandidatePoolArtifactBinding,
+    sample: StrategySampleDesignV2ArtifactBinding,
+    current: _CurrentStrategyBinding | None,
+    request: Mapping[str, Any],
+    target_col: str,
+) -> dict[str, pd.DataFrame]:
+    path = sample.source_binding.dataset_path
+    _require_dataset_path(
+        path,
+        root=Path(runtime.settings.datasets_dir).absolute(),
+    )
+    fields = _expression_fields(
+        pool.compiled_design["strategy_spec"]
+    )
+    if current is not None:
+        fields.update(_expression_fields(current.spec.to_dict()))
+    fields.add(target_col)
+    fields.update(
+        field
+        for field in request["dimension_bindings"].values()
+        if field is not None
+    )
+    economics = request["economics_inputs"] or {}
+    fields.update(
+        binding["column"]
+        for binding in economics.values()
+        if binding["kind"] == "column"
+    )
+    unknown = sorted(fields - set(sample.source_binding.columns))
+    if unknown:
+        raise StrategyError(
+            "ImpactCube dataset is missing columns: " + ", ".join(unknown)
+        )
+    frame = _read_authenticated_parquet_snapshot(
+        path,
+        root=Path(runtime.settings.datasets_dir).absolute(),
+        expected_content_hash=sample.source_binding.dataset_content_hash,
+        columns=sorted(fields),
+    )
+    if not isinstance(frame, pd.DataFrame) or len(frame) != (
+        sample.source_binding.row_count
+    ):
+        raise StrategyError(
+            "ImpactCube analysis universe row count changed"
+        )
+
+    masks: dict[str, np.ndarray] = {}
+    counts = sample.membership["header"]["counts"]["risk"]
+    for partition in _PARTITION_ORDER:
+        key = f"risk/{partition}"
+        if key not in sample.membership["masks"]:
+            raise StrategyError(
+                f"ImpactCube membership is missing {key}"
+            )
+        mask = np.asarray(
+            sample.membership["masks"][key],
+            dtype=np.bool_,
+        )
+        if len(mask) != len(frame):
+            raise StrategyError(
+                "StrategySampleDesign V2 membership row order changed"
+            )
+        if int(np.count_nonzero(mask)) != counts[partition]:
+            raise StrategyError(
+                f"ImpactCube {partition} membership count changed"
+            )
+        masks[partition] = mask
+    for index, left in enumerate(_PARTITION_ORDER):
+        for right in _PARTITION_ORDER[index + 1 :]:
+            if bool(np.any(masks[left] & masks[right])):
+                raise StrategyError(
+                    "ImpactCube risk partitions overlap"
+                )
+
+    result: dict[str, pd.DataFrame] = {}
+    for partition in request["partitions"]:
+        selected = frame.loc[
+            pd.Series(masks[partition], index=frame.index, dtype=bool)
+        ].reset_index(drop=True)
+        if selected.empty or len(selected) != counts[partition]:
+            raise StrategyError(
+                f"ImpactCube {partition} partition is empty or changed"
+            )
+        result[partition] = selected
+    _require_dataset_unchanged(sample)
+    return result
+
+
+def _read_authenticated_parquet_snapshot(
+    path: Path,
+    *,
+    root: Path,
+    expected_content_hash: str,
+    columns: list[str],
+) -> pd.DataFrame:
+    """Read only bytes copied from one authenticated, retained source fd."""
+
+    _require_dataset_path(path, root=root)
+    source_fd = -1
+    snapshot = None
+    try:
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+            raise StrategyError(
+                "ImpactCube dataset must be a regular file"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        source_fd = os.open(path, flags)
+        opened = os.fstat(source_fd)
+        after_open = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(after_open.st_mode)
+            or _file_identity(before) != _file_identity(opened)
+            or _file_identity(opened) != _file_identity(after_open)
+            or _stable_file_stat(before) != _stable_file_stat(opened)
+            or _stable_file_stat(opened) != _stable_file_stat(after_open)
+        ):
+            raise StrategyError("ImpactCube dataset changed while opening")
+
+        snapshot = tempfile.TemporaryFile(mode="w+b", dir=root)
+        digest = hashlib.sha256()
+        copied = 0
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            copied += len(chunk)
+            snapshot.write(chunk)
+        snapshot.flush()
+        source_after_copy = os.fstat(source_fd)
+        if (
+            _stable_file_stat(source_after_copy)
+            != _stable_file_stat(opened)
+            or copied != int(opened.st_size)
+            or not hmac.compare_digest(
+                digest.hexdigest(),
+                expected_content_hash,
+            )
+        ):
+            raise StrategyError(
+                "ImpactCube dataset bytes changed before replay"
+            )
+
+        snapshot_stat = os.fstat(snapshot.fileno())
+        if int(snapshot_stat.st_size) != copied:
+            raise StrategyError(
+                "ImpactCube private dataset snapshot is incomplete"
+            )
+        snapshot.seek(0)
+        frame = pd.read_parquet(snapshot, columns=columns)
+        snapshot_after_read = os.fstat(snapshot.fileno())
+        current = os.lstat(path)
+        if (
+            _stable_file_stat(snapshot_after_read)
+            != _stable_file_stat(snapshot_stat)
+            or _stable_file_stat(os.fstat(source_fd))
+            != _stable_file_stat(opened)
+            or stat.S_ISLNK(current.st_mode)
+            or _stable_file_stat(current) != _stable_file_stat(opened)
+        ):
+            raise StrategyError("ImpactCube dataset changed during replay")
+        return frame
+    except StrategyError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        raise StrategyError("ImpactCube dataset could not be read") from exc
+    finally:
+        if snapshot is not None:
+            snapshot.close()
+        if source_fd >= 0:
+            os.close(source_fd)
+
+
+def _file_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(stat.S_IFMT(value.st_mode)),
+    )
+
+
+def _stable_file_stat(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(stat.S_IFMT(value.st_mode)),
+        int(value.st_nlink),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+    )
+
+
+def _expression_fields(value: object) -> set[str]:
+    fields: set[str] = set()
+    if isinstance(value, Mapping):
+        field = value.get("field")
+        if isinstance(field, str):
+            fields.add(field)
+        for item in value.values():
+            fields.update(_expression_fields(item))
+    elif isinstance(value, Sequence) and not isinstance(
+        value,
+        str | bytes | bytearray,
+    ):
+        for item in value:
+            fields.update(_expression_fields(item))
+    return fields
+
+
+def _sample_design_evidence_ref(
+    sample: StrategySampleDesignV2ArtifactBinding,
+    *,
+    partitions: Sequence[str],
+) -> dict[str, Any]:
+    header = sample.membership["header"]
+    bundle = sample.bundle
+    design = bundle["sample_design"]
+    return {
+        "membership_artifact_id": sample.membership_artifact_id,
+        "membership_artifact_content_hash": (
+            sample.membership_artifact_content_hash
+        ),
+        "membership_id": header["membership_id"],
+        "membership_content_hash": header["content_hash"],
+        "bundle_artifact_id": sample.bundle_artifact_id,
+        "bundle_artifact_content_hash": (
+            sample.bundle_artifact_content_hash
+        ),
+        "bundle_id": bundle["bundle_id"],
+        "bundle_content_hash": bundle["content_hash"],
+        "sample_design_id": design["sample_design_id"],
+        "sample_design_content_hash": design["content_hash"],
+        "analysis_universe_row_count": header["row_count"],
+        "partition_counts": {
+            partition: header["counts"]["risk"][partition]
+            for partition in partitions
+        },
+    }
+
+
+def _dataset_evidence_binding(
+    sample: StrategySampleDesignV2ArtifactBinding,
+) -> dict[str, Any]:
+    source = sample.source_binding
+    return {
+        "task_id": source.task_id,
+        "dataset_id": source.dataset_id,
+        "dataset_content_hash": source.dataset_content_hash,
+        "dataset_source_path": source.dataset_source_path,
+        "dataset_registry_metadata_hash": (
+            source.dataset_registry_metadata_hash
+        ),
+        "workspace_revision": source.workspace_revision,
+        "workspace_generation": source.workspace_generation,
+        "semantic_mapping_hash": source.semantic_mapping_hash,
+    }
+
+
+def _require_dataset_unchanged(
+    sample: StrategySampleDesignV2ArtifactBinding,
+) -> None:
+    path = sample.source_binding.dataset_path
+    descriptor = -1
+    try:
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+            raise StrategyError(
+                "ImpactCube dataset changed during computation"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        after_open = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(after_open.st_mode)
+            or _file_identity(before) != _file_identity(opened)
+            or _file_identity(opened) != _file_identity(after_open)
+            or _stable_file_stat(before) != _stable_file_stat(opened)
+            or _stable_file_stat(opened) != _stable_file_stat(after_open)
+        ):
+            raise StrategyError(
+                "ImpactCube dataset changed during computation"
+            )
+        digest = hashlib.sha256()
+        copied = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            copied += len(chunk)
+            digest.update(chunk)
+        after_read = os.fstat(descriptor)
+        current = os.lstat(path)
+        if (
+            copied != int(opened.st_size)
+            or _stable_file_stat(after_read) != _stable_file_stat(opened)
+            or stat.S_ISLNK(current.st_mode)
+            or _stable_file_stat(current) != _stable_file_stat(opened)
+        ):
+            raise StrategyError(
+                "ImpactCube dataset changed during computation"
+            )
+    except OSError as exc:
+        raise StrategyError(
+            "ImpactCube dataset changed during computation"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not hmac.compare_digest(
+        digest.hexdigest(),
+        sample.source_binding.dataset_content_hash,
+    ):
+        raise StrategyError("ImpactCube dataset changed during computation")
+
+
+def _persist_cube(
+    runtime,
+    *,
+    task_id: str,
+    request: Mapping[str, Any],
+    pool: StrategyCandidatePoolArtifactBinding,
+    sample: StrategySampleDesignV2ArtifactBinding,
+    current: _CurrentStrategyBinding | None,
+    cube: Mapping[str, Any],
+) -> dict[str, Any]:
+    canonical = canonical_strategy_impact_cube_json(cube).encode("utf-8")
+    if len(canonical) > MAX_IMPACT_CUBE_JSON_BYTES:
+        raise StrategyError("ImpactCube artifact exceeds byte budget")
+    artifact_hash = hashlib.sha256(canonical).hexdigest()
+    out_dir = _prepare_output_directory(
+        runtime.settings.tasks_dir,
+        task_id=task_id,
+    )
+    final_path = out_dir / f"{cube['cube_id']}.json"
+    sources = cube["source_bindings"]
+    provenance = {
+        "schema_version": IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION,
+        "producer_version": STRATEGY_IMPACT_CUBE_PRODUCER_VERSION,
+        "task_id": task_id,
+        "cube_id": cube["cube_id"],
+        "cube_content_hash": cube["content_hash"],
+        "pool_ref": dict(request["pool_ref"]),
+        "sample_design_ref": dict(request["sample_design_ref"]),
+        "dataset_binding": dict(sources["dataset"]),
+        "target_binding": dict(sources["target"]),
+        "dimension_bindings": dict(request["dimension_bindings"]),
+        "current_strategy_ref": (
+            None
+            if current is None
+            else {
+                "strategy_id": current.strategy_id,
+                "strategy_type": current.strategy_type,
+                "strategy_spec_hash": current.spec_hash,
+            }
+        ),
+        "economics_inputs": (
+            None
+            if request["economics_inputs"] is None
+            else dict(request["economics_inputs"])
+        ),
+        "partitions": list(request["partitions"]),
+        "population": "risk",
+        "lifecycle": dict(_LIFECYCLE),
+    }
+    _validate_provenance(provenance)
+    uow = ArtifactUnitOfWork()
+    staged = uow.stage_file(out_dir, final_path.name)
+    try:
+        staged.path.write_bytes(canonical)
+    except OSError as exc:
+        uow.rollback()
+        raise StrategyError(
+            "ImpactCube artifact could not be staged"
+        ) from exc
+
+    db_committed = False
+    rollback_under_lock = False
+    reused = False
+    try:
+        with runtime.task_artifacts.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                _require_bindings_on_connection(
+                    conn,
+                    pool=pool,
+                    sample=sample,
+                    current=current,
+                    task_id=task_id,
+                )
+                _require_dataset_unchanged(sample)
+                row = _select_artifact_row(
+                    conn,
+                    task_id=task_id,
+                    path=final_path,
+                )
+                if row is not None:
+                    _require_existing_artifact(
+                        row,
+                        task_id=task_id,
+                        path=final_path,
+                        canonical=canonical,
+                        content_hash=artifact_hash,
+                        provenance=provenance,
+                        root=Path(runtime.settings.tasks_dir).absolute(),
+                    )
+                    uow.rollback()
+                    reused = True
+                else:
+                    if final_path.exists() or final_path.is_symlink():
+                        _require_exact_file(
+                            final_path,
+                            root=Path(
+                                runtime.settings.tasks_dir
+                            ).absolute(),
+                            canonical=canonical,
+                            content_hash=artifact_hash,
+                        )
+                        uow.rollback()
+                        reused = True
+                    else:
+                        uow.promote_all()
+                        _require_exact_file(
+                            final_path,
+                            root=Path(
+                                runtime.settings.tasks_dir
+                            ).absolute(),
+                            canonical=canonical,
+                            content_hash=artifact_hash,
+                        )
+                _require_bindings_on_connection(
+                    conn,
+                    pool=pool,
+                    sample=sample,
+                    current=current,
+                    task_id=task_id,
+                )
+                _require_dataset_unchanged(sample)
+                record = runtime.task_artifacts.register_on_connection(
+                    conn,
+                    task_id=task_id,
+                    kind=IMPACT_CUBE_ARTIFACT_KIND,
+                    path=str(final_path),
+                    content_hash=artifact_hash,
+                    origin_tool=IMPACT_CUBE_ORIGIN_TOOL,
+                    provenance=provenance,
+                )
+                _require_bindings_on_connection(
+                    conn,
+                    pool=pool,
+                    sample=sample,
+                    current=current,
+                    task_id=task_id,
+                )
+                _require_dataset_unchanged(sample)
+                conn.commit()
+                db_committed = True
+            except Exception:
+                rollback_under_lock = True
+                uow.rollback()
+                raise
+        if not reused:
+            uow.commit()
+    except Exception:
+        if not db_committed and not rollback_under_lock:
+            uow.rollback()
+        raise
+    return validate_measure_strategy_impact_cube_tool_output(
+        _tool_output(cube=cube, record=record, task_id=task_id)
+    )
+
+
+def _tool_output(
+    *,
+    cube: Mapping[str, Any],
+    record: Mapping[str, Any],
+    task_id: str,
+) -> dict[str, Any]:
+    identity = cube["identity"]
+    artifact_id = str(record["id"])
+    return {
+        "schema_version": IMPACT_CUBE_TOOL_SCHEMA_VERSION,
+        "cube_id": cube["cube_id"],
+        "content_hash": cube["content_hash"],
+        "pool_id": identity["pool_id"],
+        "pool_revision": identity["revision"],
+        "pool_snapshot_hash": identity["snapshot_hash"],
+        "strategy_type": identity["strategy_type"],
+        "partitions": [row["name"] for row in cube["partitions"]],
+        "slice_count": len(cube["slices"]),
+        "cube": dict(cube),
+        "warnings": [
+            str(flag["message"])
+            for flag in cube["red_flags"]
+            if flag["level"] in {"amber", "red"}
+        ],
+        "artifact": {
+            "artifact_id": artifact_id,
+            "kind": IMPACT_CUBE_ARTIFACT_KIND,
+            "format": "json",
+            "filename": Path(str(record["path"])).name,
+            "content_hash": str(record["content_hash"]),
+            "download_url": (
+                f"/api/tasks/{quote(task_id, safe='')}"
+                f"/task-artifacts/{quote(artifact_id, safe='')}/download"
+                f"?expected_content_hash={quote(str(record['content_hash']), safe='')}"
+            ),
+        },
+        "not_mutated_pool": True,
+        "not_created_strategy": True,
+        "not_adopted": True,
+        "not_promoted": True,
+        "not_deployed": True,
+    }
+
+
+def _validate_provenance(value: object) -> dict[str, Any]:
+    obj = _json_object(value, "ImpactCube provenance")
+    _exact_fields(obj, _PROVENANCE_FIELDS, "ImpactCube provenance")
+    if obj["schema_version"] != IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION:
+        raise StrategyError("ImpactCube provenance schema_version is invalid")
+    if obj["producer_version"] != STRATEGY_IMPACT_CUBE_PRODUCER_VERSION:
+        raise StrategyError("ImpactCube provenance producer_version is invalid")
+    for field in ("task_id", "cube_id"):
+        _text(obj[field], f"ImpactCube provenance.{field}")
+    _hash(
+        obj["cube_content_hash"],
+        "ImpactCube provenance.cube_content_hash",
+    )
+    _validate_pool_ref(obj["pool_ref"])
+    _validate_sample_design_ref(obj["sample_design_ref"])
+    dataset = _json_object(
+        obj["dataset_binding"],
+        "ImpactCube dataset provenance",
+    )
+    _exact_fields(
+        dataset,
+        _DATASET_BINDING_FIELDS,
+        "ImpactCube dataset provenance",
+    )
+    for field in ("task_id", "dataset_id", "dataset_source_path"):
+        _text(dataset[field], f"ImpactCube dataset provenance.{field}")
+    for field in (
+        "dataset_content_hash",
+        "dataset_registry_metadata_hash",
+        "semantic_mapping_hash",
+    ):
+        _hash(dataset[field], f"ImpactCube dataset provenance.{field}")
+    for field in ("workspace_revision", "workspace_generation"):
+        _nonnegative_int(
+            dataset[field],
+            f"ImpactCube dataset provenance.{field}",
+        )
+    if dataset["task_id"] != obj["task_id"]:
+        raise StrategyError("ImpactCube provenance task binding changed")
+    target = _json_object(
+        obj["target_binding"],
+        "ImpactCube target provenance",
+    )
+    _exact_fields(
+        target,
+        _TARGET_BINDING_FIELDS,
+        "ImpactCube target provenance",
+    )
+    _text(target["column"], "ImpactCube target provenance.column")
+    bad_value = _binary_int(
+        target["bad_value"],
+        "ImpactCube target provenance.bad_value",
+    )
+    if (
+        _binary_int(
+            target["good_value"],
+            "ImpactCube target provenance.good_value",
+        )
+        != 1 - bad_value
+        or target["missing_policy"]
+        != "retain_population_exclude_risk_denominator"
+    ):
+        raise StrategyError("ImpactCube target provenance changed")
+    _validate_dimension_bindings(obj["dimension_bindings"])
+    current = obj["current_strategy_ref"]
+    if current is not None:
+        current_obj = _json_object(
+            current,
+            "ImpactCube current strategy provenance",
+        )
+        _exact_fields(
+            current_obj,
+            frozenset(
+                {
+                    "strategy_id",
+                    "strategy_type",
+                    "strategy_spec_hash",
+                }
+            ),
+            "ImpactCube current strategy provenance",
+        )
+        _text(current_obj["strategy_id"], "current strategy id")
+        if current_obj["strategy_type"] not in _STRATEGY_TYPES:
+            raise StrategyError(
+                "ImpactCube current strategy type is invalid"
+            )
+        _hash(
+            current_obj["strategy_spec_hash"],
+            "current strategy spec hash",
+        )
+    _validate_economics_inputs(obj["economics_inputs"])
+    _partition_list(obj["partitions"])
+    if obj["population"] != "risk":
+        raise StrategyError("ImpactCube provenance population changed")
+    if obj["lifecycle"] != _LIFECYCLE:
+        raise StrategyError("ImpactCube provenance lifecycle changed")
+    return obj
+
+
+def _prepare_output_directory(
+    tasks_dir: Path | str,
+    *,
+    task_id: str,
+) -> Path:
+    if Path(task_id).name != task_id or task_id in {".", ".."}:
+        raise StrategyError("task_id cannot escape task storage")
+    root = Path(tasks_dir).absolute()
+    if root.exists() and (root.is_symlink() or not root.is_dir()):
+        raise StrategyError("task artifact root must be a regular directory")
+    root.mkdir(parents=True, exist_ok=True)
+    task_dir = root / task_id
+    if task_dir.exists() and (
+        task_dir.is_symlink() or not task_dir.is_dir()
+    ):
+        raise StrategyError(
+            "task artifact directory must be a regular directory"
+        )
+    task_dir.mkdir(exist_ok=True)
+    if (
+        task_dir.is_symlink()
+        or task_dir.resolve(strict=True).parent
+        != root.resolve(strict=True)
+    ):
+        raise StrategyError("ImpactCube task directory escaped storage")
+    out_dir = task_dir / "strategy_impact_cubes"
+    if out_dir.exists() and (
+        out_dir.is_symlink() or not out_dir.is_dir()
+    ):
+        raise StrategyError(
+            "ImpactCube output path must be a regular directory"
+        )
+    out_dir.mkdir(exist_ok=True)
+    if (
+        out_dir.is_symlink()
+        or out_dir.resolve(strict=True).parent
+        != task_dir.resolve(strict=True)
+    ):
+        raise StrategyError("ImpactCube output directory escaped storage")
+    return out_dir
+
+
+def _select_artifact_row(conn, *, task_id: str, path: Path):
+    return conn.execute(
+        """
+        SELECT id, task_id, kind, path, content_hash, origin_tool,
+               provenance_json, created_at
+          FROM task_artifacts
+         WHERE task_id = ? AND kind = ? AND path = ?
+        """,
+        (task_id, IMPACT_CUBE_ARTIFACT_KIND, str(path)),
+    ).fetchone()
+
+
+def _require_existing_artifact(
+    row,
+    *,
+    task_id: str,
+    path: Path,
+    canonical: bytes,
+    content_hash: str,
+    provenance: Mapping[str, Any],
+    root: Path,
+) -> None:
+    record = {field: row[field] for field in _TASK_ARTIFACT_ROW_FIELDS}
+    expected = {
+        "task_id": task_id,
+        "kind": IMPACT_CUBE_ARTIFACT_KIND,
+        "path": str(path),
+        "content_hash": content_hash,
+        "origin_tool": IMPACT_CUBE_ORIGIN_TOOL,
+    }
+    if any(str(record[field]) != value for field, value in expected.items()):
+        raise StrategyError(
+            "existing ImpactCube artifact registry row changed"
+        )
+    provenance_json = _canonical_json(provenance)
+    if str(record["provenance_json"]) != provenance_json:
+        raise StrategyError("existing ImpactCube provenance changed")
+    _require_exact_file(
+        path,
+        root=root,
+        canonical=canonical,
+        content_hash=content_hash,
+    )
+
+
+def _require_exact_file(
+    path: Path,
+    *,
+    root: Path,
+    canonical: bytes,
+    content_hash: str,
+) -> None:
+    raw = _read_regular_nofollow(
+        path,
+        root=root,
+        expected_content_hash=content_hash,
+    )
+    if raw != canonical:
+        raise StrategyError("ImpactCube artifact bytes changed")
+
+
+def _read_regular_nofollow(
+    path: Path,
+    *,
+    root: Path,
+    expected_content_hash: str,
+) -> bytes:
+    if not path.is_absolute() or path.is_symlink():
+        raise StrategyError("ImpactCube artifact must be a regular file")
+    current = path.parent
+    resolved_root = root.absolute()
+    while current != resolved_root:
+        if current.is_symlink():
+            raise StrategyError(
+                "ImpactCube artifact path traverses a symlink"
+            )
+        if current == current.parent:
+            break
+        current = current.parent
+    try:
+        path.resolve(strict=True).relative_to(
+            resolved_root.resolve(strict=True)
+        )
+    except (OSError, ValueError) as exc:
+        raise StrategyError(
+            "ImpactCube artifact escaped task storage"
+        ) from exc
+
+    descriptor = -1
+    chunks: list[bytes] = []
+    digest = hashlib.sha256()
+    total = 0
+    before = None
+    try:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise StrategyError(
+                "ImpactCube artifact must be a regular file"
+            )
+        if before.st_size < 0 or before.st_size > MAX_IMPACT_CUBE_JSON_BYTES:
+            raise StrategyError("ImpactCube artifact exceeds byte budget")
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_IMPACT_CUBE_JSON_BYTES:
+                raise StrategyError(
+                    "ImpactCube artifact exceeds byte budget"
+                )
+            digest.update(chunk)
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise StrategyError(
+                "ImpactCube artifact changed while read"
+            )
+        live = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(live.st_mode)
+            or (live.st_dev, live.st_ino)
+            != (after.st_dev, after.st_ino)
+        ):
+            raise StrategyError(
+                "ImpactCube artifact path changed while read"
+            )
+    except OSError as exc:
+        raise StrategyError("ImpactCube artifact is unavailable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    assert before is not None
+    raw = b"".join(chunks)
+    if (
+        len(raw) != before.st_size
+        or not hmac.compare_digest(
+            digest.hexdigest(),
+            expected_content_hash,
+        )
+    ):
+        raise StrategyError("ImpactCube artifact bytes changed")
+    return raw
+
+
+def _require_dataset_path(path: Path, *, root: Path) -> None:
+    resolved_root = root.absolute()
+    if (
+        not path.is_absolute()
+        or resolved_root.is_symlink()
+        or path.is_symlink()
+        or not path.is_file()
+    ):
+        raise StrategyError("ImpactCube dataset must be a regular file")
+    current = path.parent
+    while current != resolved_root:
+        if current.is_symlink():
+            raise StrategyError(
+                "ImpactCube dataset path traverses a symlink"
+            )
+        if current == current.parent:
+            break
+        current = current.parent
+    try:
+        path.resolve(strict=True).relative_to(
+            resolved_root.resolve(strict=True)
+        )
+    except (OSError, ValueError) as exc:
+        raise StrategyError(
+            "ImpactCube dataset escaped dataset storage"
+        ) from exc
+
+
+def _json_object(value: object, name: str) -> dict[str, Any]:
+    normalized = _json_value(value, name)
+    if not isinstance(normalized, dict):
+        raise StrategyError(f"{name} must be an object")
+    if normalized != value:
+        raise StrategyError(f"{name} contains non-canonical JSON values")
+    return normalized
+
+
+def _json_value(value: object, name: str) -> Any:
+    try:
+        return json.loads(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise StrategyError(f"{name} must be canonical JSON") from exc
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _exact_fields(
+    value: Mapping[str, Any],
+    expected: frozenset[str],
+    name: str,
+) -> None:
+    if set(value) != expected:
+        unexpected = sorted(set(value) - expected)
+        missing = sorted(expected - set(value))
+        details: list[str] = []
+        if unexpected:
+            details.append("unsupported fields: " + ", ".join(unexpected))
+        if missing:
+            details.append("missing fields: " + ", ".join(missing))
+        raise StrategyError(
+            f"{name} has invalid fields ({'; '.join(details)})"
+        )
+
+
+def _list(value: object, name: str) -> list[Any]:
+    normalized = _json_value(value, name)
+    if not isinstance(normalized, list):
+        raise StrategyError(f"{name} must be an array")
+    return normalized
+
+
+def _text(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise StrategyError(f"{name} must be a non-empty string")
+    return value.strip()
+
+
+def _optional_text(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    return _text(value, name)
+
+
+def _hash(value: object, name: str) -> str:
+    if not isinstance(value, str) or _HASH_RE.fullmatch(value) is None:
+        raise StrategyError(f"{name} must be a lowercase SHA-256 hash")
+    return value
+
+
+def _positive_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral) or int(value) < 1:
+        raise StrategyError(f"{name} must be a positive integer")
+    return int(value)
+
+
+def _nonnegative_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral) or int(value) < 0:
+        raise StrategyError(f"{name} must be a non-negative integer")
+    return int(value)
+
+
+def _binary_int(value: object, name: str) -> int:
+    number = _nonnegative_int(value, name)
+    if number not in {0, 1}:
+        raise StrategyError(f"{name} must be 0 or 1")
+    return number
+
+
+def _finite_number(value: object, name: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise StrategyError(f"{name} must be a finite number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise StrategyError(f"{name} must be a finite number")
+    if isinstance(value, Integral):
+        return int(value)
+    return number
+
+
+__all__ = [
+    "IMPACT_CUBE_ARTIFACT_KIND",
+    "IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION",
+    "IMPACT_CUBE_ORIGIN_TOOL",
+    "IMPACT_CUBE_TOOL_SCHEMA_VERSION",
+    "run_measure_strategy_impact_cube",
+    "validate_measure_strategy_impact_cube_tool_output",
+]

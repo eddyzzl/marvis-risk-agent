@@ -77,6 +77,9 @@ from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
 from marvis.packs.strategy.pool_validation_tools import (
     run_measure_strategy_pool_validation,
 )
+from marvis.packs.strategy.impact_cube_tools import (
+    run_measure_strategy_impact_cube,
+)
 from marvis.packs.strategy.project_context_tools import run_materialize_project_context
 from marvis.packs.strategy.report_bundle_tools import (
     run_build_strategy_report_bundle_v2,
@@ -867,6 +870,12 @@ def tool_measure_strategy_pool_validation(inputs: dict, ctx) -> dict:
     """Replay the exact current Pool on governed validation or OOT rows."""
 
     return run_measure_strategy_pool_validation(inputs, ctx, _runtime(ctx))
+
+
+def tool_measure_strategy_impact_cube(inputs: dict, ctx) -> dict:
+    """Publish unified deterministic impact slices for an exact current Pool."""
+
+    return run_measure_strategy_impact_cube(inputs, ctx, _runtime(ctx))
 
 
 def tool_build_report_bundle_v2(inputs: dict, ctx) -> dict:
