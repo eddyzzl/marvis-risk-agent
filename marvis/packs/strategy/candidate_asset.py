@@ -260,6 +260,40 @@ def refine_univariate_candidate(
     return validate_candidate_asset({**without_hash, "asset_hash": asset_hash})
 
 
+def validate_candidate_refinement_source_controls(
+    candidate_evidence: Mapping[str, Any],
+    *,
+    feature: str,
+    method: str,
+    merge_groups: Sequence[Sequence[str]],
+    selection: Mapping[str, Any],
+) -> None:
+    """Validate user pointers against one exact parent candidate without data I/O."""
+
+    evidence = validate_candidate_evidence(candidate_evidence)
+    feature_name = _text(feature, "feature")
+    method_name = _text(method, "method")
+    _feature_result, method_result = _parent_method(
+        evidence["analysis"],
+        feature=feature_name,
+        method=method_name,
+    )
+    source_bins = method_result["bins"]
+    normalized_merges = _normalize_merge_groups(merge_groups, source_bins)
+    preview_bins = []
+    for index, group in enumerate(_edited_groups(source_bins, normalized_merges)):
+        count = sum(_integer(item["count"], "parent bin count", 0) for item in group)
+        bad = sum(_integer(item["bad"], "parent bin bad", 0) for item in group)
+        preview_bins.append(
+            {
+                "bin_id": f"preflight:{index}",
+                "source_bin_ids": [item["id"] for item in group],
+                "bad_rate": None if count == 0 else float(bad / count),
+            }
+        )
+    _resolve_selection(selection, preview_bins)
+
+
 def validate_candidate_asset(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Validate an exact Candidate Asset v1 and return a detached canonical copy."""
 
@@ -1871,4 +1905,5 @@ __all__ = [
     "canonical_candidate_asset_json",
     "refine_univariate_candidate",
     "validate_candidate_asset",
+    "validate_candidate_refinement_source_controls",
 ]

@@ -204,6 +204,104 @@ class TaskArtifactRepository:
             ).fetchall()
         return [_record_from_row(row) for row in rows]
 
+    def list_recent_for_task_kind_with_count(
+        self,
+        task_id: str,
+        kind: str,
+        *,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return a newest-first bounded window plus the exact kind count."""
+
+        normalized_task_id = _required_text(task_id, field="task_id")
+        normalized_kind = _required_text(kind, field="kind")
+        bounded_limit = max(1, int(limit))
+        with connect(self.db_path) as conn:
+            count_row = conn.execute(
+                """
+                SELECT COUNT(*) AS total
+                  FROM task_artifacts
+                 WHERE task_id = ? AND kind = ?
+                """,
+                (normalized_task_id, normalized_kind),
+            ).fetchone()
+            rows = conn.execute(
+                """
+                SELECT *
+                  FROM task_artifacts
+                 WHERE task_id = ? AND kind = ?
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT ?
+                """,
+                (normalized_task_id, normalized_kind, bounded_limit),
+            ).fetchall()
+        return [_record_from_row(row) for row in rows], int(count_row["total"])
+
+    def get_for_task_kind_path(
+        self,
+        task_id: str,
+        kind: str,
+        path: str,
+    ) -> dict[str, Any] | None:
+        """Resolve one exact task/kind/path artifact identity."""
+
+        normalized_task_id = _required_text(task_id, field="task_id")
+        normalized_kind = _required_text(kind, field="kind")
+        normalized_path = _required_text(path, field="path")
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                  FROM task_artifacts
+                 WHERE task_id = ? AND kind = ? AND path = ?
+                """,
+                (normalized_task_id, normalized_kind, normalized_path),
+            ).fetchone()
+        return None if row is None else _record_from_row(row)
+
+    def find_for_task_kind_origin_by_provenance_candidate_id(
+        self,
+        task_id: str,
+        kind: str,
+        origin_tool: str,
+        candidate_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return at most two exact JSON candidate bindings.
+
+        Two rows are sufficient for callers to distinguish missing, unique,
+        and ambiguous lineage without scanning or decoding artifact history.
+        """
+
+        normalized_task_id = _required_text(task_id, field="task_id")
+        normalized_kind = _required_text(kind, field="kind")
+        normalized_origin = _required_text(origin_tool, field="origin_tool")
+        normalized_candidate_id = _required_text(
+            candidate_id,
+            field="candidate_id",
+        )
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                  FROM task_artifacts
+                 WHERE task_id = ?
+                   AND kind = ?
+                   AND origin_tool = ?
+                   AND json_valid(provenance_json)
+                   AND json_type(provenance_json, '$.candidate_id') = 'text'
+                   AND json_extract(provenance_json, '$.candidate_id') = ?
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 2
+                """,
+                (
+                    normalized_task_id,
+                    normalized_kind,
+                    normalized_origin,
+                    normalized_candidate_id,
+                ),
+            ).fetchall()
+        return [_record_from_row(row) for row in rows]
+
     def get_for_task(
         self, task_id: str, artifact_id: str
     ) -> dict[str, Any] | None:

@@ -8,12 +8,14 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from marvis.agent import turn_handlers
 from marvis.app import create_app
 from marvis.db import TaskRepository
 from marvis.orchestrator.contracts import Plan, PlanStatus
 from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestRepository,
 )
+from marvis.repositories.task_artifacts import TaskArtifactRepository
 from tests.strategy_sample_design_support import (
     materialize_mature_strategy_sample_design,
 )
@@ -183,6 +185,250 @@ def test_three_typed_candidate_workflows_run_without_any_llm(
     )
 
 
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_typed_refinement_runs_fresh_cutpoints_and_an_exact_existing_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(create_app(tmp_path))
+    task_id = _task(client, tmp_path / "owner")
+    sample_ref = materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("typed refinement must not resolve an Agent gate LLM")
+        ),
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: _BombLLM(),
+    )
+
+    fresh = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_request(
+            "univariate_candidate_refinement",
+            {
+                "feature": "score",
+                "method": "manual",
+                "manual_breakpoints": {"score": [500, 700]},
+                "selection": {
+                    "risk_threshold": {"operator": ">=", "value": 0.5}
+                },
+                "selection_reason": "保留观测坏率达到 50% 的风险箱",
+            },
+        ),
+    )
+    assert fresh.status_code == 202, fresh.text
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    fresh_plan = plans[-1]
+    assert fresh_plan.template_id == "strategy_univariate_candidate_refinement"
+    assert fresh_plan.status == PlanStatus.DONE
+    assert fresh_plan.steps[0].inputs["sample_design_ref"] == sample_ref
+    assert fresh_plan.steps[0].inputs["manual_breakpoints"] == {
+        "score": [500.0, 700.0]
+    }
+    source = client.app.state.plan_repo.load_step_output(fresh_plan.steps[0].id)
+    candidate_id = source["candidate_id"]
+
+    def unavailable_current_dataset(*args, **kwargs):
+        del args, kwargs
+        raise turn_handlers.StrategySetupError(
+            "existing refinement must not require the current DataWorkspace"
+        )
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "_strategy_dataset_preview",
+        unavailable_current_dataset,
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "_strategy_dataset_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "existing refinement must resolve its immutable source artifact"
+            )
+        ),
+    )
+
+    existing = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_request(
+            "univariate_candidate_refinement",
+            {
+                "feature": "score",
+                "method": "manual",
+                "source_candidate_id": candidate_id,
+                "merge_groups": [["regular:0", "regular:1"]],
+                "selection": {
+                    "source_bin_ids": ["regular:0", "regular:1"],
+                },
+                "selection_reason": "合并并保留已经核验的两个风险箱",
+            },
+        ),
+    )
+    assert existing.status_code == 202, existing.text
+    existing_plan = client.app.state.plan_repo.list_plans_for_task(task_id)[-1]
+    assert (
+        existing_plan.template_id
+        == "strategy_univariate_candidate_refinement_existing"
+    )
+    assert existing_plan.status == PlanStatus.DONE
+    assert len(existing_plan.steps) == 1
+    output = client.app.state.plan_repo.load_step_output(existing_plan.steps[0].id)
+    assert output["parent_candidate_id"] == candidate_id
+    assert output["parent_evidence_hash"] == source["evidence_hash"]
+    assert output["candidate_asset"]["refinement"]["merge_groups"] == [
+        ["regular:0", "regular:1"]
+    ]
+
+    invalid_controls = [
+        (
+            "feature",
+            {
+                "feature": "age",
+                "method": "manual",
+                "source_candidate_id": candidate_id,
+                "selection": {"source_bin_ids": ["regular:0"]},
+            },
+        ),
+        (
+            "method",
+            {
+                "feature": "score",
+                "method": "equal_width",
+                "source_candidate_id": candidate_id,
+                "selection": {"source_bin_ids": ["regular:0"]},
+            },
+        ),
+        (
+            "selection_bin",
+            {
+                "feature": "score",
+                "method": "manual",
+                "source_candidate_id": candidate_id,
+                "selection": {"source_bin_ids": ["regular:999"]},
+            },
+        ),
+        (
+            "merge_bin",
+            {
+                "feature": "score",
+                "method": "manual",
+                "source_candidate_id": candidate_id,
+                "merge_groups": [["regular:0", "regular:999"]],
+                "selection": {"source_bin_ids": ["regular:0"]},
+            },
+        ),
+    ]
+    for label, workflow_inputs in invalid_controls:
+        plans_before = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+        artifacts_before = client.get(
+            f"/api/tasks/{task_id}/task-artifacts"
+        ).json()["artifacts"]
+        rejected = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json=_request("univariate_candidate_refinement", workflow_inputs),
+        )
+        assert rejected.status_code == 202, (label, rejected.text)
+        assert rejected.json()["status"] == "clarification_required", label
+        assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == plans_before
+        assert client.get(f"/api/tasks/{task_id}/task-artifacts").json()[
+            "artifacts"
+        ] == artifacts_before
+
+    source_json = next(
+        artifact
+        for artifact in source["artifacts"]
+        if artifact["kind"] == "strategy_candidate_json"
+    )
+    source_record = TaskArtifactRepository(
+        client.app.state.settings.db_path
+    ).get_for_task(task_id, source_json["artifact_id"])
+    assert source_record is not None
+    Path(source_record["path"]).write_bytes(b"{}")
+    plans_before_corruption = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    artifacts_before_corruption = client.get(
+        f"/api/tasks/{task_id}/task-artifacts"
+    ).json()["artifacts"]
+    corrupted = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_request(
+            "univariate_candidate_refinement",
+            {
+                "feature": "score",
+                "method": "manual",
+                "source_candidate_id": candidate_id,
+                "selection": {"source_bin_ids": ["regular:0"]},
+            },
+        ),
+    )
+    assert corrupted.status_code == 202, corrupted.text
+    assert corrupted.json()["status"] == "clarification_required"
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == (
+        plans_before_corruption
+    )
+    assert client.get(f"/api/tasks/{task_id}/task-artifacts").json()[
+        "artifacts"
+    ] == artifacts_before_corruption
+
+    other_task_id = _task(client, tmp_path / "other")
+    cross_task = client.post(
+        f"/api/tasks/{other_task_id}/agent/messages",
+        json=_request(
+            "univariate_candidate_refinement",
+            {
+                "feature": "score",
+                "method": "manual",
+                "source_candidate_id": candidate_id,
+                "selection": {"source_bin_ids": ["regular:0"]},
+            },
+        ),
+    )
+    assert cross_task.status_code == 202, cross_task.text
+    assert client.get(f"/api/tasks/{other_task_id}/plans").json()["plans"] == []
+    assert (
+        client.get(f"/api/tasks/{other_task_id}/task-artifacts").json()["artifacts"]
+        == []
+    )
+    assert "当前任务没有候选证据" in " ".join(
+        message.get("content", "") for message in cross_task.json()["messages"]
+    )
+
+    owner_plans_before = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    owner_artifacts_before = client.get(
+        f"/api/tasks/{task_id}/task-artifacts"
+    ).json()["artifacts"]
+    forged = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_request(
+            "univariate_candidate_refinement",
+            {
+                "feature": "score",
+                "method": "manual",
+                "source_candidate_id": "candidate-" + "f" * 32,
+                "selection": {"source_bin_ids": ["regular:0"]},
+            },
+        ),
+    )
+    assert forged.status_code == 202, forged.text
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == (
+        owner_plans_before
+    )
+    assert client.get(f"/api/tasks/{task_id}/task-artifacts").json()[
+        "artifacts"
+    ] == owner_artifacts_before
+    assert "当前任务没有候选证据" in " ".join(
+        message.get("content", "") for message in forged.json()["messages"]
+    )
+
+
 def test_typed_request_schema_and_platform_fields_fail_before_execution(
     tmp_path: Path,
 ) -> None:
@@ -237,6 +483,50 @@ def test_typed_request_schema_and_platform_fields_fail_before_execution(
     assert (
         client.get(f"/api/tasks/{task_id}/task-artifacts").json()["artifacts"] == []
     )
+
+
+@pytest.mark.parametrize(
+    "platform_field",
+    [
+        "artifact_id",
+        "expected_evidence_hash",
+        "revision",
+        "dataset_id",
+        "target_col",
+    ],
+)
+def test_typed_refinement_accepts_a_user_candidate_pointer_but_not_platform_bindings(
+    tmp_path: Path,
+    platform_field: str,
+) -> None:
+    client = TestClient(create_app(tmp_path / platform_field))
+    task_id = _task(client, tmp_path / platform_field)
+    workflow_inputs = {
+        "feature": "score",
+        "method": "equal_width",
+        "source_candidate_id": "candidate-" + "a" * 32,
+        "selection": {"source_bin_ids": ["regular:0"]},
+    }
+
+    accepted_shape = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_request("univariate_candidate_refinement", workflow_inputs),
+    )
+
+    assert accepted_shape.status_code == 202, accepted_shape.text
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert (
+        client.get(f"/api/tasks/{task_id}/task-artifacts").json()["artifacts"] == []
+    )
+
+    rejected = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_request(
+            "univariate_candidate_refinement",
+            {**workflow_inputs, platform_field: "forged"},
+        ),
+    )
+    assert rejected.status_code == 422, rejected.text
 
 
 def test_new_typed_request_invalidates_an_obsolete_pending_strategy_request(

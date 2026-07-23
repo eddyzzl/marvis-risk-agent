@@ -8,7 +8,7 @@ content-addressed asset.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -34,6 +34,7 @@ from marvis.packs.strategy.candidate_asset import (
     canonical_candidate_asset_json,
     refine_univariate_candidate,
     validate_candidate_asset,
+    validate_candidate_refinement_source_controls,
 )
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
 from marvis.packs.strategy.errors import StrategyError
@@ -123,40 +124,64 @@ class _DatasetBinding:
     row_count: int
 
 
+@dataclass(frozen=True)
+class VerifiedCandidateRefinementSource:
+    """Canonical task-owned parent evidence accepted for plan construction."""
+
+    artifact_id: str
+    content_hash: str
+    candidate_id: str
+    evidence_hash: str
+
+
+def load_verified_candidate_refinement_source(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+    expected_candidate_id: str,
+    expected_evidence_hash: str,
+    feature: str,
+    method: str,
+    merge_groups: Sequence[Sequence[str]],
+    selection: Mapping[str, Any],
+) -> VerifiedCandidateRefinementSource:
+    """Verify canonical source bytes and every user-owned refinement pointer."""
+
+    source, evidence = _load_verified_source_report(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_content_hash=expected_content_hash,
+        expected_candidate_id=expected_candidate_id,
+        expected_evidence_hash=expected_evidence_hash,
+    )
+    validate_candidate_refinement_source_controls(
+        evidence,
+        feature=feature,
+        method=method,
+        merge_groups=merge_groups,
+        selection=selection,
+    )
+    return VerifiedCandidateRefinementSource(
+        artifact_id=source.artifact_id,
+        content_hash=source.content_hash,
+        candidate_id=evidence["candidate_id"],
+        evidence_hash=evidence["evidence_hash"],
+    )
+
+
 def run_refine_univariate_candidate(inputs, ctx, runtime) -> dict[str, Any]:
     """Refine one source method into an immutable development-stage asset."""
 
     normalized_inputs = _validate_inputs(inputs)
     task_id = _required_text(ctx.task_id, "task_id")
-    source = _load_source_artifact(
+    source, evidence = _load_verified_source_report(
         runtime,
         task_id=task_id,
         artifact_id=normalized_inputs["source_artifact_id"],
         expected_content_hash=normalized_inputs["expected_artifact_content_hash"],
-        expected_candidate_id=normalized_inputs["expected_candidate_id"],
-        expected_evidence_hash=normalized_inputs["expected_evidence_hash"],
-    )
-    try:
-        report_bytes = source.path.read_bytes()
-    except OSError as exc:
-        raise StrategyError("source candidate artifact could not be read") from exc
-    if not hmac.compare_digest(_sha256(report_bytes), source.content_hash):
-        raise StrategyError("source candidate artifact content hash drifted")
-    try:
-        report = strategy_candidate_report_from_json(report_bytes)
-    except (TypeError, ValueError, StrategyError) as exc:
-        raise StrategyError("source candidate report failed strict validation") from exc
-    evidence = validate_candidate_evidence(report["candidate_evidence"])
-    canonical_report = canonical_strategy_candidate_report_json(
-        evidence,
-        report["univariate_analysis"],
-    )
-    if canonical_report != report_bytes:
-        raise StrategyError("source candidate report is not canonical JSON")
-    _require_report_binding(
-        evidence,
-        source=source,
-        task_id=task_id,
         expected_candidate_id=normalized_inputs["expected_candidate_id"],
         expected_evidence_hash=normalized_inputs["expected_evidence_hash"],
     )
@@ -383,6 +408,50 @@ def _load_source_artifact(
         "source candidate artifact content hash drifted",
     )
     return binding
+
+
+def _load_verified_source_report(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+    expected_candidate_id: str,
+    expected_evidence_hash: str,
+) -> tuple[_SourceArtifactBinding, dict[str, Any]]:
+    source = _load_source_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_content_hash=expected_content_hash,
+        expected_candidate_id=expected_candidate_id,
+        expected_evidence_hash=expected_evidence_hash,
+    )
+    try:
+        report_bytes = source.path.read_bytes()
+    except OSError as exc:
+        raise StrategyError("source candidate artifact could not be read") from exc
+    if not hmac.compare_digest(_sha256(report_bytes), source.content_hash):
+        raise StrategyError("source candidate artifact content hash drifted")
+    try:
+        report = strategy_candidate_report_from_json(report_bytes)
+    except (TypeError, ValueError, StrategyError) as exc:
+        raise StrategyError("source candidate report failed strict validation") from exc
+    evidence = validate_candidate_evidence(report["candidate_evidence"])
+    canonical_report = canonical_strategy_candidate_report_json(
+        evidence,
+        report["univariate_analysis"],
+    )
+    if canonical_report != report_bytes:
+        raise StrategyError("source candidate report is not canonical JSON")
+    _require_report_binding(
+        evidence,
+        source=source,
+        task_id=task_id,
+        expected_candidate_id=expected_candidate_id,
+        expected_evidence_hash=expected_evidence_hash,
+    )
+    return source, evidence
 
 
 def _normalize_source_record(record: Mapping[str, Any]) -> _SourceArtifactBinding:
@@ -970,5 +1039,7 @@ def _require_file_content_hash(path: Path, expected: str, message: str) -> None:
 __all__ = [
     "ASSET_ARTIFACT_KIND",
     "TOOL_SCHEMA_VERSION",
+    "VerifiedCandidateRefinementSource",
+    "load_verified_candidate_refinement_source",
     "run_refine_univariate_candidate",
 ]

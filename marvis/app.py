@@ -88,6 +88,7 @@ from marvis.routers.reports import router as reports_router
 from marvis.routers.scans import router as scans_router
 from marvis.routers.skills import router as skills_router
 from marvis.routers.stage_controls import router as stage_controls_router
+from marvis.routers.strategy_candidate_lab import router as strategy_candidate_lab_router
 from marvis.routers.tasks import router as tasks_router
 from marvis.routers.validation_agent import router as validation_agent_router
 from marvis.routers.validation_contracts import router as validation_contracts_router
@@ -414,6 +415,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     app.include_router(scans_router)
     app.include_router(skills_router)
     app.include_router(stage_controls_router)
+    app.include_router(strategy_candidate_lab_router)
     app.include_router(reports_router)
     app.include_router(tasks_router)
     app.include_router(validation_agent_router)

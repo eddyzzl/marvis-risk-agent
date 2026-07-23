@@ -534,6 +534,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **2D Cross Matrix 显式 cell group 与 Pool 纵切（已完成，2026-07-19）**：新增自然语言可达的 `strategy_cross_matrix_cell_selection` Workflow 和 `strategy.materialize_cross_matrix_cell_selection`。用户必须引用唯一完整 matrix asset ID，并逐字给出一个或多个完整 cell ID；平台拒绝别名、模糊推荐、否定式和同轮复合操作，按源矩阵行主序规范化选择，固化只保存 selection/source 指针和 cell ID 的不可变 artifact，不复制 predicate、指标、动作或生命周期。group id、fragment、规则和 effect 与可选选择理由无关；group 条件是各 cell 类型化 `AND` 规则的 canonical `OR`，件数/风险/金额先聚合绑定主样本的原始观测，WOE/IV 按“所选 cells 合并为一个分组、其余 cells 保持独立”的完整分区重算。用户必须另发请求并用 selection ID 入 Pool；整张 matrix asset 不能直接入池，同一 matrix 在同一 Pool 中允许多个互斥 group，但重复 group 或任何 cell 重叠均无写入失败。Pool 在持锁事务内重新校验 selection、matrix、父 CandidateEvidence、dataset registry/path/hash，并重放 fragment 后才持久化；结果仍是 `draft/development/backtested/unvalidated`，不采纳、不部署。Cross 的人工切点、2D/3D 自动交叉搜索、代码与列写回仍需继续完成。
 
+**Candidate Lab Manual/Agent parity 首纵切（已完成，2026-07-23）**：策略任务宽桌面工作区新增 Candidate Lab，展示 task-owned、重新验真的单变量、Cross Matrix、自动树及当前 Strategy Pool；可直接启动单变量、单变量 fresh/existing refinement、Cross Matrix 和自动树。Manual 表单提交与自然语言共用 `strategy_request`、严格 compiler、PlanValidator、模板和 Tool，不维护第二套指标内核；existing refinement 的 candidate、feature/method 和 bin 只能从服务端投影选择，artifact/hash 不进入用户输入。当前活动 DataWorkspace 改变或不可用时，已有不可变 candidate 的 refinement 仍从父 artifact 恢复数据/sample lineage，并在创建计划前深验 canonical bytes、provenance、feature/method/bin；错配、损坏或跨任务引用只返回 clarification，不创建计划。投影使用 task/kind 的 `COUNT + DESC LIMIT`、总字节预算、来源 canonical/provenance 重验、重复 source cache、最新非终态 plan/assistant message 的单行查询；前端同任务 single-flight，任务切换取消旧请求，不进入轮询 tick。该纵切只覆盖已经存在的四个启动器和证据摘要，不提前宣称 Pool 全操作、交互树、评分卡、自动搜索、稳定性、代码/列写回或完整 evidence drawer 已完成。
+
 交付：
 
 1. **单规则**：tree/quantile/equal-width/chi 四类分箱、类别等值箱、3-20 箱、最小样本、KS/IV/AUC/WOE/LIFT、件数+金额、批量排序、人工选箱/合并入池和 Excel；
@@ -560,7 +562,9 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 实现七步报告组装和主报告 artifact，但报告失败不能回滚已完成的策略 evidence。
 
-**approval/reject Pool 影响测算首纵切（已完成，2026-07-19；样本强绑定于 2026-07-22 补齐）**：新增自然语言可达的 `strategy_pool_impact` Workflow 和 `strategy.measure_pool_impact`。用户只需说明要测算的 approval/reject Pool、可选基线及可选精确月份/金额列；Pool revision/hash、候选 lineage、精确且成熟的 development `StrategySampleDesignRef`、活动 dataset/hash、workspace revision/generation、确认 target 和 semantic mapping hash 均由平台绑定，不接受 LLM 注入。Tool 按样本设计的 `target_bad_value` 在同一 development 样本上重放 canonical first-match StrategySpec，输出总体动作/风险、每条规则 standalone/incremental/shadowed/remaining、默认未命中、标签覆盖、可用放款/逾期/配对金额观测、可选逐月及同任务同类型基线件数、风险和金额 delta；逐月件数、标签、风险、金额、动作与规则 incremental 均须回卷总体。结果以 canonical、内容寻址的 `strategy.impact-assessment.v2` JSON 和通用 TaskArtifact registry hash 双层固化，计算后在写入事务内再次复核 Sample Design、Pool/candidate lineage、dataset registry/path/bytes、DataWorkspace 与 baseline；空标签未确认、旧未绑定 active plan、任何漂移或守恒失败都不落盘。artifact 内 hash 用于与可信 expected hash 对账，不是数字签名；脱离原始 frame/spec 的离线 validator 只证明 schema、派生字段和内部守恒，消费持久化 evidence 时必须先核对 TaskArtifact registry 中的 content hash，不能把任意重写后再哈希的 JSON 当成平台 provenance。该纵切只产生 `development / backtested / unvalidated` 证据，不创建、修改、采纳或部署策略。它不是 Phase 4 完成：limit/pricing/segmentation 专属影响语义、分群/分群×月、swap、OOT、代码与列写回，以及七步 Excel/JSON/Markdown Report Bundle 仍须继续交付。
+**approval/reject Pool 影响测算首纵切（已完成，2026-07-19；样本强绑定于 2026-07-22 补齐）**：新增自然语言可达的 `strategy_pool_impact` Workflow 和 `strategy.measure_pool_impact`。用户只需说明要测算的 approval/reject Pool、可选基线及可选精确月份/金额列；Pool revision/hash、候选 lineage、精确且成熟的 development `StrategySampleDesignRef`、活动 dataset/hash、workspace revision/generation、确认 target 和 semantic mapping hash 均由平台绑定，不接受 LLM 注入。Tool 按样本设计的 `target_bad_value` 在同一 development 样本上重放 canonical first-match StrategySpec，输出总体动作/风险、每条规则 standalone/incremental/shadowed/remaining、默认未命中、标签覆盖、可用放款/逾期/配对金额观测、可选逐月及同任务同类型基线件数、风险和金额 delta；逐月件数、标签、风险、金额、动作与规则 incremental 均须回卷总体。结果以 canonical、内容寻址的 `strategy.impact-assessment.v2` JSON 和通用 TaskArtifact registry hash 双层固化，计算后在写入事务内再次复核 Sample Design、Pool/candidate lineage、dataset registry/path/bytes、DataWorkspace 与 baseline；空标签未确认、旧未绑定 active plan、任何漂移或守恒失败都不落盘。artifact 内 hash 用于与可信 expected hash 对账，不是数字签名；脱离原始 frame/spec 的离线 validator 只证明 schema、派生字段和内部守恒，消费持久化 evidence 时必须先核对 TaskArtifact registry 中的 content hash，不能把任意重写后再哈希的 JSON 当成平台 provenance。该纵切只产生 `development / backtested / unvalidated` 证据，不创建、修改、采纳或部署策略。它不是 Phase 4 完成：limit/pricing/segmentation 专属影响语义、分群/分群×月、swap、OOT、代码与列写回仍须继续交付。
+
+**七步 Strategy Report Bundle 纵切（已完成，2026-07-23）**：`strategy_report_bundle_v2` 会从 task-owned project context、历史策略、`StrategySampleDesign`、单变量/模型证据、候选/Pool、ImpactCube 和用户补充的 report fields 组装固定七节、不可变 revision。可选信息缺失或用户明确“暂缺”时保留 typed availability 并在读者报告中留空，空白与数值 0 严格区分；缺少会改变策略语义、样本或确定性结果的 binding 时失败关闭。输出为同一 revision 的 canonical JSON、Markdown、模块化 XLSX 与可解析 DOCX，参考用户提供的迭代评审模板和两份项目报告，但不复制其人工操作界面；四个 artifact 使用内容 hash、task ownership、canonical path、provenance 和审计绑定原子登记，任一格式渲染/登记失败会回滚整套报告登记而不回滚上游策略 evidence。DOCX 使用固定业务简报结构、可审计 evidence 标识和安全文本投影，不允许外链、字段代码或用户文本注入媒体。额度/定价专属扩展、独立 OOT 章节和完整 browser/API 旅程仍须继续完成。
 
 交付：
 
@@ -617,6 +621,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 **报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 让 Manual 和 Agent 共用缺失信息、七步 Workflow、证据和报告 revision。
 
 信息架构：Data & Semantics → Candidate Lab → Strategy Pool → Backtest & Validation → Champion/Challenger → Adoption & Artifacts → Monitoring & Iteration。
+
+**首个工作台纵切（已完成，2026-07-23）**：Candidate Lab 已实现上述四个 Manual 启动器与受认证结果/Pool 摘要，Manual 和 Agent 已共用同一 deterministic execution kernel；任务切换、active plan/open gate、澄清、失败保留输入、请求去重和投影截断均有独立前后端覆盖。Phase 6 尚未完成，其余区域、完整状态持久化、全 evidence drawer、长任务控制及七步 browser E2E 仍按本 Phase 交付。
 
 交付：
 
@@ -758,7 +764,7 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 42. 单规则/策略逐月、件数和金额回测（approval/reject 当前 Pool 的总体、逐月、规则 incremental、标签/金额覆盖、基线 delta、成熟 development Sample Design 强绑定及 `target_bad_value=0|1` 已完成；direct backtest 仅保留兼容边界，V2 Workflow 必须注入 ref；单规则独立视图、分群×月及其余类型待续）；
 43. 分群操作符与分群×月；
 44. 策略/漏斗/月度/分群/code tabs；
-45. `StrategyReportBundle`、七步 Workflow、模块化 Excel/JSON/Markdown、额度定价扩展与结构化 provenance；
+45. `StrategyReportBundle`、七步 Workflow、模块化 Excel/JSON/Markdown/DOCX、额度定价扩展与结构化 provenance（固定七节、不可变 revision、四格式原子登记已完成；额度/定价专属扩展和独立 OOT 章节待续）；
 46. Python/SQL/JSON codegen 和逐行 equivalence；
 47. 分析产物列写回与修改后数据导出。
 
@@ -772,8 +778,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 ### Phase 6：Strategy Workbench parity
 
-53. Workbench shell 与七区信息架构；
-54. 完整 Manual 控件和 evidence drawer；
+53. Workbench shell 与七区信息架构（Candidate Lab 首个宽桌面区域已接通，其余区域待续）；
+54. 完整 Manual 控件和 evidence drawer（单变量/Cross/自动树/refinement 启动器及受认证摘要已完成，Pool 全操作、其他候选和完整 drawer 待续）；
 55. 节点/切点/cell/页面/语言状态持久化；
 56. Agent 与 Manual 共用 Workflow/DSL/gate、缺失信息状态和报告 revision；
 57. 完整七步报告 browser/API E2E、进度、取消和恢复。

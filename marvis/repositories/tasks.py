@@ -1134,6 +1134,32 @@ class TaskRepository:
             ).fetchall()
         return [_row_to_agent_message(row) for row in rows]
 
+    def get_latest_assistant_message(
+        self,
+        task_id: str,
+    ) -> dict | None:
+        """Return the newest assistant message without loading chat history."""
+
+        with connect(self.db_path) as conn:
+            task_row = conn.execute(
+                "SELECT 1 FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if task_row is None:
+                raise KeyError(f"Task not found: {task_id}")
+            row = conn.execute(
+                """
+                SELECT id, task_id, role, stage, content, created_at, metadata_json
+                  FROM agent_messages
+                 WHERE task_id = ?
+                   AND role = 'assistant'
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+        return None if row is None else _row_to_agent_message(row)
+
     def has_agent_message(self, task_id: str, message_id: str) -> bool:
         with connect(self.db_path) as conn:
             row = conn.execute(

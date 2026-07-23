@@ -244,6 +244,9 @@ from marvis.packs.strategy.candidate_asset import (
     canonical_candidate_asset_json,
     validate_candidate_asset,
 )
+from marvis.packs.strategy.candidate_asset_tools import (
+    load_verified_candidate_refinement_source,
+)
 from marvis.repositories.data_workspace import (
     DataWorkspaceDataError,
     DataWorkspaceDatasetNotFound,
@@ -1801,6 +1804,7 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "univariate_candidate_analysis",
         "cross_matrix_analysis",
         "automatic_tree_candidate_build",
+        "univariate_candidate_refinement",
     }
 )
 
@@ -2796,6 +2800,30 @@ def _run_validated_strategy_request(
             auto_start=auto_start,
         )
 
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "univariate_candidate_refinement"
+        and "source_candidate_id" in draft.workflow_inputs
+    ):
+        workflow_inputs = draft.to_dict()["workflow_inputs"]
+        source_candidate_id = str(workflow_inputs.pop("source_candidate_id"))
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_univariate_candidate_refinement_existing",
+            slots={
+                **workflow_inputs,
+                **_candidate_source_artifact_slots(
+                    runtime,
+                    task_id=task.id,
+                    candidate_id=source_candidate_id,
+                    workflow_inputs=workflow_inputs,
+                ),
+            },
+            auto_start=auto_start,
+        )
+
     if context is None:
         raise StrategySetupError("当前策略操作需要任务内数据上下文。")
 
@@ -2828,6 +2856,7 @@ def _run_validated_strategy_request(
                     runtime,
                     task_id=task.id,
                     candidate_id=str(source_candidate_id),
+                    workflow_inputs=draft.workflow_inputs,
                 )
             )
         elif draft.workflow in {
@@ -3753,6 +3782,7 @@ def _standard_workflow_request_preflight(
                     runtime,
                     task_id=task.id,
                     candidate_id=str(source_candidate_id),
+                    workflow_inputs=draft.workflow_inputs,
                 )
             except StrategySetupError as exc:
                 return ("strategy_candidate_source_required", str(exc))
@@ -3783,19 +3813,17 @@ def _candidate_source_artifact_slots(
     *,
     task_id: str,
     candidate_id: str,
+    workflow_inputs: Mapping,
 ) -> dict[str, str]:
-    matches = []
-    for artifact in TaskArtifactRepository(runtime.settings.db_path).list_for_task(
-        task_id
-    ):
-        provenance = artifact.get("provenance")
-        if (
-            artifact.get("kind") == "strategy_candidate_json"
-            and artifact.get("origin_tool") == "strategy.analyze_univariate_candidates"
-            and isinstance(provenance, dict)
-            and provenance.get("candidate_id") == candidate_id
-        ):
-            matches.append(artifact)
+    artifact_repository = TaskArtifactRepository(runtime.settings.db_path)
+    matches = (
+        artifact_repository.find_for_task_kind_origin_by_provenance_candidate_id(
+            task_id,
+            "strategy_candidate_json",
+            "strategy.analyze_univariate_candidates",
+            candidate_id,
+        )
+    )
     if not matches:
         raise StrategySetupError(
             f"当前任务没有候选证据 {candidate_id}；请先运行单变量分析，"
@@ -3822,11 +3850,33 @@ def _candidate_source_artifact_slots(
         raise StrategySetupError(
             f"候选证据 {candidate_id} 的 artifact 绑定不完整，请重新生成单变量分析。"
         )
+    loader_runtime = SimpleNamespace(
+        settings=runtime.settings,
+        task_artifacts=artifact_repository,
+    )
+    try:
+        verified = load_verified_candidate_refinement_source(
+            loader_runtime,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            expected_content_hash=content_hash,
+            expected_candidate_id=candidate_id,
+            expected_evidence_hash=evidence_hash,
+            feature=workflow_inputs.get("feature"),
+            method=workflow_inputs.get("method"),
+            merge_groups=workflow_inputs.get("merge_groups", []),
+            selection=workflow_inputs.get("selection"),
+        )
+    except (OSError, StrategyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            f"候选证据 {candidate_id} 无法通过 canonical artifact 与 refinement "
+            "控制校验，请重新生成分析或核对 feature、method 和 source bin id。"
+        ) from exc
     return {
-        "source_artifact_id": artifact_id,
-        "expected_artifact_content_hash": content_hash,
-        "expected_candidate_id": candidate_id,
-        "expected_evidence_hash": evidence_hash,
+        "source_artifact_id": verified.artifact_id,
+        "expected_artifact_content_hash": verified.content_hash,
+        "expected_candidate_id": verified.candidate_id,
+        "expected_evidence_hash": verified.evidence_hash,
     }
 
 
@@ -8345,6 +8395,8 @@ def _strategy_request_requires_dataset(
     draft: CompiledStrategyRequestDraft,
 ) -> bool:
     if isinstance(draft, StandardWorkflowRequestDraft):
+        if draft.workflow == "univariate_candidate_refinement":
+            return "source_candidate_id" not in draft.workflow_inputs
         if draft.workflow in {
             *_STRATEGY_POOL_WORKFLOWS,
             "strategy_project_context",

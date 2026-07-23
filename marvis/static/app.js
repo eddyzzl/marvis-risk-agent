@@ -119,6 +119,7 @@ import {
   isStrategyClarificationMessage as isStrategyClarificationMessageController,
   renderStrategyClarification,
 } from "./js/v2/strategy_clarification_controller.js";
+import { createStrategyCandidateLabController } from "./js/v2/strategy_candidate_lab_controller.js";
 import { getSelectedTier, onSelectedTierChange } from "./js/v2/state_v2.js";
 import {
   columnFractions,
@@ -286,6 +287,25 @@ const planRailController = createPlanRailController({
   loadAgentMessages,
   renderAll,
   fillComposer: focusAgentComposerForIntervene,
+});
+const strategyCandidateLabController = createStrategyCandidateLabController({
+  $,
+  getSelectedTask: () => selectedTask,
+  getSelectedTaskId: () => selectedTaskId,
+  getBlockedReason: () => {
+    if (latestOpenGateMessage()) return "open_gate";
+    if (selectedTask?.task_type === "strategy" && selectedTaskIsBusy()) return "active_plan";
+    return "";
+  },
+  setActionStatus,
+  setAgentMessages: (messages) => {
+    if (Array.isArray(messages)) agentMessages = messages;
+  },
+  renderAgentConversation,
+  pollAgentMessagesUntilSettled,
+  refreshAgentMessages: loadAgentMessages,
+  resetPlanFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
+  renderWorkflowStepper,
 });
 const taskSearchController = createTaskSearchController({
   getElementById: $,
@@ -3936,6 +3956,10 @@ function selectTask(task) {
     rememberSelectedTaskId(task.id);
     renderCurrentTask();
     renderTaskList();
+    strategyCandidateLabController.renderAvailability();
+    if (task.task_type === "strategy") {
+      void strategyCandidateLabController.refresh(task.id, { silent: true });
+    }
     return;
   }
   // Task identity is changing — drop any in-flight typewriter state so a
@@ -3951,12 +3975,14 @@ function selectTask(task) {
   ensureActiveTaskProgressPolling(task);
   renderMetricPreview({});
   renderStoredStateSummaries();
+  const candidateLabLoadPromise = strategyCandidateLabController.selectTask(task);
   runAction(async () => {
     try {
       renderTaskList();
       await loadTaskEvidence();
       await loadReportFields();
       await loadAgentMessages(task.id);
+      await candidateLabLoadPromise;
     } finally {
       renderAll();
       await restoreResultScrollPositionAfterRender(task.id);
@@ -3973,6 +3999,7 @@ function deselectCurrentTask() {
   rememberSelectedTaskId(null);
   latestNotebookSteps = [];
   agentMessages = [];
+  strategyCandidateLabController.clear();
   resetAgentComposerToGlobalDefaults();
   renderMetricPreview({});
   setActionStatus("");
@@ -4704,6 +4731,7 @@ function renderAll() {
   renderTaskList();
   renderSettingsState();
   renderAgentConversation();
+  strategyCandidateLabController.renderAvailability();
   renderPetState();
   updateAgentSendDisabled();
 }
@@ -4719,6 +4747,7 @@ function renderChangedValidationViews() {
   renderTaskList();
   renderSettingsState();
   renderAgentConversation();
+  strategyCandidateLabController.renderAvailability();
   renderPetState();
   updateAgentSendDisabled();
 }
@@ -4873,6 +4902,7 @@ function renderAgentConversation() {
   const composer = $("agentComposer");
   const workspace = $("resultWorkspace");
   if (!panel) return;
+  strategyCandidateLabController.renderAvailability();
   const isAgent = selectedTaskIsAgentMode();
   // Driver tasks (data_join / feature / modeling) show the same conversation +
   // controls in BOTH modes. Manual = the user operates the controls (no free-text
@@ -6326,8 +6356,10 @@ async function createTask() {
   selectedTask = task;
   rememberSelectedTaskId(task.id);
   renderStoredStateSummaries();
+  const candidateLabLoadPromise = strategyCandidateLabController.selectTask(task);
   await refreshTasks();
   await loadReportFields();
+  await candidateLabLoadPromise;
   setCreateStatus("任务已创建。");
   closeTaskDialog();
   prefillAgentTaskInstruction(task);
@@ -6451,6 +6483,21 @@ async function dispatchDriverStart(taskId = selectedTaskId) {
   renderAgentConversation();
 }
 
+async function refreshStrategyCandidateLabAfterSettled(taskId, task) {
+  if (
+    selectedTaskId !== taskId
+    || task?.task_type !== "strategy"
+  ) {
+    return;
+  }
+  try {
+    await strategyCandidateLabController.refresh(taskId, { silent: true });
+  } catch (_error) {
+    // Candidate evidence is secondary to the main job lifecycle. A projection
+    // refresh failure must not keep a completed Agent task inside the poller.
+  }
+}
+
 async function pollValidationProgress(
   doneStatuses = terminalTaskStatuses,
   taskId = selectedTaskId,
@@ -6483,27 +6530,34 @@ async function pollValidationProgress(
 
       const status = polledTask.status || "";
       const serverBusyAction = taskServerBusyAction(polledTask);
+      const stopped = stopping && !serverBusyAction;
+      const settledOnServerIdle = settleWhenServerIdle && !serverBusyAction;
+      const reachedTerminalStatus = doneStatuses.has(status) && !serverBusyAction;
       if (stopping && !serverBusyAction) {
         if (selectedTaskId === taskId && !background) {
           setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "success");
         }
-        return polledTask;
       }
       // Agent-stage exceptions may occur before a deterministic stage updates
       // the task status (for example while constructing the scan contract).
       // The job lease is the authoritative liveness signal in that gap: once
       // it is gone, return control to the composer instead of polling the stale
       // pre-stage status for an hour.
-      if (settleWhenServerIdle && !serverBusyAction) {
-        return polledTask;
-      }
-      if (doneStatuses.has(status) && !serverBusyAction) {
+      if (!stopped && !settledOnServerIdle && reachedTerminalStatus) {
         if (selectedTaskId === taskId && !background) {
           if (status === "failed" || status === "review_required") {
             setTaskFailureActionStatus(polledTask);
           } else {
             setActionStatus("验证完成。", "success");
           }
+        }
+      }
+      if (stopped || settledOnServerIdle || reachedTerminalStatus) {
+        // Some focused source-level harnesses execute this poller in isolation.
+        // Keep the secondary projection hook optional there, while the app
+        // always supplies it.
+        if (typeof refreshStrategyCandidateLabAfterSettled === "function") {
+          await refreshStrategyCandidateLabAfterSettled(taskId, polledTask);
         }
         return polledTask;
       }
@@ -7141,6 +7195,7 @@ bindRunModeDeselectableCards();
 bindDialogBackdropDismissal();
 bindPlatformConfirmDialog();
 materialBindingDialog.bind();
+strategyCandidateLabController.bind(document);
 mountGovernanceExtensions();
 onSelectedTierChange(syncCreateTaskTierDefault);
 createTaskDialog.bindMaterialSourceControls();

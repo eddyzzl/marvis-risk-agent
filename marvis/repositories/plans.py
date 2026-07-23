@@ -134,6 +134,28 @@ class PlanRepository:
             ).fetchone()
         return int(row["total"])
 
+    def latest_nonterminal_summary_for_task(
+        self,
+        task_id: str,
+    ) -> dict[str, str] | None:
+        """Return only the newest active plan identity needed by UI guards."""
+
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, status
+                  FROM plans
+                 WHERE task_id = ?
+                   AND status NOT IN ('done', 'failed', 'cancelled')
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"plan_id": str(row["id"]), "status": str(row["status"])}
+
     def list_plans_by_status(self, status: PlanStatus) -> list[Plan]:
         """Plans currently in ``status`` across every task, oldest first. Used
         by the startup reclaim pass (REL-4) to find RUNNING V2 plans left

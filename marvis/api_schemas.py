@@ -1,3 +1,4 @@
+import math
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
@@ -10,6 +11,7 @@ from pydantic import (
     StrictInt,
     StrictStr,
     StringConstraints,
+    TypeAdapter,
     model_validator,
 )
 
@@ -211,7 +213,189 @@ ManualStrategyWorkflow = Literal[
     "univariate_candidate_analysis",
     "cross_matrix_analysis",
     "automatic_tree_candidate_build",
+    "univariate_candidate_refinement",
 ]
+
+ManualUnivariateRefinementMethod = Literal[
+    "equal_frequency",
+    "equal_width",
+    "chimerge",
+    "tree",
+    "manual",
+    "categorical",
+]
+ManualUnivariateAnalysisMethod = Literal[
+    "equal_frequency",
+    "equal_width",
+    "chimerge",
+    "tree",
+    "manual",
+]
+ManualCandidateId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^candidate-[0-9a-f]{32}$"),
+]
+ManualSelectionReason = Annotated[
+    StrictStr,
+    AfterValidator(_canonical_non_empty_string),
+    StringConstraints(max_length=500),
+]
+
+
+def _finite_strictly_increasing_numbers(
+    values: list[int | float],
+) -> list[int | float]:
+    previous: float | None = None
+    for value in values:
+        if isinstance(value, int) and abs(value) > 2**53 - 1:
+            raise ValueError("integer exceeds the exact JSON number range")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("numbers must be finite")
+        if previous is not None and previous >= number:
+            raise ValueError("numbers must be strictly increasing and unique")
+        previous = number
+    return values
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    if len(values) != len(set(values)):
+        raise ValueError("values must be unique")
+    return values
+
+
+ManualBreakpointList = Annotated[
+    list[StrictInt | StrictFloat],
+    Field(min_length=1, max_length=19),
+    AfterValidator(_finite_strictly_increasing_numbers),
+]
+ManualBinId = Annotated[
+    StrictStr,
+    AfterValidator(_canonical_non_empty_string),
+    StringConstraints(max_length=128),
+]
+ManualMergeGroup = Annotated[
+    list[ManualBinId],
+    Field(min_length=2, max_length=20),
+    AfterValidator(_unique_strings),
+]
+
+
+class ManualRiskThresholdRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    operator: Literal[">=", ">", "<=", "<"]
+    value: StrictRatio
+
+
+class ManualRiskThresholdSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    risk_threshold: ManualRiskThresholdRequest
+
+
+class ManualSourceBinSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    source_bin_ids: Annotated[
+        list[ManualBinId],
+        Field(min_length=1, max_length=50),
+        AfterValidator(_unique_strings),
+    ]
+
+
+class ManualFreshUnivariateRefinementInputs(BaseModel):
+    """User controls for re-analysing one feature before refinement."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    feature: StrictCanonicalNonEmptyStr
+    method: ManualUnivariateRefinementMethod
+    selection: ManualRiskThresholdSelectionRequest
+    features: Annotated[
+        list[StrictCanonicalNonEmptyStr],
+        Field(min_length=1, max_length=50),
+    ] | None = None
+    methods: Annotated[
+        list[ManualUnivariateAnalysisMethod],
+        Field(min_length=1, max_length=5),
+    ] | None = None
+    bin_count: StrictInt | None = Field(default=None, ge=3, le=20)
+    min_bin_pct: Annotated[
+        StrictInt | StrictFloat,
+        Field(ge=0.0, le=0.5),
+    ] | None = None
+    loan_amount_col: StrictCanonicalNonEmptyStr | None = None
+    overdue_amount_col: StrictCanonicalNonEmptyStr | None = None
+    sentinel_values: Annotated[
+        list[StrictStr | StrictInt | StrictFloat],
+        Field(max_length=20),
+    ] | None = None
+    manual_breakpoints: (
+        dict[StrictCanonicalNonEmptyStr, ManualBreakpointList] | None
+    ) = None
+    selection_reason: ManualSelectionReason | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_nulls(self) -> Self:
+        explicit_nulls = sorted(
+            field
+            for field in self.model_fields_set
+            if getattr(self, field) is None
+        )
+        if explicit_nulls:
+            raise ValueError(
+                "optional fields must be omitted instead of null: "
+                + ", ".join(explicit_nulls)
+            )
+        return self
+
+
+class ManualExistingUnivariateRefinementInputs(BaseModel):
+    """User controls bound to an immutable candidate the user inspected."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    feature: StrictCanonicalNonEmptyStr
+    method: ManualUnivariateRefinementMethod
+    source_candidate_id: ManualCandidateId
+    selection: ManualSourceBinSelectionRequest | ManualRiskThresholdSelectionRequest
+    merge_groups: Annotated[
+        list[ManualMergeGroup],
+        Field(max_length=20),
+    ] | None = None
+    selection_reason: ManualSelectionReason | None = None
+
+    @model_validator(mode="after")
+    def validate_optional_fields_and_merge_groups(self) -> Self:
+        explicit_nulls = sorted(
+            field
+            for field in self.model_fields_set
+            if getattr(self, field) is None
+        )
+        if explicit_nulls:
+            raise ValueError(
+                "optional fields must be omitted instead of null: "
+                + ", ".join(explicit_nulls)
+            )
+        if self.merge_groups is not None:
+            flattened = [
+                bin_id for group in self.merge_groups for bin_id in group
+            ]
+            if len(flattened) != len(set(flattened)):
+                raise ValueError(
+                    "merge_groups cannot reuse a source bin id across groups"
+                )
+        return self
+
+
+ManualUnivariateRefinementInputs = (
+    ManualFreshUnivariateRefinementInputs
+    | ManualExistingUnivariateRefinementInputs
+)
+_MANUAL_UNIVARIATE_REFINEMENT_INPUTS = TypeAdapter(
+    ManualUnivariateRefinementInputs
+)
 
 _MANUAL_STRATEGY_PLATFORM_FIELDS = frozenset(
     {
@@ -262,10 +446,21 @@ class ManualStrategyRequest(BaseModel):
 
     @model_validator(mode="after")
     def reject_platform_owned_inputs(self) -> Self:
+        if self.workflow == "univariate_candidate_refinement":
+            _MANUAL_UNIVARIATE_REFINEMENT_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        user_owned_identity_fields = (
+            {"source_candidate_id"}
+            if self.workflow == "univariate_candidate_refinement"
+            else set()
+        )
         forbidden = sorted(
             key
             for key in self.workflow_inputs
-            if (
+            if key not in user_owned_identity_fields
+            and (
                 key in _MANUAL_STRATEGY_PLATFORM_FIELDS
                 or key.startswith(("artifact_", "dataset_", "expected_", "workspace_"))
                 or key.endswith(

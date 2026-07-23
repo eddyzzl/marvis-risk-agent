@@ -4920,21 +4920,6 @@ def _validate_univariate_refinement_workflow_inputs(
             f"{workflow} 缺少字段：" + "、".join(missing) + "。"
         )
 
-    feature = _workflow_column(
-        inputs["feature"],
-        name=f"{workflow} feature",
-        whitelist=whitelist,
-    )
-    if target_col is not None and feature == target_col:
-        raise _DraftValidationError(f"{workflow} feature 不能使用目标列。")
-    method = _required_text(inputs["method"], name=f"{workflow} method")
-    if method not in UNIVARIATE_REFINEMENT_METHODS:
-        raise _DraftValidationError(
-            f"{workflow} 不支持分箱方法 {method}；可选值为："
-            + "、".join(UNIVARIATE_REFINEMENT_METHODS)
-            + "。"
-        )
-
     source_candidate_id = None
     if "source_candidate_id" in inputs:
         source_candidate_id = _required_text(
@@ -4952,6 +4937,25 @@ def _validate_univariate_refinement_workflow_inputs(
                 + "、".join(ignored_analysis_fields)
                 + "。"
             )
+
+    feature = (
+        _required_text(inputs["feature"], name=f"{workflow} feature")
+        if source_candidate_id is not None
+        else _workflow_column(
+            inputs["feature"],
+            name=f"{workflow} feature",
+            whitelist=whitelist,
+        )
+    )
+    if target_col is not None and feature == target_col:
+        raise _DraftValidationError(f"{workflow} feature 不能使用目标列。")
+    method = _required_text(inputs["method"], name=f"{workflow} method")
+    if method not in UNIVARIATE_REFINEMENT_METHODS:
+        raise _DraftValidationError(
+            f"{workflow} 不支持分箱方法 {method}；可选值为："
+            + "、".join(UNIVARIATE_REFINEMENT_METHODS)
+            + "。"
+        )
 
     analysis: dict[str, Any] = {}
     if source_candidate_id is None:

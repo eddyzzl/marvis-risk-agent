@@ -63,6 +63,19 @@ export const listStrategyArtifacts = (taskId) => (
 export const listTaskArtifacts = (taskId) => (
   apiGet(`/api/tasks/${pathPart(taskId)}/task-artifacts`)
 );
+export const getStrategyCandidateLab = (taskId, options = {}) => (
+  apiGet(`/api/tasks/${pathPart(taskId)}/strategy-candidate-lab`, options)
+);
+export const submitStrategyCandidateLabRequest = (
+  taskId,
+  strategyRequest,
+  content = "从 Candidate Lab 启动策略分析",
+) => (
+  apiPost(`/api/tasks/${pathPart(taskId)}/agent/messages`, {
+    content: String(content || "").trim() || "从 Candidate Lab 启动策略分析",
+    strategy_request: strategyRequest,
+  })
+);
 
 export function uploadDataset(taskId, file, opts = {}) {
   const formData = new FormData();

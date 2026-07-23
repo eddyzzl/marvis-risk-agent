@@ -1332,6 +1332,349 @@
               </section>
               <section id="planRetryPanel" class="plan-retry-panel hidden" aria-label="步骤重试" aria-hidden="true"></section>
               <section id="planDriverActions" class="plan-driver-actions hidden" aria-label="执行操作" aria-hidden="true"></section>
+              <section
+                id="strategyCandidateLabPanel"
+                class="strategy-candidate-lab hidden"
+                aria-label="策略 Candidate Lab"
+                aria-hidden="true"
+              >
+                <header class="candidate-lab-head">
+                  <div>
+                    <h3>Candidate Lab</h3>
+                    <p>人工操作与自然语言共用同一确定性 Workflow、证据绑定和审计链。</p>
+                  </div>
+                  <button type="button" class="button compact secondary" data-candidate-lab-retry="1">
+                    刷新证据
+                  </button>
+                </header>
+                <p
+                  id="strategyCandidateLabStatus"
+                  class="candidate-lab-status"
+                  role="status"
+                  aria-live="polite"
+                ></p>
+                <div class="candidate-lab-layout">
+                  <div class="candidate-lab-launchers" aria-label="候选分析启动器">
+                    <details class="candidate-lab-launcher" open>
+                      <summary>
+                        <span><strong>单变量候选</strong><small>分箱与候选效果分析</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="univariate_candidate_analysis">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>分析字段 <b aria-hidden="true">*</b></span>
+                          <textarea
+                            rows="2"
+                            data-candidate-lab-field="features"
+                            placeholder="例如：score, age, income"
+                          ></textarea>
+                        </label>
+                        <fieldset class="candidate-lab-methods">
+                          <legend>分箱方法（留空使用平台默认）</legend>
+                          <label><input type="checkbox" value="equal_frequency" data-candidate-lab-field="methods">等频</label>
+                          <label><input type="checkbox" value="equal_width" data-candidate-lab-field="methods">等距</label>
+                          <label><input type="checkbox" value="chimerge" data-candidate-lab-field="methods">ChiMerge</label>
+                          <label><input type="checkbox" value="tree" data-candidate-lab-field="methods">决策树</label>
+                          <label><input type="checkbox" value="manual" data-candidate-lab-field="methods">人工切点</label>
+                        </fieldset>
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>分箱数</span>
+                            <input type="number" min="3" max="20" step="1" value="10" data-candidate-lab-field="bin_count">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最小箱占比</span>
+                            <input type="number" min="0" max="0.5" step="0.01" value="0.02" data-candidate-lab-field="min_bin_pct">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>放款金额列</span>
+                            <input autocomplete="off" data-candidate-lab-field="loan_amount_col" placeholder="可选">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>逾期金额列</span>
+                            <input autocomplete="off" data-candidate-lab-field="overdue_amount_col" placeholder="可选">
+                          </label>
+                        </div>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>特殊值</span>
+                          <input autocomplete="off" data-candidate-lab-field="sentinel_values" placeholder="显式类型：number:-9999, text:001">
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>人工切点</span>
+                          <textarea
+                            rows="2"
+                            data-candidate-lab-field="manual_breakpoints"
+                            placeholder="仅 manual：score=500,600；age=30,50"
+                          ></textarea>
+                        </label>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">启动单变量分析</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>单变量细化</strong><small>重新分析，或细化已核验 Candidate</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="univariate_candidate_refinement">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>细化来源</span>
+                          <select data-candidate-lab-field="refinement_mode">
+                            <option value="fresh">重新分析后按坏率阈值选择</option>
+                            <option value="existing">从已有 Candidate 精确选择/合并 Bin</option>
+                          </select>
+                        </label>
+
+                        <div
+                          class="candidate-lab-refinement-panel"
+                          data-candidate-lab-refinement-panel="fresh"
+                          aria-hidden="false"
+                        >
+                          <div class="candidate-lab-form-grid">
+                            <label class="candidate-lab-field">
+                              <span>细化字段 <b aria-hidden="true">*</b></span>
+                              <input autocomplete="off" data-candidate-lab-field="refinement_feature" placeholder="例如：score">
+                            </label>
+                            <label class="candidate-lab-field">
+                              <span>分箱方法</span>
+                              <select data-candidate-lab-field="refinement_method">
+                                <option value="equal_frequency">等频</option>
+                                <option value="equal_width">等距</option>
+                                <option value="chimerge">ChiMerge</option>
+                                <option value="tree">决策树</option>
+                                <option value="manual">人工切点</option>
+                                <option value="categorical">类别等值箱</option>
+                              </select>
+                            </label>
+                            <label class="candidate-lab-field">
+                              <span>坏率阈值运算符</span>
+                              <select data-candidate-lab-field="risk_operator">
+                                <option value=">=">&gt;=</option>
+                                <option value=">">&gt;</option>
+                                <option value="&lt;=">&lt;=</option>
+                                <option value="&lt;">&lt;</option>
+                              </select>
+                            </label>
+                            <label class="candidate-lab-field">
+                              <span>坏率阈值（0–1）</span>
+                              <input type="number" min="0" max="1" step="0.01" value="0.20" data-candidate-lab-field="risk_value">
+                            </label>
+                            <label class="candidate-lab-field">
+                              <span>分箱数</span>
+                              <input type="number" min="3" max="20" step="1" value="10" data-candidate-lab-field="bin_count">
+                            </label>
+                            <label class="candidate-lab-field">
+                              <span>最小箱占比</span>
+                              <input type="number" min="0" max="0.5" step="0.01" value="0.02" data-candidate-lab-field="min_bin_pct">
+                            </label>
+                            <label class="candidate-lab-field">
+                              <span>放款金额列</span>
+                              <input autocomplete="off" data-candidate-lab-field="loan_amount_col" placeholder="可选">
+                            </label>
+                            <label class="candidate-lab-field">
+                              <span>逾期金额列</span>
+                              <input autocomplete="off" data-candidate-lab-field="overdue_amount_col" placeholder="可选">
+                            </label>
+                          </div>
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>特殊值</span>
+                            <input autocomplete="off" data-candidate-lab-field="sentinel_values" placeholder="显式类型：text:001, number:-9999">
+                          </label>
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>人工切点</span>
+                            <input autocomplete="off" data-candidate-lab-field="refinement_manual_breakpoints" placeholder="仅 manual：500, 600, 700">
+                          </label>
+                        </div>
+
+                        <div
+                          class="candidate-lab-refinement-panel hidden"
+                          data-candidate-lab-refinement-panel="existing"
+                          aria-hidden="true"
+                        >
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>已有 Candidate <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="source_candidate_id">
+                              <option value="">等待受认证候选投影</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>字段与方法 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="source_feature_method">
+                              <option value="">先选择 Candidate</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>源 Bin <b aria-hidden="true">*</b></span>
+                            <select
+                              multiple
+                              size="6"
+                              data-candidate-lab-field="source_bin_ids"
+                              aria-describedby="candidateLabRefinementBinHelp"
+                            ></select>
+                          </label>
+                          <p
+                            id="candidateLabRefinementBinHelp"
+                            class="candidate-lab-field-help"
+                            data-candidate-lab-refinement-empty
+                          >
+                            当前任务尚无单变量 Candidate，请先运行单变量分析。
+                          </p>
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>合并组</span>
+                            <textarea
+                              rows="2"
+                              data-candidate-lab-field="merge_groups"
+                              placeholder="可选；同组用 +，组间用；例如 regular:0+regular:1；regular:2+regular:3"
+                            ></textarea>
+                          </label>
+                        </div>
+
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>选择/细化理由</span>
+                          <textarea rows="2" maxlength="500" data-candidate-lab-field="selection_reason" placeholder="可选；记录业务评审理由"></textarea>
+                        </label>
+                        <p class="candidate-lab-boundary-note">
+                          已有模式只提交 Candidate ID、字段/方法和所选 Bin；Artifact 与哈希由平台绑定，不可填写。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">启动单变量细化</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>Cross Matrix</strong><small>两个字段的二维交叉分析</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="cross_matrix_analysis">
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>X 轴字段 <b aria-hidden="true">*</b></span>
+                            <input autocomplete="off" data-candidate-lab-field="x_feature" placeholder="例如：age">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>X 轴方法</span>
+                            <select data-candidate-lab-field="x_method">
+                              <option value="equal_frequency">等频</option>
+                              <option value="equal_width">等距</option>
+                              <option value="chimerge">ChiMerge</option>
+                              <option value="tree">决策树</option>
+                              <option value="categorical">类别等值箱</option>
+                              <option value="manual">人工切点</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>Y 轴字段 <b aria-hidden="true">*</b></span>
+                            <input autocomplete="off" data-candidate-lab-field="y_feature" placeholder="例如：score">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>Y 轴方法</span>
+                            <select data-candidate-lab-field="y_method">
+                              <option value="equal_width">等距</option>
+                              <option value="equal_frequency">等频</option>
+                              <option value="chimerge">ChiMerge</option>
+                              <option value="tree">决策树</option>
+                              <option value="categorical">类别等值箱</option>
+                              <option value="manual">人工切点</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>分箱数</span>
+                            <input type="number" min="3" max="20" step="1" value="10" data-candidate-lab-field="bin_count">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最小箱占比</span>
+                            <input type="number" min="0" max="0.5" step="0.01" value="0.02" data-candidate-lab-field="min_bin_pct">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>X 轴人工切点</span>
+                            <input autocomplete="off" data-candidate-lab-field="x_manual_breakpoints" placeholder="仅 manual：30,50">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>Y 轴人工切点</span>
+                            <input autocomplete="off" data-candidate-lab-field="y_manual_breakpoints" placeholder="仅 manual：500,600">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>放款金额列</span>
+                            <input autocomplete="off" data-candidate-lab-field="loan_amount_col" placeholder="可选">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>逾期金额列</span>
+                            <input autocomplete="off" data-candidate-lab-field="overdue_amount_col" placeholder="可选">
+                          </label>
+                        </div>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>特殊值</span>
+                          <input autocomplete="off" data-candidate-lab-field="sentinel_values" placeholder="显式类型：number:-9999, text:001">
+                        </label>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">启动 Cross Matrix</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>自动规则树</strong><small>生成完整候选树与叶节点证据</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="automatic_tree_candidate_build">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>建树字段 <b aria-hidden="true">*</b></span>
+                          <textarea
+                            rows="2"
+                            data-candidate-lab-field="features"
+                            placeholder="例如：score, age, income"
+                          ></textarea>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>风险方向</span>
+                          <textarea
+                            rows="2"
+                            data-candidate-lab-field="directions"
+                            placeholder="可选：score=decreasing；income=unordered"
+                          ></textarea>
+                        </label>
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>最大深度</span>
+                            <input type="number" min="1" max="8" step="1" data-candidate-lab-field="max_depth" placeholder="平台默认">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最小叶样本数</span>
+                            <input type="number" min="1" step="1" data-candidate-lab-field="min_leaf_count" placeholder="平台默认">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最小叶权重占比</span>
+                            <input type="number" min="0" max="0.5" step="0.01" data-candidate-lab-field="min_weight_fraction_leaf" placeholder="平台默认">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>随机种子</span>
+                            <input type="number" min="0" max="4294967295" step="1" data-candidate-lab-field="seed" placeholder="平台默认">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>样本权重列</span>
+                            <input autocomplete="off" data-candidate-lab-field="sample_weight_col" placeholder="可选">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>放款金额列</span>
+                            <input autocomplete="off" data-candidate-lab-field="loan_amount_col" placeholder="可选">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>逾期金额列</span>
+                            <input autocomplete="off" data-candidate-lab-field="overdue_amount_col" placeholder="可选">
+                          </label>
+                        </div>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">启动自动规则树</button>
+                      </form>
+                    </details>
+                  </div>
+                  <section class="candidate-lab-evidence" aria-label="受认证候选结果">
+                    <header>
+                      <h4>受认证候选与 Strategy Pool</h4>
+                      <p>证据 ID、hash 和下载均来自 task-owned 投影；此处不从对话文本推断业务事实。</p>
+                    </header>
+                    <div id="strategyCandidateLabResults" class="candidate-lab-results"></div>
+                  </section>
+                </div>
+              </section>
               <section id="agentConversationPanel" class="agent-conversation hidden" aria-label="Agent 对话" aria-hidden="true">
                 <div id="agentMessages" class="agent-messages"></div>
               </section>
