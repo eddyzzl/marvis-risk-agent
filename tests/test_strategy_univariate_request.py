@@ -4,8 +4,17 @@ import pytest
 
 from marvis.agent.strategy_request_compiler import (
     STANDARD_STRATEGY_WORKFLOWS,
+    compile_strategy_request,
     validate_strategy_request,
 )
+
+
+class _FakeLLM:
+    def __init__(self, reply: object) -> None:
+        self.reply = reply
+
+    def complete(self, **_kwargs):
+        return self.reply
 
 
 def _validate(inputs: dict, *, columns=None):
@@ -64,14 +73,109 @@ def test_univariate_request_defaults_are_platform_bounded_and_do_not_guess_field
     assert "类别字段使用等值箱" in str(result.confirmation)
 
 
+def test_univariate_manual_breakpoints_are_exact_user_controls():
+    result = _validate(
+        {
+            "features": ["score"],
+            "methods": ["manual"],
+            "manual_breakpoints": {"score": [200, 400.5]},
+        }
+    )
+
+    assert result.draft is not None
+    assert result.draft.to_dict()["workflow_inputs"]["manual_breakpoints"] == {
+        "score": [200.0, 400.5]
+    }
+    assert "手工切点：score=[200、400.5]" in str(result.confirmation)
+
+
+def test_univariate_manual_breakpoints_compile_only_when_exactly_grounded():
+    payload = {
+        "request_kind": "standard_workflow",
+        "workflow": "univariate_candidate_analysis",
+        "workflow_inputs": {
+            "features": ["score"],
+            "methods": ["manual"],
+            "manual_breakpoints": {"score": [200, 400]},
+        },
+    }
+
+    accepted = compile_strategy_request(
+        "对 score 做单变量分析，score manual 切点 [200, 400]",
+        allowed_columns=("score",),
+        target_col="bad",
+        llm=_FakeLLM(payload),
+    )
+    assert accepted.draft is not None
+    assert accepted.draft.to_dict()["workflow_inputs"]["manual_breakpoints"] == {
+        "score": [200.0, 400.0]
+    }
+
+    rewritten = compile_strategy_request(
+        "对 score 做单变量分析，score manual 切点 [200, 400]",
+        allowed_columns=("score",),
+        target_col="bad",
+        llm=_FakeLLM(
+            {
+                **payload,
+                "workflow_inputs": {
+                    **payload["workflow_inputs"],
+                    "manual_breakpoints": {"score": [200, 450]},
+                },
+            }
+        ),
+    )
+    assert rewritten.draft is None
+    assert (
+        rewritten.clarification_code
+        == "univariate_manual_breakpoints_not_grounded"
+    )
+
+
 @pytest.mark.parametrize(
     ("inputs", "message"),
     [
         ({"features": ["ghost"]}, "ghost"),
         ({"features": ["income", "income"]}, "重复"),
         ({"methods": ["quantile_magic"]}, "quantile_magic"),
-        ({"methods": []}, "1 到 4"),
+        ({"methods": []}, "1 到 5"),
         ({"methods": ["tree", "tree"]}, "重复"),
+        (
+            {"features": ["score"], "methods": ["manual"]},
+            "manual_breakpoints",
+        ),
+        (
+            {
+                "features": ["score"],
+                "methods": ["tree"],
+                "manual_breakpoints": {"score": [200, 400]},
+            },
+            "只有选择 manual",
+        ),
+        (
+            {
+                "features": ["score"],
+                "methods": ["manual"],
+                "manual_breakpoints": {"income": [200, 400]},
+            },
+            "必须且只能覆盖",
+        ),
+        (
+            {
+                "features": ["score"],
+                "methods": ["manual"],
+                "manual_breakpoints": {"score": [400, 200]},
+            },
+            "严格递增",
+        ),
+        (
+            {
+                "features": ["score"],
+                "methods": ["manual"],
+                "manual_breakpoints": {"score": [10**1000]},
+            },
+            "精确 JSON 范围",
+        ),
         ({"bin_count": 1}, "bin_count"),
         ({"min_bin_pct": 0.9}, "min_bin_pct"),
         (

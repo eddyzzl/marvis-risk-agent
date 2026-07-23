@@ -26,10 +26,12 @@ from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
 from marvis.packs.strategy import tools as strategy_tools
 from marvis.packs.strategy.errors import StrategyError
 from marvis.plugins.contracts import ToolContext
-from marvis.plugins.loader import load_builtin_packs
+from marvis.plugins.errors import SchemaValidationError
+from marvis.plugins.loader import load_builtin_packs, load_manifest
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
+from marvis.plugins.schema_validation import validate_against_schema
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
@@ -296,8 +298,12 @@ def test_univariate_tool_uses_active_workspace_and_writes_stable_reports(
     }
     evidence = validate_candidate_evidence(output["candidate_evidence"])
     assert evidence["candidate_id"] == output["candidate_id"]
+    assert evidence["analysis"]["schema_version"] == "univariate-analysis-result.v1"
+    assert evidence["producer_version"] == "strategy.univariate-candidate/1"
     assert evidence["identity"]["workspace_revision"] == workspace.revision
     assert evidence["generation"]["parameters"]["method_mode"] == "type_aware_auto"
+    assert "manual_breakpoints" not in evidence["generation"]["parameters"]
+    assert "manual_breakpoints" not in evidence["analysis"]["parameters"]
     assert evidence["generation"]["parameters"]["sample_design_ref"] == (
         sample_design_ref
     )
@@ -327,6 +333,12 @@ def test_univariate_tool_uses_active_workspace_and_writes_stable_reports(
         "strategy_candidate_xlsx",
     }
     json_record = next(record for record in records if record["kind"].endswith("json"))
+    assert json_record["provenance"]["schema_version"] == (
+        "strategy.univariate-candidate-artifact.v1"
+    )
+    assert json_record["provenance"]["producer_version"] == (
+        "strategy.univariate-candidate/1"
+    )
     report = json.loads(Path(json_record["path"]).read_bytes())
     assert report["candidate_evidence"] == evidence
     assert report["univariate_analysis"] == evidence["analysis"]
@@ -343,6 +355,166 @@ def test_univariate_tool_uses_active_workspace_and_writes_stable_reports(
         "Red Flags",
         "Lineage",
     ]
+
+
+def test_univariate_tool_manual_breakpoints_use_true_v2_lineage(
+    tmp_path: Path,
+) -> None:
+    (
+        settings,
+        runner,
+        _registry,
+        task,
+        _other,
+        dataset,
+        workspace,
+        mapping,
+        sample_design_ref,
+    ) = _runtime(tmp_path)
+
+    result = runner.invoke(
+        ToolRef("strategy", "analyze_univariate_candidates"),
+        {
+            **_inputs(dataset, workspace, mapping, sample_design_ref),
+            "features": ["score"],
+            "methods": ["manual"],
+            "manual_breakpoints": {"score": [200, 400]},
+        },
+        task_id=task.id,
+    )
+    assert result.ok, result.error
+    output = result.output
+
+    evidence = validate_candidate_evidence(output["candidate_evidence"])
+    assert output["schema_version"] == "strategy.univariate-candidate-tool.v2"
+    assert evidence["producer_version"] == "strategy.univariate-candidate/2"
+    assert evidence["analysis"]["schema_version"] == "univariate-analysis-result.v2"
+    assert evidence["analysis"]["parameters"]["manual_breakpoints"] == {
+        "score": [200.0, 400.0]
+    }
+    assert evidence["generation"]["parameters"]["analysis_schema_version"] == (
+        "univariate-analysis-result.v2"
+    )
+    assert evidence["generation"]["parameters"]["manual_breakpoints"] == {
+        "score": [200.0, 400.0]
+    }
+    manifest = load_manifest(
+        Path(__file__).parents[1] / "marvis" / "packs" / "strategy",
+        builtin=True,
+    )
+    output_schema = next(
+        tool.output_schema
+        for tool in manifest.tools
+        if tool.name == "analyze_univariate_candidates"
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {
+                **output,
+                "schema_version": "strategy.univariate-candidate-tool.v1",
+            },
+            output_schema,
+            label="mixed univariate V1/V2 output",
+        )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {
+                **output,
+                "candidate_evidence": {
+                    **output["candidate_evidence"],
+                    "producer_version": "strategy.univariate-candidate/1",
+                },
+            },
+            output_schema,
+            label="mixed univariate producer",
+        )
+
+    records = _candidate_artifacts(settings, task)
+    assert len(records) == 2
+    for record in records:
+        provenance = record["provenance"]
+        assert provenance["schema_version"] == (
+            "strategy.univariate-candidate-artifact.v2"
+        )
+        assert provenance["producer_version"] == "strategy.univariate-candidate/2"
+        assert provenance["generation_parameters"]["analysis_schema_version"] == (
+            "univariate-analysis-result.v2"
+        )
+    json_record = next(record for record in records if record["kind"].endswith("json"))
+    report = json.loads(Path(json_record["path"]).read_bytes())
+    assert report["candidate_evidence"] == evidence
+    assert report["univariate_analysis"] == evidence["analysis"]
+
+
+def test_univariate_tool_rejects_invalid_manual_breakpoint_contracts(
+    tmp_path: Path,
+) -> None:
+    (
+        settings,
+        _runner,
+        _registry,
+        task,
+        _other,
+        dataset,
+        workspace,
+        mapping,
+        sample_design_ref,
+    ) = _runtime(tmp_path)
+    base = {
+        **_inputs(dataset, workspace, mapping, sample_design_ref),
+        "features": ["score"],
+        "methods": ["manual"],
+    }
+    invalid_requests = [
+        ({**base}, "provide at least one requested numeric feature"),
+        (
+            {**base, "manual_breakpoints": {"score": []}},
+            "requires at least one breakpoint",
+        ),
+        (
+            {**base, "manual_breakpoints": {"score": [400, 200]}},
+            "strictly increasing and unique",
+        ),
+        (
+            {**base, "manual_breakpoints": {"score": [200, float("nan")]}},
+            "finite numbers",
+        ),
+        (
+            {**base, "manual_breakpoints": {"score": [10**1000]}},
+            "exact numeric precision",
+        ),
+        (
+            {
+                **base,
+                "manual_breakpoints": {"score": list(range(20))},
+            },
+            "configured bin budget",
+        ),
+        (
+            {
+                **base,
+                "methods": ["equal_width"],
+                "manual_breakpoints": {"score": [200]},
+            },
+            "only allowed when manual is requested",
+        ),
+        (
+            {
+                **base,
+                "features": ["score", "segment"],
+                "manual_breakpoints": {"score": [200], "segment": [1]},
+            },
+            "unknown or non-numeric feature",
+        ),
+    ]
+
+    for request, message in invalid_requests:
+        with pytest.raises(StrategyError, match=message):
+            strategy_tools.tool_analyze_univariate_candidates(
+                request,
+                _tool_context(settings, task),
+            )
+    assert _candidate_artifacts(settings, task) == []
 
 
 def test_univariate_omitted_amount_fields_follow_sample_design_not_semantic_roles(

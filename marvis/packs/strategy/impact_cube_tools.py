@@ -56,9 +56,9 @@ from marvis.repositories.task_artifacts import (
 )
 
 
-IMPACT_CUBE_TOOL_SCHEMA_VERSION = "strategy.measure-impact-cube-tool.v1"
+IMPACT_CUBE_TOOL_SCHEMA_VERSION = "strategy.measure-impact-cube-tool.v2"
 IMPACT_CUBE_ARTIFACT_KIND = "strategy_impact_cube_json"
-IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION = "strategy.impact-cube-artifact.v1"
+IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION = "strategy.impact-cube-artifact.v2"
 IMPACT_CUBE_ORIGIN_TOOL = "strategy.measure_strategy_impact_cube"
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -82,6 +82,9 @@ _INPUT_FIELDS = frozenset(
         "current_strategy_ref",
         "economics_inputs",
     }
+)
+_OPTIONAL_INPUT_FIELDS = frozenset(
+    {"current_strategy_ref", "economics_inputs"}
 )
 _POOL_REF_FIELDS = frozenset(
     {
@@ -171,7 +174,7 @@ _PROVENANCE_FIELDS = frozenset(
         "current_strategy_ref",
         "economics_inputs",
         "partitions",
-        "population",
+        "populations",
         "lifecycle",
     }
 )
@@ -243,17 +246,20 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
             current=current,
             task_id=task_id,
         )
-        frames = _read_partition_frames(
+        population_frames = _read_partition_frames(
             runtime,
             pool=pool,
             sample=sample,
             current=current,
             request=request,
             target_col=semantics["target_col"],
+            loan_amount_col=semantics["loan_amount_col"],
+            overdue_amount_col=semantics["overdue_amount_col"],
         )
         cube = build_strategy_impact_cube(
             pool=pool.pool,
-            partition_frames=frames,
+            partition_frames=population_frames["risk"],
+            approval_partition_frames=population_frames["approval"],
             pool_artifact_ref={
                 "artifact_id": pool.artifact_id,
                 "artifact_content_hash": pool.artifact_content_hash,
@@ -282,6 +288,12 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
                 }
             ),
             economics_bindings=request["economics_inputs"],
+            semantic_field_roles=dict(
+                sample.source_binding.semantic_field_roles
+            ),
+            entity_col=semantics["entity_col"],
+            loan_amount_col=semantics["loan_amount_col"],
+            overdue_amount_col=semantics["overdue_amount_col"],
         )
         _require_dataset_unchanged(sample)
         return _persist_cube(
@@ -301,6 +313,10 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
 
 def validate_measure_strategy_impact_cube_tool_output(
     value: object,
+    *,
+    trusted_task_id: str,
+    trusted_artifact_id: str,
+    trusted_artifact_content_hash: str,
 ) -> dict[str, Any]:
     """Validate every cached scalar against the canonical embedded cube."""
 
@@ -312,6 +328,19 @@ def validate_measure_strategy_impact_cube_tool_output(
     )
     cube = validate_strategy_impact_cube(obj["cube"])
     identity = cube["identity"]
+    task_id = _text(trusted_task_id, "trusted task_id")
+    artifact_id = _hash(
+        trusted_artifact_id,
+        "trusted artifact_id",
+    )
+    artifact_content_hash = _hash(
+        trusted_artifact_content_hash,
+        "trusted artifact content_hash",
+    )
+    if identity["task_id"] != task_id:
+        raise StrategyError(
+            "measure_strategy_impact_cube trusted task_id drifted"
+        )
     expected = {
         "schema_version": IMPACT_CUBE_TOOL_SCHEMA_VERSION,
         "cube_id": cube["cube_id"],
@@ -320,7 +349,11 @@ def validate_measure_strategy_impact_cube_tool_output(
         "pool_revision": identity["revision"],
         "pool_snapshot_hash": identity["snapshot_hash"],
         "strategy_type": identity["strategy_type"],
-        "partitions": [row["name"] for row in cube["partitions"]],
+        "partitions": [
+            row["name"]
+            for row in cube["partitions"]
+            if row["role"] == "risk"
+        ],
         "slice_count": len(cube["slices"]),
     }
     for field, expected_value in expected.items():
@@ -358,18 +391,28 @@ def validate_measure_strategy_impact_cube_tool_output(
         _OUTPUT_ARTIFACT_FIELDS,
         "measure_strategy_impact_cube artifact",
     )
-    artifact_id = _hash(artifact["artifact_id"], "artifact_id")
+    output_artifact_id = _hash(artifact["artifact_id"], "artifact_id")
+    if not hmac.compare_digest(output_artifact_id, artifact_id):
+        raise StrategyError(
+            "measure_strategy_impact_cube trusted artifact_id drifted"
+        )
     canonical = canonical_strategy_impact_cube_json(cube).encode("utf-8")
+    canonical_hash = hashlib.sha256(canonical).hexdigest()
+    if not hmac.compare_digest(canonical_hash, artifact_content_hash):
+        raise StrategyError(
+            "measure_strategy_impact_cube trusted artifact content_hash "
+            "drifted"
+        )
     expected_artifact = {
         "artifact_id": artifact_id,
         "kind": IMPACT_CUBE_ARTIFACT_KIND,
         "format": "json",
         "filename": f"{cube['cube_id']}.json",
-        "content_hash": hashlib.sha256(canonical).hexdigest(),
+        "content_hash": artifact_content_hash,
         "download_url": (
             f"/api/tasks/{quote(identity['task_id'], safe='')}"
             f"/task-artifacts/{quote(artifact_id, safe='')}/download"
-            f"?expected_content_hash={hashlib.sha256(canonical).hexdigest()}"
+            f"?expected_content_hash={artifact_content_hash}"
         ),
     }
     if artifact != expected_artifact:
@@ -382,11 +425,12 @@ def validate_measure_strategy_impact_cube_tool_output(
 
 def _validate_inputs(value: object) -> dict[str, Any]:
     obj = _json_object(value, "measure_strategy_impact_cube inputs")
-    _exact_fields(
-        obj,
-        _INPUT_FIELDS,
-        "measure_strategy_impact_cube inputs",
-    )
+    unknown = sorted(set(obj) - _INPUT_FIELDS)
+    missing = sorted((_INPUT_FIELDS - _OPTIONAL_INPUT_FIELDS) - set(obj))
+    if unknown or missing:
+        raise StrategyError(
+            "measure_strategy_impact_cube inputs fields are invalid"
+        )
     strategy_type = _text(obj["strategy_type"], "strategy_type")
     if strategy_type not in _STRATEGY_TYPES:
         raise StrategyError("strategy_type is unsupported")
@@ -405,10 +449,10 @@ def _validate_inputs(value: object) -> dict[str, Any]:
             obj["dimension_bindings"]
         ),
         "current_strategy_ref": _validate_current_strategy_ref(
-            obj["current_strategy_ref"]
+            obj.get("current_strategy_ref")
         ),
         "economics_inputs": _validate_economics_inputs(
-            obj["economics_inputs"]
+            obj.get("economics_inputs")
         ),
     }
 
@@ -653,12 +697,13 @@ def _require_sample_contract(
         raise StrategyError(
             "ImpactCube requires confirmed_matured risk outcomes"
         )
-    counts = sample.membership["header"]["counts"]["risk"]
-    for partition in partitions:
-        if counts[partition] == 0:
-            raise StrategyError(
-                f"ImpactCube {partition} partition is empty"
-            )
+    counts = sample.membership["header"]["counts"]
+    for role in ("approval", "risk"):
+        for partition in partitions:
+            if counts[role][partition] == 0:
+                raise StrategyError(
+                    f"ImpactCube {role}/{partition} partition is empty"
+                )
 
     legacy_ref = StrategySampleDesignRef.from_value(
         design["compatibility"]["legacy_development_ref"]
@@ -688,10 +733,14 @@ def _require_sample_contract(
         raise StrategyError(
             "StrategySampleDesign V2 target polarity changed from legacy lineage"
         )
+    fields = design["sample_semantics"]["field_bindings"]
     return {
         "legacy_development_ref": legacy_ref.to_ref_dict(),
         "target_col": target["column"],
         "target_bad_value": target["bad_value"],
+        "entity_col": fields["entity_field"],
+        "loan_amount_col": fields["loan_amount_field"],
+        "overdue_amount_col": fields["overdue_amount_field"],
     }
 
 
@@ -705,9 +754,12 @@ def _load_current_strategy(
     if value is None:
         return None
     strategy_id = value["strategy_id"]
-    strategy = runtime.strategies.get_strategy(strategy_id)
-    meta = runtime.strategies.get_strategy_meta(strategy_id)
-    stored_hash = runtime.strategies.get_strategy_spec_hash(strategy_id)
+    snapshot = runtime.strategies.get_strategy_snapshot(strategy_id)
+    strategy = None if snapshot is None else snapshot["strategy"]
+    meta = None if snapshot is None else snapshot["metadata"]
+    stored_hash = (
+        None if snapshot is None else snapshot["strategy_spec_hash"]
+    )
     if (
         strategy is None
         or meta is None
@@ -824,7 +876,9 @@ def _read_partition_frames(
     current: _CurrentStrategyBinding | None,
     request: Mapping[str, Any],
     target_col: str,
-) -> dict[str, pd.DataFrame]:
+    loan_amount_col: str | None,
+    overdue_amount_col: str | None,
+) -> dict[str, dict[str, pd.DataFrame]]:
     path = sample.source_binding.dataset_path
     _require_dataset_path(
         path,
@@ -836,6 +890,11 @@ def _read_partition_frames(
     if current is not None:
         fields.update(_expression_fields(current.spec.to_dict()))
     fields.add(target_col)
+    fields.update(
+        column
+        for column in (loan_amount_col, overdue_amount_col)
+        if column is not None
+    )
     fields.update(
         field
         for field in request["dimension_bindings"].values()
@@ -865,44 +924,67 @@ def _read_partition_frames(
             "ImpactCube analysis universe row count changed"
         )
 
-    masks: dict[str, np.ndarray] = {}
-    counts = sample.membership["header"]["counts"]["risk"]
-    for partition in _PARTITION_ORDER:
-        key = f"risk/{partition}"
-        if key not in sample.membership["masks"]:
-            raise StrategyError(
-                f"ImpactCube membership is missing {key}"
-            )
-        mask = np.asarray(
-            sample.membership["masks"][key],
-            dtype=np.bool_,
-        )
-        if len(mask) != len(frame):
-            raise StrategyError(
-                "StrategySampleDesign V2 membership row order changed"
-            )
-        if int(np.count_nonzero(mask)) != counts[partition]:
-            raise StrategyError(
-                f"ImpactCube {partition} membership count changed"
-            )
-        masks[partition] = mask
-    for index, left in enumerate(_PARTITION_ORDER):
-        for right in _PARTITION_ORDER[index + 1 :]:
-            if bool(np.any(masks[left] & masks[right])):
+    masks: dict[str, dict[str, np.ndarray]] = {
+        "approval": {},
+        "risk": {},
+    }
+    counts = sample.membership["header"]["counts"]
+    for role in ("approval", "risk"):
+        for partition in _PARTITION_ORDER:
+            key = f"{role}/{partition}"
+            if key not in sample.membership["masks"]:
                 raise StrategyError(
-                    "ImpactCube risk partitions overlap"
+                    f"ImpactCube membership is missing {key}"
                 )
-
-    result: dict[str, pd.DataFrame] = {}
-    for partition in request["partitions"]:
-        selected = frame.loc[
-            pd.Series(masks[partition], index=frame.index, dtype=bool)
-        ].reset_index(drop=True)
-        if selected.empty or len(selected) != counts[partition]:
-            raise StrategyError(
-                f"ImpactCube {partition} partition is empty or changed"
+            mask = np.asarray(
+                sample.membership["masks"][key],
+                dtype=np.bool_,
             )
-        result[partition] = selected
+            if len(mask) != len(frame):
+                raise StrategyError(
+                    "StrategySampleDesign V2 membership row order changed"
+                )
+            if int(np.count_nonzero(mask)) != counts[role][partition]:
+                raise StrategyError(
+                    f"ImpactCube {role}/{partition} membership count changed"
+                )
+            masks[role][partition] = mask
+        for index, left in enumerate(_PARTITION_ORDER):
+            for right in _PARTITION_ORDER[index + 1 :]:
+                if bool(np.any(masks[role][left] & masks[role][right])):
+                    raise StrategyError(
+                        f"ImpactCube {role} partitions overlap"
+                    )
+    for partition in _PARTITION_ORDER:
+        if bool(
+            np.any(
+                masks["risk"][partition]
+                & ~masks["approval"][partition]
+            )
+        ):
+            raise StrategyError(
+                f"ImpactCube risk/{partition} is outside approval population"
+            )
+
+    result: dict[str, dict[str, pd.DataFrame]] = {
+        "approval": {},
+        "risk": {},
+    }
+    for role in ("approval", "risk"):
+        for partition in request["partitions"]:
+            selected = frame.loc[
+                pd.Series(
+                    masks[role][partition],
+                    index=frame.index,
+                    dtype=bool,
+                )
+            ].reset_index(drop=True)
+            if selected.empty or len(selected) != counts[role][partition]:
+                raise StrategyError(
+                    f"ImpactCube {role}/{partition} partition is empty "
+                    "or changed"
+                )
+            result[role][partition] = selected
     _require_dataset_unchanged(sample)
     return result
 
@@ -1064,6 +1146,13 @@ def _sample_design_evidence_ref(
             partition: header["counts"]["risk"][partition]
             for partition in partitions
         },
+        "population_partition_counts": {
+            role: {
+                partition: header["counts"][role][partition]
+                for partition in partitions
+            }
+            for role in ("approval", "risk")
+        },
     }
 
 
@@ -1195,7 +1284,7 @@ def _persist_cube(
             else dict(request["economics_inputs"])
         ),
         "partitions": list(request["partitions"]),
-        "population": "risk",
+        "populations": ["approval", "risk"],
         "lifecycle": dict(_LIFECYCLE),
     }
     _validate_provenance(provenance)
@@ -1212,6 +1301,8 @@ def _persist_cube(
     db_committed = False
     rollback_under_lock = False
     reused = False
+    retained_fd = -1
+    retained_identity: tuple[int, ...] | None = None
     try:
         with runtime.task_artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1271,6 +1362,12 @@ def _persist_cube(
                     task_id=task_id,
                 )
                 _require_dataset_unchanged(sample)
+                retained_fd, retained_identity = _open_retained_exact_file(
+                    final_path,
+                    root=Path(runtime.settings.tasks_dir).absolute(),
+                    canonical=canonical,
+                    content_hash=artifact_hash,
+                )
                 record = runtime.task_artifacts.register_on_connection(
                     conn,
                     task_id=task_id,
@@ -1288,8 +1385,33 @@ def _persist_cube(
                     task_id=task_id,
                 )
                 _require_dataset_unchanged(sample)
+                _require_retained_exact_file(
+                    retained_fd,
+                    retained_identity=retained_identity,
+                    path=final_path,
+                    canonical=canonical,
+                    content_hash=artifact_hash,
+                )
                 conn.commit()
                 db_committed = True
+                try:
+                    _require_retained_exact_file(
+                        retained_fd,
+                        retained_identity=retained_identity,
+                        path=final_path,
+                        canonical=canonical,
+                        content_hash=artifact_hash,
+                    )
+                except Exception as exc:
+                    _remove_committed_artifact_record(
+                        conn,
+                        task_id=task_id,
+                        artifact_id=str(record["id"]),
+                    )
+                    raise StrategyError(
+                        "ImpactCube artifact changed after registration "
+                        "commit; registry entry was removed"
+                    ) from exc
             except Exception:
                 rollback_under_lock = True
                 uow.rollback()
@@ -1300,8 +1422,14 @@ def _persist_cube(
         if not db_committed and not rollback_under_lock:
             uow.rollback()
         raise
+    finally:
+        if retained_fd >= 0:
+            os.close(retained_fd)
     return validate_measure_strategy_impact_cube_tool_output(
-        _tool_output(cube=cube, record=record, task_id=task_id)
+        _tool_output(cube=cube, record=record, task_id=task_id),
+        trusted_task_id=task_id,
+        trusted_artifact_id=str(record["id"]),
+        trusted_artifact_content_hash=str(record["content_hash"]),
     )
 
 
@@ -1321,7 +1449,11 @@ def _tool_output(
         "pool_revision": identity["revision"],
         "pool_snapshot_hash": identity["snapshot_hash"],
         "strategy_type": identity["strategy_type"],
-        "partitions": [row["name"] for row in cube["partitions"]],
+        "partitions": [
+            row["name"]
+            for row in cube["partitions"]
+            if row["role"] == "risk"
+        ],
         "slice_count": len(cube["slices"]),
         "cube": dict(cube),
         "warnings": [
@@ -1441,8 +1573,8 @@ def _validate_provenance(value: object) -> dict[str, Any]:
         )
     _validate_economics_inputs(obj["economics_inputs"])
     _partition_list(obj["partitions"])
-    if obj["population"] != "risk":
-        raise StrategyError("ImpactCube provenance population changed")
+    if obj["populations"] != ["approval", "risk"]:
+        raise StrategyError("ImpactCube provenance populations changed")
     if obj["lifecycle"] != _LIFECYCLE:
         raise StrategyError("ImpactCube provenance lifecycle changed")
     return obj
@@ -1502,6 +1634,44 @@ def _select_artifact_row(conn, *, task_id: str, path: Path):
     ).fetchone()
 
 
+def _remove_committed_artifact_record(
+    conn,
+    *,
+    task_id: str,
+    artifact_id: str,
+) -> None:
+    normalized_task_id = _text(
+        task_id,
+        "ImpactCube compensation task_id",
+    )
+    normalized_artifact_id = _hash(
+        artifact_id,
+        "ImpactCube compensation artifact_id",
+    )
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        """
+        DELETE FROM task_artifacts
+         WHERE task_id = ? AND id = ?
+        """,
+        (normalized_task_id, normalized_artifact_id),
+    )
+    remaining = conn.execute(
+        """
+        SELECT 1
+          FROM task_artifacts
+         WHERE task_id = ? AND id = ?
+        """,
+        (normalized_task_id, normalized_artifact_id),
+    ).fetchone()
+    if remaining is not None:
+        conn.rollback()
+        raise StrategyError(
+            "ImpactCube artifact registry compensation failed"
+        )
+    conn.commit()
+
+
 def _require_existing_artifact(
     row,
     *,
@@ -1549,6 +1719,101 @@ def _require_exact_file(
     )
     if raw != canonical:
         raise StrategyError("ImpactCube artifact bytes changed")
+
+
+def _open_retained_exact_file(
+    path: Path,
+    *,
+    root: Path,
+    canonical: bytes,
+    content_hash: str,
+) -> tuple[int, tuple[int, ...]]:
+    _require_exact_file(
+        path,
+        root=root,
+        canonical=canonical,
+        content_hash=content_hash,
+    )
+    descriptor = -1
+    try:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        live = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(live.st_mode)
+            or _file_identity(opened) != _file_identity(live)
+        ):
+            raise StrategyError(
+                "ImpactCube artifact changed before registration"
+            )
+        identity = _stable_file_stat(opened)
+        _require_retained_exact_file(
+            descriptor,
+            retained_identity=identity,
+            path=path,
+            canonical=canonical,
+            content_hash=content_hash,
+        )
+        return descriptor, identity
+    except OSError as exc:
+        raise StrategyError(
+            "ImpactCube artifact is unavailable before registration"
+        ) from exc
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+
+
+def _require_retained_exact_file(
+    descriptor: int,
+    *,
+    retained_identity: tuple[int, ...] | None,
+    path: Path,
+    canonical: bytes,
+    content_hash: str,
+) -> None:
+    if descriptor < 0 or retained_identity is None:
+        raise StrategyError("ImpactCube artifact verification fd is missing")
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_IMPACT_CUBE_JSON_BYTES:
+                raise StrategyError(
+                    "ImpactCube artifact exceeds byte budget"
+                )
+            digest.update(chunk)
+            chunks.append(chunk)
+        opened = os.fstat(descriptor)
+        live = os.lstat(path)
+    except OSError as exc:
+        raise StrategyError(
+            "ImpactCube artifact changed during registration"
+        ) from exc
+    if (
+        _stable_file_stat(opened) != retained_identity
+        or not stat.S_ISREG(live.st_mode)
+        or stat.S_ISLNK(live.st_mode)
+        or _file_identity(opened) != _file_identity(live)
+        or b"".join(chunks) != canonical
+        or not hmac.compare_digest(digest.hexdigest(), content_hash)
+    ):
+        raise StrategyError(
+            "ImpactCube artifact changed during registration"
+        )
 
 
 def _read_regular_nofollow(

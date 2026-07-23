@@ -253,6 +253,12 @@ STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS = WorkflowTemplate(
             "user",
             "Explicit special values kept separate; [] is valid",
         ),
+        SlotSpec(
+            "manual_breakpoints",
+            False,
+            "user",
+            "Exact user-provided numeric cutpoints keyed by manual feature",
+        ),
     ),
     steps=(
         StepTemplate(
@@ -274,6 +280,7 @@ STRATEGY_UNIVARIATE_CANDIDATE_ANALYSIS = WorkflowTemplate(
                 "loan_amount_col": "{slot:loan_amount_col}",
                 "overdue_amount_col": "{slot:overdue_amount_col}",
                 "sentinel_values": "{slot:sentinel_values}",
+                "manual_breakpoints": "{slot:manual_breakpoints}",
             },
             depends_on_titles=(),
             post_checks=(
@@ -1810,13 +1817,13 @@ STRATEGY_IMPACT_CUBE = WorkflowTemplate(
         ),
         SlotSpec(
             "current_strategy_ref",
-            True,
+            False,
             "user",
             "Optional exact same-type current strategy comparison",
         ),
         SlotSpec(
             "economics_inputs",
-            True,
+            False,
             "user",
             "Optional typed column/scalar economics bindings",
         ),

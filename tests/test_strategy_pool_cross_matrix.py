@@ -124,6 +124,80 @@ def test_cross_matrix_cell_group_materialize_add_compile_full_chain(
     assert rule["action"] == action
 
 
+def test_manual_v2_cross_matrix_cell_group_completes_pool_chain(
+    tmp_path: Path,
+) -> None:
+    fx = _fixture(tmp_path, manual=True)
+    selected = _materialize(
+        fx,
+        [fx.populated[0]["cell_id"]],
+        reason="manual cutpoint risk segment",
+    )
+
+    added = strategy_tools.tool_add_candidate_to_pool(
+        _add_inputs(
+            selected,
+            revision=0,
+            snapshot_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fx.ctx,
+    )
+    compiled = strategy_tools.tool_compile_strategy_pool(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": added["revision"],
+            "expected_pool_snapshot_hash": added["snapshot_hash"],
+        },
+        fx.ctx,
+    )
+
+    [entry] = added["entries"]
+    [rule] = compiled["strategy_spec"]["rules"]
+    assert fx.matrix["schema_version"] == "strategy.cross-matrix-candidate-asset.v2"
+    assert entry["source"]["asset_schema_version"] == (
+        "strategy.cross-matrix-candidate-asset.v2"
+    )
+    assert entry["source"]["artifact_kind"] == (
+        CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND
+    )
+    assert rule["condition"] == entry["execution"]["condition"]
+
+
+@pytest.mark.parametrize("age_special", ["missing", "sentinel"])
+def test_manual_v2_cross_with_special_bins_completes_pool_chain(
+    tmp_path: Path,
+    age_special: str,
+) -> None:
+    fx = _fixture(
+        tmp_path,
+        manual=True,
+        age_special=age_special,
+    )
+    selected = _materialize(fx, [fx.populated[0]["cell_id"]])
+
+    added = strategy_tools.tool_add_candidate_to_pool(
+        _add_inputs(
+            selected,
+            revision=0,
+            snapshot_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        fx.ctx,
+    )
+    compiled = strategy_tools.tool_compile_strategy_pool(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": added["revision"],
+            "expected_pool_snapshot_hash": added["snapshot_hash"],
+        },
+        fx.ctx,
+    )
+
+    assert len(fx.matrix["axes"][0]["bins"]) > (
+        len(fx.matrix["axes"][0]["manual_breakpoints"]) + 1
+    )
+    assert compiled["strategy_spec"]["rules"]
+
+
 def test_complete_cross_matrix_cannot_enter_pool_directly_and_is_zero_mutation(
     tmp_path: Path,
 ) -> None:
@@ -156,6 +230,34 @@ def test_complete_cross_matrix_cannot_enter_pool_directly_and_is_zero_mutation(
         )
         is None
     )
+
+
+def test_complete_manual_v2_cross_matrix_cannot_enter_pool_directly(
+    tmp_path: Path,
+) -> None:
+    fx = _fixture(tmp_path, manual=True)
+    matrix = fx.matrix_result
+
+    with pytest.raises(
+        StrategyError,
+        match="complete Cross Matrix assets cannot be admitted directly",
+    ):
+        strategy_tools.tool_add_candidate_to_pool(
+            {
+                "source_artifact_id": fx.matrix_artifact["artifact_id"],
+                "expected_artifact_content_hash": fx.matrix_artifact["content_hash"],
+                "expected_asset_id": matrix["asset_id"],
+                "expected_asset_hash": matrix["asset_hash"],
+                "strategy_type": "approval",
+                "default_action": _action("approval"),
+                "action": _action("reject"),
+                "expected_pool_revision": 0,
+                "expected_pool_snapshot_hash": ABSENT_POOL_SNAPSHOT_HASH,
+            },
+            fx.ctx,
+        )
+
+    assert _pool_counts(fx) == (0, 0, 0)
 
 
 def test_same_matrix_disjoint_cell_groups_are_admitted(tmp_path: Path) -> None:

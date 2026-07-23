@@ -159,6 +159,8 @@ def _frame() -> pd.DataFrame:
             "ead": [1000.0, 2000.0, 1500.0, 1000.0, 500.0, 2500.0],
             "pd": [0.01, 0.20, 0.10, 0.03, 0.30, 0.02],
             "utilization": [0.5, 0.4, 0.7, 0.2, 0.9, 0.6],
+            "loan_amount": [100.0, 200.0, None, 400.0, 500.0, 600.0],
+            "overdue_amount": [0.0, 20.0, 30.0, None, 50.0, 60.0],
         }
     )
 
@@ -199,7 +201,13 @@ def _pool_artifact_ref() -> dict:
     }
 
 
-def _sample_design_v2_ref() -> dict:
+def _sample_design_v2_ref(
+    *,
+    approval_counts: dict[str, int] | None = None,
+    risk_counts: dict[str, int] | None = None,
+) -> dict:
+    risk = risk_counts or {"development": 3, "validation": 3}
+    approval = approval_counts or dict(risk)
     return {
         "membership_artifact_id": "3" * 64,
         "membership_artifact_content_hash": "4" * 64,
@@ -212,7 +220,11 @@ def _sample_design_v2_ref() -> dict:
         "sample_design_id": "strategy-sample-design-v2-" + "b" * 24,
         "sample_design_content_hash": "c" * 64,
         "analysis_universe_row_count": 6,
-        "partition_counts": {"development": 3, "validation": 3},
+        "partition_counts": dict(risk),
+        "population_partition_counts": {
+            "approval": dict(approval),
+            "risk": dict(risk),
+        },
     }
 
 
@@ -247,6 +259,8 @@ def _build(
     group_col: str | None = "group",
     segment_col: str | None = "segment",
     include_current: bool = True,
+    loan_amount_col: str | None = "loan_amount",
+    overdue_amount_col: str | None = "overdue_amount",
 ) -> dict:
     frame = _frame()
     current_spec = _current_spec(strategy_type) if include_current else None
@@ -257,6 +271,10 @@ def _build(
     )
     return build_strategy_impact_cube(
         pool=_pool(strategy_type),
+        approval_partition_frames={
+            "development": frame.iloc[:3].reset_index(drop=True),
+            "validation": frame.iloc[3:].reset_index(drop=True),
+        },
         partition_frames={
             "development": frame.iloc[:3].reset_index(drop=True),
             "validation": frame.iloc[3:].reset_index(drop=True),
@@ -281,6 +299,8 @@ def _build(
             else None
         ),
         economics_bindings=economics,
+        loan_amount_col=loan_amount_col,
+        overdue_amount_col=overdue_amount_col,
     )
 
 
@@ -289,19 +309,246 @@ def _slices(
     *,
     family: str,
     partition: str = "development",
+    population_role: str = "risk",
 ) -> list[dict]:
     return [
         item
         for item in cube["slices"]
         if item["family"] == family
         and item["dimensions"]["partition"]["value"] == partition
+        and item["population_role"] == population_role
     ]
 
 
-def _overall(cube: dict, partition: str = "development") -> dict:
-    rows = _slices(cube, family="overall", partition=partition)
+def _overall(
+    cube: dict,
+    partition: str = "development",
+    *,
+    population_role: str = "risk",
+) -> dict:
+    rows = _slices(
+        cube,
+        family="overall",
+        partition=partition,
+        population_role=population_role,
+    )
     assert len(rows) == 1
     return rows[0]
+
+
+def test_impact_cube_keeps_approval_and_risk_denominators_separate() -> None:
+    frame = _frame()
+    cube = build_strategy_impact_cube(
+        pool=_pool("approval"),
+        approval_partition_frames={
+            "development": frame.iloc[:4].reset_index(drop=True),
+            "validation": frame.iloc[4:].reset_index(drop=True),
+        },
+        partition_frames={
+            "development": frame.iloc[:3].reset_index(drop=True),
+            "validation": frame.iloc[4:].reset_index(drop=True),
+        },
+        pool_artifact_ref=_pool_artifact_ref(),
+        sample_design_v2_ref=_sample_design_v2_ref(
+            approval_counts={"development": 4, "validation": 2},
+            risk_counts={"development": 3, "validation": 2},
+        ),
+        dataset_binding=_dataset_binding(),
+        legacy_development_ref=_legacy_ref(),
+        target_col="bad",
+        target_bad_value=1,
+        month_col=None,
+        group_col=None,
+        segment_col=None,
+        current_strategy_spec=None,
+        current_strategy_ref=None,
+        economics_bindings=None,
+    )
+
+    approval = _slices(
+        cube,
+        family="overall",
+        population_role="approval",
+    )[0]
+    risk = _slices(cube, family="overall", population_role="risk")[0]
+    assert approval["population"]["value"]["count"] == 4
+    assert approval["new"]["value"]["population_count"] == 4
+    assert approval["population"]["value"]["risk"]["availability"] == (
+        "not_applicable"
+    )
+    assert risk["population"]["value"]["count"] == 3
+    assert risk["new"]["value"]["population_count"] == 3
+    assert risk["population"]["value"]["risk"]["availability"] == "present"
+    assert {
+        (row["role"], row["population_key"], row["row_count"])
+        for row in cube["partitions"]
+    } == {
+        ("approval", "approval/development", 4),
+        ("approval", "approval/validation", 2),
+        ("risk", "risk/development", 3),
+        ("risk", "risk/validation", 2),
+    }
+
+
+def test_impact_cube_preserves_amount_coverage_sums_and_waterfall_conservation() -> None:
+    cube = _build("approval")
+    approval = _slices(
+        cube,
+        family="overall",
+        population_role="approval",
+    )[0]
+    amounts = approval["population"]["value"]["amounts"]
+    assert amounts["loan_amount"]["value"] == {
+        "column": "loan_amount",
+        "covered_count": 2,
+        "coverage": pytest.approx(2 / 3),
+        "sum": 300.0,
+    }
+    assert amounts["overdue_amount"]["value"] == {
+        "column": "overdue_amount",
+        "covered_count": 3,
+        "coverage": 1.0,
+        "sum": 50.0,
+    }
+    waterfall = approval["waterfall"]["value"]
+    reached = [
+        row["incremental"]["amounts"]["loan_amount"]["value"]["sum"]
+        for row in waterfall["entries"]
+    ]
+    default_sum = waterfall["default_unmatched"]["effect"]["amounts"][
+        "loan_amount"
+    ]["value"]["sum"]
+    assert sum(reached) + default_sum == pytest.approx(300.0)
+
+    unavailable = _build(
+        "approval",
+        loan_amount_col=None,
+        overdue_amount_col=None,
+    )
+    unavailable_amounts = _slices(
+        unavailable,
+        family="overall",
+        population_role="approval",
+    )[0]["population"]["value"]["amounts"]
+    assert unavailable_amounts["loan_amount"] == {
+        "availability": "unavailable",
+        "reason": "loan_amount_field_not_bound",
+        "value": None,
+    }
+
+
+def test_new_action_bucket_must_match_waterfall_action_identity() -> None:
+    cube = copy.deepcopy(_build("approval"))
+    row = next(
+        item
+        for item in _slices(cube, family="new_action")
+        if item["dimensions"]["new_action_bucket"]["value"]["type"]
+        == "reject"
+    )
+    row["dimensions"]["new_action_bucket"]["value"]["reason_code"] = (
+        "TAMPERED_REASON"
+    )
+    _rehash_slice(row)
+    _sort_slices(cube)
+    _rehash_cube(cube)
+
+    with pytest.raises(StrategyError, match="new_action"):
+        validate_strategy_impact_cube(cube)
+
+
+def test_pricing_profit_identity_and_dimension_economics_rollup_fail_closed() -> None:
+    cube = copy.deepcopy(_build("pricing"))
+    overall = _slices(
+        cube,
+        family="overall",
+        partition="validation",
+        population_role="approval",
+    )[0]
+    values = overall["economics"]["value"]
+    values["new"]["profit"] += 1.0
+    values["new"]["profit_delta_vs_baseline"] += 1.0
+    values["new"]["roa"] = (
+        values["new"]["profit"] / values["new"]["total_ead"]
+    )
+    values["delta"]["profit"] += 1.0
+    values["delta"]["roa"] = (
+        values["new"]["roa"] - values["current"]["roa"]
+    )
+    _rehash_slice(overall)
+    _rehash_cube(cube)
+    with pytest.raises(StrategyError, match="profit identity"):
+        validate_strategy_impact_cube(cube)
+
+    cube = copy.deepcopy(_build("pricing"))
+    child = _slices(
+        cube,
+        family="group",
+        partition="validation",
+        population_role="approval",
+    )[0]
+    values = child["economics"]["value"]
+    values["new"]["revenue"] += 1.0
+    values["new"]["profit"] += 1.0
+    values["new"]["profit_delta_vs_baseline"] += 1.0
+    values["new"]["roa"] = (
+        values["new"]["profit"] / values["new"]["total_ead"]
+    )
+    values["delta"]["revenue"] += 1.0
+    values["delta"]["profit"] += 1.0
+    values["delta"]["roa"] = (
+        values["new"]["roa"] - values["current"]["roa"]
+    )
+    _rehash_slice(child)
+    _rehash_cube(cube)
+    with pytest.raises(StrategyError, match="economics.*roll"):
+        validate_strategy_impact_cube(cube)
+
+
+def test_impact_cube_redacts_small_dimension_cells_without_raw_values() -> None:
+    cube = _build("approval", segment_col=None)
+
+    group_rows = _slices(cube, family="group")
+    assert group_rows
+    assert all(row["population"]["value"]["count"] >= 2 for row in group_rows)
+    assert any(
+        row["dimensions"]["group"] == {"kind": "redacted", "value": None}
+        for row in group_rows
+    )
+    canonical = canonical_strategy_impact_cube_json(cube)
+    assert '"group":{"kind":"null","value":null}' not in canonical
+    assert cube["source_bindings"]["privacy"]["minimum_group_size"] == 2
+    assert any(
+        flag["code"] == "dimension_cells_redacted"
+        for flag in cube["red_flags"]
+    )
+
+
+def test_impact_cube_rejects_single_row_population_partitions() -> None:
+    frame = _frame().iloc[:1].reset_index(drop=True)
+    sample_ref = _sample_design_v2_ref(
+        approval_counts={"development": 1},
+        risk_counts={"development": 1},
+    )
+    sample_ref["analysis_universe_row_count"] = 1
+
+    with pytest.raises(StrategyError, match="minimum group size"):
+        build_strategy_impact_cube(
+            pool=_pool("approval"),
+            approval_partition_frames={"development": frame},
+            partition_frames={"development": frame},
+            pool_artifact_ref=_pool_artifact_ref(),
+            sample_design_v2_ref=sample_ref,
+            dataset_binding=_dataset_binding(),
+            legacy_development_ref=_legacy_ref(),
+            target_col="bad",
+            target_bad_value=1,
+            month_col=None,
+            group_col=None,
+            segment_col=None,
+            current_strategy_spec=None,
+            current_strategy_ref=None,
+            economics_bindings=None,
+        )
 
 
 def _rehash_slice(row: dict) -> None:
@@ -365,6 +612,7 @@ def _rehash_cube(cube: dict) -> None:
 def _sort_slices(cube: dict) -> None:
     cube["slices"].sort(
         key=lambda item: (
+            ["approval", "risk"].index(item["population_role"]),
             ["development", "validation", "oot"].index(
                 item["dimensions"]["partition"]["value"]
             ),
@@ -441,11 +689,14 @@ def test_impact_cube_unifies_month_group_segment_null_buckets_and_group_month() 
         "reason": None,
     }
     assert any(
-        row["dimensions"]["group"] == {"kind": "null", "value": None}
+        row["dimensions"]["group"] == {"kind": "redacted", "value": None}
         for row in _slices(cube, family="group")
     )
     assert any(
-        row["dimensions"]["segment"] == {"kind": "null", "value": None}
+        row["dimensions"]["segment"] == {
+            "kind": "redacted",
+            "value": None,
+        }
         for row in _slices(cube, family="segment")
     )
     for family in ("month", "group", "segment", "group_month"):
@@ -484,7 +735,10 @@ def test_economics_use_only_bound_deterministic_inputs_without_row_details(
     strategy_type: str,
 ) -> None:
     cube = _build(strategy_type)
-    economics = _overall(cube)["economics"]
+    economics = _overall(
+        cube,
+        population_role="approval",
+    )["economics"]
 
     assert economics["availability"] == "present"
     assert economics["reason"] is None
@@ -496,12 +750,37 @@ def test_economics_use_only_bound_deterministic_inputs_without_row_details(
     assert '"by_row"' not in canonical
 
 
+@pytest.mark.parametrize("strategy_type", ["approval", "reject"])
+def test_decision_economics_bind_current_profit_as_new_baseline(
+    strategy_type: str,
+) -> None:
+    economics = _overall(
+        _build(strategy_type),
+        partition="validation",
+        population_role="approval",
+    )["economics"]["value"]
+
+    assert economics["current"]["profit"] != 0
+    assert economics["new"]["profit"] != economics["current"]["profit"]
+    assert (
+        economics["new"]["baseline_profit"]
+        == economics["current"]["profit"]
+    )
+    assert (
+        economics["new"]["profit_delta_vs_baseline"]
+        == economics["delta"]["profit"]
+    )
+
+
 @pytest.mark.parametrize("strategy_type", ["approval", "reject", "limit", "pricing"])
 def test_missing_economics_are_typed_unavailable_never_zero(
     strategy_type: str,
 ) -> None:
     cube = _build(strategy_type, economics_bindings=None)
-    economics = _overall(cube)["economics"]
+    economics = _overall(
+        cube,
+        population_role="approval",
+    )["economics"]
 
     assert economics == {
         "availability": "unavailable",
@@ -513,15 +792,24 @@ def test_missing_economics_are_typed_unavailable_never_zero(
 def test_explicit_empty_economics_bundle_is_distinct_and_validated() -> None:
     cube = _build("approval", economics_bindings={})
 
-    assert _overall(cube)["economics"]["availability"] == "unavailable"
-    assert _overall(cube)["economics"]["reason"].startswith(
+    assert _overall(
+        cube,
+        population_role="approval",
+    )["economics"]["availability"] == "unavailable"
+    assert _overall(
+        cube,
+        population_role="approval",
+    )["economics"]["reason"].startswith(
         "missing_economics_inputs:"
     )
     assert validate_strategy_impact_cube(cube) == cube
 
 
 def test_segmentation_economics_are_typed_not_applicable() -> None:
-    assert _overall(_build("segmentation"))["economics"] == {
+    assert _overall(
+        _build("segmentation"),
+        population_role="approval",
+    )["economics"] == {
         "availability": "not_applicable",
         "reason": "segmentation_has_no_economic_contract",
         "value": None,
@@ -682,8 +970,15 @@ def test_impact_cube_fails_closed_when_slice_budget_is_exceeded() -> None:
     sample_ref["partition_counts"] = {
         "development": len(frames["development"])
     }
+    sample_ref["population_partition_counts"] = {
+        role: {"development": len(frames["development"])}
+        for role in ("approval", "risk")
+    }
 
-    with pytest.raises(StrategyError, match="slice budget"):
+    with pytest.raises(
+        StrategyError,
+        match="slice budget|high-cardinality",
+    ):
         build_strategy_impact_cube(
             pool=_pool("approval"),
             partition_frames=frames,
@@ -709,7 +1004,10 @@ def test_impact_cube_fails_closed_when_slice_budget_is_exceeded() -> None:
         ("projection_extra_field", "metrics"),
         ("family_dimension", "dimensions"),
         ("economics_delta", "economics delta"),
-        ("economics_current_binding", "current economics"),
+        (
+            "economics_current_binding",
+            "current economics|baseline_profit",
+        ),
         ("projection_value_leak", "overall_bad_rate"),
         ("transition_direction", "transition direction"),
         ("waterfall_source", "source_ref"),
@@ -729,7 +1027,7 @@ def test_coherently_rehashed_semantic_tampering_is_rejected(
         )
         row["dimensions"]["group"] = {"kind": "all", "value": None}
     else:
-        row = _overall(cube)
+        row = _overall(cube, population_role="approval")
         if tamper == "population_share":
             row["population"]["value"]["share"] = 0.5
         elif tamper == "projection_extra_field":
@@ -741,7 +1039,7 @@ def test_coherently_rehashed_semantic_tampering_is_rejected(
             cube = copy.deepcopy(
                 _build("pricing", include_current=False)
             )
-            row = _overall(cube)
+            row = _overall(cube, population_role="approval")
             row["economics"]["value"]["current"] = copy.deepcopy(
                 row["economics"]["value"]["new"]
             )
@@ -848,17 +1146,10 @@ def test_rehashed_undeclared_partitions_and_duplicate_buckets_are_rejected() -> 
         validate_strategy_impact_cube(undeclared)
 
     duplicated = copy.deepcopy(_build("approval"))
-    group_rows = _slices(duplicated, family="group")
-    null_row = next(
-        row for row in group_rows if row["dimensions"]["group"]["kind"] == "null"
-    )
-    value_row = next(
-        row
-        for row in group_rows
-        if row["dimensions"]["group"] == {"kind": "value", "value": "g1"}
-    )
-    null_row["dimensions"]["group"] = copy.deepcopy(
-        value_row["dimensions"]["group"]
+    action_rows = _slices(duplicated, family="new_action")
+    null_row, value_row = action_rows[:2]
+    null_row["dimensions"]["new_action_bucket"] = copy.deepcopy(
+        value_row["dimensions"]["new_action_bucket"]
     )
     _rehash_slice(null_row)
     _sort_slices(duplicated)

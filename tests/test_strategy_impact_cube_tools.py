@@ -57,6 +57,16 @@ def _artifacts(fx: dict) -> list[dict]:
     ]
 
 
+def _validate_output(fx: dict, output: dict) -> dict:
+    record = _artifacts(fx)[0]
+    return validate_measure_strategy_impact_cube_tool_output(
+        output,
+        trusted_task_id=fx["task"].id,
+        trusted_artifact_id=record["id"],
+        trusted_artifact_content_hash=record["content_hash"],
+    )
+
+
 def test_measure_impact_cube_publishes_exact_aggregate_only_evidence(
     tmp_path: Path,
 ) -> None:
@@ -94,7 +104,7 @@ def test_measure_impact_cube_publishes_exact_aggregate_only_evidence(
         "reason": "economics_inputs_not_provided",
         "value": None,
     }
-    assert validate_measure_strategy_impact_cube_tool_output(output) == output
+    assert _validate_output(fx, output) == output
     assert output["not_mutated_pool"] is True
     assert output["not_created_strategy"] is True
     assert output["not_adopted"] is True
@@ -115,6 +125,32 @@ def test_measure_impact_cube_publishes_exact_aggregate_only_evidence(
     )
     assert record["origin_tool"] == "strategy.measure_strategy_impact_cube"
     assert fx["runtime"].strategies.list_for_task(fx["task"].id) == []
+
+
+def test_measure_impact_cube_normalizes_omitted_optional_inputs(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    request = copy.deepcopy(fx["impact_request"])
+    request.pop("current_strategy_ref")
+    request.pop("economics_inputs")
+
+    output = run_measure_strategy_impact_cube(
+        request,
+        fx["ctx"],
+        fx["runtime"],
+    )
+
+    assert _validate_output(fx, output) == output
+    overall = next(
+        row
+        for row in output["cube"]["slices"]
+        if row["population_role"] == "approval"
+        and row["family"] == "overall"
+        and row["dimensions"]["partition"]["value"] == "development"
+    )
+    assert overall["current"]["availability"] == "unavailable"
+    assert overall["economics"]["availability"] == "unavailable"
 
 
 def test_measure_impact_cube_is_idempotent_and_cached_scalars_fail_closed(
@@ -138,7 +174,17 @@ def test_measure_impact_cube_is_idempotent_and_cached_scalars_fail_closed(
     tampered = copy.deepcopy(first)
     tampered["slice_count"] += 1
     with pytest.raises(StrategyError, match="slice_count drifted"):
-        validate_measure_strategy_impact_cube_tool_output(tampered)
+        _validate_output(fx, tampered)
+
+    with pytest.raises(StrategyError, match="trusted artifact_id"):
+        validate_measure_strategy_impact_cube_tool_output(
+            first,
+            trusted_task_id=fx["task"].id,
+            trusted_artifact_id="f" * 64,
+            trusted_artifact_content_hash=_artifacts(fx)[0][
+                "content_hash"
+            ],
+        )
 
 
 def test_measure_impact_cube_recovers_exact_orphan_file_idempotently(
@@ -218,6 +264,7 @@ def test_measure_impact_cube_reads_authenticated_private_dataset_snapshot(
 
 def test_measure_impact_cube_binds_exact_current_strategy_transition(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fx = _setup(tmp_path)
     spec = compile_strategy_pool(fx["pool"]["pool"])["strategy_spec"]
@@ -228,6 +275,18 @@ def test_measure_impact_cube_binds_exact_current_strategy_transition(
         "strategy_id": current.id,
         "expected_strategy_spec_hash": strategy_spec_hash(current.spec),
     }
+    for method_name in (
+        "get_strategy",
+        "get_strategy_meta",
+        "get_strategy_spec_hash",
+    ):
+        monkeypatch.setattr(
+            fx["runtime"].strategies,
+            method_name,
+            lambda *_args, **_kwargs: pytest.fail(
+                "ImpactCube must use one atomic strategy snapshot"
+            ),
+        )
 
     output = run_measure_strategy_impact_cube(
         request,
@@ -263,6 +322,25 @@ def test_measure_impact_cube_rejects_stale_pool_and_unknown_dimensions(
     unknown["dimension_bindings"]["group_col"] = "not_a_column"
     with pytest.raises(StrategyError, match="missing.*not_a_column"):
         run_measure_strategy_impact_cube(unknown, fx["ctx"], fx["runtime"])
+    assert _artifacts(fx) == []
+
+
+def test_measure_impact_cube_rejects_identifier_dimension_role(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    request = copy.deepcopy(fx["impact_request"])
+    request["dimension_bindings"]["group_col"] = "customer_id"
+
+    with pytest.raises(
+        StrategyError,
+        match="identifier|sensitive|personal",
+    ):
+        run_measure_strategy_impact_cube(
+            request,
+            fx["ctx"],
+            fx["runtime"],
+        )
     assert _artifacts(fx) == []
 
 
@@ -341,6 +419,70 @@ def test_measure_impact_cube_registration_failure_rolls_back_file_and_row(
         / "strategy_impact_cubes"
     )
     assert not out_dir.exists() or list(out_dir.glob("*.json")) == []
+    assert _artifacts(fx) == []
+
+
+def test_measure_impact_cube_detects_artifact_swap_during_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    real_register = fx["runtime"].task_artifacts.register_on_connection
+
+    def mutate_after_register(conn, **kwargs):
+        record = real_register(conn, **kwargs)
+        Path(kwargs["path"]).write_bytes(b'{"tampered":true}')
+        return record
+
+    monkeypatch.setattr(
+        fx["runtime"].task_artifacts,
+        "register_on_connection",
+        mutate_after_register,
+    )
+    with pytest.raises(
+        StrategyError,
+        match="changed during registration",
+    ):
+        run_measure_strategy_impact_cube(
+            fx["impact_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert _artifacts(fx) == []
+
+
+def test_measure_impact_cube_compensates_swap_after_precommit_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    real_require = impact_tools._require_retained_exact_file
+    call_count = 0
+
+    def mutate_after_precommit_check(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        real_require(*args, **kwargs)
+        if call_count == 2:
+            Path(kwargs["path"]).write_bytes(b'{"tampered":true}')
+
+    monkeypatch.setattr(
+        impact_tools,
+        "_require_retained_exact_file",
+        mutate_after_precommit_check,
+    )
+    with pytest.raises(
+        StrategyError,
+        match="changed after registration commit",
+    ):
+        run_measure_strategy_impact_cube(
+            fx["impact_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert call_count == 3
     assert _artifacts(fx) == []
 
 

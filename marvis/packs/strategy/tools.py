@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, is_dataclass, replace
 import hashlib
 import hmac
 import json
 import math
+from numbers import Integral, Real
 from pathlib import Path
 import re
 from typing import Any, Mapping
@@ -25,6 +27,7 @@ from marvis.data.workspace import (
 from marvis.db import StrategyRepository
 from marvis.db_schema import connect
 from marvis.feature.univariate import (
+    MANUAL_SCHEMA_VERSION as UNIVARIATE_MANUAL_ANALYSIS_SCHEMA_VERSION,
     SCHEMA_VERSION as UNIVARIATE_ANALYSIS_SCHEMA_VERSION,
     analyze_univariate,
 )
@@ -235,6 +238,7 @@ _UNIVARIATE_TOOL_INPUT_FIELDS = frozenset(
         "drop_nan_labels",
         "features",
         "methods",
+        "manual_breakpoints",
         "bin_count",
         "min_bin_pct",
         "loan_amount_col",
@@ -268,6 +272,11 @@ _UNIVARIATE_CANDIDATE_TOOL_SCHEMA_VERSION = "strategy.univariate-candidate-tool.
 _UNIVARIATE_CANDIDATE_PRODUCER_VERSION = "strategy.univariate-candidate/1"
 _UNIVARIATE_CANDIDATE_ARTIFACT_SCHEMA_VERSION = (
     "strategy.univariate-candidate-artifact.v1"
+)
+_UNIVARIATE_CANDIDATE_V2_TOOL_SCHEMA_VERSION = "strategy.univariate-candidate-tool.v2"
+_UNIVARIATE_CANDIDATE_V2_PRODUCER_VERSION = "strategy.univariate-candidate/2"
+_UNIVARIATE_CANDIDATE_V2_ARTIFACT_SCHEMA_VERSION = (
+    "strategy.univariate-candidate-artifact.v2"
 )
 _UNIVARIATE_MAX_ROWS = 1_000_000
 _UNIVARIATE_MAX_FEATURES = 50
@@ -652,6 +661,12 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
         frame=frame,
         field_roles=resolved_roles,
     )
+    manual_breakpoints = _univariate_manual_breakpoints(
+        inputs.get("manual_breakpoints"),
+        features=features,
+        feature_types=feature_types,
+        methods=methods,
+    )
     sentinel_mapping, sentinel_red_flags = _univariate_sentinel_mapping(
         requested_sentinels,
         features=features,
@@ -664,6 +679,7 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
         feature_types=feature_types,
         methods=methods,
         bin_count=int(inputs.get("bin_count", 10)),
+        manual_breakpoints=manual_breakpoints,
         sentinel_mapping=sentinel_mapping,
         sentinel_value_count=len(requested_sentinels),
     )
@@ -680,6 +696,7 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
         target=target_col,
         methods=(None if not methods else methods),
         feature_types=feature_types,
+        manual_breakpoints=manual_breakpoints,
         bin_count=int(inputs.get("bin_count", 10)),
         sentinel_values=sentinel_mapping,
         loan_amount=loan_amount_col,
@@ -707,8 +724,11 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
         loan_amount_col=loan_amount_col,
         overdue_amount_col=overdue_amount_col,
     )
+    version_contract = _univariate_candidate_version_contract(
+        analysis["schema_version"]
+    )
     generation_parameters = {
-        "analysis_schema_version": UNIVARIATE_ANALYSIS_SCHEMA_VERSION,
+        "analysis_schema_version": analysis["schema_version"],
         "target_col": target_col,
         "drop_nan_labels": bool(inputs.get("drop_nan_labels")),
         "nan_labels_dropped": int(nan_labels_dropped),
@@ -727,6 +747,16 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
         "estimated_evaluated_cells": int(estimated_evaluated_cells),
         "budget_unit": "row_bin_evaluations",
         "sample_design_ref": sample_binding.to_ref_dict(),
+        **(
+            {
+                "manual_breakpoints": {
+                    feature: list(points)
+                    for feature, points in manual_breakpoints.items()
+                }
+            }
+            if manual_breakpoints
+            else {}
+        ),
     }
     candidate_evidence = build_candidate_evidence(
         task_id=task_id,
@@ -750,7 +780,7 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
             sample_binding.source_ref_token,
         ),
         red_flags=red_flags,
-        producer_version=_UNIVARIATE_CANDIDATE_PRODUCER_VERSION,
+        producer_version=version_contract["producer_version"],
     )
     bundle = render_strategy_candidate_bundle(candidate_evidence, analysis)
     _assert_source_unchanged(binding.path, binding.content_hash)
@@ -764,7 +794,7 @@ def tool_analyze_univariate_candidates(inputs: dict, ctx) -> dict:
         bundle=bundle,
     )
     return {
-        "schema_version": _UNIVARIATE_CANDIDATE_TOOL_SCHEMA_VERSION,
+        "schema_version": version_contract["tool_schema_version"],
         "candidate_id": candidate_evidence["candidate_id"],
         "evidence_hash": candidate_evidence["evidence_hash"],
         "validation_status": candidate_evidence["validation_status"],
@@ -5002,21 +5032,140 @@ def _univariate_methods(raw_methods) -> tuple[str, ...]:
     ):
         raise StrategyError("methods must be an ordered array")
     methods = tuple(raw_methods)
-    supported = {"equal_frequency", "equal_width", "chimerge", "tree"}
+    supported = {"equal_frequency", "equal_width", "chimerge", "tree", "manual"}
     if len(methods) != len(set(methods)) or any(
         not isinstance(method, str) or method not in supported for method in methods
     ):
         raise StrategyError(
             "methods must be unique and selected from equal_frequency, "
-            "equal_width, chimerge, tree"
+            "equal_width, chimerge, tree, manual"
         )
     order = {
         "equal_frequency": 0,
         "equal_width": 1,
         "chimerge": 2,
         "tree": 3,
+        "manual": 4,
     }
     return tuple(sorted(methods, key=order.__getitem__))
+
+
+def _univariate_manual_breakpoints(
+    raw_breakpoints,
+    *,
+    features: list[str],
+    feature_types: Mapping[str, str],
+    methods: tuple[str, ...],
+) -> dict[str, tuple[float, ...]]:
+    manual_requested = "manual" in methods
+    if raw_breakpoints is not None and not isinstance(raw_breakpoints, Mapping):
+        raise StrategyError(
+            "manual_breakpoints must be a feature-to-array mapping"
+        )
+    provided = {} if raw_breakpoints is None else dict(raw_breakpoints)
+    if any(not isinstance(feature, str) or not feature for feature in provided):
+        raise StrategyError(
+            "manual_breakpoints keys must be requested numeric feature names"
+        )
+    if not manual_requested:
+        if provided:
+            raise StrategyError(
+                "manual_breakpoints are only allowed when manual is requested"
+            )
+        return {}
+
+    numeric_features = tuple(
+        feature for feature in features if feature_types[feature] == "numeric"
+    )
+    if not numeric_features:
+        if provided:
+            raise StrategyError(
+                "manual_breakpoints contains an unknown or non-numeric feature"
+            )
+        return {}
+    if not provided:
+        raise StrategyError(
+            "manual_breakpoints must provide at least one requested numeric feature"
+        )
+    extras = sorted(set(provided) - set(numeric_features))
+    if extras:
+        raise StrategyError(
+            "manual_breakpoints contains an unknown or non-numeric feature: "
+            + ", ".join(extras)
+        )
+    return {
+        feature: _univariate_manual_breakpoint_values(
+            provided[feature],
+            feature=feature,
+        )
+        for feature in numeric_features
+        if feature in provided
+    }
+
+
+def _univariate_manual_breakpoint_values(
+    raw_values,
+    *,
+    feature: str,
+) -> tuple[float, ...]:
+    if isinstance(raw_values, (str, bytes, bytearray)) or not isinstance(
+        raw_values,
+        Sequence,
+    ):
+        raise StrategyError(
+            f"manual_breakpoints for {feature} must be an ordered array"
+        )
+    if not raw_values:
+        raise StrategyError(
+            f"manual_breakpoints for {feature} requires at least one breakpoint"
+        )
+    if len(raw_values) + 1 > _UNIVARIATE_MAX_BINS:
+        raise StrategyError(
+            f"manual_breakpoints for {feature} exceed the configured bin budget"
+        )
+    normalized: list[float] = []
+    for item in raw_values:
+        if isinstance(item, bool) or not isinstance(item, Real):
+            raise StrategyError(
+                f"manual_breakpoints for {feature} must contain finite numbers"
+            )
+        if isinstance(item, Integral) and abs(int(item)) > 2**53 - 1:
+            raise StrategyError(
+                f"manual_breakpoints for {feature} exceed exact numeric precision"
+            )
+        number = float(item)
+        if not math.isfinite(number):
+            raise StrategyError(
+                f"manual_breakpoints for {feature} must contain finite numbers"
+            )
+        normalized.append(number)
+    if any(left >= right for left, right in zip(normalized, normalized[1:])):
+        raise StrategyError(
+            f"manual_breakpoints for {feature} must be strictly increasing and unique"
+        )
+    return tuple(normalized)
+
+
+def _univariate_candidate_version_contract(
+    analysis_schema_version: object,
+) -> dict[str, str]:
+    if analysis_schema_version == UNIVARIATE_ANALYSIS_SCHEMA_VERSION:
+        return {
+            "tool_schema_version": _UNIVARIATE_CANDIDATE_TOOL_SCHEMA_VERSION,
+            "producer_version": _UNIVARIATE_CANDIDATE_PRODUCER_VERSION,
+            "artifact_schema_version": (
+                _UNIVARIATE_CANDIDATE_ARTIFACT_SCHEMA_VERSION
+            ),
+        }
+    if analysis_schema_version == UNIVARIATE_MANUAL_ANALYSIS_SCHEMA_VERSION:
+        return {
+            "tool_schema_version": _UNIVARIATE_CANDIDATE_V2_TOOL_SCHEMA_VERSION,
+            "producer_version": _UNIVARIATE_CANDIDATE_V2_PRODUCER_VERSION,
+            "artifact_schema_version": (
+                _UNIVARIATE_CANDIDATE_V2_ARTIFACT_SCHEMA_VERSION
+            ),
+        }
+    raise StrategyError("univariate analysis schema_version is unsupported")
 
 
 def _preflight_univariate_work_budget(
@@ -5088,6 +5237,7 @@ def _univariate_estimated_evaluated_cells(
     feature_types: Mapping[str, str],
     methods: tuple[str, ...],
     bin_count: int,
+    manual_breakpoints: Mapping[str, Sequence[float]],
     sentinel_mapping: Mapping[str, list[str | int | float]],
     sentinel_value_count: int,
 ) -> int:
@@ -5095,8 +5245,20 @@ def _univariate_estimated_evaluated_cells(
     for feature in features:
         sentinel_count = len(sentinel_mapping.get(feature, ()))
         if feature_types[feature] == "numeric":
-            method_count = len(methods) if methods else 4
-            groups += method_count * (bin_count + sentinel_count + 1)
+            method_names = (
+                methods
+                if methods
+                else ("equal_frequency", "equal_width", "chimerge", "tree")
+            )
+            for method in method_names:
+                if method == "manual" and feature not in manual_breakpoints:
+                    continue
+                regular_bin_count = (
+                    len(manual_breakpoints[feature]) + 1
+                    if method == "manual"
+                    else bin_count
+                )
+                groups += regular_bin_count + sentinel_count + 1
             continue
         category_count = int(frame[feature].nunique(dropna=True))
         missing_count = int(bool(frame[feature].isna().any()))
@@ -5358,6 +5520,34 @@ def _write_univariate_candidate_artifacts(
         raise StrategyError(
             "strategy candidate report bundle must contain non-empty JSON and XLSX bytes"
         )
+    analysis = candidate_evidence.get("analysis")
+    if not isinstance(analysis, Mapping):
+        raise StrategyError("univariate candidate analysis must be an object")
+    version_contract = _univariate_candidate_version_contract(
+        analysis.get("schema_version")
+    )
+    if candidate_evidence.get("producer_version") != version_contract[
+        "producer_version"
+    ]:
+        raise StrategyError(
+            "univariate candidate analysis and producer versions do not match"
+        )
+    evidence_generation = candidate_evidence.get("generation")
+    if not isinstance(evidence_generation, Mapping) or not isinstance(
+        evidence_generation.get("parameters"),
+        Mapping,
+    ):
+        raise StrategyError("univariate candidate generation must be an object")
+    if dict(evidence_generation["parameters"]) != dict(generation_parameters):
+        raise StrategyError(
+            "univariate candidate generation parameters changed before persistence"
+        )
+    if generation_parameters.get("analysis_schema_version") != analysis.get(
+        "schema_version"
+    ):
+        raise StrategyError(
+            "univariate candidate analysis schema binding is inconsistent"
+        )
     revalidate_strategy_sample_design_execution_binding(
         runtime,
         sample_design_binding,
@@ -5410,8 +5600,10 @@ def _write_univariate_candidate_artifacts(
                             "strategy candidate report changed before registration"
                         )
                     provenance = {
-                        "schema_version": _UNIVARIATE_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
-                        "producer_version": _UNIVARIATE_CANDIDATE_PRODUCER_VERSION,
+                        "schema_version": version_contract[
+                            "artifact_schema_version"
+                        ],
+                        "producer_version": version_contract["producer_version"],
                         "candidate_id": candidate_id,
                         "evidence_hash": evidence_hash,
                         "dataset_id": str(binding.dataset.id),

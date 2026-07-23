@@ -1,6 +1,6 @@
 {
   "name": "strategy",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "display_name": "Strategy Pack",
   "description": "Vintage, roll-rate, profitability, governed sample design, univariate, automatic-tree, Voting n-of-k, and complete two-dimensional Cross Matrix candidate development with explicit leaf and Cross cell-group materialization, Strategy Pool assembly, unified deterministic ImpactCube and independent validation/OOT replay evidence, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
@@ -461,11 +461,17 @@
           },
           "methods": {
             "type": "array",
-            "maxItems": 4,
+            "maxItems": 5,
             "uniqueItems": true,
             "items": {
               "type": "string",
-              "enum": ["equal_frequency", "equal_width", "chimerge", "tree"]
+              "enum": [
+                "equal_frequency",
+                "equal_width",
+                "chimerge",
+                "tree",
+                "manual"
+              ]
             }
           },
           "bin_count": {"type": "integer", "minimum": 3, "maximum": 20},
@@ -481,6 +487,17 @@
                 {"type": "string"},
                 {"type": "number"}
               ]
+            }
+          },
+          "manual_breakpoints": {
+            "type": "object",
+            "minProperties": 1,
+            "propertyNames": {"type": "string", "minLength": 1},
+            "additionalProperties": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 19,
+              "items": {"type": "number"}
             }
           }
         },
@@ -503,7 +520,13 @@
       "output_schema": {
         "type": "object",
         "properties": {
-          "schema_version": {"const": "strategy.univariate-candidate-tool.v1"},
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "strategy.univariate-candidate-tool.v1",
+              "strategy.univariate-candidate-tool.v2"
+            ]
+          },
           "candidate_id": {"type": "string", "pattern": "^candidate-[0-9a-f]{32}$"},
           "evidence_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "validation_status": {"const": "unvalidated"},
@@ -653,6 +676,82 @@
           "red_flags",
           "candidate_evidence",
           "artifacts"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "schema_version": {
+                "const": "strategy.univariate-candidate-tool.v1"
+              },
+              "candidate_evidence": {
+                "properties": {
+                  "producer_version": {
+                    "const": "strategy.univariate-candidate/1"
+                  },
+                  "generation": {
+                    "properties": {
+                      "parameters": {
+                        "properties": {
+                          "analysis_schema_version": {
+                            "const": "univariate-analysis-result.v1"
+                          }
+                        },
+                        "required": ["analysis_schema_version"]
+                      }
+                    }
+                  },
+                  "analysis": {
+                    "properties": {
+                      "schema_version": {
+                        "const": "univariate-analysis-result.v1"
+                      }
+                    },
+                    "required": ["schema_version"]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "schema_version": {
+                "const": "strategy.univariate-candidate-tool.v2"
+              },
+              "candidate_evidence": {
+                "properties": {
+                  "producer_version": {
+                    "const": "strategy.univariate-candidate/2"
+                  },
+                  "generation": {
+                    "properties": {
+                      "parameters": {
+                        "properties": {
+                          "analysis_schema_version": {
+                            "const": "univariate-analysis-result.v2"
+                          }
+                        },
+                        "required": [
+                          "analysis_schema_version",
+                          "manual_breakpoints"
+                        ]
+                      }
+                    }
+                  },
+                  "analysis": {
+                    "properties": {
+                      "schema_version": {
+                        "const": "univariate-analysis-result.v2"
+                      },
+                      "parameters": {
+                        "required": ["manual_breakpoints"]
+                      }
+                    },
+                    "required": ["schema_version", "parameters"]
+                  }
+                }
+              }
+            }
+          }
         ],
         "additionalProperties": false
       },
@@ -2054,6 +2153,7 @@
               "equal_width",
               "chimerge",
               "tree",
+              "manual",
               "categorical"
             ]
           },
@@ -2065,6 +2165,7 @@
               "equal_width",
               "chimerge",
               "tree",
+              "manual",
               "categorical"
             ]
           }
@@ -2085,7 +2186,11 @@
         "type": "object",
         "properties": {
           "schema_version": {
-            "const": "strategy.build-cross-matrix-candidate-tool.v1"
+            "type": "string",
+            "enum": [
+              "strategy.build-cross-matrix-candidate-tool.v1",
+              "strategy.build-cross-matrix-candidate-tool.v2"
+            ]
           },
           "asset_id": {
             "type": "string",
@@ -2170,7 +2275,11 @@
             "type": "object",
             "properties": {
               "schema_version": {
-                "const": "strategy.cross-matrix-candidate-asset.v1"
+                "type": "string",
+                "enum": [
+                  "strategy.cross-matrix-candidate-asset.v1",
+                  "strategy.cross-matrix-candidate-asset.v2"
+                ]
               },
               "asset_type": {"const": "cross_matrix"},
               "lifecycle": {"type": "object"},
@@ -2187,7 +2296,11 @@
               "matrix": {"type": "object"},
               "summary": {"type": "object"},
               "producer_version": {
-                "const": "strategy.cross-matrix-candidate-asset/1"
+                "type": "string",
+                "enum": [
+                  "strategy.cross-matrix-candidate-asset/1",
+                  "strategy.cross-matrix-candidate-asset/2"
+                ]
               },
               "candidate_evidence": {"type": "object"},
               "asset_id": {
@@ -2228,10 +2341,21 @@
                   "equal_width",
                   "chimerge",
                   "tree",
+                  "manual",
                   "categorical"
                 ]
               },
-              "bin_count": {"type": "integer", "minimum": 1, "maximum": 51}
+              "bin_count": {"type": "integer", "minimum": 1, "maximum": 400},
+              "manual_breakpoints": {
+                "type": ["array", "null"],
+                "minItems": 1,
+                "maxItems": 19,
+                "items": {"type": "number"}
+              },
+              "parent_evidence_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
             },
             "required": ["feature", "method", "bin_count"],
             "additionalProperties": false
@@ -2259,7 +2383,65 @@
             ],
             "additionalProperties": false
           }
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "schema_version": {
+                "const": "strategy.build-cross-matrix-candidate-tool.v1"
+              },
+              "row_axis": {
+                "not": {
+                  "anyOf": [
+                    {"required": ["manual_breakpoints"]},
+                    {"required": ["parent_evidence_hash"]}
+                  ]
+                }
+              },
+              "column_axis": {
+                "not": {
+                  "anyOf": [
+                    {"required": ["manual_breakpoints"]},
+                    {"required": ["parent_evidence_hash"]}
+                  ]
+                }
+              },
+              "cross_matrix_candidate": {
+                "properties": {
+                  "schema_version": {
+                    "const": "strategy.cross-matrix-candidate-asset.v1"
+                  },
+                  "producer_version": {
+                    "const": "strategy.cross-matrix-candidate-asset/1"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "schema_version": {
+                "const": "strategy.build-cross-matrix-candidate-tool.v2"
+              },
+              "row_axis": {
+                "required": ["manual_breakpoints", "parent_evidence_hash"]
+              },
+              "column_axis": {
+                "required": ["manual_breakpoints", "parent_evidence_hash"]
+              },
+              "cross_matrix_candidate": {
+                "properties": {
+                  "schema_version": {
+                    "const": "strategy.cross-matrix-candidate-asset.v2"
+                  },
+                  "producer_version": {
+                    "const": "strategy.cross-matrix-candidate-asset/2"
+                  }
+                }
+              }
+            }
+          }
+        ]
       },
       "determinism": "deterministic",
       "timeout_seconds": 300,
@@ -2490,6 +2672,7 @@
               "equal_width",
               "chimerge",
               "tree",
+              "manual",
               "categorical"
             ]
           },
@@ -4625,7 +4808,7 @@
     },
     {
       "name": "measure_strategy_impact_cube",
-      "summary": "Measure one exact current Strategy Pool across governed risk partitions and publish immutable aggregate-only ImpactSlice and ImpactCube evidence for all five typed strategy families.",
+      "summary": "Measure one exact current Strategy Pool across separately governed approval and risk partitions and publish immutable aggregate-only ImpactSlice and ImpactCube evidence for all five typed strategy families.",
       "input_schema": {
         "type": "object",
         "$defs": {
@@ -4795,9 +4978,7 @@
           "sample_design_ref",
           "partitions",
           "population",
-          "dimension_bindings",
-          "current_strategy_ref",
-          "economics_inputs"
+          "dimension_bindings"
         ],
         "additionalProperties": false
       },
@@ -4805,7 +4986,7 @@
         "type": "object",
         "properties": {
           "schema_version": {
-            "const": "strategy.measure-impact-cube-tool.v1"
+            "const": "strategy.measure-impact-cube-tool.v2"
           },
           "cube_id": {
             "type": "string",

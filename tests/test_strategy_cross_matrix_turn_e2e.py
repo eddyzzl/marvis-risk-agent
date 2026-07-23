@@ -17,8 +17,9 @@ from tests.strategy_sample_design_support import (
 
 
 class _CrossMatrixLLM:
-    def __init__(self) -> None:
+    def __init__(self, workflow_inputs: dict | None = None) -> None:
         self.calls: list[dict] = []
+        self.workflow_inputs = workflow_inputs
 
     def complete(self, **kwargs) -> str:
         self.calls.append(kwargs)
@@ -26,7 +27,8 @@ class _CrossMatrixLLM:
             {
                 "request_kind": "standard_workflow",
                 "workflow": "cross_matrix_analysis",
-                "workflow_inputs": {
+                "workflow_inputs": self.workflow_inputs
+                or {
                     "x_feature": "age",
                     "x_method": "equal_width",
                     "y_feature": "score",
@@ -190,6 +192,77 @@ def test_natural_language_cross_matrix_consumes_exact_first_step_json(
     assert "二维 Cross Matrix 候选构建完成" in assistant_text
     assert "绑定样本观测（未独立验证）" in assistant_text
     assert "未选择格子、未入池、未应用写回、未采纳、未部署" in assistant_text
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_natural_language_manual_cross_reaches_both_real_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(create_app(tmp_path))
+    task_id = _task(client, tmp_path, one_nan_label=False)
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
+    llm = _CrossMatrixLLM(
+        {
+            "x_feature": "age",
+            "x_method": "manual",
+            "y_feature": "score",
+            "y_method": "equal_width",
+            "bin_count": 3,
+            "min_bin_pct": 0.02,
+            "sentinel_values": [],
+            "manual_breakpoints": {"age": [30, 50]},
+        }
+    )
+    _install_llm(monkeypatch, llm)
+
+    opened = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                "构建 age manual 切点 [30, 50] × score 等距 3 箱的"
+                "二维 Cross Matrix"
+            )
+        },
+    )
+
+    assert opened.status_code == 202, opened.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design",
+        "strategy_cross_matrix_analysis",
+    ]
+    stored = client.app.state.plan_repo.load_plan(plans[1]["id"])
+    assert stored.status == "done"
+    assert stored.steps[0].inputs["manual_breakpoints"] == {
+        "age": [30.0, 50.0]
+    }
+    first = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
+    cross = client.app.state.plan_repo.load_step_output(stored.steps[1].id)
+    assert first["schema_version"] == "strategy.univariate-candidate-tool.v2"
+    assert cross["schema_version"] == (
+        "strategy.build-cross-matrix-candidate-tool.v2"
+    )
+    assert cross["row_axis"] == {
+        "feature": "age",
+        "method": "manual",
+        "bin_count": 3,
+        "manual_breakpoints": [30.0, 50.0],
+        "parent_evidence_hash": first["evidence_hash"],
+    }
+    assert cross["column_axis"] == {
+        "feature": "score",
+        "method": "equal_width",
+        "bin_count": 3,
+        "manual_breakpoints": None,
+        "parent_evidence_hash": first["evidence_hash"],
+    }
     assert len(llm.calls) == 1
 
 

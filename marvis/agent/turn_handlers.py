@@ -74,6 +74,7 @@ from marvis.agent.strategy_request_compiler import (
     StandardWorkflowRequestDraft,
     StrategyRequestDraft,
     compile_strategy_request,
+    utterance_targets_strategy_impact_cube,
     utterance_targets_strategy_project_context,
     utterance_targets_strategy_report_bundle_v2,
     utterance_targets_strategy_sample_design,
@@ -1465,6 +1466,7 @@ def dispatch_driver_turn(
     if task.task_type == TASK_TYPE_STRATEGY and (
         utterance_targets_strategy_sample_design(text)
         or utterance_targets_strategy_report_bundle_v2(text)
+        or utterance_targets_strategy_impact_cube(text)
         or _STRATEGY_MODEL_EVIDENCE_V2_REQUEST_RE.search(text) is not None
     ):
         strategy_evidence_request = _maybe_handle_strategy_request_turn(
@@ -1984,6 +1986,7 @@ def _maybe_handle_strategy_request_turn(
     is_report_bundle_v2_request = utterance_targets_strategy_report_bundle_v2(
         text
     )
+    is_impact_cube_request = utterance_targets_strategy_impact_cube(text)
     is_model_evidence_v2_request = (
         _STRATEGY_MODEL_EVIDENCE_V2_REQUEST_RE.search(text) is not None
     )
@@ -1996,12 +1999,16 @@ def _maybe_handle_strategy_request_turn(
                 or is_report_bundle_v2_request
             )
             else (
-                _strategy_pool_impact_dataset_preview(runtime, task)
-                if _STRATEGY_POOL_IMPACT_REQUEST_RE.search(text)
+                _strategy_impact_cube_dataset_preview(runtime, task)
+                if is_impact_cube_request
                 else (
-                    _strategy_sample_design_dataset_preview(runtime, task)
-                    if is_sample_design_request
-                    else _strategy_dataset_preview(runtime, task)
+                    _strategy_pool_impact_dataset_preview(runtime, task)
+                    if _STRATEGY_POOL_IMPACT_REQUEST_RE.search(text)
+                    else (
+                        _strategy_sample_design_dataset_preview(runtime, task)
+                        if is_sample_design_request
+                        else _strategy_dataset_preview(runtime, task)
+                    )
                 )
             )
         )
@@ -2190,6 +2197,25 @@ def _prepare_and_run_validated_strategy_request(
 ) -> dict:
     """Bind current evidence, resolve the NaN policy, then instantiate once."""
 
+    expected_impact_cube_sample_binding = None
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_impact_cube"
+        and preview is not None
+    ):
+        identity = getattr(preview, "identity", None)
+        if not isinstance(identity, Mapping):
+            return _strategy_request_clarification_response(
+                repo,
+                task,
+                code="strategy_impact_cube_sample_invalid",
+                message=(
+                    "ImpactCube 编译预览缺少认证 SampleDesign 身份；"
+                    "请重新固化样本设计后重试。"
+                ),
+            )
+        expected_impact_cube_sample_binding = dict(identity)
+
     if (
         isinstance(draft, StandardWorkflowRequestDraft)
         and (
@@ -2315,6 +2341,9 @@ def _prepare_and_run_validated_strategy_request(
             auto_start=auto_start,
             drop_nan_labels=drop_nan_labels,
             expected_pool_binding=expected_pool_binding,
+            expected_impact_cube_sample_binding=(
+                expected_impact_cube_sample_binding
+            ),
             source_message=source_message,
         )
     except _StrategyV2EvidenceSetupError as exc:
@@ -2349,6 +2378,7 @@ def _run_validated_strategy_request(
     auto_start: bool,
     drop_nan_labels: bool,
     expected_pool_binding: Mapping | None = None,
+    expected_impact_cube_sample_binding: Mapping | None = None,
     source_message: Mapping | None = None,
 ) -> dict:
     """Route one already-validated draft without another execution confirmation."""
@@ -2474,6 +2504,24 @@ def _run_validated_strategy_request(
                 context=context,
                 drop_nan_labels=drop_nan_labels,
                 expected_pool_binding=expected_pool_binding,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_impact_cube"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_impact_cube",
+            slots=_strategy_impact_cube_plan_slots(
+                runtime,
+                task,
+                draft,
+                expected_sample_binding=expected_impact_cube_sample_binding,
             ),
             auto_start=auto_start,
         )
@@ -3461,6 +3509,10 @@ def _standard_workflow_request_preflight(
         # separate preflight read would open a second selection window where
         # current source/report heads could silently rebind.
         return None
+    if draft.workflow == "strategy_impact_cube":
+        # SampleDesign, Pool and optional current Strategy are selected and
+        # authenticated together exactly once immediately before plan creation.
+        return None
     if draft.workflow == "strategy_pool_impact":
         try:
             context = _strategy_pool_impact_dataset_context(runtime, task)
@@ -4127,6 +4179,459 @@ def _strategy_pool_impact_pool_binding(
             "当前 Strategy Pool revision/hash 绑定不完整，不能执行影响测算。"
         ) from exc
     return pool, binding
+
+
+def _strategy_impact_cube_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+    *,
+    expected_sample_binding: Mapping | None = None,
+) -> dict[str, object]:
+    """Bind one ImpactCube plan to a single authenticated evidence snapshot."""
+
+    if draft.workflow != "strategy_impact_cube":
+        raise StrategySetupError(
+            "Strategy ImpactCube slots 收到了错误的 Workflow。"
+        )
+    inputs = draft.to_dict()["workflow_inputs"]
+    strategy_type = inputs.get("strategy_type")
+    if strategy_type not in {
+        "approval",
+        "reject",
+        "limit",
+        "pricing",
+        "segmentation",
+    }:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_type_invalid",
+            "统一影响测算需要明确 approval、reject、limit、pricing 或 "
+            "segmentation Strategy Pool。",
+        )
+
+    read_runtime = _strategy_v2_read_runtime(runtime)
+    try:
+        artifacts = tuple(read_runtime.task_artifacts.list_for_task(task.id))
+    except _STRATEGY_V2_ARTIFACT_ERRORS as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_registry_unavailable",
+            "无法读取当前任务的 ImpactCube source artifact registry。",
+        ) from exc
+    try:
+        sample = _latest_verified_strategy_sample_design_v2_binding(
+            read_runtime,
+            task_id=task.id,
+            artifacts=artifacts,
+        )
+    except _StrategyV2EvidenceSetupError as exc:
+        code = (
+            "strategy_impact_cube_sample_required"
+            if exc.code.endswith("_sample_required")
+            else "strategy_impact_cube_sample_invalid"
+        )
+        raise _StrategyV2EvidenceSetupError(
+            code,
+            "ImpactCube 需要最新且完整认证的 StrategySampleDesign V2 "
+            "双总体样本证据；平台不会回退到旧样本。",
+        ) from exc
+
+    actual_sample_binding = {
+        "kind": "strategy_sample_design_v2",
+        "sample_design_ref": _strategy_report_sample_ref(sample),
+        "dataset_id": sample.source_binding.dataset_id,
+        "dataset_content_hash": sample.source_binding.dataset_content_hash,
+    }
+    if (
+        expected_sample_binding is not None
+        and dict(expected_sample_binding) != actual_sample_binding
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_sample_changed",
+            "StrategySampleDesign V2 在请求编译与计划创建之间发生变化；"
+            "本次未创建计划，请基于最新样本重新描述。",
+        )
+
+    pool_repository = StrategyCandidatePoolRepository(runtime.settings.db_path)
+    try:
+        current_pool = pool_repository.get_current(task.id, strategy_type)
+    except Exception as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_pool_invalid",
+            f"当前 {strategy_type} Strategy Pool head/revision 无法通过完整性复核。",
+        ) from exc
+    if current_pool is None or not _strategy_pool_entries(current_pool):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_pool_required",
+            f"当前任务没有非空 {strategy_type} Strategy Pool；"
+            "请先用自然语言把候选加入该 Pool。",
+        )
+    try:
+        pool_revision = int(current_pool["revision"])
+        pool_snapshot_hash = strategy_pool_snapshot_hash(current_pool)
+        pool = load_current_strategy_candidate_pool_artifact(
+            read_runtime,
+            task_id=task.id,
+            strategy_type=strategy_type,
+            expected_pool_revision=pool_revision,
+            expected_pool_snapshot_hash=pool_snapshot_hash,
+        )
+    except (StrategyError, *_STRATEGY_V2_ARTIFACT_ERRORS) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_pool_invalid",
+            f"当前 {strategy_type} Strategy Pool 的 artifact、来源、编译结果"
+            "或 lineage 未通过完整认证。",
+        ) from exc
+    if pool.compiled_design.get("requirements"):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_pool_unresolved",
+            "当前 Strategy Pool 仍有未解析的类型化业务动作要求；"
+            "请先补全动作后再测算影响。",
+        )
+    if pool.artifact_id not in {
+        item.get("id") for item in artifacts
+    }:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_registry_changed",
+            "Strategy Pool artifact 在证据选择期间发生变化；请重试本次测算。",
+        )
+
+    partitions = _strategy_impact_cube_partitions(inputs, sample=sample)
+    dimensions = _strategy_impact_cube_dimensions(inputs, sample=sample)
+    economics_inputs = _strategy_impact_cube_economics(
+        inputs.get("economics_inputs"),
+        sample=sample,
+    )
+    current_strategy_ref = _strategy_impact_cube_current_strategy_ref(
+        runtime,
+        task_id=task.id,
+        strategy_type=strategy_type,
+        requested_id=inputs.get("current_strategy_id"),
+    )
+
+    selected_artifact_ids = {
+        pool.artifact_id,
+        sample.membership_artifact_id,
+        sample.bundle_artifact_id,
+    }
+    registry_token = _strategy_impact_cube_registry_token(
+        artifacts,
+        selected_artifact_ids=selected_artifact_ids,
+    )
+    try:
+        refreshed_artifacts = tuple(
+            read_runtime.task_artifacts.list_for_task(task.id)
+        )
+        refreshed_pool = pool_repository.get_current(task.id, strategy_type)
+    except Exception as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_registry_changed",
+            "ImpactCube source registry 或 Strategy Pool head 在计划创建前"
+            "无法再次核对；本次未创建计划。",
+        ) from exc
+    if (
+        _strategy_impact_cube_registry_token(
+            refreshed_artifacts,
+            selected_artifact_ids=selected_artifact_ids,
+        )
+        != registry_token
+        or refreshed_pool is None
+        or refreshed_pool.get("revision") != pool_revision
+        or strategy_pool_snapshot_hash(refreshed_pool) != pool_snapshot_hash
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_registry_changed",
+            "StrategySampleDesign V2、Strategy Pool 或 artifact registry "
+            "在计划创建前发生变化；请基于最新证据重试。",
+        )
+    if current_strategy_ref is not None:
+        refreshed_current = _strategy_impact_cube_current_strategy_ref(
+            runtime,
+            task_id=task.id,
+            strategy_type=strategy_type,
+            requested_id=current_strategy_ref["strategy_id"],
+        )
+        if refreshed_current != current_strategy_ref:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_impact_cube_current_strategy_changed",
+                "当前策略的 canonical StrategySpec 在计划创建前发生变化；"
+                "本次未创建计划。",
+            )
+
+    return {
+        "strategy_type": strategy_type,
+        "pool_ref": {
+            "artifact_id": pool.artifact_id,
+            "expected_artifact_content_hash": pool.artifact_content_hash,
+            "expected_pool_id": pool.pool["pool_id"],
+            "expected_revision": pool.pool["revision"],
+            "expected_revision_id": pool.pool["revision_id"],
+            "expected_snapshot_hash": pool.pool["snapshot_hash"],
+        },
+        "sample_design_ref": _strategy_report_sample_ref(sample),
+        "partitions": partitions,
+        # ImpactCube owns both approval and risk denominators internally; this
+        # retained v1 selector states which observed-outcome population supplies
+        # risk metrics and cannot be supplied by the language model.
+        "population": "risk",
+        "dimension_bindings": dimensions,
+        "current_strategy_ref": current_strategy_ref,
+        "economics_inputs": economics_inputs,
+    }
+
+
+def _strategy_impact_cube_partitions(
+    inputs: Mapping,
+    *,
+    sample,
+) -> list[str]:
+    order = ("development", "validation", "oot")
+    try:
+        counts = sample.membership["header"]["counts"]
+        approval_counts = counts["approval"]
+        risk_counts = counts["risk"]
+    except (KeyError, TypeError) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_sample_invalid",
+            "StrategySampleDesign V2 缺少 approval/risk 分区计数。",
+        ) from exc
+    for population_counts in (approval_counts, risk_counts):
+        if not isinstance(population_counts, Mapping) or any(
+            isinstance(population_counts.get(partition), bool)
+            or not isinstance(population_counts.get(partition), int)
+            or population_counts[partition] < 0
+            for partition in order
+        ):
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_impact_cube_sample_invalid",
+                "StrategySampleDesign V2 的分区计数无效。",
+            )
+
+    requested = inputs.get("partitions")
+    if requested is None:
+        selected = [
+            partition
+            for partition in order
+            if approval_counts[partition] > 0 and risk_counts[partition] > 0
+        ]
+    else:
+        if (
+            not isinstance(requested, Sequence)
+            or isinstance(requested, str | bytes | bytearray)
+        ):
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_impact_cube_partitions_invalid",
+                "ImpactCube partitions 必须是明确的分区列表。",
+            )
+        requested_set = set(requested)
+        if (
+            not requested_set
+            or len(requested_set) != len(requested)
+            or not requested_set.issubset(order)
+        ):
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_impact_cube_partitions_invalid",
+                "ImpactCube 只接受不重复的 development、validation、oot 分区。",
+            )
+        selected = [
+            partition for partition in order if partition in requested_set
+        ]
+    empty = [
+        partition
+        for partition in selected
+        if approval_counts[partition] == 0 or risk_counts[partition] == 0
+    ]
+    if not selected or empty:
+        detail = "、".join(empty) if empty else "全部"
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_partition_empty",
+            f"所选分区 {detail} 没有同时具备 approval 与 risk 总体；"
+            "请调整样本设计或选择非空分区。",
+        )
+    return selected
+
+
+def _strategy_impact_cube_dimensions(
+    inputs: Mapping,
+    *,
+    sample,
+) -> dict[str, str | None]:
+    columns = tuple(sample.source_binding.columns)
+    roles = dict(sample.source_binding.semantic_field_roles)
+    provenance_request = sample.provenance.get("request")
+    field_bindings = (
+        provenance_request.get("field_bindings")
+        if isinstance(provenance_request, Mapping)
+        else None
+    )
+    if not isinstance(field_bindings, Mapping):
+        field_bindings = {}
+
+    def unique_role(role: str) -> str | None:
+        matches = sorted(
+            column
+            for column, assigned in roles.items()
+            if assigned == role and column in columns
+        )
+        if len(matches) > 1:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_impact_cube_dimension_ambiguous",
+                f"当前样本有多个 `{role}` 语义字段：{'、'.join(matches)}；"
+                "请在请求中明确列名。",
+            )
+        return matches[0] if matches else None
+
+    defaults = {
+        "month_col": field_bindings.get("month_field") or unique_role("month"),
+        "group_col": field_bindings.get("group_field"),
+        "segment_col": unique_role("segment"),
+    }
+    result: dict[str, str | None] = {}
+    used: set[str] = set()
+    for field in ("month_col", "group_col", "segment_col"):
+        explicit = inputs.get(field)
+        selected = explicit if explicit is not None else defaults[field]
+        if selected is not None and (
+            not isinstance(selected, str) or selected not in columns
+        ):
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_impact_cube_dimension_invalid",
+                f"ImpactCube 维度 {field} 不在最新样本绑定的数据列中。",
+            )
+        if selected is not None and roles.get(selected) in {"id", "target"}:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_impact_cube_dimension_sensitive",
+                f"字段 `{selected}` 的语义角色是 {roles[selected]}，"
+                "不能作为 ImpactCube 聚合维度。",
+            )
+        if selected is not None and selected in used:
+            if explicit is not None:
+                raise _StrategyV2EvidenceSetupError(
+                    "strategy_impact_cube_dimension_duplicate",
+                    "月份、分组和分群维度必须使用不同字段。",
+                )
+            selected = None
+        result[field] = selected
+        if selected is not None:
+            used.add(selected)
+    return result
+
+
+def _strategy_impact_cube_economics(
+    value: object,
+    *,
+    sample,
+) -> dict[str, object] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_economics_invalid",
+            "ImpactCube economics_inputs 必须是 typed column/scalar 映射。",
+        )
+    columns = set(sample.source_binding.columns)
+    roles = dict(sample.source_binding.semantic_field_roles)
+    result: dict[str, object] = {}
+    for component, raw_binding in sorted(value.items()):
+        if not isinstance(component, str) or not isinstance(raw_binding, Mapping):
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_impact_cube_economics_invalid",
+                "ImpactCube economics_inputs 组件或绑定结构无效。",
+            )
+        binding = dict(raw_binding)
+        if binding.get("kind") == "column":
+            column = binding.get("column")
+            if (
+                not isinstance(column, str)
+                or column not in columns
+                or roles.get(column) in {"id", "target"}
+            ):
+                raise _StrategyV2EvidenceSetupError(
+                    "strategy_impact_cube_economics_column_invalid",
+                    f"经济参数 {component} 未绑定到当前样本中的非敏感业务列。",
+                )
+        result[component] = binding
+    return result
+
+
+def _strategy_impact_cube_current_strategy_ref(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    strategy_type: str,
+    requested_id: object,
+) -> dict[str, str] | None:
+    if requested_id is None:
+        return None
+    if not isinstance(requested_id, str) or not requested_id:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_current_strategy_invalid",
+            "当前策略比较需要完整 strategy_id。",
+        )
+    repository = StrategyRepository(runtime.settings.db_path)
+    try:
+        snapshot = repository.get_strategy_snapshot(requested_id)
+    except Exception as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_current_strategy_invalid",
+            "当前策略的 canonical StrategySpec 无法通过完整性校验。",
+        ) from exc
+    if snapshot is None:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_current_strategy_invalid",
+            "current_strategy_id 必须属于当前任务、类型一致并带有完整 canonical "
+            "StrategySpec；平台不会跨任务或跨类型比较。",
+        )
+    meta = snapshot["metadata"]
+    strategy = snapshot["strategy"]
+    spec_hash = snapshot["strategy_spec_hash"]
+    if (
+        strategy.spec is None
+        or meta.get("task_id") != task_id
+        or meta.get("strategy_type") != strategy_type
+        or strategy.strategy_type != strategy_type
+        or not isinstance(spec_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", spec_hash) is None
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_impact_cube_current_strategy_invalid",
+            "current_strategy_id 必须属于当前任务、类型一致并带有完整 canonical "
+            "StrategySpec；平台不会跨任务或跨类型比较。",
+        )
+    return {
+        "strategy_id": requested_id,
+        "expected_strategy_spec_hash": spec_hash,
+    }
+
+
+def _strategy_impact_cube_registry_token(
+    artifacts: Sequence[Mapping],
+    *,
+    selected_artifact_ids: set[str],
+) -> str:
+    relevant = [
+        {
+            "id": item.get("id"),
+            "kind": item.get("kind"),
+            "content_hash": item.get("content_hash"),
+            "origin_tool": item.get("origin_tool"),
+            "provenance": item.get("provenance"),
+        }
+        for item in artifacts
+        if item.get("id") in selected_artifact_ids
+        or item.get("kind")
+        in {
+            SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
+            SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+        }
+    ]
+    return hashlib.sha256(
+        json.dumps(
+            relevant,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _strategy_project_context_plan_slots(
@@ -6666,6 +7171,52 @@ def _strategy_pool_impact_dataset_preview(
     )
 
 
+def _strategy_impact_cube_dataset_preview(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+):
+    """Expose compiler columns from the exact latest authenticated V2 sample."""
+
+    read_runtime = _strategy_v2_read_runtime(runtime)
+    try:
+        artifacts = tuple(read_runtime.task_artifacts.list_for_task(task.id))
+        sample = _latest_verified_strategy_sample_design_v2_binding(
+            read_runtime,
+            task_id=task.id,
+            artifacts=artifacts,
+        )
+        target = sample.bundle["sample_design"]["target_selector"]["column"]
+    except (
+        KeyError,
+        TypeError,
+        _StrategyV2EvidenceSetupError,
+        *_STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        raise StrategySetupError(
+            "ImpactCube 无法从最新 StrategySampleDesign V2 认证编译字段；"
+            "请先重新固化样本设计。"
+        ) from exc
+    if (
+        not isinstance(target, str)
+        or not target
+        or target not in sample.source_binding.columns
+    ):
+        raise StrategySetupError(
+            "最新 StrategySampleDesign V2 的目标列绑定无效。"
+        )
+    return SimpleNamespace(
+        dataset_id=sample.source_binding.dataset_id,
+        columns=sample.source_binding.columns,
+        target_col=target,
+        identity={
+            "kind": "strategy_sample_design_v2",
+            "sample_design_ref": _strategy_report_sample_ref(sample),
+            "dataset_id": sample.source_binding.dataset_id,
+            "dataset_content_hash": sample.source_binding.dataset_content_hash,
+        },
+    )
+
+
 def _strategy_sample_design_dataset_context(
     runtime: DriverTurnRuntime,
     task: TaskRecord,
@@ -7168,6 +7719,7 @@ def _strategy_request_requires_dataset(
             "strategy_project_context",
             "strategy_model_evidence_v2",
             "strategy_report_bundle_v2",
+            "strategy_impact_cube",
             "automatic_tree_leaf_materialization",
             "cross_matrix_cell_selection",
             "voting_candidate_build",

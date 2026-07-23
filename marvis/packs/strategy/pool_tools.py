@@ -71,6 +71,7 @@ from marvis.packs.strategy.cross_matrix_candidate import (
 from marvis.packs.strategy.cross_matrix_candidate_tools import (
     ASSET_ARTIFACT_KIND as CROSS_MATRIX_ASSET_ARTIFACT_KIND,
     ASSET_ARTIFACT_SCHEMA_VERSION as CROSS_MATRIX_ASSET_ARTIFACT_SCHEMA_VERSION,
+    ASSET_ARTIFACT_V2_SCHEMA_VERSION as CROSS_MATRIX_ASSET_ARTIFACT_V2_SCHEMA_VERSION,
     ORIGIN_TOOL as CROSS_MATRIX_ASSET_ORIGIN_TOOL,
 )
 from marvis.packs.strategy.cross_matrix_cell_selection import (
@@ -1165,6 +1166,11 @@ def _load_candidate_lineage(
         CROSS_MATRIX_ASSET_ORIGIN_TOOL,
         CROSS_MATRIX_ASSET_ARTIFACT_SCHEMA_VERSION,
     )
+    cross_matrix_v2_asset_triple = (
+        CROSS_MATRIX_ASSET_ARTIFACT_KIND,
+        CROSS_MATRIX_ASSET_ORIGIN_TOOL,
+        CROSS_MATRIX_ASSET_ARTIFACT_V2_SCHEMA_VERSION,
+    )
     if triple == univariate_triple:
         return _load_univariate_candidate_lineage(
             runtime,
@@ -1195,7 +1201,7 @@ def _load_candidate_lineage(
             expected_asset_hash=expected_asset_hash,
             cache=cache if cache is not None else _LineageCache.empty(),
         )
-    if triple == cross_matrix_asset_triple:
+    if triple in {cross_matrix_asset_triple, cross_matrix_v2_asset_triple}:
         raise StrategyError(
             "complete Cross Matrix assets cannot be admitted directly; "
             "materialize a cell selection first"

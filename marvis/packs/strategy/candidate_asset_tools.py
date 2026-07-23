@@ -22,6 +22,10 @@ from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.errors import DatasetContentDriftError
 from marvis.data.labels import resolve_labeled_frame
 from marvis.files import sha256_file
+from marvis.feature.univariate import (
+    MANUAL_SCHEMA_VERSION as UNIVARIATE_MANUAL_ANALYSIS_SCHEMA_VERSION,
+    SCHEMA_VERSION as UNIVARIATE_ANALYSIS_SCHEMA_VERSION,
+)
 from marvis.output.strategy_candidate_report import (
     canonical_strategy_candidate_report_json,
     strategy_candidate_report_from_json,
@@ -50,6 +54,16 @@ SOURCE_ARTIFACT_KIND = "strategy_candidate_json"
 SOURCE_ORIGIN_TOOL = "strategy.analyze_univariate_candidates"
 SOURCE_PROVENANCE_SCHEMA_VERSION = "strategy.univariate-candidate-artifact.v1"
 SOURCE_PRODUCER_VERSION = "strategy.univariate-candidate/1"
+SOURCE_V2_PROVENANCE_SCHEMA_VERSION = "strategy.univariate-candidate-artifact.v2"
+SOURCE_V2_PRODUCER_VERSION = "strategy.univariate-candidate/2"
+_SOURCE_VERSION_CONTRACTS = {
+    (SOURCE_PROVENANCE_SCHEMA_VERSION, SOURCE_PRODUCER_VERSION): (
+        UNIVARIATE_ANALYSIS_SCHEMA_VERSION
+    ),
+    (SOURCE_V2_PROVENANCE_SCHEMA_VERSION, SOURCE_V2_PRODUCER_VERSION): (
+        UNIVARIATE_MANUAL_ANALYSIS_SCHEMA_VERSION
+    ),
+}
 
 _INPUT_FIELDS = frozenset(
     {
@@ -341,9 +355,12 @@ def _load_source_artifact(
         _SOURCE_PROVENANCE_FIELDS,
         "source candidate artifact provenance",
     )
+    provenance_version_pair = (
+        provenance["schema_version"],
+        provenance["producer_version"],
+    )
     if (
-        provenance["schema_version"] != SOURCE_PROVENANCE_SCHEMA_VERSION
-        or provenance["producer_version"] != SOURCE_PRODUCER_VERSION
+        provenance_version_pair not in _SOURCE_VERSION_CONTRACTS
         or provenance["format"] != "json"
     ):
         raise StrategyError("source candidate artifact provenance contract is invalid")
@@ -420,6 +437,27 @@ def _require_report_binding(
     if identity["task_id"] != task_id:
         raise StrategyError("source candidate evidence belongs to another task")
     provenance = source.provenance
+    provenance_version_pair = (
+        provenance["schema_version"],
+        provenance["producer_version"],
+    )
+    expected_analysis_schema = _SOURCE_VERSION_CONTRACTS.get(
+        provenance_version_pair
+    )
+    analysis = evidence.get("analysis")
+    generation = evidence.get("generation")
+    parameters = generation.get("parameters") if isinstance(generation, Mapping) else None
+    if (
+        expected_analysis_schema is None
+        or not isinstance(analysis, Mapping)
+        or analysis.get("schema_version") != expected_analysis_schema
+        or not isinstance(parameters, Mapping)
+        or parameters.get("analysis_schema_version") != expected_analysis_schema
+        or evidence.get("producer_version") != provenance["producer_version"]
+    ):
+        raise StrategyError(
+            "source candidate analysis schema and provenance versions do not match"
+        )
     comparisons = {
         "candidate_id": evidence["candidate_id"],
         "evidence_hash": evidence["evidence_hash"],

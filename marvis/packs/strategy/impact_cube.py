@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 import hashlib
 import hmac
 import json
@@ -45,9 +46,9 @@ from marvis.packs.strategy.typed_backtest import (
 from marvis.validation.time_periods import month_key_series
 
 
-STRATEGY_IMPACT_SLICE_SCHEMA_VERSION = "strategy.impact-slice.v1"
-STRATEGY_IMPACT_CUBE_SCHEMA_VERSION = "strategy.impact-cube.v1"
-STRATEGY_IMPACT_CUBE_PRODUCER_VERSION = "marvis.strategy.impact-cube/1"
+STRATEGY_IMPACT_SLICE_SCHEMA_VERSION = "strategy.impact-slice.v2"
+STRATEGY_IMPACT_CUBE_SCHEMA_VERSION = "strategy.impact-cube.v2"
+STRATEGY_IMPACT_CUBE_PRODUCER_VERSION = "marvis.strategy.impact-cube/2"
 
 MAX_IMPACT_CUBE_ROWS = 2_000_000
 MAX_IMPACT_CUBE_RULES = 200
@@ -55,6 +56,21 @@ MAX_IMPACT_CUBE_SLICES = 512
 MAX_IMPACT_CUBE_WORK = 50_000_000
 MAX_IMPACT_CUBE_JSON_BYTES = 64 * 1024 * 1024
 MAX_IMPACT_CUBE_DIMENSION_VALUES = 512
+MIN_IMPACT_CUBE_GROUP_SIZE = 2
+_HIGH_CARDINALITY_MIN_ROWS = 20
+_FORBIDDEN_DIMENSION_ROLES = frozenset(
+    {
+        "id",
+        "identifier",
+        "idcard",
+        "name",
+        "phone",
+        "personal",
+        "pii",
+        "sensitive",
+        "ignore",
+    }
+)
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _CUBE_ID_RE = re.compile(r"^strategy-impact-cube-[0-9a-f]{24}$")
@@ -62,6 +78,8 @@ _SLICE_ID_RE = re.compile(r"^strategy-impact-slice-[0-9a-f]{24}$")
 _MONTH_RE = re.compile(r"^[0-9]{6}$")
 _PARTITION_ORDER = ("development", "validation", "oot")
 _PARTITIONS = frozenset(_PARTITION_ORDER)
+_POPULATION_ROLE_ORDER = ("approval", "risk")
+_POPULATION_ROLES = frozenset(_POPULATION_ROLE_ORDER)
 _STRATEGY_TYPES = frozenset(
     {"approval", "reject", "limit", "pricing", "segmentation"}
 )
@@ -304,6 +322,7 @@ _SOURCE_FIELDS = frozenset(
         "fields",
         "current_strategy",
         "economics",
+        "privacy",
     }
 )
 _POOL_ARTIFACT_FIELDS = frozenset({"artifact_id", "artifact_content_hash"})
@@ -321,6 +340,7 @@ _SAMPLE_FIELDS = frozenset(
         "sample_design_content_hash",
         "analysis_universe_row_count",
         "partition_counts",
+        "population_partition_counts",
     }
 )
 _DATASET_FIELDS = frozenset(
@@ -338,7 +358,25 @@ _DATASET_FIELDS = frozenset(
 _TARGET_FIELDS = frozenset(
     {"column", "good_value", "bad_value", "missing_policy"}
 )
-_FIELD_FIELDS = frozenset({"month_col", "group_col", "segment_col"})
+_FIELD_FIELDS = frozenset(
+    {
+        "month_col",
+        "group_col",
+        "segment_col",
+        "loan_amount_col",
+        "overdue_amount_col",
+    }
+)
+_PRIVACY_FIELDS = frozenset(
+    {
+        "policy_version",
+        "minimum_group_size",
+        "forbidden_semantic_roles",
+        "bound_dimension_roles",
+        "redacted_bucket_kind",
+        "policy_hash",
+    }
+)
 _CURRENT_REF_FIELDS = frozenset(
     {"strategy_id", "strategy_type", "strategy_spec_hash"}
 )
@@ -359,6 +397,7 @@ _SAMPLE_BINDING_FIELDS = frozenset(
 _PARTITION_FIELDS = frozenset(
     {
         "name",
+        "role",
         "population_key",
         "row_count",
         "effect_stage",
@@ -371,6 +410,7 @@ _SLICE_FIELDS = frozenset(
         "producer_version",
         "slice_id",
         "family",
+        "population_role",
         "availability",
         "unavailable_reason",
         "dimensions",
@@ -391,10 +431,12 @@ _TYPED_FIELD_FIELDS = frozenset({"availability", "reason", "value"})
 _POPULATION_FIELDS = frozenset(
     {
         "count",
+        "role",
         "labeled_count",
         "unlabeled_count",
         "label_coverage",
         "risk",
+        "amounts",
     }
 )
 _RISK_FIELDS = frozenset(
@@ -404,6 +446,7 @@ _PROJECTION_FIELDS = frozenset(
     {
         "strategy_id",
         "strategy_type",
+        "population_role",
         "population_count",
         "labeled_count",
         "label_coverage",
@@ -433,6 +476,7 @@ def build_strategy_impact_cube(
     *,
     pool: Mapping[str, Any],
     partition_frames: Mapping[str, pd.DataFrame],
+    approval_partition_frames: Mapping[str, pd.DataFrame] | None = None,
     pool_artifact_ref: Mapping[str, Any],
     sample_design_v2_ref: Mapping[str, Any],
     dataset_binding: Mapping[str, Any],
@@ -445,6 +489,10 @@ def build_strategy_impact_cube(
     current_strategy_spec: Mapping[str, Any] | StrategySpec | None,
     current_strategy_ref: Mapping[str, Any] | None,
     economics_bindings: Mapping[str, Mapping[str, Any]] | None,
+    semantic_field_roles: Mapping[str, str] | None = None,
+    entity_col: str | None = None,
+    loan_amount_col: str | None = None,
+    overdue_amount_col: str | None = None,
 ) -> dict[str, Any]:
     """Build a canonical aggregate-only ImpactCube for exact partition rows."""
 
@@ -460,22 +508,50 @@ def build_strategy_impact_cube(
         raise StrategyError("ImpactCube cannot execute unresolved Pool requirements")
     new_spec = parse_strategy_spec(compiled["strategy_spec"])
 
-    frames = _partition_frames(partition_frames)
+    risk_frames = _partition_frames(partition_frames)
+    approval_frames = (
+        {name: frame.copy() for name, frame in risk_frames.items()}
+        if approval_partition_frames is None
+        else _partition_frames(approval_partition_frames)
+    )
+    if tuple(approval_frames) != tuple(risk_frames):
+        raise StrategyError(
+            "ImpactCube approval and risk partitions must match"
+        )
+    population_frames = {
+        "approval": approval_frames,
+        "risk": risk_frames,
+    }
     pool_artifact = _pool_artifact_ref(pool_artifact_ref)
     sample_v2 = _sample_design_v2_ref(
         sample_design_v2_ref,
-        partitions=tuple(frames),
+        partitions=tuple(risk_frames),
     )
     dataset = _dataset_binding(dataset_binding)
     if dataset["task_id"] != current_pool["task_id"]:
         raise StrategyError("ImpactCube dataset belongs to another task")
-    if sum(len(frame) for frame in frames.values()) > MAX_IMPACT_CUBE_ROWS:
+    if (
+        sum(
+            len(frame)
+            for frames in population_frames.values()
+            for frame in frames.values()
+        )
+        > MAX_IMPACT_CUBE_ROWS
+    ):
         raise StrategyError("ImpactCube row budget exceeded")
-    for name, frame in frames.items():
-        if len(frame) != sample_v2["partition_counts"][name]:
-            raise StrategyError(
-                f"ImpactCube {name} rows do not match membership count"
-            )
+    for role, frames in population_frames.items():
+        counts = sample_v2["population_partition_counts"][role]
+        for name, frame in frames.items():
+            if len(frame) != counts[name]:
+                raise StrategyError(
+                    f"ImpactCube {role}/{name} rows do not match "
+                    "membership count"
+                )
+            if len(frame) < MIN_IMPACT_CUBE_GROUP_SIZE:
+                raise StrategyError(
+                    f"ImpactCube {role}/{name} is below the governed "
+                    "minimum group size"
+                )
 
     legacy_ref = StrategySampleDesignRef.from_value(
         legacy_development_ref
@@ -498,7 +574,14 @@ def build_strategy_impact_cube(
         month_col=month_col,
         group_col=group_col,
         segment_col=segment_col,
+        loan_amount_col=loan_amount_col,
+        overdue_amount_col=overdue_amount_col,
         target_col=target["column"],
+    )
+    privacy = _privacy_binding(
+        fields=fields,
+        semantic_field_roles=semantic_field_roles,
+        entity_col=entity_col,
     )
     current_spec, current_ref = _current_strategy(
         current_strategy_spec,
@@ -520,6 +603,8 @@ def build_strategy_impact_cube(
             fields["month_col"],
             fields["group_col"],
             fields["segment_col"],
+            fields["loan_amount_col"],
+            fields["overdue_amount_col"],
         )
         if column is not None
     )
@@ -528,13 +613,14 @@ def build_strategy_impact_cube(
         for binding in economics["bindings"].values()
         if binding["kind"] == "column"
     )
-    for name, frame in frames.items():
-        missing = sorted(required_columns - set(frame.columns))
-        if missing:
-            raise StrategyError(
-                f"ImpactCube {name} partition is missing columns: "
-                + ", ".join(missing)
-            )
+    for role, frames in population_frames.items():
+        for name, frame in frames.items():
+            missing = sorted(required_columns - set(frame.columns))
+            if missing:
+                raise StrategyError(
+                    f"ImpactCube {role}/{name} partition is missing columns: "
+                    + ", ".join(missing)
+                )
 
     family_status = _slice_family_status(fields)
     present_family_count = sum(
@@ -547,7 +633,11 @@ def build_strategy_impact_cube(
         + 2
     )
     work = (
-        sum(len(frame) for frame in frames.values())
+        sum(
+            len(frame)
+            for frames in population_frames.values()
+            for frame in frames.values()
+        )
         * present_family_count
         * evaluation_multiplier
     )
@@ -555,28 +645,32 @@ def build_strategy_impact_cube(
         raise StrategyError("ImpactCube evaluation work budget exceeded")
 
     descriptors: list[dict[str, Any]] = []
-    for partition in _PARTITION_ORDER:
-        frame = frames.get(partition)
-        if frame is None:
-            continue
-        partition_descriptors = _slice_descriptors(
-            partition=partition,
-            frame=frame,
-            new_spec=new_spec,
-            fields=fields,
-            max_slices=MAX_IMPACT_CUBE_SLICES - len(descriptors),
-        )
-        descriptors.extend(partition_descriptors)
+    for role in _POPULATION_ROLE_ORDER:
+        for partition in _PARTITION_ORDER:
+            frame = population_frames[role].get(partition)
+            if frame is None:
+                continue
+            partition_descriptors = _slice_descriptors(
+                population_role=role,
+                partition=partition,
+                frame=frame,
+                new_spec=new_spec,
+                fields=fields,
+                max_slices=MAX_IMPACT_CUBE_SLICES - len(descriptors),
+            )
+            descriptors.extend(partition_descriptors)
     descriptors.sort(key=_slice_sort_key)
     if len(descriptors) > MAX_IMPACT_CUBE_SLICES:
         raise StrategyError("ImpactCube slice budget exceeded")
 
     slices: list[dict[str, Any]] = []
     for descriptor in descriptors:
-        frame = frames[descriptor["partition"]]
+        role = descriptor["population_role"]
+        frame = population_frames[role][descriptor["partition"]]
         if descriptor["availability"] == "unavailable":
             slices.append(
                 _build_unavailable_slice(
+                    population_role=role,
                     partition=descriptor["partition"],
                     family=descriptor["family"],
                     dimensions=descriptor["dimensions"],
@@ -596,6 +690,7 @@ def build_strategy_impact_cube(
             raise StrategyError("ImpactCube cannot persist empty present slices")
         slices.append(
             _build_present_slice(
+                population_role=role,
                 partition=descriptor["partition"],
                 family=descriptor["family"],
                 dimensions=descriptor["dimensions"],
@@ -606,18 +701,22 @@ def build_strategy_impact_cube(
                 current_ref=current_ref,
                 target=target,
                 economics=economics,
+                loan_amount_col=fields["loan_amount_col"],
+                overdue_amount_col=fields["overdue_amount_col"],
             )
         )
 
     partition_rows = [
         {
+            "role": role,
             "name": partition,
-            "population_key": f"risk/{partition}",
-            "row_count": len(frames[partition]),
+            "population_key": f"{role}/{partition}",
+            "row_count": len(population_frames[role][partition]),
             **_partition_stage(partition),
         }
+        for role in _POPULATION_ROLE_ORDER
         for partition in _PARTITION_ORDER
-        if partition in frames
+        if partition in population_frames[role]
     ]
     source_bindings = {
         "pool_artifact": pool_artifact,
@@ -639,6 +738,7 @@ def build_strategy_impact_cube(
             ),
         ),
         "economics": economics,
+        "privacy": privacy,
     }
     identity = {
         "pool_id": current_pool["pool_id"],
@@ -730,13 +830,20 @@ def validate_strategy_impact_cube(
         _text(identity[field], f"ImpactCube identity.{field}")
 
     partitions = _validate_partitions(obj["partitions"])
-    if [row["name"] for row in partitions] != [
-        name for name in _PARTITION_ORDER if name in {row["name"] for row in partitions}
+    if [(row["role"], row["name"]) for row in partitions] != [
+        (role, name)
+        for role in _POPULATION_ROLE_ORDER
+        for name in _PARTITION_ORDER
+        if (role, name)
+        in {(row["role"], row["name"]) for row in partitions}
     ]:
         raise StrategyError("ImpactCube partitions are not canonically ordered")
+    selected_partition_names = tuple(
+        row["name"] for row in partitions if row["role"] == "risk"
+    )
     sources = _validate_source_bindings(
         obj["source_bindings"],
-        partitions=tuple(row["name"] for row in partitions),
+        partitions=selected_partition_names,
         strategy_type=identity["strategy_type"],
     )
     if sources["dataset"]["task_id"] != identity["task_id"]:
@@ -755,13 +862,15 @@ def validate_strategy_impact_cube(
             raise StrategyError(
                 f"ImpactCube lineage {field} does not match dataset binding"
             )
-    if set(sources["sample_design_v2"]["partition_counts"]) != {
-        row["name"] for row in partitions
-    }:
+    if set(sources["sample_design_v2"]["partition_counts"]) != set(
+        selected_partition_names
+    ):
         raise StrategyError("ImpactCube partition bindings changed")
     for row in partitions:
         if (
-            sources["sample_design_v2"]["partition_counts"][row["name"]]
+            sources["sample_design_v2"]["population_partition_counts"][
+                row["role"]
+            ][row["name"]]
             != row["row_count"]
         ):
             raise StrategyError("ImpactCube partition population changed")
@@ -788,15 +897,18 @@ def validate_strategy_impact_cube(
             economics=sources["economics"],
             fields=sources["fields"],
         )
-    declared_partitions = {row["name"] for row in partitions}
-    dimension_keys: set[tuple[str, str, str]] = set()
+    declared_partitions = {
+        (row["role"], row["name"]) for row in partitions
+    }
+    dimension_keys: set[tuple[str, str, str, str]] = set()
     for row in slices:
         partition = row["dimensions"]["partition"]["value"]
-        if partition not in declared_partitions:
+        if (row["population_role"], partition) not in declared_partitions:
             raise StrategyError(
                 "ImpactCube slice uses an undeclared partition"
             )
         key = (
+            row["population_role"],
             partition,
             row["family"],
             _canonical_json(row["dimensions"]),
@@ -816,6 +928,7 @@ def validate_strategy_impact_cube(
         families=families,
         slices=slices,
     )
+    _validate_new_action_consistency(slices=slices)
 
     lifecycle = _json_object(obj["lifecycle"], "ImpactCube lifecycle")
     _exact_fields(
@@ -876,6 +989,7 @@ def canonical_strategy_impact_cube_json(payload: Mapping[str, Any]) -> str:
 
 def _build_present_slice(
     *,
+    population_role: str,
     partition: str,
     family: str,
     dimensions: Mapping[str, Any],
@@ -886,17 +1000,37 @@ def _build_present_slice(
     current_ref: Mapping[str, Any] | None,
     target: Mapping[str, Any],
     economics: Mapping[str, Any],
+    loan_amount_col: str | None,
+    overdue_amount_col: str | None,
 ) -> dict[str, Any]:
+    analysis_frame = frame
+    analysis_target = dict(target)
+    if population_role == "approval":
+        reserved = "__marvis_impact_cube_approval_target__"
+        while reserved in analysis_frame.columns:
+            reserved += "_"
+        analysis_frame = frame.copy()
+        analysis_frame[reserved] = np.nan
+        analysis_target["column"] = reserved
+    slice_economics = (
+        economics
+        if population_role == "approval"
+        else {
+            "availability": "not_applicable",
+            "reason": "risk_population_economics_not_applicable",
+            "bindings": {},
+        }
+    )
     economics_args = _economics_arguments(
-        frame,
+        analysis_frame,
         strategy_type=new_spec.strategy_type,
-        economics=economics,
+        economics=slice_economics,
     )
     new_result = run_typed_backtest(
-        frame,
+        analysis_frame,
         new_spec,
-        target_col=target["column"],
-        target_bad_value=target["bad_value"],
+        target_col=analysis_target["column"],
+        target_bad_value=analysis_target["bad_value"],
         strategy_id=f"pool-design-{strategy_spec_hash(new_spec)[:24]}",
         baseline=current_spec,
         economics_inputs=economics_args["economics_inputs"],
@@ -906,42 +1040,53 @@ def _build_present_slice(
         None
         if current_spec is None
         else run_typed_backtest(
-            frame,
+            analysis_frame,
             current_spec,
-            target_col=target["column"],
-            target_bad_value=target["bad_value"],
+            target_col=analysis_target["column"],
+            target_bad_value=analysis_target["bad_value"],
             strategy_id=current_ref["strategy_id"],
             economics_inputs=economics_args["economics_inputs"],
             approval_profit_inputs=economics_args["approval_profit_inputs"],
         )
     )
     normalized_target = _normalized_target(
-        frame[target["column"]],
-        bad_value=target["bad_value"],
+        analysis_frame[analysis_target["column"]],
+        bad_value=analysis_target["bad_value"],
+    )
+    amounts = _amount_series(
+        analysis_frame,
+        loan_amount_col=loan_amount_col,
+        overdue_amount_col=overdue_amount_col,
     )
     population = _population_summary(
-        pd.Series(True, index=frame.index, dtype=bool),
+        pd.Series(True, index=analysis_frame.index, dtype=bool),
         target=normalized_target,
-        denominator=len(frame),
+        denominator=len(analysis_frame),
+        population_role=population_role,
+        amounts=amounts,
     )
     transition = _transition_field(
-        frame=frame,
+        frame=analysis_frame,
         target=normalized_target,
         new_spec=new_spec,
         current_spec=current_spec,
+        population_role=population_role,
+        amounts=amounts,
     )
     waterfall = _typed_field(
         "present",
         _waterfall(
-            frame=frame,
+            frame=analysis_frame,
             target=normalized_target,
             pool=pool,
             spec=new_spec,
+            population_role=population_role,
+            amounts=amounts,
         ),
         None,
     )
     economics_field = _economics_field(
-        economics=economics,
+        economics=slice_economics,
         strategy_type=new_spec.strategy_type,
         new_result=new_result,
         current_result=current_result,
@@ -953,17 +1098,22 @@ def _build_present_slice(
             row["effect"]["count"]
             for row in transition["value"]["rows"]
         )
-        == len(frame)
+        == len(analysis_frame)
     )
     body = {
         "schema_version": STRATEGY_IMPACT_SLICE_SCHEMA_VERSION,
         "producer_version": STRATEGY_IMPACT_CUBE_PRODUCER_VERSION,
         "family": family,
+        "population_role": population_role,
         "availability": "present",
         "unavailable_reason": None,
         "dimensions": dict(dimensions),
         "population": _typed_field("present", population, None),
-        "new": _typed_field("present", _projection(new_result), None),
+        "new": _typed_field(
+            "present",
+            _projection(new_result, population_role=population_role),
+            None,
+        ),
         "current": (
             _typed_field(
                 "unavailable",
@@ -971,7 +1121,14 @@ def _build_present_slice(
                 "current_strategy_not_bound",
             )
             if current_result is None
-            else _typed_field("present", _projection(current_result), None)
+            else _typed_field(
+                "present",
+                _projection(
+                    current_result,
+                    population_role=population_role,
+                ),
+                None,
+            )
         ),
         "transition": transition,
         "waterfall": waterfall,
@@ -987,6 +1144,7 @@ def _build_present_slice(
 
 def _build_unavailable_slice(
     *,
+    population_role: str,
     partition: str,
     family: str,
     dimensions: Mapping[str, Any],
@@ -997,6 +1155,7 @@ def _build_unavailable_slice(
         "schema_version": STRATEGY_IMPACT_SLICE_SCHEMA_VERSION,
         "producer_version": STRATEGY_IMPACT_CUBE_PRODUCER_VERSION,
         "family": family,
+        "population_role": population_role,
         "availability": "unavailable",
         "unavailable_reason": reason,
         "dimensions": dict(dimensions),
@@ -1024,6 +1183,7 @@ def _finalize_slice(body: Mapping[str, Any]) -> dict[str, Any]:
 
 def _slice_descriptors(
     *,
+    population_role: str,
     partition: str,
     frame: pd.DataFrame,
     new_spec: StrategySpec,
@@ -1034,6 +1194,7 @@ def _slice_descriptors(
         raise StrategyError("ImpactCube slice budget exceeded")
     descriptors = [
         _descriptor(
+            population_role=population_role,
             partition=partition,
             family="overall",
             dimensions=_dimensions(partition=partition),
@@ -1060,6 +1221,7 @@ def _slice_descriptors(
     _extend_descriptors(
         descriptors,
         _single_dimension_descriptors(
+            population_role=population_role,
             partition=partition,
             family="month",
             dimension="month",
@@ -1071,6 +1233,7 @@ def _slice_descriptors(
     _extend_descriptors(
         descriptors,
         _single_dimension_descriptors(
+            population_role=population_role,
             partition=partition,
             family="group",
             dimension="group",
@@ -1082,6 +1245,7 @@ def _slice_descriptors(
     _extend_descriptors(
         descriptors,
         _single_dimension_descriptors(
+            population_role=population_role,
             partition=partition,
             family="segment",
             dimension="segment",
@@ -1093,6 +1257,7 @@ def _slice_descriptors(
     _extend_descriptors(
         descriptors,
         _cross_dimension_descriptors(
+            population_role=population_role,
             partition=partition,
             family="group_month",
             left_dimension="group",
@@ -1106,6 +1271,7 @@ def _slice_descriptors(
     _extend_descriptors(
         descriptors,
         _cross_dimension_descriptors(
+            population_role=population_role,
             partition=partition,
             family="segment_month",
             left_dimension="segment",
@@ -1121,6 +1287,7 @@ def _slice_descriptors(
     _extend_descriptors(
         descriptors,
         _single_dimension_descriptors(
+            population_role=population_role,
             partition=partition,
             family="new_action",
             dimension="new_action_bucket",
@@ -1145,6 +1312,7 @@ def _extend_descriptors(
 
 def _single_dimension_descriptors(
     *,
+    population_role: str,
     partition: str,
     family: str,
     dimension: str,
@@ -1157,6 +1325,7 @@ def _single_dimension_descriptors(
         reason = f"{dimension}_field_not_bound"
         return [
             _unavailable_descriptor(
+                population_role=population_role,
                 partition=partition,
                 family=family,
                 reason=reason,
@@ -1171,6 +1340,7 @@ def _single_dimension_descriptors(
     counts = np.bincount(groups.codes, minlength=len(groups.values))
     return [
         _descriptor(
+            population_role=population_role,
             partition=partition,
             family=family,
             dimensions=_dimensions(
@@ -1187,6 +1357,7 @@ def _single_dimension_descriptors(
 
 def _cross_dimension_descriptors(
     *,
+    population_role: str,
     partition: str,
     family: str,
     left_dimension: str,
@@ -1216,6 +1387,7 @@ def _cross_dimension_descriptors(
         }
         return [
             _unavailable_descriptor(
+                population_role=population_role,
                 partition=partition,
                 family=family,
                 reason=reason,
@@ -1230,21 +1402,59 @@ def _cross_dimension_descriptors(
         + right_groups.codes.astype(np.int64, copy=False)
     )
     observed_codes, counts = np.unique(combined_codes, return_counts=True)
+    small_codes = {
+        int(code)
+        for code, count in zip(observed_codes, counts, strict=True)
+        if int(count) < MIN_IMPACT_CUBE_GROUP_SIZE
+    }
+    redacted_count = sum(
+        int(count)
+        for code, count in zip(observed_codes, counts, strict=True)
+        if int(code) in small_codes
+    )
+    if small_codes and redacted_count < MIN_IMPACT_CUBE_GROUP_SIZE:
+        candidates = sorted(
+            (
+                int(count),
+                int(code),
+            )
+            for code, count in zip(observed_codes, counts, strict=True)
+            if int(code) not in small_codes
+        )
+        for count, code in candidates:
+            small_codes.add(code)
+            redacted_count += count
+            if redacted_count >= MIN_IMPACT_CUBE_GROUP_SIZE:
+                break
+    if small_codes:
+        combined_codes = np.where(
+            np.isin(combined_codes, tuple(small_codes)),
+            -1,
+            combined_codes,
+        )
+        observed_codes, counts = np.unique(combined_codes, return_counts=True)
     if len(observed_codes) > max_groups:
         raise StrategyError("ImpactCube slice budget exceeded")
     rows: list[dict[str, Any]] = []
     for combined_code, count in zip(observed_codes, counts, strict=True):
         code = int(combined_code)
-        left_code, right_code = divmod(code, right_count)
+        if code == -1:
+            left_value = _dimension("redacted", None)
+            right_value = _dimension("redacted", None)
+        else:
+            left_code, right_code = divmod(code, right_count)
+            left_value = left_groups.values[left_code]
+            right_value = right_groups.values[right_code]
         rows.append(
             _descriptor(
+                population_role=population_role,
                 partition=partition,
                 family=family,
                 dimensions=_dimensions(
                     partition=partition,
                     **{
-                        left_dimension: left_groups.values[left_code],
-                        right_dimension: right_groups.values[right_code],
+                        left_dimension: left_value,
+                        right_dimension: right_value,
                     },
                 ),
                 codes=combined_codes,
@@ -1257,6 +1467,7 @@ def _cross_dimension_descriptors(
 
 def _descriptor(
     *,
+    population_role: str,
     partition: str,
     family: str,
     dimensions: Mapping[str, Any],
@@ -1265,6 +1476,7 @@ def _descriptor(
     row_count: int,
 ) -> dict[str, Any]:
     return {
+        "population_role": population_role,
         "partition": partition,
         "family": family,
         "availability": "present",
@@ -1284,12 +1496,14 @@ def _descriptor(
 
 def _unavailable_descriptor(
     *,
+    population_role: str,
     partition: str,
     family: str,
     reason: str,
     dimensions: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
+        "population_role": population_role,
         "partition": partition,
         "family": family,
         "availability": "unavailable",
@@ -1312,6 +1526,22 @@ def _field_groups(
         normalized = _month_values(values, field=field)
     else:
         normalized = values.map(_external_dimension_value)
+    if dimension in {"group", "segment"}:
+        nonnull = values.dropna()
+        distinct = int(nonnull.nunique(dropna=True))
+        if (
+            len(nonnull) >= _HIGH_CARDINALITY_MIN_ROWS
+            and distinct >= _HIGH_CARDINALITY_MIN_ROWS
+            and distinct / len(nonnull) > 0.5
+        ):
+            raise StrategyError(
+                "ImpactCube high-cardinality raw identifier dimension "
+                f"is forbidden: {field}"
+            )
+    normalized = _merge_small_dimension_cells(
+        normalized,
+        dimension=dimension,
+    )
     tokens = normalized.map(_dimension_token).tolist()
     seen: dict[str, dict[str, Any]] = {}
     for token, value in zip(tokens, normalized, strict=True):
@@ -1333,6 +1563,47 @@ def _field_groups(
     return _DimensionGroups(
         values=tuple(seen[token] for token in ordered_tokens),
         codes=codes,
+    )
+
+
+def _merge_small_dimension_cells(
+    normalized: pd.Series,
+    *,
+    dimension: str,
+) -> pd.Series:
+    """Replace undersized cells with one governed bucket containing no values."""
+
+    tokens = normalized.map(_dimension_token)
+    counts = tokens.value_counts(sort=False).to_dict()
+    small = {
+        token
+        for token, count in counts.items()
+        if int(count) < MIN_IMPACT_CUBE_GROUP_SIZE
+    }
+    redacted_count = sum(int(counts[token]) for token in small)
+    if small and redacted_count < MIN_IMPACT_CUBE_GROUP_SIZE:
+        candidates = sorted(
+            (
+                (int(count), str(token))
+                for token, count in counts.items()
+                if token not in small
+            )
+        )
+        for count, token in candidates:
+            small.add(token)
+            redacted_count += count
+            if redacted_count >= MIN_IMPACT_CUBE_GROUP_SIZE:
+                break
+    if not small:
+        return normalized
+    redacted = _dimension("redacted", None)
+    return pd.Series(
+        [
+            redacted if token in small else value
+            for token, value in zip(tokens, normalized, strict=True)
+        ],
+        index=normalized.index,
+        dtype="object",
     )
 
 
@@ -1421,6 +1692,8 @@ def _transition_field(
     target: pd.Series,
     new_spec: StrategySpec,
     current_spec: StrategySpec | None,
+    population_role: str,
+    amounts: Mapping[str, Any],
 ) -> dict[str, Any]:
     if current_spec is None:
         return _typed_field(
@@ -1464,6 +1737,8 @@ def _transition_field(
                     mask,
                     target=target,
                     denominator=len(frame),
+                    population_role=population_role,
+                    amounts=amounts,
                 ),
             }
         )
@@ -1522,6 +1797,8 @@ def _waterfall(
     target: pd.Series,
     pool: Mapping[str, Any],
     spec: StrategySpec,
+    population_role: str,
+    amounts: Mapping[str, Any],
 ) -> dict[str, Any]:
     evaluation = evaluate_strategy_frame(frame, spec)
     matched = evaluation.matched_rule_id.reset_index(drop=True)
@@ -1566,21 +1843,29 @@ def _waterfall(
                     standalone,
                     target=target,
                     denominator=len(frame),
+                    population_role=population_role,
+                    amounts=amounts,
                 ),
                 "incremental": _population_summary(
                     incremental,
                     target=target,
                     denominator=len(frame),
+                    population_role=population_role,
+                    amounts=amounts,
                 ),
                 "shadowed": _population_summary(
                     shadowed,
                     target=target,
                     denominator=len(frame),
+                    population_role=population_role,
+                    amounts=amounts,
                 ),
                 "remaining_after": _population_summary(
                     ~claimed,
                     target=target,
                     denominator=len(frame),
+                    population_role=population_role,
+                    amounts=amounts,
                 ),
             }
         )
@@ -1599,6 +1884,8 @@ def _waterfall(
                 unmatched,
                 target=target,
                 denominator=len(frame),
+                population_role=population_role,
+                amounts=amounts,
             ),
         },
     }
@@ -1609,13 +1896,23 @@ def _population_summary(
     *,
     target: pd.Series,
     denominator: int,
+    population_role: str,
+    amounts: Mapping[str, Any],
 ) -> dict[str, Any]:
     selected = mask.reset_index(drop=True).astype(bool)
     labelled_mask = selected & target.notna()
     count = int(selected.sum())
     labeled = int(labelled_mask.sum())
     bad = int(target.loc[labelled_mask].eq(1).sum())
-    risk = (
+    if population_role == "approval":
+        risk = {
+            "availability": "not_applicable",
+            "reason": "approval_population",
+            "bad_count": 0,
+            "bad_rate": None,
+        }
+    else:
+        risk = (
         {
             "availability": "unavailable",
             "reason": "no_labeled_rows",
@@ -1629,21 +1926,28 @@ def _population_summary(
             "bad_count": bad,
             "bad_rate": float(bad / labeled),
         }
-    )
+        )
     return {
+        "role": population_role,
         "count": count,
         "labeled_count": labeled,
         "unlabeled_count": count - labeled,
         "label_coverage": _ratio(labeled, count),
         "share": _ratio(count, denominator),
         "risk": risk,
+        "amounts": _amount_observations(selected, amounts=amounts),
     }
 
 
-def _projection(result: StrategyBacktestResult) -> dict[str, Any]:
+def _projection(
+    result: StrategyBacktestResult,
+    *,
+    population_role: str,
+) -> dict[str, Any]:
     return {
         "strategy_id": result.strategy_id,
         "strategy_type": result.strategy_type,
+        "population_role": population_role,
         "population_count": result.population_count,
         "labeled_count": result.labeled_count,
         "label_coverage": result.label_coverage,
@@ -1691,6 +1995,9 @@ def _economics_field(
                 and not isinstance(old_value, bool)
             ):
                 delta[key] = float(new_value) - float(old_value)
+        if strategy_type in {"approval", "reject", "pricing"}:
+            new_values["baseline_profit"] = current_values["profit"]
+            new_values["profit_delta_vs_baseline"] = delta["profit"]
     return _typed_field(
         "present",
         {
@@ -1953,7 +2260,11 @@ def _sample_design_v2_ref(
     partitions: tuple[str, ...],
 ) -> dict[str, Any]:
     obj = _json_object(value, "ImpactCube sample design V2 ref")
-    _exact_fields(obj, _SAMPLE_FIELDS, "ImpactCube sample design V2 ref")
+    legacy_fields = _SAMPLE_FIELDS - {"population_partition_counts"}
+    if set(obj) not in {legacy_fields, _SAMPLE_FIELDS}:
+        raise StrategyError(
+            "ImpactCube sample design V2 ref fields are invalid"
+        )
     result = dict(obj)
     for field in (
         "membership_artifact_id",
@@ -1997,11 +2308,66 @@ def _sample_design_v2_ref(
         for partition in _PARTITION_ORDER
         if partition in counts
     }
+    population_counts = (
+        {
+            "approval": dict(result["partition_counts"]),
+            "risk": dict(result["partition_counts"]),
+        }
+        if "population_partition_counts" not in obj
+        else _json_object(
+            obj["population_partition_counts"],
+            "ImpactCube population partition counts",
+        )
+    )
+    _exact_fields(
+        population_counts,
+        _POPULATION_ROLES,
+        "ImpactCube population partition counts",
+    )
+    result["population_partition_counts"] = {}
+    for role in _POPULATION_ROLE_ORDER:
+        role_counts = _json_object(
+            population_counts[role],
+            f"ImpactCube {role} partition counts",
+        )
+        if set(role_counts) != set(partitions):
+            raise StrategyError(
+                f"ImpactCube {role} partition counts do not match "
+                "selected partitions"
+            )
+        result["population_partition_counts"][role] = {
+            partition: _positive_int(
+                role_counts[partition],
+                f"ImpactCube {role}/{partition} partition count",
+            )
+            for partition in _PARTITION_ORDER
+            if partition in role_counts
+        }
+    if result["partition_counts"] != result[
+        "population_partition_counts"
+    ]["risk"]:
+        raise StrategyError(
+            "ImpactCube legacy risk partition counts changed"
+        )
+    for partition in partitions:
+        if (
+            result["population_partition_counts"]["risk"][partition]
+            > result["population_partition_counts"]["approval"][partition]
+        ):
+            raise StrategyError(
+                f"ImpactCube risk/{partition} exceeds approval population"
+            )
     if sum(result["partition_counts"].values()) > result[
         "analysis_universe_row_count"
     ]:
         raise StrategyError(
             "ImpactCube partition counts exceed analysis universe"
+        )
+    if sum(
+        result["population_partition_counts"]["approval"].values()
+    ) > result["analysis_universe_row_count"]:
+        raise StrategyError(
+            "ImpactCube approval partition counts exceed analysis universe"
         )
     return result
 
@@ -2045,12 +2411,22 @@ def _field_bindings(
     month_col: object,
     group_col: object,
     segment_col: object,
+    loan_amount_col: object,
+    overdue_amount_col: object,
     target_col: str,
 ) -> dict[str, str | None]:
     result = {
         "month_col": _optional_text(month_col, "ImpactCube month_col"),
         "group_col": _optional_text(group_col, "ImpactCube group_col"),
         "segment_col": _optional_text(segment_col, "ImpactCube segment_col"),
+        "loan_amount_col": _optional_text(
+            loan_amount_col,
+            "ImpactCube loan_amount_col",
+        ),
+        "overdue_amount_col": _optional_text(
+            overdue_amount_col,
+            "ImpactCube overdue_amount_col",
+        ),
     }
     bound = [value for value in result.values() if value is not None]
     if len(bound) != len(set(bound)):
@@ -2058,6 +2434,44 @@ def _field_bindings(
     if target_col in bound:
         raise StrategyError("ImpactCube target cannot be a slice dimension")
     return result
+
+
+def _privacy_binding(
+    *,
+    fields: Mapping[str, str | None],
+    semantic_field_roles: Mapping[str, str] | None,
+    entity_col: str | None,
+) -> dict[str, Any]:
+    roles_obj = {} if semantic_field_roles is None else dict(semantic_field_roles)
+    roles: dict[str, str] = {}
+    for column, role in roles_obj.items():
+        normalized_column = _text(column, "ImpactCube semantic role column")
+        normalized_role = _text(role, "ImpactCube semantic role").lower()
+        roles[normalized_column] = normalized_role
+    entity = _optional_text(entity_col, "ImpactCube entity_col")
+    bound_roles: dict[str, str | None] = {}
+    for dimension, field_name in _DIMENSION_FIELD_NAMES.items():
+        column = fields[field_name]
+        role = None if column is None else roles.get(column)
+        bound_roles[dimension] = role
+        if column is None:
+            continue
+        if column == entity or role in _FORBIDDEN_DIMENSION_ROLES:
+            raise StrategyError(
+                "ImpactCube identifier, personal, or sensitive dimension "
+                f"is forbidden: {column}"
+            )
+    binding = {
+        "policy_version": "strategy.dimension-privacy.v1",
+        "minimum_group_size": MIN_IMPACT_CUBE_GROUP_SIZE,
+        "forbidden_semantic_roles": sorted(_FORBIDDEN_DIMENSION_ROLES),
+        "bound_dimension_roles": bound_roles,
+        "redacted_bucket_kind": "redacted",
+    }
+    return {
+        **binding,
+        "policy_hash": _sha256(_canonical_json(binding)),
+    }
 
 
 def _slice_family_status(
@@ -2137,6 +2551,108 @@ def _normalized_target(values: pd.Series, *, bad_value: int) -> pd.Series:
     )
 
 
+def _amount_series(
+    frame: pd.DataFrame,
+    *,
+    loan_amount_col: str | None,
+    overdue_amount_col: str | None,
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for key, column in (
+        ("loan_amount", loan_amount_col),
+        ("overdue_amount", overdue_amount_col),
+    ):
+        if column is None:
+            result[key] = {
+                "column": None,
+                "values": None,
+            }
+            continue
+        raw = frame[column].reset_index(drop=True)
+        unsupported = raw.notna() & raw.map(
+            lambda item: isinstance(
+                item,
+                bool | np.bool_ | complex | np.complexfloating,
+            )
+            or not isinstance(item, str | Real | Decimal)
+        )
+        numeric = pd.to_numeric(raw, errors="coerce")
+        invalid = raw.notna() & (
+            unsupported
+            | numeric.isna()
+            | ~np.isfinite(numeric)
+        )
+        if bool(invalid.any()) or bool((numeric.dropna() < 0).any()):
+            raise StrategyError(
+                f"ImpactCube {column} must contain non-negative finite "
+                "numbers or missing"
+            )
+        result[key] = {
+            "column": column,
+            "values": numeric.astype(float),
+        }
+    return result
+
+
+def _amount_observations(
+    mask: pd.Series,
+    *,
+    amounts: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    selected = mask.reset_index(drop=True).astype(bool)
+    count = int(selected.sum())
+    result: dict[str, Any] = {}
+    for key in ("loan_amount", "overdue_amount"):
+        item = amounts[key]
+        values = item["values"]
+        if values is None:
+            result[key] = _typed_field(
+                "unavailable",
+                None,
+                f"{key}_field_not_bound",
+            )
+            continue
+        covered = selected & values.notna()
+        covered_count = int(covered.sum())
+        result[key] = _typed_field(
+            "present",
+            {
+                "column": item["column"],
+                "covered_count": covered_count,
+                "coverage": _ratio(covered_count, count),
+                "sum": float(values.loc[covered].sum()),
+            },
+            None,
+        )
+    loan = amounts["loan_amount"]["values"]
+    overdue = amounts["overdue_amount"]["values"]
+    if loan is None or overdue is None:
+        result["paired"] = _typed_field(
+            "unavailable",
+            None,
+            "paired_amount_fields_not_bound",
+        )
+    else:
+        paired = selected & loan.notna() & overdue.notna()
+        covered_count = int(paired.sum())
+        loan_sum = float(loan.loc[paired].sum())
+        overdue_sum = float(overdue.loc[paired].sum())
+        result["paired"] = _typed_field(
+            "present",
+            {
+                "covered_count": covered_count,
+                "coverage": _ratio(covered_count, count),
+                "loan_amount_sum": loan_sum,
+                "overdue_amount_sum": overdue_sum,
+                "overdue_rate": (
+                    None if loan_sum == 0 else overdue_sum / loan_sum
+                ),
+            },
+            None,
+        )
+    return result
+
+
 def _strategy_fields(spec: StrategySpec) -> set[str]:
     fields: set[str] = set()
 
@@ -2189,6 +2705,27 @@ def _red_flags(
     slices: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, str]]:
     flags: list[dict[str, str]] = []
+    redacted_cells = sum(
+        1
+        for row in slices
+        if row["availability"] == "present"
+        and any(
+            item["kind"] == "redacted"
+            for name, item in row["dimensions"].items()
+            if name != "partition"
+        )
+    )
+    if redacted_cells:
+        flags.append(
+            {
+                "code": "dimension_cells_redacted",
+                "level": "amber",
+                "message": (
+                    f"{redacted_cells} dimension cells were merged into "
+                    "governed redacted buckets to enforce minimum group size."
+                ),
+            }
+        )
     for family in ("month", "group", "segment"):
         status = family_status[family]
         if status["availability"] == "unavailable":
@@ -2230,6 +2767,7 @@ def _red_flags(
                 row
                 for row in slices
                 if row["family"] == "overall"
+                and row["population_role"] == "risk"
                 and row["dimensions"]["partition"]["value"] == partition
             ),
             None,
@@ -2304,8 +2842,58 @@ def _validate_source_bindings(
         month_col=fields["month_col"],
         group_col=fields["group_col"],
         segment_col=fields["segment_col"],
+        loan_amount_col=fields["loan_amount_col"],
+        overdue_amount_col=fields["overdue_amount_col"],
         target_col=target["column"],
     )
+    privacy = _json_object(obj["privacy"], "ImpactCube privacy binding")
+    _exact_fields(privacy, _PRIVACY_FIELDS, "ImpactCube privacy binding")
+    if (
+        privacy["policy_version"] != "strategy.dimension-privacy.v1"
+        or privacy["minimum_group_size"] != MIN_IMPACT_CUBE_GROUP_SIZE
+        or privacy["redacted_bucket_kind"] != "redacted"
+        or privacy["forbidden_semantic_roles"]
+        != sorted(_FORBIDDEN_DIMENSION_ROLES)
+    ):
+        raise StrategyError("ImpactCube privacy policy changed")
+    policy_hash = _hash(
+        privacy["policy_hash"],
+        "ImpactCube privacy policy_hash",
+    )
+    policy_body = {
+        key: value
+        for key, value in privacy.items()
+        if key != "policy_hash"
+    }
+    if not hmac.compare_digest(
+        policy_hash,
+        _sha256(_canonical_json(policy_body)),
+    ):
+        raise StrategyError("ImpactCube privacy policy_hash changed")
+    bound_roles = _json_object(
+        privacy["bound_dimension_roles"],
+        "ImpactCube privacy bound roles",
+    )
+    _exact_fields(
+        bound_roles,
+        frozenset(_DIMENSION_FIELD_NAMES),
+        "ImpactCube privacy bound roles",
+    )
+    for dimension, role in bound_roles.items():
+        if role is not None:
+            _text(role, f"ImpactCube privacy {dimension} role")
+        if (
+            result["fields"][_DIMENSION_FIELD_NAMES[dimension]] is None
+            and role is not None
+        ):
+            raise StrategyError(
+                "ImpactCube privacy role exists for an unbound dimension"
+            )
+        if role in _FORBIDDEN_DIMENSION_ROLES:
+            raise StrategyError(
+                "ImpactCube privacy contains a forbidden dimension role"
+            )
+    result["privacy"] = privacy
     current = _validate_typed_field(
         obj["current_strategy"],
         "ImpactCube current strategy",
@@ -2365,10 +2953,12 @@ def _validate_source_bindings(
 
 def _validate_partitions(value: object) -> list[dict[str, Any]]:
     rows = _list(value, "ImpactCube partitions")
-    if not rows or len(rows) > len(_PARTITION_ORDER):
+    if not rows or len(rows) > len(_PARTITION_ORDER) * len(
+        _POPULATION_ROLE_ORDER
+    ):
         raise StrategyError("ImpactCube partitions are invalid")
     normalized: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for index, raw in enumerate(rows):
         row = _json_object(raw, f"ImpactCube partitions[{index}]")
         _exact_fields(
@@ -2377,12 +2967,19 @@ def _validate_partitions(value: object) -> list[dict[str, Any]]:
             f"ImpactCube partitions[{index}]",
         )
         partition = _text(row["name"], "ImpactCube partition name")
-        if partition not in _PARTITIONS or partition in seen:
+        role = _text(row["role"], "ImpactCube population role")
+        key = (role, partition)
+        if (
+            role not in _POPULATION_ROLES
+            or partition not in _PARTITIONS
+            or key in seen
+        ):
             raise StrategyError("ImpactCube partition name is invalid")
-        seen.add(partition)
+        seen.add(key)
         expected = {
+            "role": role,
             "name": partition,
-            "population_key": f"risk/{partition}",
+            "population_key": f"{role}/{partition}",
             "row_count": _positive_int(
                 row["row_count"],
                 "ImpactCube partition row_count",
@@ -2392,6 +2989,19 @@ def _validate_partitions(value: object) -> list[dict[str, Any]]:
         if row != expected:
             raise StrategyError("ImpactCube partition metadata changed")
         normalized.append(row)
+    by_role = {
+        role: {
+            row["name"] for row in normalized if row["role"] == role
+        }
+        for role in _POPULATION_ROLE_ORDER
+    }
+    if (
+        not by_role["approval"]
+        or by_role["approval"] != by_role["risk"]
+    ):
+        raise StrategyError(
+            "ImpactCube approval and risk partition metadata must match"
+        )
     return normalized
 
 
@@ -2462,6 +3072,12 @@ def _validate_slice(
     family = _text(obj["family"], "ImpactSlice family")
     if family not in _FAMILIES:
         raise StrategyError("ImpactSlice family is invalid")
+    population_role = _text(
+        obj["population_role"],
+        "ImpactSlice population_role",
+    )
+    if population_role not in _POPULATION_ROLES:
+        raise StrategyError("ImpactSlice population_role is invalid")
     dimensions = _validate_dimensions(obj["dimensions"])
     if dimensions["partition"]["value"] not in _PARTITIONS:
         raise StrategyError("ImpactSlice partition dimension is invalid")
@@ -2528,6 +3144,7 @@ def _validate_slice(
     population = _validate_population(
         population_field["value"],
         "ImpactSlice population value",
+        expected_role=population_role,
     )
     if not math.isclose(
         population["share"],
@@ -2543,6 +3160,7 @@ def _validate_slice(
         new_field["value"],
         name="ImpactSlice new strategy",
         expected_type=strategy_type,
+        expected_role=population_role,
     )
     _require_projection_population(
         new,
@@ -2562,6 +3180,7 @@ def _validate_slice(
             current_field["value"],
             name="ImpactSlice current strategy",
             expected_type=strategy_type,
+            expected_role=population_role,
         )
         _require_projection_population(
             current,
@@ -2576,6 +3195,7 @@ def _validate_slice(
             transition_field["value"],
             population=population,
             strategy_type=strategy_type,
+            population_role=population_role,
         )
     elif transition_field["availability"] != "unavailable":
         raise StrategyError(
@@ -2591,12 +3211,22 @@ def _validate_slice(
         waterfall_field["value"],
         population=population,
         strategy_type=strategy_type,
+        population_role=population_role,
     )
     economics = _validate_typed_field(
         obj["economics"],
         "ImpactSlice economics",
     )
-    if economics["availability"] == "present":
+    if population_role == "risk":
+        if obj["economics"] != _typed_field(
+            "not_applicable",
+            None,
+            "risk_population_economics_not_applicable",
+        ):
+            raise StrategyError(
+                "ImpactSlice risk economics must be not applicable"
+            )
+    elif economics["availability"] == "present":
         _validate_economics_value(
             economics["value"],
             strategy_type=strategy_type,
@@ -2665,6 +3295,41 @@ def _validate_slice_bindings(
                 )
         return
 
+    amount_values = row["population"]["value"]["amounts"]
+    for key, field_name in (
+        ("loan_amount", "loan_amount_col"),
+        ("overdue_amount", "overdue_amount_col"),
+    ):
+        column = fields[field_name]
+        typed = amount_values[key]
+        if column is None:
+            expected = _typed_field(
+                "unavailable",
+                None,
+                f"{key}_field_not_bound",
+            )
+            if typed != expected:
+                raise StrategyError(
+                    "ImpactSlice amount availability changed from binding"
+                )
+        elif (
+            typed["availability"] != "present"
+            or typed["value"]["column"] != column
+        ):
+            raise StrategyError(
+                "ImpactSlice amount column changed from binding"
+            )
+    paired_expected = (
+        "present"
+        if fields["loan_amount_col"] is not None
+        and fields["overdue_amount_col"] is not None
+        else "unavailable"
+    )
+    if amount_values["paired"]["availability"] != paired_expected:
+        raise StrategyError(
+            "ImpactSlice paired amount availability changed from binding"
+        )
+
     expected_new_id = (
         f"pool-design-{identity['strategy_spec_hash'][:24]}"
     )
@@ -2700,7 +3365,16 @@ def _validate_slice_bindings(
             "ImpactSlice current strategy unavailable binding changed"
         )
 
-    if economics["availability"] == "present":
+    if row["population_role"] == "risk":
+        if row["economics"] != _typed_field(
+            "not_applicable",
+            None,
+            "risk_population_economics_not_applicable",
+        ):
+            raise StrategyError(
+                "ImpactSlice risk economics must be not applicable"
+            )
+    elif economics["availability"] == "present":
         if row["economics"]["availability"] != "present":
             raise StrategyError(
                 "ImpactSlice economics changed from binding"
@@ -2746,11 +3420,20 @@ def _validate_dimensions(value: object) -> dict[str, Any]:
             f"ImpactSlice dimension {name}",
         )
         kind = item["kind"]
-        if kind not in {"all", "value", "null", "unavailable"}:
+        if kind not in {
+            "all",
+            "value",
+            "null",
+            "redacted",
+            "unavailable",
+        }:
             raise StrategyError(
                 f"ImpactSlice dimension {name} kind is invalid"
             )
-        if kind in {"all", "null", "unavailable"} and item["value"] is not None:
+        if (
+            kind in {"all", "null", "redacted", "unavailable"}
+            and item["value"] is not None
+        ):
             raise StrategyError(
                 f"ImpactSlice dimension {name} must have null value"
             )
@@ -2776,7 +3459,7 @@ def _validate_family_dimensions(
         for dimension in non_partition:
             kind = dimensions[dimension]["kind"]
             if dimension in active:
-                if kind not in {"value", "null"}:
+                if kind not in {"value", "null", "redacted"}:
                     raise StrategyError(
                         f"ImpactSlice {family} dimensions are invalid"
                     )
@@ -2865,10 +3548,17 @@ def _validate_population(
     *,
     allow_zero: bool = False,
     denominator: int | None = None,
+    expected_role: str | None = None,
 ) -> dict[str, Any]:
     obj = _json_object(value, name)
     expected_fields = _POPULATION_FIELDS | {"share"}
     _exact_fields(obj, expected_fields, name)
+    role = _text(obj["role"], f"{name}.role")
+    if (
+        role not in _POPULATION_ROLES
+        or (expected_role is not None and role != expected_role)
+    ):
+        raise StrategyError(f"{name} population role is invalid")
     count = (
         _nonnegative_int(obj["count"], f"{name}.count")
         if allow_zero
@@ -2908,7 +3598,19 @@ def _validate_population(
     bad = _nonnegative_int(risk["bad_count"], f"{name}.risk.bad_count")
     if bad > labeled:
         raise StrategyError(f"{name} bad count exceeds labeled count")
-    if labeled == 0:
+    if role == "approval":
+        if (
+            labeled != 0
+            or unlabeled != count
+            or risk["availability"] != "not_applicable"
+            or risk["reason"] != "approval_population"
+            or bad != 0
+            or risk["bad_rate"] is not None
+        ):
+            raise StrategyError(
+                f"{name} approval risk must be not applicable"
+            )
+    elif labeled == 0:
         if (
             risk["availability"] != "unavailable"
             or risk["bad_rate"] is not None
@@ -2929,6 +3631,122 @@ def _validate_population(
             abs_tol=1e-12,
         ):
             raise StrategyError(f"{name} bad rate is inconsistent")
+    _validate_amounts(
+        obj["amounts"],
+        population_count=count,
+        name=f"{name}.amounts",
+    )
+    return obj
+
+
+def _validate_amounts(
+    value: object,
+    *,
+    population_count: int,
+    name: str,
+) -> dict[str, Any]:
+    obj = _json_object(value, name)
+    _exact_fields(
+        obj,
+        frozenset({"loan_amount", "overdue_amount", "paired"}),
+        name,
+    )
+    singles: dict[str, Mapping[str, Any]] = {}
+    for key in ("loan_amount", "overdue_amount"):
+        typed = _validate_typed_field(obj[key], f"{name}.{key}")
+        if typed["availability"] == "unavailable":
+            if typed["reason"] != f"{key}_field_not_bound":
+                raise StrategyError(f"{name}.{key} reason is invalid")
+            continue
+        item = _json_object(typed["value"], f"{name}.{key}.value")
+        _exact_fields(
+            item,
+            frozenset({"column", "covered_count", "coverage", "sum"}),
+            f"{name}.{key}.value",
+        )
+        _text(item["column"], f"{name}.{key}.column")
+        covered = _nonnegative_int(
+            item["covered_count"],
+            f"{name}.{key}.covered_count",
+        )
+        if covered > population_count:
+            raise StrategyError(f"{name}.{key} coverage exceeds population")
+        _require_finite_equal(
+            item["coverage"],
+            _ratio(covered, population_count),
+            name=f"{name}.{key}.coverage",
+        )
+        amount_sum = float(
+            _finite_number(item["sum"], f"{name}.{key}.sum")
+        )
+        if amount_sum < 0 or (covered == 0 and amount_sum != 0):
+            raise StrategyError(f"{name}.{key} sum is invalid")
+        singles[key] = item
+    paired = _validate_typed_field(obj["paired"], f"{name}.paired")
+    if paired["availability"] == "unavailable":
+        if paired["reason"] != "paired_amount_fields_not_bound":
+            raise StrategyError(f"{name}.paired reason is invalid")
+        if len(singles) == 2:
+            raise StrategyError(
+                f"{name}.paired contradicts available amount fields"
+            )
+        return obj
+    if len(singles) != 2:
+        raise StrategyError(f"{name}.paired requires both amount fields")
+    pair = _json_object(paired["value"], f"{name}.paired.value")
+    _exact_fields(
+        pair,
+        frozenset(
+            {
+                "covered_count",
+                "coverage",
+                "loan_amount_sum",
+                "overdue_amount_sum",
+                "overdue_rate",
+            }
+        ),
+        f"{name}.paired.value",
+    )
+    covered = _nonnegative_int(
+        pair["covered_count"],
+        f"{name}.paired.covered_count",
+    )
+    if covered > population_count or any(
+        covered > int(item["covered_count"])
+        for item in singles.values()
+    ):
+        raise StrategyError(f"{name}.paired coverage is invalid")
+    _require_finite_equal(
+        pair["coverage"],
+        _ratio(covered, population_count),
+        name=f"{name}.paired.coverage",
+    )
+    loan_sum = float(
+        _finite_number(
+            pair["loan_amount_sum"],
+            f"{name}.paired.loan_amount_sum",
+        )
+    )
+    overdue_sum = float(
+        _finite_number(
+            pair["overdue_amount_sum"],
+            f"{name}.paired.overdue_amount_sum",
+        )
+    )
+    if (
+        loan_sum < 0
+        or overdue_sum < 0
+        or (covered == 0 and (loan_sum != 0 or overdue_sum != 0))
+        or loan_sum > float(singles["loan_amount"]["sum"])
+        or overdue_sum > float(singles["overdue_amount"]["sum"])
+    ):
+        raise StrategyError(f"{name}.paired sums are invalid")
+    _require_optional_ratio(
+        pair["overdue_rate"],
+        numerator=overdue_sum,
+        denominator=loan_sum,
+        name=f"{name}.paired.overdue_rate",
+    )
     return obj
 
 
@@ -2940,17 +3758,65 @@ def _population_counts(value: Mapping[str, Any]) -> dict[str, int]:
     }
 
 
+def _require_amount_rollup(
+    parts: Sequence[Mapping[str, Any]],
+    total: Mapping[str, Any],
+    *,
+    name: str,
+) -> None:
+    for key in ("loan_amount", "overdue_amount", "paired"):
+        expected = total[key]
+        observations = [part[key] for part in parts]
+        if any(
+            item["availability"] != expected["availability"]
+            or item["reason"] != expected["reason"]
+            for item in observations
+        ):
+            raise StrategyError(f"{name} {key} availability does not roll up")
+        if expected["availability"] != "present":
+            continue
+        expected_value = expected["value"]
+        values = [item["value"] for item in observations]
+        if key != "paired" and any(
+            item["column"] != expected_value["column"] for item in values
+        ):
+            raise StrategyError(f"{name} {key} column changed")
+        if sum(int(item["covered_count"]) for item in values) != int(
+            expected_value["covered_count"]
+        ):
+            raise StrategyError(f"{name} {key} coverage does not roll up")
+        sum_fields = (
+            ("loan_amount_sum", "overdue_amount_sum")
+            if key == "paired"
+            else ("sum",)
+        )
+        for field in sum_fields:
+            actual = sum(float(item[field]) for item in values)
+            if not math.isclose(
+                actual,
+                float(expected_value[field]),
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            ):
+                raise StrategyError(
+                    f"{name} {key} {field} does not roll up"
+                )
+
+
 def _validate_projection(
     value: object,
     *,
     name: str,
     expected_type: str,
+    expected_role: str,
 ) -> dict[str, Any]:
     obj = _json_object(value, name)
     _exact_fields(obj, _PROJECTION_FIELDS, name)
     _text(obj["strategy_id"], f"{name}.strategy_id")
     if obj["strategy_type"] != expected_type:
         raise StrategyError(f"{name} strategy_type changed")
+    if obj["population_role"] != expected_role:
+        raise StrategyError(f"{name} population_role changed")
     population = _positive_int(
         obj["population_count"],
         f"{name}.population_count",
@@ -3501,6 +4367,7 @@ def _validate_transition(
     *,
     population: Mapping[str, Any],
     strategy_type: str,
+    population_role: str,
 ) -> None:
     obj = _json_object(value, "ImpactSlice transition value")
     _exact_fields(
@@ -3513,6 +4380,7 @@ def _validate_transition(
         raise StrategyError("ImpactSlice transition rows are empty")
     population_count = population["count"]
     totals = {"count": 0, "labeled_count": 0, "bad_count": 0}
+    effects: list[Mapping[str, Any]] = []
     seen: set[str] = set()
     for index, raw in enumerate(rows):
         row = _json_object(raw, f"ImpactSlice transition rows[{index}]")
@@ -3558,11 +4426,18 @@ def _validate_transition(
             row["effect"],
             f"ImpactSlice transition rows[{index}].effect",
             denominator=population_count,
+            expected_role=population_role,
         )
         for field, value in _population_counts(effect).items():
             totals[field] += value
+        effects.append(effect)
     if totals != _population_counts(population):
         raise StrategyError("ImpactSlice transition population is inconsistent")
+    _require_amount_rollup(
+        [effect["amounts"] for effect in effects],
+        population["amounts"],
+        name="ImpactSlice transition amounts",
+    )
 
 
 def _validate_action_bucket(
@@ -3588,6 +4463,7 @@ def _validate_waterfall(
     *,
     population: Mapping[str, Any],
     strategy_type: str,
+    population_role: str,
 ) -> None:
     population_count = population["count"]
     obj = _json_object(value, "ImpactSlice waterfall value")
@@ -3601,6 +4477,8 @@ def _validate_waterfall(
         raise StrategyError("ImpactSlice waterfall rule budget is invalid")
     incremental_total = {"count": 0, "labeled_count": 0, "bad_count": 0}
     previous_remaining = _population_counts(population)
+    previous_remaining_population = population
+    incremental_effects: list[Mapping[str, Any]] = []
     for index, raw in enumerate(entries):
         row = _json_object(raw, f"ImpactSlice waterfall[{index}]")
         _exact_fields(
@@ -3648,24 +4526,28 @@ def _validate_waterfall(
             f"ImpactSlice waterfall[{index}].standalone",
             allow_zero=True,
             denominator=population_count,
+            expected_role=population_role,
         )
         incremental = _validate_population(
             row["incremental"],
             f"ImpactSlice waterfall[{index}].incremental",
             allow_zero=True,
             denominator=population_count,
+            expected_role=population_role,
         )
         shadowed = _validate_population(
             row["shadowed"],
             f"ImpactSlice waterfall[{index}].shadowed",
             allow_zero=True,
             denominator=population_count,
+            expected_role=population_role,
         )
         remaining = _validate_population(
             row["remaining_after"],
             f"ImpactSlice waterfall[{index}].remaining",
             allow_zero=True,
             denominator=population_count,
+            expected_role=population_role,
         )
         standalone_counts = _population_counts(standalone)
         incremental_counts = _population_counts(incremental)
@@ -3678,6 +4560,11 @@ def _validate_waterfall(
             raise StrategyError(
                 "ImpactSlice waterfall standalone population is inconsistent"
             )
+        _require_amount_rollup(
+            [incremental["amounts"], shadowed["amounts"]],
+            standalone["amounts"],
+            name="ImpactSlice waterfall standalone amounts",
+        )
         if remaining_counts != {
             field: previous_remaining[field] - incremental_counts[field]
             for field in previous_remaining
@@ -3685,7 +4572,14 @@ def _validate_waterfall(
             raise StrategyError(
                 "ImpactSlice waterfall remaining population is inconsistent"
             )
+        _require_amount_rollup(
+            [incremental["amounts"], remaining["amounts"]],
+            previous_remaining_population["amounts"],
+            name="ImpactSlice waterfall remaining amounts",
+        )
         previous_remaining = remaining_counts
+        previous_remaining_population = remaining
+        incremental_effects.append(incremental)
         for field in incremental_total:
             incremental_total[field] += incremental_counts[field]
     default = _json_object(
@@ -3711,6 +4605,7 @@ def _validate_waterfall(
         "ImpactSlice default unmatched effect",
         allow_zero=True,
         denominator=population_count,
+        expected_role=population_role,
     )
     default_counts = _population_counts(default_effect)
     if (
@@ -3722,6 +4617,14 @@ def _validate_waterfall(
         or default_counts != previous_remaining
     ):
         raise StrategyError("ImpactSlice waterfall population is inconsistent")
+    _require_amount_rollup(
+        [
+            *(effect["amounts"] for effect in incremental_effects),
+            default_effect["amounts"],
+        ],
+        population["amounts"],
+        name="ImpactSlice waterfall population amounts",
+    )
 
 
 def _validate_waterfall_source_ref(
@@ -3793,6 +4696,11 @@ def _validate_economics_value(
         new,
         name="ImpactSlice new economics",
     )
+    _validate_economics_identity(
+        new,
+        strategy_type=strategy_type,
+        name="ImpactSlice new economics",
+    )
     current = None
     if obj["current"] is not None:
         current = _json_object(
@@ -3806,6 +4714,11 @@ def _validate_economics_value(
         )
         _validate_economics_scalars(
             current,
+            name="ImpactSlice current economics",
+        )
+        _validate_economics_identity(
+            current,
+            strategy_type=strategy_type,
             name="ImpactSlice current economics",
         )
     delta = _json_object(obj["delta"], "ImpactSlice economics delta")
@@ -3839,6 +4752,90 @@ def _validate_economics_value(
             raise StrategyError(
                 f"ImpactSlice economics delta {key} is inconsistent"
             )
+    if (
+        strategy_type in {"approval", "reject", "pricing"}
+        and current is not None
+    ):
+        _require_finite_equal(
+            new["baseline_profit"],
+            float(current["profit"]),
+            name=f"ImpactSlice {strategy_type} baseline_profit",
+        )
+        _require_finite_equal(
+            new["profit_delta_vs_baseline"],
+            float(delta["profit"]),
+            name=(
+                f"ImpactSlice {strategy_type} "
+                "profit_delta_vs_baseline"
+            ),
+        )
+
+
+def _validate_economics_identity(
+    values: Mapping[str, Any],
+    *,
+    strategy_type: str,
+    name: str,
+) -> None:
+    if strategy_type == "limit":
+        for field in ("expected_ead", "expected_loss"):
+            if float(values[field]) < 0:
+                raise StrategyError(f"{name}.{field} must be non-negative")
+        return
+    if strategy_type == "segmentation":
+        return
+    profit = float(values["profit"])
+    expected_profit = (
+        float(values["revenue"])
+        - float(values["expected_loss"])
+        - float(values["funding_cost"])
+        - float(values["operating_cost"])
+    )
+    if not math.isclose(
+        profit,
+        expected_profit,
+        rel_tol=1e-12,
+        abs_tol=1e-9,
+    ):
+        raise StrategyError(f"{name} profit identity is inconsistent")
+    total_ead = float(values["total_ead"])
+    if total_ead < 0:
+        raise StrategyError(f"{name}.total_ead must be non-negative")
+    if total_ead == 0:
+        if values["roa"] is not None or values["ead_weighted_rate"] is not None:
+            raise StrategyError(
+                f"{name} zero-EAD derived economics are inconsistent"
+            )
+    else:
+        _require_finite_equal(
+            values["roa"],
+            profit / total_ead,
+            name=f"{name}.roa",
+        )
+        if values["ead_weighted_rate"] is None:
+            raise StrategyError(
+                f"{name}.ead_weighted_rate requires positive EAD"
+            )
+    baseline = values["baseline_profit"]
+    baseline_delta = values["profit_delta_vs_baseline"]
+    if (baseline is None) is not (baseline_delta is None):
+        raise StrategyError(
+            f"{name} baseline profit fields are inconsistent"
+        )
+    if baseline is not None:
+        _require_finite_equal(
+            baseline_delta,
+            profit - float(baseline),
+            name=f"{name}.profit_delta_vs_baseline",
+        )
+    if strategy_type in {"approval", "reject"}:
+        _require_finite_equal(
+            values["expected_profit"],
+            profit,
+            name=f"{name}.expected_profit",
+        )
+        if values["profit_note"] is not None:
+            raise StrategyError(f"{name}.profit_note must be null")
 
 
 def _validate_economics_scalars(
@@ -3863,10 +4860,12 @@ def _validate_rollups(
 ) -> None:
     for partition_row in partitions:
         partition = partition_row["name"]
+        role = partition_row["role"]
         overall = [
             row
             for row in slices
             if row["family"] == "overall"
+            and row["population_role"] == role
             and row["dimensions"]["partition"]["value"] == partition
         ]
         if len(overall) != 1 or overall[0]["availability"] != "present":
@@ -3874,6 +4873,10 @@ def _validate_rollups(
                 f"ImpactCube {partition} overall slice is missing"
             )
         base = overall[0]["population"]["value"]
+        if base["role"] != role:
+            raise StrategyError(
+                f"ImpactCube {role}/{partition} population role changed"
+            )
         if base["count"] != partition_row["row_count"]:
             raise StrategyError(
                 f"ImpactCube {partition} population does not match binding"
@@ -3883,6 +4886,7 @@ def _validate_rollups(
                 row
                 for row in slices
                 if row["family"] == family
+                and row["population_role"] == role
                 and row["dimensions"]["partition"]["value"] == partition
             ]
             if families[family]["availability"] == "unavailable":
@@ -3918,11 +4922,284 @@ def _validate_rollups(
                 raise StrategyError(
                     f"ImpactCube {partition} {family} population does not roll up"
                 )
+            _require_amount_rollup(
+                [
+                    row["population"]["value"]["amounts"]
+                    for row in rows
+                ],
+                base["amounts"],
+                name=(
+                    f"ImpactCube {role}/{partition} {family} amounts"
+                ),
+            )
+            _require_economics_rollup(
+                rows,
+                overall[0],
+                name=(
+                    f"ImpactCube {role}/{partition} {family} economics"
+                ),
+            )
+
+
+def _require_economics_rollup(
+    parts: Sequence[Mapping[str, Any]],
+    total: Mapping[str, Any],
+    *,
+    name: str,
+) -> None:
+    expected = total["economics"]
+    observations = [row["economics"] for row in parts]
+    if any(
+        item["availability"] != expected["availability"]
+        or item["reason"] != expected["reason"]
+        for item in observations
+    ):
+        raise StrategyError(f"{name} availability does not roll up")
+    if expected["availability"] != "present":
+        return
+    if any(item["value"] is None for item in observations):
+        raise StrategyError(f"{name} values are incomplete")
+    strategy_type = total["new"]["value"]["strategy_type"]
+    additive = {
+        "approval": (
+            "total_ead",
+            "revenue",
+            "expected_loss",
+            "funding_cost",
+            "operating_cost",
+            "profit",
+            "expected_profit",
+            "baseline_profit",
+            "profit_delta_vs_baseline",
+        ),
+        "reject": (
+            "total_ead",
+            "revenue",
+            "expected_loss",
+            "funding_cost",
+            "operating_cost",
+            "profit",
+            "expected_profit",
+            "baseline_profit",
+            "profit_delta_vs_baseline",
+        ),
+        "limit": ("expected_ead", "expected_loss"),
+        "pricing": (
+            "total_ead",
+            "revenue",
+            "expected_loss",
+            "funding_cost",
+            "operating_cost",
+            "profit",
+            "baseline_profit",
+            "profit_delta_vs_baseline",
+        ),
+        "segmentation": (),
+    }[strategy_type]
+    total_value = expected["value"]
+    part_values = [item["value"] for item in observations]
+    for side in ("new", "current"):
+        expected_side = total_value[side]
+        child_sides = [item[side] for item in part_values]
+        if expected_side is None:
+            if any(item is not None for item in child_sides):
+                raise StrategyError(f"{name} {side} availability does not roll")
+            continue
+        if any(item is None for item in child_sides):
+            raise StrategyError(f"{name} {side} values do not roll")
+        for field in additive:
+            expected_field = expected_side[field]
+            child_fields = [item[field] for item in child_sides]
+            if expected_field is None:
+                if any(item is not None for item in child_fields):
+                    raise StrategyError(
+                        f"{name} {side}.{field} availability does not roll"
+                    )
+                continue
+            if any(item is None for item in child_fields):
+                raise StrategyError(
+                    f"{name} {side}.{field} values do not roll"
+                )
+            actual = sum(float(item) for item in child_fields)
+            if not math.isclose(
+                actual,
+                float(expected_field),
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            ):
+                raise StrategyError(
+                    f"{name} {side}.{field} does not roll up"
+                )
+        if strategy_type in {"approval", "reject", "pricing"}:
+            total_ead = float(expected_side["total_ead"])
+            weighted = 0.0
+            for child in child_sides:
+                child_ead = float(child["total_ead"])
+                rate = child["ead_weighted_rate"]
+                if child_ead:
+                    if rate is None:
+                        raise StrategyError(
+                            f"{name} {side}.ead_weighted_rate is missing"
+                        )
+                    weighted += float(rate) * child_ead
+            expected_rate = (
+                None if total_ead == 0 else weighted / total_ead
+            )
+            if expected_rate is None:
+                if expected_side["ead_weighted_rate"] is not None:
+                    raise StrategyError(
+                        f"{name} {side}.ead_weighted_rate does not roll up"
+                    )
+            else:
+                _require_finite_equal(
+                    expected_side["ead_weighted_rate"],
+                    expected_rate,
+                    name=f"{name} {side}.ead_weighted_rate",
+                )
+    expected_delta = total_value["delta"]
+    child_deltas = [item["delta"] for item in part_values]
+    for field in additive:
+        if field not in expected_delta:
+            if any(field in item for item in child_deltas):
+                raise StrategyError(
+                    f"{name} delta.{field} availability does not roll"
+                )
+            continue
+        if any(field not in item for item in child_deltas):
+            raise StrategyError(f"{name} delta.{field} values do not roll")
+        actual = sum(float(item[field]) for item in child_deltas)
+        if not math.isclose(
+            actual,
+            float(expected_delta[field]),
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        ):
+            raise StrategyError(f"{name} delta.{field} does not roll up")
+
+
+def _validate_new_action_consistency(
+    *,
+    slices: Sequence[Mapping[str, Any]],
+) -> None:
+    for role in _POPULATION_ROLE_ORDER:
+        for partition in _PARTITION_ORDER:
+            overall = next(
+                (
+                    row
+                    for row in slices
+                    if row["population_role"] == role
+                    and row["family"] == "overall"
+                    and row["dimensions"]["partition"]["value"] == partition
+                ),
+                None,
+            )
+            if overall is None:
+                continue
+            waterfall = overall["waterfall"]["value"]
+            expected: dict[str, list[Mapping[str, Any]]] = {}
+            actions: dict[str, Mapping[str, Any]] = {}
+            for entry in waterfall["entries"]:
+                token = _canonical_json(entry["action"])
+                actions[token] = entry["action"]
+                expected.setdefault(token, []).append(entry["incremental"])
+            default = waterfall["default_unmatched"]
+            token = _canonical_json(default["action"])
+            actions[token] = default["action"]
+            expected.setdefault(token, []).append(default["effect"])
+            expected = {
+                action_token: effects
+                for action_token, effects in expected.items()
+                if sum(effect["count"] for effect in effects) > 0
+            }
+            rows = [
+                row
+                for row in slices
+                if row["population_role"] == role
+                and row["family"] == "new_action"
+                and row["dimensions"]["partition"]["value"] == partition
+            ]
+            actual = {
+                _canonical_json(
+                    row["dimensions"]["new_action_bucket"]["value"]
+                ): row
+                for row in rows
+            }
+            if set(actual) != set(expected):
+                raise StrategyError(
+                    "ImpactCube new_action buckets changed from waterfall"
+                )
+            for action_token, effects in expected.items():
+                row = actual[action_token]
+                population = row["population"]["value"]
+                if _population_counts(population) != {
+                    field: sum(
+                        _population_counts(effect)[field]
+                        for effect in effects
+                    )
+                    for field in ("count", "labeled_count", "bad_count")
+                }:
+                    raise StrategyError(
+                        "ImpactCube new_action population changed from "
+                        "waterfall"
+                    )
+                _require_amount_rollup(
+                    [effect["amounts"] for effect in effects],
+                    population["amounts"],
+                    name="ImpactCube new_action amounts",
+                )
+                _require_projection_matches_action(
+                    row["new"]["value"],
+                    action=actions[action_token],
+                    name="ImpactCube new_action projection",
+                )
+
+
+def _require_projection_matches_action(
+    projection: Mapping[str, Any],
+    *,
+    action: Mapping[str, Any],
+    name: str,
+) -> None:
+    strategy_type = projection["strategy_type"]
+    population = projection["population_count"]
+    breakdown = projection["breakdown"]
+    if strategy_type in {"approval", "reject"}:
+        expected = action["value"]
+        if expected == "approval":
+            expected = "approve"
+        by_action = {row["action"]: row["count"] for row in breakdown}
+        if by_action.get(expected) != population or any(
+            count != 0
+            for key, count in by_action.items()
+            if key != expected
+        ):
+            raise StrategyError(f"{name} action does not match bucket")
+        return
+    value = action.get("output_value", action["value"])
+    field = {
+        "limit": "assigned_limit",
+        "pricing": "assigned_rate",
+        "segmentation": "segment",
+    }[strategy_type]
+    if len(breakdown) != 1 or breakdown[0]["count"] != population:
+        raise StrategyError(f"{name} breakdown is not homogeneous")
+    actual = breakdown[0][field]
+    if strategy_type in {"limit", "pricing"}:
+        if not math.isclose(
+            float(actual),
+            float(value),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise StrategyError(f"{name} value does not match bucket")
+    elif actual != value:
+        raise StrategyError(f"{name} value does not match bucket")
 
 
 def _slice_sort_key(value: Mapping[str, Any]) -> tuple[Any, ...]:
     partition = value["dimensions"]["partition"]["value"]
     return (
+        _POPULATION_ROLE_ORDER.index(value["population_role"]),
         _PARTITION_ORDER.index(partition),
         _FAMILY_ORDER.index(value["family"]),
         _canonical_json(value["dimensions"]),
@@ -4093,6 +5370,7 @@ __all__ = [
     "MAX_IMPACT_CUBE_RULES",
     "MAX_IMPACT_CUBE_SLICES",
     "MAX_IMPACT_CUBE_WORK",
+    "MIN_IMPACT_CUBE_GROUP_SIZE",
     "STRATEGY_IMPACT_CUBE_PRODUCER_VERSION",
     "STRATEGY_IMPACT_CUBE_SCHEMA_VERSION",
     "STRATEGY_IMPACT_SLICE_SCHEMA_VERSION",

@@ -7,7 +7,11 @@ import pandas as pd
 import pytest
 
 from marvis.feature.errors import FeatureError
-from marvis.feature.univariate import analyze_univariate
+from marvis.feature.univariate import (
+    MANUAL_SCHEMA_VERSION,
+    SCHEMA_VERSION,
+    analyze_univariate,
+)
 from marvis.packs.strategy.evaluator import (
     evaluate_expression,
     evaluate_expression_frame,
@@ -19,6 +23,148 @@ def _method(result: dict, feature: str, method: str) -> dict:
         item for item in result["features"] if item["feature"] == feature
     )
     return next(item for item in feature_result["methods"] if item["method"] == method)
+
+
+def test_manual_breakpoints_are_exact_v2_evidence_without_changing_v1() -> None:
+    frame = pd.DataFrame(
+        {
+            "x": [0, 1, 2, 3, 4, 5],
+            "bad": [0, 0, 1, 0, 1, 1],
+        }
+    )
+
+    manual = analyze_univariate(
+        frame,
+        features=["x"],
+        target="bad",
+        methods=["manual"],
+        manual_breakpoints={"x": [2, 4.0]},
+        bin_count=3,
+        min_bin_pct=0,
+    )
+
+    assert manual["schema_version"] == MANUAL_SCHEMA_VERSION
+    assert manual["parameters"]["manual_breakpoints"] == {"x": [2.0, 4.0]}
+    method = _method(manual, "x", "manual")
+    assert method["requested_method"] == "manual"
+    assert method["actual_method"] == "manual"
+    assert method["manual_breakpoints"] == [2.0, 4.0]
+    regular = [row for row in method["bins"] if row["kind"] == "numeric_interval"]
+    assert [(row["lower"], row["upper"]) for row in regular] == [
+        (None, 2.0),
+        (2.0, 4.0),
+        (4.0, None),
+    ]
+    assert [row["count"] for row in regular] == [2, 2, 2]
+    for value, expected_index in [(0, 0), (2, 1), (4, 2), (5, 2)]:
+        matches = [
+            row["index"]
+            for row in regular
+            if evaluate_expression({"x": value}, row["condition"])
+        ]
+        assert matches == [expected_index]
+
+    legacy = analyze_univariate(
+        frame,
+        features=["x"],
+        target="bad",
+        methods=["equal_width"],
+        bin_count=3,
+        min_bin_pct=0,
+    )
+    assert legacy["schema_version"] == SCHEMA_VERSION
+    assert "manual_breakpoints" not in legacy["parameters"]
+    assert "manual_breakpoints" not in _method(legacy, "x", "equal_width")
+
+
+@pytest.mark.parametrize(
+    ("manual_breakpoints", "message"),
+    [
+        (None, "manual_breakpoints must provide at least one"),
+        ({}, "manual_breakpoints must provide at least one"),
+        ({"x": []}, "at least one"),
+        ({"x": [2.0, 1.0]}, "strictly increasing"),
+        ({"x": [1.0, 1.0]}, "strictly increasing"),
+        ({"x": [float("nan")]}, "finite numbers"),
+        ({"x": [float("inf")]}, "finite numbers"),
+        ({"x": [True]}, "finite numbers"),
+        ({"x": ["1"]}, "finite numbers"),
+        ({"x": [10**1000]}, "exact numeric precision"),
+        ({"x": list(range(20))}, "configured bin budget"),
+        ({"other": [1.0]}, "unknown or non-numeric"),
+    ],
+)
+def test_manual_breakpoints_fail_closed_on_invalid_contract(
+    manual_breakpoints: object,
+    message: str,
+) -> None:
+    frame = pd.DataFrame({"x": [0, 1, 2, 3], "bad": [0, 0, 1, 1]})
+
+    with pytest.raises(FeatureError, match=message):
+        analyze_univariate(
+            frame,
+            features=["x"],
+            target="bad",
+            methods=["manual"],
+            manual_breakpoints=manual_breakpoints,
+            bin_count=3,
+        )
+
+
+def test_manual_breakpoints_are_scoped_to_explicit_features() -> None:
+    frame = pd.DataFrame(
+        {
+            "x": [0, 1, 2, 3],
+            "y": [10, 11, 12, 13],
+            "segment": ["a", "a", "b", "b"],
+            "bad": [0, 0, 1, 1],
+        }
+    )
+
+    with pytest.raises(FeatureError, match="only allowed when manual"):
+        analyze_univariate(
+            frame,
+            features=["x"],
+            target="bad",
+            methods=["equal_width"],
+            manual_breakpoints={"x": [1.5]},
+            bin_count=3,
+        )
+    with pytest.raises(FeatureError, match="no applicable requested method"):
+        analyze_univariate(
+            frame,
+            features=["x", "y"],
+            target="bad",
+            methods=["manual"],
+            manual_breakpoints={"x": [1.5]},
+            bin_count=3,
+        )
+    mixed = analyze_univariate(
+        frame,
+        features=["x", "y"],
+        target="bad",
+        methods=["tree", "manual"],
+        manual_breakpoints={"x": [1.5]},
+        bin_count=3,
+        min_bin_pct=0,
+    )
+    assert [row["method"] for row in mixed["features"][0]["methods"]] == [
+        "tree",
+        "manual",
+    ]
+    assert [row["method"] for row in mixed["features"][1]["methods"]] == [
+        "tree"
+    ]
+    with pytest.raises(FeatureError, match="unknown or non-numeric"):
+        analyze_univariate(
+            frame,
+            features=["segment"],
+            target="bad",
+            methods=["manual"],
+            feature_types={"segment": "categorical"},
+            manual_breakpoints={"segment": [1.5]},
+            bin_count=3,
+        )
 
 
 def test_numeric_bins_have_exact_left_closed_right_open_dsl_semantics() -> None:

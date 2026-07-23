@@ -89,6 +89,50 @@ def test_refinement_request_defaults_analysis_to_the_selected_feature_and_method
     assert "观测坏率 >= 20.00%" in str(result.confirmation)
 
 
+def test_manual_refinement_preserves_exact_cutpoints_for_fresh_analysis():
+    result = _validate(
+        {
+            "feature": "score",
+            "method": "manual",
+            "manual_breakpoints": {"score": [200, 400]},
+            "selection": {"risk_threshold": {"operator": ">=", "value": 0.2}},
+        }
+    )
+
+    assert result.draft is not None
+    inputs = result.draft.to_dict()["workflow_inputs"]
+    assert inputs["methods"] == ["manual"]
+    assert inputs["manual_breakpoints"] == {"score": [200.0, 400.0]}
+    assert "手工切点：score=[200、400]" in str(result.confirmation)
+
+
+def test_manual_refinement_compiler_rejects_rewritten_cutpoints():
+    llm = _OneReplyLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "univariate_candidate_refinement",
+            "workflow_inputs": {
+                "feature": "score",
+                "method": "manual",
+                "manual_breakpoints": {"score": [200, 450]},
+                "selection": {"risk_threshold": {"operator": ">=", "value": 0.2}},
+            },
+        }
+    )
+
+    result = compile_strategy_request(
+        "对 score 重新分析，score manual 切点 [200, 400]，"
+        "并选择坏率大于等于 20% 的候选箱",
+        allowed_columns=["score"],
+        target_col="bad",
+        llm=llm,
+    )
+
+    assert result.draft is None
+    assert result.clarification_code == "strategy_refinement_controls_not_grounded"
+    assert "manual_breakpoints" in result.clarification_fields
+
+
 def test_categorical_refinement_uses_type_aware_analysis_defaults():
     result = _validate(
         {

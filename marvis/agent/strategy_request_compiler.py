@@ -33,16 +33,7 @@ from marvis.packs.strategy.errors import StrategyError
 from marvis.strategy_adoption import AdoptionReasonError, normalize_adoption_reason
 
 
-_SYSTEM = (
-    STRATEGY_REQUEST_COMPILER_SYS.text
-    + "\nstrategy_report_bundle_v2 只生成当前 task 的受治理策略评审报告。"
-    "workflow_inputs 只能包含用户明确提供的 title/status；缺省时分别使用"
-    "「策略迭代评审报告」和 partial。ProjectContext、SampleDesign、Pool、"
-    "PoolImpact、可选模型证据、策略身份、report head CAS、generated_at、"
-    "artifact 引用和所有指标均由平台绑定，LLM 禁止填写。问句、否定、假设、"
-    "演示、仅历史描述或同轮串联训练、评分、候选、影响测算、采纳、部署、上线"
-    "时必须 clarification。"
-)
+_SYSTEM = STRATEGY_REQUEST_COMPILER_SYS.text
 
 
 STRATEGY_OPERATIONS = (
@@ -88,6 +79,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_pool_reorder",
     "strategy_pool_compile",
     "strategy_pool_impact",
+    "strategy_impact_cube",
     "strategy_report_bundle_v2",
 )
 LEGACY_REPLAY_STANDARD_STRATEGY_WORKFLOWS = (
@@ -415,6 +407,7 @@ UNIVARIATE_BINNING_METHODS = (
     "equal_width",
     "chimerge",
     "tree",
+    "manual",
 )
 UNIVARIATE_REFINEMENT_METHODS = (*UNIVARIATE_BINNING_METHODS, "categorical")
 _CROSS_MATRIX_TARGET_RE = re.compile(
@@ -515,6 +508,10 @@ _CROSS_METHOD_GROUNDING = {
     ),
     "chimerge": re.compile(r"(?:卡方|chi[-_\s]*merge|chimerge)", re.IGNORECASE),
     "tree": re.compile(r"(?:决策树|tree)", re.IGNORECASE),
+    "manual": re.compile(
+        r"(?:手工|人工|manual)\s*(?:分箱|切点|断点|breakpoints?)?",
+        re.IGNORECASE,
+    ),
     "categorical": re.compile(
         r"(?:类别等值箱|类别箱|等值箱|categorical)",
         re.IGNORECASE,
@@ -1169,7 +1166,13 @@ _POOL_IMPACT_NONCOMMAND_RE = re.compile(
 )
 _POOL_IMPACT_REPORT_ONLY_RE = re.compile(
     r"(?:只|仅)\s*(?:生成|出|写|整理|汇总)?\s*(?:报告|文档|汇报|总结)|"
+    r"(?:生成|出|写|整理|汇总|制作|导出|下载)"
+    r"[^；;。.!?？\n]{0,32}(?:报告|文档|汇报|总结)|"
+    r"(?:报告|文档|汇报|总结)"
+    r"[^；;。.!?？\n]{0,24}(?:生成|制作|导出|下载)|"
     r"(?:报告|文档|汇报|总结)\s*(?:即可|就行|only)|"
+    r"(?<![A-Za-z0-9_])(?:generate|create|write|export|download)"
+    r"[^;.!?\n]{0,32}(?:report|document|summary)|"
     r"(?<![A-Za-z0-9_])(?:report|document|summary)\s+only"
     r"(?![A-Za-z0-9_])",
     re.IGNORECASE,
@@ -1219,6 +1222,110 @@ _POOL_IMPACT_DROP_NAN_NEGATED_RE = re.compile(
     r"drop[_\s-]*nan[_\s-]*labels?\s*(?:=|:)?\s*false",
     re.IGNORECASE,
 )
+_IMPACT_CUBE_EXPLICIT_TARGET_RE = re.compile(
+    r"(?<![A-Za-z0-9_])impact(?:\s|-|_)*cube(?![A-Za-z0-9_])|"
+    r"(?:统一|五类)[^；;。.!?？\n]{0,16}(?:策略)?(?:影响|效果|测算)|"
+    r"(?:策略)?(?:影响|效果|测算)[^；;。.!?？\n]{0,16}(?:统一|五类)",
+    re.IGNORECASE,
+)
+_IMPACT_CUBE_PARTITION_ORDER = (
+    "development",
+    "validation",
+    "oot",
+)
+_IMPACT_CUBE_PARTITION_GROUNDING = {
+    "development": re.compile(
+        r"(?<![A-Za-z0-9_])development(?![A-Za-z0-9_])|"
+        r"(?:开发|训练)(?:集|样本|分区)",
+        re.IGNORECASE,
+    ),
+    "validation": re.compile(
+        r"(?<![A-Za-z0-9_])validation(?![A-Za-z0-9_])|"
+        r"(?:验证)(?:集|样本|分区)",
+        re.IGNORECASE,
+    ),
+    "oot": re.compile(
+        r"(?<![A-Za-z0-9_])oot(?![A-Za-z0-9_])|"
+        r"(?:时间外|跨期|样本外)(?:集|样本|分区)?",
+        re.IGNORECASE,
+    ),
+}
+_IMPACT_CUBE_ALL_PARTITIONS_RE = re.compile(
+    r"(?:全部|所有|完整|全量)(?:三个|三类|3个|3类)?(?:样本)?分区|"
+    r"(?<![A-Za-z0-9_])all\s+(?:three\s+)?partitions(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_IMPACT_CUBE_ECONOMICS_COMPONENTS = {
+    "approval": frozenset(
+        {
+            "ead",
+            "pd",
+            "annual_rate",
+            "funding_rate",
+            "lgd",
+            "operating_cost_per_loan",
+            "term_months",
+        }
+    ),
+    "reject": frozenset(
+        {
+            "ead",
+            "pd",
+            "annual_rate",
+            "funding_rate",
+            "lgd",
+            "operating_cost_per_loan",
+            "term_months",
+        }
+    ),
+    "limit": frozenset({"pd", "lgd", "utilization"}),
+    "pricing": frozenset(
+        {
+            "ead",
+            "pd",
+            "lgd",
+            "funding_rate",
+            "term_months",
+            "operating_cost_per_loan",
+        }
+    ),
+    "segmentation": frozenset(),
+}
+_IMPACT_CUBE_ECONOMICS_GROUNDING = {
+    "ead": re.compile(
+        r"(?<![A-Za-z0-9_])ead(?![A-Za-z0-9_])|(?:风险暴露|敞口|放款金额)",
+        re.IGNORECASE,
+    ),
+    "pd": re.compile(
+        r"(?<![A-Za-z0-9_])pd(?![A-Za-z0-9_])|(?:违约概率|坏账概率)",
+        re.IGNORECASE,
+    ),
+    "annual_rate": re.compile(
+        r"(?<![A-Za-z0-9_])annual_rate(?![A-Za-z0-9_])|年利率",
+        re.IGNORECASE,
+    ),
+    "funding_rate": re.compile(
+        r"(?<![A-Za-z0-9_])funding_rate(?![A-Za-z0-9_])|资金成本率",
+        re.IGNORECASE,
+    ),
+    "lgd": re.compile(
+        r"(?<![A-Za-z0-9_])lgd(?![A-Za-z0-9_])|(?:违约损失率|损失率)",
+        re.IGNORECASE,
+    ),
+    "operating_cost_per_loan": re.compile(
+        r"(?<![A-Za-z0-9_])operating_cost_per_loan(?![A-Za-z0-9_])|"
+        r"(?:单笔)?运营成本",
+        re.IGNORECASE,
+    ),
+    "term_months": re.compile(
+        r"(?<![A-Za-z0-9_])term_months(?![A-Za-z0-9_])|期限月数",
+        re.IGNORECASE,
+    ),
+    "utilization": re.compile(
+        r"(?<![A-Za-z0-9_])utilization(?![A-Za-z0-9_])|(?:额度)?使用率",
+        re.IGNORECASE,
+    ),
+}
 _POOL_PARTIAL_REORDER_RE = re.compile(
     r"(?:放|移|挪|排|调)(?:到|至|在)?(?:前面|后面|最前|末尾|最后|"
     r"第[一二三四五六七八九十百0-9]+(?:位|个|条))|"
@@ -2734,6 +2841,11 @@ def _validate_standard_workflow_payload(
             )
         elif workflow == "cross_matrix_cell_selection":
             normalized = _validate_cross_matrix_cell_selection_inputs(raw_inputs)
+        elif workflow == "strategy_impact_cube":
+            normalized = _validate_strategy_impact_cube_inputs(
+                raw_inputs,
+                whitelist,
+            )
         elif workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS:
             normalized = _validate_strategy_pool_impact_inputs(
                 raw_inputs,
@@ -3912,6 +4024,7 @@ def _validate_univariate_workflow_inputs(
     whitelist: tuple[str, ...],
     *,
     target_col: str | None,
+    manual_features: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     allowed = {
         "features",
@@ -3921,6 +4034,7 @@ def _validate_univariate_workflow_inputs(
         "loan_amount_col",
         "overdue_amount_col",
         "sentinel_values",
+        "manual_breakpoints",
     }
     workflow = "univariate_candidate_analysis"
     _reject_workflow_fields(inputs, allowed, workflow=workflow)
@@ -3995,6 +4109,17 @@ def _validate_univariate_workflow_inputs(
             name=f"{workflow} sentinel_values",
         ),
     }
+    expected_manual_features = (
+        features if manual_features is None else list(manual_features)
+    )
+    manual_breakpoints = _validate_manual_breakpoint_mapping(
+        inputs.get("manual_breakpoints"),
+        manual_requested="manual" in methods,
+        expected_features=expected_manual_features,
+        workflow=workflow,
+    )
+    if manual_breakpoints:
+        normalized["manual_breakpoints"] = manual_breakpoints
     for field in ("loan_amount_col", "overdue_amount_col"):
         if field in inputs:
             normalized[field] = _workflow_column(
@@ -4030,6 +4155,7 @@ def _validate_cross_matrix_workflow_inputs(
         "loan_amount_col",
         "overdue_amount_col",
         "sentinel_values",
+        "manual_breakpoints",
     }
     _reject_workflow_fields(
         inputs,
@@ -4093,6 +4219,14 @@ def _validate_cross_matrix_workflow_inputs(
         analysis_inputs,
         whitelist,
         target_col=target_col,
+        manual_features=[
+            feature
+            for feature, method in (
+                (x_feature, x_method),
+                (y_feature, y_method),
+            )
+            if method == "manual"
+        ],
     )
     return {
         **normalized,
@@ -4101,6 +4235,69 @@ def _validate_cross_matrix_workflow_inputs(
         "y_feature": y_feature,
         "y_method": y_method,
     }
+
+
+def _validate_manual_breakpoint_mapping(
+    value: object,
+    *,
+    manual_requested: bool,
+    expected_features: Sequence[str],
+    workflow: str,
+) -> dict[str, list[float]]:
+    if value is None:
+        if manual_requested:
+            raise _DraftValidationError(
+                f"{workflow} manual 分箱必须提供 manual_breakpoints。"
+            )
+        return {}
+    if not manual_requested:
+        raise _DraftValidationError(
+            f"{workflow} 只有选择 manual 分箱时才能提供 manual_breakpoints。"
+        )
+    if not isinstance(value, Mapping) or not value:
+        raise _DraftValidationError(
+            f"{workflow} manual_breakpoints 必须是非空字段到切点数组映射。"
+        )
+    expected = tuple(expected_features)
+    if not expected or set(value) != set(expected) or len(value) != len(expected):
+        raise _DraftValidationError(
+            f"{workflow} manual_breakpoints 必须且只能覆盖 manual 轴/字段："
+            + "、".join(expected)
+            + "。"
+        )
+    normalized: dict[str, list[float]] = {}
+    for feature in expected:
+        raw_points = value[feature]
+        if (
+            not isinstance(raw_points, Sequence)
+            or isinstance(raw_points, str | bytes | bytearray)
+            or not 1 <= len(raw_points) <= 19
+        ):
+            raise _DraftValidationError(
+                f"{workflow} manual_breakpoints.{feature} 必须包含 1 到 19 个切点。"
+            )
+        points: list[float] = []
+        for item in raw_points:
+            if isinstance(item, bool) or not isinstance(item, int | float):
+                raise _DraftValidationError(
+                    f"{workflow} manual_breakpoints.{feature} 只能包含有限数字。"
+                )
+            if isinstance(item, int) and abs(item) > 2**53 - 1:
+                raise _DraftValidationError(
+                    f"{workflow} manual_breakpoints.{feature} 超出精确 JSON 范围。"
+                )
+            number = float(item)
+            if not math.isfinite(number):
+                raise _DraftValidationError(
+                    f"{workflow} manual_breakpoints.{feature} 只能包含有限数字。"
+                )
+            points.append(number)
+        if any(left >= right for left, right in zip(points, points[1:])):
+            raise _DraftValidationError(
+                f"{workflow} manual_breakpoints.{feature} 必须严格递增且不重复。"
+            )
+        normalized[feature] = points
+    return normalized
 
 
 def _sentinel_sequence(value: object, *, name: str) -> list[str | int | float]:
@@ -4540,6 +4737,7 @@ def _validate_univariate_refinement_workflow_inputs(
         "loan_amount_col",
         "overdue_amount_col",
         "sentinel_values",
+        "manual_breakpoints",
     }
     allowed = analysis_fields | {
         "feature",
@@ -4951,6 +5149,162 @@ def _validate_strategy_pool_impact_inputs(
     return normalized
 
 
+def _validate_strategy_impact_cube_inputs(
+    inputs: Mapping[str, Any],
+    whitelist: tuple[str, ...],
+) -> dict[str, Any]:
+    """Validate only user-owned controls for the unified read-only ImpactCube."""
+
+    workflow = "strategy_impact_cube"
+    allowed = {
+        "strategy_type",
+        "partitions",
+        "month_col",
+        "group_col",
+        "segment_col",
+        "current_strategy_id",
+        "economics_inputs",
+    }
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    if "strategy_type" not in inputs:
+        raise _DraftValidationError(f"{workflow} 缺少 strategy_type。")
+    strategy_type = _required_text(
+        inputs["strategy_type"],
+        name=f"{workflow} strategy_type",
+    )
+    if strategy_type not in STRATEGY_TYPES:
+        raise _DraftValidationError(
+            f"{workflow} strategy_type 只能是："
+            + "、".join(STRATEGY_TYPES)
+            + "。"
+        )
+    normalized: dict[str, Any] = {"strategy_type": strategy_type}
+
+    if "partitions" in inputs:
+        raw_partitions = inputs["partitions"]
+        if (
+            not isinstance(raw_partitions, Sequence)
+            or isinstance(raw_partitions, str | bytes | bytearray)
+            or not 1 <= len(raw_partitions) <= len(_IMPACT_CUBE_PARTITION_ORDER)
+        ):
+            raise _DraftValidationError(
+                f"{workflow} partitions 必须是 1 到 3 个明确分区。"
+            )
+        partitions = [
+            _required_text(
+                item,
+                name=f"{workflow} partitions",
+            )
+            for item in raw_partitions
+        ]
+        if (
+            len(set(partitions)) != len(partitions)
+            or any(item not in _IMPACT_CUBE_PARTITION_ORDER for item in partitions)
+        ):
+            raise _DraftValidationError(
+                f"{workflow} partitions 只能无重复地使用 "
+                "development、validation、oot。"
+            )
+        normalized["partitions"] = [
+            item
+            for item in _IMPACT_CUBE_PARTITION_ORDER
+            if item in partitions
+        ]
+
+    selected_dimension_columns: list[str] = []
+    for field in ("month_col", "group_col", "segment_col"):
+        if field not in inputs:
+            continue
+        column = _workflow_column(
+            inputs[field],
+            name=f"{workflow} {field}",
+            whitelist=whitelist,
+        )
+        normalized[field] = column
+        selected_dimension_columns.append(column)
+    if len(set(selected_dimension_columns)) != len(selected_dimension_columns):
+        raise _DraftValidationError(
+            f"{workflow} month/group/segment 必须绑定不同列。"
+        )
+
+    if "current_strategy_id" in inputs:
+        normalized["current_strategy_id"] = _required_text(
+            inputs["current_strategy_id"],
+            name=f"{workflow} current_strategy_id",
+        )
+
+    if "economics_inputs" in inputs and inputs["economics_inputs"] is not None:
+        raw_economics = inputs["economics_inputs"]
+        if (
+            not isinstance(raw_economics, Mapping)
+            or not 1 <= len(raw_economics) <= 16
+            or any(not isinstance(key, str) for key in raw_economics)
+        ):
+            raise _DraftValidationError(
+                f"{workflow} economics_inputs 必须是 1 到 16 个 typed bindings。"
+            )
+        allowed_components = _IMPACT_CUBE_ECONOMICS_COMPONENTS[strategy_type]
+        unsupported = sorted(set(raw_economics) - allowed_components)
+        if unsupported:
+            raise _DraftValidationError(
+                f"{workflow} {strategy_type} 不支持 economics_inputs："
+                + "、".join(unsupported)
+                + "。"
+            )
+        economics: dict[str, dict[str, Any]] = {}
+        for component in sorted(raw_economics):
+            binding = raw_economics[component]
+            if not isinstance(binding, Mapping):
+                raise _DraftValidationError(
+                    f"{workflow} economics_inputs.{component} 必须是 typed binding。"
+                )
+            kind = binding.get("kind")
+            if kind == "column" and set(binding) == {"kind", "column"}:
+                economics[component] = {
+                    "kind": "column",
+                    "column": _workflow_column(
+                        binding["column"],
+                        name=(
+                            f"{workflow} economics_inputs.{component}.column"
+                        ),
+                        whitelist=whitelist,
+                    ),
+                }
+            elif kind == "scalar" and set(binding) == {"kind", "value"}:
+                value = binding["value"]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int | float)
+                    or not math.isfinite(float(value))
+                    or (
+                        isinstance(value, int)
+                        and abs(value) > 2**53 - 1
+                    )
+                ):
+                    raise _DraftValidationError(
+                        f"{workflow} economics_inputs.{component}.value "
+                        "必须是有限且可精确表示的数字。"
+                    )
+                if component == "term_months" and (
+                    not isinstance(value, int) or value < 1
+                ):
+                    raise _DraftValidationError(
+                        f"{workflow} economics_inputs.term_months "
+                        "必须是正整数月数。"
+                    )
+                economics[component] = {
+                    "kind": "scalar",
+                    "value": value,
+                }
+            else:
+                raise _DraftValidationError(
+                    f"{workflow} economics_inputs.{component} "
+                    "只能是 column 或 scalar binding。"
+                )
+        normalized["economics_inputs"] = economics
+    return normalized
+
+
 def _strategy_pool_action(
     value: object,
     *,
@@ -5353,7 +5707,123 @@ def _cross_analysis_controls_not_grounded(
         }
         if sentinel_syntax_ambiguous or observed_identities != expected_identities:
             missing.append("sentinel_values")
+    observed_breakpoints, breakpoint_syntax_ambiguous = (
+        _explicit_manual_breakpoint_bindings(
+            utterance,
+            whitelist=whitelist,
+            command_span=command_span,
+        )
+    )
+    expected_breakpoints = inputs.get("manual_breakpoints", {})
+    if (
+        breakpoint_syntax_ambiguous
+        or observed_breakpoints != expected_breakpoints
+    ):
+        missing.append("manual_breakpoints")
     return tuple(dict.fromkeys(missing))
+
+
+def _explicit_manual_breakpoint_bindings(
+    utterance: str,
+    *,
+    whitelist: Sequence[str],
+    command_span: tuple[int, int] | None = None,
+) -> tuple[dict[str, list[float]], bool]:
+    """Parse only explicit ``feature manual 切点 [..]`` controls."""
+
+    bindings: dict[str, list[float]] = {}
+    ambiguous = False
+    for column in sorted(whitelist, key=len, reverse=True):
+        token = (
+            rf"(?<![A-Za-z0-9_]){re.escape(column)}"
+            rf"(?![A-Za-z0-9_])"
+        )
+        pattern = re.compile(
+            rf"{token}\s*(?:轴\s*)?(?:(?:使用|用|按|采用)\s*)?"
+            rf"(?:手工|人工|manual)\s*(?:分箱\s*)?"
+            rf"(?:切点|断点|breakpoints?)\s*(?:(?:为|是)\s*)?"
+            rf"(?:=|:|：)?\s*\[(?P<points>[^\[\]]*)\]",
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(utterance):
+            if command_span is not None and not _cross_mention_is_within(
+                match.start(),
+                match.end(),
+                command_span,
+            ):
+                ambiguous = True
+                continue
+            if _automatic_tree_span_is_negated(
+                utterance,
+                start=match.start(),
+                end=match.end(),
+            ):
+                ambiguous = True
+                continue
+            raw = (
+                "["
+                + match.group("points").replace("、", ",").replace("，", ",")
+                + "]"
+            )
+            try:
+                values = json.loads(raw)
+            except json.JSONDecodeError:
+                ambiguous = True
+                continue
+            if (
+                not isinstance(values, list)
+                or not 1 <= len(values) <= 19
+                or any(
+                    isinstance(item, bool)
+                    or not isinstance(item, int | float)
+                    or (
+                        isinstance(item, int)
+                        and abs(item) > 2**53 - 1
+                    )
+                    for item in values
+                )
+            ):
+                ambiguous = True
+                continue
+            points = [float(item) for item in values]
+            if (
+                any(not math.isfinite(item) for item in points)
+                or any(
+                    left >= right
+                    for left, right in zip(points, points[1:])
+                )
+                or column in bindings
+            ):
+                ambiguous = True
+                continue
+            bindings[column] = points
+    return bindings, ambiguous
+
+
+def _ground_univariate_candidate_analysis(
+    utterance: str,
+    result: StrategyRequestCompilation,
+    *,
+    whitelist: tuple[str, ...],
+) -> StrategyRequestCompilation:
+    """Keep user-owned manual cutpoints byte-for-byte grounded in this turn."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    observed, ambiguous = _explicit_manual_breakpoint_bindings(
+        utterance,
+        whitelist=whitelist,
+    )
+    expected = inputs.get("manual_breakpoints", {})
+    if not ambiguous and observed == expected:
+        return result
+    return _clarification(
+        "manual 分箱必须用“字段名 manual 切点 [值1, 值2]”明确写出"
+        "每个字段的严格递增切点；平台不会让模型补写、改序或把其他数字当切点。",
+        code="univariate_manual_breakpoints_not_grounded",
+        fields=("manual_breakpoints",),
+    )
 
 
 def _ground_cross_matrix_analysis(
@@ -5589,6 +6059,29 @@ def _voting_strategy_type_mentions(
     )
 
 
+def _impact_cube_strategy_type_mentions(
+    utterance: str,
+) -> tuple[tuple[str, int, int], ...]:
+    """Ignore dimension words such as ``分群列`` when selecting Pool type."""
+
+    mentions = []
+    for strategy_type, start, end in _voting_strategy_type_mentions(
+        utterance
+    ):
+        matched = utterance[start:end]
+        suffix = utterance[end : end + 24]
+        if (
+            re.search(r"(?:池|pool|strategy)", matched, re.IGNORECASE)
+            or re.match(
+                r"\s*(?:策略池|策略|strategy(?:\s|-|_)*pool|\bpool\b)",
+                suffix,
+                re.IGNORECASE,
+            )
+        ):
+            mentions.append((strategy_type, start, end))
+    return tuple(mentions)
+
+
 def _voting_n_mentions(
     utterance: str,
 ) -> tuple[tuple[int, int | None, int, int], ...]:
@@ -5694,9 +6187,21 @@ def _ground_refinement_request(
             code="automatic_tree_apply_workflow_required",
             fields=("workflow",),
         )
+    if utterance_targets_strategy_impact_cube(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_impact_cube"
+    ):
+        return _clarification(
+            "原话明确要求五类统一 Strategy ImpactCube，只能编译为 "
+            "strategy_impact_cube；不能降级到 approval/reject 旧影响口径、"
+            "Pool 修改、报告、采纳或部署。",
+            code="strategy_impact_cube_workflow_required",
+            fields=("workflow",),
+        )
     if _utterance_targets_strategy_pool_impact(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
-        and draft.workflow == "strategy_pool_impact"
+        and draft.workflow
+        in {"strategy_pool_impact", "strategy_impact_cube"}
     ):
         return _clarification(
             "原话明确要求 Strategy Pool 影响测算，只能编译为 strategy_pool_impact；"
@@ -5761,6 +6266,12 @@ def _ground_refinement_request(
         return _ground_strategy_model_evidence_v2_request(utterance, result)
     if draft.workflow == "strategy_report_bundle_v2":
         return _ground_strategy_report_bundle_v2_request(utterance, result)
+    if draft.workflow == "strategy_impact_cube":
+        return _ground_strategy_impact_cube_request(
+            utterance,
+            result,
+            whitelist=whitelist,
+        )
     if draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS:
         return _ground_strategy_pool_impact_request(
             utterance,
@@ -5793,6 +6304,12 @@ def _ground_refinement_request(
             result,
             whitelist=whitelist,
         )
+    if draft.workflow == "univariate_candidate_analysis":
+        return _ground_univariate_candidate_analysis(
+            utterance,
+            result,
+            whitelist=whitelist,
+        )
     if draft.workflow != "univariate_candidate_refinement":
         return result
     inputs = draft.to_dict()["workflow_inputs"]
@@ -5802,6 +6319,18 @@ def _ground_refinement_request(
         utterance, source_candidate_id
     ):
         missing_controls.append("source_candidate_id")
+    if source_candidate_id is None:
+        observed_breakpoints, breakpoint_syntax_ambiguous = (
+            _explicit_manual_breakpoint_bindings(
+                utterance,
+                whitelist=whitelist,
+            )
+        )
+        if (
+            breakpoint_syntax_ambiguous
+            or observed_breakpoints != inputs.get("manual_breakpoints", {})
+        ):
+            missing_controls.append("manual_breakpoints")
 
     selection = inputs["selection"]
     if "source_bin_ids" in selection:
@@ -7567,6 +8096,32 @@ def _ground_voting_candidate_build(
     return result
 
 
+def utterance_targets_strategy_impact_cube(utterance: str) -> bool:
+    """Reserve only a positive, executable unified/non-binary impact clause."""
+
+    if _POOL_IMPACT_TARGET_RE.search(utterance) is None:
+        return False
+    if (
+        _POOL_IMPACT_REPORT_ONLY_RE.search(utterance) is not None
+        or _POOL_IMPACT_POSITIVE_INTENT_RE.search(utterance) is None
+    ):
+        return False
+    explicit = tuple(_IMPACT_CUBE_EXPLICIT_TARGET_RE.finditer(utterance))
+    if any(
+        not _pool_impact_span_is_negated(utterance, start=match.start())
+        for match in explicit
+    ):
+        return True
+    mentioned_types = {
+        strategy_type
+        for strategy_type, start, _end in _impact_cube_strategy_type_mentions(
+            utterance
+        )
+        if not _pool_impact_span_is_negated(utterance, start=start)
+    }
+    return bool(mentioned_types & {"limit", "pricing", "segmentation"})
+
+
 def _utterance_targets_strategy_pool_impact(utterance: str) -> bool:
     if _POOL_IMPACT_TARGET_RE.search(utterance) is None:
         return False
@@ -7736,6 +8291,398 @@ def _ground_strategy_pool_impact_request(
             code="strategy_pool_impact_controls_not_grounded",
             fields=tuple(dict.fromkeys(missing_controls)),
         )
+    return result
+
+
+def _ground_strategy_impact_cube_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+    *,
+    whitelist: tuple[str, ...],
+) -> StrategyRequestCompilation:
+    """Prove every unified ImpactCube control came from this utterance."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if (
+        _POOL_IMPACT_NEGATED_RE.search(utterance)
+        or _POOL_IMPACT_NONCOMMAND_RE.search(utterance)
+        or _POOL_IMPACT_REPORT_ONLY_RE.search(utterance)
+    ):
+        return _clarification(
+            "请用当前轮、肯定式的单一命令明确要求统一 Strategy ImpactCube；"
+            "否定、问句、历史/未来描述或仅报告不会执行测算。",
+            code="strategy_impact_cube_positive_command_required",
+            fields=("measurement_intent",),
+        )
+    if _POOL_IMPACT_POSITIVE_INTENT_RE.search(utterance) is None:
+        return _clarification(
+            "原话没有明确授权执行统一 Strategy ImpactCube。请明确说出要测算的"
+            " Pool 类型；本 Workflow 只生成可逆的只读证据。",
+            code="strategy_impact_cube_positive_command_required",
+            fields=("measurement_intent",),
+        )
+    if _POOL_IMPACT_SECOND_OPERATION_RE.search(utterance):
+        return _clarification(
+            "统一 Strategy ImpactCube 必须是当前轮唯一操作；Pool 修改、"
+            "创建策略、写回、报告、采纳、晋级或部署必须拆成后续请求。",
+            code="strategy_impact_cube_single_operation_required",
+            fields=("workflow",),
+        )
+
+    missing_controls: list[str] = []
+    strategy_type = str(inputs.get("strategy_type") or "")
+    strategy_type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    strategy_type_mentions = _impact_cube_strategy_type_mentions(utterance)
+    mentioned_strategy_types = {item[0] for item in strategy_type_mentions}
+    selected_type_is_negated = any(
+        item[0] == strategy_type
+        and _pool_impact_span_is_negated(utterance, start=item[1])
+        for item in strategy_type_mentions
+    )
+    if (
+        strategy_type_pattern is None
+        or strategy_type_pattern.search(utterance) is None
+        or mentioned_strategy_types != {strategy_type}
+        or selected_type_is_negated
+    ):
+        missing_controls.append(f"strategy_type {strategy_type or 'unknown'}")
+
+    mentioned_partitions = _impact_cube_partition_mentions(utterance)
+    negated_partitions = _impact_cube_negated_partition_mentions(utterance)
+    requested_partitions = inputs.get("partitions")
+    if requested_partitions is not None:
+        if (
+            set(requested_partitions) != mentioned_partitions
+            or set(requested_partitions) & negated_partitions
+        ):
+            missing_controls.append("partitions")
+    elif mentioned_partitions or negated_partitions:
+        missing_controls.append("partitions")
+
+    explicit_columns = _impact_cube_explicit_column_bindings(
+        utterance,
+        whitelist,
+    )
+    mentioned_columns = tuple(
+        column
+        for column in whitelist
+        if _utterance_contains_token(utterance, column)
+    )
+    for field in ("month_col", "group_col", "segment_col"):
+        selected = inputs.get(field)
+        values = explicit_columns.get(field, set())
+        if selected is None:
+            if values:
+                missing_controls.append(
+                    f"{field} {'/'.join(sorted(values))}"
+                )
+            continue
+        if (
+            values != {selected}
+            or not _utterance_contains_token(utterance, str(selected))
+            or _pool_impact_token_is_negated(utterance, str(selected))
+            or any(
+                other != selected
+                and _pool_impact_tokens_are_alternatives(
+                    utterance,
+                    str(selected),
+                    other,
+                )
+                for other in mentioned_columns
+            )
+        ):
+            missing_controls.append(f"{field} {selected}")
+
+    current_strategy_id = inputs.get("current_strategy_id")
+    strategy_id_matches = tuple(
+        _POOL_IMPACT_STRATEGY_ID_RE.finditer(utterance)
+    )
+    positive_strategy_ids = {
+        match.group(0).casefold()
+        for match in strategy_id_matches
+        if not _pool_impact_span_is_negated(
+            utterance,
+            start=match.start(),
+        )
+    }
+    if current_strategy_id is not None:
+        selected_id = str(current_strategy_id).casefold()
+        if (
+            positive_strategy_ids != {selected_id}
+            or not _utterance_contains_token(
+                utterance,
+                str(current_strategy_id),
+            )
+        ):
+            missing_controls.append(str(current_strategy_id))
+    elif positive_strategy_ids:
+        missing_controls.append("current_strategy_id")
+
+    raw_economics = inputs.get("economics_inputs")
+    mentioned_components = _impact_cube_explicit_economics_components(
+        utterance
+    )
+    if isinstance(raw_economics, Mapping):
+        for component, binding in raw_economics.items():
+            pattern = _IMPACT_CUBE_ECONOMICS_GROUNDING.get(component)
+            grounded = pattern is not None and pattern.search(utterance) is not None
+            if grounded and binding["kind"] == "column":
+                grounded = _impact_cube_economics_value_is_grounded(
+                    utterance,
+                    component=component,
+                    value=str(binding["column"]),
+                    is_column=True,
+                )
+            elif grounded:
+                grounded = _impact_cube_economics_value_is_grounded(
+                    utterance,
+                    component=component,
+                    value=binding["value"],
+                    is_column=False,
+                )
+            if not grounded:
+                missing_controls.append(f"economics_inputs.{component}")
+        if mentioned_components != set(raw_economics):
+            missing_controls.append("economics_inputs")
+    elif mentioned_components:
+        missing_controls.append("economics_inputs")
+
+    if missing_controls:
+        rendered = "、".join(dict.fromkeys(missing_controls))
+        return _clarification(
+            "统一 Strategy ImpactCube 只能使用用户原话中的 Pool 类型、分区、"
+            "精确维度列、当前策略 ID 和 typed economics_inputs；当前无法核对："
+            f"{rendered}。平台不会采用 LLM 猜测的引用、列、数字或指标。",
+            code="strategy_impact_cube_controls_not_grounded",
+            fields=tuple(dict.fromkeys(missing_controls)),
+        )
+    return result
+
+
+def _impact_cube_partition_mentions(utterance: str) -> set[str]:
+    negated = _impact_cube_negated_partition_mentions(utterance)
+    if any(
+        not _pool_impact_span_is_negated(
+            utterance,
+            start=match.start(),
+        )
+        for match in _IMPACT_CUBE_ALL_PARTITIONS_RE.finditer(utterance)
+    ):
+        return set(_IMPACT_CUBE_PARTITION_ORDER) - negated
+    return {
+        partition
+        for partition, pattern in _IMPACT_CUBE_PARTITION_GROUNDING.items()
+        if any(
+            not _pool_impact_span_is_negated(
+                utterance,
+                start=match.start(),
+            )
+            for match in pattern.finditer(utterance)
+        )
+    }
+
+
+def _impact_cube_negated_partition_mentions(utterance: str) -> set[str]:
+    negated = {
+        partition
+        for partition, pattern in _IMPACT_CUBE_PARTITION_GROUNDING.items()
+        if any(
+            _pool_impact_span_is_negated(
+                utterance,
+                start=match.start(),
+            )
+            for match in pattern.finditer(utterance)
+        )
+    }
+    if any(
+        _pool_impact_span_is_negated(
+            utterance,
+            start=match.start(),
+        )
+        for match in _IMPACT_CUBE_ALL_PARTITIONS_RE.finditer(utterance)
+    ):
+        negated.update(_IMPACT_CUBE_PARTITION_ORDER)
+    return negated
+
+
+def _impact_cube_explicit_column_bindings(
+    utterance: str,
+    whitelist: tuple[str, ...],
+) -> dict[str, set[str]]:
+    labels = {
+        "month_col": (
+            r"(?:月份|月度|申请月|观察月)(?:字段|列)|"
+            r"(?<![A-Za-z0-9_])month(?:_col|\s+column)(?![A-Za-z0-9_])"
+        ),
+        "group_col": (
+            r"(?:分组|组别|渠道)(?:字段|列)|"
+            r"(?<![A-Za-z0-9_])group(?:_col|\s+column)(?![A-Za-z0-9_])"
+        ),
+        "segment_col": (
+            r"(?:分群|客群|分层)(?:字段|列)|"
+            r"(?<![A-Za-z0-9_])segment(?:_col|\s+column)(?![A-Za-z0-9_])"
+        ),
+    }
+    bindings = {field: set() for field in labels}
+    for column in sorted(whitelist, key=len, reverse=True):
+        token = (
+            rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])"
+        )
+        for field, label in labels.items():
+            before = re.compile(
+                rf"(?:{label})\s*(?:(?:为|是|用|使用|选择|指定)\s*)?"
+                rf"(?:=|:|：)?\s*{token}",
+                re.IGNORECASE,
+            )
+            after = re.compile(
+                rf"{token}\s*(?:(?:作为|用作|是|为)\s*)?(?:{label})",
+                re.IGNORECASE,
+            )
+            if before.search(utterance) or after.search(utterance):
+                bindings[field].add(column)
+    return {field: values for field, values in bindings.items() if values}
+
+
+def _impact_cube_economics_value_is_grounded(
+    utterance: str,
+    *,
+    component: str,
+    value: str | int | float,
+    is_column: bool,
+) -> bool:
+    """Require each economics value to be locally bound to its own component."""
+
+    component_pattern = _IMPACT_CUBE_ECONOMICS_GROUNDING.get(component)
+    if component_pattern is None:
+        return False
+    if is_column:
+        token = (
+            rf"(?<![A-Za-z0-9_]){re.escape(str(value))}"
+            rf"(?![A-Za-z0-9_])"
+        )
+        marker = r"(?:列|字段|column)"
+        connector = r"(?:绑定|使用|采用|选择|指定|为|是|=|:|：)?"
+        forward = re.compile(
+            rf"(?:{component_pattern.pattern})\s*{marker}\s*"
+            rf"{connector}\s*{token}",
+            re.IGNORECASE,
+        )
+        backward = re.compile(
+            rf"{token}\s*(?:作为|用作|绑定为|是|为)?\s*"
+            rf"(?:{component_pattern.pattern})\s*{marker}",
+            re.IGNORECASE,
+        )
+        return any(
+            not _pool_impact_span_is_negated(
+                utterance,
+                start=match.start(),
+            )
+            for pattern in (forward, backward)
+            for match in pattern.finditer(utterance)
+        )
+
+    value_patterns: list[re.Pattern[str]] = []
+    candidates = {str(value)}
+    if isinstance(value, float):
+        candidates.add(format(value, ".15g"))
+        percent = value * 100.0
+        if math.isfinite(percent):
+            candidates.add(format(percent, ".15g") + "%")
+    value_patterns.extend(
+        re.compile(
+            rf"(?<![A-Za-z0-9_.]){re.escape(candidate)}"
+            rf"(?![A-Za-z0-9_.])",
+            re.IGNORECASE,
+        )
+        for candidate in sorted(candidates, key=len, reverse=True)
+    )
+
+    value_spans = {
+        (match.start(), match.end())
+        for pattern in value_patterns
+        for match in pattern.finditer(utterance)
+        if not _pool_impact_span_is_negated(
+            utterance,
+            start=match.start(),
+        )
+    }
+    if not value_spans:
+        return False
+    component_spans = [
+        (name, match.start(), match.end())
+        for name, pattern in _IMPACT_CUBE_ECONOMICS_GROUNDING.items()
+        for match in pattern.finditer(utterance)
+        if not _pool_impact_span_is_negated(
+            utterance,
+            start=match.start(),
+        )
+    ]
+    separators = re.compile(r"[、，,；;。.!?？\n]")
+    for value_start, value_end in value_spans:
+        nearby: list[tuple[int, str]] = []
+        for name, start, end in component_spans:
+            between = (
+                utterance[end:value_start]
+                if end <= value_start
+                else utterance[value_end:start]
+                if value_end <= start
+                else ""
+            )
+            if separators.search(between):
+                continue
+            distance = (
+                value_start - end
+                if end <= value_start
+                else start - value_end
+                if value_end <= start
+                else 0
+            )
+            if distance <= 32:
+                nearby.append((distance, name))
+        if not nearby:
+            continue
+        nearest_distance = min(distance for distance, _name in nearby)
+        nearest = {
+            name for distance, name in nearby if distance == nearest_distance
+        }
+        if nearest == {component}:
+            return True
+    return False
+
+
+def _impact_cube_explicit_economics_components(
+    utterance: str,
+) -> set[str]:
+    """Find only typed economics controls, not columns that share a name.
+
+    A dataset can legitimately contain a column named ``pd`` and use it as a
+    grouping dimension.  The bare token therefore cannot prove that the user
+    requested an economics binding.  Requiring either a column marker or an
+    explicit scalar assignment keeps omitted-control detection precise.
+    """
+
+    number = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?%?"
+    result: set[str] = set()
+    for component, pattern in _IMPACT_CUBE_ECONOMICS_GROUNDING.items():
+        column_binding = re.compile(
+            rf"(?:{pattern.pattern})\s*(?:列|字段|column)",
+            re.IGNORECASE,
+        )
+        scalar_binding = re.compile(
+            rf"(?:{pattern.pattern})\s*(?:=|:|：|为|是|is)\s*{number}",
+            re.IGNORECASE,
+        )
+        if any(
+            not _pool_impact_span_is_negated(
+                utterance,
+                start=match.start(),
+            )
+            for binding in (column_binding, scalar_binding)
+            for match in binding.finditer(utterance)
+        ):
+            result.add(component)
     return result
 
 
@@ -10817,6 +11764,17 @@ def _standard_workflow_confirmation_text(
                 "独立哨兵值："
                 + "、".join(str(value) for value in inputs["sentinel_values"])
             )
+        if "manual_breakpoints" in inputs:
+            details.append(
+                "手工切点："
+                + "；".join(
+                    feature
+                    + "=["
+                    + "、".join(f"{value:g}" for value in points)
+                    + "]"
+                    for feature, points in inputs["manual_breakpoints"].items()
+                )
+            )
         details.append("只生成 development/unvalidated 候选证据，不冒充独立验证结果")
     elif draft.workflow == "univariate_candidate_refinement":
         merge_text = (
@@ -10841,6 +11799,17 @@ def _standard_workflow_confirmation_text(
         ]
         if "selection_reason" in inputs:
             details.append(f"选择说明：{inputs['selection_reason']}")
+        if "manual_breakpoints" in inputs:
+            details.append(
+                "手工切点："
+                + "；".join(
+                    feature
+                    + "=["
+                    + "、".join(f"{value:g}" for value in points)
+                    + "]"
+                    for feature, points in inputs["manual_breakpoints"].items()
+                )
+            )
     elif draft.workflow == "cross_matrix_analysis":
         details = [
             "已识别为〔二维 Cross Matrix 候选分析 Workflow〕",
@@ -10864,6 +11833,17 @@ def _standard_workflow_confirmation_text(
             details.append(
                 "独立哨兵值："
                 + "、".join(str(value) for value in inputs["sentinel_values"])
+            )
+        if "manual_breakpoints" in inputs:
+            details.append(
+                "手工轴切点："
+                + "；".join(
+                    feature
+                    + "=["
+                    + "、".join(f"{value:g}" for value in points)
+                    + "]"
+                    for feature, points in inputs["manual_breakpoints"].items()
+                )
             )
     elif draft.workflow == "cross_matrix_cell_selection":
         details = [
@@ -11016,6 +11996,38 @@ def _standard_workflow_confirmation_text(
             "平台只读编译当前 task Pool 为 canonical StrategySpec 并计算 design hash",
             "结果只是草案预览，不会创建已采纳策略，也不会采纳或部署",
         ]
+    elif draft.workflow == "strategy_impact_cube":
+        details = [
+            "已识别为〔统一 Strategy ImpactCube Workflow〕",
+            f"策略类型：{inputs['strategy_type']}",
+            "平台将绑定当前非空 Pool、最新认证 StrategySampleDesign V2、"
+            "数据/语义版本和用户明确控制，确定性计算五类类型化影响",
+            (
+                "分区："
+                + (
+                    "、".join(inputs["partitions"])
+                    if "partitions" in inputs
+                    else "全部可用且非空的 development/validation/OOT"
+                )
+            ),
+            "逐月/分组/分群列未显式提供时，只会采用唯一确认的语义角色；"
+            "缺失时对应切片 unavailable，冲突时先澄清",
+            "结果只发布聚合、可下载、可复核证据；"
+            "不会修改 Pool、创建、采纳、晋级或部署策略",
+        ]
+        for field, label in (
+            ("month_col", "月份列"),
+            ("group_col", "分组列"),
+            ("segment_col", "分群列"),
+        ):
+            if field in inputs:
+                details.append(f"{label}：{inputs[field]}")
+        if "current_strategy_id" in inputs:
+            details.append(f"当前策略 ID：{inputs['current_strategy_id']}")
+        if "economics_inputs" in inputs:
+            details.append(
+                "经济口径：" + _compact_json(inputs["economics_inputs"])
+            )
     elif draft.workflow == "strategy_pool_impact":
         mode_label = (
             "相对基线"
@@ -11602,6 +12614,14 @@ def _user_prompt(
         "不能直接入池。source ID 必须与唯一正向入池命令位于同一子句，不能从否定子句、"
         "reason、引用或代词上下文借用；未来/条件指令、问句、how-to、演示和测试也"
         "必须澄清。"
+        "对于 strategy_impact_cube，只能抄录用户明确的五类 strategy_type、"
+        "可选 development/validation/oot partitions、精确 month_col/group_col/"
+        "segment_col、完整 current_strategy_id，以及 typed economics_inputs"
+        "（每项仅 column 或有限 scalar）。不得输出 Pool/SampleDesign artifact、"
+        "revision/hash、population、target、metrics、condition 或 strategy_spec。"
+        "用户未指定分区时省略，由平台选择最新样本设计中全部非空可用分区；"
+        "用户未指定维度列时省略，由平台仅绑定唯一确认语义角色。任何原话控制被遗漏、"
+        "替换、否定，或同轮串联写回、报告、采纳、晋级、部署时必须澄清。"
         "对于 strategy_pool_impact，只能抄录用户明确的 approval/reject Pool 类型，"
         "可选 absolute/vs_baseline 比较模式、完整 baseline_strategy_id、精确 month_col/"
         "loan_amount_col/overdue_amount_col 和明确的 drop_nan_labels 布尔授权。普通肯定式"

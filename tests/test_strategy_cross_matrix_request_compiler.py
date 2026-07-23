@@ -155,8 +155,61 @@ def test_cross_matrix_compiles_exact_axes_and_methods() -> None:
     assert inputs["x_method"] == "equal_frequency"
     assert inputs["y_feature"] == "score"
     assert inputs["y_method"] == "equal_width"
-    assert llm.calls[0]["prompt_version"] == 30
+    assert llm.calls[0]["prompt_version"] == 31
     assert "cross_matrix_analysis" in llm.calls[0]["system_prompt"]
+
+
+def test_cross_matrix_compiles_mixed_manual_and_automatic_axes() -> None:
+    result = compile_strategy_request(
+        "构建 age manual 切点 [30, 50] × score 等频 5 箱的二维 Cross Matrix",
+        allowed_columns=("age", "score"),
+        target_col="bad",
+        llm=_FakeLLM(
+            _payload(
+                x_method="manual",
+                y_method="equal_frequency",
+                manual_breakpoints={"age": [30, 50]},
+            )
+        ),
+    )
+
+    assert result.draft is not None
+    inputs = result.draft.to_dict()["workflow_inputs"]
+    assert inputs["methods"] == ["manual", "equal_frequency"]
+    assert inputs["manual_breakpoints"] == {"age": [30.0, 50.0]}
+    assert "手工轴切点：age=[30、50]" in result.confirmation
+
+
+@pytest.mark.parametrize(
+    "manual_breakpoints",
+    [
+        {"age": [30, 60]},
+        {"age": [50, 30]},
+        {"score": [30, 50]},
+        {"age": [30, 50], "score": [300]},
+    ],
+)
+def test_cross_matrix_rejects_ungrounded_or_misbound_manual_breakpoints(
+    manual_breakpoints: dict[str, list[int]],
+) -> None:
+    result = compile_strategy_request(
+        "构建 age manual 切点 [30, 50] × score 等频 5 箱的二维 Cross Matrix",
+        allowed_columns=("age", "score"),
+        target_col="bad",
+        llm=_FakeLLM(
+            _payload(
+                x_method="manual",
+                y_method="equal_frequency",
+                manual_breakpoints=manual_breakpoints,
+            )
+        ),
+    )
+
+    assert result.draft is None
+    assert result.clarification_code in {
+        "invalid_strategy_request",
+        "cross_matrix_analysis_controls_not_grounded",
+    }
 
 
 @pytest.mark.parametrize(

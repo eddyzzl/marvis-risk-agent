@@ -20,7 +20,10 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from openpyxl import Workbook
 
-from marvis.feature.univariate import SCHEMA_VERSION as UNIVARIATE_SCHEMA_VERSION
+from marvis.feature.univariate import (
+    MANUAL_SCHEMA_VERSION as UNIVARIATE_MANUAL_SCHEMA_VERSION,
+    SCHEMA_VERSION as UNIVARIATE_SCHEMA_VERSION,
+)
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
 from marvis.packs.strategy.dsl import canonicalize_expression
 from marvis.packs.strategy.errors import StrategyError
@@ -59,6 +62,7 @@ _PARAMETER_FIELDS = frozenset(
         "overdue_amount",
     }
 )
+_MANUAL_PARAMETER_FIELDS = _PARAMETER_FIELDS | frozenset({"manual_breakpoints"})
 _FEATURE_FIELDS = frozenset(
     {
         "feature",
@@ -80,6 +84,7 @@ _METHOD_FIELDS = frozenset(
         "bins",
     }
 )
+_MANUAL_METHOD_FIELDS = _METHOD_FIELDS | frozenset({"manual_breakpoints"})
 _METHOD_METRIC_FIELDS = frozenset(
     {"iv", "ks", "auc", "risk_direction", "missing_rate", "amount_metrics"}
 )
@@ -119,7 +124,7 @@ _BIN_OPTIONAL_FIELDS = frozenset(
     {"lower", "upper", "include_lower", "include_upper", "value"}
 )
 _METHODS = frozenset(
-    {"equal_frequency", "equal_width", "chimerge", "tree", "categorical"}
+    {"equal_frequency", "equal_width", "chimerge", "tree", "manual", "categorical"}
 )
 _BIN_KINDS = frozenset({"numeric_interval", "category", "sentinel", "missing"})
 _FIXED_WORKBOOK_DATETIME = datetime(2000, 1, 1)
@@ -130,6 +135,10 @@ _CORE_MODIFIED_TIMESTAMP = re.compile(
     rb"(<dcterms:modified\b[^>]*>)[^<]*(</dcterms:modified>)"
 )
 _MAX_XLSX_CELL_CHARACTERS = 32_767
+_UNIVARIATE_PRODUCER_BY_ANALYSIS_SCHEMA = {
+    UNIVARIATE_SCHEMA_VERSION: "strategy.univariate-candidate/1",
+    UNIVARIATE_MANUAL_SCHEMA_VERSION: "strategy.univariate-candidate/2",
+}
 
 
 class StrategyCandidateReportError(StrategyError):
@@ -222,6 +231,18 @@ def _validated_report_payload(
         raise StrategyCandidateReportError(
             "candidate evidence analysis does not match the univariate analysis"
         )
+    analysis_schema_version = normalized_analysis["schema_version"]
+    generation_parameters = normalized_evidence["generation"]["parameters"]
+    if (
+        normalized_evidence["producer_version"]
+        != _UNIVARIATE_PRODUCER_BY_ANALYSIS_SCHEMA[analysis_schema_version]
+        or generation_parameters.get("analysis_schema_version")
+        != analysis_schema_version
+    ):
+        raise StrategyCandidateReportError(
+            "candidate evidence analysis schema, generation, and producer "
+            "versions do not match"
+        )
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "candidate_evidence": normalized_evidence,
@@ -246,9 +267,13 @@ def _validate_univariate_analysis(payload: Mapping[str, Any]) -> dict[str, Any]:
     _require_exact_fields(payload, _TOP_LEVEL_FIELDS, "univariate analysis")
     normalized = _detached_json_object(payload, "univariate analysis")
 
-    if normalized["schema_version"] != UNIVARIATE_SCHEMA_VERSION:
+    schema_version = normalized["schema_version"]
+    if schema_version not in {
+        UNIVARIATE_SCHEMA_VERSION,
+        UNIVARIATE_MANUAL_SCHEMA_VERSION,
+    }:
         raise StrategyCandidateReportError(
-            f"univariate analysis schema_version must be {UNIVARIATE_SCHEMA_VERSION}"
+            "univariate analysis schema_version is unsupported"
         )
     _required_text(normalized["target"], "univariate analysis.target")
     _validate_target_definition(normalized["target_definition"])
@@ -256,9 +281,15 @@ def _validate_univariate_analysis(payload: Mapping[str, Any]) -> dict[str, Any]:
     feature_count = _positive_int(
         normalized["feature_count"], "univariate analysis.feature_count"
     )
-    _validate_parameters(normalized["parameters"])
+    manual_breakpoints = _validate_parameters(
+        normalized["parameters"],
+        schema_version=schema_version,
+    )
     available_metrics = _validate_features(
-        normalized["features"], row_count=row_count, feature_count=feature_count
+        normalized["features"],
+        row_count=row_count,
+        feature_count=feature_count,
+        manual_breakpoints=manual_breakpoints,
     )
     _validate_rankings(normalized["rankings"], available_metrics=available_metrics)
     _validate_resource_budget(
@@ -288,12 +319,25 @@ def _validate_target_definition(value: object) -> None:
         )
 
 
-def _validate_parameters(value: object) -> None:
+def _validate_parameters(
+    value: object,
+    *,
+    schema_version: str,
+) -> dict[str, list[float]]:
     if not isinstance(value, Mapping):
         raise StrategyCandidateReportError(
             "univariate analysis.parameters must be an object"
         )
-    _require_exact_fields(value, _PARAMETER_FIELDS, "univariate analysis.parameters")
+    expected_fields = (
+        _MANUAL_PARAMETER_FIELDS
+        if schema_version == UNIVARIATE_MANUAL_SCHEMA_VERSION
+        else _PARAMETER_FIELDS
+    )
+    _require_exact_fields(
+        value,
+        expected_fields,
+        "univariate analysis.parameters",
+    )
     bin_count = _positive_int(
         value["bin_count"], "univariate analysis.parameters.bin_count"
     )
@@ -314,10 +358,37 @@ def _validate_parameters(value: object) -> None:
         item = value[field]
         if item is not None:
             _required_text(item, f"univariate analysis.parameters.{field}")
+    if schema_version == UNIVARIATE_SCHEMA_VERSION:
+        return {}
+    raw_mapping = value["manual_breakpoints"]
+    if not isinstance(raw_mapping, Mapping) or not raw_mapping:
+        raise StrategyCandidateReportError(
+            "univariate analysis.parameters.manual_breakpoints must be a "
+            "non-empty object"
+        )
+    mapping: dict[str, list[float]] = {}
+    for feature, points in raw_mapping.items():
+        if not isinstance(feature, str) or not feature:
+            raise StrategyCandidateReportError(
+                "univariate analysis.parameters.manual_breakpoints keys must "
+                "be feature names"
+            )
+        mapping[feature] = _manual_breakpoints(
+            points,
+            path=(
+                "univariate analysis.parameters.manual_breakpoints"
+                f"[{feature!r}]"
+            ),
+        )
+    return mapping
 
 
 def _validate_features(
-    value: object, *, row_count: int, feature_count: int
+    value: object,
+    *,
+    row_count: int,
+    feature_count: int,
+    manual_breakpoints: Mapping[str, Sequence[float]],
 ) -> dict[tuple[str, str], Mapping[str, Any]]:
     features = _array(value, "univariate analysis.features", required=True)
     if len(features) != feature_count:
@@ -326,6 +397,7 @@ def _validate_features(
         )
     names: set[str] = set()
     available_metrics: dict[tuple[str, str], Mapping[str, Any]] = {}
+    manual_features: set[str] = set()
     for feature_index, feature in enumerate(features):
         path = f"univariate analysis.features[{feature_index}]"
         if not isinstance(feature, Mapping):
@@ -374,14 +446,22 @@ def _validate_features(
                 feature_name=name,
                 feature_type=str(feature_type),
                 sentinel_values=sentinels,
+                expected_manual_breakpoints=manual_breakpoints.get(name),
             )
             if method_name in method_names:
                 raise StrategyCandidateReportError(
                     f"{path}.methods contains duplicate method names"
                 )
             method_names.add(method_name)
+            if method_name == "manual":
+                manual_features.add(name)
             if metrics is not None:
                 available_metrics[(name, method_name)] = metrics
+    if manual_features != set(manual_breakpoints):
+        raise StrategyCandidateReportError(
+            "univariate manual method features must exactly match "
+            "parameters.manual_breakpoints"
+        )
     return available_metrics
 
 
@@ -393,13 +473,32 @@ def _validate_method(
     feature_name: str,
     feature_type: str,
     sentinel_values: Sequence[object],
+    expected_manual_breakpoints: Sequence[float] | None,
 ) -> tuple[str, Mapping[str, Any] | None]:
     if not isinstance(value, Mapping):
         raise StrategyCandidateReportError(f"{path} must be an object")
-    _require_exact_fields(value, _METHOD_FIELDS, path)
-    method = _required_text(value["method"], f"{path}.method")
+    method = _required_text(value.get("method"), f"{path}.method")
     if method not in _METHODS:
         raise StrategyCandidateReportError(f"{path}.method is unsupported")
+    fields = _MANUAL_METHOD_FIELDS if method == "manual" else _METHOD_FIELDS
+    _require_exact_fields(value, fields, path)
+    manual_points = None
+    if method == "manual":
+        if feature_type != "numeric":
+            raise StrategyCandidateReportError(
+                f"{path}.manual method requires a numeric feature"
+            )
+        manual_points = _manual_breakpoints(
+            value["manual_breakpoints"],
+            path=f"{path}.manual_breakpoints",
+        )
+        if (
+            expected_manual_breakpoints is None
+            or list(expected_manual_breakpoints) != manual_points
+        ):
+            raise StrategyCandidateReportError(
+                f"{path}.manual_breakpoints do not match analysis parameters"
+            )
     if value["requested_method"] != method:
         raise StrategyCandidateReportError(f"{path}.requested_method must match method")
 
@@ -430,6 +529,13 @@ def _validate_method(
             feature_type=feature_type,
             sentinel_values=sentinel_values,
         )
+        if method == "manual":
+            assert manual_points is not None
+            _validate_manual_bins(
+                bins,
+                breakpoints=manual_points,
+                path=f"{path}.bins",
+            )
         return method, metrics
     if status == "unavailable":
         if value["actual_method"] is not None:
@@ -453,6 +559,58 @@ def _validate_method(
     raise StrategyCandidateReportError(
         f"{path}.status must be available or unavailable"
     )
+
+
+def _manual_breakpoints(value: object, *, path: str) -> list[float]:
+    points = _array(value, path, required=True)
+    if len(points) + 1 > 20:
+        raise StrategyCandidateReportError(
+            f"{path} exceeds the 20-bin resource budget"
+        )
+    normalized: list[float] = []
+    for index, item in enumerate(points):
+        if type(item) is not float or not math.isfinite(item):
+            raise StrategyCandidateReportError(
+                f"{path}[{index}] must be a finite canonical float"
+            )
+        normalized.append(item)
+    if any(left >= right for left, right in zip(normalized, normalized[1:])):
+        raise StrategyCandidateReportError(
+            f"{path} must be strictly increasing and unique"
+        )
+    return normalized
+
+
+def _validate_manual_bins(
+    bins: Sequence[object],
+    *,
+    breakpoints: Sequence[float],
+    path: str,
+) -> None:
+    regular = [
+        item
+        for item in bins
+        if isinstance(item, Mapping) and item.get("kind") == "numeric_interval"
+    ]
+    if len(regular) != len(breakpoints) + 1:
+        raise StrategyCandidateReportError(
+            f"{path} numeric intervals do not match manual_breakpoints"
+        )
+    edges: list[float | None] = [None, *breakpoints, None]
+    for index, item in enumerate(regular):
+        if item.get("index") != index or item.get("id") != f"regular:{index}":
+            raise StrategyCandidateReportError(
+                f"{path} manual numeric interval order is not canonical"
+            )
+        if (
+            _canonical_json_text(item.get("lower"))
+            != _canonical_json_text(edges[index])
+            or _canonical_json_text(item.get("upper"))
+            != _canonical_json_text(edges[index + 1])
+        ):
+            raise StrategyCandidateReportError(
+                f"{path} numeric intervals do not match manual_breakpoints"
+            )
 
 
 def _validate_method_metrics(value: object, *, path: str) -> Mapping[str, Any]:

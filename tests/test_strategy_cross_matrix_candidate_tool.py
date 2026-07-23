@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import sys
 
 import pandas as pd
 import pytest
@@ -14,7 +15,13 @@ from marvis.data.workspace import (
     DataWorkspaceDraft,
     data_semantic_mapping_hash,
 )
-from marvis.db import DatasetRepository, TaskRepository, init_db
+from marvis.db import (
+    DatasetRepository,
+    PluginRepository,
+    TaskRepository,
+    connect,
+    init_db,
+)
 from marvis.domain import TaskCreate
 from marvis.files import sha256_file
 from marvis.packs.strategy import cross_matrix_candidate_tools
@@ -32,6 +39,13 @@ from marvis.packs.strategy.cross_matrix_candidate_tools import (
 )
 from marvis.packs.strategy.errors import StrategyError
 from marvis.plugins.contracts import ToolContext
+from marvis.plugins.errors import SchemaValidationError
+from marvis.plugins.loader import load_builtin_packs
+from marvis.plugins.loader import load_manifest
+from marvis.plugins.manifest import ToolRef
+from marvis.plugins.registry import PluginRegistry, ToolRegistry
+from marvis.plugins.runner import ToolRunner
+from marvis.plugins.schema_validation import validate_against_schema
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.settings import build_settings
@@ -44,9 +58,23 @@ def _setup(
     include_amount_columns: bool = True,
     with_split: bool = False,
     target_bad_value: int = 1,
+    age_special: str | None = None,
 ) -> dict:
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
+    plugin_repository = PluginRepository(settings.db_path)
+    plugin_registry = PluginRegistry(plugin_repository)
+    load_builtin_packs(
+        plugin_registry,
+        Path(__file__).parents[1] / "marvis" / "packs",
+    )
+    runner = ToolRunner(
+        ToolRegistry(plugin_registry),
+        plugin_repository,
+        python_executable=sys.executable,
+        datasets_root=settings.datasets_dir,
+        workspace=settings.workspace,
+    )
     task = TaskRepository(settings.db_path).create_task(
         TaskCreate(
             model_name="cross-matrix",
@@ -72,6 +100,12 @@ def _setup(
     }
     if with_split:
         frame_data["sample_split"] = ["dev"] * 8 + ["validation"] * 2 + ["oot"] * 2
+    if age_special == "missing":
+        frame_data["age"][0] = None
+    elif age_special == "sentinel":
+        frame_data["age"][0] = -999
+    elif age_special is not None:
+        raise ValueError(f"unsupported age_special: {age_special}")
     frame = pd.DataFrame(frame_data)
     if drop_one_nan_label:
         frame.loc[len(frame) - 1, "bad"] = None
@@ -179,6 +213,8 @@ def _setup(
         "methods": ["equal_width"],
         "bin_count": 3,
     }
+    if age_special == "sentinel":
+        source_inputs["sentinel_values"] = [-999]
     if include_amount_columns:
         source_inputs.update(
             {
@@ -204,14 +240,259 @@ def _setup(
     }
     return {
         "settings": settings,
+        "runner": runner,
         "task": task,
         "runtime": runtime,
         "ctx": ctx,
         "source": source,
         "dataset": dataset,
         "inputs": inputs,
+        "source_inputs": source_inputs,
         "sample_design_ref": sample_design_ref,
     }
+
+
+def _replace_source_with_manual_evidence(
+    fixture: dict,
+    *,
+    manual_breakpoints: dict[str, list[float]],
+) -> None:
+    source = strategy_tools.tool_analyze_univariate_candidates(
+        {
+            **fixture["source_inputs"],
+            "methods": ["manual"],
+            "manual_breakpoints": manual_breakpoints,
+        },
+        fixture["ctx"],
+    )
+    source_artifact = next(
+        artifact
+        for artifact in source["artifacts"]
+        if artifact["kind"] == "strategy_candidate_json"
+    )
+    fixture["source"] = source
+    fixture["inputs"] = {
+        "source_artifact_id": source_artifact["artifact_id"],
+        "expected_artifact_content_hash": source_artifact["content_hash"],
+        "expected_candidate_id": source["candidate_id"],
+        "expected_evidence_hash": source["evidence_hash"],
+        "x_feature": "age",
+        "x_method": "manual",
+        "y_feature": "score",
+        "y_method": "manual",
+    }
+
+
+def _replace_source_provenance(
+    fixture: dict,
+    *,
+    schema_version: str,
+    producer_version: str,
+) -> None:
+    repository = TaskArtifactRepository(fixture["settings"].db_path)
+    current = repository.get_for_task(
+        fixture["task"].id,
+        fixture["inputs"]["source_artifact_id"],
+    )
+    assert current is not None
+    provenance = {
+        **current["provenance"],
+        "schema_version": schema_version,
+        "producer_version": producer_version,
+    }
+    with connect(fixture["settings"].db_path) as conn:
+        conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+        cursor = conn.execute(
+            """
+            UPDATE task_artifacts
+            SET provenance_json = ?
+            WHERE task_id = ? AND id = ?
+            """,
+            (
+                json.dumps(
+                    provenance,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                fixture["task"].id,
+                fixture["inputs"]["source_artifact_id"],
+            ),
+        )
+        assert cursor.rowcount == 1
+
+
+def test_cross_matrix_tool_persists_manual_axis_cutpoints_and_parent_lineage(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    _replace_source_with_manual_evidence(
+        fixture,
+        manual_breakpoints={
+            "age": [30.0, 50.0],
+            "score": [200.0, 320.0],
+        },
+    )
+
+    invoked = fixture["runner"].invoke(
+        ToolRef("strategy", "build_cross_matrix_candidate"),
+        fixture["inputs"],
+        task_id=fixture["task"].id,
+    )
+    assert invoked.ok, invoked.error
+    result = invoked.output
+
+    evidence = fixture["source"]["candidate_evidence"]
+    assert result["schema_version"] == (
+        "strategy.build-cross-matrix-candidate-tool.v2"
+    )
+    assert result["row_axis"] == {
+        "feature": "age",
+        "method": "manual",
+        "bin_count": 3,
+        "manual_breakpoints": [30.0, 50.0],
+        "parent_evidence_hash": evidence["evidence_hash"],
+    }
+    assert result["column_axis"] == {
+        "feature": "score",
+        "method": "manual",
+        "bin_count": 3,
+        "manual_breakpoints": [200.0, 320.0],
+        "parent_evidence_hash": evidence["evidence_hash"],
+    }
+    manifest = load_manifest(
+        Path(__file__).parents[1] / "marvis" / "packs" / "strategy",
+        builtin=True,
+    )
+    output_schema = next(
+        tool.output_schema
+        for tool in manifest.tools
+        if tool.name == "build_cross_matrix_candidate"
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {
+                **result,
+                "schema_version": "strategy.build-cross-matrix-candidate-tool.v1",
+            },
+            output_schema,
+            label="mixed Cross V1/V2 output",
+        )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {
+                **result,
+                "cross_matrix_candidate": {
+                    **result["cross_matrix_candidate"],
+                    "producer_version": "strategy.cross-matrix-candidate-asset/1",
+                },
+            },
+            output_schema,
+            label="mixed Cross producer",
+        )
+    asset = result["cross_matrix_candidate"]
+    assert asset["schema_version"] == "strategy.cross-matrix-candidate-asset.v2"
+    assert asset["parent"]["evidence_hash"] == evidence["evidence_hash"]
+    assert asset["axes"][0]["manual_breakpoints"] == [30.0, 50.0]
+    assert asset["axes"][1]["manual_breakpoints"] == [200.0, 320.0]
+
+    repository = TaskArtifactRepository(fixture["settings"].db_path)
+    source_record = repository.get_for_task(
+        fixture["task"].id,
+        fixture["inputs"]["source_artifact_id"],
+    )
+    assert source_record is not None
+    assert source_record["provenance"]["schema_version"] == (
+        "strategy.univariate-candidate-artifact.v2"
+    )
+    assert source_record["provenance"]["producer_version"] == (
+        "strategy.univariate-candidate/2"
+    )
+
+    record = repository.get_for_task(
+        fixture["task"].id,
+        result["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    assert record["provenance"]["schema_version"] == (
+        "strategy.cross-matrix-candidate-artifact.v2"
+    )
+    assert record["provenance"]["parent_evidence_hash"] == evidence["evidence_hash"]
+    assert record["provenance"]["row_axis"] == result["row_axis"]
+    assert record["provenance"]["column_axis"] == result["column_axis"]
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "producer_version"),
+    [
+        (
+            "strategy.univariate-candidate-artifact.v1",
+            "strategy.univariate-candidate/2",
+        ),
+        (
+            "strategy.univariate-candidate-artifact.v2",
+            "strategy.univariate-candidate/1",
+        ),
+    ],
+)
+def test_cross_matrix_tool_rejects_mixed_source_provenance_versions(
+    tmp_path: Path,
+    schema_version: str,
+    producer_version: str,
+) -> None:
+    fixture = _setup(tmp_path)
+    _replace_source_with_manual_evidence(
+        fixture,
+        manual_breakpoints={
+            "age": [30.0, 50.0],
+            "score": [200.0, 320.0],
+        },
+    )
+    _replace_source_provenance(
+        fixture,
+        schema_version=schema_version,
+        producer_version=producer_version,
+    )
+
+    with pytest.raises(StrategyError, match="provenance contract is invalid"):
+        run_build_cross_matrix_candidate(
+            fixture["inputs"], fixture["ctx"], fixture["runtime"]
+        )
+
+
+@pytest.mark.parametrize("manual_source", [False, True])
+def test_cross_matrix_tool_requires_analysis_and_outer_provenance_versions_to_match(
+    tmp_path: Path,
+    manual_source: bool,
+) -> None:
+    fixture = _setup(tmp_path)
+    if manual_source:
+        _replace_source_with_manual_evidence(
+            fixture,
+            manual_breakpoints={
+                "age": [30.0, 50.0],
+                "score": [200.0, 320.0],
+            },
+        )
+        forged_schema = "strategy.univariate-candidate-artifact.v1"
+        forged_producer = "strategy.univariate-candidate/1"
+    else:
+        forged_schema = "strategy.univariate-candidate-artifact.v2"
+        forged_producer = "strategy.univariate-candidate/2"
+
+    _replace_source_provenance(
+        fixture,
+        schema_version=forged_schema,
+        producer_version=forged_producer,
+    )
+
+    with pytest.raises(
+        StrategyError,
+        match="analysis schema and provenance versions do not match",
+    ):
+        run_build_cross_matrix_candidate(
+            fixture["inputs"], fixture["ctx"], fixture["runtime"]
+        )
 
 
 def test_cross_matrix_tool_reads_once_replays_each_bin_and_persists_complete_asset(

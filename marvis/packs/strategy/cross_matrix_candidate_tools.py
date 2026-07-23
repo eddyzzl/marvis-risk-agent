@@ -34,6 +34,7 @@ from marvis.packs.strategy.candidate_fragment import (
     sample_context_hash_from_candidate_evidence,
 )
 from marvis.packs.strategy.cross_matrix_candidate import (
+    CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION,
     build_cross_matrix_candidate_asset,
     canonical_cross_matrix_candidate_asset_json,
     parse_cross_matrix_candidate_asset_json,
@@ -53,8 +54,10 @@ from marvis.packs.strategy.sample_design_binding import (
 
 
 TOOL_SCHEMA_VERSION = "strategy.build-cross-matrix-candidate-tool.v1"
+TOOL_V2_SCHEMA_VERSION = "strategy.build-cross-matrix-candidate-tool.v2"
 ASSET_ARTIFACT_KIND = "strategy_cross_matrix_candidate_json"
 ASSET_ARTIFACT_SCHEMA_VERSION = "strategy.cross-matrix-candidate-artifact.v1"
+ASSET_ARTIFACT_V2_SCHEMA_VERSION = "strategy.cross-matrix-candidate-artifact.v2"
 ORIGIN_TOOL = "strategy.build_cross_matrix_candidate"
 
 # The analysis workflow currently supports at most 20 bins per axis.  Keeping
@@ -263,13 +266,20 @@ def run_build_cross_matrix_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         sample_design_binding=sample_binding,
         evidence=evidence,
         asset=asset,
-        row_axis=row_axis,
-        column_axis=column_axis,
+        row_axis=asset["axes"][0],
+        column_axis=asset["axes"][1],
         cell_count=cell_count,
         content=content,
     )
+    row_axis_output = _axis_projection(asset["axes"][0])
+    column_axis_output = _axis_projection(asset["axes"][1])
     return {
-        "schema_version": TOOL_SCHEMA_VERSION,
+        "schema_version": (
+            TOOL_V2_SCHEMA_VERSION
+            if asset["schema_version"]
+            == CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION
+            else TOOL_SCHEMA_VERSION
+        ),
         "asset_id": asset["asset_id"],
         "asset_hash": asset["asset_hash"],
         "parent_candidate_id": evidence["candidate_id"],
@@ -282,16 +292,8 @@ def run_build_cross_matrix_candidate(inputs, ctx, runtime) -> dict[str, Any]:
         "labeled_count": len(labeled),
         "drop_nan_labels": projection["drop_nan_labels"],
         "nan_labels_dropped": projection["expected_dropped"],
-        "row_axis": {
-            "feature": row_axis["feature"],
-            "method": row_axis["method"],
-            "bin_count": len(row_axis["bins"]),
-        },
-        "column_axis": {
-            "feature": column_axis["feature"],
-            "method": column_axis["method"],
-            "bin_count": len(column_axis["bins"]),
-        },
+        "row_axis": row_axis_output,
+        "column_axis": column_axis_output,
         "cell_count": cell_count,
         "candidate_stage": lifecycle["candidate_stage"],
         "observation_stage": lifecycle["observation_stage"],
@@ -798,6 +800,34 @@ def _asset_lifecycle(asset: Mapping[str, Any]) -> dict[str, str]:
     return normalized
 
 
+def _axis_projection(axis: Mapping[str, Any]) -> dict[str, Any]:
+    bins = axis.get("bins")
+    if not _sequence(bins):
+        raise StrategyError("Cross Matrix axis bins must be a non-empty array")
+    result = {
+        "feature": _text(axis.get("feature"), "Cross Matrix axis feature"),
+        "method": _text(axis.get("method"), "Cross Matrix axis method"),
+        "bin_count": len(bins),
+    }
+    if "parent_evidence_hash" in axis or "manual_breakpoints" in axis:
+        result["manual_breakpoints"] = axis.get("manual_breakpoints")
+        result["parent_evidence_hash"] = _sha256_text(
+            axis.get("parent_evidence_hash"),
+            "Cross Matrix axis parent_evidence_hash",
+        )
+    return result
+
+
+def _axis_provenance(axis: Mapping[str, Any]) -> dict[str, Any]:
+    projection = _axis_projection(axis)
+    if "parent_evidence_hash" not in projection:
+        return {
+            "feature": projection["feature"],
+            "method": projection["method"],
+        }
+    return projection
+
+
 def _persist_asset(
     runtime,
     *,
@@ -825,7 +855,12 @@ def _persist_asset(
     identity = evidence["identity"]
     lifecycle = _asset_lifecycle(asset)
     provenance = {
-        "schema_version": ASSET_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": (
+            ASSET_ARTIFACT_V2_SCHEMA_VERSION
+            if asset["schema_version"]
+            == CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION
+            else ASSET_ARTIFACT_SCHEMA_VERSION
+        ),
         "producer_version": asset["producer_version"],
         "asset_schema_version": asset["schema_version"],
         "asset_type": asset["asset_type"],
@@ -847,14 +882,8 @@ def _persist_asset(
         "sample_context_hash": asset["sample_identity"]["sample_context_hash"],
         "target_col": asset["sample_identity"]["target_col"],
         "labeled_row_count": asset["sample_identity"]["row_count"],
-        "row_axis": {
-            "feature": row_axis["feature"],
-            "method": row_axis["method"],
-        },
-        "column_axis": {
-            "feature": column_axis["feature"],
-            "method": column_axis["method"],
-        },
+        "row_axis": _axis_provenance(row_axis),
+        "column_axis": _axis_provenance(column_axis),
         "cell_count": cell_count,
         "candidate_stage": lifecycle["candidate_stage"],
         "observation_stage": lifecycle["observation_stage"],
@@ -1000,7 +1029,9 @@ def _share(value: object, name: str) -> float:
 
 __all__ = [
     "ASSET_ARTIFACT_KIND",
+    "ASSET_ARTIFACT_V2_SCHEMA_VERSION",
     "CROSS_MATRIX_MAX_CELLS",
     "TOOL_SCHEMA_VERSION",
+    "TOOL_V2_SCHEMA_VERSION",
     "run_build_cross_matrix_candidate",
 ]

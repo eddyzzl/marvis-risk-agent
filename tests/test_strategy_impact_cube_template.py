@@ -50,6 +50,9 @@ def test_impact_cube_template_passes_only_exact_governed_bindings() -> None:
         "population",
     }
     assert set(template.steps[0].inputs_template) == set(slot_sources)
+    required = {slot.name for slot in template.slots if slot.required}
+    assert "current_strategy_ref" not in required
+    assert "economics_inputs" not in required
     assert not {
         "metrics",
         "strategy_spec",

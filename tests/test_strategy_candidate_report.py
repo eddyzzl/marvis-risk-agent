@@ -61,7 +61,11 @@ def _inputs(*, malicious: bool = False) -> tuple[dict, dict]:
         workspace_revision=3,
         workspace_generation=2,
         semantic_mapping_hash=HASH_B,
-        generation_parameters={"features": [feature], "methods": ["equal_width"]},
+        generation_parameters={
+            "analysis_schema_version": analysis["schema_version"],
+            "features": [feature],
+            "methods": ["equal_width"],
+        },
         seed=17,
         budget=20,
         truncated=False,
@@ -159,6 +163,109 @@ def test_persisted_report_parser_reuses_strict_contracts() -> None:
     invalid["caller_metrics"] = []
     with pytest.raises(StrategyCandidateReportError, match="unknown"):
         validate_strategy_candidate_report(invalid)
+
+
+def test_manual_v2_report_freezes_cutpoints_and_rejects_bin_drift() -> None:
+    frame = pd.DataFrame(
+        {
+            "age": [18, 21, 24, 31, 38, 42, 55, 61],
+            "bad": [0, 0, 1, 0, 1, 0, 1, 1],
+        }
+    )
+    analysis = analyze_univariate(
+        frame,
+        features=["age"],
+        target="bad",
+        methods=["manual"],
+        manual_breakpoints={"age": [25.0, 40.0]},
+        bin_count=3,
+        min_bin_pct=0,
+    )
+    evidence = build_candidate_evidence(
+        task_id="task-manual",
+        dataset_id="dataset-manual",
+        dataset_content_hash=HASH_A,
+        workspace_revision=3,
+        workspace_generation=2,
+        semantic_mapping_hash=HASH_B,
+        generation_parameters={
+            "analysis_schema_version": analysis["schema_version"],
+            "features": ["age"],
+            "methods": ["manual"],
+            "manual_breakpoints": {"age": [25.0, 40.0]},
+        },
+        seed=0,
+        budget=20,
+        truncated=False,
+        analysis=analysis,
+        metrics=[
+            MetricObservation("hit_rate", "count", "observed", 0.5),
+            MetricObservation("hit_rate", "loan_amount", "unavailable", None),
+            MetricObservation("hit_rate", "overdue_amount", "unavailable", None),
+        ],
+        source_refs=["analysis:manual"],
+        producer_version="strategy.univariate-candidate/2",
+    )
+
+    raw = canonical_strategy_candidate_report_json(evidence, analysis)
+    parsed = strategy_candidate_report_from_json(raw)
+    assert parsed["univariate_analysis"]["schema_version"] == (
+        "univariate-analysis-result.v2"
+    )
+    assert parsed["univariate_analysis"]["parameters"]["manual_breakpoints"] == {
+        "age": [25.0, 40.0]
+    }
+
+    drifted = deepcopy(analysis)
+    drifted["features"][0]["methods"][0]["manual_breakpoints"] = [20.0, 40.0]
+    drifted_evidence = _rebuild_with_analysis(evidence, drifted)
+    with pytest.raises(
+        StrategyCandidateReportError,
+        match="manual_breakpoints do not match",
+    ):
+        render_strategy_candidate_bundle(drifted_evidence, drifted)
+
+
+@pytest.mark.parametrize(
+    ("producer_version", "analysis_schema_version"),
+    [
+        ("strategy.univariate-candidate/1", "univariate-analysis-result.v2"),
+        ("strategy.univariate-candidate/2", "univariate-analysis-result.v1"),
+    ],
+)
+def test_report_rejects_impossible_analysis_producer_version_pair(
+    producer_version: str,
+    analysis_schema_version: str,
+) -> None:
+    evidence, analysis = _inputs()
+    identity = evidence["identity"]
+    generation = evidence["generation"]
+    mismatched = build_candidate_evidence(
+        task_id=identity["task_id"],
+        dataset_id=identity["dataset_id"],
+        dataset_content_hash=identity["dataset_content_hash"],
+        workspace_revision=identity["workspace_revision"],
+        workspace_generation=identity["workspace_generation"],
+        semantic_mapping_hash=identity["semantic_mapping_hash"],
+        generation_parameters={
+            **generation["parameters"],
+            "analysis_schema_version": analysis_schema_version,
+        },
+        seed=generation["seed"],
+        budget=generation["budget"],
+        truncated=generation["truncated"],
+        analysis=analysis,
+        metrics=evidence["metrics"],
+        source_refs=evidence["source_refs"],
+        red_flags=evidence["red_flags"],
+        producer_version=producer_version,
+    )
+
+    with pytest.raises(
+        StrategyCandidateReportError,
+        match="analysis schema, generation, and producer versions do not match",
+    ):
+        render_strategy_candidate_bundle(mismatched, analysis)
 
 
 def test_xlsx_contains_report_ready_evidence_without_recomputing_metrics() -> None:

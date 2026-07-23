@@ -20,11 +20,27 @@ from marvis.packs.strategy.cross_matrix_cell_selection import (
 )
 from marvis.packs.strategy.errors import StrategyError
 from marvis.repositories.task_artifacts import TaskArtifactRepository
-from tests.test_strategy_cross_matrix_candidate_tool import _setup
+from tests.test_strategy_cross_matrix_candidate_tool import (
+    _replace_source_with_manual_evidence,
+    _setup,
+)
 
 
-def _fixture(tmp_path: Path) -> SimpleNamespace:
-    base = _setup(tmp_path)
+def _fixture(
+    tmp_path: Path,
+    *,
+    manual: bool = False,
+    age_special: str | None = None,
+) -> SimpleNamespace:
+    base = _setup(tmp_path, age_special=age_special)
+    if manual:
+        _replace_source_with_manual_evidence(
+            base,
+            manual_breakpoints={
+                "age": [30.0, 50.0],
+                "score": [200.0, 320.0],
+            },
+        )
     matrix_result = run_build_cross_matrix_candidate(
         base["inputs"],
         base["ctx"],
@@ -198,6 +214,99 @@ def test_materialize_single_and_multi_are_canonical_idempotent_and_replayable(
             source_artifact_binding=verified_source.builder_binding(),
         )
         assert fragment["fragment"]["fragment_id"] == output["group_id"]
+
+
+def test_materialize_manual_v2_matrix_preserves_exact_source_versions(
+    tmp_path: Path,
+) -> None:
+    fx = _fixture(tmp_path, manual=True)
+
+    output = selection_tools.run_materialize_cross_matrix_cell_selection(
+        fx.inputs,
+        fx.ctx,
+        fx.runtime,
+    )
+
+    assert fx.matrix["schema_version"] == "strategy.cross-matrix-candidate-asset.v2"
+    assert fx.source_record["provenance"]["schema_version"] == (
+        "strategy.cross-matrix-candidate-artifact.v2"
+    )
+    descriptor = output["artifacts"][0]
+    verified = selection_tools.load_verified_cross_matrix_cell_selection_artifact(
+        fx.runtime,
+        task_id=fx.task.id,
+        artifact_id=descriptor["artifact_id"],
+        expected_content_hash=descriptor["content_hash"],
+        expected_asset_id=fx.matrix["asset_id"],
+        expected_asset_hash=fx.matrix["asset_hash"],
+    )
+    assert verified.selection["source_artifact"]["artifact_schema_version"] == (
+        "strategy.cross-matrix-candidate-artifact.v2"
+    )
+    assert verified.selection["source_asset"]["schema_version"] == (
+        "strategy.cross-matrix-candidate-asset.v2"
+    )
+    selection_record = fx.repository.get_for_task(
+        fx.task.id,
+        descriptor["artifact_id"],
+    )
+    assert selection_record is not None
+    assert selection_record["provenance"]["source_artifact_schema_version"] == (
+        "strategy.cross-matrix-candidate-artifact.v2"
+    )
+    assert selection_record["provenance"]["source_asset_schema_version"] == (
+        "strategy.cross-matrix-candidate-asset.v2"
+    )
+
+
+@pytest.mark.parametrize(
+    ("manual", "changes"),
+    [
+        (
+            False,
+            {"schema_version": "strategy.cross-matrix-candidate-artifact.v2"},
+        ),
+        (
+            True,
+            {"schema_version": "strategy.cross-matrix-candidate-artifact.v1"},
+        ),
+        (
+            True,
+            {"producer_version": "strategy.cross-matrix-candidate-asset/1"},
+        ),
+        (
+            True,
+            {"asset_schema_version": "strategy.cross-matrix-candidate-asset.v1"},
+        ),
+    ],
+)
+def test_source_loader_rejects_mixed_asset_and_provenance_versions(
+    tmp_path: Path,
+    manual: bool,
+    changes: dict[str, str],
+) -> None:
+    fx = _fixture(tmp_path, manual=manual)
+    provenance = {
+        **fx.source_record["provenance"],
+        **changes,
+    }
+    _drop_immutability_and_update(
+        fx.repository,
+        fx.matrix_artifact["artifact_id"],
+        provenance_json=selection_tools._canonical_json(provenance),
+    )
+
+    with pytest.raises(StrategyError, match="provenance|source artifact"):
+        selection_tools.load_verified_cross_matrix_source_artifact(
+            fx.runtime,
+            task_id=fx.task.id,
+            artifact_id=fx.matrix_artifact["artifact_id"],
+            expected_content_hash=fx.matrix_artifact["content_hash"],
+            expected_asset_id=fx.matrix["asset_id"],
+            expected_asset_hash=fx.matrix["asset_hash"],
+            expected_candidate_id=fx.matrix["candidate_evidence"]["candidate_id"],
+            expected_evidence_hash=fx.matrix["candidate_evidence"]["evidence_hash"],
+        )
 
 
 @pytest.mark.parametrize(

@@ -382,7 +382,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "apply_monitoring_disposition",
         "render_monitoring_report",
     }
-    assert manifest.version == "0.16.0"
+    assert manifest.version == "0.17.0"
     for tool in (project_context_tool, sample_v2_tool, model_evidence_v2_tool):
         assert tool.determinism == "deterministic"
         assert tool.failure_policy == "fail"
@@ -431,6 +431,37 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "read:dataset",
         "write:artifact",
     }
+    assert univariate_tool.input_schema["properties"]["methods"] == {
+        "type": "array",
+        "maxItems": 5,
+        "uniqueItems": True,
+        "items": {
+            "type": "string",
+            "enum": [
+                "equal_frequency",
+                "equal_width",
+                "chimerge",
+                "tree",
+                "manual",
+            ],
+        },
+    }
+    assert univariate_tool.input_schema["properties"]["manual_breakpoints"][
+        "additionalProperties"
+    ] == {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 19,
+        "items": {"type": "number"},
+    }
+    assert univariate_tool.output_schema["properties"]["schema_version"] == {
+        "type": "string",
+        "enum": [
+            "strategy.univariate-candidate-tool.v1",
+            "strategy.univariate-candidate-tool.v2",
+        ],
+    }
+    assert len(univariate_tool.output_schema["oneOf"]) == 2
     assert automatic_tree_tool.determinism == "deterministic"
     assert automatic_tree_tool.policy.human_decision_gate == "none"
     assert automatic_tree_tool.policy.effect_authorization == "none"
@@ -634,9 +665,16 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert "budget" not in cross_matrix_tool.input_schema["properties"]
     assert "cells" not in cross_matrix_tool.input_schema["properties"]
     assert cross_matrix_tool.output_schema["additionalProperties"] is False
+    assert "manual" in cross_matrix_tool.input_schema["properties"]["x_method"]["enum"]
+    assert "manual" in cross_matrix_tool.input_schema["properties"]["y_method"]["enum"]
     assert cross_matrix_tool.output_schema["properties"]["schema_version"] == {
-        "const": "strategy.build-cross-matrix-candidate-tool.v1"
+        "type": "string",
+        "enum": [
+            "strategy.build-cross-matrix-candidate-tool.v1",
+            "strategy.build-cross-matrix-candidate-tool.v2",
+        ],
     }
+    assert len(cross_matrix_tool.output_schema["oneOf"]) == 2
     assert cross_matrix_tool.output_schema["properties"]["cell_count"] == {
         "type": "integer",
         "minimum": 1,
@@ -661,6 +699,14 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "cross_matrix_asset"
     ]
     assert cross_asset_schema["additionalProperties"] is False
+    assert cross_asset_schema["properties"]["schema_version"]["enum"] == [
+        "strategy.cross-matrix-candidate-asset.v1",
+        "strategy.cross-matrix-candidate-asset.v2",
+    ]
+    assert cross_asset_schema["properties"]["producer_version"]["enum"] == [
+        "strategy.cross-matrix-candidate-asset/1",
+        "strategy.cross-matrix-candidate-asset/2",
+    ]
     assert set(cross_asset_schema["required"]) == {
         "schema_version",
         "asset_type",
@@ -749,7 +795,8 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "read:dataset",
         "write:artifact",
     }
-    assert manifest.version == "0.16.0"
+    assert "manual" in refinement_tool.input_schema["properties"]["method"]["enum"]
+    assert manifest.version == "0.17.0"
     assert "refined univariate asset" in add_pool_tool.summary
     assert "automatic-tree leaf selection" in add_pool_tool.summary
     assert "Voting n-of-k candidate" in add_pool_tool.summary
@@ -863,8 +910,6 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "partitions",
         "population",
         "dimension_bindings",
-        "current_strategy_ref",
-        "economics_inputs",
     }
     assert measure_impact_cube_tool.input_schema["properties"][
         "strategy_type"
@@ -884,7 +929,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert measure_impact_cube_tool.output_schema["additionalProperties"] is False
     assert measure_impact_cube_tool.output_schema["properties"][
         "schema_version"
-    ] == {"const": "strategy.measure-impact-cube-tool.v1"}
+    ] == {"const": "strategy.measure-impact-cube-tool.v2"}
     for boundary in (
         "not_mutated_pool",
         "not_created_strategy",

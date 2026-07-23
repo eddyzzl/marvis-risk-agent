@@ -32,7 +32,10 @@ from marvis.packs.strategy.candidate_fragment import (
 )
 from marvis.packs.strategy.cross_matrix_candidate import (
     CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION,
+    CROSS_MATRIX_CANDIDATE_ASSET_PRODUCER_VERSION,
     CROSS_MATRIX_CANDIDATE_ASSET_TYPE,
+    CROSS_MATRIX_CANDIDATE_ASSET_V2_PRODUCER_VERSION,
+    CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION,
     CrossMatrixCandidateAssetError,
     canonical_cross_matrix_candidate_asset_json,
     validate_cross_matrix_candidate_asset,
@@ -47,6 +50,9 @@ CROSS_MATRIX_CELL_SELECTION_PRODUCER_VERSION = "strategy.cross-matrix-cell-selec
 CROSS_MATRIX_SOURCE_ARTIFACT_KIND = "strategy_cross_matrix_candidate_json"
 CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION = (
     "strategy.cross-matrix-candidate-artifact.v1"
+)
+CROSS_MATRIX_SOURCE_ARTIFACT_V2_SCHEMA_VERSION = (
+    "strategy.cross-matrix-candidate-artifact.v2"
 )
 CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL = "strategy.build_cross_matrix_candidate"
 
@@ -154,7 +160,24 @@ _SOURCE_PROVENANCE_FIELDS = frozenset(
         "truncated",
     }
 )
-_AXIS_PROVENANCE_FIELDS = frozenset({"feature", "method"})
+_AXIS_PROVENANCE_V1_FIELDS = frozenset({"feature", "method"})
+_AXIS_PROVENANCE_V2_FIELDS = _AXIS_PROVENANCE_V1_FIELDS | frozenset(
+    {"bin_count", "manual_breakpoints", "parent_evidence_hash"}
+)
+_SOURCE_VERSION_CONTRACTS = {
+    CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION: (
+        CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION,
+        CROSS_MATRIX_CANDIDATE_ASSET_PRODUCER_VERSION,
+    ),
+    CROSS_MATRIX_SOURCE_ARTIFACT_V2_SCHEMA_VERSION: (
+        CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION,
+        CROSS_MATRIX_CANDIDATE_ASSET_V2_PRODUCER_VERSION,
+    ),
+}
+_SOURCE_ASSET_TO_ARTIFACT_SCHEMA = {
+    asset_schema: artifact_schema
+    for artifact_schema, (asset_schema, _producer) in _SOURCE_VERSION_CONTRACTS.items()
+}
 _SELECTION_ARTIFACT_BINDING_FIELDS = frozenset(
     {
         "artifact_id",
@@ -532,10 +555,17 @@ def _normalize_body(payload: Mapping[str, Any]) -> dict[str, Any]:
         )
     cell_ids = _stored_cell_ids(payload["cell_ids"])
     group_id = _identifier(payload["group_id"], "group_id", pattern=_GROUP_ID_RE)
+    source_artifact = _source_artifact(payload["source_artifact"])
+    source_asset = _source_asset_reference(payload["source_asset"])
+    _require_source_version_pair(
+        source_artifact["artifact_schema_version"],
+        source_asset["schema_version"],
+        name="cell selection source",
+    )
     return {
         "schema_version": CROSS_MATRIX_CELL_SELECTION_SCHEMA_VERSION,
-        "source_artifact": _source_artifact(payload["source_artifact"]),
-        "source_asset": _source_asset_reference(payload["source_asset"]),
+        "source_artifact": source_artifact,
+        "source_asset": source_asset,
         "source_candidate": _source_candidate_reference(payload["source_candidate"]),
         "group_id": group_id,
         "cell_ids": cell_ids,
@@ -553,9 +583,8 @@ def _full_matrix_asset(value: object) -> dict[str, Any]:
         raise CrossMatrixCellSelectionError(
             "full Cross Matrix asset failed strict validation"
         ) from exc
-    if (
-        asset["schema_version"] != CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION
-        or asset["asset_type"] != CROSS_MATRIX_CANDIDATE_ASSET_TYPE
+    if asset["schema_version"] not in _SOURCE_ASSET_TO_ARTIFACT_SCHEMA or (
+        asset["asset_type"] != CROSS_MATRIX_CANDIDATE_ASSET_TYPE
     ):
         raise CrossMatrixCellSelectionError(
             "source asset must use the committed Cross Matrix contract"
@@ -577,10 +606,9 @@ def _source_artifact(value: object) -> dict[str, Any]:
         raise CrossMatrixCellSelectionError(
             "source_artifact.kind must be " + CROSS_MATRIX_SOURCE_ARTIFACT_KIND
         )
-    if schema != CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION:
+    if schema not in _SOURCE_VERSION_CONTRACTS:
         raise CrossMatrixCellSelectionError(
-            "source_artifact artifact schema must be "
-            + CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION
+            "source_artifact artifact schema is unsupported"
         )
     if origin != CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL:
         raise CrossMatrixCellSelectionError(
@@ -636,10 +664,9 @@ def _source_asset_reference(value: object) -> dict[str, str]:
     _exact_fields(value, _SOURCE_ASSET_FIELDS, "source_asset")
     schema = _canonical_text(value["schema_version"], "source_asset.schema_version")
     asset_type = _canonical_text(value["asset_type"], "source_asset.asset_type")
-    if schema != CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION:
+    if schema not in _SOURCE_ASSET_TO_ARTIFACT_SCHEMA:
         raise CrossMatrixCellSelectionError(
-            "source_asset.schema_version must be "
-            + CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION
+            "source_asset.schema_version is unsupported"
         )
     if asset_type != CROSS_MATRIX_CANDIDATE_ASSET_TYPE:
         raise CrossMatrixCellSelectionError(
@@ -732,12 +759,19 @@ def _evidence_identity(value: object) -> dict[str, Any]:
 def _source_provenance(value: object) -> dict[str, Any]:
     provenance = _canonical_json_object(value, "source artifact provenance")
     _exact_fields(provenance, _SOURCE_PROVENANCE_FIELDS, "source artifact provenance")
-    if provenance["schema_version"] != CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION:
+    schema_version = _canonical_text(
+        provenance["schema_version"],
+        "source artifact provenance schema_version",
+    )
+    version_contract = _SOURCE_VERSION_CONTRACTS.get(schema_version)
+    if version_contract is None:
         raise CrossMatrixCellSelectionError(
-            "source artifact provenance schema_version changed"
+            "source artifact provenance schema_version is unsupported"
         )
+    expected_asset_schema, expected_producer = version_contract
     fixed = {
-        "asset_schema_version": CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION,
+        "producer_version": expected_producer,
+        "asset_schema_version": expected_asset_schema,
         "asset_type": CROSS_MATRIX_CANDIDATE_ASSET_TYPE,
         "candidate_stage": "development",
         "observation_stage": "backtested",
@@ -800,22 +834,120 @@ def _source_provenance(value: object) -> dict[str, Any]:
             provenance[field], f"source artifact provenance {field}"
         )
     provenance["row_axis"] = _axis_provenance(
-        provenance["row_axis"], "source artifact provenance row_axis"
+        provenance["row_axis"],
+        "source artifact provenance row_axis",
+        schema_version=schema_version,
     )
     provenance["column_axis"] = _axis_provenance(
-        provenance["column_axis"], "source artifact provenance column_axis"
+        provenance["column_axis"],
+        "source artifact provenance column_axis",
+        schema_version=schema_version,
     )
     return provenance
 
 
-def _axis_provenance(value: object, name: str) -> dict[str, str]:
+def _axis_provenance(
+    value: object,
+    name: str,
+    *,
+    schema_version: str,
+) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise CrossMatrixCellSelectionError(f"{name} must be an object")
-    _exact_fields(value, _AXIS_PROVENANCE_FIELDS, name)
-    return {
+    fields = (
+        _AXIS_PROVENANCE_V2_FIELDS
+        if schema_version == CROSS_MATRIX_SOURCE_ARTIFACT_V2_SCHEMA_VERSION
+        else _AXIS_PROVENANCE_V1_FIELDS
+    )
+    _exact_fields(value, fields, name)
+    normalized = {
         "feature": _canonical_text(value["feature"], f"{name}.feature"),
         "method": _canonical_text(value["method"], f"{name}.method"),
     }
+    if schema_version == CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION:
+        return normalized
+    bin_count = _positive_int(value["bin_count"], f"{name}.bin_count")
+    if bin_count > 400:
+        raise CrossMatrixCellSelectionError(f"{name}.bin_count exceeds 400")
+    parent_evidence_hash = _hash(
+        value["parent_evidence_hash"],
+        f"{name}.parent_evidence_hash",
+    )
+    manual_breakpoints = value["manual_breakpoints"]
+    if normalized["method"] == "manual":
+        manual_breakpoints = _manual_breakpoints(
+            manual_breakpoints,
+            name=f"{name}.manual_breakpoints",
+        )
+        if len(manual_breakpoints) + 1 > bin_count:
+            raise CrossMatrixCellSelectionError(
+                f"{name}.manual_breakpoints exceed total bin_count"
+            )
+    elif manual_breakpoints is not None:
+        raise CrossMatrixCellSelectionError(
+            f"{name}.manual_breakpoints must be null for non-manual axes"
+        )
+    return {
+        **normalized,
+        "bin_count": bin_count,
+        "manual_breakpoints": manual_breakpoints,
+        "parent_evidence_hash": parent_evidence_hash,
+    }
+
+
+def _manual_breakpoints(value: object, *, name: str) -> list[float]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        str | bytes | bytearray,
+    ):
+        raise CrossMatrixCellSelectionError(f"{name} must be a non-empty array")
+    points = list(value)
+    if not points or len(points) + 1 > 20:
+        raise CrossMatrixCellSelectionError(
+            f"{name} must define between 2 and 20 bins"
+        )
+    if any(type(item) is not float or not math.isfinite(item) for item in points):
+        raise CrossMatrixCellSelectionError(
+            f"{name} must contain canonical finite floats"
+        )
+    if any(left >= right for left, right in zip(points, points[1:])):
+        raise CrossMatrixCellSelectionError(
+            f"{name} must be strictly increasing and unique"
+        )
+    return points
+
+
+def _require_source_version_pair(
+    artifact_schema_version: str,
+    asset_schema_version: str,
+    *,
+    name: str,
+) -> None:
+    contract = _SOURCE_VERSION_CONTRACTS.get(artifact_schema_version)
+    if contract is None or contract[0] != asset_schema_version:
+        raise CrossMatrixCellSelectionError(
+            f"{name} artifact and asset schema versions do not match"
+        )
+
+
+def _axis_provenance_from_asset(
+    axis: Mapping[str, Any],
+    *,
+    asset_schema_version: str,
+) -> dict[str, Any]:
+    projected: dict[str, Any] = {
+        "feature": axis["feature"],
+        "method": axis["method"],
+    }
+    if asset_schema_version == CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION:
+        projected.update(
+            {
+                "bin_count": len(axis["bins"]),
+                "manual_breakpoints": axis["manual_breakpoints"],
+                "parent_evidence_hash": axis["parent_evidence_hash"],
+            }
+        )
+    return projected
 
 
 def _require_source_artifact_binding_matches_asset(
@@ -839,7 +971,19 @@ def _require_source_artifact_binding_matches_asset(
             "source artifact task_id does not match Cross Matrix asset"
         )
     provenance = binding["provenance"]
+    expected_artifact_schema = _SOURCE_ASSET_TO_ARTIFACT_SCHEMA.get(
+        asset["schema_version"]
+    )
+    if (
+        expected_artifact_schema is None
+        or binding["artifact_schema_version"] != expected_artifact_schema
+        or provenance["schema_version"] != expected_artifact_schema
+    ):
+        raise CrossMatrixCellSelectionError(
+            "source artifact and asset schema versions do not match"
+        )
     expected = {
+        "schema_version": expected_artifact_schema,
         "producer_version": asset["producer_version"],
         "asset_schema_version": asset["schema_version"],
         "asset_type": asset["asset_type"],
@@ -858,14 +1002,14 @@ def _require_source_artifact_binding_matches_asset(
         "sample_context_hash": sample["sample_context_hash"],
         "target_col": sample["target_col"],
         "labeled_row_count": sample["row_count"],
-        "row_axis": {
-            "feature": asset["axes"][0]["feature"],
-            "method": asset["axes"][0]["method"],
-        },
-        "column_axis": {
-            "feature": asset["axes"][1]["feature"],
-            "method": asset["axes"][1]["method"],
-        },
+        "row_axis": _axis_provenance_from_asset(
+            asset["axes"][0],
+            asset_schema_version=asset["schema_version"],
+        ),
+        "column_axis": _axis_provenance_from_asset(
+            asset["axes"][1],
+            asset_schema_version=asset["schema_version"],
+        ),
         "cell_count": asset["matrix"]["cell_count"],
         "candidate_stage": asset["lifecycle"]["candidate_stage"],
         "observation_stage": asset["lifecycle"]["observation_stage"],
@@ -978,14 +1122,17 @@ def _selection_artifact_binding(value: object) -> dict[str, Any]:
         ),
         "producer_version": CROSS_MATRIX_CELL_SELECTION_PRODUCER_VERSION,
         "source_artifact_kind": CROSS_MATRIX_SOURCE_ARTIFACT_KIND,
-        "source_artifact_schema_version": (CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION),
         "source_artifact_origin_tool": CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL,
-        "source_asset_schema_version": CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION,
         "source_asset_type": CROSS_MATRIX_CANDIDATE_ASSET_TYPE,
     }
     for field, expected in fixed.items():
         if normalized[field] != expected:
             raise CrossMatrixCellSelectionError(f"selection {field} must be {expected}")
+    _require_source_version_pair(
+        normalized["source_artifact_schema_version"],
+        normalized["source_asset_schema_version"],
+        name="selection binding source",
+    )
     return normalized
 
 
@@ -1349,6 +1496,7 @@ __all__ = [
     "CROSS_MATRIX_SOURCE_ARTIFACT_KIND",
     "CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL",
     "CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION",
+    "CROSS_MATRIX_SOURCE_ARTIFACT_V2_SCHEMA_VERSION",
     "CrossMatrixCellSelectionError",
     "IndependentlyVerifiedCrossMatrixArtifactBinding",
     "MAX_SELECTION_REASON_LENGTH",

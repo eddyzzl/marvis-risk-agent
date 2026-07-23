@@ -37,7 +37,6 @@ from marvis.packs.strategy.cross_matrix_cell_selection import (
     CROSS_MATRIX_CELL_SELECTION_PRODUCER_VERSION,
     CROSS_MATRIX_SOURCE_ARTIFACT_KIND,
     CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL,
-    CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION,
     MAX_SELECTION_REASON_LENGTH,
     CrossMatrixCellSelectionError,
     IndependentlyVerifiedCrossMatrixArtifactBinding,
@@ -341,7 +340,7 @@ def canonical_cross_matrix_source_path(
     asset_id: str,
     content_hash: str,
 ) -> Path:
-    """Return the sole CROSS-1 source path without resolving symlinks."""
+    """Return the sole version-neutral Cross Matrix source path."""
 
     normalized_task = _safe_component(task_id, "task_id")
     normalized_asset = _required_asset_id(asset_id, "asset_id")
@@ -380,7 +379,7 @@ def verify_cross_matrix_source_provenance(
     source_binding: Mapping[str, Any],
     asset_payload: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Verify exact CROSS-1 provenance and return a detached mapping."""
+    """Verify exact version-paired Cross Matrix provenance and detach it."""
 
     provenance = _canonical_json_object(provenance_payload, "source provenance")
     _require_exact_fields(provenance, SOURCE_PROVENANCE_FIELDS, "source provenance")
@@ -616,7 +615,10 @@ def load_verified_cross_matrix_source_artifact_on_connection(
         "artifact_id": normalized_artifact,
         "task_id": normalized_task,
         "kind": CROSS_MATRIX_SOURCE_ARTIFACT_KIND,
-        "artifact_schema_version": CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION,
+        "artifact_schema_version": _required_text(
+            unverified_provenance.get("schema_version"),
+            "source artifact provenance schema_version",
+        ),
         "content_hash": registered_hash,
         "origin_tool": CROSS_MATRIX_SOURCE_ARTIFACT_ORIGIN_TOOL,
         "path": str(path),

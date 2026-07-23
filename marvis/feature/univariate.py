@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from numbers import Real
 from typing import Any
 
 import numpy as np
@@ -13,6 +14,7 @@ from marvis.feature.binning import (
     degraded_bin_diagnostic,
     equal_frequency_edges,
     equal_width_edges,
+    manual_edges,
     tree_edges,
 )
 from marvis.feature.errors import FeatureError
@@ -21,7 +23,9 @@ from marvis.feature.metrics import feature_auc, feature_ks
 
 
 SCHEMA_VERSION = "univariate-analysis-result.v1"
-_NUMERIC_METHODS = ("equal_frequency", "equal_width", "chimerge", "tree")
+MANUAL_SCHEMA_VERSION = "univariate-analysis-result.v2"
+_AUTO_NUMERIC_METHODS = ("equal_frequency", "equal_width", "chimerge", "tree")
+_NUMERIC_METHODS = (*_AUTO_NUMERIC_METHODS, "manual")
 _ALL_METHODS = (*_NUMERIC_METHODS, "categorical")
 _METHOD_ORDER = {method: index for index, method in enumerate(_ALL_METHODS)}
 _MAX_SAFE_JSON_INTEGER = 2**53 - 1
@@ -34,6 +38,7 @@ def analyze_univariate(
     target: str,
     methods: Sequence[str] | None = None,
     feature_types: Mapping[str, str] | None = None,
+    manual_breakpoints: Mapping[str, Sequence[Real]] | None = None,
     bin_count: int = 10,
     sentinel_values: Mapping[str, Sequence[object]] | None = None,
     loan_amount: str | None = None,
@@ -89,13 +94,22 @@ def analyze_univariate(
         )
     requested_methods = _normalize_methods(methods)
     type_overrides = dict(feature_types or {})
+    resolved_types = {
+        feature: type_overrides.get(feature) or _infer_feature_type(frame[feature])
+        for feature in feature_names
+    }
+    normalized_manual_breakpoints = _normalize_manual_breakpoints(
+        manual_breakpoints,
+        features=feature_names,
+        feature_types=resolved_types,
+        methods=requested_methods,
+        max_bins=max_bins,
+    )
 
     feature_results: list[dict[str, Any]] = []
     rankings: list[dict[str, Any]] = []
     for feature in feature_names:
-        resolved_type = type_overrides.get(feature) or _infer_feature_type(
-            frame[feature]
-        )
+        resolved_type = resolved_types[feature]
         feature_sentinels = _normalize_sentinels(
             sentinels.get(feature, ()),
             feature,
@@ -103,14 +117,25 @@ def analyze_univariate(
         )
         if requested_methods is None:
             method_names = (
-                _NUMERIC_METHODS if resolved_type == "numeric" else ("categorical",)
+                _AUTO_NUMERIC_METHODS
+                if resolved_type == "numeric"
+                else ("categorical",)
             )
         elif resolved_type == "categorical" and "categorical" not in requested_methods:
             # Public Candidate Lab requests select numeric binning methods only;
             # categorical fields always retain their fixed equal-value method.
             method_names = ("categorical",)
         else:
-            method_names = requested_methods
+            method_names = tuple(
+                method
+                for method in requested_methods
+                if method != "manual"
+                or feature in normalized_manual_breakpoints
+            )
+            if not method_names:
+                raise FeatureError(
+                    f"feature {feature} has no applicable requested method"
+                )
         method_results = []
         for method in method_names:
             result = _analyze_method(
@@ -127,6 +152,7 @@ def analyze_univariate(
                 min_bin_pct=min_bin_pct,
                 smoothing=smoothing,
                 seed=seed,
+                manual_breakpoints=normalized_manual_breakpoints.get(feature),
             )
             method_results.append(result)
             if result["status"] == "available":
@@ -158,20 +184,31 @@ def analyze_univariate(
             _METHOD_ORDER[item["method"]],
         )
     )
+    parameters = {
+        "bin_count": int(bin_count),
+        "smoothing": float(smoothing),
+        "min_bin_pct": float(min_bin_pct),
+        "seed": int(seed),
+        "loan_amount": loan_amount,
+        "overdue_amount": overdue_amount,
+    }
+    if normalized_manual_breakpoints:
+        parameters["manual_breakpoints"] = {
+            feature: list(normalized_manual_breakpoints[feature])
+            for feature in feature_names
+            if feature in normalized_manual_breakpoints
+        }
     payload = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": (
+            MANUAL_SCHEMA_VERSION
+            if normalized_manual_breakpoints
+            else SCHEMA_VERSION
+        ),
         "target": target,
         "target_definition": {"good": 0, "bad": 1},
         "row_count": int(len(frame)),
         "feature_count": len(feature_names),
-        "parameters": {
-            "bin_count": int(bin_count),
-            "smoothing": float(smoothing),
-            "min_bin_pct": float(min_bin_pct),
-            "seed": int(seed),
-            "loan_amount": loan_amount,
-            "overdue_amount": overdue_amount,
-        },
+        "parameters": parameters,
         "features": feature_results,
         "rankings": rankings,
         "resource_budget": {
@@ -204,6 +241,7 @@ def _analyze_method(
     min_bin_pct: float,
     smoothing: float,
     seed: int,
+    manual_breakpoints: tuple[float, ...] | None,
 ) -> dict[str, Any]:
     if (feature_type == "numeric") != (method in _NUMERIC_METHODS):
         expected = "numeric" if method in _NUMERIC_METHODS else "categorical"
@@ -223,7 +261,7 @@ def _analyze_method(
             min_bin_pct=min_bin_pct,
             smoothing=smoothing,
         )
-    return _numeric_result(
+    result = _numeric_result(
         series,
         target,
         feature=feature,
@@ -235,7 +273,15 @@ def _analyze_method(
         smoothing=smoothing,
         min_bin_pct=min_bin_pct,
         seed=seed,
+        manual_breakpoints=manual_breakpoints,
     )
+    if method == "manual":
+        if manual_breakpoints is None:
+            raise FeatureError(
+                f"manual_breakpoints must provide feature {feature}"
+            )
+        result["manual_breakpoints"] = list(manual_breakpoints)
+    return result
 
 
 def _numeric_result(
@@ -251,6 +297,7 @@ def _numeric_result(
     smoothing: float,
     min_bin_pct: float,
     seed: int,
+    manual_breakpoints: tuple[float, ...] | None,
 ) -> dict[str, Any]:
     if _contains_unsafe_integer(series):
         return _unavailable(method, "unsafe_numeric_precision")
@@ -308,6 +355,12 @@ def _numeric_result(
                 min_samples_leaf=(min_bin_pct if min_bin_pct > 0 else 1),
                 seed=seed,
             )
+        elif method == "manual":
+            if manual_breakpoints is None:
+                raise FeatureError(
+                    f"manual_breakpoints must provide feature {feature}"
+                )
+            edges = manual_edges(list(manual_breakpoints))
         else:  # guarded by request validation
             raise AssertionError(method)
     except (FeatureError, ValueError) as exc:
@@ -352,7 +405,11 @@ def _numeric_result(
             }
         )
     evidence = []
-    diagnostic = degraded_bin_diagnostic(edges, bin_count, feature=feature)
+    diagnostic = (
+        None
+        if method == "manual"
+        else degraded_bin_diagnostic(edges, bin_count, feature=feature)
+    )
     if diagnostic is not None:
         evidence.append(diagnostic)
     bin_shares = [
@@ -865,6 +922,100 @@ def _normalize_methods(methods: Sequence[str] | None) -> tuple[str, ...] | None:
     return tuple(sorted(normalized, key=_METHOD_ORDER.__getitem__))
 
 
+def _normalize_manual_breakpoints(
+    value: Mapping[str, Sequence[Real]] | None,
+    *,
+    features: Sequence[str],
+    feature_types: Mapping[str, str],
+    methods: tuple[str, ...] | None,
+    max_bins: int,
+) -> dict[str, tuple[float, ...]]:
+    manual_requested = methods is not None and "manual" in methods
+    if value is not None and not isinstance(value, Mapping):
+        raise FeatureError("manual_breakpoints must be a feature-to-array mapping")
+    provided = {} if value is None else dict(value)
+    if any(not isinstance(feature, str) or not feature for feature in provided):
+        raise FeatureError(
+            "manual_breakpoints keys must be requested numeric feature names"
+        )
+    if not manual_requested:
+        if provided:
+            raise FeatureError(
+                "manual_breakpoints are only allowed when manual is requested"
+            )
+        return {}
+
+    numeric_features = tuple(
+        feature for feature in features if feature_types[feature] == "numeric"
+    )
+    if not numeric_features:
+        if provided:
+            raise FeatureError(
+                "manual_breakpoints contains an unknown or non-numeric feature"
+            )
+        return {}
+    if not provided:
+        raise FeatureError(
+            "manual_breakpoints must provide at least one requested numeric feature"
+        )
+    extras = sorted(set(provided) - set(numeric_features))
+    if extras:
+        raise FeatureError(
+            "manual_breakpoints contains an unknown or non-numeric feature: "
+            + ", ".join(extras)
+        )
+    return {
+        feature: _normalize_manual_breakpoint_values(
+            provided[feature],
+            feature=feature,
+            max_bins=max_bins,
+        )
+        for feature in numeric_features
+        if feature in provided
+    }
+
+
+def _normalize_manual_breakpoint_values(
+    value: object,
+    *,
+    feature: str,
+    max_bins: int,
+) -> tuple[float, ...]:
+    if isinstance(value, str | bytes | bytearray) or not isinstance(value, Sequence):
+        raise FeatureError(
+            f"manual_breakpoints for {feature} must be an ordered array"
+        )
+    if not value:
+        raise FeatureError(
+            f"manual_breakpoints for {feature} requires at least one breakpoint"
+        )
+    if len(value) + 1 > max_bins:
+        raise FeatureError(
+            f"manual_breakpoints for {feature} exceed the configured bin budget"
+        )
+    normalized: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, Real):
+            raise FeatureError(
+                f"manual_breakpoints for {feature} must contain finite numbers"
+            )
+        if isinstance(item, (int, np.integer)) and abs(int(item)) > _MAX_SAFE_JSON_INTEGER:
+            raise FeatureError(
+                f"manual_breakpoints for {feature} exceed exact numeric precision"
+            )
+        number = float(item)
+        if not math.isfinite(number):
+            raise FeatureError(
+                f"manual_breakpoints for {feature} must contain finite numbers"
+            )
+        normalized.append(number)
+    if any(left >= right for left, right in zip(normalized, normalized[1:])):
+        raise FeatureError(
+            f"manual_breakpoints for {feature} must be strictly increasing and unique"
+        )
+    return tuple(normalized)
+
+
 def _binary_target(series: pd.Series, name: str) -> np.ndarray:
     values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
     if not np.all(np.isfinite(values)) or not np.all(np.isin(values, [0, 1])):
@@ -1002,4 +1153,4 @@ def _assert_finite_json(value: Any, *, path: str = "result") -> None:
     raise FeatureError(f"{path} contains a non-JSON value")
 
 
-__all__ = ["SCHEMA_VERSION", "analyze_univariate"]
+__all__ = ["MANUAL_SCHEMA_VERSION", "SCHEMA_VERSION", "analyze_univariate"]

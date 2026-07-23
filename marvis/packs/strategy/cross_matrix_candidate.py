@@ -31,9 +31,20 @@ from marvis.packs.strategy.errors import StrategyError
 
 
 CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION = "strategy.cross-matrix-candidate-asset.v1"
+CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION = (
+    "strategy.cross-matrix-candidate-asset.v2"
+)
 CROSS_MATRIX_MEASUREMENT_SCHEMA_VERSION = "strategy.cross-matrix-measurement.v1"
 CROSS_MATRIX_CANDIDATE_ASSET_TYPE = "cross_matrix"
 CROSS_MATRIX_CANDIDATE_ASSET_PRODUCER_VERSION = "strategy.cross-matrix-candidate-asset/1"
+CROSS_MATRIX_CANDIDATE_ASSET_V2_PRODUCER_VERSION = (
+    "strategy.cross-matrix-candidate-asset/2"
+)
+_UNIVARIATE_V1_SCHEMA_VERSION = "univariate-analysis-result.v1"
+_UNIVARIATE_V2_SCHEMA_VERSION = "univariate-analysis-result.v2"
+_UNIVARIATE_V1_PRODUCER_VERSION = "strategy.univariate-candidate/1"
+_UNIVARIATE_V2_PRODUCER_VERSION = "strategy.univariate-candidate/2"
+_MAX_AXIS_BINS = 20
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _LIFECYCLE = {
@@ -49,12 +60,13 @@ _TOP_FIELDS = frozenset(
     }
 )
 _BODY_FIELDS = _TOP_FIELDS - {"asset_id", "asset_hash"}
-_PARENT_FIELDS = frozenset(
+_PARENT_V1_FIELDS = frozenset(
     {
         "candidate_id", "evidence_hash", "identity", "target_col", "row_count",
         "target_definition", "smoothing",
     }
 )
+_PARENT_V2_FIELDS = _PARENT_V1_FIELDS | frozenset({"analysis_schema_version"})
 _PARENT_IDENTITY_FIELDS = frozenset(
     {
         "task_id", "dataset_id", "dataset_content_hash", "workspace_revision",
@@ -65,8 +77,11 @@ _SAMPLE_FIELDS = _PARENT_IDENTITY_FIELDS | frozenset(
     {"sample_context_hash", "target_col", "row_count"}
 )
 _AXIS_SPEC_FIELDS = frozenset({"feature", "method"})
-_AXIS_FIELDS = frozenset(
+_AXIS_V1_FIELDS = frozenset(
     {"position", "feature", "method", "row_count", "bins", "axis_id", "axis_hash"}
+)
+_AXIS_V2_FIELDS = _AXIS_V1_FIELDS | frozenset(
+    {"manual_breakpoints", "parent_evidence_hash"}
 )
 _BIN_FIELDS = frozenset(
     {
@@ -121,7 +136,7 @@ def build_cross_matrix_candidate_asset(
     parent_evidence: Mapping[str, Any], *, row_axis: Mapping[str, Any],
     column_axis: Mapping[str, Any], sample_identity: Mapping[str, Any],
     measurement: Mapping[str, Any], budget: int,
-    producer_version: str = CROSS_MATRIX_CANDIDATE_ASSET_PRODUCER_VERSION,
+    producer_version: str | None = None,
 ) -> dict[str, Any]:
     """Build a complete Cartesian asset from strict primary measurements.
 
@@ -133,8 +148,23 @@ def build_cross_matrix_candidate_asset(
     """
 
     parent = _parent_from_evidence(parent_evidence)
-    row = _axis_from_evidence(parent_evidence, row_axis, position="row")
-    column = _axis_from_evidence(parent_evidence, column_axis, position="column")
+    schema_version = (
+        CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION
+        if parent.get("analysis_schema_version") == _UNIVARIATE_V2_SCHEMA_VERSION
+        else CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION
+    )
+    row = _axis_from_evidence(
+        parent_evidence,
+        row_axis,
+        position="row",
+        schema_version=schema_version,
+    )
+    column = _axis_from_evidence(
+        parent_evidence,
+        column_axis,
+        position="column",
+        schema_version=schema_version,
+    )
     if row["feature"] == column["feature"]:
         raise CrossMatrixCandidateAssetError("cross-matrix axes must use different features")
     try:
@@ -154,7 +184,7 @@ def build_cross_matrix_candidate_asset(
     matrix = _derive_matrix(axes, measured, parent=parent, sample=sample)
     summary = _derive_summary(measured, matrix=matrix)
     core = {
-        "schema_version": CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "asset_type": CROSS_MATRIX_CANDIDATE_ASSET_TYPE,
         "lifecycle": dict(_LIFECYCLE),
         "parent": parent,
@@ -164,7 +194,16 @@ def build_cross_matrix_candidate_asset(
         "budget": budget_value,
         "matrix": matrix,
         "summary": summary,
-        "producer_version": _producer(producer_version),
+        "producer_version": _producer(
+            (
+                CROSS_MATRIX_CANDIDATE_ASSET_V2_PRODUCER_VERSION
+                if schema_version == CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION
+                else CROSS_MATRIX_CANDIDATE_ASSET_PRODUCER_VERSION
+            )
+            if producer_version is None
+            else producer_version,
+            schema_version=schema_version,
+        ),
     }
     evidence = _derive_candidate_evidence(core)
     body = {**core, "candidate_evidence": evidence}
@@ -242,23 +281,27 @@ def rebuild_cross_matrix_candidate_asset(
 
 def _normalize_body(value: Mapping[str, Any]) -> dict[str, Any]:
     _exact(value, _BODY_FIELDS, "cross-matrix candidate body")
-    if value["schema_version"] != CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION:
+    schema_version = value["schema_version"]
+    if schema_version not in {
+        CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION,
+        CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION,
+    }:
         raise CrossMatrixCandidateAssetError("invalid cross-matrix schema_version")
     if value["asset_type"] != CROSS_MATRIX_CANDIDATE_ASSET_TYPE:
         raise CrossMatrixCandidateAssetError("asset_type must be cross_matrix")
     lifecycle = _lifecycle(value["lifecycle"])
-    parent = _parent_reference(value["parent"])
+    parent = _parent_reference(value["parent"], schema_version=schema_version)
     sample = _sample_identity(value["sample_identity"], parent=parent)
-    axes = _axes(value["axes"], parent=parent)
+    axes = _axes(value["axes"], parent=parent, schema_version=schema_version)
     if axes[0]["feature"] == axes[1]["feature"]:
         raise CrossMatrixCandidateAssetError("cross-matrix axes must use different features")
     measurement = _measurement(value["measurement"], axes=axes, sample=sample, stored=True)
     budget = _budget_object(value["budget"], required=len(axes[0]["bins"]) * len(axes[1]["bins"]))
     matrix = _normalize_matrix(value["matrix"], axes=axes, measurement=measurement, parent=parent, sample=sample)
     summary = _normalize_summary(value["summary"], measurement=measurement, matrix=matrix)
-    producer = _producer(value["producer_version"])
+    producer = _producer(value["producer_version"], schema_version=schema_version)
     core = {
-        "schema_version": CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "asset_type": CROSS_MATRIX_CANDIDATE_ASSET_TYPE,
         "lifecycle": lifecycle,
         "parent": parent,
@@ -284,17 +327,28 @@ def _parent_from_evidence(value: object) -> dict[str, Any]:
     if evidence["candidate_type"] != "univariate":
         raise CrossMatrixCandidateAssetError("parent candidate_type must be univariate")
     analysis = evidence["analysis"]
-    if not isinstance(analysis, Mapping) or analysis.get("schema_version") != "univariate-analysis-result.v1":
-        raise CrossMatrixCandidateAssetError("parent analysis must be univariate-analysis-result.v1")
+    if not isinstance(analysis, Mapping) or analysis.get("schema_version") not in {
+        _UNIVARIATE_V1_SCHEMA_VERSION,
+        _UNIVARIATE_V2_SCHEMA_VERSION,
+    }:
+        raise CrossMatrixCandidateAssetError(
+            "parent analysis must be a supported univariate analysis result"
+        )
+    analysis_schema_version = str(analysis["schema_version"])
     target = analysis.get("target_definition")
     if target != {"good": 0, "bad": 1}:
         raise CrossMatrixCandidateAssetError("parent target_definition must be exact binary good=0/bad=1")
     parameters = analysis.get("parameters")
     if not isinstance(parameters, Mapping):
         raise CrossMatrixCandidateAssetError("parent analysis.parameters must be an object")
+    _require_parent_univariate_version_contract(
+        evidence,
+        analysis=analysis,
+        analysis_schema_version=analysis_schema_version,
+    )
     smoothing = _positive_number(parameters.get("smoothing"), "parent smoothing")
     identity = _parent_identity(evidence["identity"])
-    return {
+    parent = {
         "candidate_id": _identifier(evidence["candidate_id"], "parent candidate_id", prefix="candidate"),
         "evidence_hash": _hash(evidence["evidence_hash"], "parent evidence_hash"),
         "identity": identity,
@@ -303,15 +357,124 @@ def _parent_from_evidence(value: object) -> dict[str, Any]:
         "target_definition": {"good": 0, "bad": 1},
         "smoothing": smoothing,
     }
+    if analysis_schema_version == _UNIVARIATE_V2_SCHEMA_VERSION:
+        parent["analysis_schema_version"] = analysis_schema_version
+    return parent
 
 
-def _parent_reference(value: object) -> dict[str, Any]:
+def _require_parent_univariate_version_contract(
+    evidence: Mapping[str, Any],
+    *,
+    analysis: Mapping[str, Any],
+    analysis_schema_version: str,
+) -> None:
+    features = analysis.get("features")
+    if not _sequence(features):
+        raise CrossMatrixCandidateAssetError(
+            "parent analysis.features must be a non-empty array"
+        )
+    manual_rows: dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
+    for feature_row in features:
+        if not isinstance(feature_row, Mapping):
+            raise CrossMatrixCandidateAssetError(
+                "parent analysis.features must contain objects"
+            )
+        feature = _text(feature_row.get("feature"), "parent analysis feature")
+        methods = feature_row.get("methods")
+        if not _sequence(methods):
+            raise CrossMatrixCandidateAssetError(
+                f"parent analysis feature {feature!r} has no methods"
+            )
+        matches = [
+            method
+            for method in methods
+            if isinstance(method, Mapping) and method.get("method") == "manual"
+        ]
+        if len(matches) > 1:
+            raise CrossMatrixCandidateAssetError(
+                f"parent analysis feature {feature!r} has duplicate manual methods"
+            )
+        if matches:
+            manual_rows[feature] = (feature_row, matches[0])
+    analysis_parameters = analysis["parameters"]
+    generation_parameters = evidence["generation"].get("parameters")
+    if not isinstance(generation_parameters, Mapping):
+        raise CrossMatrixCandidateAssetError(
+            "parent generation.parameters must be an object"
+        )
+    expected_producer_version = (
+        _UNIVARIATE_V2_PRODUCER_VERSION
+        if analysis_schema_version == _UNIVARIATE_V2_SCHEMA_VERSION
+        else _UNIVARIATE_V1_PRODUCER_VERSION
+    )
+    if (
+        generation_parameters.get("analysis_schema_version")
+        != analysis_schema_version
+        or evidence.get("producer_version") != expected_producer_version
+    ):
+        raise CrossMatrixCandidateAssetError(
+            "parent analysis schema and producer versions do not match"
+        )
+    if analysis_schema_version == _UNIVARIATE_V1_SCHEMA_VERSION:
+        if (
+            manual_rows
+            or "manual_breakpoints" in analysis_parameters
+            or "manual_breakpoints" in generation_parameters
+        ):
+            raise CrossMatrixCandidateAssetError(
+                "v1 parent analysis cannot carry manual binning evidence"
+            )
+        return
+
+    analysis_mapping = analysis_parameters.get("manual_breakpoints")
+    generation_mapping = generation_parameters.get("manual_breakpoints")
+    if (
+        not isinstance(analysis_mapping, Mapping)
+        or not analysis_mapping
+        or not isinstance(generation_mapping, Mapping)
+        or not generation_mapping
+    ):
+        raise CrossMatrixCandidateAssetError(
+            "v2 parent must freeze manual_breakpoints in analysis and generation"
+        )
+    if (
+        set(analysis_mapping) != set(manual_rows)
+        or set(generation_mapping) != set(manual_rows)
+    ):
+        raise CrossMatrixCandidateAssetError(
+            "v2 parent manual_breakpoints must exactly match manual method features"
+        )
+    for feature, (feature_row, method_row) in manual_rows.items():
+        breakpoints = _manual_axis_breakpoints(
+            evidence,
+            feature_row=feature_row,
+            method_row=method_row,
+            feature=feature,
+        )
+        _require_manual_bins_match_breakpoints(
+            feature=feature,
+            feature_row=feature_row,
+            method_row=method_row,
+            breakpoints=breakpoints,
+        )
+
+
+def _parent_reference(
+    value: object,
+    *,
+    schema_version: str,
+) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise CrossMatrixCandidateAssetError("parent must be an object")
-    _exact(value, _PARENT_FIELDS, "parent")
+    fields = (
+        _PARENT_V2_FIELDS
+        if schema_version == CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION
+        else _PARENT_V1_FIELDS
+    )
+    _exact(value, fields, "parent")
     if value["target_definition"] != {"good": 0, "bad": 1}:
         raise CrossMatrixCandidateAssetError("parent target_definition changed")
-    return {
+    result = {
         "candidate_id": _identifier(value["candidate_id"], "parent.candidate_id", prefix="candidate"),
         "evidence_hash": _hash(value["evidence_hash"], "parent.evidence_hash"),
         "identity": _parent_identity(value["identity"]),
@@ -320,6 +483,13 @@ def _parent_reference(value: object) -> dict[str, Any]:
         "target_definition": {"good": 0, "bad": 1},
         "smoothing": _positive_number(value["smoothing"], "parent.smoothing"),
     }
+    if schema_version == CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION:
+        if value["analysis_schema_version"] != _UNIVARIATE_V2_SCHEMA_VERSION:
+            raise CrossMatrixCandidateAssetError(
+                "v2 parent analysis_schema_version is invalid"
+            )
+        result["analysis_schema_version"] = _UNIVARIATE_V2_SCHEMA_VERSION
+    return result
 
 
 def _parent_identity(value: object) -> dict[str, Any]:
@@ -367,7 +537,13 @@ def _sample_identity(
     return result
 
 
-def _axis_from_evidence(parent_evidence: Mapping[str, Any], spec: object, *, position: str) -> dict[str, Any]:
+def _axis_from_evidence(
+    parent_evidence: Mapping[str, Any],
+    spec: object,
+    *,
+    position: str,
+    schema_version: str,
+) -> dict[str, Any]:
     if not isinstance(spec, Mapping):
         raise CrossMatrixCandidateAssetError(f"{position}_axis must be an object")
     _exact(spec, _AXIS_SPEC_FIELDS, f"{position}_axis")
@@ -387,9 +563,28 @@ def _axis_from_evidence(parent_evidence: Mapping[str, Any], spec: object, *, pos
     matched_methods = [item for item in methods if isinstance(item, Mapping) and item.get("method") == method]
     if len(matched_methods) != 1 or matched_methods[0].get("status") != "available":
         raise CrossMatrixCandidateAssetError(f"axis method {feature}/{method} must be uniquely available")
-    raw_bins = matched_methods[0].get("bins")
+    matched_method = matched_methods[0]
+    raw_bins = matched_method.get("bins")
     if not _sequence(raw_bins):
         raise CrossMatrixCandidateAssetError(f"axis method {feature}/{method} must have bins")
+    manual_breakpoints = None
+    if method == "manual":
+        manual_breakpoints = _manual_axis_breakpoints(
+            evidence,
+            feature_row=matched_features[0],
+            method_row=matched_method,
+            feature=feature,
+        )
+        _require_manual_bins_match_breakpoints(
+            feature=feature,
+            feature_row=matched_features[0],
+            method_row=matched_method,
+            breakpoints=manual_breakpoints,
+        )
+    elif "manual_breakpoints" in matched_method:
+        raise CrossMatrixCandidateAssetError(
+            f"non-manual axis method {feature}/{method} cannot carry manual_breakpoints"
+        )
     bins = [_bin_from_parent(item, feature=feature, method=method, axis_position=position, position=index, parent_hash=evidence["evidence_hash"]) for index, item in enumerate(raw_bins)]
     source_indexes = [item["source_index"] for item in bins]
     if source_indexes != list(range(len(bins))):
@@ -400,7 +595,204 @@ def _axis_from_evidence(parent_evidence: Mapping[str, Any], spec: object, *, pos
         raise CrossMatrixCandidateAssetError(f"axis {position} source bin conditions must be semantically unique")
     row_count = _positive_int(analysis.get("row_count"), "parent analysis.row_count")
     _conserve_bins(bins, row_count=row_count, name=f"axis {position}")
-    return _derive_axis(position=position, feature=feature, method=method, row_count=row_count, bins=bins)
+    return _derive_axis(
+        position=position,
+        feature=feature,
+        method=method,
+        row_count=row_count,
+        bins=bins,
+        schema_version=schema_version,
+        parent_evidence_hash=evidence["evidence_hash"],
+        manual_breakpoints=manual_breakpoints,
+    )
+
+
+def _manual_axis_breakpoints(
+    evidence: Mapping[str, Any],
+    *,
+    feature_row: Mapping[str, Any],
+    method_row: Mapping[str, Any],
+    feature: str,
+) -> list[float]:
+    if feature_row.get("feature_type") != "numeric":
+        raise CrossMatrixCandidateAssetError(
+            f"manual axis feature {feature!r} must be numeric"
+        )
+    if "manual_breakpoints" not in method_row:
+        raise CrossMatrixCandidateAssetError(
+            f"manual axis {feature!r} must contain manual_breakpoints"
+        )
+    breakpoints = _strict_manual_breakpoints(
+        method_row["manual_breakpoints"],
+        name=f"manual axis {feature!r} manual_breakpoints",
+    )
+    analysis_parameters = evidence["analysis"].get("parameters")
+    generation_parameters = evidence["generation"].get("parameters")
+    for name, parameters in (
+        ("analysis.parameters", analysis_parameters),
+        ("generation.parameters", generation_parameters),
+    ):
+        if not isinstance(parameters, Mapping):
+            raise CrossMatrixCandidateAssetError(f"{name} must be an object")
+        mapping = parameters.get("manual_breakpoints")
+        if not isinstance(mapping, Mapping) or feature not in mapping:
+            raise CrossMatrixCandidateAssetError(
+                f"{name}.manual_breakpoints must bind manual axis {feature!r}"
+            )
+        bound = _strict_manual_breakpoints(
+            mapping[feature],
+            name=f"{name}.manual_breakpoints[{feature!r}]",
+        )
+        if bound != breakpoints:
+            raise CrossMatrixCandidateAssetError(
+                f"{name}.manual_breakpoints changed from the manual method evidence"
+            )
+    return breakpoints
+
+
+def _strict_manual_breakpoints(value: object, *, name: str) -> list[float]:
+    if not _sequence(value):
+        raise CrossMatrixCandidateAssetError(f"{name} must be a non-empty array")
+    if len(value) + 1 > _MAX_AXIS_BINS:
+        raise CrossMatrixCandidateAssetError(
+            f"{name} exceeds the {_MAX_AXIS_BINS}-bin axis budget"
+        )
+    normalized: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, Real):
+            raise CrossMatrixCandidateAssetError(
+                f"{name} must contain finite numbers"
+            )
+        number = float(item)
+        if not math.isfinite(number):
+            raise CrossMatrixCandidateAssetError(
+                f"{name} must contain finite numbers"
+            )
+        normalized.append(number)
+    if any(left >= right for left, right in zip(normalized, normalized[1:])):
+        raise CrossMatrixCandidateAssetError(
+            f"{name} must be strictly increasing and unique"
+        )
+    if _canonical_json(value) != _canonical_json(normalized):
+        raise CrossMatrixCandidateAssetError(
+            f"{name} must already be canonical finite floats"
+        )
+    return normalized
+
+
+def _require_manual_bins_match_breakpoints(
+    *,
+    feature: str,
+    feature_row: Mapping[str, Any],
+    method_row: Mapping[str, Any],
+    breakpoints: Sequence[float],
+) -> None:
+    raw_bins = method_row.get("bins")
+    if not _sequence(raw_bins):
+        raise CrossMatrixCandidateAssetError(
+            f"manual axis {feature!r} must contain bins"
+        )
+    regular = [
+        row
+        for row in raw_bins
+        if isinstance(row, Mapping) and row.get("kind") == "numeric_interval"
+    ]
+    if len(regular) != len(breakpoints) + 1:
+        raise CrossMatrixCandidateAssetError(
+            f"manual axis {feature!r} manual_breakpoints do not match its bins"
+        )
+    raw_sentinels = feature_row.get("sentinel_values")
+    if not isinstance(raw_sentinels, Sequence) or isinstance(
+        raw_sentinels, str | bytes | bytearray
+    ):
+        raise CrossMatrixCandidateAssetError(
+            f"manual axis {feature!r} sentinel_values must be an array"
+        )
+    sentinels: tuple[float, ...] = tuple(
+        _manual_finite_number(
+            item,
+            name=f"manual axis {feature!r} sentinel_values",
+        )
+        for item in raw_sentinels
+    )
+    edges = [-math.inf, *breakpoints, math.inf]
+    for index, row in enumerate(regular):
+        expected = {
+            "index": index,
+            "id": f"regular:{index}",
+            "kind": "numeric_interval",
+            "condition": _manual_numeric_condition(
+                feature,
+                edges,
+                index,
+                sentinels,
+            ),
+            "lower": (
+                None if not math.isfinite(edges[index]) else float(edges[index])
+            ),
+            "upper": (
+                None
+                if not math.isfinite(edges[index + 1])
+                else float(edges[index + 1])
+            ),
+            "include_lower": True,
+            "include_upper": False,
+        }
+        for field, expected_value in expected.items():
+            if _canonical_json(row.get(field)) != _canonical_json(expected_value):
+                raise CrossMatrixCandidateAssetError(
+                    f"manual axis {feature!r} manual_breakpoints do not match "
+                    f"bin {index} {field}"
+                )
+
+
+def _manual_finite_number(value: object, *, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise CrossMatrixCandidateAssetError(f"{name} must contain finite numbers")
+    number = float(value)
+    if not math.isfinite(number):
+        raise CrossMatrixCandidateAssetError(f"{name} must contain finite numbers")
+    return number
+
+
+def _manual_numeric_condition(
+    feature: str,
+    edges: Sequence[float],
+    index: int,
+    sentinels: tuple[float, ...],
+) -> dict[str, Any]:
+    args: list[dict[str, Any]] = []
+    lower = float(edges[index])
+    upper = float(edges[index + 1])
+    if math.isfinite(lower):
+        args.append(_manual_compare(feature, ">=", lower))
+    if math.isfinite(upper):
+        args.append(_manual_compare(feature, "<", upper))
+    if sentinels:
+        args.append(
+            {
+                "op": "compare",
+                "field": feature,
+                "operator": "not_in",
+                "value": list(sentinels),
+                "missing": "no_match",
+            }
+        )
+    if len(args) == 1:
+        return args[0]
+    if not args:
+        return {"op": "is_not_null", "field": feature}
+    return {"op": "and", "args": args}
+
+
+def _manual_compare(feature: str, operator: str, value: float) -> dict[str, Any]:
+    return {
+        "op": "compare",
+        "field": feature,
+        "operator": operator,
+        "value": value,
+        "missing": "no_match",
+    }
 
 
 def _bin_from_parent(value: object, *, feature: str, method: str, axis_position: str, position: int, parent_hash: str) -> dict[str, Any]:
@@ -433,16 +825,49 @@ def _bin_from_parent(value: object, *, feature: str, method: str, axis_position:
     return {**body, "bin_id": bin_id, "bin_hash": _sha256(_canonical_json({**identity, "bin_id": bin_id}))}
 
 
-def _derive_axis(*, position: str, feature: str, method: str, row_count: int, bins: list[dict[str, Any]]) -> dict[str, Any]:
+def _derive_axis(
+    *,
+    position: str,
+    feature: str,
+    method: str,
+    row_count: int,
+    bins: list[dict[str, Any]],
+    schema_version: str,
+    parent_evidence_hash: str | None = None,
+    manual_breakpoints: Sequence[float] | None = None,
+) -> dict[str, Any]:
     body = {"position": position, "feature": feature, "method": method, "row_count": row_count, "bins": bins}
+    if schema_version == CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION:
+        body["parent_evidence_hash"] = _hash(
+            parent_evidence_hash,
+            "axis parent_evidence_hash",
+        )
+        body["manual_breakpoints"] = (
+            None
+            if manual_breakpoints is None
+            else list(manual_breakpoints)
+        )
     axis_id = _stable_id("cross-axis", body)
     return {**body, "axis_id": axis_id, "axis_hash": _sha256(_canonical_json({**body, "axis_id": axis_id}))}
 
 
-def _axes(value: object, *, parent: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _axes(
+    value: object,
+    *,
+    parent: Mapping[str, Any],
+    schema_version: str,
+) -> list[dict[str, Any]]:
     if not _sequence(value) or len(value) != 2:
         raise CrossMatrixCandidateAssetError("axes must contain exactly row and column")
-    axes = [_axis(item, expected_position=position, parent=parent) for item, position in zip(value, ("row", "column"), strict=True)]
+    axes = [
+        _axis(
+            item,
+            expected_position=position,
+            parent=parent,
+            schema_version=schema_version,
+        )
+        for item, position in zip(value, ("row", "column"), strict=True)
+    ]
     if any(axis["row_count"] != parent["row_count"] for axis in axes):
         raise CrossMatrixCandidateAssetError(
             "axis row_count must exactly match parent row_count"
@@ -450,10 +875,21 @@ def _axes(value: object, *, parent: Mapping[str, Any]) -> list[dict[str, Any]]:
     return axes
 
 
-def _axis(value: object, *, expected_position: str, parent: Mapping[str, Any]) -> dict[str, Any]:
+def _axis(
+    value: object,
+    *,
+    expected_position: str,
+    parent: Mapping[str, Any],
+    schema_version: str,
+) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise CrossMatrixCandidateAssetError("axis must be an object")
-    _exact(value, _AXIS_FIELDS, "axis")
+    fields = (
+        _AXIS_V2_FIELDS
+        if schema_version == CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION
+        else _AXIS_V1_FIELDS
+    )
+    _exact(value, fields, "axis")
     if value["position"] != expected_position:
         raise CrossMatrixCandidateAssetError("axes must remain row then column")
     feature = _text(value["feature"], "axis.feature")
@@ -468,9 +904,133 @@ def _axis(value: object, *, expected_position: str, parent: Mapping[str, Any]) -
     if len({item["source_bin_id"] for item in bins}) != len(bins):
         raise CrossMatrixCandidateAssetError("axis source bin ids must be unique")
     _conserve_bins(bins, row_count=row_count, name=f"axis {expected_position}")
-    expected = _derive_axis(position=expected_position, feature=feature, method=method, row_count=row_count, bins=bins)
+    manual_breakpoints = None
+    parent_evidence_hash = None
+    if schema_version == CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION:
+        parent_evidence_hash = _hash(
+            value["parent_evidence_hash"],
+            "axis parent evidence hash",
+        )
+        if not hmac.compare_digest(
+            parent_evidence_hash,
+            parent["evidence_hash"],
+        ):
+            raise CrossMatrixCandidateAssetError(
+                "axis parent evidence hash does not match parent"
+            )
+        if method == "manual":
+            manual_breakpoints = _strict_manual_breakpoints(
+                value["manual_breakpoints"],
+                name="axis.manual_breakpoints",
+            )
+            _require_stored_manual_axis_matches_breakpoints(
+                feature=feature,
+                bins=bins,
+                breakpoints=manual_breakpoints,
+            )
+        elif value["manual_breakpoints"] is not None:
+            raise CrossMatrixCandidateAssetError(
+                "non-manual v2 axis cannot carry manual_breakpoints"
+            )
+    expected = _derive_axis(
+        position=expected_position,
+        feature=feature,
+        method=method,
+        row_count=row_count,
+        bins=bins,
+        schema_version=schema_version,
+        parent_evidence_hash=parent_evidence_hash,
+        manual_breakpoints=manual_breakpoints,
+    )
     _same_identity_hash(value, expected, id_field="axis_id", hash_field="axis_hash", prefix="cross-axis", name="axis")
     return expected
+
+
+def _require_stored_manual_axis_matches_breakpoints(
+    *,
+    feature: str,
+    bins: Sequence[Mapping[str, Any]],
+    breakpoints: Sequence[float],
+) -> None:
+    regular = [row for row in bins if row["kind"] == "numeric_interval"]
+    if len(regular) != len(breakpoints) + 1:
+        raise CrossMatrixCandidateAssetError(
+            "axis.manual_breakpoints do not match stored numeric bins"
+        )
+    sentinels = _manual_condition_sentinels(
+        regular[0]["condition"],
+        feature=feature,
+    )
+    edges = [-math.inf, *breakpoints, math.inf]
+    for index, row in enumerate(regular):
+        if (
+            row["position"] != index
+            or row["source_index"] != index
+            or row["source_bin_id"] != f"regular:{index}"
+        ):
+            raise CrossMatrixCandidateAssetError(
+                "axis.manual_breakpoints do not match stored bin order"
+            )
+        expected_condition = _manual_numeric_condition(
+            feature,
+            edges,
+            index,
+            sentinels,
+        )
+        if _canonical_json(row["condition"]) != _canonical_json(expected_condition):
+            raise CrossMatrixCandidateAssetError(
+                "axis.manual_breakpoints do not match stored bin conditions"
+            )
+
+
+def _manual_condition_sentinels(
+    condition: Mapping[str, Any],
+    *,
+    feature: str,
+) -> tuple[float, ...]:
+    nodes = (
+        condition.get("args")
+        if condition.get("op") == "and"
+        else [condition]
+    )
+    if not isinstance(nodes, Sequence) or isinstance(
+        nodes,
+        str | bytes | bytearray,
+    ):
+        raise CrossMatrixCandidateAssetError(
+            "manual axis condition has an invalid conjunction"
+        )
+    sentinel_nodes = [
+        node
+        for node in nodes
+        if isinstance(node, Mapping)
+        and node.get("op") == "compare"
+        and node.get("field") == feature
+        and node.get("operator") == "not_in"
+    ]
+    if not sentinel_nodes:
+        return ()
+    if len(sentinel_nodes) != 1:
+        raise CrossMatrixCandidateAssetError(
+            "manual axis condition has duplicate sentinel exclusions"
+        )
+    values = sentinel_nodes[0].get("value")
+    if not isinstance(values, Sequence) or isinstance(
+        values,
+        str | bytes | bytearray,
+    ):
+        raise CrossMatrixCandidateAssetError(
+            "manual axis sentinel exclusion must be an array"
+        )
+    normalized = tuple(
+        _manual_finite_number(value, name="manual axis sentinel exclusion")
+        for value in values
+    )
+    if len(set(normalized)) != len(normalized):
+        raise CrossMatrixCandidateAssetError(
+            "manual axis sentinel exclusions must be unique"
+        )
+    return normalized
 
 
 def _stored_bin(value: object, **context: Any) -> dict[str, Any]:
@@ -890,7 +1450,15 @@ def _normalize_summary(value: object, *, measurement: Mapping[str, Any], matrix:
 
 
 def _derive_candidate_evidence(core: Mapping[str, Any]) -> dict[str, Any]:
-    evidence_hash = _sha256(_canonical_json({"schema_version": "strategy.cross-matrix-candidate-evidence.v1", **core}))
+    evidence_schema_version = (
+        "strategy.cross-matrix-candidate-evidence.v2"
+        if core.get("schema_version")
+        == CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION
+        else "strategy.cross-matrix-candidate-evidence.v1"
+    )
+    evidence_hash = _sha256(
+        _canonical_json({"schema_version": evidence_schema_version, **core})
+    )
     return {"candidate_id": "candidate-" + evidence_hash[:32], "evidence_hash": evidence_hash}
 
 
@@ -1054,9 +1622,14 @@ def _lifecycle(value: object) -> dict[str, str]:
     return dict(_LIFECYCLE)
 
 
-def _producer(value: object) -> str:
+def _producer(value: object, *, schema_version: str) -> str:
     producer = _text(value, "producer_version")
-    if producer != CROSS_MATRIX_CANDIDATE_ASSET_PRODUCER_VERSION:
+    expected = (
+        CROSS_MATRIX_CANDIDATE_ASSET_V2_PRODUCER_VERSION
+        if schema_version == CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION
+        else CROSS_MATRIX_CANDIDATE_ASSET_PRODUCER_VERSION
+    )
+    if producer != expected:
         raise CrossMatrixCandidateAssetError("producer_version is unsupported")
     return producer
 
@@ -1182,6 +1755,8 @@ def _object_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 __all__ = [
     "CROSS_MATRIX_CANDIDATE_ASSET_PRODUCER_VERSION",
     "CROSS_MATRIX_CANDIDATE_ASSET_SCHEMA_VERSION",
+    "CROSS_MATRIX_CANDIDATE_ASSET_V2_PRODUCER_VERSION",
+    "CROSS_MATRIX_CANDIDATE_ASSET_V2_SCHEMA_VERSION",
     "CROSS_MATRIX_CANDIDATE_ASSET_TYPE",
     "CROSS_MATRIX_MEASUREMENT_SCHEMA_VERSION",
     "CrossMatrixCandidateAssetError",
