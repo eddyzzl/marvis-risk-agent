@@ -305,6 +305,25 @@ def test_repository_rejects_incomplete_canonical_dsl_columns(
         repo.get_strategy_spec_hash(strategy.id)
 
 
+def test_repository_reads_strategy_binding_from_one_snapshot(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    repo.create_strategy("task-1", strategy)
+
+    snapshot = repo.get_strategy_snapshot(strategy.id)
+
+    assert snapshot is not None
+    assert snapshot["strategy"] == repo.get_strategy(strategy.id)
+    assert snapshot["metadata"] == repo.get_strategy_meta(strategy.id)
+    assert (
+        snapshot["strategy_spec_hash"]
+        == repo.get_strategy_spec_hash(strategy.id)
+    )
+    assert repo.get_strategy_snapshot("missing") is None
+
+
 def test_strategy_repository_round_trips_value_action_output_aliases(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

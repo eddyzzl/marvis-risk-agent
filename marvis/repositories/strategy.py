@@ -415,6 +415,38 @@ class StrategyRepository:
             ).fetchone()
         return None if row is None else _strategy_spec_hash_from_row(row)
 
+    def get_strategy_snapshot(self, strategy_id: str) -> dict[str, Any] | None:
+        """Read definition, lifecycle metadata, and hash from one database row.
+
+        Consumers that bind a plan to a strategy must not combine three
+        independently read snapshots: a concurrent replacement or reassignment
+        could otherwise mix metadata from one state with the definition from
+        another.
+        """
+
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, task_id, strategy_type, version, status, asset_status,
+                       adopted_at, adoption_reason, parent_strategy_id, created_at,
+                       rules_json, score_col, default_decision_json, description,
+                       dsl_json, dsl_schema_version, dsl_content_hash
+                  FROM strategies
+                 WHERE id = ?
+                """,
+                (strategy_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            strategy = _strategy_from_row(row)
+            metadata = _strategy_meta_from_row(row)
+            spec_hash = _strategy_spec_hash_from_row(row)
+        return {
+            "strategy": strategy,
+            "metadata": metadata,
+            "strategy_spec_hash": spec_hash,
+        }
+
     def list_for_task(self, task_id: str) -> list[Strategy]:
         with connect(self.db_path) as conn:
             rows = conn.execute(
