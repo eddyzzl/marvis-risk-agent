@@ -7,6 +7,7 @@ import json
 import math
 from pathlib import Path
 import re
+import sqlite3
 from types import SimpleNamespace
 from typing import Callable
 
@@ -89,6 +90,7 @@ from marvis.agent.workflow_recovery import (
 )
 from marvis.agent_memory.api_support import audit_agent_memory_use_from_store
 from marvis.agent_memory.store import AgentMemoryStore
+from marvis.artifacts.transactional import ArtifactTransactionError
 from marvis.data.backend import DataBackend
 from marvis.data.labels import nan_label_mask
 from marvis.data.registry import DatasetRegistry
@@ -150,6 +152,11 @@ from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
     load_verified_cross_matrix_source_artifact_on_connection,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.model_evidence_tools import (
+    _MAX_UNIVARIATE_SOURCES,
+    _load_candidate_sources,
+    _validate_inputs as _validate_model_evidence_v2_inputs,
+)
 from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignRef,
     load_strategy_sample_design_execution_binding,
@@ -158,13 +165,23 @@ from marvis.packs.strategy.sample_design_tools import (
     SAMPLE_DESIGN_ARTIFACT_KIND,
     SAMPLE_DESIGN_ORIGIN_TOOL,
 )
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+    load_strategy_sample_design_v2_artifacts,
+)
 from marvis.repositories.plans import PlanRepository
 from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestConflictError,
     PendingStrategyRequestNotFoundError,
     PendingStrategyRequestRepository,
 )
-from marvis.repositories.task_artifacts import TaskArtifactRepository
+from marvis.repositories.task_artifacts import (
+    TaskArtifactConflictError,
+    TaskArtifactDataError,
+    TaskArtifactNotFoundError,
+    TaskArtifactRepository,
+)
 from marvis.repositories.strategy_pool import (
     ABSENT_POOL_REVISION,
     ABSENT_POOL_SNAPSHOT_HASH,
@@ -1405,6 +1422,19 @@ def dispatch_driver_turn(
     )
     if dataset_export is not None:
         return dataset_export
+    text = str(user_text or "")
+    if task.task_type == TASK_TYPE_STRATEGY and (
+        utterance_targets_strategy_sample_design(text)
+        or _STRATEGY_MODEL_EVIDENCE_V2_REQUEST_RE.search(text) is not None
+    ):
+        strategy_evidence_request = _maybe_handle_strategy_request_turn(
+            runtime,
+            repo,
+            task,
+            user_text=user_text,
+        )
+        if strategy_evidence_request is not None:
+            return strategy_evidence_request
     # Explicit dataset diagnostics are narrower than the strategy compiler's
     # generic "分析" operation. Give this branch first refusal so phrases such
     # as "分析当前样本" cannot be mistaken for a request to design a strategy.
@@ -1548,10 +1578,10 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
 )
 _STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
-    r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|冻结|探索|整理|梳理|收集|刷新|更新|复盘|盘点|记录|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
+    r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|冻结|探索|整理|梳理|汇总|归集|收集|刷新|更新|复盘|盘点|记录|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
     r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
     r"添加|加入|入池|删除|移除|排序|重排|改为|编译|预览|"
-    r"develop|design|create|build|train|materialize|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
+    r"develop|design|create|build|train|materialize|aggregate|collect|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
     r"adopt|report|monitor|mine|refine|select|merge|add|remove|delete|reorder|compile|preview)",
     re.IGNORECASE,
 )
@@ -1628,6 +1658,48 @@ _PROJECT_CONTEXT_ANSWER_PATTERNS = {
 
 class _StrategySampleDesignRequiredError(StrategySetupError):
     """The current strategy request has no exact mature sample-design binding."""
+
+
+class _StrategyV2EvidenceSetupError(StrategySetupError):
+    """Typed preflight failure for platform-owned V2 evidence discovery."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+_STRATEGY_V2_ARTIFACT_ERRORS = (
+    ArtifactTransactionError,
+    TaskArtifactConflictError,
+    TaskArtifactDataError,
+    TaskArtifactNotFoundError,
+    sqlite3.Error,
+)
+
+
+_STRATEGY_MODEL_EVIDENCE_V2_REQUEST_RE = re.compile(
+    r"(?:Strategy\s+Model\s*Evidence(?:\s+V2)?|"
+    r"Model\s*Evidence(?:\s+V2)?|模型证据(?:\s*V2)?|"
+    r"单变量(?:候选)?证据(?:包|汇总)?|认证单变量(?:候选)?(?:证据|结果))",
+    re.IGNORECASE,
+)
+_STRATEGY_SAMPLE_V2_POLICY = {
+    "minimum_partition_count": 1,
+    "minimum_bad_count": 1,
+    "minimum_label_coverage": 0.8,
+    "minimum_historical_score_coverage": 0.8,
+    "maximum_group_coverage_gap": 0.2,
+    "diagnostic_severities": {
+        "entity_overlap": "fail",
+        "temporal_oot": "fail",
+        "risk_outside_approval": "fail",
+        "maturity": "fail",
+        "label_coverage": "fail",
+        "historical_score_coverage": "warn",
+        "group_coverage_gap": "warn",
+        "sufficiency": "fail",
+    },
+}
 
 
 _STRATEGY_DROP_NAN_CONFIRM_RE = re.compile(
@@ -1869,10 +1941,13 @@ def _maybe_handle_strategy_request_turn(
     preview_error = None
     is_project_context_request = utterance_targets_strategy_project_context(text)
     is_sample_design_request = utterance_targets_strategy_sample_design(text)
+    is_model_evidence_v2_request = (
+        _STRATEGY_MODEL_EVIDENCE_V2_REQUEST_RE.search(text) is not None
+    )
     try:
         preview = (
             None
-            if is_project_context_request
+            if is_project_context_request or is_model_evidence_v2_request
             else (
                 _strategy_pool_impact_dataset_preview(runtime, task)
                 if _STRATEGY_POOL_IMPACT_REQUEST_RE.search(text)
@@ -2073,7 +2148,11 @@ def _prepare_and_run_validated_strategy_request(
         and (
             draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
             or draft.workflow
-            in {"strategy_sample_design", "limit_pricing_matrix"}
+            in {
+                "strategy_sample_design",
+                "strategy_sample_design_v2",
+                "limit_pricing_matrix",
+            }
         )
         and draft.workflow_inputs.get("drop_nan_labels") is True
     ):
@@ -2087,7 +2166,8 @@ def _prepare_and_run_validated_strategy_request(
     )
     is_sample_design = (
         isinstance(draft, StandardWorkflowRequestDraft)
-        and draft.workflow == "strategy_sample_design"
+        and draft.workflow
+        in {"strategy_sample_design", "strategy_sample_design_v2"}
     )
     context = None
     if requires_dataset:
@@ -2189,6 +2269,13 @@ def _prepare_and_run_validated_strategy_request(
             drop_nan_labels=drop_nan_labels,
             expected_pool_binding=expected_pool_binding,
             source_message=source_message,
+        )
+    except _StrategyV2EvidenceSetupError as exc:
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code=exc.code,
+            message=str(exc),
         )
     except _StrategySampleDesignRequiredError as exc:
         return _strategy_request_clarification_response(
@@ -2363,6 +2450,46 @@ def _run_validated_strategy_request(
                 draft,
                 context=context,
                 drop_nan_labels=drop_nan_labels,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_sample_design_v2"
+    ):
+        if context is None:
+            raise StrategySetupError(
+                "V2 策略样本设计需要确认的活动 DataWorkspace 和二元目标列。"
+            )
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_sample_design_v2",
+            slots=_strategy_sample_design_v2_plan_slots(
+                runtime,
+                task,
+                draft,
+                context=context,
+                drop_nan_labels=drop_nan_labels,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_model_evidence_v2"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_model_evidence_v2",
+            slots=_strategy_model_evidence_v2_plan_slots(
+                runtime,
+                task,
+                verify_current=True,
             ),
             auto_start=auto_start,
         )
@@ -2665,10 +2792,24 @@ def _run_confirmed_strategy_request(
             code="strategy_request_stale_confirmation",
             message="这份策略草案已被处理、篡改或失效，请重新描述并确认。",
         )
+    persisted_payload = pending_record.validated_draft
+    persisted_workflow = (
+        persisted_payload.get("workflow")
+        if isinstance(persisted_payload, Mapping)
+        else None
+    )
+    persisted_sample_design = persisted_workflow in {
+        "strategy_sample_design",
+        "strategy_sample_design_v2",
+    }
     preview = None
     preview_error = None
     try:
-        preview = _strategy_dataset_preview(runtime, task)
+        preview = (
+            _strategy_sample_design_dataset_preview(runtime, task)
+            if persisted_sample_design
+            else _strategy_dataset_preview(runtime, task)
+        )
     except StrategySetupError as exc:
         preview_error = str(exc)
     expected_identity = pending_record.dataset_identity
@@ -2689,6 +2830,7 @@ def _run_confirmed_strategy_request(
         pending_record.validated_draft,
         allowed_columns=_strategy_request_allowed_columns(preview),
         target_col=None if preview is None else preview.target_col,
+        allow_legacy_replay=True,
     )
     if compilation.draft is None:
         _invalidate_pending_strategy_request(runtime, task, pending)
@@ -2731,11 +2873,20 @@ def _run_confirmed_strategy_request(
 
     context = None
     if _strategy_request_requires_dataset(draft):
+        is_sample_design = (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow
+            in {"strategy_sample_design", "strategy_sample_design_v2"}
+        )
         try:
-            context = _strategy_dataset_context(
-                runtime,
-                task,
-                require_target=_strategy_request_requires_target(draft),
+            context = (
+                _strategy_sample_design_dataset_context(runtime, task)
+                if is_sample_design
+                else _strategy_dataset_context(
+                    runtime,
+                    task,
+                    require_target=_strategy_request_requires_target(draft),
+                )
             )
         except StrategySetupError as exc:
             _invalidate_pending_strategy_request(runtime, task, pending)
@@ -2750,6 +2901,7 @@ def _run_confirmed_strategy_request(
             task,
             preview=preview,
             context=context,
+            use_sample_design_workspace=is_sample_design,
         ):
             _invalidate_pending_strategy_request(runtime, task, pending)
             return _strategy_request_clarification_response(
@@ -2773,7 +2925,11 @@ def _run_confirmed_strategy_request(
                     message=str(exc),
                     fields=("target_col",),
                 )
-            if n_nan:
+            confirmed_drop_nan = (
+                isinstance(draft, StandardWorkflowRequestDraft)
+                and draft.workflow_inputs.get("drop_nan_labels") is True
+            )
+            if n_nan and not confirmed_drop_nan:
                 _invalidate_pending_strategy_request(runtime, task, pending)
                 return _strategy_nan_label_clarification_response(
                     runtime,
@@ -2822,6 +2978,10 @@ def _run_confirmed_strategy_request(
     )
 
     try:
+        confirmed_drop_nan = (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow_inputs.get("drop_nan_labels") is True
+        )
         return _run_validated_strategy_request(
             runtime,
             repo,
@@ -2829,7 +2989,14 @@ def _run_confirmed_strategy_request(
             draft,
             context=context,
             auto_start=False,
-            drop_nan_labels=False,
+            drop_nan_labels=confirmed_drop_nan,
+        )
+    except _StrategyV2EvidenceSetupError as exc:
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code=exc.code,
+            message=str(exc),
         )
     except _StrategySampleDesignRequiredError as exc:
         try:
@@ -3198,6 +3365,31 @@ def _standard_workflow_request_preflight(
             )
         except StrategySetupError as exc:
             return ("strategy_sample_design_workspace_required", str(exc))
+        return None
+    if draft.workflow == "strategy_sample_design_v2":
+        try:
+            context = _strategy_sample_design_dataset_context(runtime, task)
+            _strategy_sample_design_v2_plan_slots(
+                runtime,
+                task,
+                draft,
+                context=context,
+                drop_nan_labels=bool(
+                    draft.workflow_inputs.get("drop_nan_labels", False)
+                ),
+            )
+        except _StrategyV2EvidenceSetupError as exc:
+            return (exc.code, str(exc))
+        except StrategySetupError as exc:
+            return ("strategy_sample_design_v2_workspace_required", str(exc))
+        return None
+    if draft.workflow == "strategy_model_evidence_v2":
+        try:
+            _strategy_model_evidence_v2_plan_slots(runtime, task)
+        except _StrategyV2EvidenceSetupError as exc:
+            return (exc.code, str(exc))
+        except StrategySetupError as exc:
+            return ("strategy_model_evidence_v2_binding_required", str(exc))
         return None
     if draft.workflow == "strategy_pool_impact":
         try:
@@ -4001,6 +4193,479 @@ def _strategy_sample_design_plan_slots(
         }
     )
     return slots
+
+
+def _strategy_sample_design_v2_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+    *,
+    context,
+    drop_nan_labels: bool,
+) -> dict[str, object]:
+    """Project a strict V2 request into a lossless V1 anchor plus V2 controls."""
+
+    workspace = _require_strategy_sample_design_workspace(runtime, task)
+    if (
+        workspace.active_dataset_id != context.dataset_id
+        or workspace.active_dataset_content_hash != context.dataset_content_hash
+        or workspace.revision != context.workspace_revision
+        or workspace.analysis_generation != context.analysis_generation
+    ):
+        raise StrategySetupError(
+            "活动 DataWorkspace 在 V2 样本设计计划创建前发生变化；"
+            "请基于当前版本重试。"
+        )
+    target_col = workspace.semantic_mapping.target_col
+    semantic_hash = data_semantic_mapping_hash(workspace.semantic_mapping)
+    if (
+        not isinstance(target_col, str)
+        or not target_col
+        or target_col != context.target_col
+        or target_col not in context.columns
+    ):
+        raise StrategySetupError(
+            "V2 策略样本设计只能使用 DataWorkspace 中已确认的二元目标列。"
+        )
+    if (
+        not isinstance(workspace.active_dataset_content_hash, str)
+        or not workspace.active_dataset_content_hash
+        or semantic_hash != context.semantic_mapping_hash
+    ):
+        raise StrategySetupError(
+            "活动 DataWorkspace 的数据 hash 或语义映射已变化；"
+            "请重新发起 V2 样本设计。"
+        )
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    if inputs["approval_population"] != {
+        "inclusion": None,
+        "exclusion": None,
+    } or inputs["risk_population"] != {
+        "inclusion": None,
+        "exclusion": None,
+    }:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_sample_design_v2_native_bootstrap_required",
+            "当前 V1 compatibility anchor 只支持 approval/risk 同 cohort 且"
+            "两个总体均无纳排；本次未创建计划。",
+        )
+    split_col, split_values = _strategy_sample_v2_simple_split_projection(
+        inputs["partitioning"]
+    )
+    fields = inputs["field_bindings"]
+    compatibility_columns = [
+        fields.get("month_field"),
+        fields.get("weight_field"),
+        fields.get("loan_amount_field"),
+        fields.get("overdue_amount_field"),
+    ]
+    present_columns = [
+        str(column) for column in compatibility_columns if column is not None
+    ]
+    if (
+        split_col == target_col
+        or split_col not in context.columns
+        or any(column not in context.columns for column in present_columns)
+        or target_col in present_columns
+        or split_col in present_columns
+        or len(present_columns) != len(set(present_columns))
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_sample_design_v2_native_bootstrap_required",
+            "当前 V2 字段绑定不能无损投影为 V1 compatibility anchor；"
+            "请调整重复/冲突字段，或先完成原生 V2 bootstrap。",
+        )
+
+    maturity = inputs["maturity"]
+    performance = inputs["performance_window"]
+    observation = inputs["observation_window"]
+    scope = (
+        "strategy_development"
+        if maturity["status"] == "confirmed_matured"
+        and performance["status"] == "provided"
+        and observation["status"] == "provided"
+        else "exploration_only"
+    )
+    compatibility_maturity = (
+        "unknown" if maturity["status"] == "unavailable" else maturity["status"]
+    )
+    policy = {
+        **_STRATEGY_SAMPLE_V2_POLICY,
+        "diagnostic_severities": dict(
+            _STRATEGY_SAMPLE_V2_POLICY["diagnostic_severities"]
+        ),
+    }
+    return {
+        "dataset_id": workspace.active_dataset_id,
+        "expected_dataset_content_hash": workspace.active_dataset_content_hash,
+        "workspace_revision": workspace.revision,
+        "workspace_generation": workspace.analysis_generation,
+        "semantic_mapping_hash": semantic_hash,
+        "target_col": target_col,
+        "relationship": "nested_same_cohort",
+        "scope": scope,
+        "policy": policy,
+        "compatibility_performance_window_status": performance["status"],
+        "compatibility_performance_window_days": performance["days"],
+        "compatibility_observation_window_status": observation["status"],
+        "compatibility_observation_start": observation["start"],
+        "compatibility_observation_end": observation["end"],
+        "compatibility_maturity_status": compatibility_maturity,
+        "compatibility_split_col": split_col,
+        "compatibility_development_values": [split_values["development"]],
+        "compatibility_validation_values": [split_values["validation"]],
+        "compatibility_oot_values": [split_values["oot"]],
+        "compatibility_month_col": fields.get("month_field"),
+        "compatibility_weight_col": fields.get("weight_field"),
+        "compatibility_loan_amount_col": fields.get("loan_amount_field"),
+        "compatibility_overdue_amount_col": fields.get("overdue_amount_field"),
+        "target_bad_value": inputs["target_bad_value"],
+        "drop_nan_labels": bool(drop_nan_labels),
+        "approval_population": inputs["approval_population"],
+        "risk_population": inputs["risk_population"],
+        "partitioning": inputs["partitioning"],
+        "maturity": maturity,
+        "performance_window": performance,
+        "observation_window": observation,
+        "field_bindings": fields,
+        "historical_score": inputs["historical_score"],
+    }
+
+
+def _strategy_sample_v2_simple_split_projection(
+    partitioning: object,
+) -> tuple[str, dict[str, object]]:
+    if (
+        not isinstance(partitioning, Mapping)
+        or set(partitioning) != {"method", "selectors"}
+        or partitioning.get("method") != "predicate_ast"
+        or not isinstance(partitioning.get("selectors"), Mapping)
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_sample_design_v2_native_bootstrap_required",
+            "当前 compatibility anchor 只支持同一列上的三组简单等值切分；"
+            "本次未创建计划。",
+        )
+    selectors = partitioning["selectors"]
+    if set(selectors) != {"development", "validation", "oot"}:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_sample_design_v2_native_bootstrap_required",
+            "V2 partitioning 必须完整包含 development、validation 和 OOT。",
+        )
+    columns: list[str] = []
+    values: dict[str, object] = {}
+    for partition in ("development", "validation", "oot"):
+        predicate = selectors[partition]
+        if (
+            not isinstance(predicate, Mapping)
+            or set(predicate) != {"op", "left", "right"}
+            or predicate.get("op") != "eq"
+            or not isinstance(predicate.get("left"), Mapping)
+            or set(predicate["left"]) != {"column"}
+            or not isinstance(predicate.get("right"), Mapping)
+            or set(predicate["right"]) != {"literal"}
+        ):
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_sample_design_v2_native_bootstrap_required",
+                "当前 compatibility anchor 只支持 column == literal 的简单切分；"
+                "本次未创建计划。",
+            )
+        column = predicate["left"]["column"]
+        literal = predicate["right"]["literal"]
+        if not isinstance(column, str) or not column or literal is None:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_sample_design_v2_native_bootstrap_required",
+                "V2 compatibility 切分列与三个切分值必须完整。",
+            )
+        columns.append(column)
+        values[partition] = literal
+    if len(set(columns)) != 1 or len(
+        {json.dumps(value, sort_keys=True, ensure_ascii=False) for value in values.values()}
+    ) != 3:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_sample_design_v2_native_bootstrap_required",
+            "V2 compatibility 切分必须使用同一列上的三个互异标量值。",
+        )
+    return columns[0], values
+
+
+def _strategy_model_evidence_v2_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    *,
+    verify_current: bool = False,
+) -> dict[str, object]:
+    """Discover and live-authenticate task-owned V2 sample/candidate evidence."""
+
+    read_runtime = _strategy_v2_read_runtime(runtime)
+    artifacts = _strategy_v2_artifact_snapshot(
+        read_runtime,
+        task_id=task.id,
+    )
+    registry_token = _strategy_v2_registry_token(artifacts)
+    sample_binding = _latest_verified_strategy_sample_design_v2_binding(
+        read_runtime,
+        task_id=task.id,
+        artifacts=artifacts,
+    )
+    design = sample_binding.bundle["sample_design"]
+    identity = design["identity"]
+    dataset_ref = identity["dataset_ref"]
+    workspace_ref = identity["workspace_ref"]
+    legacy_ref = design["compatibility"]["legacy_development_ref"]
+    candidate_requests: list[dict[str, str]] = []
+    for artifact in artifacts:
+        provenance = artifact.get("provenance")
+        if (
+            artifact.get("kind") != "strategy_candidate_json"
+            or artifact.get("origin_tool")
+            != "strategy.analyze_univariate_candidates"
+            or not isinstance(provenance, Mapping)
+        ):
+            continue
+        generation = provenance.get("generation_parameters")
+        if (
+            provenance.get("dataset_id") != dataset_ref["dataset_id"]
+            or provenance.get("dataset_content_hash") != dataset_ref["content_hash"]
+            or provenance.get("workspace_revision") != workspace_ref["revision"]
+            or provenance.get("workspace_generation") != workspace_ref["generation"]
+            or provenance.get("semantic_mapping_hash")
+            != workspace_ref["semantic_mapping_hash"]
+        ):
+            continue
+        if not isinstance(generation, Mapping):
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_model_evidence_v2_candidate_invalid",
+                "一份属于最新 StrategySampleDesign V2 快照的单变量候选"
+                "缺少完整 generation provenance；本次未创建计划。",
+            )
+        try:
+            source_legacy_ref = StrategySampleDesignRef.from_value(
+                generation.get("sample_design_ref")
+            ).to_ref_dict()
+        except StrategyError as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_model_evidence_v2_candidate_invalid",
+                "一份属于最新 StrategySampleDesign V2 快照的单变量候选"
+                "包含损坏或不完整的 sample_design_ref；本次未创建计划。",
+            ) from exc
+        if source_legacy_ref != legacy_ref:
+            continue
+        request = {
+            "artifact_id": artifact.get("id"),
+            "expected_artifact_content_hash": artifact.get("content_hash"),
+            "expected_candidate_id": provenance.get("candidate_id"),
+            "expected_evidence_hash": provenance.get("evidence_hash"),
+        }
+        if not all(isinstance(value, str) and value for value in request.values()):
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_model_evidence_v2_candidate_invalid",
+                "一份属于最新 StrategySampleDesign V2 快照的单变量候选"
+                "缺少 artifact、candidate 或 evidence 身份；本次未创建计划。",
+            )
+        candidate_requests.append(request)
+
+    if not candidate_requests:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_model_evidence_v2_candidate_required",
+            "当前任务没有与最新 StrategySampleDesign V2 严格兼容且通过"
+            " live loader 认证的单变量候选证据；请先运行单变量分析。",
+        )
+    candidate_requests.sort(
+        key=lambda item: (item["expected_candidate_id"], item["artifact_id"])
+    )
+    candidate_ids = [item["expected_candidate_id"] for item in candidate_requests]
+    artifact_ids = [item["artifact_id"] for item in candidate_requests]
+    if len(set(candidate_ids)) != len(candidate_ids) or len(
+        set(artifact_ids)
+    ) != len(artifact_ids):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_model_evidence_v2_duplicate_sources",
+            "兼容的单变量证据存在重复 candidate 或 artifact 身份；"
+            "平台不会猜测或重复归集。",
+        )
+    if len(candidate_requests) > _MAX_UNIVARIATE_SOURCES:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_model_evidence_v2_candidate_budget_exceeded",
+            "与最新 StrategySampleDesign V2 兼容的单变量候选数量超过"
+            f"单次全局来源上限（{_MAX_UNIVARIATE_SOURCES}）；"
+            "请先缩小候选范围。",
+        )
+    sample_design_ref = {
+        "membership_artifact_id": sample_binding.membership_artifact_id,
+        "expected_membership_artifact_content_hash": (
+            sample_binding.membership_artifact_content_hash
+        ),
+        "bundle_artifact_id": sample_binding.bundle_artifact_id,
+        "expected_bundle_artifact_content_hash": (
+            sample_binding.bundle_artifact_content_hash
+        ),
+        "expected_bundle_id": sample_binding.bundle["bundle_id"],
+        "expected_sample_design_id": design["sample_design_id"],
+        "expected_sample_design_content_hash": design["content_hash"],
+    }
+    try:
+        _validate_model_evidence_v2_inputs(
+            {
+                "sample_design_ref": sample_design_ref,
+                "univariate_sources": candidate_requests,
+            }
+        )
+        _load_candidate_sources(
+            read_runtime,
+            task_id=task.id,
+            requests=candidate_requests,
+            sample_binding=sample_binding,
+        )
+    except (StrategyError, *_STRATEGY_V2_ARTIFACT_ERRORS) as exc:
+        # Validate and authenticate the entire source set in one batch.  This
+        # preserves global count/duplicate/JSON and cumulative file-byte
+        # budgets instead of resetting a budget for every candidate.
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_model_evidence_v2_candidate_invalid",
+            "一份或多份声称与最新 StrategySampleDesign V2 兼容的单变量候选"
+            "未通过全局来源预算、文件、hash、路径、provenance 或 task "
+            "所有权复核；本次未创建计划。",
+        ) from exc
+    if verify_current:
+        current_artifacts = _strategy_v2_artifact_snapshot(
+            read_runtime,
+            task_id=task.id,
+        )
+        if _strategy_v2_registry_token(current_artifacts) != registry_token:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_model_evidence_v2_registry_changed",
+                "StrategySampleDesign V2 或单变量候选 registry 在计划创建前"
+                "发生变化；平台已冻结本次计划创建，请基于最新证据重试。",
+            )
+    return {
+        "sample_design_ref": sample_design_ref,
+        "univariate_sources": candidate_requests,
+    }
+
+
+def _strategy_v2_read_runtime(runtime: DriverTurnRuntime) -> SimpleNamespace:
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    return SimpleNamespace(
+        settings=runtime.settings,
+        backend=backend,
+        registry=registry,
+        task_artifacts=TaskArtifactRepository(runtime.settings.db_path),
+    )
+
+
+def _latest_verified_strategy_sample_design_v2_binding(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    artifacts: Sequence[Mapping],
+):
+    # TaskArtifactRepository.list_for_task is deterministic
+    # ORDER BY created_at, id; the final row is therefore the latest published
+    # V2 bundle, and a drifted latest bundle is never bypassed for an older one.
+    bundles = [
+        artifact
+        for artifact in artifacts
+        if artifact.get("kind") == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        and artifact.get("origin_tool") == SAMPLE_DESIGN_V2_ORIGIN_TOOL
+    ]
+    if not bundles:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_model_evidence_v2_sample_required",
+            "当前任务还没有 StrategySampleDesign V2 双总体样本证据；"
+            "请先用自然语言固化 V2 样本设计。",
+        )
+    newest = bundles[-1]
+    provenance = newest.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_model_evidence_v2_sample_invalid",
+            "最新 StrategySampleDesign V2 bundle 缺少完整 provenance，"
+            "本次未创建计划。",
+        )
+    try:
+        return load_strategy_sample_design_v2_artifacts(
+            read_runtime,
+            task_id=task_id,
+            membership_artifact_id=provenance.get("membership_artifact_id"),
+            expected_membership_artifact_content_hash=provenance.get(
+                "membership_artifact_content_hash"
+            ),
+            bundle_artifact_id=newest.get("id"),
+            expected_bundle_artifact_content_hash=newest.get("content_hash"),
+            expected_bundle_id=provenance.get("bundle_id"),
+            expected_sample_design_id=provenance.get("sample_design_id"),
+            expected_sample_design_content_hash=provenance.get(
+                "sample_design_content_hash"
+            ),
+        )
+    except (
+        StrategyError,
+        TypeError,
+        ValueError,
+        *_STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_model_evidence_v2_sample_invalid",
+            "最新 StrategySampleDesign V2 membership/bundle pair 未通过"
+            "文件、registry、provenance 或数据漂移复核；请重新固化样本设计。",
+        ) from exc
+
+
+def _strategy_v2_artifact_snapshot(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+) -> tuple[dict, ...]:
+    """Read one deterministic registry snapshot or expose a governed error."""
+
+    try:
+        return tuple(read_runtime.task_artifacts.list_for_task(task_id))
+    except _STRATEGY_V2_ARTIFACT_ERRORS as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_model_evidence_v2_registry_unavailable",
+            "无法读取当前任务的 StrategySampleDesign V2 artifact registry。",
+        ) from exc
+
+
+def _strategy_v2_registry_token(artifacts: Sequence[Mapping]) -> str:
+    """CAS token for evidence rows relevant to one ModelEvidence V2 plan."""
+
+    relevant = [
+        {
+            "id": artifact.get("id"),
+            "kind": artifact.get("kind"),
+            "content_hash": artifact.get("content_hash"),
+            "origin_tool": artifact.get("origin_tool"),
+            "provenance": artifact.get("provenance"),
+            "created_at": artifact.get("created_at"),
+        }
+        for artifact in artifacts
+        if (
+            artifact.get("kind") == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+            and artifact.get("origin_tool") == SAMPLE_DESIGN_V2_ORIGIN_TOOL
+        )
+        or (
+            artifact.get("kind") == "strategy_candidate_json"
+            and artifact.get("origin_tool")
+            == "strategy.analyze_univariate_candidates"
+        )
+    ]
+    try:
+        payload = json.dumps(
+            relevant,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_model_evidence_v2_registry_unavailable",
+            "Strategy ModelEvidence V2 registry snapshot 无法规范化。",
+        ) from exc
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _latest_matching_strategy_sample_design_ref(
@@ -5332,7 +5997,8 @@ def _strategy_nan_label_clarification_response(
     )
     is_sample_design = (
         isinstance(draft, StandardWorkflowRequestDraft)
-        and draft.workflow == "strategy_sample_design"
+        and draft.workflow
+        in {"strategy_sample_design", "strategy_sample_design_v2"}
     )
     refreshed = (
         _strategy_pool_impact_dataset_preview(runtime, task)
@@ -5384,7 +6050,8 @@ def _append_strategy_nan_label_clarification(
     )
     is_sample_design = (
         isinstance(payload, Mapping)
-        and payload.get("workflow") == "strategy_sample_design"
+        and payload.get("workflow")
+        in {"strategy_sample_design", "strategy_sample_design_v2"}
     )
     if is_pool_impact or is_sample_design:
         missing_description = "空标签" if is_sample_design else "空或非有限标签"
@@ -5465,7 +6132,10 @@ def _resume_strategy_after_nan_label_confirmation(
             message="空标签确认缺少已校验策略口径，请重新描述策略请求。",
         )
     is_pool_impact = payload.get("workflow") in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS
-    is_sample_design = payload.get("workflow") == "strategy_sample_design"
+    is_sample_design = payload.get("workflow") in {
+        "strategy_sample_design",
+        "strategy_sample_design_v2",
+    }
     expected_pool_binding = None
     if is_pool_impact:
         expected_pool_binding = state.get("pool_binding")
@@ -5536,6 +6206,7 @@ def _resume_strategy_after_nan_label_confirmation(
         payload,
         allowed_columns=_strategy_request_allowed_columns(preview),
         target_col=preview.target_col,
+        allow_legacy_replay=True,
     )
     if compilation.draft is None:
         return _strategy_request_clarification_response(
@@ -5580,6 +6251,7 @@ def _strategy_request_requires_dataset(
         if draft.workflow in {
             *_STRATEGY_POOL_WORKFLOWS,
             "strategy_project_context",
+            "strategy_model_evidence_v2",
             "automatic_tree_leaf_materialization",
             "cross_matrix_cell_selection",
             "voting_candidate_build",
@@ -5700,6 +6372,7 @@ def _strategy_request_requires_target(
             draft.workflow
             in {
                 "strategy_sample_design",
+                "strategy_sample_design_v2",
                 "univariate_candidate_analysis",
                 "automatic_tree_candidate_build",
                 "cross_matrix_analysis",
@@ -5731,6 +6404,7 @@ def _strategy_request_requires_complete_labels(
             draft.workflow
             in {
                 "strategy_sample_design",
+                "strategy_sample_design_v2",
                 "univariate_candidate_analysis",
                 "automatic_tree_candidate_build",
                 "cross_matrix_analysis",

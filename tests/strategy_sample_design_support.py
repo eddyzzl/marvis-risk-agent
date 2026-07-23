@@ -1,36 +1,23 @@
-"""Reusable real-Agent prerequisite for strategy-development E2E tests."""
+"""Reusable governed sample prerequisite for strategy-development E2E tests."""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from marvis.agent.plan_driver import PlanDriver
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-from marvis.data.workspace import DataSemanticMapping, DataWorkspaceDraft
+from marvis.data.workspace import (
+    DataSemanticMapping,
+    DataWorkspaceDraft,
+    data_semantic_mapping_hash,
+)
 from marvis.db import DatasetRepository, TaskRepository
 from marvis.repositories.data_workspace import DataWorkspaceRepository
-
-
-class _SampleDesignLLM:
-    def __init__(self, workflow_inputs: Mapping[str, object]) -> None:
-        self.workflow_inputs = dict(workflow_inputs)
-        self.calls: list[dict] = []
-
-    def complete(self, **kwargs) -> str:
-        self.calls.append(kwargs)
-        return json.dumps(
-            {
-                "request_kind": "standard_workflow",
-                "workflow": "strategy_sample_design",
-                "workflow_inputs": self.workflow_inputs,
-            },
-            ensure_ascii=False,
-        )
 
 
 def _ensure_active_data_workspace(client: TestClient, task_id: str) -> str:
@@ -120,12 +107,18 @@ def materialize_mature_strategy_sample_design(
     drop_nan_labels: bool = False,
     optional_columns: Mapping[str, str | None] | None = None,
 ) -> dict[str, str]:
-    """Materialize one mature task-owned design through the real NL workflow.
+    """Materialize one mature legacy anchor through its governed template.
 
-    Conventional month/weight/amount columns are included when present. Tests
-    may override or disable each optional binding through ``optional_columns``.
+    Fresh natural-language requests now use ``strategy_sample_design_v2`` and
+    may not downgrade to the legacy single-population workflow.  Older
+    downstream E2E cases still need the compatibility anchor they were written
+    against, so this fixture starts that trusted template directly instead of
+    teaching a fake LLM to emit a fresh, now-retired request.  Conventional
+    month/weight/amount columns are included when present. Tests may override
+    or disable each optional binding through ``optional_columns``.
     """
 
+    del monkeypatch  # retained in the fixture signature for existing call sites
     expected_dataset_id = _ensure_active_data_workspace(client, task_id)
     workspace_response = client.get(f"/api/tasks/{task_id}/data-workspace")
     assert workspace_response.status_code == 200, workspace_response.text
@@ -167,42 +160,48 @@ def materialize_mature_strategy_sample_design(
         "maturity_status": "confirmed_matured",
         "drop_nan_labels": drop_nan_labels,
     }
-    clauses = [
-        "固化策略样本设计",
-        "表现窗 90 天",
-        "观察窗 2025-01-01 至 2025-12-31",
-        "成熟度已确认成熟",
-        "1 代表坏样本",
-    ]
-    labels = {
-        "month_col": "月份列",
-        "weight_col": "权重列",
-        "loan_amount_col": "放款金额列",
-        "overdue_amount_col": "逾期金额列",
-    }
     for field, column in selected_optional.items():
         if column is not None:
             workflow_inputs[field] = column
-            clauses.append(f"{labels[field]} {column}")
-    clauses.append("丢弃空标签" if drop_nan_labels else "保留空标签")
-
-    llm = _SampleDesignLLM(workflow_inputs)
-    monkeypatch.setattr(
-        "marvis.agent.validation_app_service.driver_llm_client",
-        lambda request, task: llm,
+    workspace_record = DataWorkspaceRepository(
+        client.app.state.settings.db_path
+    ).get_or_default(task_id)
+    task = TaskRepository(client.app.state.settings.db_path).get_task(task_id)
+    slots = {
+        "dataset_id": dataset_id,
+        "expected_dataset_content_hash": workspace_record.active_dataset_content_hash,
+        "workspace_revision": workspace_record.revision,
+        "workspace_generation": workspace_record.analysis_generation,
+        "semantic_mapping_hash": data_semantic_mapping_hash(
+            workspace_record.semantic_mapping
+        ),
+        "target_col": task.target_col,
+        **workflow_inputs,
+    }
+    driver = PlanDriver(
+        client.app.state.plan_repo,
+        client.app.state.plan_executor,
+        planner=client.app.state.planner,
+        validator=client.app.state.plan_validator,
+        governance_service=getattr(
+            client.app.state,
+            "governance_service",
+            None,
+        ),
     )
     before_ids = {
         plan["id"]
         for plan in client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     }
-    response = client.post(
-        f"/api/tasks/{task_id}/agent/messages",
-        json={"content": "；".join(clauses) + "。"},
+    started = driver.start(
+        task_id=task_id,
+        template_id="strategy_sample_design",
+        slots=slots,
     )
-    assert response.status_code == 202, response.text
+    driver.resume(plan_id=started.plan_id, user_text="开始")
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     created = [plan for plan in plans if plan["id"] not in before_ids]
-    assert len(created) == 1, response.json()["messages"][-1]["content"]
+    assert len(created) == 1
     plan = created[0]
     assert plan["template_id"] == "strategy_sample_design"
     assert plan["status"] == "done"
@@ -215,7 +214,6 @@ def materialize_mature_strategy_sample_design(
     assert output["bundle"]["sample_design"]["target_definition"][
         "drop_nan_labels"
     ] is drop_nan_labels
-    assert len(llm.calls) == 1
     return {
         "artifact_id": output["artifact"]["artifact_id"],
         "artifact_content_hash": output["artifact"]["content_hash"],
