@@ -140,7 +140,7 @@ def test_automatic_tree_apply_compiles_one_exact_asset_and_explicit_columns() ->
     assert result.draft.to_dict() == reply
     assert len(llm.calls) == 1
     call = llm.calls[0]
-    assert call["prompt_version"] == 27
+    assert call["prompt_version"] == 30
     assert "automatic_tree_apply" in call["system_prompt"]
     assert "tree_asset_id" in call["system_prompt"]
     assert "artifact hash" in call["system_prompt"]

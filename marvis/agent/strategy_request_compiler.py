@@ -20,6 +20,7 @@ from typing import Any
 import unicodedata
 
 from marvis.agent.json_reply import load_json_object
+from marvis.data.predicate_ast import PredicateAstError, canonicalize_predicate
 from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 from marvis.packs.strategy.candidate_design import (
     CANDIDATE_DESIGN_SCHEMA_VERSION,
@@ -57,9 +58,10 @@ STRATEGY_REQUEST_KINDS = (
     "strategy_lifecycle",
     "standard_workflow",
 )
-STANDARD_STRATEGY_WORKFLOWS = (
+FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_project_context",
-    "strategy_sample_design",
+    "strategy_sample_design_v2",
+    "strategy_model_evidence_v2",
     "profit_calc",
     "roll_rate_matrix",
     "limit_pricing_matrix",
@@ -78,6 +80,16 @@ STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_pool_compile",
     "strategy_pool_impact",
 )
+LEGACY_REPLAY_STANDARD_STRATEGY_WORKFLOWS = (
+    "strategy_sample_design",
+)
+REPLAYABLE_STANDARD_STRATEGY_WORKFLOWS = (
+    *FRESH_STANDARD_STRATEGY_WORKFLOWS,
+    *LEGACY_REPLAY_STANDARD_STRATEGY_WORKFLOWS,
+)
+# Backward-compatible public name: this is intentionally the fresh-emittable
+# surface.  Persisted legacy requests must opt into the replay enum explicitly.
+STANDARD_STRATEGY_WORKFLOWS = FRESH_STANDARD_STRATEGY_WORKFLOWS
 
 _PROJECT_CONTEXT_SUBJECT_RE = re.compile(
     r"(?:策略)?项目(?:上下文|现状|背景|情况)|当前项目(?:现状|情况)|"
@@ -180,6 +192,58 @@ _SAMPLE_DESIGN_PLATFORM_CONTROL_RE = re.compile(
     r"语义(?:映射)?\s*(?:hash|哈希)|目标列",
     re.IGNORECASE,
 )
+_SAMPLE_DESIGN_V2_PLATFORM_CONTROL_RE = re.compile(
+    r"\b(?:legacy_sample_design_ref|relationship|scope|policy|dataset_id|"
+    r"expected_[a-z0-9_]*hash|workspace_(?:revision|generation)|"
+    r"analysis_generation|semantic_mapping_hash|target_col|artifact(?:_id)?|"
+    r"sample_design_(?:id|ref)|membership_(?:id|ref)|bundle_(?:id|ref)|"
+    r"content_hash|request_hash)\b|"
+    r"(?:数据集|样本|工件|产物|bundle|membership)\s*(?:ID|id|hash|哈希|引用)|"
+    r"工作区\s*(?:revision|generation|版本|代次)|策略样本(?:设计)?\s*(?:ID|id|引用)|"
+    r"(?:诊断)?策略\s*(?:policy|政策)|(?:分析)?范围\s*(?:scope|策略)",
+    re.IGNORECASE,
+)
+_MODEL_EVIDENCE_SUBJECT_RE = re.compile(
+    r"(?:Model\s*Evidence|模型证据|单变量(?:候选)?证据(?:包|汇总)?|"
+    r"认证单变量(?:候选)?(?:证据|结果))",
+    re.IGNORECASE,
+)
+_MODEL_EVIDENCE_ACTION_RE = re.compile(
+    r"(?:汇总|归集|物化|固化|生成|创建|整理|materialize|aggregate|collect|build|create)",
+    re.IGNORECASE,
+)
+_MODEL_EVIDENCE_CHAIN_RE = re.compile(
+    r"(?:训练(?:模型)?|建模|模型对比|比较模型|模型比较|逐月|月度|OOT|时间外|"
+    r"验证模型|模型验证|生成报告|形成报告|出报告|部署|投产|上线|采纳)|"
+    r"(?<![A-Za-z0-9_])(?:train(?:ing)?|model\s+comparison|compare\s+models?|"
+    r"monthly|out[-_\s]*of[-_\s]*time|validation|report|deploy|production|adopt)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_MODEL_EVIDENCE_NONCOMMAND_RE = re.compile(
+    r"[?？]|(?:能否|可否|是否|有没有|有无|可以吗|能不能|如何|怎么|怎样|假设|假如|如果|"
+    r"未来|将来|以后|稍后|明天|下周|下月)|"
+    r"(?<![A-Za-z0-9_])(?:can\s+you|could\s+you|would\s+you|what\s+if|"
+    r"how\s+to|in\s+the\s+future|later|tomorrow|next\s+(?:week|month))"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_MODEL_EVIDENCE_PLATFORM_CONTROL_RE = re.compile(
+    r"\b(?:artifact_id|candidate_id|evidence_hash|content_hash|sample_design_ref|"
+    r"membership_artifact_id|bundle_artifact_id|expected_[a-z0-9_]*(?:hash|id))\b|"
+    r"(?:工件|候选|证据|样本设计|bundle|membership)\s*(?:ID|id|hash|哈希|引用)",
+    re.IGNORECASE,
+)
+_SAMPLE_V2_POPULATION_ROLE_RE = re.compile(
+    r"(?:审批(?:总体|样本)|approval\s+population|"
+    r"风险(?:总体|样本)|risk\s+population)",
+    re.IGNORECASE,
+)
+_SAMPLE_V2_POPULATION_DIRECTION_RE = re.compile(
+    r"(?P<exclusion>排除|剔除|不纳入|exclusion|exclude)"
+    r"|(?P<inclusion>(?<!不)纳入|包含|保留|inclusion|include)",
+    re.IGNORECASE,
+)
 _SAMPLE_DESIGN_OTHER_OPERATION_RE = re.compile(
     r"(?:建模|训练模型|评分卡|自动树|决策树|叶节点|策略池|入池|采纳|采用|部署|"
     r"投产|上线|生成报告|形成报告|出报告|模型报告|过滤|筛选|纳入|排除|"
@@ -188,6 +252,15 @@ _SAMPLE_DESIGN_OTHER_OPERATION_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:model(?:ing)?|scorecard|automatic\s+tree|decision\s+tree|"
     r"strategy\s+pool|adopt|deploy|production|report|filter|clean|derive|"
     r"drop\s+rows?|keep\s+only)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_SAMPLE_DESIGN_V2_CHAIN_RE = re.compile(
+    r"(?:建模|训练模型|评分卡|自动树|决策树|叶节点|策略池|入池|采纳|采用|部署|"
+    r"投产|上线|生成报告|形成报告|出报告|模型报告|清洗|派生(?:字段|列|变量)|"
+    r"新增(?:字段|列|变量))|"
+    r"(?<![A-Za-z0-9_])(?:model(?:ing)?|scorecard|automatic\s+tree|decision\s+tree|"
+    r"strategy\s+pool|adopt|deploy|production|report|clean|derive)"
+    r"(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
 UNIVARIATE_BINNING_METHODS = (
@@ -1616,6 +1689,7 @@ _NON_REPAIRABLE_CLARIFICATION_CODES = frozenset(
         "candidate_economics_ambiguous",
         "candidate_economics_incomplete",
         "candidate_requires_observed_economics",
+        "strategy_sample_design_v2_native_bootstrap_required",
         "strategy_request_too_complex",
     }
 )
@@ -2116,13 +2190,19 @@ def validate_strategy_request(
     *,
     allowed_columns: Iterable[str] | None,
     target_col: str | None = None,
+    allow_legacy_replay: bool = False,
 ) -> StrategyRequestCompilation:
-    """Validate an already parsed LLM payload without invoking an LLM."""
+    """Validate an already parsed request without invoking an LLM.
+
+    Fresh callers intentionally cannot emit the retired V1 sample workflow.
+    Only a persistence/recovery boundary may opt into ``allow_legacy_replay``.
+    """
 
     return _validate_payload(
         payload,
         _column_whitelist(allowed_columns),
         target_col=_normalized_target_col(target_col),
+        allow_legacy_replay=allow_legacy_replay,
     ).result
 
 
@@ -2265,7 +2345,12 @@ def _validate_reply(
     if payload is None:
         message = "模型返回的策略草案不是有效 JSON 对象，请重新说明策略请求。"
         return _ValidationOutcome(_clarification(message), False, error or message)
-    return _validate_payload(payload, whitelist, target_col=target_col)
+    return _validate_payload(
+        payload,
+        whitelist,
+        target_col=target_col,
+        allow_legacy_replay=False,
+    )
 
 
 def _validate_payload(
@@ -2273,6 +2358,7 @@ def _validate_payload(
     whitelist: tuple[str, ...],
     *,
     target_col: str | None,
+    allow_legacy_replay: bool,
 ) -> _ValidationOutcome:
     if not isinstance(payload, Mapping):
         message = "策略请求必须是 JSON 对象，请重新说明。"
@@ -2313,6 +2399,7 @@ def _validate_payload(
             payload,
             whitelist,
             target_col=target_col,
+            allow_legacy_replay=allow_legacy_replay,
         )
 
     unexpected = sorted(set(payload) - _LIFECYCLE_DRAFT_FIELDS)
@@ -2412,6 +2499,7 @@ def _validate_standard_workflow_payload(
     whitelist: tuple[str, ...],
     *,
     target_col: str | None,
+    allow_legacy_replay: bool,
 ) -> _ValidationOutcome:
     missing = [
         field for field in ("workflow", "workflow_inputs") if field not in payload
@@ -2419,10 +2507,15 @@ def _validate_standard_workflow_payload(
     if missing:
         return _invalid("标准 Workflow 请求缺少字段：" + "、".join(missing) + "。")
     workflow = payload["workflow"]
-    if not isinstance(workflow, str) or workflow not in STANDARD_STRATEGY_WORKFLOWS:
+    allowed_workflows = (
+        REPLAYABLE_STANDARD_STRATEGY_WORKFLOWS
+        if allow_legacy_replay
+        else FRESH_STANDARD_STRATEGY_WORKFLOWS
+    )
+    if not isinstance(workflow, str) or workflow not in allowed_workflows:
         return _invalid(
             "不支持的标准 Workflow；可选值为："
-            + "、".join(STANDARD_STRATEGY_WORKFLOWS)
+            + "、".join(allowed_workflows)
             + "。"
         )
     raw_inputs = payload["workflow_inputs"]
@@ -2433,6 +2526,14 @@ def _validate_standard_workflow_payload(
     try:
         if workflow == "strategy_project_context":
             normalized = _validate_strategy_project_context_inputs(raw_inputs)
+        elif workflow == "strategy_sample_design_v2":
+            normalized = _validate_strategy_sample_design_v2_inputs(
+                raw_inputs,
+                whitelist,
+                target_col=target_col,
+            )
+        elif workflow == "strategy_model_evidence_v2":
+            normalized = _validate_strategy_model_evidence_v2_inputs(raw_inputs)
         elif workflow == "strategy_sample_design":
             normalized = _validate_strategy_sample_design_inputs(
                 raw_inputs,
@@ -2496,7 +2597,7 @@ def _validate_standard_workflow_payload(
         else:  # pragma: no cover - guarded by STANDARD_STRATEGY_WORKFLOWS
             raise _DraftValidationError(f"不支持的标准 Workflow：{workflow}。")
     except _DraftValidationError as exc:
-        return _invalid(str(exc))
+        return _invalid(str(exc), code=exc.code, fields=exc.fields)
 
     draft = StandardWorkflowRequestDraft(
         workflow=workflow,
@@ -2843,6 +2944,450 @@ def _validate_strategy_sample_design_inputs(
             )
         normalized["drop_nan_labels"] = value
     return normalized
+
+
+def _validate_strategy_sample_design_v2_inputs(
+    inputs: Mapping[str, Any],
+    whitelist: tuple[str, ...],
+    *,
+    target_col: str | None,
+) -> dict[str, Any]:
+    """Validate the user-owned portion of the V2 dual-population request.
+
+    V2 runtime identity, compatibility references, relationship, scope and
+    diagnostic policy are injected later from task context.  The temporary V1
+    anchor can reproduce only one simple three-value split, so unsupported
+    native designs fail with a typed clarification instead of being narrowed.
+    """
+
+    workflow = "strategy_sample_design_v2"
+    allowed = {
+        "target_bad_value",
+        "drop_nan_labels",
+        "approval_population",
+        "risk_population",
+        "partitioning",
+        "maturity",
+        "performance_window",
+        "observation_window",
+        "field_bindings",
+        "historical_score",
+    }
+    unexpected = tuple(sorted(set(inputs) - allowed))
+    if unexpected:
+        raise _DraftValidationError(
+            f"{workflow} workflow_inputs 只能包含用户拥有的样本口径；平台字段不允许："
+            + "、".join(unexpected)
+            + "。",
+            code="strategy_sample_design_v2_platform_binding_forbidden",
+            fields=unexpected,
+        )
+    missing = tuple(sorted(allowed - set(inputs)))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少必需口径：" + "、".join(missing) + "。",
+            fields=missing,
+        )
+
+    bad_value = inputs["target_bad_value"]
+    if isinstance(bad_value, bool) or not isinstance(bad_value, int) or bad_value not in {0, 1}:
+        raise _DraftValidationError(
+            f"{workflow} target_bad_value 必须是整数 0 或 1。",
+            fields=("target_bad_value",),
+        )
+    drop_missing = inputs["drop_nan_labels"]
+    if not isinstance(drop_missing, bool):
+        raise _DraftValidationError(
+            f"{workflow} drop_nan_labels 必须是布尔值。",
+            fields=("drop_nan_labels",),
+        )
+
+    approval = _validate_sample_v2_population(
+        inputs["approval_population"],
+        name="approval_population",
+        whitelist=whitelist,
+        target_col=target_col,
+    )
+    risk = _validate_sample_v2_population(
+        inputs["risk_population"],
+        name="risk_population",
+        whitelist=whitelist,
+        target_col=target_col,
+    )
+    filtered_populations = tuple(
+        name
+        for name, population in (
+            ("approval_population", approval),
+            ("risk_population", risk),
+        )
+        if population["inclusion"] is not None
+        or population["exclusion"] is not None
+    )
+    if filtered_populations:
+        raise _DraftValidationError(
+            "当前 V1 compatibility anchor 只能无损表达 approval/risk 同 cohort"
+            " 且两个总体均无纳排条件；任一总体存在纳排条件都需要先完成原生 V2"
+            " 样本 bootstrap。",
+            code="strategy_sample_design_v2_native_bootstrap_required",
+            fields=filtered_populations,
+        )
+
+    partitioning = _validate_sample_v2_partitioning(
+        inputs["partitioning"],
+        whitelist=whitelist,
+        target_col=target_col,
+    )
+    maturity = _validate_sample_v2_maturity(inputs["maturity"])
+    performance = _validate_sample_v2_performance_window(
+        inputs["performance_window"]
+    )
+    observation = _validate_sample_v2_observation_window(
+        inputs["observation_window"]
+    )
+    if maturity["status"] in {"confirmed_matured", "not_matured"}:
+        if performance["status"] != "provided":
+            raise _DraftValidationError(
+                f"{workflow} 已评估成熟度必须同时提供表现窗。",
+                fields=("maturity", "performance_window"),
+            )
+        if maturity["performance_window_days"] != performance["days"]:
+            raise _DraftValidationError(
+                f"{workflow} maturity 与 performance_window 天数必须一致。",
+                fields=("maturity.performance_window_days", "performance_window.days"),
+            )
+    fields = _validate_sample_v2_field_bindings(
+        inputs["field_bindings"],
+        whitelist=whitelist,
+        target_col=target_col,
+    )
+    if maturity["status"] in {"confirmed_matured", "not_matured"} and fields["time_field"] is None:
+        raise _DraftValidationError(
+            f"{workflow} 已评估成熟度需要 time_field。",
+            fields=("field_bindings.time_field",),
+        )
+    if observation["status"] == "provided" and fields["time_field"] is None:
+        raise _DraftValidationError(
+            f"{workflow} 已提供观察窗需要 time_field。",
+            fields=("field_bindings.time_field",),
+        )
+    historical = _validate_sample_v2_historical_score(
+        inputs["historical_score"],
+        whitelist=whitelist,
+        target_col=target_col,
+    )
+    return {
+        "target_bad_value": bad_value,
+        "drop_nan_labels": drop_missing,
+        "approval_population": approval,
+        "risk_population": risk,
+        "partitioning": partitioning,
+        "maturity": maturity,
+        "performance_window": performance,
+        "observation_window": observation,
+        "field_bindings": fields,
+        "historical_score": historical,
+    }
+
+
+def _validate_strategy_model_evidence_v2_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    if inputs:
+        fields = tuple(sorted(inputs))
+        raise _DraftValidationError(
+            "strategy_model_evidence_v2 workflow_inputs 必须是空对象；"
+            "SampleDesign 与认证单变量候选引用全部由当前 task 绑定。",
+            code="strategy_model_evidence_v2_platform_binding_forbidden",
+            fields=fields,
+        )
+    return {}
+
+
+def _validate_sample_v2_population(
+    value: object,
+    *,
+    name: str,
+    whitelist: tuple[str, ...],
+    target_col: str | None,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {"inclusion", "exclusion"}:
+        raise _DraftValidationError(
+            f"{name} 必须且只能包含 inclusion 与 exclusion。",
+            fields=(name,),
+        )
+    normalized: dict[str, Any] = {}
+    for field in ("inclusion", "exclusion"):
+        predicate = value[field]
+        if predicate is None:
+            normalized[field] = None
+            continue
+        try:
+            canonical = canonicalize_predicate(
+                predicate,
+                whitelist,
+                max_nodes=256,
+                max_depth=12,
+            )
+        except PredicateAstError as exc:
+            raise _DraftValidationError(
+                f"{name}.{field} 不是受支持的严格 predicate AST：{exc}",
+                fields=(f"{name}.{field}",),
+            ) from exc
+        if target_col is not None and target_col in canonical.required_columns:
+            raise _DraftValidationError(
+                f"{name}.{field} 不能用目标列定义样本总体。",
+                fields=(f"{name}.{field}",),
+            )
+        normalized[field] = canonical.canonical
+    return normalized
+
+
+def _validate_sample_v2_partitioning(
+    value: object,
+    *,
+    whitelist: tuple[str, ...],
+    target_col: str | None,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise _DraftValidationError("partitioning 必须是对象。", fields=("partitioning",))
+    method = value.get("method")
+    if method == "time_ranges":
+        _validate_sample_v2_time_ranges(value, whitelist=whitelist, target_col=target_col)
+        raise _DraftValidationError(
+            "当前 V1 compatibility anchor 无法无损表达 time_ranges；"
+            "需要先完成原生 V2 样本 bootstrap。",
+            code="strategy_sample_design_v2_native_bootstrap_required",
+            fields=("partitioning.method",),
+        )
+    if method != "predicate_ast" or set(value) != {"method", "selectors"}:
+        raise _DraftValidationError(
+            "partitioning 必须是严格 predicate_ast 或 time_ranges 对象。",
+            fields=("partitioning",),
+        )
+    selectors = value["selectors"]
+    partition_names = ("development", "validation", "oot")
+    if not isinstance(selectors, Mapping) or set(selectors) != set(partition_names):
+        raise _DraftValidationError(
+            "partitioning.selectors 必须完整包含 development、validation、oot。",
+            fields=("partitioning.selectors",),
+        )
+    normalized: dict[str, Any] = {}
+    columns: list[str] = []
+    values: list[object] = []
+    for partition in partition_names:
+        try:
+            predicate = canonicalize_predicate(
+                selectors[partition],
+                whitelist,
+                max_nodes=256,
+                max_depth=12,
+            ).canonical
+        except PredicateAstError as exc:
+            raise _DraftValidationError(
+                f"partitioning.selectors.{partition} 不是严格 predicate AST：{exc}",
+                fields=(f"partitioning.selectors.{partition}",),
+            ) from exc
+        column, literal = _simple_partition_equality(
+            predicate,
+            name=f"partitioning.selectors.{partition}",
+        )
+        if target_col is not None and column == target_col:
+            raise _DraftValidationError(
+                "partitioning 不能使用目标列。",
+                fields=(f"partitioning.selectors.{partition}",),
+            )
+        normalized[partition] = predicate
+        columns.append(column)
+        values.append(literal)
+    if len(set(columns)) != 1:
+        raise _DraftValidationError(
+            "compatibility anchor 要求三组 partition 使用同一个 split 列。",
+            code="strategy_sample_design_v2_native_bootstrap_required",
+            fields=("partitioning.selectors",),
+        )
+    identities = {_sample_design_value_identity(item) for item in values}
+    if len(identities) != 3:
+        raise _DraftValidationError(
+            "compatibility anchor 要求 development、validation、oot 使用三个互异值。",
+            fields=("partitioning.selectors",),
+        )
+    return {"method": "predicate_ast", "selectors": normalized}
+
+
+def _simple_partition_equality(
+    predicate: Mapping[str, Any],
+    *,
+    name: str,
+) -> tuple[str, object]:
+    if (
+        set(predicate) != {"op", "left", "right"}
+        or predicate.get("op") != "eq"
+        or not isinstance(predicate.get("left"), Mapping)
+        or set(predicate["left"]) != {"column"}
+        or not isinstance(predicate.get("right"), Mapping)
+        or set(predicate["right"]) != {"literal"}
+    ):
+        raise _DraftValidationError(
+            f"{name} 当前必须是 column == literal 的简单等值 predicate。",
+            code="strategy_sample_design_v2_native_bootstrap_required",
+            fields=(name,),
+        )
+    literal = predicate["right"]["literal"]
+    if literal is None or isinstance(literal, Mapping | Sequence) and not isinstance(literal, str):
+        raise _DraftValidationError(
+            f"{name} literal 必须是非空标量。",
+            fields=(name,),
+        )
+    return str(predicate["left"]["column"]), literal
+
+
+def _validate_sample_v2_time_ranges(
+    value: Mapping[str, Any],
+    *,
+    whitelist: tuple[str, ...],
+    target_col: str | None,
+) -> None:
+    if set(value) != {"method", "column", "ranges"}:
+        raise _DraftValidationError("time_ranges 字段不完整。", fields=("partitioning",))
+    column = _workflow_column(value["column"], name="partitioning.column", whitelist=whitelist)
+    if target_col is not None and column == target_col:
+        raise _DraftValidationError("partitioning 不能使用目标列。", fields=("partitioning.column",))
+    ranges = value["ranges"]
+    if not isinstance(ranges, Mapping) or set(ranges) != {"development", "validation", "oot"}:
+        raise _DraftValidationError("time_ranges.ranges 必须完整包含三组。", fields=("partitioning.ranges",))
+    for name, raw in ranges.items():
+        if not isinstance(raw, Mapping) or set(raw) != {"start", "end"}:
+            raise _DraftValidationError(f"partitioning.ranges.{name} 字段无效。")
+        bounds = [_strict_optional_iso_date(raw[field], f"partitioning.ranges.{name}.{field}") for field in ("start", "end")]
+        if bounds == [None, None] or bounds[0] is not None and bounds[1] is not None and bounds[0] > bounds[1]:
+            raise _DraftValidationError(f"partitioning.ranges.{name} 日期范围无效。")
+
+
+def _validate_sample_v2_maturity(value: object) -> dict[str, Any]:
+    fields = {"status", "performance_window_days", "cutoff_date", "reason"}
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise _DraftValidationError("maturity 字段必须完整且精确。", fields=("maturity",))
+    status = value["status"]
+    if status not in {"confirmed_matured", "not_matured", "unknown", "unavailable"}:
+        raise _DraftValidationError("maturity.status 不受支持。", fields=("maturity.status",))
+    if status in {"confirmed_matured", "not_matured"}:
+        days = value["performance_window_days"]
+        if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
+            raise _DraftValidationError("maturity.performance_window_days 必须是正整数。")
+        cutoff = _strict_iso_date(value["cutoff_date"], "maturity.cutoff_date")
+        if status == "confirmed_matured":
+            if value["reason"] is not None:
+                raise _DraftValidationError("confirmed_matured 的 reason 必须为 null。")
+            reason = None
+        else:
+            reason = _required_text(value["reason"], name="maturity.reason")
+        return {"status": status, "performance_window_days": days, "cutoff_date": cutoff, "reason": reason}
+    if value["performance_window_days"] is not None or value["cutoff_date"] is not None:
+        raise _DraftValidationError("unknown/unavailable maturity 的天数与截止日必须为 null。")
+    return {"status": status, "performance_window_days": None, "cutoff_date": None, "reason": _required_text(value["reason"], name="maturity.reason")}
+
+
+def _validate_sample_v2_performance_window(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {"status", "days"}:
+        raise _DraftValidationError("performance_window 字段必须完整且精确。")
+    status = value["status"]
+    if status not in {"provided", "unavailable"}:
+        raise _DraftValidationError("performance_window.status 不受支持。")
+    days = value["days"]
+    if status == "provided":
+        if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
+            raise _DraftValidationError("performance_window.days 必须是正整数。")
+    elif days is not None:
+        raise _DraftValidationError("unavailable performance_window.days 必须为 null。")
+    return {"status": status, "days": days}
+
+
+def _validate_sample_v2_observation_window(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {"status", "start", "end"}:
+        raise _DraftValidationError("observation_window 字段必须完整且精确。")
+    status = value["status"]
+    if status not in {"provided", "unavailable"}:
+        raise _DraftValidationError("observation_window.status 不受支持。")
+    if status == "provided":
+        start = _strict_iso_date(value["start"], "observation_window.start")
+        end = _strict_iso_date(value["end"], "observation_window.end")
+        if start > end:
+            raise _DraftValidationError("observation_window.start 不能晚于 end。")
+    else:
+        if value["start"] is not None or value["end"] is not None:
+            raise _DraftValidationError("unavailable observation_window 边界必须为 null。")
+        start = end = None
+    return {"status": status, "start": start, "end": end}
+
+
+def _validate_sample_v2_field_bindings(
+    value: object,
+    *,
+    whitelist: tuple[str, ...],
+    target_col: str | None,
+) -> dict[str, str | None]:
+    fields = {
+        "entity_field", "time_field", "group_field", "month_field",
+        "weight_field", "loan_amount_field", "overdue_amount_field",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise _DraftValidationError("field_bindings 字段必须完整且精确。", fields=("field_bindings",))
+    normalized: dict[str, str | None] = {}
+    for field in sorted(fields):
+        raw = value[field]
+        if raw is None:
+            normalized[field] = None
+            continue
+        column = _workflow_column(raw, name=f"field_bindings.{field}", whitelist=whitelist)
+        if target_col is not None and column == target_col:
+            raise _DraftValidationError(f"field_bindings.{field} 不能使用目标列。")
+        normalized[field] = column
+    return normalized
+
+
+def _validate_sample_v2_historical_score(
+    value: object,
+    *,
+    whitelist: tuple[str, ...],
+    target_col: str | None,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {"status", "column", "direction", "reason"}:
+        raise _DraftValidationError("historical_score 字段必须完整且精确。")
+    status = value["status"]
+    if status not in {"available", "unavailable", "not_applicable"}:
+        raise _DraftValidationError("historical_score.status 不受支持。")
+    if status == "available":
+        column = _workflow_column(value["column"], name="historical_score.column", whitelist=whitelist)
+        if target_col is not None and column == target_col:
+            raise _DraftValidationError("historical_score.column 不能使用目标列。")
+        direction = value["direction"]
+        if direction not in {"higher_is_riskier", "lower_is_riskier"}:
+            raise _DraftValidationError("historical_score.direction 不受支持。")
+        if value["reason"] is not None:
+            raise _DraftValidationError("available historical_score.reason 必须为 null。")
+        reason = None
+    else:
+        if value["column"] is not None or value["direction"] is not None:
+            raise _DraftValidationError("非 available historical_score 的 column/direction 必须为 null。")
+        column = direction = None
+        reason = _required_text(value["reason"], name="historical_score.reason")
+    return {"status": status, "column": column, "direction": direction, "reason": reason}
+
+
+def _strict_iso_date(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise _DraftValidationError(f"{name} 必须是 YYYY-MM-DD ISO 日期。")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise _DraftValidationError(f"{name} 必须是 YYYY-MM-DD ISO 日期。") from exc
+    if parsed.isoformat() != value:
+        raise _DraftValidationError(f"{name} 必须是 YYYY-MM-DD ISO 日期。")
+    return value
+
+
+def _strict_optional_iso_date(value: object, name: str) -> str | None:
+    return None if value is None else _strict_iso_date(value, name)
 
 
 def _sample_design_value_sequence(
@@ -4900,12 +5445,22 @@ def _ground_refinement_request(
         )
     if utterance_targets_strategy_sample_design(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
-        and draft.workflow == "strategy_sample_design"
+        and draft.workflow == "strategy_sample_design_v2"
     ):
         return _clarification(
-            "原话明确要求固化策略样本设计，只能编译为 strategy_sample_design；"
+            "原话明确要求固化策略样本设计，只能编译为 strategy_sample_design_v2；"
             "不能改路由到建模、建树、Strategy Pool、报告或通用策略生命周期。",
-            code="strategy_sample_design_workflow_required",
+            code="strategy_sample_design_v2_workflow_required",
+            fields=("workflow",),
+        )
+    if _utterance_targets_strategy_model_evidence_v2(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_model_evidence_v2"
+    ):
+        return _clarification(
+            "原话明确要求归集已有认证单变量证据，只能编译为 "
+            "strategy_model_evidence_v2；不能改路由到训练、模型比较、报告或部署。",
+            code="strategy_model_evidence_v2_workflow_required",
             fields=("workflow",),
         )
     if _utterance_targets_automatic_tree_apply(utterance) and not (
@@ -4976,12 +5531,14 @@ def _ground_refinement_request(
         return result
     if draft.workflow == "strategy_project_context":
         return _ground_strategy_project_context_request(utterance, result)
-    if draft.workflow == "strategy_sample_design":
-        return _ground_strategy_sample_design_request(
+    if draft.workflow == "strategy_sample_design_v2":
+        return _ground_strategy_sample_design_v2_request(
             utterance,
             result,
             whitelist=whitelist,
         )
+    if draft.workflow == "strategy_model_evidence_v2":
+        return _ground_strategy_model_evidence_v2_request(utterance, result)
     if draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS:
         return _ground_strategy_pool_impact_request(
             utterance,
@@ -5250,6 +5807,36 @@ def utterance_targets_strategy_sample_design(utterance: str) -> bool:
     return False
 
 
+def _utterance_targets_strategy_model_evidence_v2(utterance: str) -> bool:
+    historical_or_negated_action = re.compile(
+        r"(?:昨天|之前|此前|过去|上次|历史上|曾|曾经|已经|已|"
+        r"未|没有|有没有|不要|不用|无需|别|禁止|取消|暂不|先不)\s*$|"
+        r"(?<![A-Za-z0-9_])(?:yesterday|previously|earlier|already|"
+        r"do\s+not|don't|never|cancel)\s*$",
+        re.I,
+    )
+    for clause in _sample_design_clauses(utterance):
+        subjects = tuple(_MODEL_EVIDENCE_SUBJECT_RE.finditer(clause))
+        actions = tuple(_MODEL_EVIDENCE_ACTION_RE.finditer(clause))
+        for action in actions:
+            prefix = clause[max(0, action.start() - 24) : action.start()]
+            if historical_or_negated_action.search(prefix):
+                continue
+            if any(
+                (
+                    action.end() <= subject.start()
+                    and subject.start() - action.end() <= 48
+                )
+                or (
+                    subject.end() <= action.start()
+                    and action.start() - subject.end() <= 32
+                )
+                for subject in subjects
+            ):
+                return True
+    return False
+
+
 def _sample_design_build_intent_negated(utterance: str) -> bool:
     subject = r"(?:(?:策略)?样本(?:设计|边界|方案)|sample(?:\s|-|_)*design)"
     action = (
@@ -5265,6 +5852,655 @@ def _sample_design_build_intent_negated(utterance: str) -> bool:
         re.search(rf"{negation}\s*{action}.{{0,16}}{subject}", clause, re.I)
         or re.search(rf"{negation}\s*{subject}.{{0,12}}{action}", clause, re.I)
         for clause in clauses
+    )
+
+
+def _ground_strategy_sample_design_v2_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+    *,
+    whitelist: tuple[str, ...],
+) -> StrategyRequestCompilation:
+    """Ground every user-owned V2 control before a compatibility plan exists."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if _sample_design_build_intent_negated(utterance):
+        return _clarification(
+            "原话否定或取消了 V2 样本设计固化，本轮不会创建计划。",
+            code="strategy_sample_design_v2_intent_negated",
+            fields=("build_intent",),
+        )
+    if (
+        not utterance_targets_strategy_sample_design(utterance)
+        or _SAMPLE_DESIGN_NONCOMMAND_RE.search(utterance)
+    ):
+        return _clarification(
+            "请用一条当前、肯定式命令说明要固化 V2 策略样本设计；"
+            "问句、假设、历史或未来描述不会被当成立即执行授权。",
+            code="strategy_sample_design_v2_positive_command_required",
+            fields=("build_intent",),
+        )
+    if _sample_design_v2_has_chained_operation(utterance):
+        return _clarification(
+            "本轮只能生成兼容锚点并固化 V2 双总体样本证据；建模、比较、报告、"
+            "Strategy Pool、采纳和部署必须拆成后续请求。",
+            code="strategy_sample_design_v2_single_step_required",
+            fields=("next_action",),
+        )
+    if _SAMPLE_DESIGN_V2_PLATFORM_CONTROL_RE.search(utterance):
+        return _clarification(
+            "legacy ref、relationship、scope、policy、数据身份、workspace 和所有"
+            " artifact/id/hash 均由当前 task 绑定，不能由自然语言注入。",
+            code="strategy_sample_design_v2_platform_binding_forbidden",
+            fields=("platform_binding",),
+        )
+
+    missing: list[str] = []
+    performance = inputs["performance_window"]
+    if not _sample_design_performance_grounded(
+        utterance,
+        status=performance["status"],
+        days=performance["days"],
+    ):
+        missing.append("performance_window")
+    observation = inputs["observation_window"]
+    if not _sample_design_observation_grounded(
+        utterance,
+        status=observation["status"],
+        start=observation["start"],
+        end=observation["end"],
+    ):
+        missing.append("observation_window")
+    maturity = inputs["maturity"]
+    maturity_status_grounded = (
+        _sample_design_maturity_grounded(utterance, maturity["status"])
+        if maturity["status"] != "unavailable"
+        else re.search(
+            r"(?:成熟度|maturity).{0,12}(?:暂时没有|暂无|未提供|不可用|unavailable)|"
+            r"(?:暂时没有|暂无|未提供|不可用|unavailable).{0,12}(?:成熟度|maturity)",
+            utterance,
+            re.I,
+        )
+        is not None
+    )
+    if not maturity_status_grounded:
+        missing.append("maturity.status")
+    maturity_days = maturity["performance_window_days"]
+    if maturity_days is not None and not _sample_v2_maturity_days_grounded(
+        utterance,
+        maturity_days,
+    ):
+        missing.append("maturity.performance_window_days")
+    maturity_cutoff = maturity["cutoff_date"]
+    if maturity_cutoff is not None and not _sample_v2_maturity_cutoff_grounded(
+        utterance,
+        maturity_cutoff,
+    ):
+        missing.append("maturity.cutoff_date")
+    maturity_reason = maturity["reason"]
+    if maturity_reason is not None and not _sample_v2_maturity_reason_grounded(
+        utterance,
+        maturity_reason,
+    ):
+        missing.append("maturity.reason")
+    if not _sample_design_target_bad_value_grounded(
+        utterance,
+        inputs["target_bad_value"],
+    ):
+        missing.append("target_bad_value")
+    if not _sample_v2_drop_policy_grounded(utterance, inputs["drop_nan_labels"]):
+        missing.append("drop_nan_labels")
+
+    for role, labels in (
+        ("approval_population", ("审批总体", "审批样本", "approval population")),
+        ("risk_population", ("风险总体", "风险样本", "risk population")),
+    ):
+        population = inputs[role]
+        if population["inclusion"] is None and population["exclusion"] is None:
+            if not _sample_v2_no_population_filters_grounded(utterance, labels):
+                missing.append(role)
+        else:
+            for field in ("inclusion", "exclusion"):
+                predicate = population[field]
+                if predicate is not None and not _sample_v2_predicate_grounded(
+                    utterance,
+                    predicate,
+                    role_labels=labels,
+                    direction=field,
+                ):
+                    missing.append(f"{role}.{field}")
+
+    selectors = inputs["partitioning"]["selectors"]
+    split_column: str | None = None
+    for partition, labels in (
+        ("development", ("开发", "development", "dev")),
+        ("validation", ("验证", "validation", "valid")),
+        ("oot", ("OOT", "时间外")),
+    ):
+        column, value = _simple_partition_equality(
+            selectors[partition],
+            name=f"partitioning.selectors.{partition}",
+        )
+        split_column = column
+        if not _sample_v2_partition_equality_grounded(
+            utterance,
+            values=[value],
+            labels=labels,
+        ):
+            missing.append(f"partitioning.selectors.{partition}")
+    assert split_column is not None
+    if not _sample_design_column_role_grounded(
+        utterance,
+        column=split_column,
+        labels=("切分列", "拆分列", "split column", "split_col"),
+    ):
+        missing.append("partitioning.column")
+
+    binding_labels = {
+        "entity_field": ("实体字段", "客户字段", "entity field"),
+        "time_field": ("时间字段", "日期字段", "time field"),
+        "group_field": ("分组字段", "群组字段", "group field"),
+        "month_field": ("月份字段", "月度字段", "month field"),
+        "weight_field": ("权重字段", "weight field"),
+        "loan_amount_field": ("放款金额字段", "贷款金额字段", "loan amount field"),
+        "overdue_amount_field": ("逾期金额字段", "overdue amount field"),
+    }
+    for field, labels in binding_labels.items():
+        value = inputs["field_bindings"][field]
+        if value is None:
+            if not _sample_v2_unavailable_role_grounded(utterance, labels):
+                missing.append(f"field_bindings.{field}")
+        elif not _sample_design_column_role_grounded(
+            utterance,
+            column=value,
+            labels=labels,
+        ):
+            missing.append(f"field_bindings.{field}")
+        for candidate in whitelist:
+            if _sample_design_column_role_grounded(
+                utterance,
+                column=candidate,
+                labels=labels,
+            ) and value != candidate:
+                missing.append(f"field_bindings.{field}={candidate}")
+
+    historical = inputs["historical_score"]
+    if not _sample_v2_historical_score_grounded(
+        utterance,
+        historical,
+        whitelist=whitelist,
+    ):
+        missing.append("historical_score")
+    if missing:
+        fields = tuple(dict.fromkeys(missing))
+        return _clarification(
+            "V2 样本设计草案存在无法逐字与原话核对的控制项："
+            + "、".join(fields)
+            + "。平台不会猜测、补写或静默降级。",
+            code="strategy_sample_design_v2_controls_not_grounded",
+            fields=fields,
+        )
+    return result
+
+
+def _ground_strategy_model_evidence_v2_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    if _model_evidence_v2_has_positive_chain(utterance):
+        return _clarification(
+            "当前 ModelEvidence V2 只归集当前 task 中已有的认证单变量候选；"
+            "训练、模型比较、月度/OOT/验证模型、报告、采纳和部署必须拆分并等待对应认证证据。",
+            code="strategy_model_evidence_v2_univariate_only",
+            fields=("requested_evidence",),
+        )
+    if _MODEL_EVIDENCE_PLATFORM_CONTROL_RE.search(utterance):
+        return _clarification(
+            "ModelEvidence 的 SampleDesign、candidate 与 artifact id/hash 全部由当前 task 发现并复核，"
+            "不能由自然语言注入。",
+            code="strategy_model_evidence_v2_platform_binding_forbidden",
+            fields=("task_context",),
+        )
+    if (
+        not _utterance_targets_strategy_model_evidence_v2(utterance)
+        or _MODEL_EVIDENCE_NONCOMMAND_RE.search(utterance)
+    ):
+        return _clarification(
+            "请明确发出一条当前、肯定式命令，只归集已有认证单变量候选为 ModelEvidence V2。",
+            code="strategy_model_evidence_v2_positive_command_required",
+            fields=("build_intent",),
+        )
+    return result
+
+
+def _model_evidence_v2_has_positive_chain(utterance: str) -> bool:
+    """Return true only for a positively requested downstream operation."""
+
+    boundaries = "；;。.!?？\n，,、/"
+    for match in _MODEL_EVIDENCE_CHAIN_RE.finditer(utterance):
+        left = max(utterance.rfind(mark, 0, match.start()) for mark in boundaries) + 1
+        prefix = utterance[left : match.start()]
+        if re.search(
+            r"(?:不需要|不用|暂不|先不|不要|无需|不再|不做|"
+            r"别|禁止|不会|未|没有|并非|而非|不)"
+            r"\s*(?:再|进行|做|生成|形成|输出)?\s*$|"
+            r"(?:(?:do\s+not\s+need\s+to|don't\s+need\s+to|"
+            r"do\s+not|don't|never|without|no)\s+)"
+            r"(?:(?:further\s+)?(?:do|generate|create|run)\s+)?$",
+            prefix,
+            re.I,
+        ):
+            continue
+        return True
+    return False
+
+
+def _sample_design_v2_has_chained_operation(utterance: str) -> bool:
+    for match in _SAMPLE_DESIGN_V2_CHAIN_RE.finditer(utterance):
+        prefix = utterance[max(0, match.start() - 10) : match.start()]
+        if re.search(r"(?:不|不要|无需|不再|别|禁止|not\s+|do\s+not\s+|don't\s+)$", prefix, re.I):
+            continue
+        return True
+    return False
+
+
+def _sample_v2_value_grounded(utterance: str, value: object) -> bool:
+    if isinstance(value, str):
+        return _utterance_contains_token(utterance, value) or value in utterance
+    return re.search(rf"(?<![0-9.]){re.escape(str(value))}(?![0-9.])", utterance) is not None
+
+
+def _sample_v2_drop_policy_grounded(utterance: str, expected: bool) -> bool:
+    true_match = re.search(
+        r"(?:丢弃|排除|剔除|删除).{0,12}(?:NaN|nan|空标签|缺失标签)|"
+        r"(?:drop|exclude).{0,12}(?:nan|missing)\s+labels?",
+        utterance,
+        re.I,
+    )
+    false_match = re.search(
+        r"(?:不丢弃|不排除|保留).{0,12}(?:NaN|nan|空标签|缺失标签)|"
+        r"(?:do\s+not|don't)\s+(?:drop|exclude).{0,12}(?:nan|missing)\s+labels?",
+        utterance,
+        re.I,
+    )
+    return false_match is not None if expected is False else true_match is not None and false_match is None
+
+
+def _sample_v2_no_population_filters_grounded(
+    utterance: str,
+    labels: Sequence[str],
+) -> bool:
+    no_filter = re.compile(
+        r"(?:无|没有|不设|不设置|不使用|无需)\s*(?:任何)?\s*"
+        r"(?:(?:纳排|纳入\s*(?:和|及|或|/)?\s*排除|筛选|过滤)(?:条件)?|"
+        r"(?:额外|附加)?条件)|"
+        r"(?:(?:no|without)\s+(?:population\s+)?filters?|"
+        r"inclusion\s*(?:=|:)?\s*(?:none|null)\s*(?:and|,|，|、|/)\s*"
+        r"exclusion\s*(?:=|:)?\s*(?:none|null))",
+        re.I,
+    )
+    positive_filter = re.compile(
+        r"(?:纳入|包含|保留|排除|剔除|不纳入|inclusion|include|"
+        r"exclusion|exclude).{0,40}"
+        r"(?:不等于|等于|不为|大于等于|小于等于|大于|小于|"
+        r"!=|<>|>=|<=|(?<![<>!=])=(?!=)|\b(?:eq|ne|gt|gte|lt|lte)\b)",
+        re.I,
+    )
+    return any(
+        no_filter.search(segment) is not None
+        and positive_filter.search(segment) is None
+        for segment in _sample_v2_role_owned_segments(utterance, labels)
+    )
+
+
+def _sample_v2_predicate_grounded(
+    utterance: str,
+    predicate: object,
+    *,
+    role_labels: Sequence[str],
+    direction: str,
+) -> bool:
+    if direction not in {"inclusion", "exclusion"}:
+        return False
+    for role_segment in _sample_v2_role_owned_segments(utterance, role_labels):
+        markers = tuple(_SAMPLE_V2_POPULATION_DIRECTION_RE.finditer(role_segment))
+        for index, marker in enumerate(markers):
+            if marker.lastgroup != direction:
+                continue
+            end = (
+                markers[index + 1].start()
+                if index + 1 < len(markers)
+                else len(role_segment)
+            )
+            local = role_segment[marker.start() : end]
+            if _sample_v2_predicate_semantics_grounded(local, predicate):
+                return True
+    return False
+
+
+def _sample_v2_role_owned_segments(
+    utterance: str,
+    labels: Sequence[str],
+) -> tuple[str, ...]:
+    expected = re.compile(
+        "|".join(
+            re.escape(label)
+            for label in sorted(labels, key=len, reverse=True)
+        ),
+        re.I,
+    )
+    segments: list[str] = []
+    for clause in _sample_design_clauses(utterance):
+        roles = tuple(_SAMPLE_V2_POPULATION_ROLE_RE.finditer(clause))
+        for index, role in enumerate(roles):
+            if expected.search(role.group(0)) is None:
+                continue
+            start = 0 if index == 0 else role.start()
+            end = roles[index + 1].start() if index + 1 < len(roles) else len(clause)
+            segments.append(clause[start:end].strip())
+    return tuple(segments)
+
+
+def _sample_v2_predicate_semantics_grounded(
+    text: str,
+    predicate: object,
+) -> bool:
+    if not isinstance(predicate, Mapping):
+        return False
+    op = predicate.get("op")
+    if op in {"eq", "ne", "gt", "gte", "lt", "lte"}:
+        left = _sample_v2_operand_pattern(predicate.get("left"))
+        right = _sample_v2_operand_pattern(predicate.get("right"))
+        operator = _sample_v2_operator_pattern(str(op))
+        if left is None or right is None or operator is None:
+            return False
+        return (
+            re.search(
+                rf"{left}.{{0,24}}(?:{operator}).{{0,24}}{right}",
+                text,
+                re.I,
+            )
+            is not None
+        )
+    if op in {"is_null", "is_not_null"}:
+        arg = _sample_v2_operand_pattern(predicate.get("arg"))
+        if arg is None:
+            return False
+        null_operator = (
+            r"(?:为空|是空值|is\s+null)"
+            if op == "is_null"
+            else r"(?:不为空|非空|is\s+not\s+null)"
+        )
+        return (
+            re.search(
+                rf"{arg}.{{0,16}}(?:{null_operator})|"
+                rf"(?:{null_operator}).{{0,16}}{arg}",
+                text,
+                re.I,
+            )
+            is not None
+        )
+    if op in {"and", "or"}:
+        args = predicate.get("args")
+        if not isinstance(args, Sequence) or isinstance(
+            args,
+            str | bytes | bytearray,
+        ):
+            return False
+        connector = (
+            r"(?:且|并且|同时|(?<![A-Za-z0-9_])and(?![A-Za-z0-9_]))"
+            if op == "and"
+            else r"(?:或|或者|(?<![A-Za-z0-9_])or(?![A-Za-z0-9_]))"
+        )
+        return (
+            re.search(connector, text, re.I) is not None
+            and all(
+                _sample_v2_predicate_semantics_grounded(text, item)
+                for item in args
+            )
+        )
+    if op == "not":
+        return bool(
+            re.search(
+                r"(?:不满足|否定|(?<![A-Za-z0-9_])not(?![A-Za-z0-9_]))",
+                text,
+                re.I,
+            )
+            and _sample_v2_predicate_semantics_grounded(
+                text,
+                predicate.get("arg"),
+            )
+        )
+    return False
+
+
+def _sample_v2_operand_pattern(value: object) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    if set(value) == {"column"}:
+        return _sample_v2_token_pattern(value["column"])
+    if set(value) == {"literal"}:
+        return _sample_v2_token_pattern(value["literal"])
+    return None
+
+
+def _sample_v2_token_pattern(value: object) -> str:
+    text = _sample_design_scalar_text(value)
+    escaped = re.escape(text)
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", text):
+        return rf"(?<![A-Za-z0-9_.-]){escaped}(?![A-Za-z0-9_.-])"
+    return escaped
+
+
+def _sample_v2_operator_pattern(operator: str) -> str | None:
+    return {
+        "eq": (
+            r"(?:(?<!不)(?<!大于)(?<!小于)等于|(?<!不)为|(?<!不)是|"
+            r"(?<![<>!=])=(?!=)|(?<![A-Za-z0-9_])"
+            r"(?:eq|equals?|equal\s+to)(?![A-Za-z0-9_]))"
+        ),
+        "ne": (
+            r"(?:不等于|不为|不是|!=|<>|(?<![A-Za-z0-9_])"
+            r"(?:ne|not\s+equal(?:\s+to)?)(?![A-Za-z0-9_]))"
+        ),
+        "gt": (
+            r"(?:大于(?!等于)|高于|>(?!=)|(?<![A-Za-z0-9_])"
+            r"(?:gt|greater\s+than)(?![A-Za-z0-9_]))"
+        ),
+        "gte": (
+            r"(?:大于等于|不小于|至少|>=|(?<![A-Za-z0-9_])"
+            r"(?:gte|greater\s+than\s+or\s+equal(?:\s+to)?|at\s+least)"
+            r"(?![A-Za-z0-9_]))"
+        ),
+        "lt": (
+            r"(?:小于(?!等于)|低于|<(?!=)|(?<![A-Za-z0-9_])"
+            r"(?:lt|less\s+than)(?![A-Za-z0-9_]))"
+        ),
+        "lte": (
+            r"(?:小于等于|不大于|至多|<=|(?<![A-Za-z0-9_])"
+            r"(?:lte|less\s+than\s+or\s+equal(?:\s+to)?|at\s+most)"
+            r"(?![A-Za-z0-9_]))"
+        ),
+    }.get(operator)
+
+
+def _sample_v2_maturity_days_grounded(
+    utterance: str,
+    days: object,
+) -> bool:
+    if isinstance(days, bool) or not isinstance(days, int):
+        return False
+    contexts = tuple(
+        clause
+        for clause in _sample_design_clauses(utterance)
+        if re.search(
+            r"(?:成熟(?:度)?(?:表现)?窗|成熟表现期|"
+            r"maturity.{0,12}performance\s+window)",
+            clause,
+            re.I,
+        )
+    )
+    observed = {
+        int(value)
+        for clause in contexts
+        for value in re.findall(r"(?<!\d)(\d{1,6})\s*(?:天|days?)(?!\w)", clause, re.I)
+    }
+    return observed == {days}
+
+
+def _sample_v2_maturity_cutoff_grounded(
+    utterance: str,
+    cutoff: object,
+) -> bool:
+    if not isinstance(cutoff, str):
+        return False
+    date_pattern = r"\d{4}-\d{2}-\d{2}"
+    maturity_label = r"(?:成熟(?:度)?|maturity)"
+    cutoff_label = r"(?:截止日|截止日期|cutoff(?:\s+date)?)"
+    contexts = tuple(
+        clause
+        for clause in _sample_design_clauses(utterance)
+        if re.search(
+            rf"{maturity_label}.{{0,16}}{cutoff_label}|"
+            rf"{cutoff_label}.{{0,16}}{maturity_label}",
+            clause,
+            re.I,
+        )
+    )
+    dates = {
+        value
+        for clause in contexts
+        for value in re.findall(date_pattern, clause)
+    }
+    return dates == {cutoff}
+
+
+def _sample_v2_maturity_reason_grounded(
+    utterance: str,
+    reason: object,
+) -> bool:
+    if not isinstance(reason, str) or not reason:
+        return False
+    return any(
+        re.search(r"(?:成熟(?:度)?(?:原因|理由)|maturity\s+reason)", clause, re.I)
+        is not None
+        and _sample_v2_value_grounded(clause, reason)
+        for clause in _sample_design_clauses(utterance)
+    )
+
+
+def _sample_v2_partition_equality_grounded(
+    utterance: str,
+    *,
+    values: Sequence[object],
+    labels: Sequence[str],
+) -> bool:
+    label_pattern = "|".join(
+        re.escape(label) for label in sorted(labels, key=len, reverse=True)
+    )
+    matches = [
+        match
+        for clause in _sample_design_clauses(utterance)
+        if (match := re.search(rf"(?:{label_pattern})", clause, re.I))
+    ]
+    if len(matches) != 1:
+        return False
+    clause_match = matches[0]
+    clause = clause_match.string
+    remainder = clause[clause_match.end() :]
+    if re.match(
+        r"^\s*(?:样本)?\s*(?:取?值|values?)\s*"
+        r"(?:不等于|不为|不是|!=|<>|大于|小于|高于|低于|>=|<=|>|<)",
+        remainder,
+        re.I,
+    ):
+        return False
+    if re.match(
+        r"^\s*(?:样本)?\s*(?:(?:取?值|values?)\s*(?:为|是|等于|=)?|"
+        r"(?:为|是|等于|=))",
+        remainder,
+        re.I,
+    ) is None:
+        return False
+    return _sample_design_split_values_grounded(
+        utterance,
+        values=values,
+        labels=labels,
+    )
+
+
+def _sample_v2_unavailable_role_grounded(
+    utterance: str,
+    labels: Sequence[str],
+) -> bool:
+    role = "(?:" + "|".join(re.escape(label) for label in labels) + ")"
+    unavailable = r"(?:暂时没有|暂无|没有|未提供|不可用|不适用|unavailable|not\s+available|none|null)"
+    return (
+        re.search(
+            rf"{role}.{{0,12}}(?:{unavailable})|(?:{unavailable}).{{0,12}}{role}",
+            utterance,
+            re.I,
+        )
+        is not None
+    )
+
+
+def _sample_v2_historical_score_grounded(
+    utterance: str,
+    historical: Mapping[str, Any],
+    *,
+    whitelist: Sequence[str],
+) -> bool:
+    subject = r"(?:历史分|历史评分|历史模型分|historical\s+score)"
+    status = historical["status"]
+    if status == "available":
+        column = historical["column"]
+        direction = historical["direction"]
+        owned_clauses = tuple(
+            clause
+            for clause in _sample_design_clauses(utterance)
+            if re.search(subject, clause, re.I)
+            and _sample_v2_value_grounded(clause, column)
+        )
+        if len(owned_clauses) != 1:
+            return False
+        clause = owned_clauses[0]
+        if any(
+            candidate != column
+            and _sample_v2_value_grounded(clause, candidate)
+            for candidate in whitelist
+        ):
+            return False
+        direction_patterns = {
+            "higher_is_riskier": (
+                r"(?:越高越风险|高分高风险|higher[_\s-]*is[_\s-]*riskier)"
+            ),
+            "lower_is_riskier": (
+                r"(?:越低越风险|低分高风险|lower[_\s-]*is[_\s-]*riskier)"
+            ),
+        }
+        observed = {
+            candidate
+            for candidate, pattern in direction_patterns.items()
+            if re.search(pattern, clause, re.I)
+        }
+        return observed == {direction}
+    status_pattern = (
+        r"(?:暂时没有|暂无|没有|未提供|不可用|unavailable)"
+        if status == "unavailable"
+        else r"(?:不适用|not[_\s-]*applicable)"
+    )
+    return any(
+        re.search(
+            rf"{subject}.{{0,16}}(?:{status_pattern})|"
+            rf"(?:{status_pattern}).{{0,16}}{subject}",
+            clause,
+            re.I,
+        )
+        and _sample_v2_value_grounded(clause, historical["reason"])
+        for clause in _sample_design_clauses(utterance)
     )
 
 
@@ -5481,8 +6717,15 @@ def _sample_design_performance_grounded(
     days: object,
 ) -> bool:
     labels = re.compile(r"表现(?:窗|期)|performance\s+window", re.I)
+    maturity_labels = re.compile(
+        r"成熟(?:度)?(?:表现)?(?:窗|期)|"
+        r"maturity.{0,12}performance\s+window",
+        re.I,
+    )
     clauses = tuple(
-        clause for clause in _sample_design_clauses(utterance) if labels.search(clause)
+        clause
+        for clause in _sample_design_clauses(utterance)
+        if labels.search(clause) and maturity_labels.search(clause) is None
     )
     if not clauses:
         return False
@@ -8895,6 +10138,42 @@ def _standard_workflow_confirmation_text(
                 "revision/CAS、消息哈希、artifact id、来源引用和所有指标由平台拥有",
             ]
         )
+    elif draft.workflow == "strategy_sample_design_v2":
+        performance = inputs["performance_window"]
+        observation = inputs["observation_window"]
+        maturity = inputs["maturity"]
+        historical_score = inputs["historical_score"]
+        details = [
+            "已识别为〔V2 双总体策略样本设计 Workflow〕",
+            (
+                f"表现窗：{performance['days']} 天"
+                if performance["status"] == "provided"
+                else "表现窗：unavailable"
+            ),
+            (
+                f"观察窗：{observation['start']} 至 {observation['end']}"
+                if observation["status"] == "provided"
+                else "观察窗：unavailable"
+            ),
+            f"成熟度：{maturity['status']}；坏样本值：{inputs['target_bad_value']}",
+            (
+                f"历史分：{historical_score['status']}；"
+                f"字段：{historical_score['column'] or 'null'}；"
+                f"方向：{historical_score['direction'] or 'null'}"
+            ),
+            "approval/risk 总体与 development/validation/OOT 三分区将分别固化",
+            "当前兼容模式先确定性生成 V1 development 锚点，再生成 V2 证据；"
+            "仅支持 approval/risk 同 cohort 且两者均无纳排；任一总体纳排、"
+            "时间切分或复杂 selector 都会明确要求原生 V2 bootstrap，不会静默丢失",
+            "legacy ref、relationship、scope、policy、数据/workspace 身份和所有 id/hash 由平台绑定",
+        ]
+    elif draft.workflow == "strategy_model_evidence_v2":
+        details = [
+            "已识别为〔Strategy ModelEvidence V2 Workflow〕",
+            "workflow_inputs 为空；平台从当前 task 绑定已认证 SampleDesign V2 与单变量候选",
+            "当前只归集 univariate evidence，不训练模型、不比较模型、不生成月度/OOT 模型证据",
+            "不报告、不采纳、不部署",
+        ]
     elif draft.workflow == "strategy_sample_design":
         performance = (
             f"已提供 {inputs['performance_window_days']} 天"
@@ -9769,14 +11048,25 @@ def _user_prompt(
         "dataset/Pool/backtest/monitoring 引用、artifact id/hash、来源引用、可用性结论或指标。"
         "一次只刷新项目上下文，不得串联样本、候选、影响、报告、采纳或部署；没有 as_of"
         "必须 clarification，不能默认今天。"
-        "对于 strategy_sample_design，只能抄录用户明确提供的表现窗状态/天数、观察窗"
-        "状态/ISO 起止日期、成熟度、代表坏样本的整数 0/1、完整三路 split 及可选"
-        "月份/权重/金额列和明确的"
-        "空标签处理授权。没有表现窗和成熟度时不得猜；只有用户明确说暂时没有/未知"
-        "并要求先探索，才可写 unavailable/unknown。不得填写 dataset/hash/workspace/"
-        "semantic/target 等平台绑定，也不得串联过滤、筛选、纳排、仅保留、删行、"
-        "清洗、派生列、建模、建树、Strategy Pool、"
-        "采纳、部署或报告。"
+        "对于 strategy_sample_design_v2，workflow_inputs 必须精确包含用户明确提供的"
+        " target_bad_value、drop_nan_labels、approval_population、risk_population、"
+        "partitioning、maturity、performance_window、observation_window、field_bindings、"
+        "historical_score。所有嵌套字段、null、状态、列、值、方向与 reason 都必须能逐字"
+        "回到原话。approval/risk、inclusion/exclusion 与 predicate operator/column/literal"
+        " 必须在各自局部语境中逐项对应；表现窗、观察窗和 maturity cutoff 日期不得互相借用。"
+        "普通表现窗不能只借用成熟表现窗；maturity cutoff 必须在同一子句带成熟度限定；"
+        "historical_score 的字段和方向必须在同一局部子句绑定，不能借用其他字段的方向。"
+        "当前 compatibility bootstrap 仅允许 approval/risk 同 cohort 且两个总体"
+        "均无纳排、同列三个互异简单等值 selector；time_ranges、任一总体纳排或复杂 selector"
+        " 必须 clarification。"
+        "relationship/scope/policy、legacy ref、dataset/workspace/target、membership/bundle/"
+        "artifact id/hash 全部禁止填写，也不得串联建模、模型比较、报告、Strategy Pool、"
+        "采纳或部署。"
+        "对于 strategy_model_evidence_v2，workflow_inputs 必须是空对象；只汇总当前 task"
+        " 已有认证单变量候选。所有 SampleDesign/candidate/artifact 引用由平台绑定；训练、"
+        "模型对比、月度/OOT/验证模型、报告、采纳或部署的正向请求必须 clarification；"
+        "明确说不做这些后续动作可以接受；“此前/已有/已认证”只有位于当前归集动作之后时"
+        "才视为来源状态；“此前未汇总”“没有汇总”“有没有汇总”必须 clarification。"
         "对于 automatic_tree_candidate_build，只能抄录用户明确提供的 features、"
         "权重/金额字段、方向和树参数；不得填写平台拥有的数据绑定、目标列、标签策略、"
         "预算、结果、叶子、动作、排名或推荐，也不得串联选叶或 Strategy Pool。"
@@ -9908,6 +11198,9 @@ _TYPE_LABELS = {
 
 __all__ = [
     "CompiledStrategyRequestDraft",
+    "FRESH_STANDARD_STRATEGY_WORKFLOWS",
+    "LEGACY_REPLAY_STANDARD_STRATEGY_WORKFLOWS",
+    "REPLAYABLE_STANDARD_STRATEGY_WORKFLOWS",
     "STANDARD_STRATEGY_WORKFLOWS",
     "UNIVARIATE_BINNING_METHODS",
     "UNIVARIATE_REFINEMENT_METHODS",
