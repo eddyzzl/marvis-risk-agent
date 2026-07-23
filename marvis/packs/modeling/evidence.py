@@ -9,11 +9,12 @@ the same task and compare their live bytes/records with this snapshot.
 The supplied StrategySampleDesign V2 bundle is deliberately an external trust
 input to validation.  This keeps the evidence payload compact while preventing
 a self-consistent JSON document from inventing maturity, sample membership, or
-dataset provenance.  The Tool that publishes this contract must, before the
-training transaction starts, load the verified dataset and decoded membership,
-evaluate the three split selectors row by row, compare every selector mask with
-its governed membership mask, and call ``build_training_split_mask_hashes``.
-Caller-supplied hashes are never evidence of that comparison by themselves.
+dataset provenance.  The Tool that publishes this contract must load the
+verified dataset and decoded membership, materialize a platform-owned private
+split from the three risk-population masks, evaluate that actual private split
+row by row, compare every selector mask with its governed membership mask, and
+call ``build_training_split_mask_hashes``.  Caller-supplied hashes are never
+evidence of that comparison by themselves.
 """
 
 from __future__ import annotations
@@ -48,10 +49,10 @@ from marvis.packs.strategy.sample_design_v2 import (
 )
 
 
-MODELING_TRAINING_EVIDENCE_SCHEMA_VERSION = "modeling.training-evidence.v2.1"
+MODELING_TRAINING_EVIDENCE_SCHEMA_VERSION = "modeling.training-evidence.v2.2"
 MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND = "modeling_training_evidence_json"
 MODELING_TRAINING_EVIDENCE_PRODUCER_VERSION = (
-    "marvis.modeling.training-evidence/2.1"
+    "marvis.modeling.training-evidence/2.2"
 )
 SAMPLE_MEMBERSHIP_ARTIFACT_KIND = "strategy_sample_membership_v2_binary"
 SAMPLE_DESIGN_BUNDLE_ARTIFACT_KIND = "strategy_sample_design_v2_json"
@@ -70,6 +71,14 @@ RAW_SCORE_PRODUCT = RAW_BAD_PROBABILITY_SCORE_PRODUCT
 MODEL_TARGET_ENCODING_RULE = (
     "raw_good_to_0_raw_bad_to_1_preserve_missing_v1"
 )
+GOVERNED_SPLIT_MATERIALIZATION_SOURCE = (
+    "strategy_sample_design_v2_membership"
+)
+GOVERNED_SPLIT_MATERIALIZATION_VALUES = {
+    "train": "__marvis_risk_development_v2__",
+    "test": "__marvis_risk_validation_v2__",
+    "oot": "__marvis_risk_oot_v2__",
+}
 
 MAX_TRAINING_EVIDENCE_JSON_BYTES = 4 * 1024 * 1024
 MAX_TRAINING_EVIDENCE_JSON_DEPTH = 32
@@ -84,6 +93,9 @@ MAX_TRAINING_MASK_ROWS = (
 ) * 8
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_GOVERNED_SPLIT_COLUMN_RE = re.compile(
+    r"^__marvis_governed_split_v2(?:_[1-9][0-9]*)?__$"
+)
 _EVIDENCE_ID_RE = re.compile(
     r"^modeling-training-evidence-[0-9a-f]{24}$"
 )
@@ -176,11 +188,15 @@ _TRAINING_CONTRACT_FIELDS = frozenset(
         "features",
         "seed",
         "target",
+        "split_materialization",
         "split_proof",
         "label_handling",
         "weighting",
         "early_stopping_rounds",
     }
+)
+_SPLIT_MATERIALIZATION_FIELDS = frozenset(
+    {"source", "column", "values", "content_hash"}
 )
 _TRAIN_CONFIG_FIELDS = frozenset(field.name for field in fields(TrainConfig))
 _TARGET_FIELDS = frozenset(
@@ -409,10 +425,10 @@ def build_training_split_mask_hashes(
     """Hash masks only after proving selector/member equality and conservation.
 
     This helper is pure.  The publishing Tool owns the trust boundary: it must
-    obtain ``selector_masks`` from selectors evaluated against the verified
-    training dataset and ``membership_masks`` from the independently decoded
-    task-owned membership artifact.  Passing caller-provided masks or hashes to
-    this helper does not establish provenance.
+    obtain ``selector_masks`` from the platform-owned private split projected
+    from the verified membership and ``membership_masks`` from the independently
+    decoded task-owned membership artifact.  Passing caller-provided masks or
+    hashes to this helper does not establish provenance.
     """
 
     context = _sample_context(sample_design_bundle)
@@ -1218,6 +1234,7 @@ def _build_training_contract(
         "features": list(config["features"]),
         "seed": config["seed"],
         "target": target,
+        "split_materialization": _expected_split_materialization(config),
         "split_proof": split_proof,
         "label_handling": {
             "drop_nan_labels": config["drop_nan_labels"],
@@ -1289,6 +1306,14 @@ def _training_contract(
         raise ModelingTrainingEvidenceError(
             "training weighting does not match TrainConfig and sample semantics"
         )
+    split_materialization = _split_materialization(
+        obj["split_materialization"]
+    )
+    expected_materialization = _expected_split_materialization(config)
+    if split_materialization != expected_materialization:
+        raise ModelingTrainingEvidenceError(
+            "split_materialization does not match governed TrainConfig"
+        )
     split_proof = _split_proof(obj["split_proof"])
     expected_proof = _expected_split_proof(
         config,
@@ -1319,11 +1344,73 @@ def _training_contract(
         "features": features,
         "seed": seed,
         "target": target,
+        "split_materialization": split_materialization,
         "split_proof": split_proof,
         "label_handling": label_handling,
         "weighting": weighting,
         "early_stopping_rounds": early_stopping,
     }
+
+
+def _expected_split_materialization(
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    column = _text(config["split_col"], "TrainConfig.split_col")
+    if _GOVERNED_SPLIT_COLUMN_RE.fullmatch(column) is None:
+        raise ModelingTrainingEvidenceError(
+            "TrainConfig.split_col must be the governed private split column"
+        )
+    values = dict(config["split_values"])
+    if values != GOVERNED_SPLIT_MATERIALIZATION_VALUES:
+        raise ModelingTrainingEvidenceError(
+            "TrainConfig.split_values must use governed private split values"
+        )
+    body = {
+        "source": GOVERNED_SPLIT_MATERIALIZATION_SOURCE,
+        "column": column,
+        "values": values,
+    }
+    return {
+        **body,
+        "content_hash": _sha256(_canonical_json(body)),
+    }
+
+
+def _split_materialization(value: object) -> dict[str, Any]:
+    obj = _object(value, "split_materialization")
+    _exact_fields(
+        obj,
+        _SPLIT_MATERIALIZATION_FIELDS,
+        "split_materialization",
+    )
+    source = _text(obj["source"], "split_materialization.source")
+    column = _text(obj["column"], "split_materialization.column")
+    values_obj = _object(obj["values"], "split_materialization.values")
+    _exact_fields(
+        values_obj,
+        frozenset({"train", "test", "oot"}),
+        "split_materialization.values",
+    )
+    values = {
+        name: _text(
+            values_obj[name],
+            f"split_materialization.values.{name}",
+        )
+        for name in ("train", "test", "oot")
+    }
+    body = {"source": source, "column": column, "values": values}
+    content_hash = _hash(
+        obj["content_hash"],
+        "split_materialization.content_hash",
+    )
+    if not hmac.compare_digest(
+        content_hash,
+        _sha256(_canonical_json(body)),
+    ):
+        raise ModelingTrainingEvidenceError(
+            "split_materialization.content_hash does not match content"
+        )
+    return {**body, "content_hash": content_hash}
 
 
 def _train_config(value: object) -> dict[str, Any]:
@@ -2744,6 +2831,8 @@ def _sha256(value: str | bytes) -> str:
 
 
 __all__ = [
+    "GOVERNED_SPLIT_MATERIALIZATION_SOURCE",
+    "GOVERNED_SPLIT_MATERIALIZATION_VALUES",
     "LEGACY_RAW_CLASS_ONE_SCORE_PRODUCT",
     "MAX_TRAINING_EVIDENCE_JSON_BYTES",
     "MAX_TRAINING_EVIDENCE_JSON_DEPTH",

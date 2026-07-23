@@ -61,7 +61,12 @@ def _fixture(
         "approval_only",
         "approval_only",
     ),
-    training_split_col: str = "model_split",
+    risk_evidence_splits: tuple[object, object, object] = (
+        "train",
+        "test",
+        "oot",
+    ),
+    internal_split_collision: bool = False,
     bad_weight_split: str | None = None,
     bad_weight_value: object = None,
     single_class_oot: str | None = None,
@@ -86,9 +91,14 @@ def _fixture(
         ("validation", "test", "202602"),
         ("oot", "oot", "202603"),
     )
-    for (partition, model_split, month), approval_model_split in zip(
+    for (
+        (partition, model_split, month),
+        approval_model_split,
+        risk_evidence_split,
+    ) in zip(
         partitions,
         approval_model_splits,
+        risk_evidence_splits,
         strict=True,
     ):
         for index in range(6):
@@ -97,7 +107,7 @@ def _fixture(
                 {
                     "sample_partition": partition,
                     "model_split": model_split,
-                    "evidence_split": model_split,
+                    "evidence_split": risk_evidence_split,
                     "risk_flag": 1,
                     "apply_date": f"2026-{int(month[-2:]):02d}-{index + 1:02d}",
                     "apply_month": month,
@@ -137,6 +147,8 @@ def _fixture(
         )
         ordinal += 1
     frame = pd.DataFrame(rows)
+    if internal_split_collision:
+        frame["__marvis_governed_split_v2__"] = "source-owned"
     if bad_weight_split is not None:
         split_value = {"train": "train", "test": "test", "oot": "oot"}[
             bad_weight_split
@@ -145,7 +157,10 @@ def _fixture(
             (frame["risk_flag"] == 1) & (frame["model_split"] == split_value)
         ][0]
         frame.loc[row_index, "weight"] = bad_weight_value
-    if any(value is None or value is pd.NA for value in approval_model_splits):
+    if any(
+        value is None or value is pd.NA
+        for value in (*approval_model_splits, *risk_evidence_splits)
+    ):
         frame["evidence_split"] = frame["evidence_split"].astype("string")
     if missing_train_label:
         first_train = frame.index[
@@ -353,8 +368,6 @@ def _fixture(
         "sample_design_ref": sample_ref,
         "recipe": "lr",
         "features": ["x1", "x2"],
-        "split_col": training_split_col,
-        "split_values": {"train": "train", "test": "test", "oot": "oot"},
         "params": {"max_iter": 200, "sample_weight_col": "weight"},
         "seed": 23,
         "early_stopping_rounds": None,
@@ -715,13 +728,13 @@ def test_transaction_revalidator_rejects_training_binding_drift(
         conn.rollback()
 
 
-def test_selector_ignores_approval_split_values_and_nullable_split(
+def test_internal_selector_ignores_source_split_values_and_nulls(
     tmp_path: Path,
 ) -> None:
     fx = _fixture(
         tmp_path,
         approval_model_splits=("train", None, "oot"),
-        training_split_col="evidence_split",
+        risk_evidence_splits=("not-a-split", None, "not-a-split"),
     )
 
     output = _run(fx)
@@ -883,18 +896,46 @@ def test_calibration_and_platform_owned_params_are_rejected(
         _run(fx)
 
 
-def test_split_alias_overlap_and_feature_leak_are_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("split_col", "model_split"),
+        (
+            "split_values",
+            {"train": "train", "test": "test", "oot": "oot"},
+        ),
+    ],
+)
+def test_caller_cannot_supply_source_split_contract(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
     fx = _fixture(tmp_path)
-    fx["inputs"]["split_values"]["test"] = "train"
-    with pytest.raises(ModelingError, match="distinct"):
+    fx["inputs"][field] = value
+
+    with pytest.raises(ModelingError, match="fields|unexpected|invalid"):
         _run(fx)
 
-    fx = _fixture(tmp_path / "feature-leak")
-    fx["inputs"]["features"].append("model_split")
-    with pytest.raises(ModelingError, match="leak"):
+
+@pytest.mark.parametrize("field", ["split_col", "split_values"])
+def test_caller_cannot_smuggle_source_split_contract_in_params(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    fx = _fixture(tmp_path)
+    fx["inputs"]["params"][field] = (
+        "model_split"
+        if field == "split_col"
+        else {"train": "train", "test": "test", "oot": "oot"}
+    )
+
+    with pytest.raises(ModelingError, match="platform-owned"):
         _run(fx)
 
-    fx = _fixture(tmp_path / "target-leak")
+
+def test_target_feature_leak_is_rejected(tmp_path: Path) -> None:
+    fx = _fixture(tmp_path)
     fx["inputs"]["features"].append("bad")
     with pytest.raises(ModelingError, match="target column.*leak"):
         _run(fx)
@@ -975,14 +1016,116 @@ def test_governed_weight_field_can_be_explicitly_unused(tmp_path: Path) -> None:
     }
 
 
-def test_live_selector_must_equal_membership_row_for_row(tmp_path: Path) -> None:
+def test_internal_selector_hashes_equal_membership_row_for_row(
+    tmp_path: Path,
+) -> None:
     fx = _fixture(tmp_path)
-    fx["inputs"]["split_values"]["oot"] = "approval_only"
 
-    with pytest.raises(ModelingError, match="selector mask"):
-        _run(fx)
+    binding = _binding(fx, _run(fx))
+    proof = binding.evidence["training_contract"]["split_proof"]
 
-    assert _governed_records(fx) == []
+    assert proof["selector_union_mask_content_hash"] == (
+        proof["membership_union_mask_content_hash"]
+    )
+    assert proof["selector_union_mask_content_hash"] == (
+        proof["risk_membership_mask_content_hash"]
+    )
+    assert all(
+        split["selector_mask_content_hash"]
+        == split["membership_mask_content_hash"]
+        for split in proof["splits"]
+    )
+
+
+def test_private_internal_split_is_stable_collision_safe_and_provenanced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _fixture(tmp_path, internal_split_collision=True)
+    dataset_path = fx["runtime"].registry.resolve_path(fx["dataset"].id)
+    source_bytes = dataset_path.read_bytes()
+    original_recipe = evidence_tools._train_recipe
+    observed: dict[str, object] = {}
+
+    def inspect_private_split(
+        recipe,
+        backend,
+        training_path,
+        config,
+        *,
+        out_dir,
+    ):
+        private = backend.read_frame(training_path)
+        observed["config"] = config
+        observed["frame"] = private.copy()
+        return original_recipe(
+            recipe,
+            backend,
+            training_path,
+            config,
+            out_dir=out_dir,
+        )
+
+    monkeypatch.setattr(
+        evidence_tools,
+        "_train_recipe",
+        inspect_private_split,
+    )
+
+    binding = _binding(fx, _run(fx))
+    config = observed["config"]
+    private = observed["frame"]
+    assert config == binding.experiment.config
+    assert isinstance(private, pd.DataFrame)
+    assert config.split_col == "__marvis_governed_split_v2_1__"
+    assert config.split_values == {
+        "train": "__marvis_risk_development_v2__",
+        "test": "__marvis_risk_validation_v2__",
+        "oot": "__marvis_risk_oot_v2__",
+    }
+    assert set(private["__marvis_governed_split_v2__"]) == {"source-owned"}
+    expected_values = {
+        "development": config.split_values["train"],
+        "validation": config.split_values["test"],
+        "oot": config.split_values["oot"],
+    }
+    assert (
+        private.groupby("sample_partition")[config.split_col]
+        .unique()
+        .map(list)
+        .to_dict()
+        == {name: [value] for name, value in expected_values.items()}
+    )
+    assert dataset_path.read_bytes() == source_bytes
+    split_body = {
+        "source": "strategy_sample_design_v2_membership",
+        "column": config.split_col,
+        "values": config.split_values,
+    }
+    split_hash = hashlib.sha256(
+        json.dumps(
+            split_body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert binding.evidence["training_contract"]["split_materialization"] == {
+        **split_body,
+        "content_hash": split_hash,
+    }
+    for provenance in (
+        binding.model_binary_record["provenance"],
+        binding.evidence_record["provenance"],
+    ):
+        assert provenance["split_source"] == split_body["source"]
+        assert provenance["internal_split_column"] == config.split_col
+        assert provenance["internal_split_values"] == config.split_values
+        assert provenance["internal_split_contract_hash"] == split_hash
+    assert binding.evidence_record["provenance"][
+        "split_proof_content_hash"
+    ] == binding.evidence["training_contract"]["split_proof"]["content_hash"]
 
 
 @pytest.mark.parametrize(

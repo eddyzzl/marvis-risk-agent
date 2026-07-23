@@ -148,6 +148,11 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert "dataset_id" not in evidence_train_tool.input_schema["properties"]
     assert "target_col" not in evidence_train_tool.input_schema["properties"]
     assert "drop_nan_labels" not in evidence_train_tool.input_schema["properties"]
+    assert "split_col" not in evidence_train_tool.input_schema["properties"]
+    assert "split_values" not in evidence_train_tool.input_schema["properties"]
+    assert not {"split_col", "split_values"} & set(
+        evidence_train_tool.input_schema["required"]
+    )
     assert evidence_train_tool.output_schema["additionalProperties"] is False
     assert {"write:model", "write:experiment", "write:task"} <= set(
         evidence_train_tool.side_effects

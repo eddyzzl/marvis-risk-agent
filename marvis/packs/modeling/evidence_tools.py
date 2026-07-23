@@ -6,7 +6,8 @@ adds the stricter trust boundary needed by the Strategy Workbench:
 
 * the active dataset, target and missing-label policy come only from a verified
   StrategySampleDesign V2 artifact pair;
-* live split selectors are proved row-for-row against decoded membership;
+* a collision-safe private split is materialized directly from decoded
+  membership, and its selector masks are proved row-for-row against it;
 * only the governed risk-union rows reach the recipe;
 * recipes run in a task-local private directory, then their model/meta outputs,
   immutable registrations, canonical evidence and audits share one caller-owned
@@ -47,6 +48,8 @@ from marvis.packs.modeling._common import BINARY_MODELING_RECIPES
 from marvis.packs.modeling._runtime import _artifact_base_dir, _runtime
 from marvis.packs.modeling.contracts import Experiment, ModelArtifact, TrainConfig
 from marvis.packs.modeling.evidence import (
+    GOVERNED_SPLIT_MATERIALIZATION_SOURCE,
+    GOVERNED_SPLIT_MATERIALIZATION_VALUES,
     MAX_TRAINING_EVIDENCE_JSON_BYTES,
     MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
     MODEL_BINARY_REF_KIND,
@@ -84,10 +87,10 @@ from marvis.repositories.task_artifacts import (
 
 
 TRAIN_MODEL_WITH_EVIDENCE_V2_TOOL_SCHEMA_VERSION = (
-    "modeling.train-model-with-evidence-v2-tool.v1.1"
+    "modeling.train-model-with-evidence-v2-tool.v1.2"
 )
 TRAINING_EVIDENCE_ARTIFACT_SCHEMA_VERSION = (
-    "modeling.training-evidence-artifact.v1.1"
+    "modeling.training-evidence-artifact.v1.2"
 )
 TRAIN_MODEL_WITH_EVIDENCE_V2_ORIGIN_TOOL = (
     "modeling.train_model_with_evidence_v2"
@@ -104,13 +107,17 @@ _MAX_INPUT_JSON_BYTES = 1024 * 1024
 _MAX_MODEL_BINARY_BYTES = 8 * 1024 * 1024 * 1024
 _MAX_RECIPE_META_BYTES = 64 * 1024 * 1024
 _TRAINING_TASK_LOCK_TIMEOUT_SECONDS = 0
+_INTERNAL_SPLIT_SOURCE = GOVERNED_SPLIT_MATERIALIZATION_SOURCE
+_INTERNAL_SPLIT_COLUMN_BASE = "__marvis_governed_split_v2__"
+_INTERNAL_SPLIT_COLUMN_RE = re.compile(
+    r"^__marvis_governed_split_v2(?:_[1-9][0-9]*)?__$"
+)
+_INTERNAL_SPLIT_VALUES = dict(GOVERNED_SPLIT_MATERIALIZATION_VALUES)
 _INPUT_FIELDS = frozenset(
     {
         "sample_design_ref",
         "recipe",
         "features",
-        "split_col",
-        "split_values",
         "params",
         "seed",
         "early_stopping_rounds",
@@ -173,6 +180,10 @@ _MODEL_PROVENANCE_FIELDS = frozenset(
         "sample_membership_artifact_content_hash",
         "sample_bundle_artifact_id",
         "sample_bundle_artifact_content_hash",
+        "split_source",
+        "internal_split_column",
+        "internal_split_values",
+        "internal_split_contract_hash",
     }
 )
 _EVIDENCE_PROVENANCE_FIELDS = frozenset(
@@ -205,6 +216,11 @@ _EVIDENCE_PROVENANCE_FIELDS = frozenset(
         "sample_membership_artifact_content_hash",
         "sample_bundle_artifact_id",
         "sample_bundle_artifact_content_hash",
+        "split_source",
+        "internal_split_column",
+        "internal_split_values",
+        "internal_split_contract_hash",
+        "split_proof_content_hash",
         "governance",
     }
 )
@@ -350,18 +366,18 @@ def run_train_model_with_evidence_v2(
     training_stage_dir: Path | None = None
     try:
         sample = _load_sample(runtime, task_id=task_id, request=request)
-        frame, selector_masks, membership_masks, risk_mask = _training_frame_and_masks(
+        frame, membership_masks, risk_mask = _training_frame_and_masks(
             runtime,
             sample=sample,
             request=request,
         )
-        split_hashes = build_training_split_mask_hashes(
-            sample_design_bundle=sample.bundle,
-            selector_masks=selector_masks,
-            membership_masks=membership_masks,
-            risk_membership_mask=risk_mask,
+        internal_split = _build_internal_split_contract(frame)
+        config = _training_config(
+            runtime,
+            sample=sample,
+            request=request,
+            internal_split=internal_split,
         )
-        config = _training_config(runtime, sample=sample, request=request)
         _validate_governed_training_weights(
             frame,
             membership_masks=membership_masks,
@@ -370,6 +386,23 @@ def run_train_model_with_evidence_v2(
         risk_frame = frame.loc[risk_mask].copy()
         if risk_frame.empty:
             raise ModelingError("governed risk training population is empty")
+        _materialize_private_governed_split(
+            risk_frame,
+            membership_masks=membership_masks,
+            risk_membership_mask=risk_mask,
+            internal_split=internal_split,
+        )
+        selector_masks = _private_split_selector_masks(
+            risk_frame,
+            risk_membership_mask=risk_mask,
+            internal_split=internal_split,
+        )
+        split_hashes = build_training_split_mask_hashes(
+            sample_design_bundle=sample.bundle,
+            selector_masks=selector_masks,
+            membership_masks=membership_masks,
+            risk_membership_mask=risk_mask,
+        )
         target_contract = _governed_target_contract(sample)
         _encode_private_model_target(
             risk_frame,
@@ -1117,7 +1150,7 @@ def _training_frame_and_masks(
     *,
     sample: StrategySampleDesignV2ArtifactBinding,
     request: Mapping[str, Any],
-) -> tuple[pd.DataFrame, dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray]:
+) -> tuple[pd.DataFrame, dict[str, np.ndarray], np.ndarray]:
     source = sample.source_binding
     path = source.dataset_path
     frame = runtime.backend.read_frame(path)
@@ -1127,7 +1160,6 @@ def _training_frame_and_masks(
         raise ModelingError("governed training dataset bytes changed")
     required = {
         *request["features"],
-        request["split_col"],
         sample.bundle["sample_design"]["target_selector"]["column"],
     }
     weight = request["params"].get("sample_weight_col")
@@ -1148,21 +1180,83 @@ def _training_frame_and_masks(
         [membership["train"], membership["test"], membership["oot"]]
     )
     risk = np.ascontiguousarray(risk, dtype=np.bool_)
-    split_values = request["split_values"]
-    split_series = frame[request["split_col"]]
-    selector = {
-        name: np.ascontiguousarray(
-            np.logical_and(
-                risk,
-                split_series.eq(split_values[name])
-                .fillna(False)
-                .to_numpy(dtype=np.bool_),
-            ),
-            dtype=np.bool_,
-        )
-        for name in _SPLIT_NAMES
+    return frame, membership, risk
+
+
+def _build_internal_split_contract(frame: pd.DataFrame) -> dict[str, Any]:
+    """Choose one deterministic source-column-safe private split contract."""
+
+    source_columns = {str(column) for column in frame.columns}
+    candidate = _INTERNAL_SPLIT_COLUMN_BASE
+    attempt = 0
+    while candidate in source_columns:
+        attempt += 1
+        candidate = f"__marvis_governed_split_v2_{attempt}__"
+    body = {
+        "source": _INTERNAL_SPLIT_SOURCE,
+        "column": candidate,
+        "values": dict(_INTERNAL_SPLIT_VALUES),
     }
-    return frame, selector, membership, risk
+    return body
+
+
+def _materialize_private_governed_split(
+    risk_frame: pd.DataFrame,
+    *,
+    membership_masks: Mapping[str, np.ndarray],
+    risk_membership_mask: np.ndarray,
+    internal_split: Mapping[str, Any],
+) -> None:
+    """Project authenticated full-frame membership into the private risk frame."""
+
+    column = str(internal_split["column"])
+    if column in {str(value) for value in risk_frame.columns}:
+        raise ModelingError("internal governed split column collided before training")
+    risk = np.asarray(risk_membership_mask, dtype=np.bool_)
+    if int(np.count_nonzero(risk)) != len(risk_frame):
+        raise ModelingError("private risk frame no longer matches governed membership")
+    assigned = np.zeros(len(risk_frame), dtype=np.bool_)
+    values = np.empty(len(risk_frame), dtype=object)
+    for name in _SPLIT_NAMES:
+        full_mask = np.asarray(membership_masks[name], dtype=np.bool_)
+        if full_mask.shape != risk.shape:
+            raise ModelingError("governed membership mask length changed")
+        private_mask = np.ascontiguousarray(full_mask[risk], dtype=np.bool_)
+        if np.any(np.logical_and(assigned, private_mask)):
+            raise ModelingError("governed membership masks overlap")
+        values[private_mask] = str(internal_split["values"][name])
+        assigned = np.logical_or(assigned, private_mask)
+    if not np.all(assigned):
+        raise ModelingError("private governed split does not cover risk membership")
+    risk_frame[column] = values
+
+
+def _private_split_selector_masks(
+    risk_frame: pd.DataFrame,
+    *,
+    risk_membership_mask: np.ndarray,
+    internal_split: Mapping[str, Any],
+) -> dict[str, np.ndarray]:
+    """Re-evaluate the actual recipe split column into full-source selectors."""
+
+    risk = np.asarray(risk_membership_mask, dtype=np.bool_)
+    if int(np.count_nonzero(risk)) != len(risk_frame):
+        raise ModelingError("private risk frame no longer matches governed membership")
+    column = str(internal_split["column"])
+    if column not in risk_frame.columns:
+        raise ModelingError("private governed split column is unavailable")
+    series = risk_frame[column]
+    selector: dict[str, np.ndarray] = {}
+    for name in _SPLIT_NAMES:
+        private_mask = (
+            series.eq(str(internal_split["values"][name]))
+            .fillna(False)
+            .to_numpy(dtype=np.bool_)
+        )
+        full_mask = np.zeros(risk.shape, dtype=np.bool_)
+        full_mask[risk] = private_mask
+        selector[name] = np.ascontiguousarray(full_mask, dtype=np.bool_)
+    return selector
 
 
 def _training_config(
@@ -1170,6 +1264,7 @@ def _training_config(
     *,
     sample: StrategySampleDesignV2ArtifactBinding,
     request: Mapping[str, Any],
+    internal_split: Mapping[str, Any],
 ) -> TrainConfig:
     design = sample.bundle["sample_design"]
     target = design["target_selector"]
@@ -1179,10 +1274,15 @@ def _training_config(
         )
     _governed_target_contract(sample)
     target_col = target["column"]
-    if request["split_col"] == target_col:
-        raise ModelingError("target and split columns must be distinct")
     if target_col in request["features"]:
         raise ModelingError("target column must not leak into features")
+    split_col = _text(internal_split["column"], "internal split column")
+    split_values = _object(internal_split["values"], "internal split values")
+    _exact_fields(split_values, frozenset(_SPLIT_NAMES), "internal split values")
+    if not _INTERNAL_SPLIT_COLUMN_RE.fullmatch(split_col):
+        raise ModelingError("internal governed split column is invalid")
+    if split_values != _INTERNAL_SPLIT_VALUES:
+        raise ModelingError("internal governed split values are invalid")
     params = dict(request["params"])
     weight_col = params.get("sample_weight_col")
     governed_weight_col = design["sample_semantics"]["field_bindings"][
@@ -1195,7 +1295,7 @@ def _training_config(
         )
     if weight_col is not None and weight_col in {
         target_col,
-        request["split_col"],
+        split_col,
         *request["features"],
     }:
         raise ModelingError(
@@ -1216,8 +1316,8 @@ def _training_config(
         dataset_id=sample.source_binding.dataset_id,
         features=tuple(request["features"]),
         target_col=target_col,
-        split_col=request["split_col"],
-        split_values=dict(request["split_values"]),
+        split_col=split_col,
+        split_values=dict(split_values),
         params=params,
         seed=request["seed"],
         early_stopping_rounds=request["early_stopping_rounds"],
@@ -1380,17 +1480,6 @@ def _validate_inputs(value: object) -> dict[str, Any]:
     features = _text_array(obj["features"], "features", required=True)
     if len(features) != len(set(features)):
         raise ModelingError("features must not contain duplicates")
-    split_col = _text(obj["split_col"], "split_col")
-    if split_col in features:
-        raise ModelingError("split_col must not leak into features")
-    splits = _object(obj["split_values"], "split_values")
-    _exact_fields(splits, frozenset(_SPLIT_NAMES), "split_values")
-    split_values = {
-        name: _text(splits[name], f"split_values.{name}")
-        for name in _SPLIT_NAMES
-    }
-    if len(set(split_values.values())) != 3:
-        raise ModelingError("split_values must be three distinct non-empty strings")
     params = _json_object(obj["params"], "params")
     _reject_caller_owned_platform_params(params)
     weight_aliases = [
@@ -1417,8 +1506,6 @@ def _validate_inputs(value: object) -> dict[str, Any]:
         "sample_design_ref": _sample_ref(obj["sample_design_ref"]),
         "recipe": recipe,
         "features": features,
-        "split_col": split_col,
-        "split_values": split_values,
         "params": params,
         "seed": seed,
         "early_stopping_rounds": early_stopping,
@@ -1484,6 +1571,8 @@ def _reject_caller_owned_platform_params(value: object, path: str = "params") ->
         "preprocessing_steps",
         "preprocessing_chain_traceable",
         "refit_on_train_plus_test",
+        "split_col",
+        "split_values",
     }
     if isinstance(value, Mapping):
         for raw_key, child in value.items():
@@ -1576,6 +1665,30 @@ def _canonical_snapshot_hash(value: object, *, name: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _internal_split_provenance(config: TrainConfig) -> dict[str, Any]:
+    """Authenticate the platform-owned split frozen in live TrainConfig."""
+
+    column = _text(config.split_col, "live internal split column")
+    values = dict(config.split_values)
+    if not _INTERNAL_SPLIT_COLUMN_RE.fullmatch(column):
+        raise ModelingError("live TrainConfig does not use a governed internal split")
+    if values != _INTERNAL_SPLIT_VALUES:
+        raise ModelingError("live TrainConfig governed split values changed")
+    body = {
+        "source": _INTERNAL_SPLIT_SOURCE,
+        "column": column,
+        "values": values,
+    }
+    return {
+        "split_source": _INTERNAL_SPLIT_SOURCE,
+        "internal_split_column": column,
+        "internal_split_values": values,
+        "internal_split_contract_hash": hashlib.sha256(
+            _canonical_json(body).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
 def _model_provenance(
     *,
     task_id: str,
@@ -1617,6 +1730,7 @@ def _model_provenance(
         ),
         "sample_bundle_artifact_id": sample.bundle_artifact_id,
         "sample_bundle_artifact_content_hash": sample.bundle_artifact_content_hash,
+        **_internal_split_provenance(experiment.config),
     }
 
 
@@ -1682,6 +1796,10 @@ def _evidence_provenance(
         ),
         "sample_bundle_artifact_id": sample.bundle_artifact_id,
         "sample_bundle_artifact_content_hash": sample.bundle_artifact_content_hash,
+        **_internal_split_provenance(experiment.config),
+        "split_proof_content_hash": evidence["training_contract"][
+            "split_proof"
+        ]["content_hash"],
         "governance": _governance_flags(),
     }
 

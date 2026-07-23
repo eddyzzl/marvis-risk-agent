@@ -73,8 +73,12 @@ def _config(**overrides) -> TrainConfig:
         "dataset_id": "dataset-v2",
         "features": ("income", "age"),
         "target_col": "target",
-        "split_col": "model_split",
-        "split_values": {"train": "train", "test": "test", "oot": "oot"},
+        "split_col": "__marvis_governed_split_v2__",
+        "split_values": {
+            "train": "__marvis_risk_development_v2__",
+            "test": "__marvis_risk_validation_v2__",
+            "oot": "__marvis_risk_oot_v2__",
+        },
         "params": {"learning_rate": 0.05, "num_leaves": 16},
         "seed": 42,
         "early_stopping_rounds": 20,
@@ -375,6 +379,17 @@ def test_freezes_canonical_train_config_target_and_verified_mask_proof():
         "nan_labels_dropped": 0,
     }
     assert training["weighting"] == {"used": False, "column": None}
+    assert training["split_materialization"] == {
+        "source": "strategy_sample_design_v2_membership",
+        "column": "__marvis_governed_split_v2__",
+        "values": {
+            "train": "__marvis_risk_development_v2__",
+            "test": "__marvis_risk_validation_v2__",
+            "oot": "__marvis_risk_oot_v2__",
+        },
+        "content_hash": training["split_materialization"]["content_hash"],
+    }
+    assert len(training["split_materialization"]["content_hash"]) == 64
     assert training["target"] == {
         "column": "target",
         "good_value": 0,
@@ -691,6 +706,17 @@ def test_training_mask_helper_hashes_numpy_and_list_inputs_identically():
         (_config(split_values={"train": "x", "test": "x", "oot": "z"}), "distinct"),
         (_config(split_values={"train": 1, "test": True, "oot": 2.0}), "canonical text"),
         (_config(split_values={"train": "", "test": "test", "oot": "oot"}), "canonical text"),
+        (_config(split_col="model_split"), "governed private split column"),
+        (
+            _config(
+                split_values={
+                    "train": "train",
+                    "test": "test",
+                    "oot": "oot",
+                }
+            ),
+            "governed private split values",
+        ),
         (_config(target_type="continuous"), "target_type=binary"),
         (_config(recipe_id=None), "recipe_id"),
         (_config(drop_nan_labels=False), "drop_missing"),
@@ -979,6 +1005,11 @@ def test_rejects_wrong_sample_pair_kind_id_or_bundle_hash():
     ("path", "value", "message"),
     [
         (("training_contract", "train_config_hash"), "0" * 64, "train_config_hash"),
+        (
+            ("training_contract", "split_materialization", "content_hash"),
+            "0" * 64,
+            "split_materialization.content_hash",
+        ),
         (("training_contract", "split_proof", "content_hash"), "0" * 64, "split_proof.content_hash"),
         (("metrics_snapshot", "content_hash"), "0" * 64, "metrics_snapshot.content_hash"),
         (
