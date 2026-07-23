@@ -48,6 +48,8 @@ _MIGRATION_TABLES = frozenset({
     "strategy_automatic_tree_apply_runs",
     "strategy_project_context_heads",
     "strategy_project_context_revisions",
+    "strategy_report_heads",
+    "strategy_report_revisions",
 })
 
 # ARCH-10: schema_version mechanism.
@@ -165,7 +167,11 @@ _MIGRATION_TABLES = frozenset({
 # an append-only revision chain for the governed StrategyProjectContext.  The
 # database owns lineage/head integrity while the repository revalidates the
 # canonical contract and its content hashes on every read and write.
-SCHEMA_VERSION = 19
+#
+# _migration_020_strategy_report_revisions adds one immutable report ledger per
+# task/strategy scope.  Three task-owned rendered artifacts are bound to every
+# revision, while a CAS head and database triggers enforce exact N-1 lineage.
+SCHEMA_VERSION = 20
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -2889,6 +2895,289 @@ def _migration_019_strategy_project_context(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_020_strategy_report_revisions(conn: sqlite3.Connection) -> None:
+    """Add immutable StrategyReportBundle revisions and exact CAS heads."""
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_report_revisions (
+            report_id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.report-bundle.v2'),
+            producer_version TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            strategy_scope TEXT NOT NULL,
+            strategy_id TEXT,
+            strategy_version TEXT,
+            report_revision INTEGER NOT NULL CHECK(report_revision >= 1),
+            previous_report_id TEXT,
+            report_json TEXT NOT NULL CHECK(json_valid(report_json)),
+            bundle_content_hash TEXT NOT NULL
+                CHECK(length(bundle_content_hash) = 64)
+                CHECK(bundle_content_hash NOT GLOB '*[^0-9a-f]*'),
+            json_artifact_id TEXT NOT NULL,
+            json_artifact_hash TEXT NOT NULL
+                CHECK(length(json_artifact_hash) = 64)
+                CHECK(json_artifact_hash NOT GLOB '*[^0-9a-f]*'),
+            markdown_artifact_id TEXT NOT NULL,
+            markdown_artifact_hash TEXT NOT NULL
+                CHECK(length(markdown_artifact_hash) = 64)
+                CHECK(markdown_artifact_hash NOT GLOB '*[^0-9a-f]*'),
+            xlsx_artifact_id TEXT NOT NULL,
+            xlsx_artifact_hash TEXT NOT NULL
+                CHECK(length(xlsx_artifact_hash) = 64)
+                CHECK(xlsx_artifact_hash NOT GLOB '*[^0-9a-f]*'),
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, strategy_scope, report_revision),
+            UNIQUE(report_id, task_id, strategy_scope),
+            CHECK(
+                (strategy_id IS NULL
+                 AND strategy_version IS NULL
+                 AND strategy_scope = 'task-draft')
+                OR
+                (strategy_id IS NOT NULL
+                 AND strategy_version IS NOT NULL
+                 AND strategy_scope = 'strategy:' || strategy_id)
+            ),
+            CHECK(
+                (report_revision = 1 AND previous_report_id IS NULL)
+                OR
+                (report_revision > 1 AND previous_report_id IS NOT NULL)
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(previous_report_id, task_id, strategy_scope)
+                REFERENCES strategy_report_revisions(
+                    report_id, task_id, strategy_scope
+                )
+                DEFERRABLE INITIALLY DEFERRED,
+            FOREIGN KEY(json_artifact_id) REFERENCES task_artifacts(id),
+            FOREIGN KEY(markdown_artifact_id) REFERENCES task_artifacts(id),
+            FOREIGN KEY(xlsx_artifact_id) REFERENCES task_artifacts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_report_revisions_latest
+            ON strategy_report_revisions(
+                task_id, strategy_scope, report_revision DESC,
+                created_at DESC, report_id DESC
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_report_heads (
+            task_id TEXT NOT NULL,
+            strategy_scope TEXT NOT NULL,
+            strategy_id TEXT,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.report-head.v2'),
+            current_revision INTEGER NOT NULL DEFAULT 0
+                CHECK(current_revision >= 0),
+            current_report_id TEXT,
+            current_content_hash TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(task_id, strategy_scope),
+            CHECK(
+                (strategy_id IS NULL AND strategy_scope = 'task-draft')
+                OR
+                (strategy_id IS NOT NULL
+                 AND strategy_scope = 'strategy:' || strategy_id)
+            ),
+            CHECK(
+                (current_revision = 0
+                 AND current_report_id IS NULL
+                 AND current_content_hash IS NULL)
+                OR
+                (current_revision >= 1
+                 AND current_report_id IS NOT NULL
+                 AND length(current_content_hash) = 64
+                 AND current_content_hash NOT GLOB '*[^0-9a-f]*')
+            ),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(current_report_id, task_id, strategy_scope)
+                REFERENCES strategy_report_revisions(
+                    report_id, task_id, strategy_scope
+                )
+                DEFERRABLE INITIALLY DEFERRED
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_revisions_parent
+        BEFORE INSERT ON strategy_report_revisions
+        WHEN (
+            (NEW.report_revision = 1 AND NEW.previous_report_id IS NOT NULL)
+            OR
+            (NEW.report_revision > 1 AND NOT EXISTS (
+                SELECT 1
+                  FROM strategy_report_revisions AS parent
+                 WHERE parent.report_id = NEW.previous_report_id
+                   AND parent.task_id = NEW.task_id
+                   AND parent.strategy_scope = NEW.strategy_scope
+                   AND parent.report_revision = NEW.report_revision - 1
+            ))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report parent mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_revisions_head_parent
+        BEFORE INSERT ON strategy_report_revisions
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategy_report_heads AS head
+             WHERE head.task_id = NEW.task_id
+               AND head.strategy_scope = NEW.strategy_scope
+               AND head.current_revision = NEW.report_revision - 1
+               AND head.current_report_id IS NEW.previous_report_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report revision is not based on head');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_revisions_artifacts
+        BEFORE INSERT ON strategy_report_revisions
+        WHEN NOT (
+            EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.json_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_bundle_json'
+                   AND artifact.content_hash = NEW.json_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+            AND EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.markdown_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_markdown'
+                   AND artifact.content_hash = NEW.markdown_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+            AND EXISTS (
+                SELECT 1 FROM task_artifacts AS artifact
+                 WHERE artifact.id = NEW.xlsx_artifact_id
+                   AND artifact.task_id = NEW.task_id
+                   AND artifact.kind = 'strategy_report_xlsx'
+                   AND artifact.content_hash = NEW.xlsx_artifact_hash
+                   AND artifact.origin_tool = 'strategy.build_report_bundle_v2'
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report output artifact mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_heads_target_insert
+        BEFORE INSERT ON strategy_report_heads
+        WHEN NEW.current_revision > 0 AND NOT EXISTS (
+            SELECT 1
+              FROM strategy_report_revisions AS revision
+             WHERE revision.report_id = NEW.current_report_id
+               AND revision.task_id = NEW.task_id
+               AND revision.strategy_scope = NEW.strategy_scope
+               AND revision.report_revision = NEW.current_revision
+               AND revision.bundle_content_hash = NEW.current_content_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report head mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_heads_target_update
+        BEFORE UPDATE ON strategy_report_heads
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategy_report_revisions AS revision
+             WHERE revision.report_id = NEW.current_report_id
+               AND revision.task_id = NEW.task_id
+               AND revision.strategy_scope = NEW.strategy_scope
+               AND revision.report_revision = NEW.current_revision
+               AND revision.bundle_content_hash = NEW.current_content_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report head mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_heads_append_only
+        BEFORE UPDATE ON strategy_report_heads
+        WHEN NEW.task_id IS NOT OLD.task_id
+          OR NEW.strategy_scope IS NOT OLD.strategy_scope
+          OR NEW.strategy_id IS NOT OLD.strategy_id
+          OR NEW.schema_version IS NOT OLD.schema_version
+          OR NEW.created_at IS NOT OLD.created_at
+          OR NEW.current_revision <> OLD.current_revision + 1
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy report head is append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_revisions_immutable_update
+        BEFORE UPDATE ON strategy_report_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_report_revisions are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_revisions_immutable_delete
+        BEFORE DELETE ON strategy_report_revisions
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_report_revisions are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_report_heads_immutable_delete
+        BEFORE DELETE ON strategy_report_heads
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_report_heads are task-owned');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_report_output_artifacts_immutable_delete
+        BEFORE DELETE ON task_artifacts
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+         AND EXISTS (
+            SELECT 1
+              FROM strategy_report_revisions AS revision
+             WHERE revision.json_artifact_id = OLD.id
+                OR revision.markdown_artifact_id = OLD.id
+                OR revision.xlsx_artifact_id = OLD.id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'published strategy report artifacts are immutable');
+        END
+        """
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -2916,6 +3205,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (17, _migration_017_automatic_tree_apply_runs),
     (18, _migration_018_strategy_dsl_content_hash),
     (19, _migration_019_strategy_project_context),
+    (20, _migration_020_strategy_report_revisions),
 ]
 
 
