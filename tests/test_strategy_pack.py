@@ -350,6 +350,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "reorder_strategy_pool",
         "compile_strategy_pool",
         "measure_pool_impact",
+        "build_report_bundle_v2",
         "design_strategy_candidate",
         "build_strategy",
         "apply_strategy",
@@ -369,7 +370,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "apply_monitoring_disposition",
         "render_monitoring_report",
     }
-    assert manifest.version == "0.13.0"
+    assert manifest.version == "0.14.0"
     for tool in (project_context_tool, sample_v2_tool, model_evidence_v2_tool):
         assert tool.determinism == "deterministic"
         assert tool.failure_policy == "fail"

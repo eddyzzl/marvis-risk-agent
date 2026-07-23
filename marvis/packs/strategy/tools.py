@@ -75,6 +75,9 @@ from marvis.packs.strategy.pool_tools import (
 )
 from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
 from marvis.packs.strategy.project_context_tools import run_materialize_project_context
+from marvis.packs.strategy.report_bundle_tools import (
+    run_build_strategy_report_bundle_v2,
+)
 from marvis.packs.strategy.model_evidence_tools import (
     run_materialize_model_evidence_v2,
 )
@@ -855,6 +858,12 @@ def tool_measure_pool_impact(inputs: dict, ctx) -> dict:
     """Measure governed first-match and monthly impact for the current Pool."""
 
     return run_measure_pool_impact(inputs, ctx, _runtime(ctx))
+
+
+def tool_build_report_bundle_v2(inputs: dict, ctx) -> dict:
+    """Build and publish the governed StrategyReportBundle projections."""
+
+    return run_build_strategy_report_bundle_v2(inputs, ctx, _runtime(ctx))
 
 
 def tool_materialize_project_context(inputs: dict, ctx) -> dict:

@@ -1,6 +1,6 @@
 {
   "name": "strategy",
-  "version": "0.13.1",
+  "version": "0.14.0",
   "display_name": "Strategy Pack",
   "description": "Vintage, roll-rate, profitability, governed sample design, univariate, automatic-tree, Voting n-of-k, and complete two-dimensional Cross Matrix candidate development with explicit leaf and Cross cell-group materialization, Strategy Pool assembly, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
@@ -4407,6 +4407,380 @@
         "effect_authorization": "none"
       },
       "side_effects": ["read:task", "read:dataset", "write:artifact"],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "build_report_bundle_v2",
+      "summary": "Build and atomically publish deterministic JSON, Markdown, and Excel StrategyReportBundle projections from exact governed evidence refs.",
+      "input_schema": {
+        "type": "object",
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "membership_artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_membership_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "bundle_artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_bundle_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_bundle_id": {"type": "string", "minLength": 1},
+              "expected_sample_design_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "membership_artifact_id",
+              "expected_membership_artifact_content_hash",
+              "bundle_artifact_id",
+              "expected_bundle_artifact_content_hash",
+              "expected_bundle_id",
+              "expected_sample_design_id",
+              "expected_sample_design_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "candidate_pool_ref": {
+            "type": "object",
+            "properties": {
+              "strategy_type": {
+                "type": "string",
+                "enum": ["approval", "reject"]
+              },
+              "expected_pool_revision": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "expected_pool_snapshot_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "strategy_type",
+              "expected_pool_revision",
+              "expected_pool_snapshot_hash",
+              "expected_artifact_id",
+              "expected_artifact_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "pool_impact_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_assessment_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_assessment_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "expected_artifact_content_hash",
+              "expected_assessment_id",
+              "expected_assessment_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "strategy_identity": {
+            "type": "object",
+            "properties": {
+              "strategy_id": {"type": "string", "minLength": 1},
+              "strategy_version": {"type": "string", "minLength": 1},
+              "strategy_type": {
+                "type": "string",
+                "enum": ["approval", "reject"]
+              }
+            },
+            "required": [
+              "strategy_id",
+              "strategy_version",
+              "strategy_type"
+            ],
+            "additionalProperties": false
+          },
+          "model_evidence_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_bundle_id": {"type": "string", "minLength": 1},
+              "expected_bundle_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "expected_artifact_content_hash",
+              "expected_bundle_id",
+              "expected_bundle_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "training_evidence_ref": {
+            "type": "object",
+            "properties": {
+              "sample_design_ref": {
+                "$ref": "#/$defs/sample_design_ref"
+              },
+              "model_binary_artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_model_binary_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "evidence_artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_evidence_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_experiment_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_model_artifact_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_evidence_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_evidence_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "sample_design_ref",
+              "model_binary_artifact_id",
+              "expected_model_binary_artifact_content_hash",
+              "evidence_artifact_id",
+              "expected_evidence_artifact_content_hash",
+              "expected_experiment_id",
+              "expected_model_artifact_id",
+              "expected_evidence_id",
+              "expected_evidence_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "score_evidence_ref": {
+            "type": "object",
+            "properties": {
+              "evidence_artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_evidence_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "score_vector_artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_score_vector_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "evidence_artifact_id",
+              "expected_evidence_artifact_content_hash",
+              "score_vector_artifact_id",
+              "expected_score_vector_artifact_content_hash"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "status": {
+            "type": "string",
+            "enum": ["draft", "partial", "final"]
+          },
+          "report_revision": {"type": "integer", "minimum": 1},
+          "previous_report_id": {
+            "type": ["string", "null"],
+            "pattern": "^strategy-report-[0-9a-f]{24}$"
+          },
+          "previous_report_content_hash": {
+            "oneOf": [
+              {"$ref": "#/$defs/sha256"},
+              {"type": "null"}
+            ]
+          },
+          "generated_at": {"type": "string", "minLength": 1},
+          "sample_design_ref": {
+            "$ref": "#/$defs/sample_design_ref"
+          },
+          "candidate_pool_ref": {
+            "$ref": "#/$defs/candidate_pool_ref"
+          },
+          "pool_impact_ref": {
+            "$ref": "#/$defs/pool_impact_ref"
+          },
+          "strategy_identity": {
+            "oneOf": [
+              {"$ref": "#/$defs/strategy_identity"},
+              {"type": "null"}
+            ]
+          },
+          "model_evidence_ref": {
+            "oneOf": [
+              {"$ref": "#/$defs/model_evidence_ref"},
+              {"type": "null"}
+            ]
+          },
+          "training_evidence_ref": {
+            "oneOf": [
+              {"$ref": "#/$defs/training_evidence_ref"},
+              {"type": "null"}
+            ]
+          },
+          "score_evidence_ref": {
+            "oneOf": [
+              {"$ref": "#/$defs/score_evidence_ref"},
+              {"type": "null"}
+            ]
+          }
+        },
+        "required": [
+          "title",
+          "status",
+          "report_revision",
+          "previous_report_id",
+          "previous_report_content_hash",
+          "generated_at",
+          "sample_design_ref",
+          "candidate_pool_ref",
+          "pool_impact_ref"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.build-report-bundle-v2-tool.v1"
+          },
+          "report_id": {
+            "type": "string",
+            "pattern": "^strategy-report-[0-9a-f]{24}$"
+          },
+          "report_revision": {"type": "integer", "minimum": 1},
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["draft", "partial", "final"]
+          },
+          "strategy_id": {"type": ["string", "null"]},
+          "strategy_version": {"type": ["string", "null"]},
+          "strategy_type": {
+            "type": ["string", "null"],
+            "enum": ["approval", "reject", null]
+          },
+          "bundle": {"type": "object", "minProperties": 1},
+          "artifacts": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "strategy_report_bundle_json",
+                    "strategy_report_markdown",
+                    "strategy_report_xlsx"
+                  ]
+                },
+                "format": {
+                  "type": "string",
+                  "enum": ["json", "markdown", "xlsx"]
+                },
+                "filename": {
+                  "type": "string",
+                  "enum": ["report.json", "report.md", "report.xlsx"]
+                },
+                "content_hash": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "download_url": {"type": "string", "minLength": 1}
+              },
+              "required": [
+                "artifact_id",
+                "kind",
+                "format",
+                "filename",
+                "content_hash",
+                "download_url"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "not_created_strategy": {"const": true},
+          "not_adopted": {"const": true},
+          "not_deployed": {"const": true}
+        },
+        "required": [
+          "schema_version",
+          "report_id",
+          "report_revision",
+          "content_hash",
+          "status",
+          "strategy_id",
+          "strategy_version",
+          "strategy_type",
+          "bundle",
+          "artifacts",
+          "warnings",
+          "not_created_strategy",
+          "not_adopted",
+          "not_deployed"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_build_report_bundle_v2",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:task",
+        "read:dataset",
+        "write:artifact"
+      ],
       "memory_limit_mb": 2048
     },
     {
