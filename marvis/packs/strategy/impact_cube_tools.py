@@ -53,18 +53,28 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactConflictError,
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
+    _stable_artifact_id,
 )
 
 
-IMPACT_CUBE_TOOL_SCHEMA_VERSION = "strategy.measure-impact-cube-tool.v2"
+IMPACT_CUBE_TOOL_SCHEMA_VERSION = "strategy.measure-impact-cube-tool.v3"
 IMPACT_CUBE_ARTIFACT_KIND = "strategy_impact_cube_json"
-IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION = "strategy.impact-cube-artifact.v2"
+IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION = "strategy.impact-cube-artifact.v3"
 IMPACT_CUBE_ORIGIN_TOOL = "strategy.measure_strategy_impact_cube"
+IMPACT_CUBE_MEASUREMENT_RUN_SCHEMA_VERSION = (
+    "strategy.impact-cube-measurement-run.v1"
+)
+IMPACT_CUBE_MEASUREMENT_AUDIT_KIND = (
+    "strategy.impact-cube.measurement.completed"
+)
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _POOL_ID_RE = re.compile(r"^strategy-pool-[0-9a-f]{32}$")
 _POOL_REVISION_ID_RE = re.compile(
     r"^strategy-pool-revision-[0-9a-f]{32}$"
+)
+_MEASUREMENT_RUN_ID_RE = re.compile(
+    r"^strategy-impact-cube-run-[0-9a-f]{24}$"
 )
 _PARTITION_ORDER = ("development", "validation", "oot")
 _PARTITIONS = frozenset(_PARTITION_ORDER)
@@ -142,6 +152,7 @@ _OUTPUT_FIELDS = frozenset(
         "cube",
         "warnings",
         "artifact",
+        "producer_run_ref",
         "not_mutated_pool",
         "not_created_strategy",
         "not_adopted",
@@ -176,7 +187,43 @@ _PROVENANCE_FIELDS = frozenset(
         "partitions",
         "populations",
         "lifecycle",
+        "producer_run",
     }
+)
+_PRODUCER_RUN_FIELDS = frozenset(
+    {
+        "schema_version",
+        "run_id",
+        "content_hash",
+        "input_hash",
+        "task_id",
+        "request",
+        "tool_ref",
+        "cube_ref",
+        "artifact_ref",
+    }
+)
+_PRODUCER_TOOL_REF_FIELDS = frozenset(
+    {
+        "plugin",
+        "tool",
+        "origin_tool",
+        "tool_schema_version",
+        "producer_version",
+    }
+)
+_PRODUCER_CUBE_REF_FIELDS = frozenset({"cube_id", "content_hash"})
+_PRODUCER_ARTIFACT_REF_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "kind",
+        "filename",
+        "content_hash",
+        "origin_tool",
+    }
+)
+_PRODUCER_RUN_REF_FIELDS = frozenset(
+    {"kind", "ref_id", "content_hash"}
 )
 _LIFECYCLE = {
     "mutates_pool": False,
@@ -317,6 +364,8 @@ def validate_measure_strategy_impact_cube_tool_output(
     trusted_task_id: str,
     trusted_artifact_id: str,
     trusted_artifact_content_hash: str,
+    trusted_producer_run_id: str,
+    trusted_producer_run_content_hash: str,
 ) -> dict[str, Any]:
     """Validate every cached scalar against the canonical embedded cube."""
 
@@ -418,6 +467,33 @@ def validate_measure_strategy_impact_cube_tool_output(
     if artifact != expected_artifact:
         raise StrategyError(
             "measure_strategy_impact_cube artifact binding drifted"
+        )
+    producer_run_ref = _json_object(
+        obj["producer_run_ref"],
+        "measure_strategy_impact_cube producer_run_ref",
+    )
+    _exact_fields(
+        producer_run_ref,
+        _PRODUCER_RUN_REF_FIELDS,
+        "measure_strategy_impact_cube producer_run_ref",
+    )
+    expected_run_id = _text(
+        trusted_producer_run_id,
+        "trusted producer_run id",
+    )
+    if _MEASUREMENT_RUN_ID_RE.fullmatch(expected_run_id) is None:
+        raise StrategyError("trusted producer_run id is invalid")
+    expected_run_content_hash = _hash(
+        trusted_producer_run_content_hash,
+        "trusted producer_run content_hash",
+    )
+    if producer_run_ref != {
+        "kind": "tool_run",
+        "ref_id": expected_run_id,
+        "content_hash": expected_run_content_hash,
+    }:
+        raise StrategyError(
+            "measure_strategy_impact_cube producer_run_ref drifted"
         )
     obj["cube"] = cube
     return obj
@@ -1238,6 +1314,224 @@ def _require_dataset_unchanged(
         raise StrategyError("ImpactCube dataset changed during computation")
 
 
+def build_impact_cube_producer_run(
+    *,
+    task_id: str,
+    request: Mapping[str, Any],
+    cube_id: str,
+    cube_content_hash: str,
+    artifact_id: str,
+    artifact_filename: str,
+    artifact_content_hash: str,
+) -> dict[str, Any]:
+    """Build one stable, content-addressed deterministic measurement run."""
+
+    normalized_task_id = _text(task_id, "producer_run.task_id")
+    normalized_request = _validate_inputs(request)
+    tool_ref = {
+        "plugin": "strategy",
+        "tool": "measure_strategy_impact_cube",
+        "origin_tool": IMPACT_CUBE_ORIGIN_TOOL,
+        "tool_schema_version": IMPACT_CUBE_TOOL_SCHEMA_VERSION,
+        "producer_version": STRATEGY_IMPACT_CUBE_PRODUCER_VERSION,
+    }
+    input_binding = {
+        "task_id": normalized_task_id,
+        "request": normalized_request,
+        "producer": tool_ref,
+    }
+    input_hash = hashlib.sha256(
+        _canonical_json(input_binding).encode("utf-8")
+    ).hexdigest()
+    body = {
+        "schema_version": IMPACT_CUBE_MEASUREMENT_RUN_SCHEMA_VERSION,
+        "run_id": f"strategy-impact-cube-run-{input_hash[:24]}",
+        "input_hash": input_hash,
+        "task_id": normalized_task_id,
+        "request": normalized_request,
+        "tool_ref": tool_ref,
+        "cube_ref": {
+            "cube_id": _text(cube_id, "producer_run.cube_ref.cube_id"),
+            "content_hash": _hash(
+                cube_content_hash,
+                "producer_run.cube_ref.content_hash",
+            ),
+        },
+        "artifact_ref": {
+            "artifact_id": _hash(
+                artifact_id,
+                "producer_run.artifact_ref.artifact_id",
+            ),
+            "kind": IMPACT_CUBE_ARTIFACT_KIND,
+            "filename": _text(
+                artifact_filename,
+                "producer_run.artifact_ref.filename",
+            ),
+            "content_hash": _hash(
+                artifact_content_hash,
+                "producer_run.artifact_ref.content_hash",
+            ),
+            "origin_tool": IMPACT_CUBE_ORIGIN_TOOL,
+        },
+    }
+    content_hash = hashlib.sha256(
+        _canonical_json(body).encode("utf-8")
+    ).hexdigest()
+    return validate_impact_cube_producer_run(
+        {**body, "content_hash": content_hash},
+        expected_task_id=normalized_task_id,
+        expected_request=normalized_request,
+        expected_cube_id=cube_id,
+        expected_cube_content_hash=cube_content_hash,
+        expected_artifact_id=artifact_id,
+        expected_artifact_filename=artifact_filename,
+        expected_artifact_content_hash=artifact_content_hash,
+    )
+
+
+def validate_impact_cube_producer_run(
+    value: object,
+    *,
+    expected_task_id: str,
+    expected_request: Mapping[str, Any],
+    expected_cube_id: str,
+    expected_cube_content_hash: str,
+    expected_artifact_id: str,
+    expected_artifact_filename: str,
+    expected_artifact_content_hash: str,
+) -> dict[str, Any]:
+    """Authenticate a measurement run and all of its evidence bindings."""
+
+    obj = _json_object(value, "ImpactCube producer_run")
+    _exact_fields(obj, _PRODUCER_RUN_FIELDS, "ImpactCube producer_run")
+    if obj["schema_version"] != IMPACT_CUBE_MEASUREMENT_RUN_SCHEMA_VERSION:
+        raise StrategyError("ImpactCube producer_run schema_version is invalid")
+    task_id = _text(expected_task_id, "expected producer_run task_id")
+    request = _validate_inputs(expected_request)
+    if obj["task_id"] != task_id or obj["request"] != request:
+        raise StrategyError("ImpactCube producer_run input binding changed")
+    tool_ref = _json_object(
+        obj["tool_ref"],
+        "ImpactCube producer_run.tool_ref",
+    )
+    _exact_fields(
+        tool_ref,
+        _PRODUCER_TOOL_REF_FIELDS,
+        "ImpactCube producer_run.tool_ref",
+    )
+    expected_tool_ref = {
+        "plugin": "strategy",
+        "tool": "measure_strategy_impact_cube",
+        "origin_tool": IMPACT_CUBE_ORIGIN_TOOL,
+        "tool_schema_version": IMPACT_CUBE_TOOL_SCHEMA_VERSION,
+        "producer_version": STRATEGY_IMPACT_CUBE_PRODUCER_VERSION,
+    }
+    if tool_ref != expected_tool_ref:
+        raise StrategyError("ImpactCube producer_run tool_ref changed")
+    expected_input_hash = hashlib.sha256(
+        _canonical_json(
+            {
+                "task_id": task_id,
+                "request": request,
+                "producer": expected_tool_ref,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    input_hash = _hash(
+        obj["input_hash"],
+        "ImpactCube producer_run.input_hash",
+    )
+    if not hmac.compare_digest(input_hash, expected_input_hash):
+        raise StrategyError("ImpactCube producer_run input_hash changed")
+    run_id = _text(obj["run_id"], "ImpactCube producer_run.run_id")
+    if (
+        _MEASUREMENT_RUN_ID_RE.fullmatch(run_id) is None
+        or run_id != f"strategy-impact-cube-run-{input_hash[:24]}"
+    ):
+        raise StrategyError("ImpactCube producer_run run_id changed")
+
+    cube_ref = _json_object(
+        obj["cube_ref"],
+        "ImpactCube producer_run.cube_ref",
+    )
+    _exact_fields(
+        cube_ref,
+        _PRODUCER_CUBE_REF_FIELDS,
+        "ImpactCube producer_run.cube_ref",
+    )
+    expected_cube_ref = {
+        "cube_id": _text(
+            expected_cube_id,
+            "expected producer_run cube_id",
+        ),
+        "content_hash": _hash(
+            expected_cube_content_hash,
+            "expected producer_run cube content_hash",
+        ),
+    }
+    if cube_ref != expected_cube_ref:
+        raise StrategyError("ImpactCube producer_run cube binding changed")
+
+    artifact_ref = _json_object(
+        obj["artifact_ref"],
+        "ImpactCube producer_run.artifact_ref",
+    )
+    _exact_fields(
+        artifact_ref,
+        _PRODUCER_ARTIFACT_REF_FIELDS,
+        "ImpactCube producer_run.artifact_ref",
+    )
+    expected_artifact_ref = {
+        "artifact_id": _hash(
+            expected_artifact_id,
+            "expected producer_run artifact_id",
+        ),
+        "kind": IMPACT_CUBE_ARTIFACT_KIND,
+        "filename": _text(
+            expected_artifact_filename,
+            "expected producer_run artifact filename",
+        ),
+        "content_hash": _hash(
+            expected_artifact_content_hash,
+            "expected producer_run artifact content_hash",
+        ),
+        "origin_tool": IMPACT_CUBE_ORIGIN_TOOL,
+    }
+    if artifact_ref != expected_artifact_ref:
+        raise StrategyError("ImpactCube producer_run artifact binding changed")
+
+    body = {key: obj[key] for key in obj if key != "content_hash"}
+    expected_content_hash = hashlib.sha256(
+        _canonical_json(body).encode("utf-8")
+    ).hexdigest()
+    content_hash = _hash(
+        obj["content_hash"],
+        "ImpactCube producer_run.content_hash",
+    )
+    if not hmac.compare_digest(content_hash, expected_content_hash):
+        raise StrategyError("ImpactCube producer_run self hash changed")
+    return obj
+
+
+def impact_cube_producer_run_ref(
+    producer_run: Mapping[str, Any],
+) -> dict[str, str]:
+    """Project an authenticated producer run to the public source-ref shape."""
+
+    obj = _json_object(producer_run, "ImpactCube producer_run")
+    run_id = _text(obj.get("run_id"), "ImpactCube producer_run.run_id")
+    if _MEASUREMENT_RUN_ID_RE.fullmatch(run_id) is None:
+        raise StrategyError("ImpactCube producer_run run_id is invalid")
+    return {
+        "kind": "tool_run",
+        "ref_id": run_id,
+        "content_hash": _hash(
+            obj.get("content_hash"),
+            "ImpactCube producer_run.content_hash",
+        ),
+    }
+
+
 def _persist_cube(
     runtime,
     *,
@@ -1257,6 +1551,20 @@ def _persist_cube(
         task_id=task_id,
     )
     final_path = out_dir / f"{cube['cube_id']}.json"
+    artifact_id = _stable_artifact_id(
+        task_id=task_id,
+        kind=IMPACT_CUBE_ARTIFACT_KIND,
+        path=str(final_path),
+    )
+    producer_run = build_impact_cube_producer_run(
+        task_id=task_id,
+        request=request,
+        cube_id=str(cube["cube_id"]),
+        cube_content_hash=str(cube["content_hash"]),
+        artifact_id=artifact_id,
+        artifact_filename=final_path.name,
+        artifact_content_hash=artifact_hash,
+    )
     sources = cube["source_bindings"]
     provenance = {
         "schema_version": IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION,
@@ -1286,6 +1594,7 @@ def _persist_cube(
         "partitions": list(request["partitions"]),
         "populations": ["approval", "risk"],
         "lifecycle": dict(_LIFECYCLE),
+        "producer_run": producer_run,
     }
     _validate_provenance(provenance)
     uow = ArtifactUnitOfWork()
@@ -1301,6 +1610,8 @@ def _persist_cube(
     db_committed = False
     rollback_under_lock = False
     reused = False
+    created_artifact_row: dict[str, Any] | None = None
+    created_audit_row: dict[str, Any] | None = None
     retained_fd = -1
     retained_identity: tuple[int, ...] | None = None
     try:
@@ -1320,6 +1631,7 @@ def _persist_cube(
                     task_id=task_id,
                     path=final_path,
                 )
+                artifact_row_existed = row is not None
                 if row is not None:
                     _require_existing_artifact(
                         row,
@@ -1377,6 +1689,30 @@ def _persist_cube(
                     origin_tool=IMPACT_CUBE_ORIGIN_TOOL,
                     provenance=provenance,
                 )
+                if str(record["id"]) != artifact_id:
+                    raise StrategyError(
+                        "ImpactCube artifact stable identity changed"
+                    )
+                if not artifact_row_existed:
+                    inserted_artifact_row = _select_artifact_row(
+                        conn,
+                        task_id=task_id,
+                        path=final_path,
+                    )
+                    if inserted_artifact_row is None:
+                        raise StrategyError(
+                            "ImpactCube artifact registration disappeared"
+                        )
+                    created_artifact_row = {
+                        field: inserted_artifact_row[field]
+                        for field in _TASK_ARTIFACT_ROW_FIELDS
+                    }
+                created_audit_row = _write_or_require_measurement_audit(
+                    conn,
+                    runtime=runtime,
+                    producer_run=producer_run,
+                    artifact_row_existed=artifact_row_existed,
+                )
                 _require_bindings_on_connection(
                     conn,
                     pool=pool,
@@ -1395,6 +1731,7 @@ def _persist_cube(
                 conn.commit()
                 db_committed = True
                 try:
+                    conn.execute("BEGIN IMMEDIATE")
                     _require_retained_exact_file(
                         retained_fd,
                         retained_identity=retained_identity,
@@ -1402,15 +1739,34 @@ def _persist_cube(
                         canonical=canonical,
                         content_hash=artifact_hash,
                     )
-                except Exception as exc:
-                    _remove_committed_artifact_record(
+                    require_impact_cube_measurement_audit_on_connection(
                         conn,
-                        task_id=task_id,
-                        artifact_id=str(record["id"]),
+                        producer_run,
                     )
+                    conn.commit()
+                except Exception as exc:
+                    conn.rollback()
+                    if (
+                        created_artifact_row is not None
+                        or created_audit_row is not None
+                    ):
+                        _remove_committed_artifact_record(
+                            conn,
+                            created_artifact_row=created_artifact_row,
+                            created_audit_row=created_audit_row,
+                        )
+                        disposition = (
+                            "newly created registry and audit entries "
+                            "were removed"
+                        )
+                    else:
+                        disposition = (
+                            "pre-existing registry and audit entries "
+                            "were retained"
+                        )
                     raise StrategyError(
-                        "ImpactCube artifact changed after registration "
-                        "commit; registry entry was removed"
+                        "ImpactCube artifact or measurement audit changed "
+                        f"after registration commit; {disposition}"
                     ) from exc
             except Exception:
                 rollback_under_lock = True
@@ -1426,10 +1782,19 @@ def _persist_cube(
         if retained_fd >= 0:
             os.close(retained_fd)
     return validate_measure_strategy_impact_cube_tool_output(
-        _tool_output(cube=cube, record=record, task_id=task_id),
+        _tool_output(
+            cube=cube,
+            record=record,
+            task_id=task_id,
+            producer_run=producer_run,
+        ),
         trusted_task_id=task_id,
         trusted_artifact_id=str(record["id"]),
         trusted_artifact_content_hash=str(record["content_hash"]),
+        trusted_producer_run_id=str(producer_run["run_id"]),
+        trusted_producer_run_content_hash=str(
+            producer_run["content_hash"]
+        ),
     )
 
 
@@ -1438,6 +1803,7 @@ def _tool_output(
     cube: Mapping[str, Any],
     record: Mapping[str, Any],
     task_id: str,
+    producer_run: Mapping[str, Any],
 ) -> dict[str, Any]:
     identity = cube["identity"]
     artifact_id = str(record["id"])
@@ -1473,6 +1839,7 @@ def _tool_output(
                 f"?expected_content_hash={quote(str(record['content_hash']), safe='')}"
             ),
         },
+        "producer_run_ref": impact_cube_producer_run_ref(producer_run),
         "not_mutated_pool": True,
         "not_created_strategy": True,
         "not_adopted": True,
@@ -1577,6 +1944,54 @@ def _validate_provenance(value: object) -> dict[str, Any]:
         raise StrategyError("ImpactCube provenance populations changed")
     if obj["lifecycle"] != _LIFECYCLE:
         raise StrategyError("ImpactCube provenance lifecycle changed")
+    run_obj = _json_object(
+        obj["producer_run"],
+        "ImpactCube provenance.producer_run",
+    )
+    run = validate_impact_cube_producer_run(
+        run_obj,
+        expected_task_id=obj["task_id"],
+        expected_request=run_obj.get("request"),
+        expected_cube_id=obj["cube_id"],
+        expected_cube_content_hash=obj["cube_content_hash"],
+        expected_artifact_id=_json_object(
+            run_obj.get("artifact_ref"),
+            "ImpactCube producer_run.artifact_ref",
+        ).get("artifact_id"),
+        expected_artifact_filename=_json_object(
+            run_obj.get("artifact_ref"),
+            "ImpactCube producer_run.artifact_ref",
+        ).get("filename"),
+        expected_artifact_content_hash=_json_object(
+            run_obj.get("artifact_ref"),
+            "ImpactCube producer_run.artifact_ref",
+        ).get("content_hash"),
+    )
+    request = run["request"]
+    if (
+        request["pool_ref"] != obj["pool_ref"]
+        or request["sample_design_ref"] != obj["sample_design_ref"]
+        or request["partitions"] != obj["partitions"]
+        or request["dimension_bindings"] != obj["dimension_bindings"]
+        or request["economics_inputs"] != obj["economics_inputs"]
+    ):
+        raise StrategyError(
+            "ImpactCube producer_run request provenance changed"
+        )
+    expected_current_request = (
+        None
+        if obj["current_strategy_ref"] is None
+        else {
+            "strategy_id": obj["current_strategy_ref"]["strategy_id"],
+            "expected_strategy_spec_hash": obj["current_strategy_ref"][
+                "strategy_spec_hash"
+            ],
+        }
+    )
+    if request["current_strategy_ref"] != expected_current_request:
+        raise StrategyError(
+            "ImpactCube producer_run current strategy provenance changed"
+        )
     return obj
 
 
@@ -1634,40 +2049,213 @@ def _select_artifact_row(conn, *, task_id: str, path: Path):
     ).fetchone()
 
 
+def require_impact_cube_measurement_audit_on_connection(
+    conn,
+    producer_run: Mapping[str, Any],
+) -> None:
+    """Require the unique succeeded audit for one authenticated run record."""
+
+    if not conn.in_transaction:
+        raise StrategyError(
+            "ImpactCube measurement audit requires a caller-owned transaction"
+        )
+    run = _json_object(producer_run, "ImpactCube producer_run")
+    run_id = _text(run.get("run_id"), "ImpactCube producer_run.run_id")
+    input_hash = _hash(
+        run.get("input_hash"),
+        "ImpactCube producer_run.input_hash",
+    )
+    rows = conn.execute(
+        """
+        SELECT actor, inputs_hash, outcome, detail_json
+          FROM audit
+         WHERE kind = ? AND target_ref = ?
+         ORDER BY at, id
+        """,
+        (IMPACT_CUBE_MEASUREMENT_AUDIT_KIND, run_id),
+    ).fetchall()
+    if len(rows) != 1:
+        state = "missing" if not rows else "duplicated"
+        raise StrategyError(
+            f"ImpactCube measurement audit is {state}"
+        )
+    row = rows[0]
+    try:
+        detail = json.loads(
+            str(row["detail_json"]),
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_json_constant,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise StrategyError(
+            "ImpactCube measurement audit detail is invalid"
+        ) from exc
+    if (
+        str(row["actor"]) != "system"
+        or str(row["inputs_hash"]) != input_hash
+        or str(row["outcome"]) != "succeeded"
+        or detail != {"producer_run": run}
+    ):
+        raise StrategyError(
+            "ImpactCube measurement audit binding changed"
+        )
+
+
+def _write_or_require_measurement_audit(
+    conn,
+    *,
+    runtime,
+    producer_run: Mapping[str, Any],
+    artifact_row_existed: bool,
+) -> dict[str, Any] | None:
+    run = _json_object(producer_run, "ImpactCube producer_run")
+    rows = conn.execute(
+        """
+        SELECT 1
+          FROM audit
+         WHERE kind = ? AND target_ref = ?
+         ORDER BY at, id
+        """,
+        (IMPACT_CUBE_MEASUREMENT_AUDIT_KIND, run["run_id"]),
+    ).fetchall()
+    if artifact_row_existed:
+        require_impact_cube_measurement_audit_on_connection(conn, run)
+        return None
+    if rows:
+        raise StrategyError(
+            "ImpactCube measurement audit exists without its artifact row"
+        )
+    runtime.repo.write_audit_on_connection(
+        conn,
+        kind=IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,
+        target_ref=run["run_id"],
+        inputs_hash=run["input_hash"],
+        outcome="succeeded",
+        detail={"producer_run": run},
+    )
+    created_rows = conn.execute(
+        """
+        SELECT id, kind, actor, target_ref, inputs_hash, outcome,
+               detail_json, at
+          FROM audit
+         WHERE kind = ? AND target_ref = ?
+         ORDER BY at, id
+        """,
+        (IMPACT_CUBE_MEASUREMENT_AUDIT_KIND, run["run_id"]),
+    ).fetchall()
+    if len(created_rows) != 1:
+        raise StrategyError(
+            "ImpactCube created measurement audit is not unique"
+        )
+    created_row = dict(created_rows[0])
+    require_impact_cube_measurement_audit_on_connection(conn, run)
+    return created_row
+
+
 def _remove_committed_artifact_record(
     conn,
     *,
-    task_id: str,
-    artifact_id: str,
+    created_artifact_row: Mapping[str, Any] | None,
+    created_audit_row: Mapping[str, Any] | None,
 ) -> None:
-    normalized_task_id = _text(
-        task_id,
-        "ImpactCube compensation task_id",
+    artifact = (
+        None
+        if created_artifact_row is None
+        else {
+            field: _text(
+                created_artifact_row.get(field),
+                f"ImpactCube compensation artifact.{field}",
+            )
+            for field in _TASK_ARTIFACT_ROW_FIELDS
+        }
     )
-    normalized_artifact_id = _hash(
-        artifact_id,
-        "ImpactCube compensation artifact_id",
+    if artifact is not None:
+        artifact["id"] = _hash(
+            artifact["id"],
+            "ImpactCube compensation artifact.id",
+        )
+        artifact["content_hash"] = _hash(
+            artifact["content_hash"],
+            "ImpactCube compensation artifact.content_hash",
+        )
+    audit = (
+        None
+        if created_audit_row is None
+        else {
+            field: _text(
+                created_audit_row.get(field),
+                f"ImpactCube compensation audit.{field}",
+            )
+            for field in (
+                "id",
+                "kind",
+                "actor",
+                "target_ref",
+                "inputs_hash",
+                "outcome",
+                "detail_json",
+                "at",
+            )
+        }
     )
+    if audit is not None:
+        if audit["kind"] != IMPACT_CUBE_MEASUREMENT_AUDIT_KIND:
+            raise StrategyError(
+                "ImpactCube compensation audit kind is invalid"
+            )
+        if _MEASUREMENT_RUN_ID_RE.fullmatch(audit["target_ref"]) is None:
+            raise StrategyError(
+                "ImpactCube compensation producer_run_id is invalid"
+            )
+        audit["inputs_hash"] = _hash(
+            audit["inputs_hash"],
+            "ImpactCube compensation audit.inputs_hash",
+        )
     conn.execute("BEGIN IMMEDIATE")
-    conn.execute(
-        """
-        DELETE FROM task_artifacts
-         WHERE task_id = ? AND id = ?
-        """,
-        (normalized_task_id, normalized_artifact_id),
-    )
-    remaining = conn.execute(
-        """
-        SELECT 1
-          FROM task_artifacts
-         WHERE task_id = ? AND id = ?
-        """,
-        (normalized_task_id, normalized_artifact_id),
-    ).fetchone()
-    if remaining is not None:
+    artifact_deleted = 0
+    audit_deleted = 0
+    if artifact is not None:
+        artifact_deleted = conn.execute(
+            """
+            DELETE FROM task_artifacts
+             WHERE id = ? AND task_id = ? AND kind = ? AND path = ?
+               AND content_hash = ? AND origin_tool = ?
+               AND provenance_json = ? AND created_at = ?
+            """,
+            tuple(
+                artifact[field]
+                for field in _TASK_ARTIFACT_ROW_FIELDS
+            ),
+        ).rowcount
+    if audit is not None:
+        audit_deleted = conn.execute(
+            """
+            DELETE FROM audit
+             WHERE id = ? AND kind = ? AND actor = ?
+               AND target_ref = ? AND inputs_hash = ? AND outcome = ?
+               AND detail_json = ? AND at = ?
+            """,
+            tuple(
+                audit[field]
+                for field in (
+                    "id",
+                    "kind",
+                    "actor",
+                    "target_ref",
+                    "inputs_hash",
+                    "outcome",
+                    "detail_json",
+                    "at",
+                )
+            ),
+        ).rowcount
+    if (
+        (artifact is not None and artifact_deleted != 1)
+        or (audit is not None and audit_deleted != 1)
+    ):
         conn.rollback()
         raise StrategyError(
-            "ImpactCube artifact registry compensation failed"
+            "ImpactCube artifact registry compensation CAS failed"
         )
     conn.commit()
 
@@ -1952,6 +2540,21 @@ def _json_object(value: object, name: str) -> dict[str, Any]:
     return normalized
 
 
+def _object_without_duplicate_keys(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
 def _json_value(value: object, name: str) -> Any:
     try:
         return json.loads(
@@ -2053,8 +2656,14 @@ def _finite_number(value: object, name: str) -> int | float:
 __all__ = [
     "IMPACT_CUBE_ARTIFACT_KIND",
     "IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION",
+    "IMPACT_CUBE_MEASUREMENT_AUDIT_KIND",
+    "IMPACT_CUBE_MEASUREMENT_RUN_SCHEMA_VERSION",
     "IMPACT_CUBE_ORIGIN_TOOL",
     "IMPACT_CUBE_TOOL_SCHEMA_VERSION",
+    "build_impact_cube_producer_run",
+    "impact_cube_producer_run_ref",
+    "require_impact_cube_measurement_audit_on_connection",
     "run_measure_strategy_impact_cube",
+    "validate_impact_cube_producer_run",
     "validate_measure_strategy_impact_cube_tool_output",
 ]

@@ -320,12 +320,12 @@ _STRATEGY_REPORT_CHAIN_NEGATION_RE = re.compile(
     re.IGNORECASE,
 )
 _STRATEGY_REPORT_PLATFORM_CONTROL_RE = re.compile(
-    r"\b(?:project_context_ref|sample_design_ref|candidate_pool_ref|"
-    r"pool_impact_ref|strategy_identity|model_evidence_ref|"
+    r"(?<![A-Za-z0-9_])(?:project_context_ref|sample_design_ref|candidate_pool_ref|"
+    r"pool_impact_ref|impact_cube_ref|strategy_identity|model_evidence_ref|"
     r"training_evidence_ref|score_evidence_ref|report_revision|"
     r"previous_report_id|previous_report_content_hash|generated_at|"
     r"strategy_id|strategy_version|artifact_id|content_hash|"
-    r"expected_[a-z0-9_]+|cas|metrics?)\b|"
+    r"expected_[a-z0-9_]+|cas|metrics?)(?![A-Za-z0-9_])|"
     r"(?:项目上下文|样本设计|策略池|影响测算|模型证据|训练证据|评分证据)"
     r"\s*(?:artifact|工件|产物)?\s*(?:ID|id|hash|哈希|引用)|"
     r"(?:报告|report)\s*(?:revision|版本)\s*(?:=|:|：)\s*\d+|"
@@ -6805,8 +6805,8 @@ def _ground_strategy_report_bundle_v2_request(
     if _STRATEGY_REPORT_PLATFORM_CONTROL_RE.search(utterance):
         return _clarification(
             "报告只允许用户提供 title/status；ProjectContext、SampleDesign、"
-            "Pool、PoolImpact、模型证据、策略身份、revision/CAS、generated_at、"
-            "artifact id/hash 和指标均由平台绑定。",
+            "Pool、ImpactCube/兼容 PoolImpact、模型证据、策略身份、"
+            "revision/CAS、generated_at、artifact id/hash 和指标均由平台绑定。",
             code="strategy_report_bundle_v2_platform_binding_forbidden",
             fields=("platform_bindings",),
         )
@@ -12860,9 +12860,11 @@ def _user_prompt(
         "对于 strategy_report_bundle_v2，workflow_inputs 只能包含用户明确提供的 title "
         "和 status；status 仅允许 draft/partial/final。用户未提供时必须使用固定默认值"
         " title=策略迭代评审报告、status=partial。ProjectContext、SampleDesign、Pool、"
-        "PoolImpact、ModelEvidence/training/score、strategy identity、report revision/"
-        "previous head CAS、generated_at、artifact id/hash、来源引用和所有指标必须省略，"
-        "由平台在计划创建时精确绑定。报告请求必须是当前、肯定、单步骤命令；问句、否定、"
+        "ImpactCube/兼容 PoolImpact、ModelEvidence/training/score、strategy identity、"
+        "report revision/previous head CAS、generated_at、artifact id/hash、来源引用和"
+        "所有指标必须省略，由平台在计划创建时精确绑定。报告可在原话中点名 approval/"
+        "reject/limit/pricing/segmentation，但 strategy_type 也必须省略。报告请求必须是"
+        "当前、肯定、单步骤命令；问句、否定、"
         "假设、演示、仅历史描述，或同轮串联训练、评分、候选、影响测算、采纳、部署、"
         "上线时必须 clarification。"
         "对于 strategy_dsl_delivery，workflow_inputs 只能包含用户原话中唯一完整的"

@@ -247,7 +247,7 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=33,
+    version=34,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
@@ -473,8 +473,11 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "时固定使用 title=策略迭代评审报告、status=partial。ProjectContext、SampleDesign、Pool、"
         "ImpactCube/兼容 PoolImpact、ModelEvidence/training/score、策略身份、report revision/"
         "previous head CAS、generated_at、artifact id/hash、来源引用和所有指标均由平台绑定，"
-        "禁止输出。问句、否定、假设、演示、仅历史描述，或同轮串联训练、评分、候选、影响测算、"
-        "采纳、部署、上线时必须 clarification。"
+        "禁止输出。报告可点名 approval/reject/limit/pricing/segmentation 类型，但类型只保留在"
+        "用户原话中供平台确定性绑定，不能写入 workflow_inputs。平台优先选择最新精确兼容"
+        "ImpactCube；只有 approval/reject 在完全没有兼容 ImpactCube 时才允许使用旧 PoolImpact，"
+        "不得由模型选择或回退。问句、否定、假设、演示、仅历史描述，或同轮串联训练、评分、候选、"
+        "影响测算、采纳、部署、上线时必须 clarification。"
         "最大化利润开发审批 cutoff 属于 strategy_lifecycle，不是独立 profit_calc；定价规则开发、应用或采纳"
         "也属于 strategy_lifecycle，不是 limit_pricing_matrix。\n"
         "operation 与 strategy_type 是两个正交字段，必须分别判断。operation 只能是："

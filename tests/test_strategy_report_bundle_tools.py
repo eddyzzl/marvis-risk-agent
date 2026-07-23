@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import hashlib
+import json
 from pathlib import Path
 import sqlite3
 
@@ -12,6 +13,10 @@ from marvis.db import TaskRepository
 from marvis.output.strategy_report_bundle import render_strategy_report_bundle
 from marvis.packs.strategy import tools as strategy_tools
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.impact_cube_tools import (
+    IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,
+    run_measure_strategy_impact_cube,
+)
 from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
 from marvis.packs.strategy.pool_tools import (
     load_current_strategy_candidate_pool_artifact,
@@ -31,6 +36,7 @@ from marvis.packs.strategy.sample_design_v2_tools import (
     SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
     run_materialize_sample_design_v2,
 )
+from marvis.plugins.errors import SchemaValidationError
 from marvis.plugins.loader import load_manifest
 from marvis.plugins.schema_validation import validate_against_schema
 from marvis.repositories.strategy_reports import (
@@ -41,6 +47,7 @@ from marvis.repositories.strategy_reports import (
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 import marvis.packs.strategy.report_bundle_tools as report_tools
 from test_strategy_pool_impact_tools import _setup as _impact_setup
+from test_strategy_impact_cube_tools import _setup as _cube_setup
 
 
 def _eq(column: str, value: object) -> dict:
@@ -227,6 +234,101 @@ def _setup(tmp_path: Path) -> dict:
     }
 
 
+def _setup_impact_cube_report(tmp_path: Path) -> dict:
+    fixture = _cube_setup(tmp_path)
+    impact_output = run_measure_strategy_impact_cube(
+        fixture["impact_request"],
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    message = TaskRepository(fixture["settings"].db_path).add_agent_message(
+        fixture["task"].id,
+        role="user",
+        stage="chat",
+        content="生成 ImpactCube V2 策略报告。",
+    )
+    run_materialize_project_context(
+        {
+            "expected_revision": 0,
+            "expected_revision_id": None,
+            "expected_state_hash": None,
+            "user_message_ref": {
+                "message_id": message["id"],
+                "content_hash": hashlib.sha256(
+                    message["content"].encode("utf-8")
+                ).hexdigest(),
+            },
+            "as_of": "2026-07-24",
+            "scope": "贷前准入策略",
+            "business_context": {"project.goal": "准入策略迭代"},
+            "explicit_unavailable": ["historical_strategy_reviews"],
+            "external_report_filenames": [],
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    project_context = load_current_strategy_project_context_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+    )
+    assert project_context is not None
+    pool = load_current_strategy_candidate_pool_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        strategy_type="approval",
+    )
+    request = {
+        "title": "ImpactCube V2 策略报告",
+        "status": "partial",
+        "report_revision": 1,
+        "previous_report_id": None,
+        "previous_report_content_hash": None,
+        "generated_at": "2026-07-24T08:00:00+00:00",
+        "project_context_ref": {
+            "artifact_id": project_context.artifact_id,
+            "expected_artifact_content_hash": (
+                project_context.artifact_content_hash
+            ),
+            "expected_revision": project_context.revision["revision"],
+            "expected_revision_id": project_context.revision["revision_id"],
+            "expected_state_hash": project_context.revision["state_hash"],
+        },
+        "sample_design_ref": deepcopy(fixture["sample_ref"]),
+        "candidate_pool_ref": {
+            "strategy_type": pool.strategy_type,
+            "expected_pool_revision": pool.pool["revision"],
+            "expected_pool_snapshot_hash": pool.pool["snapshot_hash"],
+            "expected_artifact_id": pool.artifact_id,
+            "expected_artifact_content_hash": pool.artifact_content_hash,
+        },
+        # A structurally valid but nonexistent legacy ref proves the V2 source
+        # wins without authenticating or projecting stale legacy evidence.
+        "pool_impact_ref": {
+            "artifact_id": "f" * 64,
+            "expected_artifact_content_hash": "e" * 64,
+            "expected_assessment_id": "unused-legacy-impact",
+            "expected_assessment_content_hash": "d" * 64,
+        },
+        "impact_cube_ref": {
+            "artifact_id": impact_output["artifact"]["artifact_id"],
+            "expected_artifact_content_hash": impact_output["artifact"][
+                "content_hash"
+            ],
+            "expected_cube_id": impact_output["cube_id"],
+            "expected_cube_content_hash": impact_output["content_hash"],
+        },
+        "strategy_identity": None,
+        "model_evidence_ref": None,
+        "training_evidence_ref": None,
+        "score_evidence_ref": None,
+    }
+    return {
+        **fixture,
+        "impact_output": impact_output,
+        "request": request,
+    }
+
+
 def _run(fixture: dict) -> dict:
     return run_build_strategy_report_bundle_v2(
         fixture["request"],
@@ -250,6 +352,14 @@ def _audit_rows(fixture: dict) -> list[sqlite3.Row]:
         return conn.execute(
             "SELECT * FROM audit WHERE kind = ? ORDER BY at, id",
             (BUILD_STRATEGY_REPORT_BUNDLE_V2_AUDIT_KIND,),
+        ).fetchall()
+
+
+def _measurement_audit_rows(fixture: dict) -> list[sqlite3.Row]:
+    with fixture["runtime"].task_artifacts.transaction() as conn:
+        return conn.execute(
+            "SELECT * FROM audit WHERE kind = ? ORDER BY at, id",
+            (IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,),
         ).fetchall()
 
 
@@ -301,6 +411,280 @@ def test_build_report_bundle_publishes_three_exact_governed_outputs(
         label="report bundle input",
     )
     validate_against_schema(output, tool.output_schema, label="report bundle output")
+
+
+def test_report_bundle_manifest_accepts_exactly_supported_impact_source_shapes(
+    tmp_path: Path,
+) -> None:
+    tool = next(
+        item
+        for item in load_manifest(
+            Path(__file__).parents[1] / "marvis" / "packs" / "strategy",
+            builtin=True,
+        ).tools
+        if item.name == "build_report_bundle_v2"
+    )
+    legacy_only = deepcopy(_setup(tmp_path / "legacy")["request"])
+    cube_and_legacy = deepcopy(
+        _setup_impact_cube_report(tmp_path / "cube")["request"]
+    )
+    cube_only = deepcopy(cube_and_legacy)
+    cube_only.pop("pool_impact_ref")
+    neither = deepcopy(legacy_only)
+    neither.pop("pool_impact_ref")
+
+    validate_against_schema(
+        legacy_only,
+        tool.input_schema,
+        label="legacy PoolImpact-only report input",
+    )
+    validate_against_schema(
+        cube_only,
+        tool.input_schema,
+        label="ImpactCube-only report input",
+    )
+    validate_against_schema(
+        cube_and_legacy,
+        tool.input_schema,
+        label="ImpactCube-preferred report input with legacy ref",
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            neither,
+            tool.input_schema,
+            label="report input without impact evidence",
+        )
+
+
+def test_build_report_bundle_prefers_authenticated_impact_cube_v2(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+
+    output = _run(fixture)
+
+    refs = output["bundle"]["strategy_artifact_refs"]
+    assert {
+        (item["kind"], item["ref_id"])
+        for item in refs
+    } == {
+        (
+            "strategy_candidate_pool",
+            fixture["pool_artifact"]["artifact_id"],
+        ),
+        (
+            "strategy_impact",
+            fixture["impact_output"]["artifact"]["artifact_id"],
+        ),
+    }
+    assert fixture["request"]["pool_impact_ref"]["artifact_id"] not in {
+        item["ref_id"] for item in refs
+    }
+    assert output["bundle"]["effect_stages"] == [
+        "backtested",
+        "oot_validated",
+    ]
+    impact = output["bundle"]["sections"][5]
+    assert {
+        (item["population"], item["partition"])
+        for item in impact["stage_evidence"]
+    } == {
+        ("approval", "development"),
+        ("risk", "development"),
+        ("approval", "validation"),
+        ("risk", "validation"),
+    }
+    assert "oot_claim_suppressed_by_validation_blocker" not in {
+        item["code"] for item in impact["red_flags"]
+    }
+    final_fields = {
+        item["field_id"]: item["field"]["value"]
+        for item in output["bundle"]["sections"][6]["summary_fields"]
+    }
+    assert final_fields["evidence_stages"] == [
+        "backtested",
+        "oot_validated",
+    ]
+    assert final_fields["validation_statuses"] == [
+        "unvalidated",
+        "independent_evidence",
+    ]
+    slice_table = next(
+        table
+        for table in impact["tables"]
+        if table["table_id"] == "impact_cube_slices"
+    )
+    assert {
+        row["cells"]["population"]["value"]
+        for row in slice_table["rows"]
+    } == {"approval", "risk"}
+    assert {
+        row["cells"]["partition"]["value"]
+        for row in slice_table["rows"]
+    } == {"development", "validation"}
+    assert {
+        row["cells"]["family"]["value"]
+        for row in slice_table["rows"]
+    } >= {"overall", "month", "group", "segment", "group_month"}
+    economics = next(
+        table
+        for table in impact["tables"]
+        if table["table_id"] == "impact_cube_economics"
+    )
+    assert all(
+        row["cells"]["new"]["value"] is None
+        for row in economics["rows"]
+    )
+    rendered = render_strategy_report_bundle(output["bundle"])
+    assert fixture["impact_output"]["cube_id"].encode("utf-8") in rendered[
+        "json"
+    ]
+    assert rendered["xlsx"].startswith(b"PK")
+    assert len(_report_rows(fixture)) == 3
+    audit = _audit_rows(fixture)[0]
+    detail = json.loads(str(audit["detail_json"]))
+    assert detail["source_artifacts"]["impact_cube"] == {
+        "artifact_id": fixture["impact_output"]["artifact"]["artifact_id"],
+        "content_hash": fixture["impact_output"]["artifact"]["content_hash"],
+        "producer_run_ref": fixture["impact_output"]["producer_run_ref"],
+    }
+    assert detail["source_artifacts"]["pool_impact"] is None
+
+
+def test_build_report_bundle_rejects_impact_cube_provenance_drift(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+    artifact_id = fixture["impact_output"]["artifact"]["artifact_id"]
+    with fixture["runtime"].task_artifacts.transaction() as conn:
+        conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+        row = conn.execute(
+            "SELECT provenance_json FROM task_artifacts WHERE id = ?",
+            (artifact_id,),
+        ).fetchone()
+        assert row is not None
+        provenance = json.loads(str(row["provenance_json"]))
+        provenance["cube_content_hash"] = "0" * 64
+        conn.execute(
+            "UPDATE task_artifacts SET provenance_json = ? WHERE id = ?",
+            (
+                json.dumps(
+                    provenance,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ),
+                artifact_id,
+            ),
+        )
+        conn.commit()
+
+    with pytest.raises(StrategyError, match="provenance"):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
+def test_build_report_bundle_rejects_missing_or_duplicate_cube_run_audit(
+    tmp_path: Path,
+) -> None:
+    missing = _setup_impact_cube_report(tmp_path / "missing")
+    with missing["runtime"].task_artifacts.transaction() as conn:
+        conn.execute(
+            "DELETE FROM audit WHERE kind = ?",
+            (IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,),
+        )
+        conn.commit()
+
+    with pytest.raises(StrategyError, match="measurement audit is missing"):
+        _run(missing)
+    assert _report_rows(missing) == []
+    assert _audit_rows(missing) == []
+
+    duplicate = _setup_impact_cube_report(tmp_path / "duplicate")
+    original = _measurement_audit_rows(duplicate)[0]
+    with duplicate["runtime"].task_artifacts.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO audit(
+                id, kind, actor, target_ref, inputs_hash, outcome,
+                detail_json, at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "duplicate-impact-cube-measurement-audit",
+                original["kind"],
+                original["actor"],
+                original["target_ref"],
+                original["inputs_hash"],
+                original["outcome"],
+                original["detail_json"],
+                original["at"],
+            ),
+        )
+        conn.commit()
+
+    with pytest.raises(
+        StrategyError,
+        match="measurement audit is duplicated",
+    ):
+        _run(duplicate)
+    assert _report_rows(duplicate) == []
+    assert _audit_rows(duplicate) == []
+
+
+def test_build_report_bundle_rejects_tampered_cube_run_self_hash(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+    artifact_id = fixture["impact_output"]["artifact"]["artifact_id"]
+    with fixture["runtime"].task_artifacts.transaction() as conn:
+        conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+        row = conn.execute(
+            "SELECT provenance_json FROM task_artifacts WHERE id = ?",
+            (artifact_id,),
+        ).fetchone()
+        assert row is not None
+        provenance = json.loads(str(row["provenance_json"]))
+        provenance["producer_run"]["content_hash"] = "0" * 64
+        conn.execute(
+            "UPDATE task_artifacts SET provenance_json = ? WHERE id = ?",
+            (
+                json.dumps(
+                    provenance,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ),
+                artifact_id,
+            ),
+        )
+        conn.commit()
+
+    with pytest.raises(StrategyError, match="producer_run|self hash"):
+        _run(fixture)
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
+def test_build_report_bundle_requires_one_authenticated_impact_source(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    fixture["request"]["pool_impact_ref"] = None
+    fixture["request"]["impact_cube_ref"] = None
+
+    with pytest.raises(
+        StrategyError,
+        match="requires impact_cube_ref or pool_impact_ref",
+    ):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
 
 
 def test_first_report_revision_defaults_omitted_previous_head_to_null(
@@ -449,6 +833,73 @@ def test_build_report_bundle_revalidates_source_tamper_before_commit(
         tampering_render,
     )
     with pytest.raises(StrategyError, match="impact|artifact|hash|bytes"):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
+def test_build_report_bundle_revalidates_impact_cube_tamper_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+    original_render = report_tools.render_strategy_report_bundle
+    impact_path = Path(
+        next(
+            item
+            for item in fixture["runtime"].task_artifacts.list_for_task(
+                fixture["task"].id
+            )
+            if item["id"]
+            == fixture["impact_output"]["artifact"]["artifact_id"]
+        )["path"]
+    )
+
+    def tampering_render(bundle):
+        rendered = original_render(bundle)
+        impact_path.write_bytes(b"{}")
+        return rendered
+
+    monkeypatch.setattr(
+        report_tools,
+        "render_strategy_report_bundle",
+        tampering_render,
+    )
+    with pytest.raises(StrategyError, match="ImpactCube|artifact|hash|bytes"):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
+def test_build_report_bundle_revalidates_cube_run_audit_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+    original_render = report_tools.render_strategy_report_bundle
+
+    def tampering_render(bundle):
+        rendered = original_render(bundle)
+        with fixture["runtime"].task_artifacts.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE audit
+                   SET outcome = 'failed'
+                 WHERE kind = ?
+                """,
+                (IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,),
+            )
+            conn.commit()
+        return rendered
+
+    monkeypatch.setattr(
+        report_tools,
+        "render_strategy_report_bundle",
+        tampering_render,
+    )
+    with pytest.raises(StrategyError, match="audit binding changed"):
         _run(fixture)
 
     assert _report_rows(fixture) == []

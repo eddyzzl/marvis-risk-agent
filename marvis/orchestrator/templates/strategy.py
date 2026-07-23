@@ -1953,13 +1953,19 @@ STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
             "candidate_pool_ref",
             True,
             "task_context",
-            "Exact current nonempty approval/reject Candidate Pool",
+            "Exact current nonempty typed Candidate Pool",
         ),
         SlotSpec(
             "pool_impact_ref",
-            True,
+            False,
             "task_context",
-            "Exact latest development PoolImpact for the bound Pool",
+            "Legacy exact development PoolImpact for approval/reject fallback",
+        ),
+        SlotSpec(
+            "impact_cube_ref",
+            False,
+            "task_context",
+            "Preferred latest exact authenticated ImpactCube for the bound Pool",
         ),
         SlotSpec(
             "report_revision",
@@ -2021,6 +2027,7 @@ STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
                 "sample_design_ref": "{slot:sample_design_ref}",
                 "candidate_pool_ref": "{slot:candidate_pool_ref}",
                 "pool_impact_ref": "{slot:pool_impact_ref}",
+                "impact_cube_ref": "{slot:impact_cube_ref}",
                 "report_revision": "{slot:report_revision}",
                 "previous_report_id": "{slot:previous_report_id}",
                 "previous_report_content_hash": (

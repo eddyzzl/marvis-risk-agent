@@ -4986,7 +4986,7 @@
         "type": "object",
         "properties": {
           "schema_version": {
-            "const": "strategy.measure-impact-cube-tool.v2"
+            "const": "strategy.measure-impact-cube-tool.v3"
           },
           "cube_id": {
             "type": "string",
@@ -5060,6 +5060,22 @@
             ],
             "additionalProperties": false
           },
+          "producer_run_ref": {
+            "type": "object",
+            "properties": {
+              "kind": {"const": "tool_run"},
+              "ref_id": {
+                "type": "string",
+                "pattern": "^strategy-impact-cube-run-[0-9a-f]{24}$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": ["kind", "ref_id", "content_hash"],
+            "additionalProperties": false
+          },
           "not_mutated_pool": {"const": true},
           "not_created_strategy": {"const": true},
           "not_adopted": {"const": true},
@@ -5079,6 +5095,7 @@
           "cube",
           "warnings",
           "artifact",
+          "producer_run_ref",
           "not_mutated_pool",
           "not_created_strategy",
           "not_adopted",
@@ -5431,7 +5448,7 @@
     },
     {
       "name": "build_report_bundle_v2",
-      "summary": "Build and atomically publish deterministic JSON, Markdown, and Excel StrategyReportBundle projections from exact governed evidence refs.",
+      "summary": "Build and atomically publish deterministic JSON, Markdown, and Excel StrategyReportBundle projections with exact ImpactCube-first evidence and approval/reject-only legacy PoolImpact fallback.",
       "input_schema": {
         "type": "object",
         "$defs": {
@@ -5498,7 +5515,13 @@
             "properties": {
               "strategy_type": {
                 "type": "string",
-                "enum": ["approval", "reject"]
+                "enum": [
+                  "approval",
+                  "reject",
+                  "limit",
+                  "pricing",
+                  "segmentation"
+                ]
               },
               "expected_pool_revision": {
                 "type": "integer",
@@ -5544,6 +5567,29 @@
             ],
             "additionalProperties": false
           },
+          "impact_cube_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_cube_id": {
+                "type": "string",
+                "pattern": "^strategy-impact-cube-[0-9a-f]{24}$"
+              },
+              "expected_cube_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "expected_artifact_content_hash",
+              "expected_cube_id",
+              "expected_cube_content_hash"
+            ],
+            "additionalProperties": false
+          },
           "strategy_identity": {
             "type": "object",
             "properties": {
@@ -5551,7 +5597,13 @@
               "strategy_version": {"type": "string", "minLength": 1},
               "strategy_type": {
                 "type": "string",
-                "enum": ["approval", "reject"]
+                "enum": [
+                  "approval",
+                  "reject",
+                  "limit",
+                  "pricing",
+                  "segmentation"
+                ]
               }
             },
             "required": [
@@ -5679,6 +5731,9 @@
           "pool_impact_ref": {
             "$ref": "#/$defs/pool_impact_ref"
           },
+          "impact_cube_ref": {
+            "$ref": "#/$defs/impact_cube_ref"
+          },
           "strategy_identity": {
             "oneOf": [
               {"$ref": "#/$defs/strategy_identity"},
@@ -5711,8 +5766,11 @@
           "generated_at",
           "project_context_ref",
           "sample_design_ref",
-          "candidate_pool_ref",
-          "pool_impact_ref"
+          "candidate_pool_ref"
+        ],
+        "anyOf": [
+          {"required": ["impact_cube_ref"]},
+          {"required": ["pool_impact_ref"]}
         ],
         "additionalProperties": false
       },
@@ -5739,7 +5797,14 @@
           "strategy_version": {"type": ["string", "null"]},
           "strategy_type": {
             "type": ["string", "null"],
-            "enum": ["approval", "reject", null]
+            "enum": [
+              "approval",
+              "reject",
+              "limit",
+              "pricing",
+              "segmentation",
+              null
+            ]
           },
           "bundle": {"type": "object", "minProperties": 1},
           "artifacts": {

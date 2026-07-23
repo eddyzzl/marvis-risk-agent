@@ -945,7 +945,28 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert measure_impact_cube_tool.output_schema["additionalProperties"] is False
     assert measure_impact_cube_tool.output_schema["properties"][
         "schema_version"
-    ] == {"const": "strategy.measure-impact-cube-tool.v2"}
+    ] == {"const": "strategy.measure-impact-cube-tool.v3"}
+    assert measure_impact_cube_tool.output_schema["properties"][
+        "producer_run_ref"
+    ] == {
+        "type": "object",
+        "properties": {
+            "kind": {"const": "tool_run"},
+            "ref_id": {
+                "type": "string",
+                "pattern": "^strategy-impact-cube-run-[0-9a-f]{24}$",
+            },
+            "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+            },
+        },
+        "required": ["kind", "ref_id", "content_hash"],
+        "additionalProperties": False,
+    }
+    assert "producer_run_ref" in measure_impact_cube_tool.output_schema[
+        "required"
+    ]
     for boundary in (
         "not_mutated_pool",
         "not_created_strategy",

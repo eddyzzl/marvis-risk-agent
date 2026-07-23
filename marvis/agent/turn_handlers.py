@@ -186,6 +186,7 @@ from marvis.packs.strategy.model_evidence_tools import (
     _validate_inputs as _validate_model_evidence_v2_inputs,
     load_strategy_model_evidence_v2_artifact,
 )
+from marvis.packs.strategy.impact_cube_tools import IMPACT_CUBE_ARTIFACT_KIND
 from marvis.packs.strategy.pool_impact_tools import (
     POOL_IMPACT_ARTIFACT_KIND,
     load_strategy_pool_impact_artifact,
@@ -198,6 +199,9 @@ from marvis.packs.strategy.project_context_tools import (
 )
 from marvis.packs.strategy.report_bundle_adapters import (
     build_strategy_report_bundle_source_inputs,
+)
+from marvis.packs.strategy.report_bundle_tools import (
+    load_strategy_impact_cube_artifact,
 )
 from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignRef,
@@ -5584,6 +5588,19 @@ _STRATEGY_REPORT_POOL_TYPE_PATTERNS = {
         r"拒绝|(?<![A-Za-z0-9_])reject(?![A-Za-z0-9_])",
         re.IGNORECASE,
     ),
+    "limit": re.compile(
+        r"额度|(?<![A-Za-z0-9_])limit(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "pricing": re.compile(
+        r"定价|利率|(?<![A-Za-z0-9_])pricing(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "segmentation": re.compile(
+        r"分群|分层|客群|"
+        r"(?<![A-Za-z0-9_])segmentation(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
 }
 _STRATEGY_REPORT_POOL_COMMAND_RE = re.compile(
     r"(?:生成|创建|制作|编制|形成|出一份|出个|给我|导出|构建)"
@@ -5678,18 +5695,49 @@ def _strategy_report_bundle_v2_plan_slots(
         "expected_artifact_id": pool.artifact_id,
         "expected_artifact_content_hash": pool.artifact_content_hash,
     }
-    impact = _strategy_report_latest_pool_impact_binding(
+    impact_cube = _strategy_report_latest_impact_cube_binding(
         read_runtime,
         task_id=task.id,
         artifacts=artifacts,
         pool=pool,
+        sample_ref=sample_ref,
     )
-    pool_impact_ref = {
-        "artifact_id": impact.artifact_id,
-        "expected_artifact_content_hash": impact.artifact_content_hash,
-        "expected_assessment_id": impact.assessment["assessment_id"],
-        "expected_assessment_content_hash": impact.assessment["content_hash"],
-    }
+    impact_cube_ref = (
+        None
+        if impact_cube is None
+        else {
+            "artifact_id": impact_cube.artifact_id,
+            "expected_artifact_content_hash": (
+                impact_cube.artifact_content_hash
+            ),
+            "expected_cube_id": impact_cube.cube["cube_id"],
+            "expected_cube_content_hash": impact_cube.cube["content_hash"],
+        }
+    )
+    impact = None
+    pool_impact_ref = None
+    if impact_cube is None:
+        if pool.strategy_type not in {"approval", "reject"}:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_report_bundle_v2_impact_cube_required",
+                f"当前 {pool.strategy_type} Strategy Pool 没有同 revision、"
+                "snapshot 和 SampleDesign 的 ImpactCube；该策略类型不允许"
+                "回退到旧 PoolImpact，请先单独完成 ImpactCube 测算。",
+            )
+        impact = _strategy_report_latest_pool_impact_binding(
+            read_runtime,
+            task_id=task.id,
+            artifacts=artifacts,
+            pool=pool,
+        )
+        pool_impact_ref = {
+            "artifact_id": impact.artifact_id,
+            "expected_artifact_content_hash": impact.artifact_content_hash,
+            "expected_assessment_id": impact.assessment["assessment_id"],
+            "expected_assessment_content_hash": impact.assessment[
+                "content_hash"
+            ],
+        }
 
     model_evidence, model_evidence_ref = (
         _strategy_report_optional_model_evidence(
@@ -5744,6 +5792,7 @@ def _strategy_report_bundle_v2_plan_slots(
             sample_design=sample,
             candidate_pool=pool,
             pool_impact=impact,
+            impact_cube=impact_cube,
             model_evidence=model_evidence,
             training_evidence=training_evidence,
             score_evidence=score_evidence,
@@ -5751,8 +5800,9 @@ def _strategy_report_bundle_v2_plan_slots(
     except (ModelingError, StrategyError, *_STRATEGY_V2_ARTIFACT_ERRORS) as exc:
         raise _StrategyV2EvidenceSetupError(
             "strategy_report_bundle_v2_source_incompatible",
-            "当前 ProjectContext、SampleDesign V2、Strategy Pool、PoolImpact "
-            "或可选模型证据不属于同一条可认证证据链；本次未创建计划。",
+            "当前 ProjectContext、SampleDesign V2、Strategy Pool、"
+            "ImpactCube/兼容 PoolImpact 或可选模型证据不属于同一条"
+            "可认证证据链；本次未创建计划。",
         ) from exc
 
     return {
@@ -5770,6 +5820,7 @@ def _strategy_report_bundle_v2_plan_slots(
         "sample_design_ref": sample_ref,
         "candidate_pool_ref": candidate_pool_ref,
         "pool_impact_ref": pool_impact_ref,
+        "impact_cube_ref": impact_cube_ref,
         "report_revision": int(head["current_revision"]) + 1,
         "previous_report_id": head["current_report_id"],
         "previous_report_content_hash": head["current_content_hash"],
@@ -5885,13 +5936,15 @@ def _strategy_report_requested_pool_type(
     if len(selected) > 1:
         raise _StrategyV2EvidenceSetupError(
             "strategy_report_bundle_v2_pool_type_ambiguous",
-            "同一报告请求同时点名 approval 和 reject Pool；请只选择一种策略类型。",
+            "同一报告请求同时点名多个 Strategy Pool 类型；"
+            "请只选择一种策略类型。",
         )
     if not selected and negated:
         raise _StrategyV2EvidenceSetupError(
             "strategy_report_bundle_v2_pool_type_required",
-            "报告请求只排除了 Pool 类型，没有明确肯定选择要使用的审批/准入或"
-            "拒绝 Pool；平台不会绑定被否定的 Pool。",
+            "报告请求只排除了 Pool 类型，没有明确肯定选择要使用的"
+            "审批/准入、拒绝、额度、定价或分群 Pool；平台不会绑定"
+            "被否定的 Pool。",
         )
     return selected[0] if selected else None
 
@@ -5935,7 +5988,13 @@ def _strategy_report_current_pool_binding(
     )
     current: dict[str, Mapping] = {}
     try:
-        for strategy_type in ("approval", "reject"):
+        for strategy_type in (
+            "approval",
+            "reject",
+            "limit",
+            "pricing",
+            "segmentation",
+        ):
             pool = repository.get_current(task_id, strategy_type)
             if pool is not None and pool.get("entries"):
                 current[strategy_type] = pool
@@ -5957,13 +6016,13 @@ def _strategy_report_current_pool_binding(
     elif not current:
         raise _StrategyV2EvidenceSetupError(
             "strategy_report_bundle_v2_pool_required",
-            "当前任务没有可用于报告的非空 approval/reject Strategy Pool。",
+            "当前任务没有可用于报告的非空 Strategy Pool。",
         )
     else:
         raise _StrategyV2EvidenceSetupError(
             "strategy_report_bundle_v2_pool_type_required",
-            "当前同时存在非空 approval 和 reject Strategy Pool；"
-            "请在报告请求中明确选择审批/准入或拒绝 Pool，平台不会猜测。",
+            "当前同时存在多个非空 Strategy Pool；请在报告请求中明确"
+            "选择审批/准入、拒绝、额度、定价或分群 Pool，平台不会猜测。",
         )
 
     selected = current[selected_type]
@@ -6051,6 +6110,109 @@ def _strategy_report_sample_ref(sample) -> dict[str, object]:
         "expected_sample_design_id": design["sample_design_id"],
         "expected_sample_design_content_hash": design["content_hash"],
     }
+
+
+def _strategy_report_latest_impact_cube_binding(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    artifacts: Sequence[Mapping],
+    pool,
+    sample_ref: Mapping[str, object],
+):
+    """Prefer the newest exact Pool + SampleDesign ImpactCube.
+
+    Registry order is stable oldest-to-newest.  Authenticate each candidate
+    from newest to oldest before inspecting its embedded Pool/SampleDesign
+    identity.  A valid unrelated cube can therefore be skipped, while an
+    unauthenticatable candidate fails closed because its raw provenance cannot
+    safely prove that it was unrelated.
+    """
+
+    expected_pool_ref = {
+        "artifact_id": pool.artifact_id,
+        "expected_artifact_content_hash": pool.artifact_content_hash,
+        "expected_pool_id": pool.pool["pool_id"],
+        "expected_revision": pool.pool["revision"],
+        "expected_revision_id": pool.pool["revision_id"],
+        "expected_snapshot_hash": pool.pool["snapshot_hash"],
+    }
+    same_kind = [
+        item
+        for item in artifacts
+        if item.get("kind") == IMPACT_CUBE_ARTIFACT_KIND
+    ]
+    for item in reversed(same_kind):
+        provenance = item.get("provenance")
+        try:
+            binding = load_strategy_impact_cube_artifact(
+                read_runtime,
+                task_id=task_id,
+                artifact_id=item.get("id"),
+                expected_artifact_content_hash=item.get("content_hash"),
+                expected_cube_id=(
+                    provenance.get("cube_id")
+                    if isinstance(provenance, Mapping)
+                    else None
+                ),
+                expected_cube_content_hash=(
+                    provenance.get("cube_content_hash")
+                    if isinstance(provenance, Mapping)
+                    else None
+                ),
+            )
+            cube = binding.cube
+            identity = cube["identity"]
+            sources = cube["source_bindings"]
+            pool_artifact = sources["pool_artifact"]
+            sample = sources["sample_design_v2"]
+            authenticated_pool_ref = {
+                "artifact_id": pool_artifact["artifact_id"],
+                "expected_artifact_content_hash": pool_artifact[
+                    "artifact_content_hash"
+                ],
+                "expected_pool_id": identity["pool_id"],
+                "expected_revision": identity["revision"],
+                "expected_revision_id": identity["revision_id"],
+                "expected_snapshot_hash": identity["snapshot_hash"],
+            }
+            authenticated_sample_ref = {
+                "membership_artifact_id": sample[
+                    "membership_artifact_id"
+                ],
+                "expected_membership_artifact_content_hash": sample[
+                    "membership_artifact_content_hash"
+                ],
+                "bundle_artifact_id": sample["bundle_artifact_id"],
+                "expected_bundle_artifact_content_hash": sample[
+                    "bundle_artifact_content_hash"
+                ],
+                "expected_bundle_id": sample["bundle_id"],
+                "expected_sample_design_id": sample["sample_design_id"],
+                "expected_sample_design_content_hash": sample[
+                    "sample_design_content_hash"
+                ],
+            }
+        except (
+            KeyError,
+            StrategyError,
+            TypeError,
+            ValueError,
+            *_STRATEGY_V2_ARTIFACT_ERRORS,
+        ) as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_report_bundle_v2_impact_cube_invalid",
+                "最新待判定的 ImpactCube 候选未通过文件、registry、"
+                "provenance、producer-run 或 audit 复核；其真实 Pool/"
+                "SampleDesign 身份无法确认，平台不会回退到旧 ImpactCube "
+                "或 PoolImpact。",
+            ) from exc
+        if (
+            authenticated_pool_ref == expected_pool_ref
+            and authenticated_sample_ref == dict(sample_ref)
+        ):
+            return binding
+    return None
 
 
 def _strategy_report_latest_pool_impact_binding(

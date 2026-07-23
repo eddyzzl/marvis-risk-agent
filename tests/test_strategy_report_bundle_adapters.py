@@ -29,6 +29,14 @@ from marvis.packs.modeling.score_evidence_tools import (
 from marvis.packs.strategy.candidate_fragment import (
     build_verified_candidate_fragment,
 )
+from marvis.packs.strategy.impact_cube import (
+    build_strategy_impact_cube,
+    canonical_strategy_impact_cube_json,
+)
+from marvis.packs.strategy.impact_cube_tools import (
+    IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION,
+    build_impact_cube_producer_run,
+)
 from marvis.packs.strategy.model_evidence import (
     build_model_comparison_evidence,
     build_model_comparison_metric,
@@ -72,6 +80,7 @@ from marvis.packs.strategy.report_bundle import (
     build_strategy_report_bundle,
 )
 from marvis.packs.strategy.report_bundle_adapters import (
+    StrategyImpactCubeArtifactBinding,
     build_strategy_report_bundle_source_inputs,
 )
 from marvis.packs.strategy.sample_design_v2 import (
@@ -465,6 +474,376 @@ def _bindings(
     return project, sample, pool, impact
 
 
+def _pool_binding_for_strategy_type(
+    tmp_path: Path,
+    sample: StrategySampleDesignV2ArtifactBinding,
+    strategy_type: str,
+) -> StrategyCandidatePoolArtifactBinding:
+    design = sample.bundle["sample_design"]
+    dataset = design["identity"]["dataset_ref"]
+    workspace = design["identity"]["workspace_ref"]
+    evidence_identity = {
+        "dataset_id": dataset["dataset_id"],
+        "dataset_content_hash": dataset["content_hash"],
+        "workspace_revision": workspace["revision"],
+        "workspace_generation": workspace["generation"],
+        "semantic_mapping_hash": workspace["semantic_mapping_hash"],
+        "sample_context_hash": _hash("sample-context"),
+    }
+    fragment = build_verified_candidate_fragment(
+        artifact={
+            "artifact_id": f"{strategy_type}-candidate-artifact",
+            "artifact_kind": "test_candidate_json",
+            "artifact_schema_version": "test.candidate-artifact.v1",
+            "artifact_content_hash": _hash(
+                f"{strategy_type}-candidate-artifact"
+            ),
+            "origin_tool": "strategy.test_candidate",
+        },
+        asset={
+            "schema_version": "test.candidate.v1",
+            "asset_id": f"{strategy_type}-candidate-asset",
+            "asset_hash": _hash(f"{strategy_type}-candidate-asset"),
+            "asset_type": "univariate_refinement",
+        },
+        fragment_type="strategy_rule",
+        rule_id=f"rule-{strategy_type}",
+        condition={
+            "op": "compare",
+            "field": "customer_id",
+            "operator": "==",
+            "value": "PII-CUSTOMER-0001",
+            "missing": "no_match",
+        },
+        requirements=[],
+        effect_id=f"{strategy_type}-effect",
+        evidence_id=f"{strategy_type}-evidence",
+        evidence_hash=_hash(f"{strategy_type}-evidence"),
+        evidence_identity=evidence_identity,
+    )
+    actions = {
+        "approval": (_action("approval"), _action("reject")),
+        "reject": (_action("approval"), _action("reject")),
+        "limit": (
+            {
+                "type": "limit",
+                "value": 1_000.0,
+                "reason_code": None,
+                "stop": True,
+            },
+            {
+                "type": "limit",
+                "value": 2_000.0,
+                "reason_code": None,
+                "stop": True,
+            },
+        ),
+        "pricing": (
+            {
+                "type": "pricing",
+                "value": 0.10,
+                "reason_code": None,
+                "stop": True,
+            },
+            {
+                "type": "pricing",
+                "value": 0.20,
+                "reason_code": None,
+                "stop": True,
+            },
+        ),
+        "segmentation": (
+            {
+                "type": "segment",
+                "value": "A",
+                "reason_code": None,
+                "stop": True,
+            },
+            {
+                "type": "segment",
+                "value": "B",
+                "reason_code": None,
+                "stop": True,
+            },
+        ),
+    }
+    default_action, action = actions[strategy_type]
+    pool = add_verified_candidate_fragment(
+        None,
+        task_id=sample.task_id,
+        strategy_type=strategy_type,
+        default_action=default_action,
+        verified_candidate_fragment=fragment,
+        action=action,
+    )
+    compiled = compile_strategy_pool(pool)
+    canonical = canonical_strategy_pool_json(pool)
+    return StrategyCandidatePoolArtifactBinding(
+        task_id=sample.task_id,
+        strategy_type=strategy_type,
+        pool=pool,
+        compiled_design=compiled,
+        artifact_id=_hash(f"{strategy_type}-pool-artifact"),
+        artifact_path=tmp_path / f"{strategy_type}-pool.json",
+        artifact_content_hash=_file_hash(canonical),
+        artifact_origin_tool="strategy.add_candidate_to_pool",
+        artifact_provenance={},
+        artifact_provenance_json="{}",
+        lineages=(),
+        tasks_root=tmp_path,
+        datasets_root=tmp_path,
+        db_path=tmp_path / "marvis.sqlite",
+    )
+
+
+def _impact_cube_binding(
+    tmp_path: Path,
+    sample: StrategySampleDesignV2ArtifactBinding,
+    pool: StrategyCandidatePoolArtifactBinding,
+    *,
+    economics: bool = True,
+) -> StrategyImpactCubeArtifactBinding:
+    design = sample.bundle["sample_design"]
+    header = sample.membership["header"]
+    counts = header["counts"]
+    partitions = ("development", "validation", "oot")
+    frame = pd.DataFrame(
+        {
+            "customer_id": [
+                "PII-CUSTOMER-0001",
+                "PII-CUSTOMER-0002",
+                "PII-CUSTOMER-0003",
+            ],
+            "target": [1, 0, 1],
+            "apply_month": ["202601", "202601", "202602"],
+            "channel": ["web", "web", "web"],
+            "segment": ["repeat", "repeat", "repeat"],
+            "loan_amount": [100.0, 200.0, None],
+            "overdue_amount": [10.0, 0.0, 20.0],
+            "ead": [1_000.0, 2_000.0, 1_500.0],
+            "pd": [0.20, 0.01, 0.30],
+            "utilization": [0.50, 0.40, 0.60],
+        }
+    )
+    approval_frames = {
+        partition: frame.iloc[: counts["approval"][partition]].reset_index(
+            drop=True
+        )
+        for partition in partitions
+    }
+    risk_frames = {
+        partition: frame.iloc[: counts["risk"][partition]].reset_index(
+            drop=True
+        )
+        for partition in partitions
+    }
+    sample_ref = {
+        "membership_artifact_id": sample.membership_artifact_id,
+        "membership_artifact_content_hash": (
+            sample.membership_artifact_content_hash
+        ),
+        "membership_id": header["membership_id"],
+        "membership_content_hash": header["content_hash"],
+        "bundle_artifact_id": sample.bundle_artifact_id,
+        "bundle_artifact_content_hash": sample.bundle_artifact_content_hash,
+        "bundle_id": sample.bundle["bundle_id"],
+        "bundle_content_hash": sample.bundle["content_hash"],
+        "sample_design_id": design["sample_design_id"],
+        "sample_design_content_hash": design["content_hash"],
+        "analysis_universe_row_count": counts["analysis_universe"],
+        "partition_counts": {
+            partition: counts["risk"][partition]
+            for partition in partitions
+        },
+        "population_partition_counts": {
+            role: {
+                partition: counts[role][partition]
+                for partition in partitions
+            }
+            for role in ("approval", "risk")
+        },
+    }
+    dataset = design["identity"]["dataset_ref"]
+    workspace = design["identity"]["workspace_ref"]
+    dataset_binding = {
+        "task_id": sample.task_id,
+        "dataset_id": dataset["dataset_id"],
+        "dataset_content_hash": dataset["content_hash"],
+        "dataset_source_path": f"{sample.task_id}/sample.parquet",
+        "dataset_registry_metadata_hash": _hash("dataset-registry"),
+        "workspace_revision": workspace["revision"],
+        "workspace_generation": workspace["generation"],
+        "semantic_mapping_hash": workspace["semantic_mapping_hash"],
+    }
+    economics_by_type = {
+        "approval": {
+            "ead": {"kind": "column", "column": "ead"},
+            "pd": {"kind": "column", "column": "pd"},
+            "annual_rate": {"kind": "scalar", "value": 0.20},
+            "funding_rate": {"kind": "scalar", "value": 0.05},
+            "lgd": {"kind": "scalar", "value": 0.50},
+            "operating_cost_per_loan": {
+                "kind": "scalar",
+                "value": 10.0,
+            },
+            "term_months": {"kind": "scalar", "value": 12},
+        },
+        "reject": {
+            "ead": {"kind": "column", "column": "ead"},
+            "pd": {"kind": "column", "column": "pd"},
+            "annual_rate": {"kind": "scalar", "value": 0.20},
+            "funding_rate": {"kind": "scalar", "value": 0.05},
+            "lgd": {"kind": "scalar", "value": 0.50},
+            "operating_cost_per_loan": {
+                "kind": "scalar",
+                "value": 10.0,
+            },
+            "term_months": {"kind": "scalar", "value": 12},
+        },
+        "limit": {
+            "pd": {"kind": "column", "column": "pd"},
+            "lgd": {"kind": "scalar", "value": 0.50},
+            "utilization": {
+                "kind": "column",
+                "column": "utilization",
+            },
+        },
+        "pricing": {
+            "ead": {"kind": "column", "column": "ead"},
+            "pd": {"kind": "column", "column": "pd"},
+            "lgd": {"kind": "scalar", "value": 0.50},
+            "funding_rate": {"kind": "scalar", "value": 0.05},
+            "term_months": {"kind": "scalar", "value": 12},
+            "operating_cost_per_loan": {
+                "kind": "scalar",
+                "value": 10.0,
+            },
+        },
+        "segmentation": None,
+    }
+    economics_inputs = (
+        economics_by_type[pool.strategy_type] if economics else None
+    )
+    cube = build_strategy_impact_cube(
+        pool=pool.pool,
+        approval_partition_frames=approval_frames,
+        partition_frames=risk_frames,
+        pool_artifact_ref={
+            "artifact_id": pool.artifact_id,
+            "artifact_content_hash": pool.artifact_content_hash,
+        },
+        sample_design_v2_ref=sample_ref,
+        dataset_binding=dataset_binding,
+        legacy_development_ref=design["compatibility"][
+            "legacy_development_ref"
+        ],
+        target_col="target",
+        target_bad_value=1,
+        month_col="apply_month",
+        group_col="channel",
+        segment_col="segment",
+        current_strategy_spec=None,
+        current_strategy_ref=None,
+        economics_bindings=economics_inputs,
+        loan_amount_col="loan_amount",
+        overdue_amount_col="overdue_amount",
+    )
+    canonical = canonical_strategy_impact_cube_json(cube)
+    artifact_hash = _file_hash(canonical)
+    artifact_id = _hash("impact-cube-artifact")
+    request_sample_ref = {
+        "membership_artifact_id": sample.membership_artifact_id,
+        "expected_membership_artifact_content_hash": (
+            sample.membership_artifact_content_hash
+        ),
+        "bundle_artifact_id": sample.bundle_artifact_id,
+        "expected_bundle_artifact_content_hash": (
+            sample.bundle_artifact_content_hash
+        ),
+        "expected_bundle_id": sample.bundle["bundle_id"],
+        "expected_sample_design_id": design["sample_design_id"],
+        "expected_sample_design_content_hash": design["content_hash"],
+    }
+    pool_ref = {
+        "artifact_id": pool.artifact_id,
+        "expected_artifact_content_hash": pool.artifact_content_hash,
+        "expected_pool_id": pool.pool["pool_id"],
+        "expected_revision": pool.pool["revision"],
+        "expected_revision_id": pool.pool["revision_id"],
+        "expected_snapshot_hash": pool.pool["snapshot_hash"],
+    }
+    dimensions = {
+        "month_col": "apply_month",
+        "group_col": "channel",
+        "segment_col": "segment",
+    }
+    producer_run = build_impact_cube_producer_run(
+        task_id=sample.task_id,
+        request={
+            "strategy_type": pool.strategy_type,
+            "pool_ref": pool_ref,
+            "sample_design_ref": request_sample_ref,
+            "partitions": list(partitions),
+            "population": "risk",
+            "dimension_bindings": dimensions,
+            "current_strategy_ref": None,
+            "economics_inputs": economics_inputs,
+        },
+        cube_id=cube["cube_id"],
+        cube_content_hash=cube["content_hash"],
+        artifact_id=artifact_id,
+        artifact_filename=f"{cube['cube_id']}.json",
+        artifact_content_hash=artifact_hash,
+    )
+    provenance = {
+        "schema_version": IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION,
+        "producer_version": cube["producer_version"],
+        "task_id": sample.task_id,
+        "cube_id": cube["cube_id"],
+        "cube_content_hash": cube["content_hash"],
+        "pool_ref": pool_ref,
+        "sample_design_ref": request_sample_ref,
+        "dataset_binding": dataset_binding,
+        "target_binding": {
+            "column": "target",
+            "good_value": 0,
+            "bad_value": 1,
+            "missing_policy": (
+                "retain_population_exclude_risk_denominator"
+            ),
+        },
+        "dimension_bindings": dimensions,
+        "current_strategy_ref": None,
+        "economics_inputs": economics_inputs,
+        "partitions": list(partitions),
+        "populations": ["approval", "risk"],
+        "lifecycle": dict(cube["lifecycle"]),
+        "producer_run": producer_run,
+    }
+    return StrategyImpactCubeArtifactBinding(
+        task_id=sample.task_id,
+        artifact_id=artifact_id,
+        artifact_path=(
+            tmp_path
+            / sample.task_id
+            / "strategy_impact_cubes"
+            / f"{cube['cube_id']}.json"
+        ),
+        artifact_content_hash=artifact_hash,
+        artifact_provenance=provenance,
+        artifact_provenance_json=json.dumps(
+            provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ),
+        cube=cube,
+        tasks_root=tmp_path,
+        db_path=tmp_path / "marvis.sqlite",
+    )
+
+
 def _training_binding(
     tmp_path: Path,
     sample: StrategySampleDesignV2ArtifactBinding,
@@ -747,6 +1126,424 @@ def test_adapter_is_deterministic_bundle_ready_and_uses_exact_source_identities(
             "content_hash": sample.bundle_artifact_content_hash,
         }
     ]
+
+
+def test_adapter_prefers_impact_cube_and_projects_all_populations_partitions(
+    tmp_path: Path,
+) -> None:
+    project, sample, pool, legacy_impact = _bindings(tmp_path)
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        pool_impact=legacy_impact,
+        impact_cube=impact_cube,
+    )
+
+    assert result["strategy_artifact_refs"] == [
+        {
+            "kind": "strategy_candidate_pool",
+            "ref_id": pool.artifact_id,
+            "content_hash": pool.artifact_content_hash,
+        },
+        {
+            "kind": "strategy_impact",
+            "ref_id": impact_cube.artifact_id,
+            "content_hash": impact_cube.artifact_content_hash,
+        },
+    ]
+    producer_run = impact_cube.artifact_provenance["producer_run"]
+    assert result["tool_run_refs"].count(
+        {
+            "kind": "tool_run",
+            "ref_id": producer_run["run_id"],
+            "content_hash": producer_run["content_hash"],
+        }
+    ) == 1
+    impact = result["sections"][5]
+    table_ids = {table["table_id"] for table in impact["tables"]}
+    assert {
+        "impact_cube_partitions",
+        "impact_cube_slices",
+        "impact_cube_waterfall",
+        "impact_cube_transitions",
+        "impact_cube_economics",
+    } <= table_ids
+    assert {
+        (item["effect_stage"], item["population"], item["partition"])
+        for item in impact["stage_evidence"]
+    } == {
+        ("backtested", "approval", "development"),
+        ("backtested", "risk", "development"),
+        ("oot_validated", "approval", "validation"),
+        ("oot_validated", "risk", "validation"),
+        ("oot_validated", "approval", "oot"),
+        ("oot_validated", "risk", "oot"),
+    }
+    slices = next(
+        table
+        for table in impact["tables"]
+        if table["table_id"] == "impact_cube_slices"
+    )
+    assert {
+        row["cells"]["population"]["value"]
+        for row in slices["rows"]
+    } == {"approval", "risk"}
+    assert {
+        row["cells"]["partition"]["value"]
+        for row in slices["rows"]
+    } == {"development", "validation", "oot"}
+    assert {
+        row["cells"]["family"]["value"]
+        for row in slices["rows"]
+    } >= {
+        "overall",
+        "month",
+        "group",
+        "segment",
+        "group_month",
+        "segment_month",
+        "new_action",
+    }
+    serialized = json.dumps(result, ensure_ascii=False, sort_keys=True)
+    assert legacy_impact.artifact_id not in serialized
+    assert "PII-CUSTOMER" not in serialized
+
+
+def test_adapter_suppresses_oot_claims_but_keeps_partition_results_when_blocked(
+    tmp_path: Path,
+) -> None:
+    sample = _sample_binding(tmp_path, maturity_status="not_matured")
+    dataset = sample.bundle["sample_design"]["identity"]["dataset_ref"]
+    project = _project_binding(
+        tmp_path,
+        task_id=sample.task_id,
+        dataset_ref=build_source_ref(
+            kind="dataset",
+            ref_id=dataset["dataset_id"],
+            content_hash=dataset["content_hash"],
+        ),
+    )
+    pool = _pool_binding_for_strategy_type(
+        tmp_path,
+        sample,
+        "approval",
+    )
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        impact_cube=impact_cube,
+    )
+
+    impact = result["sections"][5]
+    assert {
+        (item["population"], item["partition"])
+        for item in impact["stage_evidence"]
+    } == {
+        ("approval", "development"),
+        ("risk", "development"),
+    }
+    partitions = next(
+        table
+        for table in impact["tables"]
+        if table["table_id"] == "impact_cube_partitions"
+    )
+    blocked_rows = [
+        row
+        for row in partitions["rows"]
+        if row["cells"]["partition"]["value"] in {"validation", "oot"}
+    ]
+    assert blocked_rows
+    assert all(
+        row["cells"][field]["availability"] == "unavailable"
+        and row["cells"][field]["value"] is None
+        and row["cells"][field]["note"]
+        == "claim_suppressed_by_validation_blocker"
+        for row in blocked_rows
+        for field in ("effect_stage", "validation_status")
+    )
+    slices = next(
+        table
+        for table in impact["tables"]
+        if table["table_id"] == "impact_cube_slices"
+    )
+    assert {
+        row["cells"]["partition"]["value"] for row in slices["rows"]
+    } == {"development", "validation", "oot"}
+    assert {
+        item["code"] for item in impact["red_flags"]
+    } >= {"oot_claim_suppressed_by_validation_blocker"}
+    final_fields = {
+        item["field_id"]: item["field"]["value"]
+        for item in result["sections"][6]["summary_fields"]
+    }
+    assert final_fields["evidence_stages"] == ["backtested"]
+    assert final_fields["validation_statuses"] == ["unvalidated"]
+    bundle = build_strategy_report_bundle(
+        task_id=sample.task_id,
+        report_revision=1,
+        strategy_id=None,
+        strategy_version=None,
+        strategy_type="approval",
+        title=_present(
+            "Blocked ImpactCube",
+            result["strategy_artifact_refs"][0],
+        ),
+        status="partial",
+        generated_at="2026-07-24T16:00:00+08:00",
+        **result,
+    )
+    assert bundle["effect_stages"] == ["backtested"]
+    assert bundle["completeness_summary"]["has_validation_blocker"] is True
+
+
+@pytest.mark.parametrize(
+    ("strategy_type", "metric_key"),
+    [
+        ("approval", "approve_count"),
+        ("reject", "bad_capture_rate"),
+        ("limit", "total_limit"),
+        ("pricing", "mean_rate"),
+        ("segmentation", "segment_count"),
+    ],
+)
+def test_impact_cube_projection_preserves_all_five_strategy_metric_contracts(
+    tmp_path: Path,
+    strategy_type: str,
+    metric_key: str,
+) -> None:
+    sample = _sample_binding(tmp_path)
+    dataset = sample.bundle["sample_design"]["identity"]["dataset_ref"]
+    project = _project_binding(
+        tmp_path,
+        task_id=sample.task_id,
+        dataset_ref=build_source_ref(
+            kind="dataset",
+            ref_id=dataset["dataset_id"],
+            content_hash=dataset["content_hash"],
+        ),
+    )
+    pool = _pool_binding_for_strategy_type(
+        tmp_path,
+        sample,
+        strategy_type,
+    )
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        impact_cube=impact_cube,
+    )
+
+    table = next(
+        item
+        for item in result["sections"][5]["tables"]
+        if item["table_id"] == "impact_cube_slices"
+    )
+    row = next(
+        item
+        for item in table["rows"]
+        if item["cells"]["population"]["value"] == "risk"
+        and item["cells"]["partition"]["value"] == "development"
+        and item["cells"]["family"]["value"] == "overall"
+    )
+    assert row["cells"]["new_metrics"]["availability"] == "present"
+    assert metric_key in row["cells"]["new_metrics"]["value"]
+    bundle = build_strategy_report_bundle(
+        task_id=sample.task_id,
+        report_revision=1,
+        strategy_id=None,
+        strategy_version=None,
+        strategy_type=strategy_type,
+        title=_present(
+            f"{strategy_type} ImpactCube",
+            result["strategy_artifact_refs"][0],
+        ),
+        status="partial",
+        generated_at="2026-07-24T16:00:00+08:00",
+        **result,
+    )
+    assert bundle["strategy_type"] == strategy_type
+    assert bundle["effect_stages"] == ["backtested", "oot_validated"]
+
+
+def test_impact_cube_missing_economics_stays_blank_never_synthetic_zero(
+    tmp_path: Path,
+) -> None:
+    project, sample, pool, _legacy_impact = _bindings(tmp_path)
+    impact_cube = _impact_cube_binding(
+        tmp_path,
+        sample,
+        pool,
+        economics=False,
+    )
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        pool_impact=None,
+        impact_cube=impact_cube,
+    )
+
+    impact = result["sections"][5]
+    economics = next(
+        table
+        for table in impact["tables"]
+        if table["table_id"] == "impact_cube_economics"
+    )
+    assert economics["rows"]
+    for row in economics["rows"]:
+        for field in ("current", "new", "delta"):
+            assert row["cells"][field]["value"] is None
+            assert row["cells"][field]["availability"] in {
+                "unavailable",
+                "not_applicable",
+            }
+
+
+def test_adapter_rejects_impact_cube_bound_to_another_pool_artifact(
+    tmp_path: Path,
+) -> None:
+    project, sample, pool, _legacy_impact = _bindings(tmp_path)
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+    selected_pool = replace(pool, artifact_id="a" * 64)
+
+    with pytest.raises(
+        StrategyReportBundleError,
+        match="another candidate-pool artifact",
+    ):
+        build_strategy_report_bundle_source_inputs(
+            project_context=project,
+            sample_design=sample,
+            candidate_pool=selected_pool,
+            impact_cube=impact_cube,
+        )
+
+
+def test_adapter_rejects_impact_cube_producer_run_self_hash_tamper(
+    tmp_path: Path,
+) -> None:
+    project, sample, pool, _legacy_impact = _bindings(tmp_path)
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+    forged_provenance = json.loads(
+        impact_cube.artifact_provenance_json
+    )
+    forged_provenance["producer_run"]["content_hash"] = "0" * 64
+    forged = replace(
+        impact_cube,
+        artifact_provenance=forged_provenance,
+        artifact_provenance_json=json.dumps(
+            forged_provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ),
+    )
+
+    with pytest.raises(
+        StrategyReportBundleError,
+        match="producer_run|self hash",
+    ):
+        build_strategy_report_bundle_source_inputs(
+            project_context=project,
+            sample_design=sample,
+            candidate_pool=pool,
+            impact_cube=forged,
+        )
+
+
+def test_adapter_rejects_impact_cube_with_forged_development_lineage(
+    tmp_path: Path,
+) -> None:
+    project, sample, pool, _legacy_impact = _bindings(tmp_path)
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+    forged_cube = json.loads(
+        canonical_strategy_impact_cube_json(impact_cube.cube)
+    )
+    forged_cube["source_bindings"]["development_lineage"][
+        "sample_binding"
+    ]["sample_context_hash"] = _hash("forged-sample-context")
+    body = {
+        key: value
+        for key, value in forged_cube.items()
+        if key not in {"cube_id", "content_hash"}
+    }
+    canonical_body = json.dumps(
+        body,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    forged_cube["cube_id"] = (
+        "strategy-impact-cube-"
+        + hashlib.sha256(canonical_body.encode("utf-8")).hexdigest()[:24]
+    )
+    without_hash = {
+        key: value
+        for key, value in forged_cube.items()
+        if key != "content_hash"
+    }
+    forged_cube["content_hash"] = hashlib.sha256(
+        json.dumps(
+            without_hash,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    forged_canonical = canonical_strategy_impact_cube_json(forged_cube)
+    forged_artifact_hash = _file_hash(forged_canonical)
+    forged_producer_run = build_impact_cube_producer_run(
+        task_id=impact_cube.task_id,
+        request=impact_cube.artifact_provenance["producer_run"]["request"],
+        cube_id=forged_cube["cube_id"],
+        cube_content_hash=forged_cube["content_hash"],
+        artifact_id=impact_cube.artifact_id,
+        artifact_filename=impact_cube.artifact_path.name,
+        artifact_content_hash=forged_artifact_hash,
+    )
+    forged_provenance = {
+        **impact_cube.artifact_provenance,
+        "cube_id": forged_cube["cube_id"],
+        "cube_content_hash": forged_cube["content_hash"],
+        "producer_run": forged_producer_run,
+    }
+    forged_provenance_json = json.dumps(
+        forged_provenance,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    forged_binding = replace(
+        impact_cube,
+        artifact_content_hash=forged_artifact_hash,
+        artifact_provenance=forged_provenance,
+        artifact_provenance_json=forged_provenance_json,
+        cube=forged_cube,
+    )
+
+    with pytest.raises(
+        StrategyReportBundleError,
+        match="development lineage differs",
+    ):
+        build_strategy_report_bundle_source_inputs(
+            project_context=project,
+            sample_design=sample,
+            candidate_pool=pool,
+            impact_cube=forged_binding,
+        )
 
 
 def test_adapter_never_leaks_raw_rows_pii_or_overclaims_lifecycle(

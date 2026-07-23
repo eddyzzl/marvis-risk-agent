@@ -10,8 +10,11 @@ development evidence to an independent-validation or production claim.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
 from marvis.packs.modeling.evidence import (
@@ -35,6 +38,18 @@ from marvis.packs.strategy.model_evidence import (
 )
 from marvis.packs.strategy.model_evidence_tools import (
     StrategyModelEvidenceV2ArtifactBinding,
+)
+from marvis.packs.strategy.dsl import strategy_spec_hash
+from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.impact_cube import (
+    STRATEGY_IMPACT_CUBE_PRODUCER_VERSION,
+    canonical_strategy_impact_cube_json,
+    validate_strategy_impact_cube,
+)
+from marvis.packs.strategy.impact_cube_tools import (
+    IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION,
+    impact_cube_producer_run_ref,
+    validate_impact_cube_producer_run,
 )
 from marvis.packs.strategy.pool import (
     canonical_strategy_pool_json,
@@ -99,6 +114,49 @@ _MODEL_STATUS_TO_AVAILABILITY = {
     "not_matured": "not_matured",
     "not_applicable": "not_applicable",
 }
+_IMPACT_CUBE_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "producer_version",
+        "task_id",
+        "cube_id",
+        "cube_content_hash",
+        "pool_ref",
+        "sample_design_ref",
+        "dataset_binding",
+        "target_binding",
+        "dimension_bindings",
+        "current_strategy_ref",
+        "economics_inputs",
+        "partitions",
+        "populations",
+        "lifecycle",
+        "producer_run",
+    }
+)
+
+
+@dataclass(frozen=True)
+class StrategyImpactCubeArtifactBinding:
+    """Authenticated immutable ImpactCube source for report projection."""
+
+    task_id: str
+    artifact_id: str
+    artifact_path: Path
+    artifact_content_hash: str
+    artifact_provenance: dict[str, Any]
+    artifact_provenance_json: str
+    cube: dict[str, Any]
+    tasks_root: Path
+    db_path: Path
+
+
+def validate_strategy_impact_cube_artifact_binding(
+    binding: StrategyImpactCubeArtifactBinding,
+) -> dict[str, Any]:
+    """Revalidate one typed ImpactCube artifact binding for downstream use."""
+
+    return _authenticated_impact_cube(binding)
 
 
 def build_strategy_report_bundle_source_inputs(
@@ -106,7 +164,8 @@ def build_strategy_report_bundle_source_inputs(
     project_context: StrategyProjectContextArtifactBinding,
     sample_design: StrategySampleDesignV2ArtifactBinding,
     candidate_pool: StrategyCandidatePoolArtifactBinding,
-    pool_impact: StrategyPoolImpactArtifactBinding,
+    pool_impact: StrategyPoolImpactArtifactBinding | None = None,
+    impact_cube: StrategyImpactCubeArtifactBinding | None = None,
     model_evidence: StrategyModelEvidenceV2ArtifactBinding | None = None,
     training_evidence: ModelingTrainingEvidenceArtifactBinding | None = None,
     score_evidence: ModelScoreEvidenceArtifactBinding | None = None,
@@ -125,14 +184,30 @@ def build_strategy_report_bundle_source_inputs(
         task_id,
         sample_design=sample_design,
         candidate_pool=candidate_pool,
-        pool_impact=pool_impact,
+        pool_impact=(
+            None if impact_cube is not None else pool_impact
+        ),
+        impact_cube=impact_cube,
         model_evidence=model_evidence,
         training_evidence=training_evidence,
         score_evidence=score_evidence,
     )
     sample = _authenticated_sample_design(sample_design)
     pool, design = _authenticated_candidate_pool(candidate_pool)
-    impact = _authenticated_pool_impact(pool_impact)
+    if impact_cube is None and pool_impact is None:
+        raise StrategyReportBundleError(
+            "an authenticated ImpactCube or legacy PoolImpact is required"
+        )
+    cube = (
+        None
+        if impact_cube is None
+        else _authenticated_impact_cube(impact_cube)
+    )
+    impact = (
+        None
+        if cube is not None or pool_impact is None
+        else _authenticated_pool_impact(pool_impact)
+    )
     effective_training = _effective_training_binding(
         training_evidence=training_evidence,
         score_evidence=score_evidence,
@@ -168,14 +243,27 @@ def build_strategy_report_bundle_source_inputs(
         training_evidence=effective_training,
         score_evidence=score_evidence,
     )
-    _require_pool_impact_identity(
-        sample=sample,
-        pool_binding=candidate_pool,
-        pool=pool,
-        compiled_design=design,
-        impact_binding=pool_impact,
-        impact=impact,
-    )
+    if cube is not None:
+        assert impact_cube is not None
+        _require_impact_cube_identity(
+            sample_binding=sample_design,
+            sample=sample,
+            pool_binding=candidate_pool,
+            pool=pool,
+            compiled_design=design,
+            impact_binding=impact_cube,
+            cube=cube,
+        )
+    else:
+        assert pool_impact is not None and impact is not None
+        _require_pool_impact_identity(
+            sample=sample,
+            pool_binding=candidate_pool,
+            pool=pool,
+            compiled_design=design,
+            impact_binding=pool_impact,
+            impact=impact,
+        )
 
     refs = _EvidenceRefs(
         project=_artifact_ref(
@@ -194,9 +282,17 @@ def build_strategy_report_bundle_source_inputs(
             candidate_pool.artifact_content_hash,
         ),
         impact=_artifact_ref(
-            "pool_impact",
-            pool_impact.artifact_id,
-            pool_impact.artifact_content_hash,
+            "strategy_impact" if cube is not None else "pool_impact",
+            (
+                impact_cube.artifact_id
+                if cube is not None and impact_cube is not None
+                else pool_impact.artifact_id
+            ),
+            (
+                impact_cube.artifact_content_hash
+                if cube is not None and impact_cube is not None
+                else pool_impact.artifact_content_hash
+            ),
         ),
         model=(
             None
@@ -226,7 +322,8 @@ def build_strategy_report_bundle_source_inputs(
             )
         ),
     )
-    sections_by_key = {
+    state = project["state"]
+    pre_impact_sections = {
         "current_project": _current_project_section(project, refs.project),
         "historical_versions": _history_section(project, refs.project),
         "sample_design": _sample_section(sample, refs.sample),
@@ -241,26 +338,56 @@ def build_strategy_report_bundle_source_inputs(
             compiled_design=design,
             source_ref=refs.pool,
         ),
-        "impact_assessment": _impact_section(
-            impact=impact,
-            pool_ref=refs.pool,
-            impact_ref=refs.impact,
+    }
+    allow_oot_validated = not _has_validation_blocker(
+        sections=pre_impact_sections.values(),
+        missing_information=state["missing_information_records"],
+    )
+    sections_by_key = {
+        **pre_impact_sections,
+        "impact_assessment": (
+            _impact_cube_section(
+                cube=cube,
+                pool_ref=refs.pool,
+                impact_ref=refs.impact,
+                allow_oot_validated=allow_oot_validated,
+            )
+            if cube is not None
+            else _impact_section(
+                impact=impact,
+                pool_ref=refs.pool,
+                impact_ref=refs.impact,
+            )
         ),
-        "final_document": _final_document_section(
-            pool=pool,
-            compiled_design=design,
-            impact=impact,
-            pool_ref=refs.pool,
-            impact_ref=refs.impact,
+        "final_document": (
+            _impact_cube_final_document_section(
+                pool=pool,
+                compiled_design=design,
+                cube=cube,
+                pool_ref=refs.pool,
+                impact_ref=refs.impact,
+                allow_oot_validated=allow_oot_validated,
+            )
+            if cube is not None
+            else _final_document_section(
+                pool=pool,
+                compiled_design=design,
+                impact=impact,
+                pool_ref=refs.pool,
+                impact_ref=refs.impact,
+            )
         ),
     }
-    state = project["state"]
     snapshot = state["current_project_snapshot"]
     dataset_refs = _dedupe_refs(
         [
             *snapshot["dataset_refs"],
             _dataset_ref_from_sample(sample),
-            _dataset_ref_from_impact(impact),
+            (
+                _dataset_ref_from_impact_cube(cube)
+                if cube is not None
+                else _dataset_ref_from_impact(impact)
+            ),
         ]
     )
     tool_run_refs = _dedupe_refs(
@@ -270,6 +397,15 @@ def build_strategy_report_bundle_source_inputs(
                 ref
                 for history in state["historical_strategy_reviews"]
                 for ref in history["tool_run_refs"]
+            ),
+            *(
+                []
+                if impact_cube is None
+                else [
+                    impact_cube_producer_run_ref(
+                        impact_cube.artifact_provenance["producer_run"]
+                    )
+                ]
             ),
         ]
     )
@@ -431,6 +567,198 @@ def _authenticated_pool_impact(
         "pool-impact",
     )
     return impact
+
+
+def _authenticated_impact_cube(
+    binding: StrategyImpactCubeArtifactBinding,
+) -> dict[str, Any]:
+    _require_binding_type(
+        binding,
+        StrategyImpactCubeArtifactBinding,
+        "ImpactCube",
+    )
+    cube = validate_strategy_impact_cube(binding.cube)
+    if cube != binding.cube or cube["identity"]["task_id"] != binding.task_id:
+        raise StrategyReportBundleError(
+            "ImpactCube binding identity changed"
+        )
+    _require_canonical_artifact_hash(
+        binding.artifact_content_hash,
+        canonical_strategy_impact_cube_json(cube),
+        "ImpactCube",
+    )
+    _require_impact_cube_provenance(binding, cube)
+    return cube
+
+
+def _require_impact_cube_provenance(
+    binding: StrategyImpactCubeArtifactBinding,
+    cube: Mapping[str, Any],
+) -> None:
+    try:
+        canonical = json.dumps(
+            binding.artifact_provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        provenance = json.loads(canonical)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise StrategyReportBundleError(
+            "ImpactCube artifact provenance is invalid"
+        ) from exc
+    if (
+        not isinstance(provenance, dict)
+        or set(provenance) != _IMPACT_CUBE_PROVENANCE_FIELDS
+        or binding.artifact_provenance_json != canonical
+    ):
+        raise StrategyReportBundleError(
+            "ImpactCube artifact provenance fields changed"
+        )
+    if (
+        provenance["schema_version"]
+        != IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION
+        or provenance["producer_version"]
+        != STRATEGY_IMPACT_CUBE_PRODUCER_VERSION
+        or provenance["task_id"] != binding.task_id
+        or provenance["cube_id"] != cube["cube_id"]
+        or provenance["cube_content_hash"] != cube["content_hash"]
+        or provenance["populations"] != ["approval", "risk"]
+        or provenance["lifecycle"] != cube["lifecycle"]
+    ):
+        raise StrategyReportBundleError(
+            "ImpactCube artifact provenance identity changed"
+        )
+    sources = cube["source_bindings"]
+    if (
+        provenance["dataset_binding"] != sources["dataset"]
+        or provenance["target_binding"] != sources["target"]
+        or provenance["dimension_bindings"]
+        != {
+            key: sources["fields"][key]
+            for key in ("month_col", "group_col", "segment_col")
+        }
+    ):
+        raise StrategyReportBundleError(
+            "ImpactCube artifact provenance source binding changed"
+        )
+    current = sources["current_strategy"]
+    expected_current = (
+        current["value"]
+        if current["availability"] == "present"
+        else None
+    )
+    if provenance["current_strategy_ref"] != expected_current:
+        raise StrategyReportBundleError(
+            "ImpactCube artifact provenance current strategy changed"
+        )
+    economics = sources["economics"]
+    expected_economics = provenance["economics_inputs"]
+    if expected_economics is None:
+        expected_absence = (
+            ("not_applicable", "segmentation_has_no_economic_contract")
+            if cube["identity"]["strategy_type"] == "segmentation"
+            else ("unavailable", "economics_inputs_not_provided")
+        )
+        if (
+            (
+                economics["availability"],
+                economics["reason"],
+            )
+            != expected_absence
+            or economics["bindings"] != {}
+        ):
+            raise StrategyReportBundleError(
+                "ImpactCube artifact provenance economics changed"
+            )
+    elif expected_economics != economics["bindings"]:
+        raise StrategyReportBundleError(
+            "ImpactCube artifact provenance economics changed"
+        )
+    expected_partitions = [
+        item["name"]
+        for item in cube["partitions"]
+        if item["role"] == "risk"
+    ]
+    if provenance["partitions"] != expected_partitions:
+        raise StrategyReportBundleError(
+            "ImpactCube artifact provenance partitions changed"
+        )
+    identity = cube["identity"]
+    pool_artifact = sources["pool_artifact"]
+    expected_pool_ref = {
+        "artifact_id": pool_artifact["artifact_id"],
+        "expected_artifact_content_hash": pool_artifact[
+            "artifact_content_hash"
+        ],
+        "expected_pool_id": identity["pool_id"],
+        "expected_revision": identity["revision"],
+        "expected_revision_id": identity["revision_id"],
+        "expected_snapshot_hash": identity["snapshot_hash"],
+    }
+    if provenance["pool_ref"] != expected_pool_ref:
+        raise StrategyReportBundleError(
+            "ImpactCube artifact provenance Pool binding changed"
+        )
+    sample = sources["sample_design_v2"]
+    expected_sample_ref = {
+        "membership_artifact_id": sample["membership_artifact_id"],
+        "expected_membership_artifact_content_hash": sample[
+            "membership_artifact_content_hash"
+        ],
+        "bundle_artifact_id": sample["bundle_artifact_id"],
+        "expected_bundle_artifact_content_hash": sample[
+            "bundle_artifact_content_hash"
+        ],
+        "expected_bundle_id": sample["bundle_id"],
+        "expected_sample_design_id": sample["sample_design_id"],
+        "expected_sample_design_content_hash": sample[
+            "sample_design_content_hash"
+        ],
+    }
+    if provenance["sample_design_ref"] != expected_sample_ref:
+        raise StrategyReportBundleError(
+            "ImpactCube artifact provenance sample-design binding changed"
+        )
+    request = {
+        "strategy_type": cube["identity"]["strategy_type"],
+        "pool_ref": provenance["pool_ref"],
+        "sample_design_ref": provenance["sample_design_ref"],
+        "partitions": provenance["partitions"],
+        "population": "risk",
+        "dimension_bindings": provenance["dimension_bindings"],
+        "current_strategy_ref": (
+            None
+            if provenance["current_strategy_ref"] is None
+            else {
+                "strategy_id": provenance["current_strategy_ref"][
+                    "strategy_id"
+                ],
+                "expected_strategy_spec_hash": provenance[
+                    "current_strategy_ref"
+                ]["strategy_spec_hash"],
+            }
+        ),
+        "economics_inputs": provenance["economics_inputs"],
+    }
+    try:
+        validate_impact_cube_producer_run(
+            provenance["producer_run"],
+            expected_task_id=binding.task_id,
+            expected_request=request,
+            expected_cube_id=cube["cube_id"],
+            expected_cube_content_hash=cube["content_hash"],
+            expected_artifact_id=binding.artifact_id,
+            expected_artifact_filename=binding.artifact_path.name,
+            expected_artifact_content_hash=(
+                binding.artifact_content_hash
+            ),
+        )
+    except StrategyError as exc:
+        raise StrategyReportBundleError(
+            f"ImpactCube producer_run is invalid: {exc}"
+        ) from exc
 
 
 def _authenticated_model_evidence(
@@ -671,6 +999,128 @@ def _require_pool_impact_identity(
         )
 
 
+def _require_impact_cube_identity(
+    *,
+    sample_binding: StrategySampleDesignV2ArtifactBinding,
+    sample: Mapping[str, Any],
+    pool_binding: StrategyCandidatePoolArtifactBinding,
+    pool: Mapping[str, Any],
+    compiled_design: Mapping[str, Any],
+    impact_binding: StrategyImpactCubeArtifactBinding,
+    cube: Mapping[str, Any],
+) -> None:
+    identity = cube["identity"]
+    expected_pool = {
+        "pool_id": pool["pool_id"],
+        "task_id": pool["task_id"],
+        "strategy_type": pool["strategy_type"],
+        "revision": pool["revision"],
+        "revision_id": pool["revision_id"],
+        "snapshot_hash": pool["snapshot_hash"],
+        "design_hash": compiled_design["design_hash"],
+        "strategy_spec_hash": strategy_spec_hash(
+            compiled_design["strategy_spec"]
+        ),
+    }
+    if any(identity[key] != value for key, value in expected_pool.items()):
+        raise StrategyReportBundleError(
+            "ImpactCube candidate-pool identity changed"
+        )
+    source = cube["source_bindings"]
+    if source["pool_artifact"] != {
+        "artifact_id": pool_binding.artifact_id,
+        "artifact_content_hash": pool_binding.artifact_content_hash,
+    }:
+        raise StrategyReportBundleError(
+            "ImpactCube references another candidate-pool artifact"
+        )
+    design = sample["sample_design"]
+    header = sample_binding.membership["header"]
+    source_sample = source["sample_design_v2"]
+    expected_sample = {
+        "membership_artifact_id": sample_binding.membership_artifact_id,
+        "membership_artifact_content_hash": (
+            sample_binding.membership_artifact_content_hash
+        ),
+        "membership_id": header["membership_id"],
+        "membership_content_hash": header["content_hash"],
+        "bundle_artifact_id": sample_binding.bundle_artifact_id,
+        "bundle_artifact_content_hash": (
+            sample_binding.bundle_artifact_content_hash
+        ),
+        "bundle_id": sample["bundle_id"],
+        "bundle_content_hash": sample["content_hash"],
+        "sample_design_id": design["sample_design_id"],
+        "sample_design_content_hash": design["content_hash"],
+        "analysis_universe_row_count": header["counts"][
+            "analysis_universe"
+        ],
+        "partition_counts": {
+            partition: header["counts"]["risk"][partition]
+            for partition in ("development", "validation", "oot")
+            if partition in source_sample["partition_counts"]
+        },
+        "population_partition_counts": {
+            role: {
+                partition: header["counts"][role][partition]
+                for partition in ("development", "validation", "oot")
+                if partition
+                in source_sample["population_partition_counts"][role]
+            }
+            for role in ("approval", "risk")
+        },
+    }
+    if source_sample != expected_sample:
+        raise StrategyReportBundleError(
+            "ImpactCube references another sample-design V2 artifact"
+        )
+    if not pool["entries"]:
+        raise StrategyReportBundleError(
+            "ImpactCube Candidate Pool has no development lineage"
+        )
+    expected_development_binding = {
+        "task_id": pool["task_id"],
+        **pool["entries"][0]["source"]["evidence_identity"],
+    }
+    if (
+        source["development_lineage"]["sample_binding"]
+        != expected_development_binding
+    ):
+        raise StrategyReportBundleError(
+            "ImpactCube development lineage differs from the Candidate Pool"
+        )
+    dataset = design["identity"]["dataset_ref"]
+    workspace = design["identity"]["workspace_ref"]
+    source_dataset = source["dataset"]
+    expected_dataset_identity = {
+        "task_id": sample_binding.task_id,
+        "dataset_id": dataset["dataset_id"],
+        "dataset_content_hash": dataset["content_hash"],
+        "workspace_revision": workspace["revision"],
+        "workspace_generation": workspace["generation"],
+        "semantic_mapping_hash": workspace["semantic_mapping_hash"],
+    }
+    if any(
+        source_dataset[key] != value
+        for key, value in expected_dataset_identity.items()
+    ):
+        raise StrategyReportBundleError(
+            "ImpactCube dataset binding differs from the sample design"
+        )
+    target = design["target_selector"]
+    if (
+        source["target"]["column"] != target["column"]
+        or source["target"]["good_value"] != target["good_value"]
+        or source["target"]["bad_value"] != target["bad_value"]
+        or source["development_lineage"]["legacy_development_ref"]
+        != design["compatibility"]["legacy_development_ref"]
+        or impact_binding.task_id != sample_binding.task_id
+    ):
+        raise StrategyReportBundleError(
+            "ImpactCube target or development lineage changed"
+        )
+
+
 def _current_project_section(
     revision: Mapping[str, Any],
     source_ref: Mapping[str, str],
@@ -678,9 +1128,17 @@ def _current_project_section(
     state = revision["state"]
     snapshot = state["current_project_snapshot"]
     fields = [
-        _named("scope", "项目范围", snapshot["scope"]),
+        _named(
+            "scope",
+            "项目范围",
+            _projected_context_field(snapshot["scope"]),
+        ),
         *(
-            _named(f"current_{key}", label, snapshot["status_fields"][key])
+            _named(
+                f"current_{key}",
+                label,
+                _projected_context_field(snapshot["status_fields"][key]),
+            )
             for key, label in (
                 ("volume", "当前规模"),
                 ("approval", "当前通过表现"),
@@ -688,7 +1146,11 @@ def _current_project_section(
                 ("economics", "当前收益表现"),
             )
         ),
-        _named("maturity_summary", "样本成熟度", snapshot["maturity_summary"]),
+        _named(
+            "maturity_summary",
+            "样本成熟度",
+            _projected_context_field(snapshot["maturity_summary"]),
+        ),
     ]
     return build_strategy_report_section(
         key="current_project",
@@ -730,10 +1192,16 @@ def _history_section(
                 "row_id": history["review_id"],
                 "cells": {
                     "version": version_field,
-                    "effective_period": history["effective_period"],
-                    "asset_status": history["asset_status"],
-                    "scope": history["scope"],
-                    "traffic_allocation": history["traffic_allocation"],
+                    "effective_period": _projected_context_field(
+                        history["effective_period"]
+                    ),
+                    "asset_status": _projected_context_field(
+                        history["asset_status"]
+                    ),
+                    "scope": _projected_context_field(history["scope"]),
+                    "traffic_allocation": _projected_context_field(
+                        history["traffic_allocation"]
+                    ),
                     "evidence_status": _present_field(
                         history["availability"],
                         source_ref,
@@ -1202,6 +1670,737 @@ def _candidate_section(
         ],
         tables=[candidates, strategy],
         source_refs=[source_ref],
+    )
+
+
+def _impact_cube_section(
+    *,
+    cube: Mapping[str, Any],
+    pool_ref: Mapping[str, str],
+    impact_ref: Mapping[str, str],
+    allow_oot_validated: bool,
+) -> dict[str, Any]:
+    lifecycle = cube["lifecycle"]
+    family_fields = []
+    for family, status in cube["slice_families"].items():
+        family_fields.append(
+            _named(
+                f"{family}_status",
+                f"{family}切片状态",
+                (
+                    _present_field("present", impact_ref)
+                    if status["availability"] == "present"
+                    else _absent_field(
+                        status["availability"],
+                        note=status["reason"],
+                    )
+                ),
+            )
+        )
+    summary_fields = [
+        _named(
+            "impact_cube_id",
+            "ImpactCube ID",
+            _present_field(cube["cube_id"], impact_ref),
+        ),
+        _named(
+            "strategy_type",
+            "策略类型",
+            _present_field(
+                cube["identity"]["strategy_type"],
+                impact_ref,
+            ),
+        ),
+        _named(
+            "impact_slice_count",
+            "影响切片数",
+            _present_field(len(cube["slices"]), impact_ref),
+        ),
+        _named(
+            "impact_partitions",
+            "测算分区",
+            _present_field(
+                list(
+                    dict.fromkeys(
+                        row["name"] for row in cube["partitions"]
+                    )
+                ),
+                impact_ref,
+            ),
+        ),
+        _named(
+            "impact_populations",
+            "测算人群",
+            _present_field(["approval", "risk"], impact_ref),
+        ),
+        _named(
+            "creates_strategy",
+            "是否创建策略",
+            _present_field(lifecycle["creates_strategy"], impact_ref),
+        ),
+        _named(
+            "adoption_status",
+            "采纳状态",
+            _present_field("not_adopted", impact_ref),
+        ),
+        _named(
+            "deployment_status",
+            "部署状态",
+            _present_field("not_deployed", impact_ref),
+        ),
+        *family_fields,
+    ]
+    tables = [
+        _impact_cube_partition_table(
+            cube,
+            impact_ref,
+            allow_oot_validated=allow_oot_validated,
+        ),
+        _impact_cube_slices_table(cube, impact_ref),
+        _impact_cube_waterfall_table(cube, impact_ref),
+        _impact_cube_transitions_table(cube, impact_ref),
+        _impact_cube_economics_table(cube, impact_ref),
+    ]
+    dataset_ref = _dataset_ref_from_impact_cube(cube)
+    return build_strategy_report_section(
+        key="impact_assessment",
+        title=_SECTION_TITLES["impact_assessment"],
+        availability="present",
+        summary_fields=summary_fields,
+        tables=tables,
+        stage_evidence=[
+            {
+                "effect_stage": row["effect_stage"],
+                "population": row["role"],
+                "partition": row["name"],
+                "binding": {
+                    "kind": (
+                        "development_backtest"
+                        if row["effect_stage"] == "backtested"
+                        else "independent_validation"
+                    ),
+                    "dataset_ref": dataset_ref,
+                    "frozen_artifact_ref": pool_ref,
+                    "result_ref": impact_ref,
+                },
+            }
+            for row in cube["partitions"]
+            if (
+                row["effect_stage"] != "oot_validated"
+                or allow_oot_validated
+            )
+        ],
+        red_flags=[
+            {
+                "code": item["code"],
+                "level": item["level"],
+                "message": item["message"],
+                "source_refs": [impact_ref],
+            }
+            for item in cube["red_flags"]
+        ]
+        + (
+            []
+            if allow_oot_validated
+            else [
+                {
+                    "code": "oot_claim_suppressed_by_validation_blocker",
+                    "level": "amber",
+                    "message": (
+                        "ImpactCube 的 validation/OOT 分区结果仍在表格中保留，"
+                        "但当前验证阻塞项未解决，因此报告未声明 OOT 已验证。"
+                    ),
+                    "source_refs": [impact_ref],
+                }
+            ]
+        ),
+        source_refs=[pool_ref, impact_ref],
+    )
+
+
+def _has_validation_blocker(
+    *,
+    sections: Iterable[Mapping[str, Any]],
+    missing_information: Sequence[Mapping[str, Any]],
+) -> bool:
+    if any(
+        item["blocking"] == "validation" and item["status"] != "provided"
+        for item in missing_information
+    ):
+        return True
+    for section in sections:
+        for item in section["summary_fields"]:
+            if item["field"]["blocking"] == "validation":
+                return True
+        for table in section["tables"]:
+            for row in table["rows"]:
+                if any(
+                    field["blocking"] == "validation"
+                    for field in row["cells"].values()
+                ):
+                    return True
+    return False
+
+
+def _impact_cube_partition_table(
+    cube: Mapping[str, Any],
+    source_ref: Mapping[str, str],
+    *,
+    allow_oot_validated: bool,
+) -> dict[str, Any]:
+    return build_strategy_report_table(
+        table_id="impact_cube_partitions",
+        title="ImpactCube 分区与证据阶段",
+        sheet_key="10_validation",
+        granularity="aggregate",
+        content_class="lineage",
+        columns=[
+            _column("population", "人群口径"),
+            _column("partition", "样本分区"),
+            _column("population_key", "人群分区键"),
+            _column("row_count", "样本数", unit="count", precision=0),
+            _column("effect_stage", "效果阶段"),
+            _column("validation_status", "验证状态"),
+        ],
+        rows=[
+            {
+                "row_id": (
+                    f"impact-partition-{row['role']}-{row['name']}"
+                ),
+                "cells": {
+                    "population": _present_field(
+                        row["role"],
+                        source_ref,
+                    ),
+                    "partition": _present_field(
+                        row["name"],
+                        source_ref,
+                    ),
+                    "population_key": _present_field(
+                        row["population_key"],
+                        source_ref,
+                    ),
+                    "row_count": _present_field(
+                        row["row_count"],
+                        source_ref,
+                    ),
+                    "effect_stage": _impact_partition_claim_field(
+                        row,
+                        source_ref,
+                        key="effect_stage",
+                        allow_oot_validated=allow_oot_validated,
+                    ),
+                    "validation_status": _impact_partition_claim_field(
+                        row,
+                        source_ref,
+                        key="validation_status",
+                        allow_oot_validated=allow_oot_validated,
+                    ),
+                },
+            }
+            for row in cube["partitions"]
+        ],
+        source_refs=[source_ref],
+    )
+
+
+def _impact_partition_claim_field(
+    partition: Mapping[str, Any],
+    source_ref: Mapping[str, str],
+    *,
+    key: str,
+    allow_oot_validated: bool,
+) -> dict[str, Any]:
+    if (
+        partition["effect_stage"] == "oot_validated"
+        and not allow_oot_validated
+    ):
+        return _absent_field(
+            "unavailable",
+            note="claim_suppressed_by_validation_blocker",
+        )
+    return _present_field(partition[key], source_ref)
+
+
+def _impact_cube_slices_table(
+    cube: Mapping[str, Any],
+    source_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    rows = []
+    for item in cube["slices"]:
+        population = item["population"]
+        population_value = (
+            population["value"]
+            if population["availability"] == "present"
+            else None
+        )
+        risk = (
+            None
+            if population_value is None
+            else population_value["risk"]
+        )
+        rows.append(
+            {
+                "row_id": item["slice_id"],
+                "cells": {
+                    "slice_id": _present_field(
+                        item["slice_id"],
+                        source_ref,
+                    ),
+                    "population": _present_field(
+                        item["population_role"],
+                        source_ref,
+                    ),
+                    "partition": _dimension_field(
+                        item["dimensions"]["partition"],
+                        source_ref,
+                    ),
+                    "family": _present_field(
+                        item["family"],
+                        source_ref,
+                    ),
+                    "month": _dimension_field(
+                        item["dimensions"]["month"],
+                        source_ref,
+                    ),
+                    "group": _dimension_field(
+                        item["dimensions"]["group"],
+                        source_ref,
+                    ),
+                    "segment": _dimension_field(
+                        item["dimensions"]["segment"],
+                        source_ref,
+                    ),
+                    "new_action": _dimension_field(
+                        item["dimensions"]["new_action_bucket"],
+                        source_ref,
+                    ),
+                    "slice_availability": _present_field(
+                        item["availability"],
+                        source_ref,
+                    ),
+                    "population_count": _wrapped_mapping_field(
+                        population,
+                        source_ref,
+                        key="count",
+                    ),
+                    "population_share": _wrapped_mapping_field(
+                        population,
+                        source_ref,
+                        key="share",
+                    ),
+                    "labeled_count": _wrapped_mapping_field(
+                        population,
+                        source_ref,
+                        key="labeled_count",
+                    ),
+                    "label_coverage": _wrapped_mapping_field(
+                        population,
+                        source_ref,
+                        key="label_coverage",
+                    ),
+                    "bad_count": _risk_field(
+                        risk,
+                        source_ref,
+                        key="bad_count",
+                    ),
+                    "bad_rate": _risk_field(
+                        risk,
+                        source_ref,
+                        key="bad_rate",
+                    ),
+                    "amounts": _wrapped_mapping_field(
+                        population,
+                        source_ref,
+                        key="amounts",
+                    ),
+                    "new_metrics": _strategy_projection_field(
+                        item["new"],
+                        source_ref,
+                        key="metrics",
+                    ),
+                    "new_breakdown": _strategy_projection_field(
+                        item["new"],
+                        source_ref,
+                        key="breakdown",
+                    ),
+                    "current_metrics": _strategy_projection_field(
+                        item["current"],
+                        source_ref,
+                        key="metrics",
+                    ),
+                    "current_breakdown": _strategy_projection_field(
+                        item["current"],
+                        source_ref,
+                        key="breakdown",
+                    ),
+                },
+            }
+        )
+    return build_strategy_report_table(
+        table_id="impact_cube_slices",
+        title="ImpactCube 逐分区、逐月与逐维度结果",
+        sheet_key="08_impact",
+        granularity="aggregate",
+        content_class="segment_summary",
+        columns=[
+            _column("slice_id", "切片ID"),
+            _column("population", "人群口径"),
+            _column("partition", "样本分区"),
+            _column("family", "切片族"),
+            _column("month", "月份"),
+            _column("group", "分组"),
+            _column("segment", "客群"),
+            _column("new_action", "新策略动作"),
+            _column("slice_availability", "切片状态"),
+            _column("population_count", "样本数", unit="count", precision=0),
+            _column("population_share", "样本占比", unit="%", precision=4),
+            _column("labeled_count", "有标签数", unit="count", precision=0),
+            _column("label_coverage", "标签覆盖率", unit="%", precision=4),
+            _column("bad_count", "坏样本数", unit="count", precision=0),
+            _column("bad_rate", "坏账率", unit="%", precision=4),
+            _column("amounts", "金额观测"),
+            _column("new_metrics", "新策略指标"),
+            _column("new_breakdown", "新策略分布"),
+            _column("current_metrics", "当前策略指标"),
+            _column("current_breakdown", "当前策略分布"),
+        ],
+        rows=rows,
+        source_refs=[source_ref],
+    )
+
+
+def _impact_cube_waterfall_table(
+    cube: Mapping[str, Any],
+    source_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    rows = []
+    for item in cube["slices"]:
+        if item["family"] != "overall":
+            continue
+        waterfall = item["waterfall"]
+        if waterfall["availability"] != "present":
+            continue
+        partition = item["dimensions"]["partition"]["value"]
+        for entry in waterfall["value"]["entries"]:
+            action = entry["action"]
+            rows.append(
+                {
+                    "row_id": (
+                        f"{item['slice_id']}-{entry['entry_id']}"
+                    ),
+                    "cells": {
+                        "population": _present_field(
+                            item["population_role"],
+                            source_ref,
+                        ),
+                        "partition": _present_field(
+                            partition,
+                            source_ref,
+                        ),
+                        "position": _present_field(
+                            entry["position"],
+                            source_ref,
+                        ),
+                        "rule_id": _present_field(
+                            entry["rule_id"],
+                            source_ref,
+                        ),
+                        "action_type": _present_field(
+                            action["type"],
+                            source_ref,
+                        ),
+                        "action_value": _present_field(
+                            action["value"],
+                            source_ref,
+                        ),
+                        "standalone_count": _present_field(
+                            entry["standalone"]["count"],
+                            source_ref,
+                        ),
+                        "incremental_count": _present_field(
+                            entry["incremental"]["count"],
+                            source_ref,
+                        ),
+                        "shadowed_count": _present_field(
+                            entry["shadowed"]["count"],
+                            source_ref,
+                        ),
+                        "remaining_count": _present_field(
+                            entry["remaining_after"]["count"],
+                            source_ref,
+                        ),
+                        "incremental_bad_rate": _effect_risk_field(
+                            entry["incremental"],
+                            source_ref,
+                            key="bad_rate",
+                        ),
+                    },
+                }
+            )
+    return build_strategy_report_table(
+        table_id="impact_cube_waterfall",
+        title="ImpactCube First-match Waterfall",
+        sheet_key="07_waterfall_swap",
+        granularity="aggregate",
+        content_class="rule_summary",
+        columns=[
+            _column("population", "人群口径"),
+            _column("partition", "样本分区"),
+            _column("position", "规则顺序"),
+            _column("rule_id", "规则ID"),
+            _column("action_type", "动作类型"),
+            _column("action_value", "动作值"),
+            _column("standalone_count", "独立命中数", unit="count", precision=0),
+            _column("incremental_count", "增量命中数", unit="count", precision=0),
+            _column("shadowed_count", "被遮蔽数", unit="count", precision=0),
+            _column("remaining_count", "剩余数", unit="count", precision=0),
+            _column("incremental_bad_rate", "增量坏账率", unit="%", precision=4),
+        ],
+        rows=rows,
+        source_refs=[source_ref],
+    )
+
+
+def _impact_cube_transitions_table(
+    cube: Mapping[str, Any],
+    source_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    rows = []
+    for item in cube["slices"]:
+        if (
+            item["family"] != "overall"
+            or item["transition"]["availability"] != "present"
+        ):
+            continue
+        partition = item["dimensions"]["partition"]["value"]
+        for index, transition in enumerate(
+            item["transition"]["value"]["rows"]
+        ):
+            effect = transition["effect"]
+            rows.append(
+                {
+                    "row_id": (
+                        f"{item['slice_id']}-transition-{index}"
+                    ),
+                    "cells": {
+                        "population": _present_field(
+                            item["population_role"],
+                            source_ref,
+                        ),
+                        "partition": _present_field(
+                            partition,
+                            source_ref,
+                        ),
+                        "from_action": _present_field(
+                            transition["from_bucket"],
+                            source_ref,
+                        ),
+                        "to_action": _present_field(
+                            transition["to_bucket"],
+                            source_ref,
+                        ),
+                        "direction": _present_field(
+                            transition["direction"],
+                            source_ref,
+                        ),
+                        "count": _present_field(
+                            effect["count"],
+                            source_ref,
+                        ),
+                        "bad_count": _effect_risk_field(
+                            effect,
+                            source_ref,
+                            key="bad_count",
+                        ),
+                        "bad_rate": _effect_risk_field(
+                            effect,
+                            source_ref,
+                            key="bad_rate",
+                        ),
+                        "amounts": _present_field(
+                            effect["amounts"],
+                            source_ref,
+                        ),
+                    },
+                }
+            )
+    return build_strategy_report_table(
+        table_id="impact_cube_transitions",
+        title="当前策略与新策略 Swap/迁移",
+        sheet_key="07_waterfall_swap",
+        granularity="aggregate",
+        content_class="metric_summary",
+        columns=[
+            _column("population", "人群口径"),
+            _column("partition", "样本分区"),
+            _column("from_action", "当前动作"),
+            _column("to_action", "新动作"),
+            _column("direction", "迁移方向"),
+            _column("count", "样本数", unit="count", precision=0),
+            _column("bad_count", "坏样本数", unit="count", precision=0),
+            _column("bad_rate", "坏账率", unit="%", precision=4),
+            _column("amounts", "金额观测"),
+        ],
+        rows=rows,
+        source_refs=[source_ref],
+    )
+
+
+def _impact_cube_economics_table(
+    cube: Mapping[str, Any],
+    source_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    rows = []
+    for item in cube["slices"]:
+        economics = item["economics"]
+        rows.append(
+            {
+                "row_id": f"{item['slice_id']}-economics",
+                "cells": {
+                    "population": _present_field(
+                        item["population_role"],
+                        source_ref,
+                    ),
+                    "partition": _dimension_field(
+                        item["dimensions"]["partition"],
+                        source_ref,
+                    ),
+                    "family": _present_field(
+                        item["family"],
+                        source_ref,
+                    ),
+                    "month": _dimension_field(
+                        item["dimensions"]["month"],
+                        source_ref,
+                    ),
+                    "group": _dimension_field(
+                        item["dimensions"]["group"],
+                        source_ref,
+                    ),
+                    "segment": _dimension_field(
+                        item["dimensions"]["segment"],
+                        source_ref,
+                    ),
+                    "new_action": _dimension_field(
+                        item["dimensions"]["new_action_bucket"],
+                        source_ref,
+                    ),
+                    "availability": _present_field(
+                        economics["availability"],
+                        source_ref,
+                    ),
+                    "current": _wrapped_mapping_field(
+                        economics,
+                        source_ref,
+                        key="current",
+                    ),
+                    "new": _wrapped_mapping_field(
+                        economics,
+                        source_ref,
+                        key="new",
+                    ),
+                    "delta": _wrapped_mapping_field(
+                        economics,
+                        source_ref,
+                        key="delta",
+                    ),
+                },
+            }
+        )
+    return build_strategy_report_table(
+        table_id="impact_cube_economics",
+        title="ImpactCube 收益与经济性",
+        sheet_key="09_economics",
+        granularity="aggregate",
+        content_class="metric_summary",
+        columns=[
+            _column("population", "人群口径"),
+            _column("partition", "样本分区"),
+            _column("family", "切片族"),
+            _column("month", "月份"),
+            _column("group", "分组"),
+            _column("segment", "客群"),
+            _column("new_action", "新策略动作"),
+            _column("availability", "经济性状态"),
+            _column("current", "当前策略经济性"),
+            _column("new", "新策略经济性"),
+            _column("delta", "经济性变化"),
+        ],
+        rows=rows,
+        source_refs=[source_ref],
+    )
+
+
+def _impact_cube_final_document_section(
+    *,
+    pool: Mapping[str, Any],
+    compiled_design: Mapping[str, Any],
+    cube: Mapping[str, Any],
+    pool_ref: Mapping[str, str],
+    impact_ref: Mapping[str, str],
+    allow_oot_validated: bool,
+) -> dict[str, Any]:
+    claimable_partitions = [
+        row
+        for row in cube["partitions"]
+        if (
+            row["effect_stage"] != "oot_validated"
+            or allow_oot_validated
+        )
+    ]
+    stages = list(
+        dict.fromkeys(
+            row["effect_stage"] for row in claimable_partitions
+        )
+    )
+    validation_statuses = list(
+        dict.fromkeys(
+            row["validation_status"] for row in claimable_partitions
+        )
+    )
+    return build_strategy_report_section(
+        key="final_document",
+        title=_SECTION_TITLES["final_document"],
+        availability="present",
+        summary_fields=[
+            _named(
+                "strategy_type",
+                "策略类型",
+                _present_field(pool["strategy_type"], pool_ref),
+            ),
+            _named(
+                "design_hash",
+                "候选策略设计哈希",
+                _present_field(compiled_design["design_hash"], pool_ref),
+            ),
+            _named(
+                "evidence_stages",
+                "当前证据阶段",
+                _present_field(stages, impact_ref),
+            ),
+            _named(
+                "validation_statuses",
+                "验证状态",
+                _present_field(validation_statuses, impact_ref),
+            ),
+            _named(
+                "adoption_status",
+                "采纳状态",
+                _present_field("not_adopted", impact_ref),
+            ),
+            _named(
+                "deployment_status",
+                "部署状态",
+                _present_field("not_deployed", impact_ref),
+            ),
+            _named(
+                "creates_strategy",
+                "是否已创建生产策略",
+                _present_field(False, impact_ref),
+            ),
+        ],
+        source_refs=[pool_ref, impact_ref],
     )
 
 
@@ -2059,6 +3258,110 @@ def _nullable_metric_field(
     return _present_field(value, source_ref)
 
 
+def _dimension_field(
+    dimension: Mapping[str, Any],
+    source_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    kind = dimension["kind"]
+    if kind == "value":
+        return _present_field(dimension["value"], source_ref)
+    if kind == "null":
+        return _present_field("(null)", source_ref)
+    if kind == "redacted":
+        return _absent_field(
+            "unavailable",
+            note="redacted_by_dimension_privacy_policy",
+        )
+    return _absent_field("not_applicable", note="all_values")
+
+
+def _wrapped_mapping_field(
+    wrapper: Mapping[str, Any],
+    source_ref: Mapping[str, str],
+    *,
+    key: str,
+) -> dict[str, Any]:
+    availability = wrapper["availability"]
+    if availability != "present":
+        return _absent_field(
+            availability,
+            note=wrapper["reason"],
+        )
+    value = wrapper["value"]
+    if not isinstance(value, Mapping) or key not in value:
+        raise StrategyReportBundleError(
+            f"ImpactCube present projection is missing {key}"
+        )
+    observed = value[key]
+    if observed is None:
+        return _absent_field(
+            "unavailable",
+            note=f"{key}_is_undefined",
+        )
+    return _present_field(observed, source_ref)
+
+
+def _strategy_projection_field(
+    wrapper: Mapping[str, Any],
+    source_ref: Mapping[str, str],
+    *,
+    key: str,
+) -> dict[str, Any]:
+    return _wrapped_mapping_field(
+        wrapper,
+        source_ref,
+        key=key,
+    )
+
+
+def _risk_field(
+    risk: Mapping[str, Any] | None,
+    source_ref: Mapping[str, str],
+    *,
+    key: str,
+) -> dict[str, Any]:
+    if risk is None:
+        return _absent_field(
+            "unavailable",
+            note="population_slice_unavailable",
+        )
+    availability = risk["availability"]
+    if availability != "present":
+        return _absent_field(
+            availability,
+            note=risk["reason"],
+        )
+    value = risk[key]
+    if value is None:
+        return _absent_field(
+            "unavailable",
+            note=f"{key}_is_undefined",
+        )
+    return _present_field(value, source_ref)
+
+
+def _effect_risk_field(
+    effect: Mapping[str, Any],
+    source_ref: Mapping[str, str],
+    *,
+    key: str,
+) -> dict[str, Any]:
+    risk = effect["risk"]
+    availability = risk["availability"]
+    if availability != "present":
+        return _absent_field(
+            availability,
+            note=risk["reason"],
+        )
+    value = risk[key]
+    if value is None:
+        return _absent_field(
+            "unavailable",
+            note=f"{key}_is_undefined",
+        )
+    return _present_field(value, source_ref)
+
+
 def _present_field(
     value: Any,
     source_ref: Mapping[str, str],
@@ -2069,6 +3372,15 @@ def _present_field(
         origin="tool_output",
         source_refs=[source_ref],
     )
+
+
+def _projected_context_field(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    field = validate_report_field(value)
+    if field["availability"] == "present" and field["blocking"] != "none":
+        return {**field, "blocking": "none"}
+    return field
 
 
 def _present_field_many(
@@ -2153,6 +3465,17 @@ def _dataset_ref_from_impact(
         "dataset",
         sample["dataset_id"],
         sample["dataset_content_hash"],
+    )
+
+
+def _dataset_ref_from_impact_cube(
+    cube: Mapping[str, Any],
+) -> dict[str, str]:
+    dataset = cube["source_bindings"]["dataset"]
+    return _artifact_ref(
+        "dataset",
+        dataset["dataset_id"],
+        dataset["dataset_content_hash"],
     )
 
 
@@ -2271,4 +3594,8 @@ def _require_canonical_artifact_hash(
         )
 
 
-__all__ = ["build_strategy_report_bundle_source_inputs"]
+__all__ = [
+    "StrategyImpactCubeArtifactBinding",
+    "build_strategy_report_bundle_source_inputs",
+    "validate_strategy_impact_cube_artifact_binding",
+]

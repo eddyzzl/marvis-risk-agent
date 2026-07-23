@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import copy
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -14,10 +15,14 @@ from marvis.packs.strategy.impact_cube import (
 )
 from marvis.packs.strategy.impact_cube_tools import (
     IMPACT_CUBE_ARTIFACT_KIND,
+    IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,
     IMPACT_CUBE_TOOL_SCHEMA_VERSION,
     run_measure_strategy_impact_cube,
     validate_measure_strategy_impact_cube_tool_output,
 )
+from marvis.plugins.errors import SchemaValidationError
+from marvis.plugins.loader import load_manifest
+from marvis.plugins.schema_validation import validate_against_schema
 import marvis.packs.strategy.impact_cube_tools as impact_tools
 from marvis.packs.strategy.pool import compile_strategy_pool
 from marvis.packs.strategy.strategy import build_strategy_from_spec
@@ -57,13 +62,24 @@ def _artifacts(fx: dict) -> list[dict]:
     ]
 
 
+def _measurement_audits(fx: dict) -> list:
+    with fx["runtime"].task_artifacts.transaction() as conn:
+        return conn.execute(
+            "SELECT * FROM audit WHERE kind = ? ORDER BY at, id",
+            (IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,),
+        ).fetchall()
+
+
 def _validate_output(fx: dict, output: dict) -> dict:
     record = _artifacts(fx)[0]
+    producer_run = record["provenance"]["producer_run"]
     return validate_measure_strategy_impact_cube_tool_output(
         output,
         trusted_task_id=fx["task"].id,
         trusted_artifact_id=record["id"],
         trusted_artifact_content_hash=record["content_hash"],
+        trusted_producer_run_id=producer_run["run_id"],
+        trusted_producer_run_content_hash=producer_run["content_hash"],
     )
 
 
@@ -124,6 +140,55 @@ def test_measure_impact_cube_publishes_exact_aggregate_only_evidence(
         "?expected_content_hash=" + output["artifact"]["content_hash"]
     )
     assert record["origin_tool"] == "strategy.measure_strategy_impact_cube"
+    run_ref = output["producer_run_ref"]
+    assert run_ref["kind"] == "tool_run"
+    assert run_ref["ref_id"].startswith("strategy-impact-cube-run-")
+    assert len(run_ref["ref_id"]) == len("strategy-impact-cube-run-") + 24
+    assert len(run_ref["content_hash"]) == 64
+    provenance_run = record["provenance"]["producer_run"]
+    assert provenance_run["run_id"] == run_ref["ref_id"]
+    assert provenance_run["content_hash"] == run_ref["content_hash"]
+    assert provenance_run["artifact_ref"] == {
+        "artifact_id": record["id"],
+        "kind": IMPACT_CUBE_ARTIFACT_KIND,
+        "filename": path.name,
+        "content_hash": record["content_hash"],
+        "origin_tool": "strategy.measure_strategy_impact_cube",
+    }
+    assert provenance_run["cube_ref"] == {
+        "cube_id": output["cube_id"],
+        "content_hash": output["content_hash"],
+    }
+
+    tool = next(
+        item
+        for item in load_manifest(
+            Path(__file__).parents[1] / "marvis" / "packs" / "strategy",
+            builtin=True,
+        ).tools
+        if item.name == "measure_strategy_impact_cube"
+    )
+    validate_against_schema(
+        output,
+        tool.output_schema,
+        label="ImpactCube v3 output",
+    )
+    missing_run_ref = copy.deepcopy(output)
+    missing_run_ref.pop("producer_run_ref")
+    with pytest.raises(SchemaValidationError, match="required property"):
+        validate_against_schema(
+            missing_run_ref,
+            tool.output_schema,
+            label="ImpactCube output without producer run",
+        )
+    audits = _measurement_audits(fx)
+    assert len(audits) == 1
+    assert audits[0]["target_ref"] == run_ref["ref_id"]
+    assert audits[0]["inputs_hash"] == provenance_run["input_hash"]
+    assert audits[0]["outcome"] == "succeeded"
+    assert json.loads(str(audits[0]["detail_json"])) == {
+        "producer_run": provenance_run,
+    }
     assert fx["runtime"].strategies.list_for_task(fx["task"].id) == []
 
 
@@ -171,6 +236,7 @@ def test_measure_impact_cube_is_idempotent_and_cached_scalars_fail_closed(
 
     assert first == second
     assert len(_artifacts(fx)) == 1
+    assert len(_measurement_audits(fx)) == 1
     tampered = copy.deepcopy(first)
     tampered["slice_count"] += 1
     with pytest.raises(StrategyError, match="slice_count drifted"):
@@ -184,6 +250,102 @@ def test_measure_impact_cube_is_idempotent_and_cached_scalars_fail_closed(
             trusted_artifact_content_hash=_artifacts(fx)[0][
                 "content_hash"
             ],
+            trusted_producer_run_id=first["producer_run_ref"]["ref_id"],
+            trusted_producer_run_content_hash=first[
+                "producer_run_ref"
+            ]["content_hash"],
+        )
+    tampered_run = copy.deepcopy(first)
+    tampered_run["producer_run_ref"]["content_hash"] = "0" * 64
+    with pytest.raises(StrategyError, match="producer_run_ref drifted"):
+        _validate_output(fx, tampered_run)
+
+
+def test_measure_impact_cube_replay_requires_exact_unique_measurement_audit(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    first = run_measure_strategy_impact_cube(
+        fx["impact_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    run_id = first["producer_run_ref"]["ref_id"]
+    with fx["runtime"].task_artifacts.transaction() as conn:
+        conn.execute(
+            "DELETE FROM audit WHERE kind = ? AND target_ref = ?",
+            (IMPACT_CUBE_MEASUREMENT_AUDIT_KIND, run_id),
+        )
+        conn.commit()
+
+    with pytest.raises(StrategyError, match="measurement audit is missing"):
+        run_measure_strategy_impact_cube(
+            fx["impact_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    record = _artifacts(fx)[0]
+    producer_run = record["provenance"]["producer_run"]
+    with fx["runtime"].task_artifacts.transaction() as conn:
+        fx["runtime"].repo.write_audit_on_connection(
+            conn,
+            kind=IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,
+            target_ref=run_id,
+            inputs_hash=producer_run["input_hash"],
+            outcome="succeeded",
+            detail={"producer_run": producer_run},
+        )
+        fx["runtime"].repo.write_audit_on_connection(
+            conn,
+            kind=IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,
+            target_ref=run_id,
+            inputs_hash=producer_run["input_hash"],
+            outcome="succeeded",
+            detail={"producer_run": producer_run},
+        )
+        conn.commit()
+
+    with pytest.raises(
+        StrategyError,
+        match="measurement audit is duplicated",
+    ):
+        run_measure_strategy_impact_cube(
+            fx["impact_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+
+def test_measure_impact_cube_replay_rejects_tampered_measurement_audit(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    output = run_measure_strategy_impact_cube(
+        fx["impact_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    with fx["runtime"].task_artifacts.transaction() as conn:
+        conn.execute(
+            """
+            UPDATE audit
+               SET inputs_hash = ?
+             WHERE kind = ? AND target_ref = ?
+            """,
+            (
+                "0" * 64,
+                IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,
+                output["producer_run_ref"]["ref_id"],
+            ),
+        )
+        conn.commit()
+
+    with pytest.raises(StrategyError, match="audit binding changed"):
+        run_measure_strategy_impact_cube(
+            fx["impact_request"],
+            fx["ctx"],
+            fx["runtime"],
         )
 
 
@@ -202,6 +364,10 @@ def test_measure_impact_cube_recovers_exact_orphan_file_idempotently(
         conn.execute(
             "DELETE FROM task_artifacts WHERE id = ?",
             (artifact_id,),
+        )
+        conn.execute(
+            "DELETE FROM audit WHERE kind = ?",
+            (IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,),
         )
         conn.commit()
 
@@ -420,6 +586,38 @@ def test_measure_impact_cube_registration_failure_rolls_back_file_and_row(
     )
     assert not out_dir.exists() or list(out_dir.glob("*.json")) == []
     assert _artifacts(fx) == []
+    assert _measurement_audits(fx) == []
+
+
+def test_measure_impact_cube_audit_failure_rolls_back_file_and_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("measurement audit unavailable")
+
+    monkeypatch.setattr(
+        fx["runtime"].repo,
+        "write_audit_on_connection",
+        fail_audit,
+    )
+    with pytest.raises(RuntimeError, match="measurement audit unavailable"):
+        run_measure_strategy_impact_cube(
+            fx["impact_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert _artifacts(fx) == []
+    assert _measurement_audits(fx) == []
+    out_dir = (
+        Path(fx["settings"].tasks_dir)
+        / fx["task"].id
+        / "strategy_impact_cubes"
+    )
+    assert not out_dir.exists() or list(out_dir.glob("*.json")) == []
 
 
 def test_measure_impact_cube_detects_artifact_swap_during_registration(
@@ -484,6 +682,150 @@ def test_measure_impact_cube_compensates_swap_after_precommit_verification(
 
     assert call_count == 3
     assert _artifacts(fx) == []
+    assert _measurement_audits(fx) == []
+
+
+def test_measure_impact_cube_compensation_cas_preserves_changed_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    real_require = (
+        impact_tools.require_impact_cube_measurement_audit_on_connection
+    )
+    call_count = 0
+
+    def tamper_after_precommit_check(conn, producer_run):
+        nonlocal call_count
+        call_count += 1
+        real_require(conn, producer_run)
+        if call_count == 1:
+            conn.execute(
+                """
+                UPDATE audit
+                   SET outcome = 'failed'
+                 WHERE kind = ? AND target_ref = ?
+                """,
+                (
+                    IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,
+                    producer_run["run_id"],
+                ),
+            )
+
+    monkeypatch.setattr(
+        impact_tools,
+        "require_impact_cube_measurement_audit_on_connection",
+        tamper_after_precommit_check,
+    )
+    with pytest.raises(
+        StrategyError,
+        match="compensation CAS failed",
+    ):
+        run_measure_strategy_impact_cube(
+            fx["impact_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert call_count == 2
+    assert len(_artifacts(fx)) == 1
+    audits = _measurement_audits(fx)
+    assert len(audits) == 1
+    assert audits[0]["outcome"] == "failed"
+
+
+def test_measure_impact_cube_replay_transient_postcommit_failure_retains_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    run_measure_strategy_impact_cube(
+        fx["impact_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    artifacts_before = copy.deepcopy(_artifacts(fx))
+    audits_before = [
+        dict(row) for row in _measurement_audits(fx)
+    ]
+    real_require = (
+        impact_tools.require_impact_cube_measurement_audit_on_connection
+    )
+    call_count = 0
+
+    def fail_only_postcommit(conn, producer_run):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise StrategyError("transient postcommit verification failure")
+        real_require(conn, producer_run)
+
+    monkeypatch.setattr(
+        impact_tools,
+        "require_impact_cube_measurement_audit_on_connection",
+        fail_only_postcommit,
+    )
+    with pytest.raises(
+        StrategyError,
+        match="pre-existing registry and audit entries were retained",
+    ):
+        run_measure_strategy_impact_cube(
+            fx["impact_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert call_count == 2
+    assert _artifacts(fx) == artifacts_before
+    assert [
+        dict(row) for row in _measurement_audits(fx)
+    ] == audits_before
+
+
+def test_measure_impact_cube_replay_file_drift_retains_existing_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    run_measure_strategy_impact_cube(
+        fx["impact_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    artifacts_before = copy.deepcopy(_artifacts(fx))
+    audits_before = [
+        dict(row) for row in _measurement_audits(fx)
+    ]
+    real_require = impact_tools._require_retained_exact_file
+    call_count = 0
+
+    def drift_after_precommit_check(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        real_require(*args, **kwargs)
+        if call_count == 2:
+            Path(kwargs["path"]).write_bytes(b'{"tampered":true}')
+
+    monkeypatch.setattr(
+        impact_tools,
+        "_require_retained_exact_file",
+        drift_after_precommit_check,
+    )
+    with pytest.raises(
+        StrategyError,
+        match="pre-existing registry and audit entries were retained",
+    ):
+        run_measure_strategy_impact_cube(
+            fx["impact_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert call_count == 3
+    assert _artifacts(fx) == artifacts_before
+    assert [
+        dict(row) for row in _measurement_audits(fx)
+    ] == audits_before
 
 
 def test_measure_impact_cube_concurrent_identical_calls_publish_once(
@@ -505,6 +847,7 @@ def test_measure_impact_cube_concurrent_identical_calls_publish_once(
 
     assert outputs[0] == outputs[1]
     assert len(_artifacts(fx)) == 1
+    assert len(_measurement_audits(fx)) == 1
 
 
 def test_measure_impact_cube_detects_dataset_drift_before_publication(

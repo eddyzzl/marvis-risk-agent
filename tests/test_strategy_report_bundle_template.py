@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from marvis.orchestrator.contracts import PostCheck
 from marvis.orchestrator.templates.sample import BUILTIN_TEMPLATES
 from marvis.orchestrator.templates.strategy import STRATEGY_REPORT_BUNDLE_V2
+from marvis.plugins.loader import load_manifest
 from marvis.plugins.manifest import ToolRef
 
 
@@ -41,6 +44,7 @@ def test_report_bundle_exposes_only_title_and_status_as_user_slots() -> None:
         "sample_design_ref",
         "candidate_pool_ref",
         "pool_impact_ref",
+        "impact_cube_ref",
         "report_revision",
         "previous_report_id",
         "previous_report_content_hash",
@@ -58,3 +62,27 @@ def test_report_bundle_exposes_only_title_and_status_as_user_slots() -> None:
         "adopt",
         "deploy",
     } & set(template.steps[0].inputs_template)
+
+
+def test_report_bundle_manifest_requires_one_impact_source_and_five_types() -> None:
+    tool = next(
+        item
+        for item in load_manifest(
+            Path(__file__).parents[1] / "marvis" / "packs" / "strategy",
+            builtin=True,
+        ).tools
+        if item.name == "build_report_bundle_v2"
+    )
+    schema = tool.input_schema
+
+    assert schema["anyOf"] == [
+        {"required": ["impact_cube_ref"]},
+        {"required": ["pool_impact_ref"]},
+    ]
+    assert set(
+        schema["$defs"]["candidate_pool_ref"]["properties"][
+            "strategy_type"
+        ]["enum"]
+    ) == {"approval", "reject", "limit", "pricing", "segmentation"}
+    assert "pool_impact_ref" not in schema["required"]
+    assert "impact_cube_ref" not in schema["required"]

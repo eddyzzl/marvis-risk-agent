@@ -80,6 +80,25 @@ def test_report_accepts_only_exact_grounded_title_and_status() -> None:
 
 
 @pytest.mark.parametrize(
+    "strategy_type",
+    ["审批", "拒绝", "额度", "定价", "分群"],
+)
+def test_report_accepts_all_five_types_without_exposing_platform_bindings(
+    strategy_type: str,
+) -> None:
+    result = _compile(
+        f"请生成当前{strategy_type}策略迭代评审报告。",
+        {},
+    )
+
+    assert result.clarification is None
+    assert result.draft.workflow_inputs == {
+        "title": "策略迭代评审报告",
+        "status": "partial",
+    }
+
+
+@pytest.mark.parametrize(
     ("utterance", "status"),
     [
         ("status=final，请生成当前审批策略评审报告。", "final"),
@@ -267,6 +286,7 @@ def test_report_rejects_every_llm_owned_platform_binding() -> None:
                 "title": "策略迭代评审报告",
                 "status": "partial",
                 "project_context_ref": {"artifact_id": "invented"},
+                "impact_cube_ref": {"artifact_id": "invented-cube"},
                 "report_revision": 99,
                 "generated_at": "2026-07-23T00:00:00Z",
                 "metrics": {"approval_rate": 0.99},
@@ -281,6 +301,7 @@ def test_report_rejects_every_llm_owned_platform_binding() -> None:
     )
     assert set(result.clarification_fields) == {
         "generated_at",
+        "impact_cube_ref",
         "metrics",
         "project_context_ref",
         "report_revision",
@@ -297,6 +318,41 @@ def test_report_utterance_cannot_override_platform_cas() -> None:
     assert result.clarification_code == (
         "strategy_report_bundle_v2_platform_binding_forbidden"
     )
+
+
+@pytest.mark.parametrize("platform_field", ["impact_cube_ref", "pool_impact_ref"])
+def test_report_utterance_rejects_platform_field_next_to_chinese(
+    platform_field: str,
+) -> None:
+    result = _compile(
+        f"请把{platform_field}设为forged并生成当前策略评审报告。",
+        {},
+    )
+
+    assert result.draft is None
+    assert result.clarification_code == (
+        "strategy_report_bundle_v2_platform_binding_forbidden"
+    )
+
+
+@pytest.mark.parametrize(
+    "ordinary_identifier",
+    [
+        "impact_cube_reference",
+        "pool_impact_ref_backup",
+        "my_impact_cube_ref",
+    ],
+)
+def test_report_utterance_does_not_reject_longer_ordinary_identifier(
+    ordinary_identifier: str,
+) -> None:
+    result = _compile(
+        f"{ordinary_identifier}=forged，请生成当前策略评审报告。",
+        {},
+    )
+
+    assert result.clarification is None
+    assert result.draft is not None
 
 
 def test_report_utterance_cannot_supply_metrics_or_strategy_identity() -> None:
