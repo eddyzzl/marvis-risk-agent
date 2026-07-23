@@ -75,6 +75,9 @@ from marvis.packs.strategy.pool_tools import (
 )
 from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
 from marvis.packs.strategy.project_context_tools import run_materialize_project_context
+from marvis.packs.strategy.model_evidence_tools import (
+    run_materialize_model_evidence_v2,
+)
 from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignExecutionBinding,
     StrategySampleDesignRef,
@@ -86,6 +89,9 @@ from marvis.packs.strategy.sample_design_binding import (
 from marvis.packs.strategy.sample_design_tools import (
     load_strategy_sample_design_artifact,
     run_materialize_sample_design,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    run_materialize_sample_design_v2,
 )
 from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.contracts import Strategy
@@ -869,6 +875,18 @@ def tool_materialize_sample_design(inputs: dict, ctx) -> dict:
     """Freeze the exact active strategy sample boundary as immutable evidence."""
 
     return run_materialize_sample_design(inputs, ctx, _runtime(ctx))
+
+
+def tool_materialize_sample_design_v2(inputs: dict, ctx) -> dict:
+    """Freeze governed dual-population V2 sample evidence."""
+
+    return run_materialize_sample_design_v2(inputs, ctx, _runtime(ctx))
+
+
+def tool_materialize_model_evidence_v2(inputs: dict, ctx) -> dict:
+    """Materialize governed V2 analysis evidence from authenticated sources."""
+
+    return run_materialize_model_evidence_v2(inputs, ctx, _runtime(ctx))
 
 
 def tool_design_strategy_candidate(inputs: dict, ctx) -> dict:

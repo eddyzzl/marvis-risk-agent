@@ -208,6 +208,48 @@ def test_task_analysis_artifact_registration_failure_rolls_back_files_and_rows(
     assert repository.list_for_task(task.id) == []
 
 
+def test_strategy_v2_materializers_are_thin_runtime_forwarders(monkeypatch):
+    ctx = object()
+    runtime = object()
+    inputs = {"nullable_value": None}
+    calls = []
+
+    def fake_runtime(actual_ctx):
+        assert actual_ctx is ctx
+        return runtime
+
+    def fake_sample(actual_inputs, actual_ctx, actual_runtime):
+        calls.append(("sample", actual_inputs, actual_ctx, actual_runtime))
+        return {"result": "sample"}
+
+    def fake_model(actual_inputs, actual_ctx, actual_runtime):
+        calls.append(("model", actual_inputs, actual_ctx, actual_runtime))
+        return {"result": "model"}
+
+    monkeypatch.setattr(strategy_tools, "_runtime", fake_runtime)
+    monkeypatch.setattr(
+        strategy_tools,
+        "run_materialize_sample_design_v2",
+        fake_sample,
+    )
+    monkeypatch.setattr(
+        strategy_tools,
+        "run_materialize_model_evidence_v2",
+        fake_model,
+    )
+
+    assert strategy_tools.tool_materialize_sample_design_v2(inputs, ctx) == {
+        "result": "sample"
+    }
+    assert strategy_tools.tool_materialize_model_evidence_v2(inputs, ctx) == {
+        "result": "model"
+    }
+    assert calls == [
+        ("sample", inputs, ctx, runtime),
+        ("model", inputs, ctx, runtime),
+    ]
+
+
 def test_strategy_manifest_registers_expected_tools(tmp_path):
     plugin_registry = _real_builtin_registry(tmp_path)
 
@@ -276,12 +318,24 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     challenger_report_tool = next(
         tool for tool in manifest.tools if tool.name == "render_challenger_report"
     )
+    project_context_tool = next(
+        tool for tool in manifest.tools if tool.name == "materialize_project_context"
+    )
+    sample_v2_tool = next(
+        tool for tool in manifest.tools if tool.name == "materialize_sample_design_v2"
+    )
+    model_evidence_v2_tool = next(
+        tool for tool in manifest.tools if tool.name == "materialize_model_evidence_v2"
+    )
 
     assert tool_names == {
         "vintage_curve",
         "roll_rate_matrix",
         "profit_calc",
+        "materialize_project_context",
         "materialize_sample_design",
+        "materialize_sample_design_v2",
+        "materialize_model_evidence_v2",
         "analyze_univariate_candidates",
         "build_automatic_tree_candidate",
         "apply_automatic_tree",
@@ -315,6 +369,42 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "apply_monitoring_disposition",
         "render_monitoring_report",
     }
+    assert manifest.version == "0.13.0"
+    for tool in (project_context_tool, sample_v2_tool, model_evidence_v2_tool):
+        assert tool.determinism == "deterministic"
+        assert tool.failure_policy == "fail"
+        assert tool.policy.human_decision_gate == "none"
+        assert tool.policy.effect_authorization == "none"
+    for tool in (sample_v2_tool, model_evidence_v2_tool):
+        assert set(tool.side_effects) == {
+            "read:task",
+            "read:dataset",
+            "write:artifact",
+        }
+        assert tool.input_schema["additionalProperties"] is False
+        assert tool.output_schema["additionalProperties"] is False
+    assert sample_v2_tool.output_schema["properties"]["schema_version"] == {
+        "const": "strategy.materialize-sample-design-v2-tool.v1"
+    }
+    assert sample_v2_tool.input_schema["properties"]["partitioning"]["oneOf"]
+    assert sample_v2_tool.input_schema["$defs"]["predicate"]["oneOf"]
+    assert model_evidence_v2_tool.output_schema["properties"]["schema_version"] == {
+        "const": "strategy.materialize-model-evidence-v2-tool.v3"
+    }
+    assert model_evidence_v2_tool.input_schema["properties"][
+        "univariate_sources"
+    ]["maxItems"] == 100
+    assert set(
+        model_evidence_v2_tool.output_schema["properties"]["artifact"][
+            "required"
+        ]
+    ) == {"kind", "format", "filename", "content_hash"}
+    assert "artifact_id" not in model_evidence_v2_tool.output_schema["properties"][
+        "artifact"
+    ]["properties"]
+    assert "download_url" not in model_evidence_v2_tool.output_schema[
+        "properties"
+    ]["artifact"]["properties"]
     assert build_tool.determinism == "deterministic"
     assert "write:strategy" in build_tool.side_effects
     assert "write:dataset" in apply_tool.side_effects
@@ -646,7 +736,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "read:dataset",
         "write:artifact",
     }
-    assert manifest.version == "0.12.0"
+    assert manifest.version == "0.13.0"
     assert "refined univariate asset" in add_pool_tool.summary
     assert "automatic-tree leaf selection" in add_pool_tool.summary
     assert "Voting n-of-k candidate" in add_pool_tool.summary
