@@ -19,6 +19,7 @@ from marvis.packs.strategy.dsl_delivery_tools import (
     run_export_strategy_delivery,
     validate_export_strategy_delivery_tool_output,
 )
+import marvis.packs.strategy.dsl_delivery_tools as delivery_tools
 from marvis.packs.strategy.tools import _runtime
 from test_strategy_apply_tool import _runtime_fixture
 
@@ -62,6 +63,15 @@ def _artifact_rows(runtime, task_id: str) -> list[dict]:
     ]
 
 
+def _artifact_ids(output: dict) -> dict[str, str]:
+    return {
+        name: output["artifacts"][index]["artifact_id"]
+        for index, name in enumerate(
+            ("python", "sql", "strategy_json", "equivalence_json")
+        )
+    }
+
+
 def _audit_count(settings, *, delivery_id: str) -> int:
     with sqlite3.connect(settings.db_path) as conn:
         return int(
@@ -90,6 +100,7 @@ def test_export_strategy_delivery_publishes_authenticated_code_and_equivalence(
         expected_task_id=fixture[1].id,
         expected_strategy_ref=request["strategy_ref"],
         expected_dataset_ref=request["dataset_ref"],
+        expected_artifact_ids=_artifact_ids(output),
     ) == output
     assert output["strategy_type"] == strategy_type
     assert output["not_applied"] is True
@@ -148,6 +159,78 @@ def test_export_strategy_delivery_exact_retry_is_idempotent(
         fixture[0],
         delivery_id=first["delivery_id"],
     ) == 1
+
+
+def test_export_strategy_delivery_rejects_tampered_registered_file(
+    tmp_path: Path,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    first, runtime = _run(fixture, request)
+    row = next(
+        item
+        for item in _artifact_rows(runtime, fixture[1].id)
+        if item["kind"] == DELIVERY_ARTIFACT_KINDS["python"]
+    )
+    path = Path(row["path"])
+    path.write_text("tampered\n", encoding="utf-8")
+
+    with pytest.raises(
+        StrategyDeliveryToolError,
+        match="existing.*bytes|artifact.*changed",
+    ):
+        _run(fixture, request)
+
+    assert path.read_text(encoding="utf-8") == "tampered\n"
+    assert len(_artifact_rows(runtime, fixture[1].id)) == 4
+    assert _audit_count(
+        fixture[0],
+        delivery_id=first["delivery_id"],
+    ) == 1
+
+
+def test_export_strategy_delivery_recovers_exact_promoted_orphan_set(
+    tmp_path: Path,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    first, runtime = _run(fixture, request)
+    rows = _artifact_rows(runtime, fixture[1].id)
+    original = {
+        str(row["path"]): Path(row["path"]).read_bytes()
+        for row in rows
+    }
+    with sqlite3.connect(fixture[0].db_path) as conn:
+        conn.executemany(
+            "DELETE FROM task_artifacts WHERE id = ?",
+            [(row["id"],) for row in rows],
+        )
+
+    replay, _runtime_again = _run(fixture, request)
+
+    assert replay == first
+    assert len(_artifact_rows(runtime, fixture[1].id)) == 4
+    assert all(Path(path).read_bytes() == raw for path, raw in original.items())
+
+
+def test_export_strategy_delivery_rejects_drifted_audit_on_retry(
+    tmp_path: Path,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    first, _runtime_value = _run(fixture, request)
+    with sqlite3.connect(fixture[0].db_path) as conn:
+        conn.execute(
+            """
+            UPDATE audit
+               SET detail_json = '{}'
+             WHERE kind = ? AND target_ref = ?
+            """,
+            (DELIVERY_AUDIT_KIND, first["delivery_id"]),
+        )
+
+    with pytest.raises(StrategyDeliveryToolError, match="audit.*changed"):
+        _run(fixture, request)
 
 
 def test_export_strategy_delivery_rejects_strategy_or_dataset_drift(
@@ -252,4 +335,62 @@ def test_delivery_output_validator_requires_external_exact_refs(
             expected_task_id=fixture[1].id,
             expected_strategy_ref=request["strategy_ref"],
             expected_dataset_ref=request["dataset_ref"],
+            expected_artifact_ids=_artifact_ids(output),
+        )
+
+
+def test_export_strategy_delivery_authenticates_snapshot_and_artifact_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _runtime_fixture(tmp_path, "approval")
+    request = _inputs(fixture)
+    runtime = _runtime(fixture[-1])
+    private_reads: list[object] = []
+    original_read_parquet = delivery_tools.pd.read_parquet
+
+    def reject_live_path_read(*args, **kwargs):
+        raise AssertionError("delivery must not reopen the live dataset path")
+
+    def record_private_read(source, *args, **kwargs):
+        assert not isinstance(source, (str, Path))
+        private_reads.append(source)
+        return original_read_parquet(source, *args, **kwargs)
+
+    monkeypatch.setattr(runtime.backend, "read_frame", reject_live_path_read)
+    monkeypatch.setattr(
+        delivery_tools.pd,
+        "read_parquet",
+        record_private_read,
+    )
+
+    output = run_export_strategy_delivery(
+        request,
+        fixture[-1],
+        runtime,
+    )
+    assert len(private_reads) == 1
+    for artifact in output["artifacts"]:
+        assert artifact["download_url"].endswith(
+            f"?expected_content_hash={artifact['content_hash']}"
+        )
+
+    forged = deepcopy(output)
+    forged["artifacts"][0]["artifact_id"] = "0" * 64
+    forged["artifacts"][0]["download_url"] = forged["artifacts"][0][
+        "download_url"
+    ].replace(
+        output["artifacts"][0]["artifact_id"],
+        "0" * 64,
+    )
+    with pytest.raises(
+        StrategyDeliveryToolError,
+        match="authenticated publication",
+    ):
+        validate_export_strategy_delivery_tool_output(
+            forged,
+            expected_task_id=fixture[1].id,
+            expected_strategy_ref=request["strategy_ref"],
+            expected_dataset_ref=request["dataset_ref"],
+            expected_artifact_ids=_artifact_ids(output),
         )

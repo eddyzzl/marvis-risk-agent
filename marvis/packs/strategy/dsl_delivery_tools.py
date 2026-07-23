@@ -11,11 +11,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import hashlib
+import hmac
 import json
+import os
 from pathlib import Path
 import re
+import stat
+import tempfile
 from typing import Any
 from urllib.parse import quote
+
+import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.errors import DatasetContentDriftError
@@ -127,6 +133,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _DELIVERY_ID_RE = re.compile(r"^strategy-delivery-[0-9a-f]{24}$")
 _SAFE_TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MAX_INPUT_BYTES = 64 * 1024
+_MAX_DELIVERY_ARTIFACT_BYTES = 64 * 1024 * 1024
 _BOUNDARY_ERRORS = (
     DatasetContentDriftError,
     TaskArtifactConflictError,
@@ -150,13 +157,13 @@ def run_export_strategy_delivery(inputs, ctx, runtime) -> dict[str, Any]:
             task_id=task_id,
             request=request,
         )
-        frame = runtime.backend.read_frame(source["dataset_path"])
-        if sha256_file(source["dataset_path"]) != request["dataset_ref"][
-            "expected_content_hash"
-        ]:
-            raise StrategyDeliveryToolError(
-                "dataset no longer matches the exact delivery request"
-            )
+        frame = _read_authenticated_parquet_snapshot(
+            source["dataset_path"],
+            root=Path(runtime.settings.datasets_dir).absolute(),
+            expected_content_hash=request["dataset_ref"][
+                "expected_content_hash"
+            ],
+        )
         spec = source["spec"]
         equivalence = verify_strategy_delivery_equivalence(
             spec,
@@ -198,6 +205,7 @@ def validate_export_strategy_delivery_tool_output(
     expected_task_id: str,
     expected_strategy_ref: Mapping[str, Any],
     expected_dataset_ref: Mapping[str, Any],
+    expected_artifact_ids: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Validate a Tool output against the exact refs held by its caller."""
 
@@ -207,6 +215,7 @@ def validate_export_strategy_delivery_tool_output(
     dataset_ref = _dataset_ref(obj["dataset_ref"])
     trusted_strategy = _strategy_ref(expected_strategy_ref)
     trusted_dataset = _dataset_ref(expected_dataset_ref)
+    trusted_artifact_ids = _artifact_ids(expected_artifact_ids)
     task_id = _task_id(expected_task_id)
     if strategy_ref != trusted_strategy:
         raise StrategyDeliveryToolError(
@@ -257,6 +266,12 @@ def validate_export_strategy_delivery_tool_output(
         obj["artifacts"],
         task_id=task_id,
     )
+    for index, name in enumerate(_FILE_CONTRACT):
+        if artifacts[index]["artifact_id"] != trusted_artifact_ids[name]:
+            raise StrategyDeliveryToolError(
+                f"export_strategy_delivery artifacts[{index}] artifact_id "
+                "does not match its authenticated publication"
+            )
     content_hashes = {
         name: artifacts[index]["content_hash"]
         for index, name in enumerate(_FILE_CONTRACT)
@@ -407,6 +422,126 @@ def _load_exact_sources(
     }
 
 
+def _read_authenticated_parquet_snapshot(
+    path: Path,
+    *,
+    root: Path,
+    expected_content_hash: str,
+) -> pd.DataFrame:
+    """Read delivery rows only from one hash-authenticated private snapshot."""
+
+    source_fd = -1
+    snapshot = None
+    try:
+        resolved_root = root.resolve(strict=True)
+        if (
+            not path.is_absolute()
+            or path.is_symlink()
+            or not path.is_file()
+            or not path.resolve(strict=True).is_relative_to(resolved_root)
+        ):
+            raise StrategyDeliveryToolError(
+                "dataset path escaped governed dataset storage"
+            )
+        before = os.lstat(path)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        source_fd = os.open(path, flags)
+        opened = os.fstat(source_fd)
+        after_open = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(after_open.st_mode)
+            or _file_identity(before) != _file_identity(opened)
+            or _file_identity(opened) != _file_identity(after_open)
+            or _stable_file_stat(before) != _stable_file_stat(opened)
+            or _stable_file_stat(opened) != _stable_file_stat(after_open)
+        ):
+            raise StrategyDeliveryToolError(
+                "dataset changed while opening the delivery snapshot"
+            )
+
+        snapshot = tempfile.TemporaryFile(mode="w+b", dir=resolved_root)
+        digest = hashlib.sha256()
+        copied = 0
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            copied += len(chunk)
+            snapshot.write(chunk)
+        snapshot.flush()
+        if (
+            _stable_file_stat(os.fstat(source_fd))
+            != _stable_file_stat(opened)
+            or copied != int(opened.st_size)
+            or not hmac.compare_digest(
+                digest.hexdigest(),
+                expected_content_hash,
+            )
+        ):
+            raise StrategyDeliveryToolError(
+                "dataset bytes changed before delivery reconciliation"
+            )
+
+        snapshot_stat = os.fstat(snapshot.fileno())
+        if int(snapshot_stat.st_size) != copied:
+            raise StrategyDeliveryToolError(
+                "private delivery dataset snapshot is incomplete"
+            )
+        snapshot.seek(0)
+        frame = pd.read_parquet(snapshot)
+        current = os.lstat(path)
+        if (
+            _stable_file_stat(os.fstat(snapshot.fileno()))
+            != _stable_file_stat(snapshot_stat)
+            or _stable_file_stat(os.fstat(source_fd))
+            != _stable_file_stat(opened)
+            or stat.S_ISLNK(current.st_mode)
+            or _stable_file_stat(current) != _stable_file_stat(opened)
+        ):
+            raise StrategyDeliveryToolError(
+                "dataset changed during delivery reconciliation"
+            )
+        return frame
+    except StrategyDeliveryToolError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        raise StrategyDeliveryToolError(
+            "dataset could not be read for delivery reconciliation"
+        ) from exc
+    finally:
+        if snapshot is not None:
+            snapshot.close()
+        if source_fd >= 0:
+            os.close(source_fd)
+
+
+def _file_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(stat.S_IFMT(value.st_mode)),
+    )
+
+
+def _stable_file_stat(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(stat.S_IFMT(value.st_mode)),
+        int(value.st_nlink),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+    )
+
+
 def _delivery_contents(
     *,
     spec: Mapping[str, Any],
@@ -509,6 +644,7 @@ def _publish_delivery(
         "not_adopted": True,
         "not_deployed": True,
     }
+    reused = False
     try:
         for name, artifact in staged.items():
             artifact.path.write_bytes(contents[name])
@@ -524,7 +660,16 @@ def _publish_delivery(
                 request=request,
                 source=source,
             )
-            uow.promote_all()
+            reused = _prepare_delivery_outputs_under_lock(
+                conn,
+                uow=uow,
+                task_id=task_id,
+                tasks_root=tasks_root,
+                staged=staged,
+                contents=contents,
+                content_hashes=content_hashes,
+                provenance_base=provenance_base,
+            )
             records = []
             for name, contract in _FILE_CONTRACT.items():
                 if sha256_file(staged[name].final_path) != content_hashes[name]:
@@ -547,29 +692,17 @@ def _publish_delivery(
                         },
                     )
                 )
-            if not _audit_exists(
+            _write_or_require_delivery_audit(
                 conn,
+                task_id=task_id,
                 delivery_id=delivery_id,
                 request_hash=request_hash,
-            ):
-                _write_audit_row(
-                    conn,
-                    kind=DELIVERY_AUDIT_KIND,
-                    target_ref=delivery_id,
-                    inputs_hash=request_hash,
-                    outcome="succeeded",
-                    detail={
-                        "task_id": task_id,
-                        "strategy_ref": dict(request["strategy_ref"]),
-                        "dataset_ref": dict(request["dataset_ref"]),
-                        "equivalence_id": equivalence["equivalence_id"],
-                        "artifact_ids": [record["id"] for record in records],
-                        "not_applied": True,
-                        "not_adopted": True,
-                        "not_deployed": True,
-                    },
-                )
-        uow.commit()
+                request=request,
+                equivalence=equivalence,
+                records=records,
+            )
+        if not reused:
+            uow.commit()
     except Exception:
         uow.rollback()
         raise
@@ -607,7 +740,221 @@ def _publish_delivery(
         expected_task_id=task_id,
         expected_strategy_ref=request["strategy_ref"],
         expected_dataset_ref=request["dataset_ref"],
+        expected_artifact_ids={
+            name: record["id"]
+            for name, record in zip(
+                _FILE_CONTRACT,
+                records,
+                strict=True,
+            )
+        },
     )
+
+
+def _prepare_delivery_outputs_under_lock(
+    conn,
+    *,
+    uow: ArtifactUnitOfWork,
+    task_id: str,
+    tasks_root: Path,
+    staged: Mapping[str, Any],
+    contents: Mapping[str, bytes],
+    content_hashes: Mapping[str, str],
+    provenance_base: Mapping[str, Any],
+) -> bool:
+    rows = {}
+    for name, contract in _FILE_CONTRACT.items():
+        rows[name] = conn.execute(
+            """
+            SELECT id, task_id, kind, path, content_hash, origin_tool,
+                   provenance_json, created_at
+              FROM task_artifacts
+             WHERE task_id = ? AND kind = ? AND path = ?
+            """,
+            (
+                task_id,
+                contract["kind"],
+                str(staged[name].final_path),
+            ),
+        ).fetchone()
+    registered = [name for name, row in rows.items() if row is not None]
+    if registered and len(registered) != len(_FILE_CONTRACT):
+        raise StrategyDeliveryToolError(
+            "existing strategy delivery registry set is incomplete"
+        )
+
+    if registered:
+        for name, contract in _FILE_CONTRACT.items():
+            provenance = {
+                **dict(provenance_base),
+                "format_key": name,
+                "artifact_kind": contract["kind"],
+                "artifact_content_hash": content_hashes[name],
+            }
+            _require_existing_delivery_row(
+                rows[name],
+                task_id=task_id,
+                kind=contract["kind"],
+                path=staged[name].final_path,
+                content_hash=content_hashes[name],
+                provenance=provenance,
+            )
+            _require_exact_delivery_file(
+                staged[name].final_path,
+                root=tasks_root,
+                expected=contents[name],
+                expected_hash=content_hashes[name],
+            )
+        uow.rollback()
+        return True
+
+    existing_files = [
+        name
+        for name in _FILE_CONTRACT
+        if (
+            staged[name].final_path.exists()
+            or staged[name].final_path.is_symlink()
+        )
+    ]
+    if existing_files:
+        if len(existing_files) != len(_FILE_CONTRACT):
+            raise StrategyDeliveryToolError(
+                "existing strategy delivery orphan set is incomplete"
+            )
+        for name in _FILE_CONTRACT:
+            _require_exact_delivery_file(
+                staged[name].final_path,
+                root=tasks_root,
+                expected=contents[name],
+                expected_hash=content_hashes[name],
+            )
+        uow.rollback()
+        return True
+
+    uow.promote_all()
+    for name in _FILE_CONTRACT:
+        _require_exact_delivery_file(
+            staged[name].final_path,
+            root=tasks_root,
+            expected=contents[name],
+            expected_hash=content_hashes[name],
+        )
+    return False
+
+
+def _require_existing_delivery_row(
+    row,
+    *,
+    task_id: str,
+    kind: str,
+    path: Path,
+    content_hash: str,
+    provenance: Mapping[str, Any],
+) -> None:
+    expected_id = _stable_task_artifact_id(
+        task_id=task_id,
+        kind=kind,
+        path=str(path),
+    )
+    expected = {
+        "id": expected_id,
+        "task_id": task_id,
+        "kind": kind,
+        "path": str(path),
+        "content_hash": content_hash,
+        "origin_tool": DELIVERY_ORIGIN_TOOL,
+        "provenance_json": _canonical_json(provenance),
+    }
+    if row is None or any(str(row[field]) != value for field, value in expected.items()):
+        raise StrategyDeliveryToolError(
+            "existing strategy delivery registry row changed"
+        )
+
+
+def _stable_task_artifact_id(
+    *,
+    task_id: str,
+    kind: str,
+    path: str,
+) -> str:
+    identity = json.dumps(
+        [task_id, kind, path],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(
+        f"marvis.task_artifact.v1:{identity}".encode("utf-8")
+    ).hexdigest()
+
+
+def _require_exact_delivery_file(
+    path: Path,
+    *,
+    root: Path,
+    expected: bytes,
+    expected_hash: str,
+) -> None:
+    descriptor = -1
+    try:
+        if not path.is_absolute() or path.is_symlink():
+            raise StrategyDeliveryToolError(
+                "existing strategy delivery artifact must be a regular file"
+            )
+        resolved_root = root.resolve(strict=True)
+        path.resolve(strict=True).relative_to(resolved_root)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or int(before.st_size) < 0
+            or int(before.st_size) > _MAX_DELIVERY_ARTIFACT_BYTES
+        ):
+            raise StrategyDeliveryToolError(
+                "existing strategy delivery artifact must be a bounded "
+                "regular file"
+            )
+        chunks: list[bytes] = []
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_DELIVERY_ARTIFACT_BYTES:
+                raise StrategyDeliveryToolError(
+                    "existing strategy delivery artifact exceeds byte budget"
+                )
+            digest.update(chunk)
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+        if (
+            _stable_file_stat(after) != _stable_file_stat(before)
+            or stat.S_ISLNK(current.st_mode)
+            or _file_identity(current) != _file_identity(before)
+            or total != int(before.st_size)
+            or not hmac.compare_digest(digest.hexdigest(), expected_hash)
+            or b"".join(chunks) != expected
+        ):
+            raise StrategyDeliveryToolError(
+                "existing strategy delivery artifact bytes changed"
+            )
+    except StrategyDeliveryToolError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise StrategyDeliveryToolError(
+            "existing strategy delivery artifact is unavailable"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _revalidate_sources_on_connection(
@@ -692,6 +1039,8 @@ def _artifact_output(
         "download_url": (
             f"/api/tasks/{quote(task_id, safe='')}/task-artifacts/"
             f"{quote(artifact_id, safe='')}/download"
+            "?expected_content_hash="
+            f"{quote(str(record['content_hash']), safe='')}"
         ),
     }
 
@@ -727,35 +1076,86 @@ def _validate_artifacts(value: object, *, task_id: str | None) -> list[dict]:
             expected["download_url"] = (
                 f"/api/tasks/{quote(task_id, safe='')}/task-artifacts/"
                 f"{quote(artifact_id, safe='')}/download"
+                "?expected_content_hash="
+                f"{quote(expected['content_hash'], safe='')}"
             )
         if artifact != expected:
             raise StrategyDeliveryToolError(
                 f"export_strategy_delivery artifacts[{index}] drifted"
             )
-        if not isinstance(artifact["download_url"], str) or not artifact[
-            "download_url"
-        ].endswith(f"/{artifact_id}/download"):
-            raise StrategyDeliveryToolError(
-                f"export_strategy_delivery artifacts[{index}] download_url "
-                "is invalid"
-            )
         normalized.append(expected)
     return normalized
 
 
-def _audit_exists(conn, *, delivery_id: str, request_hash: str) -> bool:
-    return (
-        conn.execute(
-            """
-            SELECT 1
-              FROM audit
-             WHERE kind = ? AND target_ref = ? AND inputs_hash = ?
-             LIMIT 1
-            """,
-            (DELIVERY_AUDIT_KIND, delivery_id, request_hash),
-        ).fetchone()
-        is not None
+def _artifact_ids(value: object) -> dict[str, str]:
+    obj = _canonical_object(value, "expected_artifact_ids")
+    _exact_fields(
+        obj,
+        frozenset(_FILE_CONTRACT),
+        "expected_artifact_ids",
     )
+    return {
+        name: _hash(obj[name], f"expected_artifact_ids.{name}")
+        for name in _FILE_CONTRACT
+    }
+
+
+def _write_or_require_delivery_audit(
+    conn,
+    *,
+    task_id: str,
+    delivery_id: str,
+    request_hash: str,
+    request: Mapping[str, Any],
+    equivalence: Mapping[str, Any],
+    records: list[Mapping[str, Any]],
+) -> None:
+    detail = {
+        "task_id": task_id,
+        "strategy_ref": dict(request["strategy_ref"]),
+        "dataset_ref": dict(request["dataset_ref"]),
+        "equivalence_id": equivalence["equivalence_id"],
+        "artifact_ids": [record["id"] for record in records],
+        "not_applied": True,
+        "not_adopted": True,
+        "not_deployed": True,
+    }
+    rows = conn.execute(
+        """
+        SELECT actor, outcome, detail_json
+          FROM audit
+         WHERE kind = ? AND target_ref = ? AND inputs_hash = ?
+         ORDER BY at, id
+        """,
+        (DELIVERY_AUDIT_KIND, delivery_id, request_hash),
+    ).fetchall()
+    if not rows:
+        _write_audit_row(
+            conn,
+            kind=DELIVERY_AUDIT_KIND,
+            target_ref=delivery_id,
+            inputs_hash=request_hash,
+            outcome="succeeded",
+            detail=detail,
+        )
+        return
+    try:
+        persisted_detail = (
+            json.loads(str(rows[0]["detail_json"]))
+            if len(rows) == 1
+            else None
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        persisted_detail = None
+    if (
+        len(rows) != 1
+        or str(rows[0]["actor"]) != "system"
+        or str(rows[0]["outcome"]) != "succeeded"
+        or persisted_detail != detail
+    ):
+        raise StrategyDeliveryToolError(
+            "existing strategy delivery audit changed"
+        )
 
 
 def _bounded_rows(value: object) -> int:
