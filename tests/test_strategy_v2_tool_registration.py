@@ -23,6 +23,7 @@ def _manifest_tool(name: str):
         Path(__file__).parents[1] / "marvis" / "packs" / "strategy",
         builtin=True,
     )
+    assert manifest.version == "0.13.1"
     return next(tool for tool in manifest.tools if tool.name == name)
 
 
@@ -57,6 +58,22 @@ def test_sample_design_v2_manifest_accepts_real_envelope_and_rejects_drift(
             tool.input_schema,
             label="sample-design V2 omitted nullable input",
         )
+
+    for role, field, value in (
+        ("membership", "artifact_id", "a" * 64),
+        ("membership", "content_hash", "b" * 64),
+        ("membership", "download_url", "/forged-membership"),
+        ("bundle", "artifact_id", "c" * 64),
+        ("bundle", "download_url", "/forged-bundle"),
+    ):
+        old_artifact_shape = deepcopy(output)
+        old_artifact_shape["artifacts"][role][field] = value
+        with pytest.raises(SchemaValidationError, match="Additional properties"):
+            validate_against_schema(
+                old_artifact_shape,
+                tool.output_schema,
+                label="sample-design V2 old artifact output",
+            )
 
 
 def test_model_evidence_v2_manifest_accepts_real_envelope_and_rejects_old_shape(

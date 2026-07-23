@@ -1,6 +1,6 @@
 {
   "name": "strategy",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "display_name": "Strategy Pack",
   "description": "Vintage, roll-rate, profitability, governed sample design, univariate, automatic-tree, Voting n-of-k, and complete two-dimensional Cross Matrix candidate development with explicit leaf and Cross cell-group materialization, Strategy Pool assembly, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
@@ -3868,7 +3868,7 @@
       "output_schema": {
         "type": "object",
         "properties": {
-          "schema_version": {"const": "strategy.materialize-sample-design-v2-tool.v1"},
+          "schema_version": {"const": "strategy.materialize-sample-design-v2-tool.v2"},
           "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "bundle_id": {
             "type": "string",
@@ -3959,47 +3959,26 @@
             ],
             "additionalProperties": false
           },
-          "artifact_base": {
+          "membership_artifact": {
             "type": "object",
             "properties": {
-              "artifact_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "kind": {"type": "string", "minLength": 1},
-              "format": {"type": "string", "minLength": 1},
-              "filename": {"type": "string", "minLength": 1},
-              "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "download_url": {"type": "string", "minLength": 1}
+              "kind": {"const": "strategy_sample_membership_v2_binary"},
+              "format": {"const": "binary"},
+              "filename": {"type": "string", "minLength": 1}
             },
-            "required": [
-              "artifact_id",
-              "kind",
-              "format",
-              "filename",
-              "content_hash",
-              "download_url"
-            ],
+            "required": ["kind", "format", "filename"],
             "additionalProperties": false
           },
-          "membership_artifact": {
-            "allOf": [
-              {"$ref": "#/$defs/artifact_base"},
-              {
-                "properties": {
-                  "kind": {"const": "strategy_sample_membership_v2_binary"},
-                  "format": {"const": "binary"}
-                }
-              }
-            ]
-          },
           "bundle_artifact": {
-            "allOf": [
-              {"$ref": "#/$defs/artifact_base"},
-              {
-                "properties": {
-                  "kind": {"const": "strategy_sample_design_v2_json"},
-                  "format": {"const": "json"}
-                }
-              }
-            ]
+            "type": "object",
+            "properties": {
+              "kind": {"const": "strategy_sample_design_v2_json"},
+              "format": {"const": "json"},
+              "filename": {"type": "string", "minLength": 1},
+              "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            },
+            "required": ["kind", "format", "filename", "content_hash"],
+            "additionalProperties": false
           },
           "population_counts": {
             "type": "object",

@@ -7,6 +7,7 @@ import sqlite3
 import pandas as pd
 import pytest
 
+from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.data.workspace import DataSemanticMapping, DataWorkspaceDraft
@@ -238,14 +239,24 @@ def _v2_artifacts(fx: dict) -> list[dict]:
     ]
 
 
+def _live_v2_artifact(fx: dict, kind: str) -> dict:
+    records = [item for item in _v2_artifacts(fx) if item["kind"] == kind]
+    assert len(records) == 1
+    return records[0]
+
+
 def _load_output(fx: dict, output: dict):
+    membership = _live_v2_artifact(
+        fx, SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND
+    )
+    bundle = _live_v2_artifact(fx, SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND)
     return load_strategy_sample_design_v2_artifacts(
         fx["runtime"],
         task_id=fx["task"].id,
-        membership_artifact_id=output["artifacts"]["membership"]["artifact_id"],
-        expected_membership_artifact_content_hash=output["artifacts"]["membership"]["content_hash"],
-        bundle_artifact_id=output["artifacts"]["bundle"]["artifact_id"],
-        expected_bundle_artifact_content_hash=output["artifacts"]["bundle"]["content_hash"],
+        membership_artifact_id=membership["id"],
+        expected_membership_artifact_content_hash=membership["content_hash"],
+        bundle_artifact_id=bundle["id"],
+        expected_bundle_artifact_content_hash=bundle["content_hash"],
         expected_bundle_id=output["bundle_id"],
         expected_sample_design_id=output["sample_design_id"],
         expected_sample_design_content_hash=output["sample_design_content_hash"],
@@ -263,7 +274,15 @@ def test_materialize_v2_is_idempotent_strict_and_verified(
 
     assert first == second
     assert first["schema_version"] == SAMPLE_DESIGN_V2_TOOL_SCHEMA_VERSION
+    assert first["schema_version"] == "strategy.materialize-sample-design-v2-tool.v2"
     assert validate_materialize_sample_design_v2_tool_output(first) == first
+    assert set(first["artifacts"]["membership"]) == {"kind", "format", "filename"}
+    assert set(first["artifacts"]["bundle"]) == {
+        "kind",
+        "format",
+        "filename",
+        "content_hash",
+    }
     assert len(first["bundle"]["metric_observations"]) == 40
     definitions = {
         item["metric_definition_id"]: item["metric_key"]
@@ -283,17 +302,50 @@ def test_materialize_v2_is_idempotent_strict_and_verified(
     assert fx["runtime"].strategies.list_for_task(fx["task"].id) == []
 
 
-def test_v2_output_hash_binds_membership_link_and_rejects_link_interchange(
+def test_v2_cached_artifact_summaries_reject_unbound_identity_fields_and_swaps(
     tmp_path: Path,
 ) -> None:
     fx = _setup(tmp_path)
     output = run_materialize_sample_design_v2(fx["request"], fx["ctx"], fx["runtime"])
     assert len(output["content_hash"]) == 64
 
-    tampered = deepcopy(output)
-    tampered["artifacts"]["membership"]["content_hash"] = "f" * 64
-    with pytest.raises(StrategyError, match="content_hash|artifact drifted"):
-        validate_materialize_sample_design_v2_tool_output(tampered)
+    for role in ("membership", "bundle"):
+        for field, forged in (
+            ("artifact_id", "f" * 64),
+            ("download_url", "/api/tasks/forged/task-artifacts/forged/download"),
+        ):
+            tampered = deepcopy(output)
+            tampered["artifacts"][role][field] = forged
+            body = {key: value for key, value in tampered.items() if key != "content_hash"}
+            tampered["content_hash"] = v2_tools.hashlib.sha256(
+                v2_tools._canonical_json(body).encode("utf-8")
+            ).hexdigest()
+            with pytest.raises(StrategyError, match=f"unsupported: {field}"):
+                validate_materialize_sample_design_v2_tool_output(tampered)
+
+    membership_hash = deepcopy(output)
+    membership_hash["artifacts"]["membership"]["content_hash"] = "f" * 64
+    membership_body = {
+        key: value for key, value in membership_hash.items() if key != "content_hash"
+    }
+    membership_hash["content_hash"] = v2_tools.hashlib.sha256(
+        v2_tools._canonical_json(membership_body).encode("utf-8")
+    ).hexdigest()
+    with pytest.raises(StrategyError, match="unsupported: content_hash"):
+        validate_materialize_sample_design_v2_tool_output(membership_hash)
+
+    forged_bundle_hash = deepcopy(output)
+    forged_bundle_hash["artifacts"]["bundle"]["content_hash"] = "f" * 64
+    forged_bundle_body = {
+        key: value
+        for key, value in forged_bundle_hash.items()
+        if key != "content_hash"
+    }
+    forged_bundle_hash["content_hash"] = v2_tools.hashlib.sha256(
+        v2_tools._canonical_json(forged_bundle_body).encode("utf-8")
+    ).hexdigest()
+    with pytest.raises(StrategyError, match="artifact drifted"):
+        validate_materialize_sample_design_v2_tool_output(forged_bundle_hash)
 
     swapped = deepcopy(output)
     swapped["artifacts"]["membership"] = deepcopy(output["artifacts"]["bundle"])
@@ -301,7 +353,7 @@ def test_v2_output_hash_binds_membership_link_and_rejects_link_interchange(
     swapped["content_hash"] = v2_tools.hashlib.sha256(
         v2_tools._canonical_json(swapped_body).encode("utf-8")
     ).hexdigest()
-    with pytest.raises(StrategyError, match="artifact drifted|interchanged"):
+    with pytest.raises(StrategyError, match="artifact drifted|unsupported"):
         validate_materialize_sample_design_v2_tool_output(swapped)
 
 
@@ -316,7 +368,10 @@ def test_v2_reuses_membership_across_policy_specific_bundles(tmp_path: Path) -> 
     assert second["membership_id"] == first["membership_id"]
     assert second["artifacts"]["membership"] == first["artifacts"]["membership"]
     assert second["bundle_id"] != first["bundle_id"]
-    assert second["artifacts"]["bundle"]["artifact_id"] != first["artifacts"]["bundle"]["artifact_id"]
+    assert (
+        second["artifacts"]["bundle"]["content_hash"]
+        != first["artifacts"]["bundle"]["content_hash"]
+    )
     artifacts = _v2_artifacts(fx)
     assert [item["kind"] for item in artifacts].count(
         SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND
@@ -501,14 +556,20 @@ def test_v2_rejects_workspace_dataset_and_artifact_drift(tmp_path: Path) -> None
             "UPDATE data_workspaces SET revision = revision + 1 WHERE task_id = ?",
             (fx["task"].id,),
         )
+    membership_record = _live_v2_artifact(
+        fx, SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND
+    )
+    bundle_record = _live_v2_artifact(fx, SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND)
     with pytest.raises(StrategyError, match="workspace_revision|binding|DataWorkspace"):
         load_strategy_sample_design_v2_artifacts(
             fx["runtime"],
             task_id=fx["task"].id,
-            membership_artifact_id=output["artifacts"]["membership"]["artifact_id"],
-            expected_membership_artifact_content_hash=output["artifacts"]["membership"]["content_hash"],
-            bundle_artifact_id=output["artifacts"]["bundle"]["artifact_id"],
-            expected_bundle_artifact_content_hash=output["artifacts"]["bundle"]["content_hash"],
+            membership_artifact_id=membership_record["id"],
+            expected_membership_artifact_content_hash=membership_record[
+                "content_hash"
+            ],
+            bundle_artifact_id=bundle_record["id"],
+            expected_bundle_artifact_content_hash=bundle_record["content_hash"],
             expected_bundle_id=output["bundle_id"],
             expected_sample_design_id=output["sample_design_id"],
             expected_sample_design_content_hash=output["sample_design_content_hash"],
@@ -536,6 +597,40 @@ def test_v2_registration_failure_rolls_back_pair(tmp_path: Path, monkeypatch) ->
     out_dir = fx["settings"].tasks_dir / fx["task"].id / "strategy_sample_designs_v2"
     assert not list(out_dir.glob("*.bin"))
     assert not list(out_dir.glob("*.json"))
+
+
+def test_v2_post_database_commit_cleanup_failure_keeps_pair_and_replays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    original_commit = ArtifactUnitOfWork.commit
+
+    def fail_cleanup(_self):
+        raise RuntimeError("injected post-commit cleanup failure")
+
+    monkeypatch.setattr(ArtifactUnitOfWork, "commit", fail_cleanup)
+    with pytest.raises(RuntimeError, match="injected post-commit cleanup failure"):
+        run_materialize_sample_design_v2(fx["request"], fx["ctx"], fx["runtime"])
+
+    records = _v2_artifacts(fx)
+    assert {record["kind"] for record in records} == {
+        SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+    }
+    assert all(Path(record["path"]).is_file() for record in records)
+
+    monkeypatch.setattr(ArtifactUnitOfWork, "commit", original_commit)
+    replay = run_materialize_sample_design_v2(
+        fx["request"], fx["ctx"], fx["runtime"]
+    )
+    assert validate_materialize_sample_design_v2_tool_output(replay) == replay
+    loaded = _load_output(fx, replay)
+    assert loaded.bundle == replay["bundle"]
+    assert loaded.membership["header"] == replay["membership"]
+    assert {record["id"] for record in _v2_artifacts(fx)} == {
+        record["id"] for record in records
+    }
 
 
 def test_v2_rechecks_workspace_under_writer_lock(tmp_path: Path, monkeypatch) -> None:
@@ -617,8 +712,8 @@ def test_v2_symlink_and_v1_loader_fail_closed(tmp_path: Path) -> None:
         load_strategy_sample_design_artifact(
             fx["runtime"],
             task_id=fx["task"].id,
-            artifact_id=output["artifacts"]["bundle"]["artifact_id"],
-            expected_artifact_content_hash=output["artifacts"]["bundle"]["content_hash"],
+            artifact_id=bundle["id"],
+            expected_artifact_content_hash=bundle["content_hash"],
             expected_sample_design_id=output["sample_design_id"],
             expected_sample_design_content_hash=output["sample_design_content_hash"],
         )

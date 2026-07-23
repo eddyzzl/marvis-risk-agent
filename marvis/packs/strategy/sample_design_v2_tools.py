@@ -20,7 +20,6 @@ from numbers import Real
 from pathlib import Path
 import re
 from typing import Any
-from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
@@ -81,7 +80,7 @@ from marvis.repositories.task_artifacts import (
 )
 
 
-SAMPLE_DESIGN_V2_TOOL_SCHEMA_VERSION = "strategy.materialize-sample-design-v2-tool.v1"
+SAMPLE_DESIGN_V2_TOOL_SCHEMA_VERSION = "strategy.materialize-sample-design-v2-tool.v2"
 SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION = "strategy.sample-design-v2-artifact.v1"
 SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND = "strategy_sample_membership_v2_binary"
 SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND = "strategy_sample_design_v2_json"
@@ -163,8 +162,9 @@ _OUTPUT_FIELDS = frozenset(
         "not_deployed",
     }
 )
-_ARTIFACT_OUTPUT_FIELDS = frozenset(
-    {"artifact_id", "kind", "format", "filename", "content_hash", "download_url"}
+_MEMBERSHIP_ARTIFACT_OUTPUT_FIELDS = frozenset({"kind", "format", "filename"})
+_BUNDLE_ARTIFACT_OUTPUT_FIELDS = frozenset(
+    {"kind", "format", "filename", "content_hash"}
 )
 _ARTIFACTS_FIELDS = frozenset({"membership", "bundle"})
 _LEGACY_MAPPING_FIELDS = frozenset(
@@ -360,31 +360,22 @@ def validate_materialize_sample_design_v2_tool_output(value: object) -> dict[str
             raise StrategyError(f"sample-design V2 output {field} drifted")
     artifacts = _json_object(obj["artifacts"], "sample-design V2 artifacts")
     _exact_fields(artifacts, _ARTIFACTS_FIELDS, "sample-design V2 artifacts")
-    task_id = design["identity"]["task_id"]
     bundle_bytes = canonical_strategy_sample_design_v2_bundle_json(bundle).encode("utf-8")
     bundle_hash = hashlib.sha256(bundle_bytes).hexdigest()
-    bundle_artifact = _validate_output_artifact(
+    _validate_output_artifact(
         artifacts["bundle"],
-        task_id=task_id,
         kind=SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
         artifact_format="json",
         filename=f"{bundle['bundle_id']}.json",
         expected_content_hash=bundle_hash,
     )
-    membership_artifact = _validate_output_artifact(
+    _validate_output_artifact(
         artifacts["membership"],
-        task_id=task_id,
         kind=SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
         artifact_format="binary",
         filename=f"{header['membership_id']}.bin",
         expected_content_hash=None,
     )
-    _hash(membership_artifact["content_hash"], "membership artifact content_hash")
-    if (
-        membership_artifact["artifact_id"] == bundle_artifact["artifact_id"]
-        or membership_artifact["content_hash"] == bundle_artifact["content_hash"]
-    ):
-        raise StrategyError("sample-design V2 output artifact links were interchanged")
     mapping = _json_object(obj["legacy_mapping"], "sample-design V2 legacy_mapping")
     _exact_fields(mapping, _LEGACY_MAPPING_FIELDS, "sample-design V2 legacy_mapping")
     legacy_ref = StrategySampleDesignRef.from_value(
@@ -1638,6 +1629,8 @@ def _persist_pair(
         "membership_artifact_content_hash": membership_file_hash,
     }
     uow = ArtifactUnitOfWork()
+    db_committed = False
+    rollback_attempted_under_lock = False
     staged_membership = uow.stage_file(out_dir, membership_path.name)
     staged_bundle = uow.stage_file(out_dir, bundle_path.name)
     try:
@@ -1722,16 +1715,18 @@ def _persist_pair(
                     provenance=bundle_provenance,
                 )
                 conn.commit()
+                db_committed = True
             except Exception:
+                rollback_attempted_under_lock = True
                 uow.rollback()
                 raise
         uow.commit()
     except Exception:
-        uow.rollback()
+        if not db_committed and not rollback_attempted_under_lock:
+            uow.rollback()
         raise
     return validate_materialize_sample_design_v2_tool_output(
         _tool_output(
-            task_id=task_id,
             membership=membership,
             bundle=bundle,
             membership_record=membership_record,
@@ -1742,7 +1737,6 @@ def _persist_pair(
 
 def _tool_output(
     *,
-    task_id: str,
     membership: Mapping[str, Any],
     bundle: Mapping[str, Any],
     membership_record: Mapping[str, Any],
@@ -1761,10 +1755,14 @@ def _tool_output(
         "membership": dict(header),
         "artifacts": {
             "membership": _artifact_output(
-                task_id=task_id, record=membership_record, artifact_format="binary"
+                record=membership_record,
+                artifact_format="binary",
+                include_content_hash=False,
             ),
             "bundle": _artifact_output(
-                task_id=task_id, record=bundle_record, artifact_format="json"
+                record=bundle_record,
+                artifact_format="json",
+                include_content_hash=True,
             ),
         },
         "legacy_mapping": {
@@ -1786,21 +1784,20 @@ def _tool_output(
     }
 
 
-def _artifact_output(*, task_id: str, record: Mapping[str, Any], artifact_format: str) -> dict[str, str]:
-    artifact_id = str(record["id"])
-    content_hash = str(record["content_hash"])
-    return {
-        "artifact_id": artifact_id,
+def _artifact_output(
+    *,
+    record: Mapping[str, Any],
+    artifact_format: str,
+    include_content_hash: bool,
+) -> dict[str, str]:
+    output = {
         "kind": str(record["kind"]),
         "format": artifact_format,
         "filename": Path(str(record["path"])).name,
-        "content_hash": content_hash,
-        "download_url": (
-            f"/api/tasks/{quote(task_id, safe='')}"
-            f"/task-artifacts/{quote(artifact_id, safe='')}/download"
-            f"?expected_content_hash={content_hash}"
-        ),
     }
+    if include_content_hash:
+        output["content_hash"] = str(record["content_hash"])
+    return output
 
 
 def _warnings(bundle: Mapping[str, Any]) -> list[str]:
@@ -2203,33 +2200,34 @@ def _require_exact_file(
 def _validate_output_artifact(
     value: object,
     *,
-    task_id: str,
     kind: str,
     artifact_format: str,
     filename: str,
     expected_content_hash: str | None,
 ) -> dict[str, Any]:
     obj = _json_object(value, "sample-design V2 output artifact")
-    _exact_fields(obj, _ARTIFACT_OUTPUT_FIELDS, "sample-design V2 output artifact")
-    artifact_id = _hash(obj["artifact_id"], "artifact_id")
-    content_hash = _hash(obj["content_hash"], "artifact content_hash")
     expected = {
-        "artifact_id": artifact_id,
         "kind": kind,
         "format": artifact_format,
         "filename": filename,
-        "content_hash": content_hash,
-        "download_url": (
-            f"/api/tasks/{quote(task_id, safe='')}"
-            f"/task-artifacts/{quote(artifact_id, safe='')}/download"
-            f"?expected_content_hash={content_hash}"
-        ),
     }
     if expected_content_hash is not None:
+        _exact_fields(
+            obj,
+            _BUNDLE_ARTIFACT_OUTPUT_FIELDS,
+            "sample-design V2 output artifact",
+        )
+        _hash(obj["content_hash"], "artifact content_hash")
         expected["content_hash"] = expected_content_hash
+    else:
+        _exact_fields(
+            obj,
+            _MEMBERSHIP_ARTIFACT_OUTPUT_FIELDS,
+            "sample-design V2 output artifact",
+        )
     if obj != expected:
         raise StrategyError("sample-design V2 output artifact drifted")
-    return obj
+    return expected
 
 
 def _dataset_source_ref(binding: _LiveBinding) -> dict[str, str]:

@@ -20,6 +20,8 @@ from marvis.packs.strategy.model_evidence_tools import (
     validate_materialize_model_evidence_v2_tool_output,
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
     run_materialize_sample_design_v2,
 )
 from marvis.packs.strategy.sample_design_tools import run_materialize_sample_design
@@ -45,6 +47,22 @@ def _fixture(tmp_path: Path, *, not_matured: bool = False) -> dict:
     sample_v2 = run_materialize_sample_design_v2(
         fx["request"], fx["ctx"], fx["runtime"]
     )
+    sample_records = TaskArtifactRepository(fx["settings"].db_path).list_for_task(
+        fx["task"].id
+    )
+    membership_record = [
+        item
+        for item in sample_records
+        if item["kind"] == SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND
+    ]
+    bundle_record = [
+        item
+        for item in sample_records
+        if item["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+    ]
+    assert len(membership_record) == len(bundle_record) == 1
+    membership_record = membership_record[0]
+    bundle_record = bundle_record[0]
     candidate = strategy_tools.tool_analyze_univariate_candidates(
         {
             "dataset_id": fx["dataset"].id,
@@ -72,16 +90,12 @@ def _fixture(tmp_path: Path, *, not_matured: bool = False) -> dict:
     )
     inputs = {
         "sample_design_ref": {
-            "membership_artifact_id": sample_v2["artifacts"]["membership"][
-                "artifact_id"
+            "membership_artifact_id": membership_record["id"],
+            "expected_membership_artifact_content_hash": membership_record[
+                "content_hash"
             ],
-            "expected_membership_artifact_content_hash": sample_v2["artifacts"][
-                "membership"
-            ]["content_hash"],
-            "bundle_artifact_id": sample_v2["artifacts"]["bundle"]["artifact_id"],
-            "expected_bundle_artifact_content_hash": sample_v2["artifacts"][
-                "bundle"
-            ]["content_hash"],
+            "bundle_artifact_id": bundle_record["id"],
+            "expected_bundle_artifact_content_hash": bundle_record["content_hash"],
             "expected_bundle_id": sample_v2["bundle_id"],
             "expected_sample_design_id": sample_v2["sample_design_id"],
             "expected_sample_design_content_hash": sample_v2[

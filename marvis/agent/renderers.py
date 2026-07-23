@@ -2393,6 +2393,26 @@ def _sample_design_integrity_failure() -> tuple[str, list[dict]]:
     )
 
 
+def _sample_design_v2_integrity_failure() -> tuple[str, list[dict]]:
+    return (
+        "**策略样本设计 V2 结果完整性校验失败**：计划缓存与 canonical "
+        "sample-design bundle、membership 或 artifact 摘要不一致，已停止展示"
+        "所有样本数量、身份与下载链接。请重新运行策略样本设计；统一产物栏只会"
+        "提供通过 TaskArtifact 注册 hash 校验的产物。",
+        [],
+    )
+
+
+def _model_evidence_v2_integrity_failure() -> tuple[str, list[dict]]:
+    return (
+        "**策略分析证据 V2 结果完整性校验失败**：计划缓存与 canonical "
+        "sample-design/model-evidence bundle 或 artifact 摘要不一致，已停止展示"
+        "变量、分箱、观测、身份与产物信息。请重新运行策略分析证据生成；统一"
+        "产物栏只会展示注册并校验通过的 TaskArtifact。",
+        [],
+    )
+
+
 def _project_context_integrity_failure() -> tuple[str, list[dict]]:
     return (
         "**策略项目上下文完整性校验失败**：计划缓存与 immutable revision/artifact "
@@ -2642,6 +2662,209 @@ def _render_materialize_sample_design(o: dict):
         )
     if o["warnings"]:
         text += "\n\n**样本设计提示**：" + "；".join(o["warnings"])
+    return text, tables
+
+
+def _strategy_sample_v2_population_rows(bundle: dict) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for population in bundle["populations"]:
+        partitions = {
+            item["name"]: item["row_count"] for item in population["partitions"]
+        }
+        maturity = population["maturity_evidence"]
+        rows.append(
+            [
+                population["role"],
+                _num(population["total_count"]),
+                _num(partitions["development"]),
+                _num(partitions["validation"]),
+                _num(partitions["oot"]),
+                maturity["status"],
+            ]
+        )
+    return rows
+
+
+def _render_materialize_sample_design_v2(o: dict):
+    """Render only facts validated from the cached V2 sample envelope."""
+
+    from marvis.packs.strategy.errors import StrategyError
+    from marvis.packs.strategy.sample_design_v2_tools import (
+        validate_materialize_sample_design_v2_tool_output,
+    )
+
+    try:
+        o = validate_materialize_sample_design_v2_tool_output(o)
+    except (StrategyError, RecursionError):
+        return _sample_design_v2_integrity_failure()
+
+    bundle = o["bundle"]
+    design = bundle["sample_design"]
+    semantics = design["sample_semantics"]
+    historical = bundle["historical_score"]
+    risk_population = next(
+        item for item in bundle["populations"] if item["role"] == "risk"
+    )
+    maturity = risk_population["maturity_evidence"]
+    score_detail = historical["status"]
+    if historical["status"] == "available":
+        score_detail += f" / {historical['column']} / {historical['direction']}"
+    else:
+        score_detail += f" / {historical['reason']}"
+
+    text = (
+        f"**策略样本设计 V2 已固化**：范围 `{semantics['scope']}`，"
+        f"人群关系 `{design['relationship']}`；已锁定 approval/risk 两个人群的 "
+        "development、validation、OOT 分区。\n"
+        f"- 风险样本成熟度：`{maturity['status']}`；历史评分：`{score_detail}`。\n"
+        "- 本步骤只固化样本与诊断证据，未创建策略、未采纳、未部署。"
+    )
+    if semantics["scope"] == "exploration_only":
+        text += "\n- 当前范围为 exploration-only，不可声称已完成成熟样本验证。"
+    if o["warnings"]:
+        text += "\n- 诊断提示：" + "；".join(o["warnings"]) + "。"
+    else:
+        text += "\n- 诊断提示：无。"
+
+    bundle_artifact = o["artifacts"]["bundle"]
+    membership_artifact = o["artifacts"]["membership"]
+    text += (
+        "\n\n**样本产物摘要（非 registry 身份认证）**："
+        f"bundle `{bundle_artifact['filename']}`，canonical content hash "
+        f"`{bundle_artifact['content_hash']}`；membership "
+        f"`{membership_artifact['filename']}`，membership semantic content hash "
+        f"`{o['membership_content_hash']}`。\n"
+        "- 下载请使用任务页统一产物栏。当前 Tool v2 envelope 不包含可信 "
+        "download_url、registry artifact id 或 membership binary artifact hash，"
+        "本渲染器不会自行拼接链接。"
+    )
+
+    tables: list[dict] = [
+        {
+            "title": "双人群样本分区",
+            "columns": [
+                "人群",
+                "总样本数",
+                "开发集",
+                "验证集",
+                "OOT",
+                "成熟度",
+            ],
+            "rows": _strategy_sample_v2_population_rows(bundle),
+        },
+        {
+            "title": "样本设计口径",
+            "columns": ["项目", "状态/值", "补充说明"],
+            "rows": [
+                ["scope", semantics["scope"], "样本使用范围"],
+                ["relationship", design["relationship"], "双人群关系"],
+                ["risk maturity", maturity["status"], maturity["reason"] or ""],
+                ["historical score", historical["status"], score_detail],
+            ],
+        },
+        {
+            "title": "样本诊断",
+            "columns": ["类别", "代码", "状态", "说明"],
+            "rows": [
+                [
+                    item["category"],
+                    item["code"],
+                    item["status"],
+                    item["message"],
+                ]
+                for item in bundle["diagnostics"]
+            ],
+        },
+        {
+            "title": "样本产物摘要",
+            "columns": ["角色", "类型", "文件", "cached 可验证 hash"],
+            "rows": [
+                [
+                    "sample-design bundle",
+                    bundle_artifact["kind"],
+                    bundle_artifact["filename"],
+                    bundle_artifact["content_hash"],
+                ],
+                [
+                    "membership",
+                    membership_artifact["kind"],
+                    membership_artifact["filename"],
+                    f"semantic:{o['membership_content_hash']}",
+                ],
+            ],
+        },
+    ]
+    return text, tables
+
+
+def _strategy_model_v2_evidence_rows(bundle: dict) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for evidence in bundle["univariate_evidence"]:
+        statuses = {
+            "present": 0,
+            "unavailable": 0,
+            "not_matured": 0,
+            "not_applicable": 0,
+        }
+        for observation in evidence["observations"]:
+            statuses[observation["status"]] += 1
+        rows.append(
+            [
+                evidence["feature"],
+                evidence["analysis_variant"],
+                _num(len(evidence["bins"])),
+                _num(len(evidence["observations"])),
+                _num(statuses["present"]),
+                _num(statuses["unavailable"]),
+                _num(statuses["not_matured"]),
+                _num(statuses["not_applicable"]),
+            ]
+        )
+    return rows
+
+
+def _render_materialize_model_evidence_v2(o: dict):
+    """Render authenticated V2 univariate evidence without inventing a download."""
+
+    from marvis.packs.strategy.errors import StrategyError
+    from marvis.packs.strategy.model_evidence_tools import (
+        validate_materialize_model_evidence_v2_tool_output,
+    )
+
+    try:
+        o = validate_materialize_model_evidence_v2_tool_output(o)
+    except (StrategyError, RecursionError):
+        return _model_evidence_v2_integrity_failure()
+
+    bundle = o["bundle"]
+    evidence = bundle["univariate_evidence"]
+    artifact = o["artifact"]
+    text = (
+        f"**策略分析证据 V2 已固化**：已认证 **{len(evidence)}** 条单变量证据，"
+        "证据范围为 `risk/development`。\n"
+        "- 当前是 **univariate-only**：未创建模型、未进行模型比较、未采纳、"
+        "未部署。\n"
+        f"- 证据文件 `{artifact['filename']}`，content hash "
+        f"`{artifact['content_hash']}`；下载请使用任务页统一产物栏。当前 Tool v3 "
+        "envelope 不包含可信 download_url 或 registry artifact id，本渲染器不会"
+        "自行拼接链接。"
+    )
+    tables = [
+        {
+            "title": "单变量分析证据",
+            "columns": [
+                "变量",
+                "分析方法",
+                "分箱数",
+                "观测数",
+                "present",
+                "unavailable",
+                "not_matured",
+                "not_applicable",
+            ],
+            "rows": _strategy_model_v2_evidence_rows(bundle),
+        }
+    ]
     return text, tables
 
 
@@ -5728,6 +5951,8 @@ _RENDERERS = {
     "measure_pool_impact": _render_measure_pool_impact,
     "materialize_project_context": _render_materialize_project_context,
     "materialize_sample_design": _render_materialize_sample_design,
+    "materialize_sample_design_v2": _render_materialize_sample_design_v2,
+    "materialize_model_evidence_v2": _render_materialize_model_evidence_v2,
     "backtest_strategy": _render_backtest_strategy,
     "tradeoff_view": _render_tradeoff_view,
     "design_cutoff_bands": _render_design_cutoff_bands,
@@ -5780,6 +6005,10 @@ def render_tool_output(tool: str, output: dict):
             return _pool_impact_integrity_failure()
         if tool == "materialize_sample_design":
             return _sample_design_integrity_failure()
+        if tool == "materialize_sample_design_v2":
+            return _sample_design_v2_integrity_failure()
+        if tool == "materialize_model_evidence_v2":
+            return _model_evidence_v2_integrity_failure()
         if tool == "materialize_project_context":
             return _project_context_integrity_failure()
         if tool == "apply_automatic_tree":
