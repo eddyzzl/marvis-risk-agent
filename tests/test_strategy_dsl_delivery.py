@@ -379,3 +379,11 @@ def test_auto_not_equal_null_has_row_and_frame_delivery_parity() -> None:
     )
 
     assert evidence["matched"] is True
+
+
+def test_delivery_equivalence_rejects_an_empty_source_sample() -> None:
+    with pytest.raises(StrategyDeliveryError, match="at least one source row"):
+        verify_strategy_delivery_equivalence(
+            _approval_spec(),
+            pd.DataFrame({"risk_score": []}),
+        )

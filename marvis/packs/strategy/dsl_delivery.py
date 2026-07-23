@@ -383,6 +383,10 @@ def verify_strategy_delivery_equivalence(
         )
     parsed = parse_strategy_spec(spec)
     validate_strategy_duckdb_input_frame(frame, parsed.to_dict())
+    if frame.empty:
+        raise StrategyDeliveryError(
+            "strategy delivery equivalence requires at least one source row"
+        )
     positions = _sample_positions(len(frame), maximum_rows=maximum_rows)
     sample = frame.iloc[positions].reset_index(drop=True)
     validate_strategy_duckdb_input_frame(sample, parsed.to_dict())
@@ -523,8 +527,10 @@ def validate_strategy_delivery_equivalence(
         normalized["sample_count"],
         "sample_count",
     )
-    if sample_count > source_count or (
-        source_count > 0 and sample_count == 0
+    if (
+        source_count == 0
+        or sample_count == 0
+        or sample_count > source_count
     ):
         raise StrategyDeliveryError(
             "strategy delivery equivalence sample counts are invalid"
