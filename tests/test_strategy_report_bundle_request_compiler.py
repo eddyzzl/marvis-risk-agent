@@ -80,6 +80,58 @@ def test_report_accepts_only_exact_grounded_title_and_status() -> None:
 
 
 @pytest.mark.parametrize(
+    ("utterance", "status"),
+    [
+        ("status=final，请生成当前审批策略评审报告。", "final"),
+        ("请生成当前审批策略评审报告，设为 draft。", "draft"),
+        ("请生成阶段性审批策略评审报告。", "partial"),
+    ],
+)
+def test_report_accepts_explicit_assignment_or_clear_positive_status_phrase(
+    utterance: str,
+    status: str,
+) -> None:
+    result = _compile(utterance, {"status": status})
+
+    assert result.clarification is None
+    assert result.draft.workflow_inputs["status"] == status
+
+
+@pytest.mark.parametrize(
+    ("utterance", "workflow_inputs"),
+    [
+        (
+            "请生成当前审批策略评审报告，标题为《最终版拒绝 Pool 复盘》。",
+            {"title": "最终版拒绝 Pool 复盘", "status": "final"},
+        ),
+        (
+            "请生成当前审批策略评审报告，不要 final 状态。",
+            {"status": "final"},
+        ),
+        (
+            "请生成当前审批策略评审报告，标题为《draft 策略复盘》。",
+            {"title": "draft 策略复盘", "status": "draft"},
+        ),
+        (
+            "请生成当前审批策略评审报告，不要 partial 状态。",
+            {"status": "partial"},
+        ),
+    ],
+)
+def test_report_status_requires_positive_assignment_outside_title_or_negation(
+    utterance: str,
+    workflow_inputs: dict,
+) -> None:
+    result = _compile(utterance, workflow_inputs)
+
+    assert result.draft is None
+    assert result.clarification_code == (
+        "strategy_report_bundle_v2_controls_not_grounded"
+    )
+    assert result.clarification_fields == ("status",)
+
+
+@pytest.mark.parametrize(
     "utterance",
     [
         "不要生成当前策略评审报告。",
@@ -137,6 +189,44 @@ def test_report_bundle_target_does_not_hijack_existing_strategy_reports(
     utterance: str,
 ) -> None:
     assert utterance_targets_strategy_report_bundle_v2(utterance) is False
+
+
+def test_report_bundle_target_does_not_hijack_canonical_stored_strategy_id() -> None:
+    strategy_id = "strategy-existing-approval"
+    utterance = f"请为 strategy_id={strategy_id} 生成审批策略评审报告。"
+
+    result = compile_strategy_request(
+        utterance,
+        allowed_columns=None,
+        target_col=None,
+        llm=_RawPayloadLLM(
+            {
+                "request_kind": "strategy_lifecycle",
+                "operation": "report",
+                "strategy_type": "approval",
+                "strategy_id": strategy_id,
+            }
+        ),
+    )
+
+    assert result.clarification is None
+    assert result.draft.to_dict() == {
+        "operation": "report",
+        "strategy_type": "approval",
+        "strategy_id": strategy_id,
+    }
+
+
+def test_viewing_a_past_report_is_not_a_new_report_command() -> None:
+    utterance = "现在查看昨天生成的策略评审报告。"
+
+    assert utterance_targets_strategy_report_bundle_v2(utterance) is False
+    result = _compile(utterance, {})
+
+    assert result.draft is None
+    assert result.clarification_code == (
+        "strategy_report_bundle_v2_positive_command_required"
+    )
 
 
 @pytest.mark.parametrize(

@@ -300,6 +300,13 @@ _STRATEGY_REPORT_CURRENT_RE = re.compile(
     r"(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
+_STRATEGY_REPORT_RETRIEVAL_RE = re.compile(
+    r"(?:查看|看一下|看下|打开|获取|调出|检索|回看|下载)"
+    r"[^；;。.!?？\n]{0,80}(?:报告|Report)|"
+    r"(?<![A-Za-z0-9_])(?:view|open|retrieve|get|fetch|show|download)"
+    r"[^;.!?\n]{0,80}\breport(?:\s+bundle)?\b",
+    re.IGNORECASE,
+)
 _STRATEGY_REPORT_CHAINED_OPERATION_RE = re.compile(
     r"(?:训练(?:模型)?|建模|(?:模型|数据)?评分|打分|"
     r"(?:生成|构建|开发|筛选|分析)(?:策略)?候选|"
@@ -341,23 +348,39 @@ _STRATEGY_REPORT_TITLE_RE = re.compile(
     r"(?P<plain>[^，,；;。.!?？\n]{1,200}))",
     re.IGNORECASE,
 )
-_STRATEGY_REPORT_STATUS_GROUNDING = {
+_STRATEGY_REPORT_STATUS_VALUE_PATTERNS = {
     "draft": re.compile(
-        r"(?<!不)(?:草稿|草案)(?:版|状态)?|"
-        r"(?<![A-Za-z0-9_])draft(?:\s+status|\s+report)?(?![A-Za-z0-9_])",
+        r"(?:草稿|草案)|(?<![A-Za-z0-9_])draft(?![A-Za-z0-9_])",
         re.IGNORECASE,
     ),
     "partial": re.compile(
-        r"(?:阶段性|部分|中间)(?:版|报告|状态)?|"
-        r"(?<![A-Za-z0-9_])partial(?:\s+status|\s+report)?(?![A-Za-z0-9_])",
+        r"(?:阶段性|部分|中间)|"
+        r"(?<![A-Za-z0-9_])partial(?![A-Za-z0-9_])",
         re.IGNORECASE,
     ),
     "final": re.compile(
-        r"(?:最终|终稿|定稿)(?:版|报告|状态)?|"
-        r"(?<![A-Za-z0-9_])final(?:\s+status|\s+report)?(?![A-Za-z0-9_])",
+        r"(?:最终|终稿|定稿)|"
+        r"(?<![A-Za-z0-9_])final(?![A-Za-z0-9_])",
         re.IGNORECASE,
     ),
 }
+_STRATEGY_REPORT_STATUS_LABEL_RE = re.compile(
+    r"(?:报告)?状态|(?<![A-Za-z0-9_])status(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_STATUS_NEGATION_RE = re.compile(
+    r"(?:不要|不用|无需|先别|先不|暂不|禁止|排除|而非|不是|并非|不使用)"
+    r"[^，,；;。.!?？\n]{0,20}$|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|not|never|without|exclude)"
+    r"[^,;.!?\n]{0,20}$",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_STATUS_HISTORY_RE = re.compile(
+    r"(?:昨天|之前|此前|过去|上次|曾经|历史|已归档|已生成)|"
+    r"(?<![A-Za-z0-9_])(?:yesterday|previously|earlier|historical|"
+    r"last\s+time|archived|already\s+generated)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
 _SAMPLE_V2_POPULATION_ROLE_RE = re.compile(
     r"(?:审批(?:总体|样本)|approval\s+population|"
     r"风险(?:总体|样本)|risk\s+population)",
@@ -5595,6 +5618,19 @@ def _voting_mention_is_within(
     )
 
 
+def _is_canonical_stored_strategy_report_request(
+    draft: CompiledStrategyRequestDraft | None,
+) -> bool:
+    """Keep a fully identified stored-strategy report on its legacy route."""
+
+    return bool(
+        isinstance(draft, StrategyRequestDraft)
+        and draft.operation == "report"
+        and draft.strategy_spec is None
+        and draft.strategy_id
+    )
+
+
 def _ground_refinement_request(
     utterance: str,
     result: StrategyRequestCompilation,
@@ -5602,9 +5638,13 @@ def _ground_refinement_request(
     whitelist: tuple[str, ...],
 ) -> StrategyRequestCompilation:
     draft = result.draft
-    if utterance_targets_strategy_report_bundle_v2(utterance) and not (
-        isinstance(draft, StandardWorkflowRequestDraft)
-        and draft.workflow == "strategy_report_bundle_v2"
+    if (
+        utterance_targets_strategy_report_bundle_v2(utterance)
+        and not (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow == "strategy_report_bundle_v2"
+        )
+        and not _is_canonical_stored_strategy_report_request(draft)
     ):
         return _clarification(
             "原话明确要求生成受治理策略评审报告，只能编译为 "
@@ -5919,6 +5959,7 @@ def utterance_targets_strategy_report_bundle_v2(utterance: str) -> bool:
 
     return bool(
         _STRATEGY_REPORT_STORED_STRATEGY_RE.search(utterance) is None
+        and _STRATEGY_REPORT_RETRIEVAL_RE.search(utterance) is None
         and _STRATEGY_REPORT_SUBJECT_RE.search(utterance)
         and _STRATEGY_REPORT_ACTION_RE.search(utterance)
     )
@@ -5978,12 +6019,14 @@ def _ground_strategy_report_bundle_v2_request(
     elif inputs["title"] != _STRATEGY_REPORT_DEFAULT_TITLE:
         missing.append("title")
 
-    status_mentions = {
-        status
-        for status, pattern in _STRATEGY_REPORT_STATUS_GROUNDING.items()
-        if pattern.search(utterance)
-    }
-    if len(status_mentions) > 1:
+    positive_statuses, negated_statuses = _strategy_report_status_mentions(
+        utterance
+    )
+    status_mentions = set(positive_statuses)
+    negated_status_mentions = set(negated_statuses)
+    if inputs["status"] in negated_status_mentions:
+        missing.append("status")
+    elif len(status_mentions) > 1:
         missing.append("status")
     elif status_mentions:
         if inputs["status"] != next(iter(status_mentions)):
@@ -6016,6 +6059,143 @@ def _strategy_report_title_mentions(utterance: str) -> tuple[str, ...]:
         if value and value not in values:
             values.append(value)
     return tuple(values)
+
+
+def _strategy_report_status_mentions(
+    utterance: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return positive and prohibited status controls from the report command."""
+
+    masked = list(utterance)
+    for match in _STRATEGY_REPORT_TITLE_RE.finditer(utterance):
+        masked[match.start() : match.end()] = " " * (
+            match.end() - match.start()
+        )
+    command_text = "".join(masked)
+    action_matches = tuple(_STRATEGY_REPORT_ACTION_RE.finditer(command_text))
+    if not action_matches:
+        return (), ()
+
+    positive: list[str] = []
+    negated: list[str] = []
+    for status, value_pattern in _STRATEGY_REPORT_STATUS_VALUE_PATTERNS.items():
+        for value_match in value_pattern.finditer(command_text):
+            if (
+                _STRATEGY_REPORT_STATUS_HISTORY_RE.search(
+                    _strategy_report_control_clause(
+                        command_text,
+                        start=value_match.start(),
+                        end=value_match.end(),
+                    )
+                )
+                or not _strategy_report_status_shares_command(
+                    command_text,
+                    value_start=value_match.start(),
+                    value_end=value_match.end(),
+                    action_matches=action_matches,
+                )
+            ):
+                continue
+            if _strategy_report_status_span_is_negated(
+                command_text,
+                start=value_match.start(),
+            ):
+                negated.append(status)
+                break
+            if _strategy_report_status_has_positive_assignment(
+                command_text,
+                value_start=value_match.start(),
+                value_end=value_match.end(),
+            ) or any(
+                action.start() <= value_match.start()
+                and value_match.end() <= action.end()
+                for action in action_matches
+            ):
+                positive.append(status)
+                break
+    return tuple(positive), tuple(negated)
+
+
+def _strategy_report_control_clause(
+    utterance: str,
+    *,
+    start: int,
+    end: int,
+) -> str:
+    separators = ("，", ",", "；", ";", "。", ".", "！", "!", "？", "?", "\n")
+    clause_start = max(
+        utterance.rfind(separator, 0, start) for separator in separators
+    )
+    clause_end_candidates = [
+        position
+        for separator in separators
+        if (position := utterance.find(separator, end)) >= 0
+    ]
+    clause_end = (
+        min(clause_end_candidates)
+        if clause_end_candidates
+        else len(utterance)
+    )
+    return utterance[clause_start + 1 : clause_end]
+
+
+def _strategy_report_status_has_positive_assignment(
+    utterance: str,
+    *,
+    value_start: int,
+    value_end: int,
+) -> bool:
+    before = utterance[max(0, value_start - 32) : value_start]
+    if re.search(
+        r"(?:设为|设置为|改为|采用|使用|用|选择|指定为|而是)\s*$|"
+        r"(?<![A-Za-z0-9_])(?:set\s+to|use|as|instead)(?![A-Za-z0-9_])\s*$",
+        before,
+        re.IGNORECASE,
+    ):
+        return True
+    label_matches = tuple(_STRATEGY_REPORT_STATUS_LABEL_RE.finditer(before))
+    if label_matches:
+        tail = before[label_matches[-1].end() :]
+        if re.fullmatch(
+            r"\s*(?:(?:设置|设定|指定|设|定)\s*)?"
+            r"(?:(?:为|是|用|采用|设为|设置为|=|:|：|is)\s*)?",
+            tail,
+            re.IGNORECASE,
+        ):
+            return True
+
+    after = utterance[value_end : value_end + 24]
+    return re.match(
+        r"\s*(?:版|报告)?\s*(?:(?:作为|设为|设置为|is)\s*)?"
+        r"(?:(?:报告)?状态|(?<![A-Za-z0-9_])status(?![A-Za-z0-9_]))",
+        after,
+        re.IGNORECASE,
+    ) is not None
+
+
+def _strategy_report_status_shares_command(
+    utterance: str,
+    *,
+    value_start: int,
+    value_end: int,
+    action_matches: Sequence[re.Match[str]],
+) -> bool:
+    for action in action_matches:
+        between = utterance[
+            min(action.start(), value_start) : max(action.end(), value_end)
+        ]
+        if re.search(r"[；;。.!?！？\n]", between) is None:
+            return True
+    return False
+
+
+def _strategy_report_status_span_is_negated(
+    utterance: str,
+    *,
+    start: int,
+) -> bool:
+    prefix = utterance[max(0, start - 32) : start]
+    return _STRATEGY_REPORT_STATUS_NEGATION_RE.search(prefix) is not None
 
 
 def utterance_targets_strategy_sample_design(utterance: str) -> bool:

@@ -34,7 +34,15 @@ from marvis.packs.strategy.report_bundle_tools import (
     validate_build_strategy_report_bundle_v2_tool_output,
 )
 from marvis.plugins.manifest import ToolRef
+from marvis.repositories.strategy_reports import StrategyReportRepository
 from test_strategy_report_bundle_tools import _run, _setup
+from test_strategy_request_turn import (
+    _FakeLLM as _StoredStrategyLLM,
+    _install_llm as _install_stored_strategy_llm,
+    _saved_strategy,
+    _strategy_request_plans,
+    _task as _strategy_task,
+)
 
 
 class _ReportLLM:
@@ -155,6 +163,51 @@ def test_report_turn_uses_only_explicit_pool_type_selection(
     expected: str,
 ) -> None:
     assert _strategy_report_requested_pool_type({"content": message}) == expected
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            "生成审批策略评审报告，标题为《拒绝 Pool 复盘》",
+            "approval",
+        ),
+        (
+            "昨天的拒绝 Pool 报告已归档，现在生成审批策略评审报告",
+            "approval",
+        ),
+        (
+            "不要使用拒绝 Pool，请生成审批策略评审报告",
+            "approval",
+        ),
+        (
+            "不是拒绝 Pool，而是审批 Pool，请生成当前策略评审报告",
+            "approval",
+        ),
+        (
+            "请生成当前策略评审报告，策略类型为 reject",
+            "reject",
+        ),
+        (
+            "生成当前策略评审报告，标题为《拒绝 Pool 复盘》",
+            None,
+        ),
+    ],
+)
+def test_report_turn_ignores_title_history_and_negated_pool_type_mentions(
+    message: str,
+    expected: str | None,
+) -> None:
+    assert _strategy_report_requested_pool_type({"content": message}) == expected
+
+
+def test_report_turn_rejects_only_negated_pool_type_selection() -> None:
+    with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
+        _strategy_report_requested_pool_type(
+            {"content": "请生成当前策略评审报告，不要使用拒绝 Pool。"}
+        )
+
+    assert raised.value.code == "strategy_report_bundle_v2_pool_type_required"
 
 
 def test_report_turn_clarifies_when_both_nonempty_pool_types_exist(
@@ -551,3 +604,75 @@ def test_report_command_autostarts_exact_one_step_without_dataset_preview(
     assert "未创建策略、未采纳、未部署或上线" in rendered_messages
     assert rendered_messages.count("](/api/tasks/") == 3
     assert len(llm.calls) == 1
+
+
+def test_canonical_stored_strategy_report_stays_on_legacy_workflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(create_app(tmp_path))
+    task_id = _strategy_task(client, tmp_path)
+    strategy_id = _saved_strategy(client, task_id)
+    llm = _StoredStrategyLLM(
+        {
+            "request_kind": "strategy_lifecycle",
+            "operation": "report",
+            "strategy_type": "approval",
+            "strategy_id": strategy_id,
+        }
+    )
+    _install_stored_strategy_llm(monkeypatch, llm)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                f"请为 strategy_id={strategy_id} 生成审批策略评审报告。"
+            )
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plans = _strategy_request_plans(client, task_id)
+    assert [plan["template_id"] for plan in plans] == [
+        "stored_strategy_report"
+    ]
+    assert plans[0]["status"] == "done"
+    assert len(llm.calls) == 1
+
+
+def test_viewing_past_report_does_not_create_a_new_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    first = _run(fixture)
+    client = TestClient(create_app(fixture["settings"].workspace))
+    llm = _ReportLLM()
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    response = client.post(
+        f"/api/tasks/{fixture['task'].id}/agent/messages",
+        json={"content": "现在查看昨天生成的策略评审报告。"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "clarification_required"
+    assert response.json()["code"] == (
+        "strategy_report_bundle_v2_positive_command_required"
+    )
+    assert client.get(
+        f"/api/tasks/{fixture['task'].id}/plans"
+    ).json()["plans"] == []
+    head = StrategyReportRepository(
+        fixture["settings"].db_path
+    ).get_head(
+        task_id=fixture["task"].id,
+        strategy_id=None,
+    )
+    assert head["current_revision"] == 1
+    assert head["current_report_id"] == first["report_id"]
+    assert head["current_content_hash"] == first["content_hash"]

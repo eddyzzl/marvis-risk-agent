@@ -4748,6 +4748,41 @@ _STRATEGY_REPORT_POOL_TYPE_PATTERNS = {
         re.IGNORECASE,
     ),
 }
+_STRATEGY_REPORT_POOL_COMMAND_RE = re.compile(
+    r"(?:生成|创建|制作|编制|形成|出一份|出个|给我|导出|构建)"
+    r"[^；;。.!?？\n]{0,80}(?:报告|Report)|"
+    r"(?<![A-Za-z0-9_])(?:generate|create|build|produce|prepare|render|export)"
+    r"[^;.!?\n]{0,80}\breport(?:\s+bundle)?\b",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_POOL_TITLE_RE = re.compile(
+    r"(?:报告标题|标题|report\s+title|title)\s*"
+    r"(?:为|是|叫|is|=|:|：)\s*"
+    r"(?:[“\"'《][^”\"'》\n]{1,200}[”\"'》]|"
+    r"[^，,；;。.!?？\n]{1,200})",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_POOL_SELECTOR_RE = re.compile(
+    r"(?:选择|选用|使用|采用|针对|指定|按|基于|改用|就用|要用|而是|"
+    r"(?:Pool|策略)\s*类型\s*(?:为|是|=|:|：)|"
+    r"(?<![A-Za-z0-9_])(?:select|choose|use|using|for|on|but|instead)"
+    r"(?![A-Za-z0-9_]))\s*$",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_POOL_TYPE_NEGATION_RE = re.compile(
+    r"(?:不要|不用|无需|先别|先不|暂不|禁止|排除|剔除|而非|不是|并非|"
+    r"不使用|不选|不选择)\s*(?:(?:选择|选用|使用|采用|针对|指定)\s*)?"
+    r"[^，,；;。.!?？\n]{0,16}$|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|not|never|without|exclude)"
+    r"[^,;.!?\n]{0,20}$",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_POOL_HISTORY_RE = re.compile(
+    r"(?:昨天|之前|此前|过去|上次|曾经|历史|已归档|已生成)|"
+    r"(?<![A-Za-z0-9_])(?:yesterday|previously|earlier|historical|"
+    r"last\s+time|archived|already\s+generated)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
 
 
 def _strategy_report_bundle_v2_plan_slots(
@@ -4946,17 +4981,110 @@ def _strategy_report_requested_pool_type(
         if isinstance(source_message, Mapping)
         else ""
     )
-    selected = [
-        strategy_type
-        for strategy_type, pattern in _STRATEGY_REPORT_POOL_TYPE_PATTERNS.items()
-        if pattern.search(text)
-    ]
+    masked = list(text)
+    for match in _STRATEGY_REPORT_POOL_TITLE_RE.finditer(text):
+        masked[match.start() : match.end()] = " " * (
+            match.end() - match.start()
+        )
+    command_text = "".join(masked)
+    actions = tuple(_STRATEGY_REPORT_POOL_COMMAND_RE.finditer(command_text))
+    selected: list[str] = []
+    negated: list[str] = []
+    for strategy_type, pattern in _STRATEGY_REPORT_POOL_TYPE_PATTERNS.items():
+        for match in pattern.finditer(command_text):
+            prefix = command_text[max(0, match.start() - 40) : match.start()]
+            if _STRATEGY_REPORT_POOL_TYPE_NEGATION_RE.search(prefix):
+                if strategy_type not in negated:
+                    negated.append(strategy_type)
+                continue
+            clause_start = max(
+                command_text.rfind(separator, 0, match.start())
+                for separator in ("，", ",", "；", ";", "。", ".", "！", "!", "？", "?", "\n")
+            )
+            clause_end_candidates = [
+                position
+                for separator in (
+                    "，",
+                    ",",
+                    "；",
+                    ";",
+                    "。",
+                    ".",
+                    "！",
+                    "!",
+                    "？",
+                    "?",
+                    "\n",
+                )
+                if (position := command_text.find(separator, match.end())) >= 0
+            ]
+            clause_end = (
+                min(clause_end_candidates)
+                if clause_end_candidates
+                else len(command_text)
+            )
+            local_clause = command_text[clause_start + 1 : clause_end]
+            if _STRATEGY_REPORT_POOL_HISTORY_RE.search(local_clause):
+                continue
+
+            inside_creation = any(
+                action.start() <= match.start()
+                and match.end() <= action.end()
+                for action in actions
+            )
+            explicitly_selected = (
+                _STRATEGY_REPORT_POOL_SELECTOR_RE.search(prefix) is not None
+                and _strategy_report_pool_selector_shares_command(
+                    command_text,
+                    mention_start=match.start(),
+                    mention_end=match.end(),
+                    actions=actions,
+                )
+            )
+            if inside_creation or explicitly_selected:
+                if strategy_type not in selected:
+                    selected.append(strategy_type)
+                break
     if len(selected) > 1:
         raise _StrategyV2EvidenceSetupError(
             "strategy_report_bundle_v2_pool_type_ambiguous",
             "同一报告请求同时点名 approval 和 reject Pool；请只选择一种策略类型。",
         )
+    if not selected and negated:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_pool_type_required",
+            "报告请求只排除了 Pool 类型，没有明确肯定选择要使用的审批/准入或"
+            "拒绝 Pool；平台不会绑定被否定的 Pool。",
+        )
     return selected[0] if selected else None
+
+
+def _strategy_report_pool_selector_shares_command(
+    utterance: str,
+    *,
+    mention_start: int,
+    mention_end: int,
+    actions: Sequence[re.Match[str]],
+) -> bool:
+    sentence_start = max(
+        utterance.rfind(separator, 0, mention_start)
+        for separator in ("。", ".", "！", "!", "？", "?", "；", ";", "\n")
+    )
+    sentence_end_candidates = [
+        position
+        for separator in ("。", ".", "！", "!", "？", "?", "；", ";", "\n")
+        if (position := utterance.find(separator, mention_end)) >= 0
+    ]
+    sentence_end = (
+        min(sentence_end_candidates)
+        if sentence_end_candidates
+        else len(utterance)
+    )
+    return any(
+        sentence_start < action.start()
+        and action.end() <= sentence_end
+        for action in actions
+    )
 
 
 def _strategy_report_current_pool_binding(
