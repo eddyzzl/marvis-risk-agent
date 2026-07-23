@@ -703,6 +703,7 @@ def test_task_artifact_list_is_path_free_and_downloads_by_owned_id(tmp_path):
                 "available": True,
                 "download_url": (
                     f"/api/tasks/{task_id}/task-artifacts/{record['id']}/download"
+                    f"?expected_content_hash={record['content_hash']}"
                 ),
             }
         ],
@@ -715,8 +716,7 @@ def test_task_artifact_list_is_path_free_and_downloads_by_owned_id(tmp_path):
         f"/api/tasks/{task_id}/task-artifacts/{record['id']}/download"
     )
     hash_bound_download = client.get(
-        f"/api/tasks/{task_id}/task-artifacts/{record['id']}/download"
-        f"?expected_content_hash={record['content_hash']}"
+        listed.json()["artifacts"][0]["download_url"]
     )
     wrong_hash_download = client.get(
         f"/api/tasks/{task_id}/task-artifacts/{record['id']}/download"

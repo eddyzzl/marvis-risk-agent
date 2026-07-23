@@ -8,6 +8,7 @@ in one small module.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 from typing import Any
 
@@ -2393,6 +2394,16 @@ def _strategy_report_integrity_failure() -> tuple[str, list[dict]]:
     )
 
 
+def _strategy_delivery_integrity_failure() -> tuple[str, list[dict]]:
+    return (
+        "**策略交付结果完整性校验失败**：计划缓存与受信任的任务/步骤输入、"
+        "canonical Strategy DSL、等价性证据或 TaskArtifact registry 摘要"
+        "不一致，已停止展示交付身份、样本数量和下载链接。请重新生成离线"
+        "交付包；下载接口仍会按注册 hash 复核文件。",
+        [],
+    )
+
+
 def _sample_design_integrity_failure() -> tuple[str, list[dict]]:
     return (
         "**策略样本设计结果完整性校验失败**：计划缓存与 canonical sample-design "
@@ -3394,6 +3405,96 @@ def _render_build_strategy_report_bundle_v2(o: dict):
         "- 本步骤只生成受治理报告：**未创建策略、未采纳、未部署或上线**。\n"
         f"- 完整性警告：{warning_text}\n"
         f"- 下载：{downloads}"
+    )
+    return text, []
+
+
+def _render_export_strategy_delivery(
+    o: dict,
+    *,
+    trusted_task_id: str | None,
+    trusted_inputs: Mapping[str, Any] | None,
+    trusted_artifacts: Mapping[str, Any] | None,
+):
+    """Render the internally bound, hash-pinned Strategy DSL delivery."""
+
+    from marvis.packs.strategy.dsl_delivery_tools import (
+        DELIVERY_ARTIFACT_KINDS,
+        StrategyDeliveryToolError,
+        validate_export_strategy_delivery_tool_output,
+        validate_strategy_delivery_artifact_records,
+    )
+
+    try:
+        if (
+            not isinstance(trusted_task_id, str)
+            or not trusted_task_id
+            or not isinstance(trusted_inputs, Mapping)
+            or set(trusted_inputs)
+            != {
+                "strategy_ref",
+                "dataset_ref",
+                "workspace_ref",
+                "maximum_equivalence_rows",
+            }
+            or not isinstance(trusted_artifacts, Mapping)
+            or o.get("maximum_equivalence_rows")
+            != trusted_inputs["maximum_equivalence_rows"]
+        ):
+            raise StrategyDeliveryToolError(
+                "renderer is missing authenticated delivery context"
+            )
+        expected_artifacts = validate_strategy_delivery_artifact_records(
+            trusted_artifacts,
+            expected_task_id=trusted_task_id,
+            expected_delivery_id=o.get("delivery_id"),
+            expected_strategy_ref=trusted_inputs["strategy_ref"],
+            expected_dataset_ref=trusted_inputs["dataset_ref"],
+            expected_workspace_ref=trusted_inputs["workspace_ref"],
+            expected_maximum_equivalence_rows=trusted_inputs[
+                "maximum_equivalence_rows"
+            ],
+            expected_equivalence=o.get("equivalence"),
+        )
+        o = validate_export_strategy_delivery_tool_output(
+            o,
+            expected_task_id=trusted_task_id,
+            expected_strategy_ref=trusted_inputs["strategy_ref"],
+            expected_dataset_ref=trusted_inputs["dataset_ref"],
+            expected_workspace_ref=trusted_inputs["workspace_ref"],
+            expected_artifacts=expected_artifacts,
+        )
+    except (
+        AttributeError,
+        IndexError,
+        KeyError,
+        RecursionError,
+        StrategyDeliveryToolError,
+        TypeError,
+    ):
+        return _strategy_delivery_integrity_failure()
+
+    download_labels = {
+        DELIVERY_ARTIFACT_KINDS["python"]: "Python",
+        DELIVERY_ARTIFACT_KINDS["sql"]: "DuckDB SQL",
+        DELIVERY_ARTIFACT_KINDS["strategy_json"]: "Strategy JSON",
+        DELIVERY_ARTIFACT_KINDS["equivalence_json"]: "Equivalence JSON",
+    }
+    downloads = " · ".join(
+        f"[{download_labels[artifact['kind']]}]({artifact['download_url']})"
+        for artifact in o["artifacts"]
+    )
+    equivalence = o["equivalence"]
+    scope_status = "bounded" if equivalence["bounded"] else "full"
+    text = (
+        f"**Strategy DSL 离线交付已生成**：交付 ID `{o['delivery_id']}`，"
+        f"策略类型 **{o['strategy_type']}**，版本 **{o['strategy_version']}**。\n"
+        f"- 等价性校验：sample_count **{equivalence['sample_count']}** / "
+        f"source_row_count **{o['source_row_count']}**（**{scope_status}**）。\n"
+        "- 执行边界：**offline-only**；"
+        "**not_applied=true / not_adopted=true / not_deployed=true**"
+        "（未应用、未采纳、未部署）。\n"
+        f"- 内容哈希固定下载：{downloads}"
     )
     return text, []
 
@@ -5993,6 +6094,7 @@ _RENDERERS = {
     "compile_strategy_pool": _render_compile_strategy_pool,
     "measure_pool_impact": _render_measure_pool_impact,
     "build_report_bundle_v2": _render_build_strategy_report_bundle_v2,
+    "export_strategy_delivery": _render_export_strategy_delivery,
     "materialize_project_context": _render_materialize_project_context,
     "materialize_sample_design": _render_materialize_sample_design,
     "materialize_sample_design_v2": _render_materialize_sample_design_v2,
@@ -6039,14 +6141,30 @@ def _render_generic(o: dict):
     return "已完成。", []
 
 
-def render_tool_output(tool: str, output: dict):
+def render_tool_output(
+    tool: str,
+    output: dict,
+    *,
+    trusted_task_id: str | None = None,
+    trusted_inputs: Mapping[str, Any] | None = None,
+    trusted_artifacts: Mapping[str, Any] | None = None,
+):
     """Render a tool's raw output to (text, tables); falls back to generic."""
     renderer = _RENDERERS.get(tool, _render_generic)
     try:
+        if tool == "export_strategy_delivery":
+            return renderer(
+                output or {},
+                trusted_task_id=trusted_task_id,
+                trusted_inputs=trusted_inputs,
+                trusted_artifacts=trusted_artifacts,
+            )
         return renderer(output or {})
     except Exception:
         if tool == "build_report_bundle_v2":
             return _strategy_report_integrity_failure()
+        if tool == "export_strategy_delivery":
+            return _strategy_delivery_integrity_failure()
         if tool == "measure_pool_impact":
             return _pool_impact_integrity_failure()
         if tool == "materialize_sample_design":

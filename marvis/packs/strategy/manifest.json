@@ -1,6 +1,6 @@
 {
   "name": "strategy",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "display_name": "Strategy Pack",
   "description": "Vintage, roll-rate, profitability, governed sample design, univariate, automatic-tree, Voting n-of-k, and complete two-dimensional Cross Matrix candidate development with explicit leaf and Cross cell-group materialization, Strategy Pool assembly, unified deterministic ImpactCube and independent validation/OOT replay evidence, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
@@ -5098,6 +5098,330 @@
       },
       "side_effects": [
         "read:artifacts",
+        "read:task",
+        "read:dataset",
+        "read:strategy",
+        "write:artifact"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "export_strategy_delivery",
+      "summary": "Export one exact task-owned strategy as standalone Python, DuckDB SQL, and canonical JSON, then publish deterministic equivalence evidence over an explicitly bounded sample without applying, adopting, or deploying it.",
+      "input_schema": {
+        "type": "object",
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "strategy_ref": {
+            "type": "object",
+            "properties": {
+              "strategy_id": {"type": "string", "minLength": 1},
+              "expected_strategy_type": {
+                "type": "string",
+                "enum": [
+                  "approval",
+                  "reject",
+                  "limit",
+                  "pricing",
+                  "segmentation"
+                ]
+              },
+              "expected_version": {"type": "integer", "minimum": 1},
+              "expected_spec_hash": {"$ref": "#/$defs/sha256"}
+            },
+            "required": [
+              "strategy_id",
+              "expected_strategy_type",
+              "expected_version",
+              "expected_spec_hash"
+            ],
+            "additionalProperties": false
+          },
+          "dataset_ref": {
+            "type": "object",
+            "properties": {
+              "dataset_id": {"type": "string", "minLength": 1},
+              "expected_content_hash": {"$ref": "#/$defs/sha256"}
+            },
+            "required": ["dataset_id", "expected_content_hash"],
+            "additionalProperties": false
+          },
+          "workspace_ref": {
+            "type": "object",
+            "properties": {
+              "revision": {"type": "integer", "minimum": 0},
+              "analysis_generation": {"type": "integer", "minimum": 0},
+              "semantic_mapping_hash": {"$ref": "#/$defs/sha256"},
+              "active_dataset_id": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "active_dataset_content_hash": {
+                "oneOf": [
+                  {"type": "null"},
+                  {"$ref": "#/$defs/sha256"}
+                ]
+              }
+            },
+            "required": [
+              "revision",
+              "analysis_generation",
+              "semantic_mapping_hash",
+              "active_dataset_id",
+              "active_dataset_content_hash"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "properties": {
+          "strategy_ref": {"$ref": "#/$defs/strategy_ref"},
+          "dataset_ref": {"$ref": "#/$defs/dataset_ref"},
+          "workspace_ref": {"$ref": "#/$defs/workspace_ref"},
+          "maximum_equivalence_rows": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096
+          }
+        },
+        "required": [
+          "strategy_ref",
+          "dataset_ref",
+          "workspace_ref",
+          "maximum_equivalence_rows"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "strategy_ref": {
+            "type": "object",
+            "properties": {
+              "strategy_id": {"type": "string", "minLength": 1},
+              "expected_strategy_type": {
+                "type": "string",
+                "enum": [
+                  "approval",
+                  "reject",
+                  "limit",
+                  "pricing",
+                  "segmentation"
+                ]
+              },
+              "expected_version": {"type": "integer", "minimum": 1},
+              "expected_spec_hash": {"$ref": "#/$defs/sha256"}
+            },
+            "required": [
+              "strategy_id",
+              "expected_strategy_type",
+              "expected_version",
+              "expected_spec_hash"
+            ],
+            "additionalProperties": false
+          },
+          "dataset_ref": {
+            "type": "object",
+            "properties": {
+              "dataset_id": {"type": "string", "minLength": 1},
+              "expected_content_hash": {"$ref": "#/$defs/sha256"}
+            },
+            "required": ["dataset_id", "expected_content_hash"],
+            "additionalProperties": false
+          },
+          "workspace_ref": {
+            "type": "object",
+            "properties": {
+              "revision": {"type": "integer", "minimum": 0},
+              "analysis_generation": {"type": "integer", "minimum": 0},
+              "semantic_mapping_hash": {"$ref": "#/$defs/sha256"},
+              "active_dataset_id": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "active_dataset_content_hash": {
+                "oneOf": [
+                  {"type": "null"},
+                  {"$ref": "#/$defs/sha256"}
+                ]
+              }
+            },
+            "required": [
+              "revision",
+              "analysis_generation",
+              "semantic_mapping_hash",
+              "active_dataset_id",
+              "active_dataset_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "artifact": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"$ref": "#/$defs/sha256"},
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "strategy_delivery_python",
+                  "strategy_delivery_sql",
+                  "strategy_delivery_json",
+                  "strategy_delivery_equivalence_json"
+                ]
+              },
+              "format": {
+                "type": "string",
+                "enum": ["python", "sql", "json"]
+              },
+              "filename": {
+                "type": "string",
+                "enum": [
+                  "strategy.py",
+                  "strategy.sql",
+                  "strategy.json",
+                  "equivalence.json"
+                ]
+              },
+              "content_hash": {"$ref": "#/$defs/sha256"},
+              "download_url": {"type": "string", "minLength": 1}
+            },
+            "required": [
+              "artifact_id",
+              "kind",
+              "format",
+              "filename",
+              "content_hash",
+              "download_url"
+            ],
+            "additionalProperties": false
+          },
+          "equivalence": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "const": "strategy.dsl-delivery-equivalence.v1"
+              },
+              "strategy_spec_hash": {"$ref": "#/$defs/sha256"},
+              "source_row_count": {"type": "integer", "minimum": 1},
+              "sample_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4096
+              },
+              "sample_hash": {"$ref": "#/$defs/sha256"},
+              "engines": {
+                "const": ["marvis_evaluator", "python", "duckdb_sql"]
+              },
+              "result_hashes": {
+                "type": "object",
+                "properties": {
+                  "marvis_evaluator": {"$ref": "#/$defs/sha256"},
+                  "python": {"$ref": "#/$defs/sha256"},
+                  "duckdb_sql": {"$ref": "#/$defs/sha256"}
+                },
+                "required": ["marvis_evaluator", "python", "duckdb_sql"],
+                "additionalProperties": false
+              },
+              "matched": {"const": true},
+              "bounded": {"type": "boolean"},
+              "equivalence_id": {
+                "type": "string",
+                "pattern": "^strategy-dsl-equivalence-[0-9a-f]{24}$"
+              },
+              "content_hash": {"$ref": "#/$defs/sha256"}
+            },
+            "required": [
+              "schema_version",
+              "strategy_spec_hash",
+              "source_row_count",
+              "sample_count",
+              "sample_hash",
+              "engines",
+              "result_hashes",
+              "matched",
+              "bounded",
+              "equivalence_id",
+              "content_hash"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "properties": {
+          "schema_version": {
+            "const": "strategy.export-dsl-delivery-tool.v1"
+          },
+          "delivery_id": {
+            "type": "string",
+            "pattern": "^strategy-delivery-[0-9a-f]{24}$"
+          },
+          "task_id": {"type": "string", "minLength": 1},
+          "strategy_id": {"type": "string", "minLength": 1},
+          "strategy_type": {
+            "type": "string",
+            "enum": [
+              "approval",
+              "reject",
+              "limit",
+              "pricing",
+              "segmentation"
+            ]
+          },
+          "strategy_version": {"type": "integer", "minimum": 1},
+          "strategy_ref": {"$ref": "#/$defs/strategy_ref"},
+          "dataset_ref": {"$ref": "#/$defs/dataset_ref"},
+          "workspace_ref": {"$ref": "#/$defs/workspace_ref"},
+          "source_row_count": {"type": "integer", "minimum": 1},
+          "maximum_equivalence_rows": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096
+          },
+          "equivalence": {"$ref": "#/$defs/equivalence"},
+          "artifacts": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {"$ref": "#/$defs/artifact"}
+          },
+          "not_applied": {"const": true},
+          "not_adopted": {"const": true},
+          "not_deployed": {"const": true}
+        },
+        "required": [
+          "schema_version",
+          "delivery_id",
+          "task_id",
+          "strategy_id",
+          "strategy_type",
+          "strategy_version",
+          "strategy_ref",
+          "dataset_ref",
+          "workspace_ref",
+          "source_row_count",
+          "maximum_equivalence_rows",
+          "equivalence",
+          "artifacts",
+          "not_applied",
+          "not_adopted",
+          "not_deployed"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_export_strategy_delivery",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
         "read:task",
         "read:dataset",
         "read:strategy",

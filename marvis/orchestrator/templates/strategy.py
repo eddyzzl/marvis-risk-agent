@@ -1856,6 +1856,70 @@ STRATEGY_IMPACT_CUBE = WorkflowTemplate(
 )
 
 
+STRATEGY_DSL_DELIVERY = WorkflowTemplate(
+    id="strategy_dsl_delivery",
+    title="导出离线策略代码与等价证据",
+    goal_patterns=(
+        "导出策略代码",
+        "生成策略 Python SQL JSON",
+        "export strategy delivery",
+        "export strategy code",
+    ),
+    slots=(
+        SlotSpec(
+            "strategy_ref",
+            True,
+            "task_context",
+            "Exact task-owned strategy id, type, version, and spec hash",
+        ),
+        SlotSpec(
+            "dataset_ref",
+            True,
+            "task_context",
+            "Exact active task-owned dataset id and content hash",
+        ),
+        SlotSpec(
+            "workspace_ref",
+            True,
+            "task_context",
+            "Exact DataWorkspace revision, generation, semantics, and active dataset",
+        ),
+        SlotSpec(
+            "maximum_equivalence_rows",
+            True,
+            "task_context",
+            "Platform-fixed deterministic equivalence sample budget",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="导出策略代码并校验等价性",
+            tool_ref=ToolRef("strategy", "export_strategy_delivery"),
+            inputs_template={
+                "strategy_ref": "{slot:strategy_ref}",
+                "dataset_ref": "{slot:dataset_ref}",
+                "workspace_ref": "{slot:workspace_ref}",
+                "maximum_equivalence_rows": (
+                    "{slot:maximum_equivalence_rows}"
+                ),
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "delivery_id"}),
+                PostCheck(
+                    "nonempty",
+                    {"field": "equivalence.equivalence_id"},
+                ),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
     id="strategy_report_bundle_v2",
     title="生成 StrategyReportBundle V2",

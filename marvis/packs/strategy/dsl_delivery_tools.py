@@ -10,6 +10,7 @@ transaction and one rollback-capable filesystem unit of work.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 import hashlib
 import hmac
 import json
@@ -20,16 +21,20 @@ import stat
 import tempfile
 from typing import Any
 from urllib.parse import quote
+import uuid
 
 import pandas as pd
 
-from marvis.artifacts import ArtifactUnitOfWork
-from marvis.artifacts.transactional import ArtifactTransactionError
 from marvis.data.errors import DatasetContentDriftError
-from marvis.files import sha256_file
+from marvis.data.workspace import (
+    DataSemanticMapping,
+    data_semantic_mapping_from_dict,
+    data_semantic_mapping_hash,
+)
 from marvis.packs.strategy.dsl import (
     canonical_strategy_json,
     parse_strategy_spec,
+    strategy_spec_hash,
 )
 from marvis.packs.strategy.dsl_delivery import (
     MAX_EQUIVALENCE_ROWS,
@@ -40,7 +45,6 @@ from marvis.packs.strategy.dsl_delivery import (
     verify_strategy_delivery_equivalence,
 )
 from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.legacy_adapter import legacy_strategy_to_spec
 from marvis.repositories.audit import _write_audit_row
 from marvis.repositories.strategy import _strategy_spec_hash_from_row
 from marvis.repositories.task_artifacts import (
@@ -66,7 +70,12 @@ _STRATEGY_TYPES = frozenset(
     {"approval", "reject", "limit", "pricing", "segmentation"}
 )
 _INPUT_FIELDS = frozenset(
-    {"strategy_ref", "dataset_ref", "maximum_equivalence_rows"}
+    {
+        "strategy_ref",
+        "dataset_ref",
+        "workspace_ref",
+        "maximum_equivalence_rows",
+    }
 )
 _STRATEGY_REF_FIELDS = frozenset(
     {
@@ -79,6 +88,15 @@ _STRATEGY_REF_FIELDS = frozenset(
 _DATASET_REF_FIELDS = frozenset(
     {"dataset_id", "expected_content_hash"}
 )
+_WORKSPACE_REF_FIELDS = frozenset(
+    {
+        "revision",
+        "analysis_generation",
+        "semantic_mapping_hash",
+        "active_dataset_id",
+        "active_dataset_content_hash",
+    }
+)
 _OUTPUT_FIELDS = frozenset(
     {
         "schema_version",
@@ -89,6 +107,7 @@ _OUTPUT_FIELDS = frozenset(
         "strategy_version",
         "strategy_ref",
         "dataset_ref",
+        "workspace_ref",
         "source_row_count",
         "maximum_equivalence_rows",
         "equivalence",
@@ -106,6 +125,37 @@ _ARTIFACT_FIELDS = frozenset(
         "filename",
         "content_hash",
         "download_url",
+    }
+)
+_ARTIFACT_RECORD_FIELDS = frozenset(
+    {
+        "id",
+        "task_id",
+        "kind",
+        "path",
+        "content_hash",
+        "origin_tool",
+        "provenance",
+        "created_at",
+    }
+)
+_ARTIFACT_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "producer_version",
+        "task_id",
+        "delivery_id",
+        "strategy_ref",
+        "dataset_ref",
+        "workspace_ref",
+        "maximum_equivalence_rows",
+        "equivalence_ref",
+        "not_applied",
+        "not_adopted",
+        "not_deployed",
+        "format_key",
+        "artifact_kind",
+        "artifact_content_hash",
     }
 )
 _FILE_CONTRACT = {
@@ -136,7 +186,6 @@ _SAFE_TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MAX_INPUT_BYTES = 64 * 1024
 _MAX_DELIVERY_ARTIFACT_BYTES = 64 * 1024 * 1024
 _BOUNDARY_ERRORS = (
-    ArtifactTransactionError,
     DatasetContentDriftError,
     TaskArtifactConflictError,
     TaskArtifactDataError,
@@ -146,6 +195,816 @@ _BOUNDARY_ERRORS = (
 
 class StrategyDeliveryToolError(StrategyDeliveryError):
     """The governed delivery request or one of its exact bindings is invalid."""
+
+
+@dataclass
+class _SecureStagedDeliveryFile:
+    """One delivery file staged and promoted only through held directory fds."""
+
+    stage_name: str
+    final_name: str
+    stage_path: Path
+    final_path: Path
+    stage_identity: tuple[int, int]
+    promoted_identity: tuple[int, int] | None = None
+    final_created: bool = False
+    discarded: bool = False
+
+    @property
+    def path(self) -> Path:
+        return self.stage_path
+
+
+class _SecureDeliveryUnitOfWork:
+    """Directory-fd-relative delivery publication with rollback.
+
+    The task, strategy-delivery, output, and staging directories stay open for
+    the whole filesystem/SQLite boundary. Every create, read, link, unlink,
+    and rollback is relative to those descriptors, so replacing any named
+    parent after validation cannot redirect publication outside the directory
+    chain that was authenticated.
+    """
+
+    def __init__(
+        self,
+        tasks_root: Path,
+        *,
+        task_id: str,
+        delivery_id: str,
+    ) -> None:
+        self.tasks_root = Path(tasks_root).absolute()
+        self.task_id = task_id
+        self.delivery_id = delivery_id
+        self.output_dir = (
+            self.tasks_root
+            / task_id
+            / "strategy_delivery"
+            / delivery_id
+        )
+        self._root_fd = -1
+        self._task_fd = -1
+        self._delivery_root_fd = -1
+        self._output_fd = -1
+        self._staging_fd = -1
+        self._root_identity: tuple[int, int] | None = None
+        self._task_identity: tuple[int, int] | None = None
+        self._delivery_root_identity: tuple[int, int] | None = None
+        self._output_identity: tuple[int, int] | None = None
+        self._staging_identity: tuple[int, int] | None = None
+        self._items: list[_SecureStagedDeliveryFile] = []
+        self._committed = False
+        self._closed = False
+        try:
+            self._open_chain()
+        except Exception:
+            self.close()
+            raise
+
+    def _open_chain(self) -> None:
+        if (
+            Path(self.task_id).name != self.task_id
+            or self.task_id in {".", ".."}
+            or _DELIVERY_ID_RE.fullmatch(self.delivery_id) is None
+        ):
+            raise StrategyDeliveryToolError(
+                "strategy delivery output identity is unsafe"
+            )
+        try:
+            self.tasks_root.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise StrategyDeliveryToolError(
+                "strategy delivery task root is unavailable"
+            ) from exc
+        self._root_fd, self._root_identity = _open_root_delivery_directory(
+            self.tasks_root,
+            "strategy delivery task root",
+        )
+        self._task_fd, self._task_identity = _open_or_create_delivery_directory(
+            self._root_fd,
+            self.task_id,
+            "strategy delivery task directory",
+        )
+        (
+            self._delivery_root_fd,
+            self._delivery_root_identity,
+        ) = _open_or_create_delivery_directory(
+            self._task_fd,
+            "strategy_delivery",
+            "strategy delivery root",
+        )
+        self._output_fd, self._output_identity = (
+            _open_or_create_delivery_directory(
+                self._delivery_root_fd,
+                self.delivery_id,
+                "strategy delivery output directory",
+            )
+        )
+        self._staging_fd, self._staging_identity = (
+            _open_or_create_delivery_directory(
+                self._output_fd,
+                ".staging",
+                "strategy delivery staging directory",
+            )
+        )
+        self.assert_attached(include_staging=True)
+
+    def assert_attached(self, *, include_staging: bool = False) -> None:
+        if self._closed:
+            raise StrategyDeliveryToolError(
+                "strategy delivery directory chain is closed"
+            )
+        try:
+            root_now = os.lstat(self.tasks_root)
+            _require_directory_identity(
+                root_now,
+                self._root_identity,
+                "strategy delivery task root",
+            )
+            _require_named_directory_identity(
+                self._root_fd,
+                self.task_id,
+                self._task_identity,
+                "strategy delivery task directory",
+            )
+            _require_named_directory_identity(
+                self._task_fd,
+                "strategy_delivery",
+                self._delivery_root_identity,
+                "strategy delivery root",
+            )
+            _require_named_directory_identity(
+                self._delivery_root_fd,
+                self.delivery_id,
+                self._output_identity,
+                "strategy delivery output directory",
+            )
+            if include_staging:
+                _require_named_directory_identity(
+                    self._output_fd,
+                    ".staging",
+                    self._staging_identity,
+                    "strategy delivery staging directory",
+                )
+        except StrategyDeliveryToolError:
+            raise
+        except OSError as exc:
+            raise StrategyDeliveryToolError(
+                "strategy delivery directory chain changed during publication"
+            ) from exc
+
+    def stage_file(
+        self,
+        final_name: str,
+    ) -> _SecureStagedDeliveryFile:
+        if Path(final_name).name != final_name or final_name in {".", ".."}:
+            raise StrategyDeliveryToolError(
+                "strategy delivery filename is unsafe"
+            )
+        self.assert_attached(include_staging=True)
+        token = uuid.uuid4().hex
+        stage_name = f"{Path(final_name).stem}.{token}{Path(final_name).suffix}"
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                stage_name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=self._staging_fd,
+            )
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise StrategyDeliveryToolError(
+                    "strategy delivery staging target is not a regular file"
+                )
+            identity = _directory_entry_identity(metadata)
+        except StrategyDeliveryToolError:
+            raise
+        except OSError as exc:
+            raise StrategyDeliveryToolError(
+                "strategy delivery artifact could not be staged safely"
+            ) from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        artifact = _SecureStagedDeliveryFile(
+            stage_name=stage_name,
+            final_name=final_name,
+            stage_path=self.output_dir / ".staging" / stage_name,
+            final_path=self.output_dir / final_name,
+            stage_identity=identity,
+        )
+        self._items.append(artifact)
+        self.assert_attached(include_staging=True)
+        return artifact
+
+    def write_stage(
+        self,
+        artifact: _SecureStagedDeliveryFile,
+        payload: bytes,
+    ) -> None:
+        self.assert_attached(include_staging=True)
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                artifact.stage_name,
+                os.O_WRONLY
+                | os.O_TRUNC
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=self._staging_fd,
+            )
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or _directory_entry_identity(metadata)
+                != artifact.stage_identity
+            ):
+                raise StrategyDeliveryToolError(
+                    "strategy delivery staging target changed"
+                )
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
+            view = memoryview(payload)
+            written = 0
+            while written < len(view):
+                count = os.write(descriptor, view[written:])
+                if count <= 0:
+                    raise OSError("short strategy delivery artifact write")
+                written += count
+        except StrategyDeliveryToolError:
+            raise
+        except OSError as exc:
+            raise StrategyDeliveryToolError(
+                "strategy delivery artifact could not be staged safely"
+            ) from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        _require_exact_delivery_entry(
+            self._staging_fd,
+            artifact.stage_name,
+            expected=payload,
+            expected_hash=hashlib.sha256(payload).hexdigest(),
+            expected_identity=artifact.stage_identity,
+        )
+        self.assert_attached(include_staging=True)
+
+    def final_exists(self, artifact: _SecureStagedDeliveryFile) -> bool:
+        self.assert_attached()
+        try:
+            os.stat(
+                artifact.final_name,
+                dir_fd=self._output_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise StrategyDeliveryToolError(
+                "existing strategy delivery artifact is unavailable"
+            ) from exc
+        return True
+
+    def require_final(
+        self,
+        artifact: _SecureStagedDeliveryFile,
+        *,
+        expected: bytes,
+        expected_hash: str,
+    ) -> None:
+        self.assert_attached()
+        _require_exact_delivery_entry(
+            self._output_fd,
+            artifact.final_name,
+            expected=expected,
+            expected_hash=expected_hash,
+        )
+        self.assert_attached()
+
+    def promote_selected(
+        self,
+        *,
+        names: list[str],
+        contents: Mapping[str, bytes],
+        content_hashes: Mapping[str, str],
+        artifacts: Mapping[str, _SecureStagedDeliveryFile],
+    ) -> None:
+        for name in names:
+            artifact = artifacts[name]
+            self._promote_one(artifact)
+            self.require_final(
+                artifact,
+                expected=contents[name],
+                expected_hash=content_hashes[name],
+            )
+
+    def _promote_one(
+        self,
+        artifact: _SecureStagedDeliveryFile,
+    ) -> None:
+        try:
+            self.assert_attached(include_staging=True)
+            _require_regular_delivery_entry_identity(
+                self._staging_fd,
+                artifact.stage_name,
+                artifact.stage_identity,
+                "strategy delivery staging target",
+            )
+            if self.final_exists(artifact):
+                raise StrategyDeliveryToolError(
+                    "strategy delivery final appeared during no-overwrite "
+                    "publication"
+                )
+            os.link(
+                artifact.stage_name,
+                artifact.final_name,
+                src_dir_fd=self._staging_fd,
+                dst_dir_fd=self._output_fd,
+                follow_symlinks=False,
+            )
+            # Record the no-clobber link before any fallible unlink, stat,
+            # identity, or attachment check so rollback owns this final.
+            artifact.final_created = True
+            artifact.promoted_identity = artifact.stage_identity
+            _unlink_known_delivery_entry(
+                self._staging_fd,
+                artifact.stage_name,
+                artifact.stage_identity,
+            )
+            artifact.discarded = True
+            _require_promoted_delivery_entry(
+                self._output_fd,
+                artifact.final_name,
+                artifact.stage_identity,
+            )
+            self.assert_attached(include_staging=True)
+        except StrategyDeliveryToolError:
+            raise
+        except OSError as exc:
+            raise StrategyDeliveryToolError(
+                "strategy delivery artifact promotion failed safely"
+            ) from exc
+
+    def discard_stage(self, artifact: _SecureStagedDeliveryFile) -> None:
+        if artifact.final_created or artifact.discarded:
+            return
+        _unlink_known_delivery_entry(
+            self._staging_fd,
+            artifact.stage_name,
+            artifact.stage_identity,
+        )
+        artifact.discarded = True
+
+    def discard_staged(self) -> None:
+        for artifact in self._items:
+            self.discard_stage(artifact)
+
+    def commit(self) -> None:
+        """Make rollback impossible after SQLite commits the publication."""
+        self._committed = True
+
+    def rollback(self) -> None:
+        if self._committed:
+            return
+        for artifact in reversed(self._items):
+            try:
+                if artifact.final_created:
+                    if artifact.promoted_identity is not None:
+                        _unlink_known_delivery_entry(
+                            self._output_fd,
+                            artifact.final_name,
+                            artifact.promoted_identity,
+                        )
+                if not artifact.discarded:
+                    _unlink_known_delivery_entry(
+                        self._staging_fd,
+                        artifact.stage_name,
+                        artifact.stage_identity,
+                    )
+            except (OSError, StrategyDeliveryToolError):
+                # Preserve the original publication error. Unknown/replaced
+                # entries are deliberately not deleted during compensation.
+                continue
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        for descriptor in (
+            self._staging_fd,
+            self._output_fd,
+            self._delivery_root_fd,
+            self._task_fd,
+            self._root_fd,
+        ):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        self._closed = True
+
+
+class _PathSafeDeliveryUnitOfWork:
+    """Windows-compatible publication when Python lacks dir-fd operations.
+
+    The Windows stdlib cannot hold an open directory chain for relative
+    link/unlink. This backend therefore rejects symlinks, junctions, and
+    other reparse points; records each directory/file identity; and rechecks
+    containment plus identity before and after every filesystem mutation.
+    """
+
+    def __init__(
+        self,
+        tasks_root: Path,
+        *,
+        task_id: str,
+        delivery_id: str,
+    ) -> None:
+        if (
+            Path(task_id).name != task_id
+            or task_id in {".", ".."}
+            or _DELIVERY_ID_RE.fullmatch(delivery_id) is None
+        ):
+            raise StrategyDeliveryToolError(
+                "strategy delivery output identity is unsafe"
+            )
+        self.tasks_root = Path(tasks_root).absolute()
+        self.task_id = task_id
+        self.delivery_id = delivery_id
+        self.task_dir = self.tasks_root / task_id
+        self.delivery_root = self.task_dir / "strategy_delivery"
+        self.output_dir = self.delivery_root / delivery_id
+        self.staging_dir = self.output_dir / ".staging"
+        self._root_identity: tuple[int, int] | None = None
+        self._task_identity: tuple[int, int] | None = None
+        self._delivery_root_identity: tuple[int, int] | None = None
+        self._output_identity: tuple[int, int] | None = None
+        self._staging_identity: tuple[int, int] | None = None
+        self._items: list[_SecureStagedDeliveryFile] = []
+        self._committed = False
+        self._closed = False
+        self._open_chain()
+
+    def _open_chain(self) -> None:
+        self._root_identity = _open_or_create_delivery_path_directory(
+            self.tasks_root,
+            "strategy delivery task root",
+        )
+        resolved_root = _require_delivery_path_directory_identity(
+            self.tasks_root,
+            self._root_identity,
+            "strategy delivery task root",
+        )
+        self._task_identity = _open_or_create_delivery_path_directory(
+            self.task_dir,
+            "strategy delivery task directory",
+        )
+        _require_delivery_child_directory(
+            self.task_dir,
+            self._task_identity,
+            "strategy delivery task directory",
+            resolved_root=resolved_root,
+        )
+        self._delivery_root_identity = (
+            _open_or_create_delivery_path_directory(
+                self.delivery_root,
+                "strategy delivery root",
+            )
+        )
+        _require_delivery_child_directory(
+            self.delivery_root,
+            self._delivery_root_identity,
+            "strategy delivery root",
+            resolved_root=resolved_root,
+        )
+        self._output_identity = _open_or_create_delivery_path_directory(
+            self.output_dir,
+            "strategy delivery output directory",
+        )
+        _require_delivery_child_directory(
+            self.output_dir,
+            self._output_identity,
+            "strategy delivery output directory",
+            resolved_root=resolved_root,
+        )
+        self._staging_identity = _open_or_create_delivery_path_directory(
+            self.staging_dir,
+            "strategy delivery staging directory",
+        )
+        _require_delivery_child_directory(
+            self.staging_dir,
+            self._staging_identity,
+            "strategy delivery staging directory",
+            resolved_root=resolved_root,
+        )
+        self.assert_attached(include_staging=True)
+
+    def assert_attached(self, *, include_staging: bool = False) -> None:
+        if self._closed:
+            raise StrategyDeliveryToolError(
+                "strategy delivery directory chain is closed"
+            )
+        resolved_root = _require_delivery_path_directory_identity(
+            self.tasks_root,
+            self._root_identity,
+            "strategy delivery task root",
+        )
+        for path, identity, label in (
+            (
+                self.task_dir,
+                self._task_identity,
+                "strategy delivery task directory",
+            ),
+            (
+                self.delivery_root,
+                self._delivery_root_identity,
+                "strategy delivery root",
+            ),
+            (
+                self.output_dir,
+                self._output_identity,
+                "strategy delivery output directory",
+            ),
+        ):
+            resolved = _require_delivery_path_directory_identity(
+                path,
+                identity,
+                label,
+            )
+            try:
+                resolved.relative_to(resolved_root)
+            except ValueError as exc:
+                raise StrategyDeliveryToolError(
+                    f"{label} escaped its authenticated task root"
+                ) from exc
+        if include_staging:
+            resolved_staging = _require_delivery_path_directory_identity(
+                self.staging_dir,
+                self._staging_identity,
+                "strategy delivery staging directory",
+            )
+            try:
+                resolved_staging.relative_to(resolved_root)
+            except ValueError as exc:
+                raise StrategyDeliveryToolError(
+                    "strategy delivery staging directory escaped its "
+                    "authenticated task root"
+                ) from exc
+
+    def stage_file(
+        self,
+        final_name: str,
+    ) -> _SecureStagedDeliveryFile:
+        if Path(final_name).name != final_name or final_name in {".", ".."}:
+            raise StrategyDeliveryToolError(
+                "strategy delivery filename is unsafe"
+            )
+        self.assert_attached(include_staging=True)
+        token = uuid.uuid4().hex
+        stage_name = f"{Path(final_name).stem}.{token}{Path(final_name).suffix}"
+        stage_path = self.staging_dir / stage_name
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                stage_path,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOINHERIT", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            opened = os.fstat(descriptor)
+            declared = os.lstat(stage_path)
+            if (
+                _is_delivery_reparse_point(stage_path, declared)
+                or not stat.S_ISREG(opened.st_mode)
+                or _directory_entry_identity(opened)
+                != _directory_entry_identity(declared)
+            ):
+                raise StrategyDeliveryToolError(
+                    "strategy delivery staging target is not a regular file"
+                )
+            identity = _directory_entry_identity(opened)
+        except StrategyDeliveryToolError:
+            raise
+        except OSError as exc:
+            raise StrategyDeliveryToolError(
+                "strategy delivery artifact could not be staged safely"
+            ) from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        artifact = _SecureStagedDeliveryFile(
+            stage_name=stage_name,
+            final_name=final_name,
+            stage_path=stage_path,
+            final_path=self.output_dir / final_name,
+            stage_identity=identity,
+        )
+        self._items.append(artifact)
+        self.assert_attached(include_staging=True)
+        return artifact
+
+    def write_stage(
+        self,
+        artifact: _SecureStagedDeliveryFile,
+        payload: bytes,
+    ) -> None:
+        self.assert_attached(include_staging=True)
+        descriptor = -1
+        try:
+            declared = os.lstat(artifact.stage_path)
+            if (
+                _is_delivery_reparse_point(artifact.stage_path, declared)
+                or not stat.S_ISREG(declared.st_mode)
+                or _directory_entry_identity(declared)
+                != artifact.stage_identity
+            ):
+                raise StrategyDeliveryToolError(
+                    "strategy delivery staging target changed"
+                )
+            descriptor = os.open(
+                artifact.stage_path,
+                os.O_WRONLY
+                | os.O_TRUNC
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOINHERIT", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or _directory_entry_identity(opened)
+                != artifact.stage_identity
+            ):
+                raise StrategyDeliveryToolError(
+                    "strategy delivery staging target changed"
+                )
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
+            view = memoryview(payload)
+            written = 0
+            while written < len(view):
+                count = os.write(descriptor, view[written:])
+                if count <= 0:
+                    raise OSError("short strategy delivery artifact write")
+                written += count
+        except StrategyDeliveryToolError:
+            raise
+        except OSError as exc:
+            raise StrategyDeliveryToolError(
+                "strategy delivery artifact could not be staged safely"
+            ) from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        _require_exact_delivery_path(
+            artifact.stage_path,
+            expected=payload,
+            expected_hash=hashlib.sha256(payload).hexdigest(),
+            expected_identity=artifact.stage_identity,
+        )
+        self.assert_attached(include_staging=True)
+
+    def final_exists(self, artifact: _SecureStagedDeliveryFile) -> bool:
+        self.assert_attached()
+        try:
+            os.lstat(artifact.final_path)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise StrategyDeliveryToolError(
+                "existing strategy delivery artifact is unavailable"
+            ) from exc
+        return True
+
+    def require_final(
+        self,
+        artifact: _SecureStagedDeliveryFile,
+        *,
+        expected: bytes,
+        expected_hash: str,
+    ) -> None:
+        self.assert_attached()
+        _require_exact_delivery_path(
+            artifact.final_path,
+            expected=expected,
+            expected_hash=expected_hash,
+        )
+        self.assert_attached()
+
+    def promote_selected(
+        self,
+        *,
+        names: list[str],
+        contents: Mapping[str, bytes],
+        content_hashes: Mapping[str, str],
+        artifacts: Mapping[str, _SecureStagedDeliveryFile],
+    ) -> None:
+        for name in names:
+            artifact = artifacts[name]
+            self._promote_one(artifact)
+            self.require_final(
+                artifact,
+                expected=contents[name],
+                expected_hash=content_hashes[name],
+            )
+
+    def _promote_one(
+        self,
+        artifact: _SecureStagedDeliveryFile,
+    ) -> None:
+        try:
+            self.assert_attached(include_staging=True)
+            _require_regular_delivery_path_identity(
+                artifact.stage_path,
+                artifact.stage_identity,
+                "strategy delivery staging target",
+            )
+            if self.final_exists(artifact):
+                raise StrategyDeliveryToolError(
+                    "strategy delivery final appeared during no-overwrite "
+                    "publication"
+                )
+            try:
+                os.link(
+                    artifact.stage_path,
+                    artifact.final_path,
+                    follow_symlinks=False,
+                )
+            except (NotImplementedError, TypeError):
+                os.link(artifact.stage_path, artifact.final_path)
+            # Record the no-clobber link before any fallible unlink, stat,
+            # identity, or attachment check so rollback owns this final.
+            artifact.final_created = True
+            artifact.promoted_identity = artifact.stage_identity
+            _unlink_known_delivery_path(
+                artifact.stage_path,
+                artifact.stage_identity,
+            )
+            artifact.discarded = True
+            _require_promoted_delivery_path(
+                artifact.final_path,
+                artifact.stage_identity,
+            )
+            self.assert_attached(include_staging=True)
+        except StrategyDeliveryToolError:
+            raise
+        except OSError as exc:
+            raise StrategyDeliveryToolError(
+                "strategy delivery artifact promotion failed safely"
+            ) from exc
+
+    def discard_stage(self, artifact: _SecureStagedDeliveryFile) -> None:
+        if artifact.final_created or artifact.discarded:
+            return
+        self.assert_attached(include_staging=True)
+        _unlink_known_delivery_path(
+            artifact.stage_path,
+            artifact.stage_identity,
+        )
+        artifact.discarded = True
+        self.assert_attached(include_staging=True)
+
+    def discard_staged(self) -> None:
+        for artifact in self._items:
+            self.discard_stage(artifact)
+
+    def commit(self) -> None:
+        self._committed = True
+
+    def rollback(self) -> None:
+        if self._committed:
+            return
+        for artifact in reversed(self._items):
+            try:
+                self.assert_attached(include_staging=True)
+                if artifact.final_created:
+                    if artifact.promoted_identity is not None:
+                        _unlink_known_delivery_path(
+                            artifact.final_path,
+                            artifact.promoted_identity,
+                        )
+                if not artifact.discarded:
+                    _unlink_known_delivery_path(
+                        artifact.stage_path,
+                        artifact.stage_identity,
+                    )
+            except (OSError, StrategyDeliveryToolError):
+                continue
+
+    def close(self) -> None:
+        self._closed = True
 
 
 def run_export_strategy_delivery(inputs, ctx, runtime) -> dict[str, Any]:
@@ -180,6 +1039,7 @@ def run_export_strategy_delivery(inputs, ctx, runtime) -> dict[str, Any]:
         delivery_id = _delivery_id(
             strategy_ref=request["strategy_ref"],
             dataset_ref=request["dataset_ref"],
+            workspace_ref=request["workspace_ref"],
             maximum_equivalence_rows=request["maximum_equivalence_rows"],
             equivalence=equivalence,
             content_hashes=content_hashes,
@@ -207,6 +1067,7 @@ def validate_export_strategy_delivery_tool_output(
     expected_task_id: str,
     expected_strategy_ref: Mapping[str, Any],
     expected_dataset_ref: Mapping[str, Any],
+    expected_workspace_ref: Mapping[str, Any],
     expected_artifacts: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Validate a Tool output against the exact refs held by its caller."""
@@ -217,6 +1078,10 @@ def validate_export_strategy_delivery_tool_output(
     dataset_ref = _dataset_ref(obj["dataset_ref"])
     trusted_strategy = _strategy_ref(expected_strategy_ref)
     trusted_dataset = _dataset_ref(expected_dataset_ref)
+    trusted_workspace = _workspace_ref(
+        expected_workspace_ref,
+        dataset_ref=trusted_dataset,
+    )
     trusted_artifacts = _artifact_projections(expected_artifacts)
     task_id = _task_id(expected_task_id)
     if strategy_ref != trusted_strategy:
@@ -227,6 +1092,15 @@ def validate_export_strategy_delivery_tool_output(
     if dataset_ref != trusted_dataset:
         raise StrategyDeliveryToolError(
             "export_strategy_delivery dataset_ref does not match its "
+            "authenticated request"
+        )
+    workspace_ref = _workspace_ref(
+        obj["workspace_ref"],
+        dataset_ref=dataset_ref,
+    )
+    if workspace_ref != trusted_workspace:
+        raise StrategyDeliveryToolError(
+            "export_strategy_delivery workspace_ref does not match its "
             "authenticated request"
         )
     if (
@@ -301,6 +1175,7 @@ def validate_export_strategy_delivery_tool_output(
     expected_id = _delivery_id(
         strategy_ref=strategy_ref,
         dataset_ref=dataset_ref,
+        workspace_ref=workspace_ref,
         maximum_equivalence_rows=maximum_rows,
         equivalence=equivalence,
         content_hashes=content_hashes,
@@ -320,9 +1195,158 @@ def validate_export_strategy_delivery_tool_output(
             )
     obj["strategy_ref"] = strategy_ref
     obj["dataset_ref"] = dataset_ref
+    obj["workspace_ref"] = workspace_ref
     obj["equivalence"] = equivalence
     obj["artifacts"] = artifacts
     return obj
+
+
+def validate_strategy_delivery_artifact_records(
+    value: object,
+    *,
+    expected_task_id: str,
+    expected_delivery_id: str,
+    expected_strategy_ref: Mapping[str, Any],
+    expected_dataset_ref: Mapping[str, Any],
+    expected_workspace_ref: Mapping[str, Any],
+    expected_maximum_equivalence_rows: int,
+    expected_equivalence: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    """Authenticate the four registry rows behind a rendered delivery."""
+
+    records = _canonical_object(value, "strategy delivery artifact records")
+    _exact_fields(
+        records,
+        frozenset(_FILE_CONTRACT),
+        "strategy delivery artifact records",
+    )
+    task_id = _task_id(expected_task_id)
+    if (
+        not isinstance(expected_delivery_id, str)
+        or _DELIVERY_ID_RE.fullmatch(expected_delivery_id) is None
+    ):
+        raise StrategyDeliveryToolError(
+            "strategy delivery artifact records have an invalid delivery id"
+        )
+    strategy_ref = _strategy_ref(expected_strategy_ref)
+    dataset_ref = _dataset_ref(expected_dataset_ref)
+    workspace_ref = _workspace_ref(
+        expected_workspace_ref,
+        dataset_ref=dataset_ref,
+    )
+    maximum_rows = _bounded_rows(expected_maximum_equivalence_rows)
+    equivalence = _canonical_object(
+        expected_equivalence,
+        "strategy delivery expected equivalence",
+    )
+    equivalence_ref = {
+        "equivalence_id": _text(
+            equivalence.get("equivalence_id"),
+            "equivalence.equivalence_id",
+        ),
+        "content_hash": _hash(
+            equivalence.get("content_hash"),
+            "equivalence.content_hash",
+        ),
+        "sample_hash": _hash(
+            equivalence.get("sample_hash"),
+            "equivalence.sample_hash",
+        ),
+    }
+    projections: dict[str, dict[str, str]] = {}
+    seen_ids: set[str] = set()
+    for name, contract in _FILE_CONTRACT.items():
+        record = _canonical_object(
+            records[name],
+            f"strategy delivery artifact records.{name}",
+        )
+        _exact_fields(
+            record,
+            _ARTIFACT_RECORD_FIELDS,
+            f"strategy delivery artifact records.{name}",
+        )
+        artifact_id = _hash(
+            record["id"],
+            f"strategy delivery artifact records.{name}.id",
+        )
+        if artifact_id in seen_ids:
+            raise StrategyDeliveryToolError(
+                "strategy delivery artifact records reuse an artifact id"
+            )
+        seen_ids.add(artifact_id)
+        content_hash = _hash(
+            record["content_hash"],
+            f"strategy delivery artifact records.{name}.content_hash",
+        )
+        path = Path(
+            _text(
+                record["path"],
+                f"strategy delivery artifact records.{name}.path",
+            )
+        )
+        canonical_path = Path(os.path.abspath(path))
+        if (
+            record["task_id"] != task_id
+            or record["kind"] != contract["kind"]
+            or record["origin_tool"] != DELIVERY_ORIGIN_TOOL
+            or not path.is_absolute()
+            or path != canonical_path
+            or tuple(canonical_path.parts[-4:])
+            != (
+                task_id,
+                "strategy_delivery",
+                expected_delivery_id,
+                contract["filename"],
+            )
+        ):
+            raise StrategyDeliveryToolError(
+                f"strategy delivery artifact record {name} identity drifted"
+            )
+        expected_artifact_id = _stable_task_artifact_id(
+            task_id=task_id,
+            kind=contract["kind"],
+            path=str(canonical_path),
+        )
+        if artifact_id != expected_artifact_id:
+            raise StrategyDeliveryToolError(
+                f"strategy delivery artifact record {name} stable identity "
+                "drifted"
+            )
+        provenance = _canonical_object(
+            record["provenance"],
+            f"strategy delivery artifact records.{name}.provenance",
+        )
+        _exact_fields(
+            provenance,
+            _ARTIFACT_PROVENANCE_FIELDS,
+            f"strategy delivery artifact records.{name}.provenance",
+        )
+        expected_provenance = {
+            "schema_version": DELIVERY_ARTIFACT_SCHEMA_VERSION,
+            "producer_version": DELIVERY_PRODUCER_VERSION,
+            "task_id": task_id,
+            "delivery_id": expected_delivery_id,
+            "strategy_ref": strategy_ref,
+            "dataset_ref": dataset_ref,
+            "workspace_ref": workspace_ref,
+            "maximum_equivalence_rows": maximum_rows,
+            "equivalence_ref": equivalence_ref,
+            "not_applied": True,
+            "not_adopted": True,
+            "not_deployed": True,
+            "format_key": name,
+            "artifact_kind": contract["kind"],
+            "artifact_content_hash": content_hash,
+        }
+        if provenance != expected_provenance:
+            raise StrategyDeliveryToolError(
+                f"strategy delivery artifact record {name} provenance drifted"
+            )
+        projections[name] = {
+            "artifact_id": artifact_id,
+            "content_hash": content_hash,
+        }
+    return projections
 
 
 def _validate_inputs(value: object) -> dict[str, Any]:
@@ -335,6 +1359,10 @@ def _validate_inputs(value: object) -> dict[str, Any]:
     return {
         "strategy_ref": _strategy_ref(obj["strategy_ref"]),
         "dataset_ref": _dataset_ref(obj["dataset_ref"]),
+        "workspace_ref": _workspace_ref(
+            obj["workspace_ref"],
+            dataset_ref=obj["dataset_ref"],
+        ),
         "maximum_equivalence_rows": _bounded_rows(
             obj["maximum_equivalence_rows"]
         ),
@@ -378,6 +1406,55 @@ def _dataset_ref(value: object) -> dict[str, str]:
     }
 
 
+def _workspace_ref(
+    value: object,
+    *,
+    dataset_ref: object,
+) -> dict[str, Any]:
+    obj = _canonical_object(value, "workspace_ref")
+    _exact_fields(obj, _WORKSPACE_REF_FIELDS, "workspace_ref")
+    trusted_dataset = _dataset_ref(dataset_ref)
+    active_dataset_id = obj["active_dataset_id"]
+    active_content_hash = obj["active_dataset_content_hash"]
+    if (active_dataset_id is None) != (active_content_hash is None):
+        raise StrategyDeliveryToolError(
+            "workspace_ref active dataset id/hash must both be null or present"
+        )
+    if active_dataset_id is not None:
+        active_dataset_id = _text(
+            active_dataset_id,
+            "workspace_ref.active_dataset_id",
+        )
+        active_content_hash = _hash(
+            active_content_hash,
+            "workspace_ref.active_dataset_content_hash",
+        )
+        if (
+            active_dataset_id != trusted_dataset["dataset_id"]
+            or active_content_hash
+            != trusted_dataset["expected_content_hash"]
+        ):
+            raise StrategyDeliveryToolError(
+                "workspace_ref active dataset does not match dataset_ref"
+            )
+    return {
+        "revision": _non_negative_int(
+            obj["revision"],
+            "workspace_ref.revision",
+        ),
+        "analysis_generation": _non_negative_int(
+            obj["analysis_generation"],
+            "workspace_ref.analysis_generation",
+        ),
+        "semantic_mapping_hash": _hash(
+            obj["semantic_mapping_hash"],
+            "workspace_ref.semantic_mapping_hash",
+        ),
+        "active_dataset_id": active_dataset_id,
+        "active_dataset_content_hash": active_content_hash,
+    }
+
+
 def _load_exact_sources(
     runtime,
     *,
@@ -385,15 +1462,16 @@ def _load_exact_sources(
     request: Mapping[str, Any],
 ) -> dict[str, Any]:
     strategy_ref = request["strategy_ref"]
-    strategy = runtime.strategies.get_strategy(strategy_ref["strategy_id"])
-    meta = runtime.strategies.get_strategy_meta(strategy_ref["strategy_id"])
-    spec_hash = runtime.strategies.get_strategy_spec_hash(
+    snapshot = runtime.strategies.get_strategy_snapshot(
         strategy_ref["strategy_id"]
     )
-    if strategy is None or meta is None or spec_hash is None:
+    if snapshot is None:
         raise StrategyDeliveryToolError(
             "strategy does not match the exact delivery request"
         )
+    strategy = snapshot["strategy"]
+    meta = snapshot["metadata"]
+    spec_hash = snapshot["strategy_spec_hash"]
     if (
         meta["task_id"] != task_id
         or meta["strategy_type"] != strategy_ref["expected_strategy_type"]
@@ -403,9 +1481,18 @@ def _load_exact_sources(
         raise StrategyDeliveryToolError(
             "strategy no longer matches the exact delivery request"
         )
-    spec = parse_strategy_spec(
-        strategy.spec or legacy_strategy_to_spec(strategy)
-    ).to_dict()
+    if (
+        strategy.spec is None
+        or not hmac.compare_digest(
+            strategy_spec_hash(strategy.spec),
+            spec_hash,
+        )
+    ):
+        raise StrategyDeliveryToolError(
+            "strategy is not a canonical Strategy DSL snapshot; migrate the "
+            "historical compatibility row before delivery"
+        )
+    spec = parse_strategy_spec(strategy.spec).to_dict()
     if spec["strategy_type"] != strategy_ref["expected_strategy_type"]:
         raise StrategyDeliveryToolError(
             "strategy no longer matches the exact delivery request"
@@ -587,6 +1674,7 @@ def _delivery_id(
     *,
     strategy_ref: Mapping[str, Any],
     dataset_ref: Mapping[str, Any],
+    workspace_ref: Mapping[str, Any],
     maximum_equivalence_rows: int,
     equivalence: Mapping[str, Any],
     content_hashes: Mapping[str, str],
@@ -600,6 +1688,7 @@ def _delivery_id(
         "producer_version": DELIVERY_PRODUCER_VERSION,
         "strategy_ref": dict(strategy_ref),
         "dataset_ref": dict(dataset_ref),
+        "workspace_ref": dict(workspace_ref),
         "maximum_equivalence_rows": maximum_equivalence_rows,
         "equivalence_ref": {
             "equivalence_id": equivalence["equivalence_id"],
@@ -628,24 +1717,12 @@ def _publish_delivery(
     contents: Mapping[str, bytes],
     content_hashes: Mapping[str, str],
 ) -> dict[str, Any]:
-    tasks_root = Path(runtime.settings.tasks_dir).resolve()
-    output_dir = (
-        tasks_root / task_id / "strategy_delivery" / delivery_id
+    tasks_root = Path(runtime.settings.tasks_dir).absolute()
+    uow = _open_delivery_directory_chain(
+        tasks_root,
+        task_id=task_id,
+        delivery_id=delivery_id,
     )
-    try:
-        output_dir.resolve(strict=False).relative_to(tasks_root)
-    except ValueError as exc:
-        raise StrategyDeliveryToolError(
-            "strategy delivery output path escaped the task root"
-        ) from exc
-    uow = ArtifactUnitOfWork()
-    staged = {
-        name: uow.stage_file(
-            output_dir,
-            contract["filename"],
-        )
-        for name, contract in _FILE_CONTRACT.items()
-    }
     provenance_base = {
         "schema_version": DELIVERY_ARTIFACT_SCHEMA_VERSION,
         "producer_version": DELIVERY_PRODUCER_VERSION,
@@ -653,6 +1730,7 @@ def _publish_delivery(
         "delivery_id": delivery_id,
         "strategy_ref": dict(request["strategy_ref"]),
         "dataset_ref": dict(request["dataset_ref"]),
+        "workspace_ref": dict(request["workspace_ref"]),
         "maximum_equivalence_rows": request["maximum_equivalence_rows"],
         "equivalence_ref": {
             "equivalence_id": equivalence["equivalence_id"],
@@ -663,14 +1741,16 @@ def _publish_delivery(
         "not_adopted": True,
         "not_deployed": True,
     }
-    reused = False
+    registry_replay = False
+    records: list[dict[str, Any]]
+    validated_output: dict[str, Any]
     try:
+        staged = {
+            name: uow.stage_file(contract["filename"])
+            for name, contract in _FILE_CONTRACT.items()
+        }
         for name, artifact in staged.items():
-            artifact.path.write_bytes(contents[name])
-            if sha256_file(artifact.path) != content_hashes[name]:
-                raise StrategyDeliveryToolError(
-                    f"staged strategy delivery {name} hash drifted"
-                )
+            uow.write_stage(artifact, contents[name])
         with runtime.task_artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
             _revalidate_sources_on_connection(
@@ -679,11 +1759,10 @@ def _publish_delivery(
                 request=request,
                 source=source,
             )
-            reused = _prepare_delivery_outputs_under_lock(
+            registry_replay = _prepare_delivery_outputs_under_lock(
                 conn,
                 uow=uow,
                 task_id=task_id,
-                tasks_root=tasks_root,
                 staged=staged,
                 contents=contents,
                 content_hashes=content_hashes,
@@ -691,9 +1770,8 @@ def _publish_delivery(
             )
             records = []
             for name, contract in _FILE_CONTRACT.items():
-                _require_exact_delivery_file(
-                    staged[name].final_path,
-                    root=tasks_root,
+                uow.require_final(
+                    staged[name],
                     expected=contents[name],
                     expected_hash=content_hashes[name],
                 )
@@ -721,20 +1799,43 @@ def _publish_delivery(
                 request=request,
                 equivalence=equivalence,
                 records=records,
+                registry_replay=registry_replay,
             )
             for name in _FILE_CONTRACT:
-                _require_exact_delivery_file(
-                    staged[name].final_path,
-                    root=tasks_root,
+                uow.require_final(
+                    staged[name],
                     expected=contents[name],
                     expected_hash=content_hashes[name],
                 )
-        if not reused:
-            uow.commit()
+            uow.assert_attached()
+            validated_output = _build_validated_delivery_output(
+                task_id=task_id,
+                request=request,
+                delivery_id=delivery_id,
+                equivalence=equivalence,
+                records=records,
+            )
     except Exception:
         uow.rollback()
         raise
+    else:
+        # SQLite committed only after the complete public Tool output contract
+        # validated. No-overwrite publication has no post-commit filesystem
+        # cleanup; this only disables rollback.
+        uow.commit()
+    finally:
+        uow.close()
+    return validated_output
 
+
+def _build_validated_delivery_output(
+    *,
+    task_id: str,
+    request: Mapping[str, Any],
+    delivery_id: str,
+    equivalence: Mapping[str, Any],
+    records: list[Mapping[str, Any]],
+) -> dict[str, Any]:
     output = {
         "schema_version": DELIVERY_TOOL_SCHEMA_VERSION,
         "delivery_id": delivery_id,
@@ -744,6 +1845,7 @@ def _publish_delivery(
         "strategy_version": request["strategy_ref"]["expected_version"],
         "strategy_ref": dict(request["strategy_ref"]),
         "dataset_ref": dict(request["dataset_ref"]),
+        "workspace_ref": dict(request["workspace_ref"]),
         "source_row_count": equivalence["source_row_count"],
         "maximum_equivalence_rows": request["maximum_equivalence_rows"],
         "equivalence": dict(equivalence),
@@ -768,6 +1870,7 @@ def _publish_delivery(
         expected_task_id=task_id,
         expected_strategy_ref=request["strategy_ref"],
         expected_dataset_ref=request["dataset_ref"],
+        expected_workspace_ref=request["workspace_ref"],
         expected_artifacts={
             name: {
                 "artifact_id": record["id"],
@@ -782,13 +1885,50 @@ def _publish_delivery(
     )
 
 
+def _open_delivery_directory_chain(
+    tasks_root: Path,
+    *,
+    task_id: str,
+    delivery_id: str,
+) -> _SecureDeliveryUnitOfWork | _PathSafeDeliveryUnitOfWork:
+    backend = (
+        _SecureDeliveryUnitOfWork
+        if _supports_secure_delivery_dir_fds()
+        else _PathSafeDeliveryUnitOfWork
+    )
+    return backend(
+        tasks_root,
+        task_id=task_id,
+        delivery_id=delivery_id,
+    )
+
+
+def _supports_secure_delivery_dir_fds() -> bool:
+    supported = getattr(os, "supports_dir_fd", ())
+    follows = getattr(os, "supports_follow_symlinks", ())
+    return (
+        hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.link in follows
+        and all(
+            function in supported
+            for function in (
+                os.open,
+                os.stat,
+                os.mkdir,
+                os.link,
+                os.unlink,
+            )
+        )
+    )
+
+
 def _prepare_delivery_outputs_under_lock(
     conn,
     *,
-    uow: ArtifactUnitOfWork,
+    uow: _SecureDeliveryUnitOfWork | _PathSafeDeliveryUnitOfWork,
     task_id: str,
-    tasks_root: Path,
-    staged: Mapping[str, Any],
+    staged: Mapping[str, _SecureStagedDeliveryFile],
     contents: Mapping[str, bytes],
     content_hashes: Mapping[str, str],
     provenance_base: Mapping[str, Any],
@@ -830,40 +1970,46 @@ def _prepare_delivery_outputs_under_lock(
                 content_hash=content_hashes[name],
                 provenance=provenance,
             )
-            _require_exact_delivery_file(
-                staged[name].final_path,
-                root=tasks_root,
+            uow.require_final(
+                staged[name],
                 expected=contents[name],
                 expected_hash=content_hashes[name],
             )
-        uow.rollback()
+        uow.discard_staged()
         return True
 
     existing_files = [
         name
         for name in _FILE_CONTRACT
-        if (
-            staged[name].final_path.exists()
-            or staged[name].final_path.is_symlink()
-        )
+        if uow.final_exists(staged[name])
     ]
     if existing_files:
         for name in existing_files:
-            _require_exact_delivery_file(
-                staged[name].final_path,
-                root=tasks_root,
+            uow.require_final(
+                staged[name],
                 expected=contents[name],
                 expected_hash=content_hashes[name],
             )
+            uow.discard_stage(staged[name])
         if len(existing_files) == len(_FILE_CONTRACT):
-            uow.rollback()
-            return True
+            # Exact files with no registry rows are a recoverable crash
+            # boundary: replay rows and create the missing success audit in
+            # this transaction. Only authenticated registry replay requires
+            # an already-persisted audit.
+            return False
 
-    uow.promote_all()
+    missing_files = [
+        name for name in _FILE_CONTRACT if name not in existing_files
+    ]
+    uow.promote_selected(
+        names=missing_files,
+        contents=contents,
+        content_hashes=content_hashes,
+        artifacts=staged,
+    )
     for name in _FILE_CONTRACT:
-        _require_exact_delivery_file(
-            staged[name].final_path,
-            root=tasks_root,
+        uow.require_final(
+            staged[name],
             expected=contents[name],
             expected_hash=content_hashes[name],
         )
@@ -915,31 +2061,409 @@ def _stable_task_artifact_id(
     ).hexdigest()
 
 
-def _require_exact_delivery_file(
+def _directory_entry_identity(
+    value: os.stat_result,
+) -> tuple[int, int]:
+    return (int(value.st_dev), int(value.st_ino))
+
+
+def _delivery_directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _require_directory_identity(
+    metadata: os.stat_result,
+    expected_identity: tuple[int, int] | None,
+    label: str,
+) -> None:
+    if (
+        expected_identity is None
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or _directory_entry_identity(metadata) != expected_identity
+    ):
+        raise StrategyDeliveryToolError(
+            f"{label} changed or became a symlink during publication"
+        )
+
+
+def _open_root_delivery_directory(
+    path: Path,
+    label: str,
+) -> tuple[int, tuple[int, int]]:
+    descriptor = -1
+    try:
+        declared = os.lstat(path)
+        if stat.S_ISLNK(declared.st_mode) or not stat.S_ISDIR(
+            declared.st_mode
+        ):
+            raise StrategyDeliveryToolError(
+                f"{label} must be a regular directory, not a symlink"
+            )
+        descriptor = os.open(path, _delivery_directory_open_flags())
+        opened = os.fstat(descriptor)
+        current = os.lstat(path)
+        identity = _directory_entry_identity(opened)
+        _require_directory_identity(opened, identity, label)
+        _require_directory_identity(declared, identity, label)
+        _require_directory_identity(current, identity, label)
+        return descriptor, identity
+    except StrategyDeliveryToolError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise StrategyDeliveryToolError(
+            f"{label} is unavailable or is a symlink"
+        ) from exc
+
+
+def _open_or_create_delivery_directory(
+    parent_fd: int,
+    name: str,
+    label: str,
+) -> tuple[int, tuple[int, int]]:
+    if Path(name).name != name or name in {".", ".."}:
+        raise StrategyDeliveryToolError(f"{label} has an unsafe name")
+    descriptor = -1
+    try:
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        declared = os.stat(
+            name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if stat.S_ISLNK(declared.st_mode) or not stat.S_ISDIR(
+            declared.st_mode
+        ):
+            raise StrategyDeliveryToolError(
+                f"{label} must be a regular directory, not a symlink"
+            )
+        descriptor = os.open(
+            name,
+            _delivery_directory_open_flags(),
+            dir_fd=parent_fd,
+        )
+        opened = os.fstat(descriptor)
+        current = os.stat(
+            name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        identity = _directory_entry_identity(opened)
+        _require_directory_identity(opened, identity, label)
+        _require_directory_identity(declared, identity, label)
+        _require_directory_identity(current, identity, label)
+        return descriptor, identity
+    except StrategyDeliveryToolError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise StrategyDeliveryToolError(
+            f"{label} is unavailable or is a symlink"
+        ) from exc
+
+
+def _require_named_directory_identity(
+    parent_fd: int,
+    name: str,
+    expected_identity: tuple[int, int] | None,
+    label: str,
+) -> None:
+    metadata = os.stat(
+        name,
+        dir_fd=parent_fd,
+        follow_symlinks=False,
+    )
+    _require_directory_identity(metadata, expected_identity, label)
+
+
+def _require_regular_delivery_entry_identity(
+    directory_fd: int,
+    name: str,
+    expected_identity: tuple[int, int],
+    label: str,
+) -> None:
+    metadata = os.stat(
+        name,
+        dir_fd=directory_fd,
+        follow_symlinks=False,
+    )
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or _directory_entry_identity(metadata) != expected_identity
+    ):
+        raise StrategyDeliveryToolError(
+            f"{label} changed or is not a regular file"
+        )
+
+
+def _require_promoted_delivery_entry(
+    directory_fd: int,
+    name: str,
+    expected_identity: tuple[int, int],
+) -> None:
+    metadata = os.stat(
+        name,
+        dir_fd=directory_fd,
+        follow_symlinks=False,
+    )
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or _directory_entry_identity(metadata) != expected_identity
+    ):
+        raise StrategyDeliveryToolError(
+            "strategy delivery promotion changed its staged file"
+        )
+
+
+def _remove_delivery_entry(directory_fd: int, name: str) -> None:
+    """Remove one already-authenticated delivery entry relative to its fd."""
+
+    os.unlink(name, dir_fd=directory_fd)
+
+
+def _unlink_known_delivery_entry(
+    directory_fd: int,
+    name: str,
+    expected_identity: tuple[int, int],
+) -> None:
+    try:
+        metadata = os.stat(
+            name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or _directory_entry_identity(metadata) != expected_identity
+    ):
+        raise StrategyDeliveryToolError(
+            "strategy delivery cleanup target changed"
+        )
+    _remove_delivery_entry(directory_fd, name)
+
+
+def _is_delivery_reparse_point(
+    path: Path,
+    metadata: os.stat_result,
+) -> bool:
+    file_attributes = int(getattr(metadata, "st_file_attributes", 0))
+    reparse_flag = int(
+        getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+    is_junction = getattr(os.path, "isjunction", None)
+    try:
+        junction = bool(is_junction(path)) if is_junction is not None else False
+    except OSError:
+        junction = True
+    return (
+        stat.S_ISLNK(metadata.st_mode)
+        or bool(file_attributes & reparse_flag)
+        or junction
+    )
+
+
+def _open_or_create_delivery_path_directory(
+    path: Path,
+    label: str,
+) -> tuple[int, int]:
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise StrategyDeliveryToolError(f"{label} is unavailable") from exc
+    try:
+        before = os.lstat(path)
+        if (
+            _is_delivery_reparse_point(path, before)
+            or not stat.S_ISDIR(before.st_mode)
+        ):
+            raise StrategyDeliveryToolError(
+                f"{label} must be a regular directory, not a symlink, "
+                "junction, or reparse point"
+            )
+        path.resolve(strict=True)
+        after = os.lstat(path)
+        identity = _directory_entry_identity(before)
+        if (
+            _is_delivery_reparse_point(path, after)
+            or not stat.S_ISDIR(after.st_mode)
+            or _directory_entry_identity(after) != identity
+        ):
+            raise StrategyDeliveryToolError(
+                f"{label} changed during publication"
+            )
+        return identity
+    except StrategyDeliveryToolError:
+        raise
+    except OSError as exc:
+        raise StrategyDeliveryToolError(f"{label} is unavailable") from exc
+
+
+def _require_delivery_path_directory_identity(
+    path: Path,
+    expected_identity: tuple[int, int] | None,
+    label: str,
+) -> Path:
+    try:
+        before = os.lstat(path)
+        if (
+            expected_identity is None
+            or _is_delivery_reparse_point(path, before)
+            or not stat.S_ISDIR(before.st_mode)
+            or _directory_entry_identity(before) != expected_identity
+        ):
+            raise StrategyDeliveryToolError(
+                f"{label} changed or became a symlink, junction, or "
+                "reparse point during publication"
+            )
+        resolved = path.resolve(strict=True)
+        after = os.lstat(path)
+        if (
+            _is_delivery_reparse_point(path, after)
+            or not stat.S_ISDIR(after.st_mode)
+            or _directory_entry_identity(after) != expected_identity
+        ):
+            raise StrategyDeliveryToolError(
+                f"{label} changed during publication"
+            )
+        return resolved
+    except StrategyDeliveryToolError:
+        raise
+    except OSError as exc:
+        raise StrategyDeliveryToolError(
+            f"{label} changed during publication"
+        ) from exc
+
+
+def _require_delivery_child_directory(
+    path: Path,
+    expected_identity: tuple[int, int] | None,
+    label: str,
+    *,
+    resolved_root: Path,
+) -> None:
+    resolved = _require_delivery_path_directory_identity(
+        path,
+        expected_identity,
+        label,
+    )
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise StrategyDeliveryToolError(
+            f"{label} escaped its authenticated task root"
+        ) from exc
+
+
+def _require_regular_delivery_path_identity(
+    path: Path,
+    expected_identity: tuple[int, int],
+    label: str,
+) -> None:
+    try:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        raise StrategyDeliveryToolError(f"{label} is unavailable") from exc
+    if (
+        _is_delivery_reparse_point(path, metadata)
+        or not stat.S_ISREG(metadata.st_mode)
+        or _directory_entry_identity(metadata) != expected_identity
+    ):
+        raise StrategyDeliveryToolError(
+            f"{label} changed or is not a regular file"
+        )
+
+
+def _require_promoted_delivery_path(
+    path: Path,
+    expected_identity: tuple[int, int],
+) -> None:
+    metadata = os.lstat(path)
+    if (
+        _is_delivery_reparse_point(path, metadata)
+        or not stat.S_ISREG(metadata.st_mode)
+        or _directory_entry_identity(metadata) != expected_identity
+    ):
+        raise StrategyDeliveryToolError(
+            "strategy delivery promotion changed its staged file"
+        )
+
+
+def _remove_delivery_path(path: Path) -> None:
+    path.unlink()
+
+
+def _unlink_known_delivery_path(
+    path: Path,
+    expected_identity: tuple[int, int],
+) -> None:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if (
+        _is_delivery_reparse_point(path, metadata)
+        or not stat.S_ISREG(metadata.st_mode)
+        or _directory_entry_identity(metadata) != expected_identity
+    ):
+        raise StrategyDeliveryToolError(
+            "strategy delivery cleanup target changed"
+        )
+    _remove_delivery_path(path)
+
+
+def _require_exact_delivery_path(
     path: Path,
     *,
-    root: Path,
     expected: bytes,
     expected_hash: str,
+    expected_identity: tuple[int, int] | None = None,
 ) -> None:
     descriptor = -1
     try:
-        if not path.is_absolute() or path.is_symlink():
+        declared = os.lstat(path)
+        if (
+            _is_delivery_reparse_point(path, declared)
+            or not stat.S_ISREG(declared.st_mode)
+        ):
             raise StrategyDeliveryToolError(
                 "existing strategy delivery artifact must be a regular file"
             )
-        resolved_root = root.resolve(strict=True)
-        path.resolve(strict=True).relative_to(resolved_root)
-        flags = (
+        descriptor = os.open(
+            path,
             os.O_RDONLY
             | getattr(os, "O_BINARY", 0)
             | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NOINHERIT", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
         )
-        descriptor = os.open(path, flags)
         before = os.fstat(descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
+            or _directory_entry_identity(declared)
+            != _directory_entry_identity(before)
+            or (
+                expected_identity is not None
+                and _directory_entry_identity(before) != expected_identity
+            )
             or int(before.st_size) < 0
             or int(before.st_size) > _MAX_DELIVERY_ARTIFACT_BYTES
         ):
@@ -965,8 +2489,9 @@ def _require_exact_delivery_file(
         current = os.lstat(path)
         if (
             _stable_file_stat(after) != _stable_file_stat(before)
-            or stat.S_ISLNK(current.st_mode)
-            or _file_identity(current) != _file_identity(before)
+            or _is_delivery_reparse_point(path, current)
+            or _directory_entry_identity(current)
+            != _directory_entry_identity(before)
             or total != int(before.st_size)
             or not hmac.compare_digest(digest.hexdigest(), expected_hash)
             or b"".join(chunks) != expected
@@ -976,7 +2501,92 @@ def _require_exact_delivery_file(
             )
     except StrategyDeliveryToolError:
         raise
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
+        raise StrategyDeliveryToolError(
+            "existing strategy delivery artifact is unavailable"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _require_exact_delivery_entry(
+    directory_fd: int,
+    name: str,
+    *,
+    expected: bytes,
+    expected_hash: str,
+    expected_identity: tuple[int, int] | None = None,
+) -> None:
+    descriptor = -1
+    try:
+        declared = os.stat(
+            name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISREG(declared.st_mode):
+            raise StrategyDeliveryToolError(
+                "existing strategy delivery artifact must be a regular file"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or _directory_entry_identity(declared)
+            != _directory_entry_identity(before)
+            or (
+                expected_identity is not None
+                and _directory_entry_identity(before) != expected_identity
+            )
+            or int(before.st_size) < 0
+            or int(before.st_size) > _MAX_DELIVERY_ARTIFACT_BYTES
+        ):
+            raise StrategyDeliveryToolError(
+                "existing strategy delivery artifact must be a bounded "
+                "regular file"
+            )
+        chunks: list[bytes] = []
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_DELIVERY_ARTIFACT_BYTES:
+                raise StrategyDeliveryToolError(
+                    "existing strategy delivery artifact exceeds byte budget"
+                )
+            digest.update(chunk)
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        current = os.stat(
+            name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if (
+            _stable_file_stat(after) != _stable_file_stat(before)
+            or stat.S_ISLNK(current.st_mode)
+            or _directory_entry_identity(current)
+            != _directory_entry_identity(before)
+            or total != int(before.st_size)
+            or not hmac.compare_digest(digest.hexdigest(), expected_hash)
+            or b"".join(chunks) != expected
+        ):
+            raise StrategyDeliveryToolError(
+                "existing strategy delivery artifact bytes changed"
+            )
+    except StrategyDeliveryToolError:
+        raise
+    except OSError as exc:
         raise StrategyDeliveryToolError(
             "existing strategy delivery artifact is unavailable"
         ) from exc
@@ -1074,6 +2684,18 @@ def _revalidate_sources_on_connection(
         raise StrategyDeliveryToolError(
             "strategy no longer matches the exact delivery request"
         )
+    if any(
+        row[field] is None
+        for field in (
+            "dsl_json",
+            "dsl_schema_version",
+            "dsl_content_hash",
+        )
+    ):
+        raise StrategyDeliveryToolError(
+            "strategy is not a canonical Strategy DSL snapshot; migrate the "
+            "historical compatibility row before delivery"
+        )
     try:
         spec_hash = _strategy_spec_hash_from_row(row)
     except (StrategyError, TypeError, ValueError) as exc:
@@ -1110,11 +2732,76 @@ def _revalidate_sources_on_connection(
         raise StrategyDeliveryToolError(
             "dataset no longer matches the exact delivery request"
         )
+    if _workspace_ref_on_connection(conn, task_id=task_id) != request[
+        "workspace_ref"
+    ]:
+        raise StrategyDeliveryToolError(
+            "DataWorkspace no longer matches the exact delivery request"
+        )
     _require_authenticated_file_hash(
         source["dataset_path"],
         root=source["dataset_root"],
         expected_hash=dataset_ref["expected_content_hash"],
     )
+
+
+def _workspace_ref_on_connection(
+    conn,
+    *,
+    task_id: str,
+) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT revision, active_dataset_id, active_dataset_content_hash,
+               analysis_generation, semantic_mapping_json
+          FROM data_workspaces
+         WHERE task_id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return {
+            "revision": 0,
+            "analysis_generation": 0,
+            "semantic_mapping_hash": data_semantic_mapping_hash(
+                DataSemanticMapping()
+            ),
+            "active_dataset_id": None,
+            "active_dataset_content_hash": None,
+        }
+    try:
+        raw_mapping = str(row["semantic_mapping_json"])
+        mapping_payload = json.loads(raw_mapping)
+        if raw_mapping != _canonical_json(mapping_payload):
+            raise ValueError("semantic mapping is not canonical JSON")
+        mapping = data_semantic_mapping_from_dict(mapping_payload)
+        return _workspace_ref(
+            {
+                "revision": int(row["revision"]),
+                "analysis_generation": int(row["analysis_generation"]),
+                "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+                "active_dataset_id": row["active_dataset_id"],
+                "active_dataset_content_hash": row[
+                    "active_dataset_content_hash"
+                ],
+            },
+            dataset_ref={
+                "dataset_id": (
+                    row["active_dataset_id"]
+                    if row["active_dataset_id"] is not None
+                    else "__unselected__"
+                ),
+                "expected_content_hash": (
+                    row["active_dataset_content_hash"]
+                    if row["active_dataset_content_hash"] is not None
+                    else "0" * 64
+                ),
+            },
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StrategyDeliveryToolError(
+            "DataWorkspace no longer matches the exact delivery request"
+        ) from exc
 
 
 def _artifact_output(
@@ -1149,6 +2836,7 @@ def _validate_artifacts(value: object, *, task_id: str | None) -> list[dict]:
             "export_strategy_delivery artifacts are invalid"
         )
     normalized: list[dict] = []
+    artifact_ids: set[str] = set()
     for index, (name, contract) in enumerate(_FILE_CONTRACT.items()):
         artifact = _canonical_object(
             value[index],
@@ -1159,6 +2847,11 @@ def _validate_artifacts(value: object, *, task_id: str | None) -> list[dict]:
             artifact["artifact_id"],
             f"artifacts[{index}].artifact_id",
         )
+        if artifact_id in artifact_ids:
+            raise StrategyDeliveryToolError(
+                "export_strategy_delivery artifact ids must be unique"
+            )
+        artifact_ids.add(artifact_id)
         expected = {
             "artifact_id": artifact_id,
             "kind": contract["kind"],
@@ -1227,11 +2920,13 @@ def _write_or_require_delivery_audit(
     request: Mapping[str, Any],
     equivalence: Mapping[str, Any],
     records: list[Mapping[str, Any]],
+    registry_replay: bool,
 ) -> None:
     detail = {
         "task_id": task_id,
         "strategy_ref": dict(request["strategy_ref"]),
         "dataset_ref": dict(request["dataset_ref"]),
+        "workspace_ref": dict(request["workspace_ref"]),
         "equivalence_id": equivalence["equivalence_id"],
         "artifact_ids": [record["id"] for record in records],
         "not_applied": True,
@@ -1248,7 +2943,19 @@ def _write_or_require_delivery_audit(
         """,
         (delivery_id, request_hash),
     ).fetchall()
-    if not rows:
+    delivery_rows = [
+        row
+        for row in rows
+        if not (
+            str(row["kind"]) in {"tool.invoke.started", "tool.invoke"}
+            and str(row["target_ref"]) == DELIVERY_ORIGIN_TOOL
+        )
+    ]
+    if not delivery_rows:
+        if registry_replay:
+            raise StrategyDeliveryToolError(
+                "existing strategy delivery audit changed"
+            )
         _write_audit_row(
             conn,
             kind=DELIVERY_AUDIT_KIND,
@@ -1260,19 +2967,19 @@ def _write_or_require_delivery_audit(
         return
     try:
         persisted_detail = (
-            json.loads(str(rows[0]["detail_json"]))
-            if len(rows) == 1
+            json.loads(str(delivery_rows[0]["detail_json"]))
+            if len(delivery_rows) == 1
             else None
         )
     except (TypeError, ValueError, json.JSONDecodeError):
         persisted_detail = None
     if (
-        len(rows) != 1
-        or str(rows[0]["kind"]) != DELIVERY_AUDIT_KIND
-        or str(rows[0]["target_ref"]) != delivery_id
-        or str(rows[0]["inputs_hash"]) != request_hash
-        or str(rows[0]["actor"]) != "system"
-        or str(rows[0]["outcome"]) != "succeeded"
+        len(delivery_rows) != 1
+        or str(delivery_rows[0]["kind"]) != DELIVERY_AUDIT_KIND
+        or str(delivery_rows[0]["target_ref"]) != delivery_id
+        or str(delivery_rows[0]["inputs_hash"]) != request_hash
+        or str(delivery_rows[0]["actor"]) != "system"
+        or str(delivery_rows[0]["outcome"]) != "succeeded"
         or persisted_detail != detail
     ):
         raise StrategyDeliveryToolError(
@@ -1370,4 +3077,5 @@ __all__ = [
     "StrategyDeliveryToolError",
     "run_export_strategy_delivery",
     "validate_export_strategy_delivery_tool_output",
+    "validate_strategy_delivery_artifact_records",
 ]

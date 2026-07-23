@@ -80,6 +80,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_pool_compile",
     "strategy_pool_impact",
     "strategy_impact_cube",
+    "strategy_dsl_delivery",
     "strategy_report_bundle_v2",
 )
 LEGACY_REPLAY_STANDARD_STRATEGY_WORKFLOWS = (
@@ -371,6 +372,134 @@ _STRATEGY_REPORT_STATUS_HISTORY_RE = re.compile(
     r"(?:昨天|之前|此前|过去|上次|曾经|历史|已归档|已生成)|"
     r"(?<![A-Za-z0-9_])(?:yesterday|previously|earlier|historical|"
     r"last\s+time|archived|already\s+generated)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_STRATEGY_DSL_DELIVERY_FORMAT_SEQUENCE = (
+    r"(?:Python|SQL|JSON)"
+    r"(?:(?:\s*(?:[、,/+]|和|及|与|and)\s*|\s+)"
+    r"(?:Python|SQL|JSON)){1,2}"
+)
+_STRATEGY_DSL_DELIVERY_SUBJECT_RE = re.compile(
+    r"(?:策略(?:DSL|代码|交付包|交付文件)|"
+    r"策略[^；;。.!?？\n]{0,48}(?:DSL|代码|交付包|交付文件|"
+    + _STRATEGY_DSL_DELIVERY_FORMAT_SEQUENCE
+    + r")|"
+    + _STRATEGY_DSL_DELIVERY_FORMAT_SEQUENCE
+    + r"[^；;。.!?？\n]{0,40}(?:策略|代码|交付)|"
+    r"\bstrategy\b[^;.!?\n]{0,64}(?:DSL|code|delivery|delivery\s+bundle|"
+    + _STRATEGY_DSL_DELIVERY_FORMAT_SEQUENCE
+    + r")\b)",
+    re.IGNORECASE,
+)
+_STRATEGY_DSL_DELIVERY_ACTION_RE = re.compile(
+    r"(?:导出|生成|创建|构建|打包|交付|下载)"
+    r"[^；;。.!?？\n]{0,80}(?:策略(?:DSL|代码|交付)|Python|SQL|JSON)|"
+    r"(?<![A-Za-z0-9_])(?:export|generate|create|build|package|deliver|download)"
+    r"[^;.!?\n]{0,80}\b(?:strategy\s+)?"
+    r"(?:DSL|code|delivery|Python|SQL|JSON)\b",
+    re.IGNORECASE,
+)
+_STRATEGY_DSL_DELIVERY_NEGATED_RE = re.compile(
+    r"(?:不要|不用|无需|先别|先不|暂不|取消|停止|禁止|别|不(?!是))"
+    r"[^；;。.!?？\n]{0,48}(?:导出|生成|创建|构建|打包|交付|下载)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|not|never|cancel|stop)"
+    r"[^;.!?\n]{0,48}(?:export|generate|create|build|package|deliver|download)",
+    re.IGNORECASE,
+)
+_STRATEGY_DSL_DELIVERY_NONCOMMAND_RE = re.compile(
+    r"[?？]|(?:能否|可否|是否|可以吗|能不能|要不要|会不会|如何|怎么|怎样|"
+    r"假设|假如|如果|若|演示|示范|举例|教程|说明一下|解释一下)|"
+    r"(?<![A-Za-z0-9_])(?:can\s+you|could\s+you|would\s+you|"
+    r"should\s+(?:i|we)|is\s+it\s+possible|what\s+if|suppose|assuming|"
+    r"how\s+to|hypothetical(?:ly)?|example|demo|test|tutorial)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_STRATEGY_DSL_DELIVERY_PAST_RE = re.compile(
+    r"(?:昨天|之前|此前|过去|上次|曾经|历史上)|"
+    r"(?:已经|已)\s*(?:导出|生成|创建|构建|打包|交付|下载)|"
+    r"(?<![A-Za-z0-9_])(?:yesterday|previously|earlier|historically|"
+    r"last\s+time|in\s+the\s+past|already\s+(?:exported|generated|created|"
+    r"built|packaged|delivered|downloaded))(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_STRATEGY_DSL_DELIVERY_CURRENT_RE = re.compile(
+    r"(?:现在|本次|这次|重新|再导出|立即|马上)|"
+    r"(?<![A-Za-z0-9_])(?:now|currently|this\s+time|again|re-export)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_STRATEGY_DSL_DELIVERY_CHAIN_RE = re.compile(
+    r"(?:应用|写回|回写|采纳|采用|部署|上线|投产|晋级|生成报告|创建报告|"
+    r"影响测算|训练(?:模型)?|建模|(?:模型|数据)?评分)|"
+    r"(?<![A-Za-z0-9_])(?:apply|write\s*back|adopt|deploy|go[-\s]?live|"
+    r"put\s+into\s+production|promote|generate\s+(?:a\s+)?report|"
+    r"measure\s+impact|train(?:\s+(?:a\s+)?model)?|score)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_STRATEGY_DSL_DELIVERY_CHAIN_NEGATION_RE = re.compile(
+    r"(?:不要|不用|无需|不再|并未|未|不|禁止|避免)\s*$|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|not|never|without)\s*$",
+    re.IGNORECASE,
+)
+_STRATEGY_DSL_DELIVERY_NEGATED_CHAIN_LIST_RE = re.compile(
+    r"(?:不要|不用|无需|不再|禁止|避免|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|never|without))\s*"
+    r"(?:应用|写回|回写|采纳|采用|部署|上线|投产|晋级|生成报告|创建报告|"
+    r"影响测算|训练(?:模型)?|建模|(?:模型|数据)?评分|"
+    r"apply|write\s*back|adopt|deploy|go[-\s]?live|promote|"
+    r"generate\s+(?:a\s+)?report|measure\s+impact|"
+    r"train(?:\s+(?:a\s+)?model)?|score)"
+    r"(?:\s*(?:、|,|，|或|和|及|与|/|\band\b|\bor\b)\s*"
+    r"(?:应用|写回|回写|采纳|采用|部署|上线|投产|晋级|生成报告|创建报告|"
+    r"影响测算|训练(?:模型)?|建模|(?:模型|数据)?评分|"
+    r"apply|write\s*back|adopt|deploy|go[-\s]?live|promote|"
+    r"generate\s+(?:a\s+)?report|measure\s+impact|"
+    r"train(?:\s+(?:a\s+)?model)?|score))*",
+    re.IGNORECASE,
+)
+_STRATEGY_DSL_DELIVERY_PLATFORM_CONTROL_RE = re.compile(
+    r"\b(?:strategy_ref|dataset_ref|workspace_ref|workspace_revision|"
+    r"analysis_generation|semantic_mapping_hash|expected_strategy_type|expected_version|"
+    r"expected_spec_hash|expected_content_hash|maximum_equivalence_rows|"
+    r"source_row_count|sample_count|sample_hash|result_hashes|content_hash|"
+    r"artifact_id|delivery_id|equivalence_id)\b|"
+    r"(?:策略(?:版本|类型|哈希)|样本(?:数据)?(?:ID|哈希)|"
+    r"数据集(?:ID|哈希)|数据哈希|等价(?:校验)?(?:样本)?(?:上限|行数)|"
+    r"产物ID|工件ID)\s*"
+    r"(?:(?:设置|设|指定|调整|改)?(?:为|成)|使用|采用|取|=|:|：)?\s*"
+    r"(?:[-+]?\d+(?:\.\d+)?|[A-Za-z][A-Za-z0-9_.:-]*)|"
+    r"(?:用|使用|采用|指定)\s*(?:数据集|样本数据)\s*"
+    r"(?:(?:为|是)|=|:|：)?\s*[A-Za-z0-9][A-Za-z0-9_.:-]*|"
+    r"(?:审批|准入|拒绝|额度|限额|授信|定价|利率|分群|分层)\s*策略|"
+    r"版本\s*(?:(?:为|是)|=|:|：)?\s*\d+(?!\d)|"
+    r"(?:v(?:ersion)?\s*\d+)[^，,；;。.!?？\n]{0,12}策略|"
+    r"策略[^，,；;。.!?？\n]{0,12}(?:v(?:ersion)?\s*\d+)|"
+    r"\d+\s*行[^，,；;。.!?？\n]{0,12}等价|"
+    r"等价[^，,；;。.!?？\n]{0,12}\d+\s*行|"
+    r"\b(?:strategy\s+(?:version|type|hash)|"
+    r"dataset(?:\s+(?:id|hash))?|data\s+hash|"
+    r"workspace\s+(?:revision|generation)|semantic\s+mapping\s+hash|"
+    r"artifact\s+id)\s*(?:(?:is|to|as)|=|:)?\s*"
+    r"(?:[-+]?\d+(?:\.\d+)?|[A-Za-z][A-Za-z0-9_.:-]*)\b|"
+    r"\b(?:approval|admission|reject(?:ion)?|limit|pricing|segmentation)"
+    r"\s+strategy\b|"
+    r"\b(?:v(?:ersion)?\s*\d+)[^;,.!?\n]{0,20}\bstrategy\b|"
+    r"\bstrategy\b[^;,.!?\n]{0,20}\b(?:v(?:ersion)?\s*\d+)\b|"
+    r"\b(?:use|using|with|select|choose)\s+(?:the\s+)?dataset\s+"
+    r"[A-Za-z0-9][A-Za-z0-9_.:-]*\b|"
+    r"\b\d+\s*[- ]?\s*rows?\b[^;,.!?\n]{0,24}\bequivalence\b|"
+    r"\bequivalence\b[^;,.!?\n]{0,24}\b\d+\s*[- ]?\s*rows?\b|"
+    r"\b(?:maximum|max(?:imum)?|limit(?:ed)?\s+to)\s+\d+\s+"
+    r"(?:equivalence(?:\s+(?:sample|check))?\s+rows?|"
+    r"rows?\s+for\s+equivalence)\b|"
+    r"\bequivalence(?:\s+(?:sample|check))?\s+(?:limit|rows?)\s*"
+    r"(?:(?:is|to)|=|:)?\s*\d+\b",
+    re.IGNORECASE,
+)
+_STRATEGY_DSL_DELIVERY_STRATEGY_ID_RE = re.compile(
+    r"(?<![A-Za-z0-9_])strategy-[A-Za-z0-9][A-Za-z0-9_-]*"
+    r"(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
 _SAMPLE_V2_POPULATION_ROLE_RE = re.compile(
@@ -1944,6 +2073,7 @@ _NON_REPAIRABLE_CLARIFICATION_CODES = frozenset(
         "candidate_economics_incomplete",
         "candidate_requires_observed_economics",
         "strategy_report_bundle_v2_platform_binding_forbidden",
+        "strategy_dsl_delivery_platform_binding_forbidden",
         "strategy_sample_design_v2_native_bootstrap_required",
         "strategy_request_too_complex",
     }
@@ -2791,6 +2921,8 @@ def _validate_standard_workflow_payload(
             normalized = _validate_strategy_model_evidence_v2_inputs(raw_inputs)
         elif workflow == "strategy_report_bundle_v2":
             normalized = _validate_strategy_report_bundle_v2_inputs(raw_inputs)
+        elif workflow == "strategy_dsl_delivery":
+            normalized = _validate_strategy_dsl_delivery_inputs(raw_inputs)
         elif workflow == "strategy_sample_design":
             normalized = _validate_strategy_sample_design_inputs(
                 raw_inputs,
@@ -3009,6 +3141,40 @@ def _validate_strategy_report_bundle_v2_inputs(
             fields=("status",),
         )
     return {"title": title, "status": status}
+
+
+def _validate_strategy_dsl_delivery_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, str]:
+    """Accept only an optional user-owned strategy identifier."""
+
+    workflow = "strategy_dsl_delivery"
+    allowed = {"strategy_id"}
+    unexpected = sorted(set(inputs) - allowed)
+    if unexpected:
+        raise _DraftValidationError(
+            f"{workflow} workflow_inputs 只允许 strategy_id；平台字段 "
+            + "、".join(unexpected)
+            + " 由 Agent 在计划创建时绑定。",
+            code="strategy_dsl_delivery_platform_binding_forbidden",
+            fields=tuple(unexpected),
+        )
+    if "strategy_id" not in inputs:
+        return {}
+    strategy_id = _required_text(
+        inputs["strategy_id"],
+        name="strategy_dsl_delivery strategy_id",
+    )
+    if (
+        len(strategy_id) > 128
+        or _STRATEGY_DSL_DELIVERY_STRATEGY_ID_RE.fullmatch(strategy_id) is None
+    ):
+        raise _DraftValidationError(
+            "strategy_dsl_delivery strategy_id 必须是完整的 strategy-* ID。",
+            code="strategy_dsl_delivery_strategy_id_invalid",
+            fields=("strategy_id",),
+        )
+    return {"strategy_id": strategy_id}
 
 
 def _project_context_text_list(
@@ -6131,6 +6297,17 @@ def _ground_refinement_request(
     whitelist: tuple[str, ...],
 ) -> StrategyRequestCompilation:
     draft = result.draft
+    if utterance_targets_strategy_dsl_delivery(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_dsl_delivery"
+    ):
+        return _clarification(
+            "原话明确要求导出离线策略代码和等价证据，只能编译为 "
+            "strategy_dsl_delivery；不能改路由到通用策略应用、报告、"
+            "采纳或部署。",
+            code="strategy_dsl_delivery_workflow_required",
+            fields=("workflow",),
+        )
     if (
         utterance_targets_strategy_report_bundle_v2(utterance)
         and not (
@@ -6264,6 +6441,8 @@ def _ground_refinement_request(
         )
     if draft.workflow == "strategy_model_evidence_v2":
         return _ground_strategy_model_evidence_v2_request(utterance, result)
+    if draft.workflow == "strategy_dsl_delivery":
+        return _ground_strategy_dsl_delivery_request(utterance, result)
     if draft.workflow == "strategy_report_bundle_v2":
         return _ground_strategy_report_bundle_v2_request(utterance, result)
     if draft.workflow == "strategy_impact_cube":
@@ -6481,6 +6660,100 @@ def utterance_targets_strategy_project_context(utterance: str) -> bool:
         _PROJECT_CONTEXT_SUBJECT_RE.search(utterance)
         and _PROJECT_CONTEXT_ACTION_RE.search(utterance)
     )
+
+
+def utterance_targets_strategy_dsl_delivery(utterance: str) -> bool:
+    """Recognize an explicit offline Strategy DSL delivery request."""
+
+    return bool(
+        _STRATEGY_DSL_DELIVERY_SUBJECT_RE.search(utterance)
+        and _STRATEGY_DSL_DELIVERY_ACTION_RE.search(utterance)
+    )
+
+
+def _ground_strategy_dsl_delivery_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+
+    if _STRATEGY_DSL_DELIVERY_NEGATED_RE.search(utterance):
+        return _clarification(
+            "否定的策略代码导出请求不会创建或执行交付计划；"
+            "请在需要执行时单独发出肯定命令。",
+            code="strategy_dsl_delivery_intent_negated",
+            fields=("delivery_intent",),
+        )
+    if (
+        not utterance_targets_strategy_dsl_delivery(utterance)
+        or _STRATEGY_DSL_DELIVERY_NONCOMMAND_RE.search(utterance)
+        or (
+            _STRATEGY_DSL_DELIVERY_PAST_RE.search(utterance)
+            and _STRATEGY_DSL_DELIVERY_CURRENT_RE.search(utterance) is None
+        )
+    ):
+        return _clarification(
+            "请单独发出一次立即导出当前策略 Python、SQL、JSON 与等价证据的"
+            "肯定命令；问句、假设、演示或仅历史描述不会创建交付。",
+            code="strategy_dsl_delivery_positive_command_required",
+            fields=("delivery_intent",),
+        )
+    if _strategy_dsl_delivery_has_positive_chained_operation(utterance):
+        return _clarification(
+            "本轮只能导出离线策略代码与等价证据；应用、写回、报告、影响测算、"
+            "训练、评分、采纳、晋级或部署必须作为后续独立受治理请求。",
+            code="strategy_dsl_delivery_single_operation_required",
+            fields=("next_action",),
+        )
+    if _STRATEGY_DSL_DELIVERY_PLATFORM_CONTROL_RE.search(utterance):
+        return _clarification(
+            "策略交付只允许用户提供 strategy_id；策略类型、version/spec hash、"
+            "活动数据集及 hash、等价样本预算、artifact id/hash 和结果均由平台绑定。",
+            code="strategy_dsl_delivery_platform_binding_forbidden",
+            fields=("platform_bindings",),
+        )
+
+    mentioned_ids = tuple(
+        dict.fromkeys(
+            match.group(0)
+            for match in _STRATEGY_DSL_DELIVERY_STRATEGY_ID_RE.finditer(
+                utterance
+            )
+        )
+    )
+    selected_id = inputs.get("strategy_id")
+    if selected_id is None:
+        if mentioned_ids:
+            return _clarification(
+                "原话中的完整 strategy_id 必须逐字进入交付请求；平台不会忽略"
+                "已点名策略并改用其他策略。",
+                code="strategy_dsl_delivery_controls_not_grounded",
+                fields=("strategy_id",),
+            )
+    elif mentioned_ids != (selected_id,):
+        return _clarification(
+            "策略交付只能逐字使用原话中唯一完整的 strategy_id；多个 ID、"
+            "遗漏或模型替换都不会执行。",
+            code="strategy_dsl_delivery_controls_not_grounded",
+            fields=("strategy_id",),
+        )
+    return result
+
+
+def _strategy_dsl_delivery_has_positive_chained_operation(
+    utterance: str,
+) -> bool:
+    active_text = _STRATEGY_DSL_DELIVERY_NEGATED_CHAIN_LIST_RE.sub(
+        " ",
+        utterance,
+    )
+    for match in _STRATEGY_DSL_DELIVERY_CHAIN_RE.finditer(active_text):
+        prefix = active_text[max(0, match.start() - 16) : match.start()]
+        if _STRATEGY_DSL_DELIVERY_CHAIN_NEGATION_RE.search(prefix) is None:
+            return True
+    return False
 
 
 def utterance_targets_strategy_report_bundle_v2(utterance: str) -> bool:
@@ -8124,6 +8397,15 @@ def utterance_targets_strategy_impact_cube(utterance: str) -> bool:
 
 def _utterance_targets_strategy_pool_impact(utterance: str) -> bool:
     if _POOL_IMPACT_TARGET_RE.search(utterance) is None:
+        return False
+    if (
+        _POOL_IMPACT_REPORT_ONLY_RE.search(utterance) is not None
+        and _POOL_IMPACT_POSITIVE_INTENT_RE.search(utterance) is None
+        and _POOL_IMPACT_NEGATED_RE.search(utterance) is None
+        and _POOL_IMPACT_NONCOMMAND_RE.search(utterance) is None
+    ):
+        # "加入 Pool，然后生成效果报告" contains both Pool and effect, but
+        # its report clause does not authorize an impact measurement.
         return False
     signals = tuple(
         match
@@ -11587,6 +11869,22 @@ def _standard_workflow_confirmation_text(
             "当前只归集 univariate evidence，不训练模型、不比较模型、不生成月度/OOT 模型证据",
             "不报告、不采纳、不部署",
         ]
+    elif draft.workflow == "strategy_dsl_delivery":
+        details = [
+            "已识别为〔离线 Strategy DSL 交付 Workflow〕",
+            (
+                f"策略 ID：{inputs['strategy_id']}"
+                if "strategy_id" in inputs
+                else "策略 ID：由平台仅在当前任务恰有一个可交付策略时唯一绑定"
+            ),
+            "平台将原子绑定策略类型、version/spec hash 与当前活动 task-owned "
+            "dataset id/content hash",
+            "将生成 Python、DuckDB SQL、canonical JSON 和等价证据四个"
+            "content-hash 固定下载文件",
+            "等价证据会明确显示校验样本数、源数据行数及是否为最多 4096 行的"
+            "受治理有界样本，不会把抽样校验称为全量校验",
+            "本步骤只生成离线代码；不会应用、写回、采纳、晋级或部署策略",
+        ]
     elif draft.workflow == "strategy_report_bundle_v2":
         details = [
             "已识别为〔StrategyReportBundle V2 Workflow〕",
@@ -12567,6 +12865,14 @@ def _user_prompt(
         "由平台在计划创建时精确绑定。报告请求必须是当前、肯定、单步骤命令；问句、否定、"
         "假设、演示、仅历史描述，或同轮串联训练、评分、候选、影响测算、采纳、部署、"
         "上线时必须 clarification。"
+        "对于 strategy_dsl_delivery，workflow_inputs 只能包含用户原话中唯一完整的"
+        "可选 strategy_id；没有 ID 时必须省略，由平台仅在当前任务只有一个可交付策略时"
+        "唯一绑定。strategy_ref、策略类型/version/spec hash、dataset_ref、数据 hash、"
+        "workspace_ref/revision/generation/semantic hash、"
+        "maximum_equivalence_rows、artifact id/hash、等价结果和所有指标均由平台绑定，"
+        "禁止输出。请求必须是当前、肯定、单步骤导出命令；问句、否定、假设、演示、"
+        "仅历史描述，或同轮串联应用、写回、报告、影响测算、训练、评分、采纳、晋级、"
+        "部署时必须 clarification。"
         "对于 automatic_tree_candidate_build，只能抄录用户明确提供的 features、"
         "权重/金额字段、方向和树参数；不得填写平台拥有的数据绑定、目标列、标签策略、"
         "预算、结果、叶子、动作、排名或推荐，也不得串联选叶或 Strategy Pool。"
@@ -12622,6 +12928,12 @@ def _user_prompt(
         "用户未指定分区时省略，由平台选择最新样本设计中全部非空可用分区；"
         "用户未指定维度列时省略，由平台仅绑定唯一确认语义角色。任何原话控制被遗漏、"
         "替换、否定，或同轮串联写回、报告、采纳、晋级、部署时必须澄清。"
+        "对于 strategy_dsl_delivery，只能逐字抄录用户原话中唯一完整的可选"
+        " strategy_id；未点名时必须省略。不得输出 strategy_ref、策略类型/version/"
+        "spec hash、dataset_ref/hash、workspace_ref/revision/generation/"
+        "semantic hash、等价样本预算、artifact id/hash、代码内容、"
+        "等价结果或指标。它只导出离线 Python/SQL/JSON 与明确标注范围的等价证据，"
+        "不得串联应用、写回、报告、影响测算、训练、评分、采纳、晋级或部署。"
         "对于 strategy_pool_impact，只能抄录用户明确的 approval/reject Pool 类型，"
         "可选 absolute/vs_baseline 比较模式、完整 baseline_strategy_id、精确 month_col/"
         "loan_amount_col/overdue_amount_col 和明确的 drop_nan_labels 布尔授权。普通肯定式"
@@ -12721,6 +13033,7 @@ __all__ = [
     "StandardWorkflowRequestDraft",
     "compile_strategy_request",
     "strategy_request_confirmation_text",
+    "utterance_targets_strategy_dsl_delivery",
     "utterance_targets_strategy_project_context",
     "utterance_targets_strategy_report_bundle_v2",
     "utterance_targets_strategy_sample_design",

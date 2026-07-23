@@ -102,6 +102,7 @@ def test_done_strategy_plan_lazily_loads_escaped_artifacts_once_per_plan():
             version: 2,
             asset_status: "adopted_local",
             available: true,
+            download_url: "/api/tasks/task-A/strategy-artifacts/artifact-1/download",
           }}] }};
         }};
         const listTaskArtifactsClient = async () => {{
@@ -113,14 +114,45 @@ def test_done_strategy_plan_lazily_loads_escaped_artifacts_once_per_plan():
               kind: "strategy<script>",
               origin_tool: "strategy.duplicate",
               available: true,
+              download_url: "/api/tasks/task-A/task-artifacts/task-duplicate/download?expected_content_hash={"d" * 64}",
             }},
             {{
               id: "task-analysis-1",
               filename: "profit.csv",
               kind: "profit_csv",
               origin_tool: "strategy.profit_calc",
+              created_at: "2026-07-23T08:00:00Z",
               available: true,
+              download_url: "/api/tasks/task-A/task-artifacts/task-analysis-1/download?expected_content_hash={"a" * 64}",
             }},
+            ...[
+              ["delivery-python-old", "strategy.py", "strategy_delivery_python", "{"5" * 64}"],
+              ["delivery-sql-old", "strategy.sql", "strategy_delivery_sql", "{"6" * 64}"],
+              ["delivery-json-old", "strategy.json", "strategy_delivery_json", "{"7" * 64}"],
+              ["delivery-equivalence-old", "equivalence.json", "strategy_delivery_equivalence_json", "{"8" * 64}"],
+            ].map(([id, filename, kind, contentHash]) => ({{
+              id,
+              filename,
+              kind,
+              origin_tool: "strategy.export_strategy_delivery",
+              created_at: "2026-07-23T08:01:00Z",
+              available: true,
+              download_url: `/api/tasks/task-A/task-artifacts/${{id}}/download?expected_content_hash=${{contentHash}}`,
+            }})),
+            ...[
+              ["delivery-python", "strategy.py", "strategy_delivery_python", "{"1" * 64}"],
+              ["delivery-sql", "strategy.sql", "strategy_delivery_sql", "{"2" * 64}"],
+              ["delivery-json", "strategy.json", "strategy_delivery_json", "{"3" * 64}"],
+              ["delivery-equivalence", "equivalence.json", "strategy_delivery_equivalence_json", "{"4" * 64}"],
+            ].map(([id, filename, kind, contentHash]) => ({{
+              id,
+              filename,
+              kind,
+              origin_tool: "strategy.export_strategy_delivery",
+              created_at: "2026-07-23T08:02:00Z",
+              available: true,
+              download_url: `/api/tasks/task-A/task-artifacts/${{id}}/download?expected_content_hash=${{contentHash}}`,
+            }})),
           ] }};
         }};
         const controller = createPlanRailController({{
@@ -180,9 +212,22 @@ def test_done_strategy_plan_lazily_loads_escaped_artifacts_once_per_plan():
     assert "生产已部署" not in payload["firstHtml"]
     assert "已在生产环境上线" not in payload["firstHtml"]
     assert "artifact-1/download" in payload["firstHtml"]
-    assert "task-artifacts/task-analysis-1/download" in payload["firstHtml"]
+    assert (
+        f"task-artifacts/task-analysis-1/download?expected_content_hash={'a' * 64}"
+        in payload["firstHtml"]
+    )
     assert "task-artifacts/task-duplicate/download" not in payload["firstHtml"]
     assert "任务分析" in payload["firstHtml"]
+    assert "Python" in payload["firstHtml"]
+    assert "DuckDB SQL" in payload["firstHtml"]
+    assert "Strategy JSON" in payload["firstHtml"]
+    assert "Equivalence JSON" in payload["firstHtml"]
+    assert payload["firstHtml"].count("离线交付") == 4
+    for content_hash in ("1" * 64, "2" * 64, "3" * 64, "4" * 64):
+        assert f"?expected_content_hash={content_hash}" in payload["firstHtml"]
+    for content_hash in ("5" * 64, "6" * 64, "7" * 64, "8" * 64):
+        assert f"?expected_content_hash={content_hash}" not in payload["firstHtml"]
+    assert "delivery-python-old/download" not in payload["firstHtml"]
     assert "<img" not in payload["firstHtml"]
     assert "<script>" not in payload["firstHtml"]
     assert "&lt;img" in payload["firstHtml"]

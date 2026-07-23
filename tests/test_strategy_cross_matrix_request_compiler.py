@@ -155,7 +155,7 @@ def test_cross_matrix_compiles_exact_axes_and_methods() -> None:
     assert inputs["x_method"] == "equal_frequency"
     assert inputs["y_feature"] == "score"
     assert inputs["y_method"] == "equal_width"
-    assert llm.calls[0]["prompt_version"] == 31
+    assert llm.calls[0]["prompt_version"] == 32
     assert "cross_matrix_analysis" in llm.calls[0]["system_prompt"]
 
 

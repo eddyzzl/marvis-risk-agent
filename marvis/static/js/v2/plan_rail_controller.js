@@ -931,10 +931,32 @@ export function createPlanRailController({
         const seen = new Set(
           strategyArtifacts.map((item) => `${String(item?.kind || "")}\u0000${String(item?.filename || "")}`),
         );
+        const newestTaskArtifactByKey = new Map();
+        taskArtifacts.forEach((item, index) => {
+          const key = `${String(item?.kind || "")}\u0000${String(item?.filename || "")}`;
+          const createdAt = Date.parse(String(item?.created_at || ""));
+          const candidate = {
+            item,
+            index,
+            createdAt: Number.isFinite(createdAt) ? createdAt : Number.NEGATIVE_INFINITY,
+          };
+          const current = newestTaskArtifactByKey.get(key);
+          if (
+            !current
+            || candidate.createdAt > current.createdAt
+            || (
+              candidate.createdAt === current.createdAt
+              && candidate.index > current.index
+            )
+          ) {
+            newestTaskArtifactByKey.set(key, candidate);
+          }
+        });
         const artifacts = [
           ...strategyArtifacts,
-          ...taskArtifacts.filter((item) => {
+          ...taskArtifacts.filter((item, index) => {
             const key = `${String(item?.kind || "")}\u0000${String(item?.filename || "")}`;
+            if (newestTaskArtifactByKey.get(key)?.index !== index) return false;
             if (seen.has(key)) return false;
             seen.add(key);
             return true;
@@ -968,29 +990,43 @@ export function createPlanRailController({
     return labels[String(status || "")] || "状态未标注";
   }
 
-  function strategyArtifactRowsHtml(artifacts, taskId) {
+  const strategyDeliveryKindLabels = {
+    strategy_delivery_python: "Python",
+    strategy_delivery_sql: "DuckDB SQL",
+    strategy_delivery_json: "Strategy JSON",
+    strategy_delivery_equivalence_json: "Equivalence JSON",
+  };
+
+  function strategyArtifactRowsHtml(artifacts) {
     if (!artifacts.length) {
       return '<p class="strategy-artifacts-empty">计划已完成，当前没有可下载的策略产物。</p>';
     }
     const rows = artifacts.map((artifact) => {
-      const artifactId = String(artifact?.id || "");
       const filename = String(artifact?.filename || "策略产物");
       const kind = String(artifact?.kind || "artifact");
+      const deliveryKind = strategyDeliveryKindLabels[kind] || "";
       const version = artifact?.version == null ? "" : `v${String(artifact.version)}`;
       const taskAnalysis = artifact?.artifact_scope === "task_analysis";
-      const status = taskAnalysis
-        ? String(artifact?.origin_tool || "任务分析产物")
-        : strategyArtifactStatusLabel(artifact?.asset_status);
-      const available = Boolean(artifact?.available && artifactId);
-      const route = taskAnalysis ? "task-artifacts" : "strategy-artifacts";
+      let scope = version;
+      let status = strategyArtifactStatusLabel(artifact?.asset_status);
+      if (taskAnalysis) {
+        scope = "任务分析";
+        status = String(artifact?.origin_tool || "任务分析产物");
+      }
+      if (deliveryKind) {
+        scope = "策略交付";
+        status = "离线交付";
+      }
+      const downloadUrl = String(artifact?.download_url || "");
+      const available = Boolean(artifact?.available && downloadUrl);
       const action = available
-        ? `<a class="button compact secondary strategy-artifact-download" href="/api/tasks/${encodeURIComponent(taskId)}/${route}/${encodeURIComponent(artifactId)}/download" download>下载</a>`
+        ? `<a class="button compact secondary strategy-artifact-download" href="${escapeHtml(downloadUrl)}" download>下载</a>`
         : '<span class="strategy-artifact-unavailable" aria-label="文件不可用">不可用</span>';
       return [
         '<li class="strategy-artifact-row">',
         '<span class="strategy-artifact-copy">',
         `<strong>${escapeHtml(filename)}</strong>`,
-        `<small>${escapeHtml([kind, taskAnalysis ? "任务分析" : version, status].filter(Boolean).join(" · "))}</small>`,
+        `<small>${escapeHtml([deliveryKind || kind, scope, status].filter(Boolean).join(" · "))}</small>`,
         "</span>",
         action,
         "</li>",
@@ -999,7 +1035,7 @@ export function createPlanRailController({
     return `<ul class="strategy-artifact-list">${rows.join("")}</ul>`;
   }
 
-  function strategyArtifactsCardHtml(state, taskId) {
+  function strategyArtifactsCardHtml(state) {
     if (!state) return "";
     if (state.state === "loading") {
       return [
@@ -1036,7 +1072,7 @@ export function createPlanRailController({
       hasAdopted
         ? '<p class="strategy-artifacts-notice">本地采纳仅代表当前 MARVIS 工作区已确认，不代表生产环境已上线。</p>'
         : '<p class="strategy-artifacts-notice">这些文件是当前任务的本地分析产物，不代表策略已采纳或生产环境已上线。</p>',
-      strategyArtifactRowsHtml(artifacts, taskId),
+      strategyArtifactRowsHtml(artifacts),
       "</section>",
     ].join("");
   }
@@ -1047,7 +1083,7 @@ export function createPlanRailController({
   // (data-driver-confirm / data-driver-report-download) — only the mount moves
   // out of the narrow rail into the roomy middle region. Returns "" when there is
   // no driver action to surface (the caller then hides the panel).
-  function planDriverActionsHtml(plan, strategyArtifactState = null, taskId = selectedTaskId()) {
+  function planDriverActionsHtml(plan, strategyArtifactState = null) {
     const cards = [];
     const awaitingStart = plan?.status === "validated" && !isAgentMode?.();
     if (awaitingStart) {
@@ -1072,7 +1108,7 @@ export function createPlanRailController({
         "</section>",
       ].join(""));
     }
-    const strategyArtifactsCard = strategyArtifactsCardHtml(strategyArtifactState, taskId);
+    const strategyArtifactsCard = strategyArtifactsCardHtml(strategyArtifactState);
     if (strategyArtifactsCard) cards.push(strategyArtifactsCard);
     if (!cards.length) return "";
     return `<div class="plan-driver-actions-body">${cards.join("")}</div>`;

@@ -299,7 +299,10 @@ def test_create_plan_endpoint_rejects_handcrafted_novel_strategy_plan_without_pe
             "rule_strategy",
             "strategy_analysis",
             "strategy_development",
+            "strategy_limit_pricing_analysis",
             "strategy_monitoring",
+            "strategy_profit_analysis",
+            "strategy_roll_rate_analysis",
         ],
     }
     assert client.app.state.plan_repo.list_plans_for_task("task-1") == []
@@ -883,6 +886,47 @@ def test_create_app_can_create_strategy_analysis_plan_from_goal(tmp_path):
     ]
     assert [step["title"] for step in plan["steps"] if step["needs_confirmation"]] == ["回测策略"]
     assert [step["title"] for step in plan["steps"] if step["decision_point"]] == ["回测策略"]
+
+
+def test_generic_plan_endpoint_cannot_inject_strategy_dsl_delivery_bindings(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _create_task(app.state.plan_repo.db_path)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/plans",
+        json={
+            "goal": "导出策略代码",
+            "slots": {
+                "strategy_ref": {
+                    "strategy_id": "strategy-forged",
+                    "expected_strategy_type": "approval",
+                    "expected_version": 999,
+                    "expected_spec_hash": "a" * 64,
+                },
+                "dataset_ref": {
+                    "dataset_id": "dataset-forged",
+                    "expected_content_hash": "b" * 64,
+                },
+                "workspace_ref": {
+                    "revision": 0,
+                    "analysis_generation": 0,
+                    "semantic_mapping_hash": "c" * 64,
+                    "active_dataset_id": None,
+                    "active_dataset_content_hash": None,
+                },
+                "maximum_equivalence_rows": 4096,
+            },
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "strategy_plan_entry_not_allowed"
+    assert detail["plan_source"] == "template"
+    assert detail["template_id"] == "strategy_dsl_delivery"
+    assert detail["strategy_tools"] == ["export_strategy_delivery"]
+    assert app.state.plan_repo.list_plans_for_task(task_id) == []
 
 
 def test_create_app_can_create_strategy_development_plan_with_business_contract(tmp_path):

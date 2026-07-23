@@ -319,6 +319,9 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         for tool in manifest.tools
         if tool.name == "measure_strategy_impact_cube"
     )
+    delivery_tool = next(
+        tool for tool in manifest.tools if tool.name == "export_strategy_delivery"
+    )
     run_monitoring_tool = next(
         tool for tool in manifest.tools if tool.name == "run_strategy_monitoring"
     )
@@ -362,6 +365,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "measure_pool_impact",
         "measure_strategy_pool_validation",
         "measure_strategy_impact_cube",
+        "export_strategy_delivery",
         "build_report_bundle_v2",
         "design_strategy_candidate",
         "build_strategy",
@@ -382,7 +386,19 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "apply_monitoring_disposition",
         "render_monitoring_report",
     }
-    assert manifest.version == "0.17.0"
+    assert manifest.version == "0.18.0"
+    assert delivery_tool.determinism == "deterministic"
+    assert delivery_tool.failure_policy == "fail"
+    assert delivery_tool.policy.human_decision_gate == "none"
+    assert delivery_tool.policy.effect_authorization == "none"
+    assert set(delivery_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "read:strategy",
+        "write:artifact",
+    }
+    assert delivery_tool.input_schema["additionalProperties"] is False
+    assert delivery_tool.output_schema["additionalProperties"] is False
     for tool in (project_context_tool, sample_v2_tool, model_evidence_v2_tool):
         assert tool.determinism == "deterministic"
         assert tool.failure_policy == "fail"
@@ -796,7 +812,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "write:artifact",
     }
     assert "manual" in refinement_tool.input_schema["properties"]["method"]["enum"]
-    assert manifest.version == "0.17.0"
+    assert manifest.version == "0.18.0"
     assert "refined univariate asset" in add_pool_tool.summary
     assert "automatic-tree leaf selection" in add_pool_tool.summary
     assert "Voting n-of-k candidate" in add_pool_tool.summary

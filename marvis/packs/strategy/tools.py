@@ -83,6 +83,9 @@ from marvis.packs.strategy.pool_validation_tools import (
 from marvis.packs.strategy.impact_cube_tools import (
     run_measure_strategy_impact_cube,
 )
+from marvis.packs.strategy.dsl_delivery_tools import (
+    run_export_strategy_delivery,
+)
 from marvis.packs.strategy.project_context_tools import run_materialize_project_context
 from marvis.packs.strategy.report_bundle_tools import (
     run_build_strategy_report_bundle_v2,
@@ -906,6 +909,12 @@ def tool_measure_strategy_impact_cube(inputs: dict, ctx) -> dict:
     """Publish unified deterministic impact slices for an exact current Pool."""
 
     return run_measure_strategy_impact_cube(inputs, ctx, _runtime(ctx))
+
+
+def tool_export_strategy_delivery(inputs: dict, ctx) -> dict:
+    """Publish offline Strategy DSL code plus bounded equivalence evidence."""
+
+    return run_export_strategy_delivery(inputs, ctx, _runtime(ctx))
 
 
 def tool_build_report_bundle_v2(inputs: dict, ctx) -> dict:

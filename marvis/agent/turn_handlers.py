@@ -74,6 +74,7 @@ from marvis.agent.strategy_request_compiler import (
     StandardWorkflowRequestDraft,
     StrategyRequestDraft,
     compile_strategy_request,
+    utterance_targets_strategy_dsl_delivery,
     utterance_targets_strategy_impact_cube,
     utterance_targets_strategy_project_context,
     utterance_targets_strategy_report_bundle_v2,
@@ -95,6 +96,7 @@ from marvis.agent_memory.api_support import audit_agent_memory_use_from_store
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.artifacts.transactional import ArtifactTransactionError
 from marvis.data.backend import DataBackend
+from marvis.data.errors import DatasetContentDriftError
 from marvis.data.labels import nan_label_mask
 from marvis.data.registry import DatasetRegistry
 from marvis.data.transform_semantics import effective_transform_semantic_mapping
@@ -160,6 +162,8 @@ from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
     load_verified_cross_matrix_source_artifact_on_connection,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.dsl import strategy_spec_hash
+from marvis.packs.strategy.dsl_delivery import MAX_EQUIVALENCE_ROWS
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.evidence import (
     MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
@@ -1465,6 +1469,7 @@ def dispatch_driver_turn(
     text = str(user_text or "")
     if task.task_type == TASK_TYPE_STRATEGY and (
         utterance_targets_strategy_sample_design(text)
+        or utterance_targets_strategy_dsl_delivery(text)
         or utterance_targets_strategy_report_bundle_v2(text)
         or utterance_targets_strategy_impact_cube(text)
         or _STRATEGY_MODEL_EVIDENCE_V2_REQUEST_RE.search(text) is not None
@@ -1766,7 +1771,8 @@ def _is_strategy_request_intent(text: str) -> bool:
     """Recognize standard strategy requests plus narrow tree-build shorthand."""
 
     return bool(
-        _STRATEGY_AUTOMATIC_TREE_SHORTHAND_RE.search(text)
+        utterance_targets_strategy_dsl_delivery(text)
+        or _STRATEGY_AUTOMATIC_TREE_SHORTHAND_RE.search(text)
         or (
             _STRATEGY_REQUEST_ACTION_RE.search(text)
             and _STRATEGY_REQUEST_SUBJECT_RE.search(text)
@@ -2394,6 +2400,28 @@ def _run_validated_strategy_request(
             task,
             template_id="stored_strategy_report",
             slots={"strategy_id": draft.strategy_id},
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_dsl_delivery"
+    ):
+        if context is None:
+            raise StrategySetupError(
+                "策略代码交付需要当前任务内唯一且已认证的数据集。"
+            )
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_dsl_delivery",
+            slots=_strategy_dsl_delivery_plan_slots(
+                runtime,
+                task,
+                draft,
+                context=context,
+            ),
             auto_start=auto_start,
         )
 
@@ -3509,6 +3537,10 @@ def _standard_workflow_request_preflight(
         # separate preflight read would open a second selection window where
         # current source/report heads could silently rebind.
         return None
+    if draft.workflow == "strategy_dsl_delivery":
+        # Strategy and dataset refs are selected and authenticated together
+        # exactly once immediately before plan creation.
+        return None
     if draft.workflow == "strategy_impact_cube":
         # SampleDesign, Pool and optional current Strategy are selected and
         # authenticated together exactly once immediately before plan creation.
@@ -4376,6 +4408,306 @@ def _strategy_impact_cube_plan_slots(
         "dimension_bindings": dimensions,
         "current_strategy_ref": current_strategy_ref,
         "economics_inputs": economics_inputs,
+    }
+
+
+def _strategy_dsl_delivery_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+    *,
+    context,
+) -> dict[str, object]:
+    """Bind one offline delivery to exact strategy and dataset snapshots."""
+
+    if draft.workflow != "strategy_dsl_delivery":
+        raise StrategySetupError(
+            "Strategy DSL delivery slots 收到了错误的 Workflow。"
+        )
+    requested_id = draft.to_dict()["workflow_inputs"].get("strategy_id")
+    repository = StrategyRepository(runtime.settings.db_path)
+
+    if requested_id is None:
+        try:
+            candidate_ids = [
+                str(meta["id"])
+                for meta in repository.list_meta_for_task(task.id)
+                if isinstance(meta.get("id"), str)
+            ]
+        except Exception as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_dsl_delivery_registry_unavailable",
+                "无法读取当前任务的策略注册表，未创建交付计划。",
+            ) from exc
+        eligible: list[tuple[str, dict, dict[str, object]]] = []
+        for strategy_id in candidate_ids:
+            try:
+                snapshot = repository.get_strategy_snapshot(strategy_id)
+                strategy_ref = _strategy_dsl_delivery_strategy_ref(
+                    snapshot,
+                    task_id=task.id,
+                )
+            except (
+                StrategyError,
+                sqlite3.Error,
+                TypeError,
+                ValueError,
+                _StrategyV2EvidenceSetupError,
+            ):
+                continue
+            eligible.append((strategy_id, snapshot, strategy_ref))
+        if not eligible:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_dsl_delivery_strategy_required",
+                "当前任务没有可交付的 canonical Strategy；请先完成策略构建。",
+            )
+        if len(eligible) != 1:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_dsl_delivery_strategy_ambiguous",
+                "当前任务有多个可交付策略，请在导出命令中明确完整 strategy_id。",
+            )
+        strategy_id, snapshot, strategy_ref = eligible[0]
+    else:
+        strategy_id = str(requested_id)
+        try:
+            snapshot = repository.get_strategy_snapshot(strategy_id)
+        except Exception as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_dsl_delivery_strategy_invalid",
+                "指定策略无法通过当前任务的完整性复核。",
+            ) from exc
+        strategy_ref = _strategy_dsl_delivery_strategy_ref(
+            snapshot,
+            task_id=task.id,
+        )
+
+    dataset_id = getattr(context, "dataset_id", None)
+    dataset_hash = getattr(context, "dataset_content_hash", None)
+    workspace_revision = getattr(context, "workspace_revision", None)
+    workspace_generation = getattr(context, "analysis_generation", None)
+    semantic_mapping_hash = getattr(context, "semantic_mapping_hash", None)
+    if (
+        not isinstance(dataset_id, str)
+        or not dataset_id
+        or not isinstance(dataset_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", dataset_hash) is None
+        or isinstance(workspace_revision, bool)
+        or not isinstance(workspace_revision, int)
+        or workspace_revision < 0
+        or isinstance(workspace_generation, bool)
+        or not isinstance(workspace_generation, int)
+        or workspace_generation < 0
+        or not isinstance(semantic_mapping_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", semantic_mapping_hash) is None
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_dsl_delivery_dataset_invalid",
+            "当前策略样本缺少可认证 dataset/workspace identity。",
+        )
+    try:
+        workspace = DataWorkspaceRepository(
+            runtime.settings.db_path
+        ).get_or_default(task.id)
+    except (
+        DataWorkspaceDataError,
+        KeyError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_dsl_delivery_dataset_invalid",
+            "当前 DataWorkspace 无法通过完整性复核。",
+        ) from exc
+    if (
+        workspace.revision != workspace_revision
+        or workspace.analysis_generation != workspace_generation
+        or data_semantic_mapping_hash(workspace.semantic_mapping)
+        != semantic_mapping_hash
+        or (
+            workspace.active_dataset_id is not None
+            and (
+                workspace.active_dataset_id != dataset_id
+                or workspace.active_dataset_content_hash != dataset_hash
+            )
+        )
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_dsl_delivery_dataset_invalid",
+            "当前活动 DataWorkspace 与已确认的数据上下文不一致。",
+        )
+    workspace_ref = {
+        "revision": workspace_revision,
+        "analysis_generation": workspace_generation,
+        "semantic_mapping_hash": semantic_mapping_hash,
+        "active_dataset_id": workspace.active_dataset_id,
+        "active_dataset_content_hash": (
+            workspace.active_dataset_content_hash
+        ),
+    }
+    _backend, registry = _modeling_data_runtime(runtime.settings)
+    try:
+        dataset = registry.get(dataset_id)
+        registry.resolve_verified_path(dataset_id)
+    except (
+        DatasetContentDriftError,
+        KeyError,
+        OSError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_dsl_delivery_dataset_invalid",
+            "当前策略样本未通过 task ownership、registry 或文件 hash 复核。",
+        ) from exc
+    if (
+        str(dataset.task_id) != task.id
+        or dataset.content_hash != dataset_hash
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_dsl_delivery_dataset_invalid",
+            "当前策略样本不属于本任务或 content hash 已变化。",
+        )
+    dataset_ref = {
+        "dataset_id": dataset_id,
+        "expected_content_hash": dataset_hash,
+    }
+
+    # Close the selection window before plan creation. The Tool repeats the
+    # same exact-ref checks under its publication transaction.
+    try:
+        refreshed_snapshot = repository.get_strategy_snapshot(strategy_id)
+        refreshed_ref = _strategy_dsl_delivery_strategy_ref(
+            refreshed_snapshot,
+            task_id=task.id,
+        )
+        if requested_id is None:
+            refreshed_eligible = []
+            for meta in repository.list_meta_for_task(task.id):
+                candidate_id = meta.get("id")
+                if not isinstance(candidate_id, str):
+                    continue
+                try:
+                    candidate_snapshot = repository.get_strategy_snapshot(
+                        candidate_id
+                    )
+                    candidate_ref = _strategy_dsl_delivery_strategy_ref(
+                        candidate_snapshot,
+                        task_id=task.id,
+                    )
+                except (
+                    StrategyError,
+                    sqlite3.Error,
+                    TypeError,
+                    ValueError,
+                    _StrategyV2EvidenceSetupError,
+                ):
+                    continue
+                refreshed_eligible.append((candidate_id, candidate_ref))
+        refreshed_dataset = registry.get(dataset_id)
+        registry.resolve_verified_path(dataset_id)
+        refreshed_workspace = DataWorkspaceRepository(
+            runtime.settings.db_path
+        ).get_or_default(task.id)
+    except (
+        DataWorkspaceDataError,
+        DatasetContentDriftError,
+        KeyError,
+        OSError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+        _StrategyV2EvidenceSetupError,
+    ) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_dsl_delivery_binding_changed",
+            "策略或活动数据集在计划创建前发生变化；本次未创建交付计划。",
+        ) from exc
+    if (
+        refreshed_ref != strategy_ref
+        or (
+            requested_id is None
+            and refreshed_eligible != [(strategy_id, strategy_ref)]
+        )
+        or refreshed_workspace.revision != workspace_revision
+        or refreshed_workspace.analysis_generation != workspace_generation
+        or data_semantic_mapping_hash(refreshed_workspace.semantic_mapping)
+        != semantic_mapping_hash
+        or (
+            refreshed_workspace.active_dataset_id is not None
+            and (
+                refreshed_workspace.active_dataset_id != dataset_id
+                or refreshed_workspace.active_dataset_content_hash
+                != dataset_hash
+            )
+        )
+        or str(refreshed_dataset.task_id) != task.id
+        or refreshed_dataset.content_hash != dataset_hash
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_dsl_delivery_binding_changed",
+            "策略或活动数据集在计划创建前发生变化；本次未创建交付计划。",
+        )
+
+    return {
+        "strategy_ref": strategy_ref,
+        "dataset_ref": dataset_ref,
+        "workspace_ref": workspace_ref,
+        "maximum_equivalence_rows": MAX_EQUIVALENCE_ROWS,
+    }
+
+
+def _strategy_dsl_delivery_strategy_ref(
+    snapshot: object,
+    *,
+    task_id: str,
+) -> dict[str, object]:
+    if not isinstance(snapshot, Mapping):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_dsl_delivery_strategy_invalid",
+            "策略缺少可认证的原子 snapshot，或不属于当前任务。",
+        )
+    try:
+        strategy = snapshot["strategy"]
+        metadata = snapshot["metadata"]
+        spec_hash = snapshot["strategy_spec_hash"]
+        strategy_id = str(metadata["id"])
+        strategy_type = str(metadata["strategy_type"])
+        version = metadata["version"]
+        canonical_spec_hash = (
+            strategy_spec_hash(strategy.spec)
+            if getattr(strategy, "spec", None) is not None
+            else None
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_dsl_delivery_strategy_invalid",
+            "策略 snapshot 的 identity、type、version 或 spec hash 不完整。",
+        ) from exc
+    if (
+        metadata.get("task_id") != task_id
+        or getattr(strategy, "id", None) != strategy_id
+        or getattr(strategy, "strategy_type", None) != strategy_type
+        or strategy_type
+        not in {"approval", "reject", "limit", "pricing", "segmentation"}
+        or isinstance(version, bool)
+        or not isinstance(version, int)
+        or version < 1
+        or not isinstance(spec_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", spec_hash) is None
+        or canonical_spec_hash != spec_hash
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_dsl_delivery_strategy_invalid",
+            "strategy_id 必须属于当前任务，并带有一致的五类 type、正版本和"
+            " canonical Strategy DSL/spec hash；历史兼容行需先迁移。",
+        )
+    return {
+        "strategy_id": strategy_id,
+        "expected_strategy_type": strategy_type,
+        "expected_version": version,
+        "expected_spec_hash": spec_hash,
     }
 
 

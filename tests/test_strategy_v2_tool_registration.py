@@ -23,7 +23,7 @@ def _manifest_tool(name: str):
         Path(__file__).parents[1] / "marvis" / "packs" / "strategy",
         builtin=True,
     )
-    assert manifest.version == "0.14.0"
+    assert manifest.version == "0.18.0"
     return next(tool for tool in manifest.tools if tool.name == name)
 
 

@@ -6,7 +6,7 @@ message payloads and metadata envelopes returned after those transitions.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from marvis.agent.driver_turn import DriverMessage
@@ -27,9 +27,11 @@ class PlanMessageComposer:
         self,
         *,
         load_output: Callable[[str], Any],
+        load_task_artifact: Callable[[str, str], Any] | None = None,
         latest_failed_step_run_error_kind: Callable[[str], str | None] | None = None,
     ):
         self._load_output = load_output
+        self._load_task_artifact = load_task_artifact
         self._latest_failed_step_run_error_kind = latest_failed_step_run_error_kind
 
     def plan_overview_message(self, plan: Plan) -> DriverMessage:
@@ -123,7 +125,17 @@ class PlanMessageComposer:
         if terminal is not None:
             output = self._safe_output(terminal.id)
             if output is not None:
-                text, tables = render_tool_output(terminal.tool_ref.tool, output)
+                text, tables = render_tool_output(
+                    terminal.tool_ref.tool,
+                    output,
+                    trusted_task_id=plan.task_id,
+                    trusted_inputs=terminal.inputs,
+                    trusted_artifacts=self._trusted_delivery_artifacts(
+                        plan.task_id,
+                        terminal,
+                        output,
+                    ),
+                )
                 if text:
                     parts.append(text)
         meta = {"plan_id": plan.id, "run_seq": run_seq, "tables": tables}
@@ -208,6 +220,38 @@ class PlanMessageComposer:
             return self._load_output(step_id)
         except KeyError:
             return None
+
+    def _trusted_delivery_artifacts(
+        self,
+        task_id: str,
+        step: PlanStep,
+        output: object,
+    ) -> dict[str, dict] | None:
+        if (
+            step.tool_ref.tool != "export_strategy_delivery"
+            or self._load_task_artifact is None
+            or not isinstance(output, Mapping)
+        ):
+            return None
+        artifacts = output.get("artifacts")
+        names = ("python", "sql", "strategy_json", "equivalence_json")
+        if not isinstance(artifacts, list) or len(artifacts) != len(names):
+            return None
+        trusted: dict[str, dict] = {}
+        for name, artifact in zip(names, artifacts, strict=True):
+            if not isinstance(artifact, Mapping):
+                return None
+            artifact_id = artifact.get("artifact_id")
+            if not isinstance(artifact_id, str) or not artifact_id:
+                return None
+            try:
+                record = self._load_task_artifact(task_id, artifact_id)
+            except (KeyError, TypeError, ValueError):
+                return None
+            if not isinstance(record, Mapping):
+                return None
+            trusted[name] = dict(record)
+        return trusted
 
 
 __all__ = ["PlanMessageComposer"]

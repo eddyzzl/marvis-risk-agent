@@ -38,6 +38,7 @@ from marvis.agent.renderers import render_tool_output
 from marvis.governance.errors import AuthorizationError
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.templates import get_template
+from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.strategy_adoption import AdoptionReasonError, normalize_adoption_reason
 
 # A reply counts as confirmation of the current gate only when, after stripping
@@ -178,8 +179,16 @@ class PlanDriver:
         self._llm = llm_client
         self._governance = governance_service
         self._principal = local_principal
+        artifact_repo = (
+            TaskArtifactRepository(self._repo.db_path)
+            if getattr(self._repo, "db_path", None) is not None
+            else None
+        )
         self._composer = PlanMessageComposer(
             load_output=self._safe_output,
+            load_task_artifact=(
+                artifact_repo.get_for_task if artifact_repo is not None else None
+            ),
             latest_failed_step_run_error_kind=self._latest_failed_step_run_error_kind,
         )
         self._gate_execution = GateExecutionAdapter(

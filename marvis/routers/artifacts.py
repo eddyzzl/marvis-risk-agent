@@ -169,6 +169,7 @@ def list_task_artifacts(task_id: str, request: Request) -> dict:
             if integrity_failures[path] is not None:
                 path = None
         artifact_id = str(row.get("id") or "")
+        content_hash = str(row.get("content_hash") or "")
         available = path is not None and bool(artifact_id)
         artifacts.append(
             {
@@ -176,12 +177,14 @@ def list_task_artifacts(task_id: str, request: Request) -> dict:
                 "kind": str(row.get("kind") or ""),
                 "filename": _artifact_filename(row.get("path")),
                 "origin_tool": str(row.get("origin_tool") or ""),
-                "content_hash": str(row.get("content_hash") or ""),
+                "content_hash": content_hash,
                 "created_at": str(row.get("created_at") or ""),
                 "available": available,
                 "download_url": (
                     f"/api/tasks/{quote(task_id, safe='')}/task-artifacts/"
                     f"{quote(artifact_id, safe='')}/download"
+                    "?expected_content_hash="
+                    f"{quote(content_hash, safe='')}"
                     if available
                     else None
                 ),
