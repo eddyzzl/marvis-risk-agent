@@ -1480,7 +1480,7 @@
         "properties": {
           "schema_version": {
             "type": "string",
-            "const": "modeling.train-model-with-evidence-v2-tool.v1"
+            "const": "modeling.train-model-with-evidence-v2-tool.v1.1"
           },
           "experiment_id": {
             "type": "string",
@@ -1500,7 +1500,7 @@
           },
           "score_product": {
             "type": "string",
-            "const": "raw_native_uncalibrated_probability_p_class_1"
+            "const": "raw_native_uncalibrated_bad_probability"
           },
           "sample_design_ref": {
             "type": "object",

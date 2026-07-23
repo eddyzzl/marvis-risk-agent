@@ -18,11 +18,14 @@ from marvis.packs.modeling.contracts import (
     TrainConfig,
 )
 from marvis.packs.modeling.evidence import (
+    LEGACY_RAW_CLASS_ONE_SCORE_PRODUCT,
     MAX_TRAINING_MASK_BYTES,
     MAX_TRAINING_MASK_ROWS,
+    MODEL_TARGET_ENCODING_RULE,
     MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
     MODELING_TRAINING_EVIDENCE_SCHEMA_VERSION,
     NON_FINITE_BOUNDARY_TAG,
+    RAW_BAD_PROBABILITY_SCORE_PRODUCT,
     SAMPLE_DESIGN_BUNDLE_ARTIFACT_KIND,
     SAMPLE_MEMBERSHIP_ARTIFACT_KIND,
     ModelingTrainingEvidenceError,
@@ -347,9 +350,7 @@ def test_builds_task_owned_content_addressed_training_evidence():
         "model_artifact_id": evidence["model_artifact"]["artifact_id"],
     }
     metadata = evidence["model_artifact"]["scoring_metadata"]
-    assert metadata["score_product"] == (
-        "raw_native_uncalibrated_probability_p_class_1"
-    )
+    assert metadata["score_product"] == RAW_BAD_PROBABILITY_SCORE_PRODUCT
     assert metadata["calibration_status"] == "not_applied"
     assert len(evidence["model_artifact"]["scoring_metadata_hash"]) == 64
     binding = evidence["sample_design_binding"]
@@ -378,8 +379,15 @@ def test_freezes_canonical_train_config_target_and_verified_mask_proof():
         "column": "target",
         "good_value": 0,
         "bad_value": 1,
+        "encoded_good_value": 0,
+        "encoded_bad_value": 1,
+        "encoding_rule": MODEL_TARGET_ENCODING_RULE,
+        "encoding_content_hash": training["target"][
+            "encoding_content_hash"
+        ],
         "drop_missing": True,
     }
+    assert len(training["target"]["encoding_content_hash"]) == 64
     splits = training["split_proof"]["splits"]
     assert [item["name"] for item in splits] == ["train", "test", "oot"]
     assert [item["partition"] for item in splits] == [
@@ -546,11 +554,19 @@ def test_rejects_not_matured_or_exploration_only_samples():
         _evidence(bundle=bundle)
 
 
-def test_rejects_single_class_or_empty_training_samples():
-    single_class = build_sample_design_v2_fixture(single_class_development=True)
+@pytest.mark.parametrize(
+    "bundle",
+    [
+        build_sample_design_v2_fixture(single_class_development=True),
+        build_sample_design_v2_fixture(single_class_validation=True),
+    ],
+)
+def test_rejects_single_class_train_or_test_samples(bundle):
     with pytest.raises(ModelingTrainingEvidenceError, match="both good and bad"):
-        _evidence(bundle=single_class)
+        _evidence(bundle=bundle)
 
+
+def test_rejects_empty_training_sample():
     empty = build_sample_design_v2_fixture(empty_development=True)
     with pytest.raises(ModelingTrainingEvidenceError, match="must not be empty"):
         _evidence(bundle=empty)
@@ -694,11 +710,38 @@ def test_rejects_ungoverned_sample_weight_column():
         _evidence(experiment=_experiment(config=config))
 
 
-def test_rejects_reversed_bad_target_without_transformation_artifact():
+def test_accepts_reversed_raw_target_with_explicit_bad_probability_encoding():
     bundle = _custom_bundle(good_value=1, bad_value=0)
+    evidence = _evidence(bundle=bundle)
+    target = evidence["training_contract"]["target"]
 
-    with pytest.raises(ModelingTrainingEvidenceError, match="good_value=0.*bad_value=1"):
-        _evidence(bundle=bundle)
+    assert target["good_value"] == 1
+    assert target["bad_value"] == 0
+    assert target["encoded_good_value"] == 0
+    assert target["encoded_bad_value"] == 1
+    assert target["encoding_rule"] == MODEL_TARGET_ENCODING_RULE
+    assert len(target["encoding_content_hash"]) == 64
+    assert (
+        evidence["model_artifact"]["scoring_metadata"]["score_product"]
+        == RAW_BAD_PROBABILITY_SCORE_PRODUCT
+    )
+
+
+def test_rejects_legacy_ambiguous_class_one_score_product():
+    bundle = build_sample_design_v2_fixture()
+    evidence = _evidence(bundle=bundle)
+    evidence["model_artifact"]["scoring_metadata"]["score_product"] = (
+        LEGACY_RAW_CLASS_ONE_SCORE_PRODUCT
+    )
+
+    with pytest.raises(
+        ModelingTrainingEvidenceError,
+        match="legacy.*class-one.*republish",
+    ):
+        validate_modeling_training_evidence(
+            evidence,
+            sample_design_bundle=bundle,
+        )
 
 
 def test_rejects_ensemble_and_calibrated_score_products():
@@ -944,6 +987,15 @@ def test_rejects_wrong_sample_pair_kind_id_or_bundle_hash():
             "scoring_metadata_hash",
         ),
         (
+            (
+                "training_contract",
+                "target",
+                "encoding_content_hash",
+            ),
+            "0" * 64,
+            "encoding_content_hash",
+        ),
+        (
             ("model_artifact", "model_binary_ref", "content_hash"),
             "0" * 64,
             "evidence_id|content_hash",
@@ -1080,11 +1132,36 @@ def test_zero_bootstrap_count_only_allows_absent_test_ks_ci():
     assert values["test_ks_ci_std"] is None
 
 
-def test_rejects_labeled_single_class_oot_as_insufficient_data():
+def test_labeled_single_class_oot_keeps_psi_but_forbids_label_metrics():
     bundle = _custom_bundle(oot_mode="single_class")
+    single_class_metrics = _metrics(
+        oot_ks=None,
+        oot_auc=None,
+        overfit_train_oot_gap=None,
+        overfit_flag=False,
+    )
 
-    with pytest.raises(ModelingTrainingEvidenceError, match="single-class OOT"):
-        _evidence(bundle=bundle)
+    evidence = _evidence(
+        bundle=bundle,
+        experiment=_experiment(metrics=single_class_metrics),
+    )
+    values = evidence["metrics_snapshot"]["values"]
+    assert values["psi_oot_vs_train"] == 0.07
+    assert values["oot_ks"] is None
+    assert values["oot_auc"] is None
+    assert values["oot_ks_ci_low"] is None
+    assert values["oot_lift_head_10"] is None
+
+    with pytest.raises(
+        ModelingTrainingEvidenceError,
+        match="availability.*OOT label support",
+    ):
+        _evidence(
+            bundle=bundle,
+            experiment=_experiment(
+                metrics=replace(single_class_metrics, oot_auc=0.5)
+            ),
+        )
 
 
 def test_empty_oot_allows_no_label_metrics_and_rejects_fake_ci_or_lift():

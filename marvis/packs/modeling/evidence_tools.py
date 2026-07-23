@@ -55,6 +55,7 @@ from marvis.packs.modeling.evidence import (
     SAMPLE_MEMBERSHIP_ARTIFACT_KIND,
     ModelingTrainingEvidenceError,
     build_model_binary_artifact_ref,
+    build_modeling_target_contract,
     build_modeling_training_evidence,
     build_task_artifact_ref,
     build_training_split_mask_hashes,
@@ -83,10 +84,10 @@ from marvis.repositories.task_artifacts import (
 
 
 TRAIN_MODEL_WITH_EVIDENCE_V2_TOOL_SCHEMA_VERSION = (
-    "modeling.train-model-with-evidence-v2-tool.v1"
+    "modeling.train-model-with-evidence-v2-tool.v1.1"
 )
 TRAINING_EVIDENCE_ARTIFACT_SCHEMA_VERSION = (
-    "modeling.training-evidence-artifact.v1"
+    "modeling.training-evidence-artifact.v1.1"
 )
 TRAIN_MODEL_WITH_EVIDENCE_V2_ORIGIN_TOOL = (
     "modeling.train_model_with_evidence_v2"
@@ -161,6 +162,7 @@ _MODEL_PROVENANCE_FIELDS = frozenset(
         "scoring_metadata_hash",
         "train_config_hash",
         "metrics_snapshot_content_hash",
+        "target_encoding_content_hash",
         "dataset_id",
         "dataset_content_hash",
         "sample_design_id",
@@ -186,6 +188,7 @@ _EVIDENCE_PROVENANCE_FIELDS = frozenset(
         "scoring_metadata_hash",
         "train_config_hash",
         "metrics_snapshot_content_hash",
+        "target_encoding_content_hash",
         "evidence_id",
         "evidence_content_hash",
         "evidence_artifact_content_hash",
@@ -228,6 +231,65 @@ class ModelingTrainingEvidenceArtifactBinding:
     evidence: dict[str, Any]
     model_binary_path: Path
     evidence_path: Path
+
+
+def build_training_evidence_ref(
+    binding: ModelingTrainingEvidenceArtifactBinding,
+) -> dict[str, Any]:
+    """Build the complete authenticated input ref expected by downstream Tools."""
+
+    if not isinstance(binding, ModelingTrainingEvidenceArtifactBinding):
+        raise ModelingError("training-evidence artifact binding is invalid")
+    sample = binding.sample
+    design = sample.bundle["sample_design"]
+    reference = {
+        "sample_design_ref": {
+            "membership_artifact_id": sample.membership_artifact_id,
+            "expected_membership_artifact_content_hash": (
+                sample.membership_artifact_content_hash
+            ),
+            "bundle_artifact_id": sample.bundle_artifact_id,
+            "expected_bundle_artifact_content_hash": (
+                sample.bundle_artifact_content_hash
+            ),
+            "expected_bundle_id": sample.bundle["bundle_id"],
+            "expected_sample_design_id": design["sample_design_id"],
+            "expected_sample_design_content_hash": design["content_hash"],
+        },
+        "model_binary_artifact_id": str(binding.model_binary_record["id"]),
+        "expected_model_binary_artifact_content_hash": str(
+            binding.model_binary_record["content_hash"]
+        ),
+        "evidence_artifact_id": str(binding.evidence_record["id"]),
+        "expected_evidence_artifact_content_hash": str(
+            binding.evidence_record["content_hash"]
+        ),
+        "expected_experiment_id": binding.experiment.id,
+        "expected_model_artifact_id": binding.model_artifact.id,
+        "expected_evidence_id": str(binding.evidence["evidence_id"]),
+        "expected_evidence_content_hash": str(
+            binding.evidence["content_hash"]
+        ),
+    }
+    # Reuse every normal input boundary before exposing the reference.
+    reference["sample_design_ref"] = _sample_ref(
+        reference["sample_design_ref"]
+    )
+    for name in (
+        "model_binary_artifact_id",
+        "expected_model_binary_artifact_content_hash",
+        "evidence_artifact_id",
+        "expected_evidence_artifact_content_hash",
+        "expected_evidence_content_hash",
+    ):
+        reference[name] = _hash(reference[name], name)
+    for name in (
+        "expected_experiment_id",
+        "expected_model_artifact_id",
+        "expected_evidence_id",
+    ):
+        reference[name] = _text(reference[name], name)
+    return reference
 
 
 @dataclass
@@ -308,6 +370,19 @@ def run_train_model_with_evidence_v2(
         risk_frame = frame.loc[risk_mask].copy()
         if risk_frame.empty:
             raise ModelingError("governed risk training population is empty")
+        target_contract = _governed_target_contract(sample)
+        _encode_private_model_target(
+            risk_frame,
+            target_contract=target_contract,
+        )
+        _require_binary_train_test_support(
+            risk_frame,
+            config=config,
+        )
+        single_class_oot = _has_labeled_single_class_oot(
+            risk_frame,
+            config=config,
+        )
         artifact_dir = _artifact_base_dir(runtime.settings, task_id)
         _require_artifact_directory_boundary(
             runtime.settings.tasks_dir,
@@ -330,6 +405,8 @@ def run_train_model_with_evidence_v2(
             config,
             out_dir=training_stage_dir,
         )
+        if single_class_oot:
+            result = _without_single_class_oot_label_metrics(result)
         _, model_hash = _require_staged_recipe_model_binary(
             training_stage_dir,
             artifact=result.artifact,
@@ -568,6 +645,101 @@ def load_modeling_training_evidence_artifacts(
         evidence=evidence,
         model_binary_path=model_path,
         evidence_path=evidence_path,
+    )
+
+
+def require_modeling_training_evidence_artifact_binding_on_connection(
+    conn,
+    binding: ModelingTrainingEvidenceArtifactBinding,
+) -> None:
+    """Re-authenticate training evidence while a downstream writer holds a lock."""
+
+    if not isinstance(binding, ModelingTrainingEvidenceArtifactBinding):
+        raise ModelingError("training-evidence artifact binding is invalid")
+    try:
+        require_strategy_sample_design_v2_artifact_binding_on_connection(
+            conn,
+            binding.sample,
+        )
+    except StrategyError as exc:
+        raise ModelingError(str(exc)) from exc
+
+    _require_task_artifact_row_on_connection(
+        conn,
+        task_id=binding.task_id,
+        record=binding.model_binary_record,
+        name="model binary TaskArtifact",
+    )
+    _require_task_artifact_row_on_connection(
+        conn,
+        task_id=binding.task_id,
+        record=binding.evidence_record,
+        name="training evidence TaskArtifact",
+    )
+    _require_experiment_row_on_connection(conn, binding=binding)
+    _require_model_artifact_row_on_connection(conn, binding=binding)
+
+    tasks_root = binding.model_binary_path.parents[2]
+    artifact_dir = binding.model_binary_path.parent
+    model_path, model_hash = _require_model_binary(
+        tasks_root,
+        task_id=binding.task_id,
+        artifact_dir=artifact_dir,
+        artifact=binding.model_artifact,
+    )
+    if model_path != binding.model_binary_path or not hmac.compare_digest(
+        model_hash,
+        str(binding.model_binary_record["content_hash"]),
+    ):
+        raise ModelingError("model binary file changed before write")
+
+    expected_evidence_path = artifact_dir / (
+        f"{binding.evidence['evidence_id']}.training_evidence.json"
+    )
+    if binding.evidence_path != expected_evidence_path:
+        raise ModelingError("training evidence path changed before write")
+    evidence_raw = _read_regular_file(
+        binding.evidence_path,
+        root=tasks_root,
+        expected_hash=str(binding.evidence_record["content_hash"]),
+        maximum_bytes=MAX_TRAINING_EVIDENCE_JSON_BYTES,
+    )
+    live_evidence = modeling_training_evidence_from_json(
+        evidence_raw,
+        sample_design_bundle=binding.sample.bundle,
+    )
+    if live_evidence != binding.evidence:
+        raise ModelingError("training evidence content changed before write")
+    _require_live_training_snapshot_binding(
+        experiment=binding.experiment,
+        model_artifact=binding.model_artifact,
+        evidence=live_evidence,
+    )
+    _require_provenance(
+        binding.model_binary_record["provenance"],
+        expected=_model_provenance(
+            task_id=binding.task_id,
+            sample=binding.sample,
+            experiment=binding.experiment,
+            model_artifact=binding.model_artifact,
+            model_hash=model_hash,
+        ),
+        fields=_MODEL_PROVENANCE_FIELDS,
+        name="model binary provenance",
+    )
+    _require_provenance(
+        binding.evidence_record["provenance"],
+        expected=_evidence_provenance(
+            task_id=binding.task_id,
+            sample=binding.sample,
+            experiment=binding.experiment,
+            model_artifact=binding.model_artifact,
+            model_record=binding.model_binary_record,
+            evidence=live_evidence,
+            evidence_file_hash=str(binding.evidence_record["content_hash"]),
+        ),
+        fields=_EVIDENCE_PROVENANCE_FIELDS,
+        name="training evidence provenance",
     )
 
 
@@ -1001,12 +1173,11 @@ def _training_config(
 ) -> TrainConfig:
     design = sample.bundle["sample_design"]
     target = design["target_selector"]
-    if target["status"] != "resolved" or (
-        target["good_value"], target["bad_value"]
-    ) != (0, 1):
+    if target["status"] != "resolved":
         raise ModelingError(
-            "first governed training vertical requires resolved good=0, bad=1 target"
+            "governed training requires a resolved binary target"
         )
+    _governed_target_contract(sample)
     target_col = target["column"]
     if request["split_col"] == target_col:
         raise ModelingError("target and split columns must be distinct")
@@ -1056,6 +1227,119 @@ def _training_config(
         eval_metric="ks_auc",
         drop_nan_labels=target["drop_missing"],
     )
+
+
+def _governed_target_contract(
+    sample: StrategySampleDesignV2ArtifactBinding,
+) -> dict[str, Any]:
+    target = sample.bundle["sample_design"]["target_selector"]
+    return build_modeling_target_contract(
+        column=target["column"],
+        good_value=target["good_value"],
+        bad_value=target["bad_value"],
+        drop_missing=target["drop_missing"],
+    )
+
+
+def _encode_private_model_target(
+    frame: pd.DataFrame,
+    *,
+    target_contract: Mapping[str, Any],
+) -> None:
+    """Encode only the private risk frame; the governed source remains raw."""
+
+    column = str(target_contract["column"])
+    raw = frame[column]
+    missing = raw.isna().to_numpy(dtype=np.bool_)
+    bool_values = raw.map(
+        lambda value: isinstance(value, (bool, np.bool_))
+    ).to_numpy(dtype=np.bool_)
+    numeric = pd.to_numeric(raw, errors="coerce").to_numpy(dtype=float)
+    invalid = (
+        (~missing & bool_values)
+        | (~missing & ~np.isfinite(numeric))
+        | (
+            ~missing
+            & (numeric != float(target_contract["good_value"]))
+            & (numeric != float(target_contract["bad_value"]))
+        )
+    )
+    if np.any(invalid):
+        raise ModelingError(
+            "governed target contains non-numeric, non-finite, boolean, or "
+            "out-of-contract values"
+        )
+    encoded = np.full(len(frame), np.nan, dtype=float)
+    encoded[
+        ~missing & (numeric == float(target_contract["good_value"]))
+    ] = float(target_contract["encoded_good_value"])
+    encoded[
+        ~missing & (numeric == float(target_contract["bad_value"]))
+    ] = float(target_contract["encoded_bad_value"])
+    frame[column] = encoded
+
+
+def _has_labeled_single_class_oot(
+    frame: pd.DataFrame,
+    *,
+    config: TrainConfig,
+) -> bool:
+    oot_mask = (
+        frame[config.split_col]
+        .eq(config.split_values["oot"])
+        .fillna(False)
+        .to_numpy(dtype=np.bool_)
+    )
+    target = pd.to_numeric(
+        frame.loc[oot_mask, config.target_col],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    classes = np.unique(target[np.isfinite(target)])
+    return classes.size == 1
+
+
+def _require_binary_train_test_support(
+    frame: pd.DataFrame,
+    *,
+    config: TrainConfig,
+) -> None:
+    for split_name in ("train", "test"):
+        mask = (
+            frame[config.split_col]
+            .eq(config.split_values[split_name])
+            .fillna(False)
+            .to_numpy(dtype=np.bool_)
+        )
+        target = pd.to_numeric(
+            frame.loc[mask, config.target_col],
+            errors="coerce",
+        ).to_numpy(dtype=float)
+        classes = set(target[np.isfinite(target)].tolist())
+        if classes != {0.0, 1.0}:
+            raise ModelingError(
+                f"governed {split_name} split requires both good and bad labels"
+            )
+
+
+def _without_single_class_oot_label_metrics(result):
+    metrics = result.metrics
+    normalized = replace(
+        metrics,
+        oot_ks=None,
+        oot_auc=None,
+        weighted_oot_ks=None,
+        weighted_oot_auc=None,
+        overfit_train_oot_gap=None,
+        overfit_flag=metrics.overfit_train_test_gap > 0.10,
+        oot_ks_ci_low=None,
+        oot_ks_ci_high=None,
+        oot_ks_ci_std=None,
+        oot_lift_head_5=None,
+        oot_lift_tail_5=None,
+        oot_lift_head_10=None,
+        oot_lift_tail_10=None,
+    )
+    return replace(result, metrics=normalized)
 
 
 def _validate_governed_training_weights(
@@ -1306,6 +1590,9 @@ def _model_provenance(
         experiment=experiment,
         model_artifact=model_artifact,
     )
+    target_encoding_hash = _governed_target_contract(sample)[
+        "encoding_content_hash"
+    ]
     return {
         "schema_version": TRAINING_EVIDENCE_ARTIFACT_SCHEMA_VERSION,
         "format": "binary",
@@ -1317,6 +1604,7 @@ def _model_provenance(
         "model_path": model_artifact.model_path,
         "model_binary_artifact_content_hash": model_hash,
         **snapshot_hashes,
+        "target_encoding_content_hash": target_encoding_hash,
         "dataset_id": sample.source_binding.dataset_id,
         "dataset_content_hash": sample.source_binding.dataset_content_hash,
         "sample_design_id": design["sample_design_id"],
@@ -1351,6 +1639,20 @@ def _evidence_provenance(
         model_artifact=model_artifact,
         evidence=evidence,
     )
+    target_encoding_hash = _governed_target_contract(sample)[
+        "encoding_content_hash"
+    ]
+    if not hmac.compare_digest(
+        target_encoding_hash,
+        str(
+            evidence["training_contract"]["target"][
+                "encoding_content_hash"
+            ]
+        ),
+    ):
+        raise ModelingError(
+            "live target encoding drifted from immutable training evidence"
+        )
     return {
         "schema_version": TRAINING_EVIDENCE_ARTIFACT_SCHEMA_VERSION,
         "format": "json",
@@ -1364,6 +1666,7 @@ def _evidence_provenance(
         "evidence_id": evidence["evidence_id"],
         "evidence_content_hash": evidence["content_hash"],
         "evidence_artifact_content_hash": evidence_file_hash,
+        "target_encoding_content_hash": target_encoding_hash,
         "dataset_id": identity["dataset_ref"]["dataset_id"],
         "dataset_content_hash": identity["dataset_ref"]["content_hash"],
         "workspace_revision": workspace["revision"],
@@ -1477,6 +1780,165 @@ def _registered_record(
     if record["origin_tool"] != TRAIN_MODEL_WITH_EVIDENCE_V2_ORIGIN_TOOL:
         raise ModelingError("training-evidence TaskArtifact origin changed")
     return record
+
+
+def _require_task_artifact_row_on_connection(
+    conn,
+    *,
+    task_id: str,
+    record: Mapping[str, Any],
+    name: str,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT id, task_id, kind, path, content_hash, origin_tool,
+               provenance_json, created_at
+          FROM task_artifacts
+         WHERE task_id = ? AND id = ?
+        """,
+        (task_id, str(record["id"])),
+    ).fetchone()
+    if row is None:
+        raise ModelingError(f"{name} disappeared before write")
+    expected_scalars = {
+        "id": str(record["id"]),
+        "task_id": task_id,
+        "kind": str(record["kind"]),
+        "path": str(record["path"]),
+        "content_hash": str(record["content_hash"]),
+        "origin_tool": str(record["origin_tool"]),
+        "created_at": str(record["created_at"]),
+    }
+    if any(str(row[key]) != value for key, value in expected_scalars.items()):
+        raise ModelingError(f"{name} row changed before write")
+    provenance = _load_database_json(
+        row["provenance_json"],
+        name=f"{name} provenance",
+    )
+    if provenance != record["provenance"]:
+        raise ModelingError(f"{name} provenance changed before write")
+
+
+def _require_experiment_row_on_connection(
+    conn,
+    *,
+    binding: ModelingTrainingEvidenceArtifactBinding,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT id, task_id, recipe_id, config_json, metrics_json,
+               artifact_id, status, created_at
+          FROM experiments
+         WHERE id = ?
+        """,
+        (binding.experiment.id,),
+    ).fetchone()
+    if row is None:
+        raise ModelingError("training experiment disappeared before write")
+    expected_scalars = {
+        "id": binding.experiment.id,
+        "task_id": binding.task_id,
+        "recipe_id": binding.experiment.recipe_id,
+        "artifact_id": binding.model_artifact.id,
+        "status": "trained",
+        "created_at": binding.experiment.created_at,
+    }
+    if any(str(row[key]) != value for key, value in expected_scalars.items()):
+        raise ModelingError("training experiment row changed before write")
+    expected_config = json.loads(
+        _canonical_json(asdict(binding.experiment.config))
+    )
+    expected_metrics = json.loads(
+        _canonical_json(asdict(binding.experiment.metrics))
+    )
+    if _load_database_json(
+        row["config_json"],
+        name="training experiment config",
+    ) != expected_config:
+        raise ModelingError("training experiment config drifted before write")
+    if _load_database_json(
+        row["metrics_json"],
+        name="training experiment metrics",
+    ) != expected_metrics:
+        raise ModelingError("training experiment metrics drifted before write")
+
+
+def _require_model_artifact_row_on_connection(
+    conn,
+    *,
+    binding: ModelingTrainingEvidenceArtifactBinding,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT id, experiment_id, algorithm, model_path, pmml_path,
+               feature_list_json, feature_importance_json, params_json,
+               woe_maps_json, scorecard_table_json, created_at,
+               score_direction, points_direction,
+               baseline_distributions_json
+          FROM model_artifacts
+         WHERE id = ?
+        """,
+        (binding.model_artifact.id,),
+    ).fetchone()
+    if row is None:
+        raise ModelingError("model artifact row disappeared before write")
+    artifact = binding.model_artifact
+    expected_scalars = {
+        "id": artifact.id,
+        "experiment_id": binding.experiment.id,
+        "algorithm": artifact.algorithm,
+        "model_path": artifact.model_path,
+        "pmml_path": artifact.pmml_path,
+        "created_at": artifact.created_at,
+        "score_direction": artifact.score_direction,
+        "points_direction": artifact.points_direction,
+    }
+    for key, expected in expected_scalars.items():
+        observed = None if row[key] is None else str(row[key])
+        if observed != expected:
+            raise ModelingError("model artifact row changed before write")
+    expected_json = {
+        "feature_list_json": list(artifact.feature_list),
+        "feature_importance_json": [
+            [feature, importance]
+            for feature, importance in artifact.feature_importance
+        ],
+        "params_json": artifact.params,
+        "woe_maps_json": artifact.woe_maps,
+        "scorecard_table_json": list(artifact.scorecard_table),
+        "baseline_distributions_json": artifact.baseline_distributions,
+    }
+    for column, expected in expected_json.items():
+        observed = (
+            None
+            if row[column] is None
+            else _load_database_json(
+                row[column],
+                name=f"model artifact {column}",
+            )
+        )
+        if observed != expected:
+            raise ModelingError("model artifact metadata drifted before write")
+
+
+def _load_database_json(value: object, *, name: str) -> Any:
+    if not isinstance(value, str) or len(value.encode("utf-8")) > _MAX_RECIPE_META_BYTES:
+        raise ModelingError(f"{name} is invalid")
+
+    def without_duplicates(pairs):
+        result: dict[str, Any] = {}
+        for key, child in pairs:
+            if key in result:
+                raise ModelingError(f"{name} contains duplicate keys")
+            result[key] = child
+        return result
+
+    try:
+        return json.loads(value, object_pairs_hook=without_duplicates)
+    except ModelingError:
+        raise
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ModelingError(f"{name} is invalid") from exc
 
 
 def _require_staged_recipe_model_binary(
@@ -1749,7 +2211,9 @@ __all__ = [
     "TRAIN_MODEL_WITH_EVIDENCE_V2_ORIGIN_TOOL",
     "TRAIN_MODEL_WITH_EVIDENCE_V2_TOOL_SCHEMA_VERSION",
     "ModelingTrainingEvidenceArtifactBinding",
+    "build_training_evidence_ref",
     "load_modeling_training_evidence_artifacts",
+    "require_modeling_training_evidence_artifact_binding_on_connection",
     "run_train_model_with_evidence_v2",
     "tool_train_model_with_evidence_v2",
     "validate_train_model_with_evidence_v2_tool_output",

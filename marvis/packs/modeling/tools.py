@@ -101,7 +101,9 @@ from marvis.packs.modeling.train_tools import (  # noqa: F401
     tool_tune_hyperparameters,
 )
 from marvis.packs.modeling.evidence_tools import (  # noqa: F401
+    build_training_evidence_ref,
     load_modeling_training_evidence_artifacts,
+    require_modeling_training_evidence_artifact_binding_on_connection,
     run_train_model_with_evidence_v2,
     tool_train_model_with_evidence_v2,
     validate_train_model_with_evidence_v2_tool_output,
@@ -270,6 +272,8 @@ from marvis.packs.modeling.select_tools import (  # noqa: F401
 )
 
 __all__ = [
+    "build_training_evidence_ref",
+    "require_modeling_training_evidence_artifact_binding_on_connection",
     "tool_calibrate_model",
     "tool_check_data_quality",
     "tool_compare_experiments",

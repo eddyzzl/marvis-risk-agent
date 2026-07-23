@@ -48,16 +48,28 @@ from marvis.packs.strategy.sample_design_v2 import (
 )
 
 
-MODELING_TRAINING_EVIDENCE_SCHEMA_VERSION = "modeling.training-evidence.v2"
+MODELING_TRAINING_EVIDENCE_SCHEMA_VERSION = "modeling.training-evidence.v2.1"
 MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND = "modeling_training_evidence_json"
 MODELING_TRAINING_EVIDENCE_PRODUCER_VERSION = (
-    "marvis.modeling.training-evidence/2"
+    "marvis.modeling.training-evidence/2.1"
 )
 SAMPLE_MEMBERSHIP_ARTIFACT_KIND = "strategy_sample_membership_v2_binary"
 SAMPLE_DESIGN_BUNDLE_ARTIFACT_KIND = "strategy_sample_design_v2_json"
 MODEL_BINARY_REF_KIND = "modeling_model_binary"
 TRAINING_MASK_HASH_ALGORITHM = "sha256-packed-bool-little-v1"
-RAW_SCORE_PRODUCT = "raw_native_uncalibrated_probability_p_class_1"
+LEGACY_RAW_CLASS_ONE_SCORE_PRODUCT = (
+    "raw_native_uncalibrated_probability_p_class_1"
+)
+RAW_BAD_PROBABILITY_SCORE_PRODUCT = (
+    "raw_native_uncalibrated_bad_probability"
+)
+# Source-compatibility alias for existing callers.  Serialized evidence using
+# the old, class-index-only value is intentionally rejected below: V2 evidence
+# must prove that class 1 is the deterministically encoded bad class.
+RAW_SCORE_PRODUCT = RAW_BAD_PROBABILITY_SCORE_PRODUCT
+MODEL_TARGET_ENCODING_RULE = (
+    "raw_good_to_0_raw_bad_to_1_preserve_missing_v1"
+)
 
 MAX_TRAINING_EVIDENCE_JSON_BYTES = 4 * 1024 * 1024
 MAX_TRAINING_EVIDENCE_JSON_DEPTH = 32
@@ -172,7 +184,16 @@ _TRAINING_CONTRACT_FIELDS = frozenset(
 )
 _TRAIN_CONFIG_FIELDS = frozenset(field.name for field in fields(TrainConfig))
 _TARGET_FIELDS = frozenset(
-    {"column", "good_value", "bad_value", "drop_missing"}
+    {
+        "column",
+        "good_value",
+        "bad_value",
+        "encoded_good_value",
+        "encoded_bad_value",
+        "encoding_rule",
+        "encoding_content_hash",
+        "drop_missing",
+    }
 )
 _LABEL_HANDLING_FIELDS = frozenset(
     {"drop_nan_labels", "nan_labels_dropped"}
@@ -906,9 +927,14 @@ def _scoring_metadata(
         raise ModelingTrainingEvidenceError(
             "non-scorecard model cannot carry a scorecard_table"
         )
+    if obj["score_product"] == LEGACY_RAW_CLASS_ONE_SCORE_PRODUCT:
+        raise ModelingTrainingEvidenceError(
+            "legacy class-one score_product is ambiguous; republish training "
+            "evidence with explicit bad-class target encoding"
+        )
     if obj["score_product"] != RAW_SCORE_PRODUCT:
         raise ModelingTrainingEvidenceError(
-            "first training-evidence vertical requires raw native P(class=1) score"
+            "training evidence requires raw native uncalibrated bad probability"
         )
     if obj["calibration_status"] != "not_applied":
         raise ModelingTrainingEvidenceError(
@@ -1384,41 +1410,103 @@ def _require_binary_modeling_recipe(value: str, *, name: str) -> None:
     if value == "ensemble":
         raise ModelingTrainingEvidenceError(
             f"{name} does not support ensemble; expected an authoritative "
-            "binary modeling recipe that emits native P(class=1)"
+            "binary modeling recipe that emits native probability for its "
+            "encoded bad class"
         )
     raise ModelingTrainingEvidenceError(
         f"{name} must be an authoritative binary modeling recipe that emits "
-        "native P(class=1)"
+        "native probability for its encoded bad class"
     )
 
 
 def _target_from_context(context: Mapping[str, Any]) -> dict[str, Any]:
     target = context["target"]
+    return build_modeling_target_contract(
+        column=target["column"],
+        good_value=target["good_value"],
+        bad_value=target["bad_value"],
+        drop_missing=target["drop_missing"],
+    )
+
+
+def build_modeling_target_contract(
+    *,
+    column: object,
+    good_value: object,
+    bad_value: object,
+    drop_missing: object,
+) -> dict[str, Any]:
+    """Build the sole raw-target -> model-target encoding contract.
+
+    The original SampleDesign values remain visible as ``good_value`` and
+    ``bad_value``.  Every governed V2 model is trained on a private copy where
+    good is encoded as 0 and bad as 1, so native ``predict_proba[:, 1]`` always
+    means bad probability and downstream scoring must never guess or invert it.
+    """
+
+    normalized_column = _text(column, "training target.column")
+    good = _binary_value(good_value, "training target.good_value")
+    bad = _binary_value(bad_value, "training target.bad_value")
+    if good == bad or {good, bad} != {0, 1}:
+        raise ModelingTrainingEvidenceError(
+            "training target raw good/bad values must be distinct integers 0 and 1"
+        )
+    encoding = {
+        "column": normalized_column,
+        "good_value": good,
+        "bad_value": bad,
+        "encoded_good_value": 0,
+        "encoded_bad_value": 1,
+        "encoding_rule": MODEL_TARGET_ENCODING_RULE,
+    }
     return {
-        "column": target["column"],
-        "good_value": target["good_value"],
-        "bad_value": target["bad_value"],
-        "drop_missing": target["drop_missing"],
+        **encoding,
+        "encoding_content_hash": _sha256(_canonical_json(encoding)),
+        "drop_missing": _boolean(
+            drop_missing,
+            "training target.drop_missing",
+        ),
     }
 
 
 def _target(value: object) -> dict[str, Any]:
     obj = _object(value, "training target")
     _exact_fields(obj, _TARGET_FIELDS, "training target")
-    good = _binary_value(obj["good_value"], "training target.good_value")
-    bad = _binary_value(obj["bad_value"], "training target.bad_value")
-    if good != 0 or bad != 1:
+    expected = build_modeling_target_contract(
+        column=obj["column"],
+        good_value=obj["good_value"],
+        bad_value=obj["bad_value"],
+        drop_missing=obj["drop_missing"],
+    )
+    encoded_good = _binary_value(
+        obj["encoded_good_value"],
+        "training target.encoded_good_value",
+    )
+    encoded_bad = _binary_value(
+        obj["encoded_bad_value"],
+        "training target.encoded_bad_value",
+    )
+    if (encoded_good, encoded_bad) != (0, 1):
         raise ModelingTrainingEvidenceError(
-            "first training-evidence vertical requires good_value=0 and bad_value=1"
+            "training target model encoding must map good to 0 and bad to 1"
         )
-    return {
-        "column": _text(obj["column"], "training target.column"),
-        "good_value": good,
-        "bad_value": bad,
-        "drop_missing": _boolean(
-            obj["drop_missing"], "training target.drop_missing"
-        ),
-    }
+    rule = _text(obj["encoding_rule"], "training target.encoding_rule")
+    if rule != MODEL_TARGET_ENCODING_RULE:
+        raise ModelingTrainingEvidenceError(
+            "training target encoding_rule is unsupported"
+        )
+    supplied_hash = _hash(
+        obj["encoding_content_hash"],
+        "training target.encoding_content_hash",
+    )
+    if not hmac.compare_digest(
+        supplied_hash,
+        expected["encoding_content_hash"],
+    ):
+        raise ModelingTrainingEvidenceError(
+            "training target encoding_content_hash does not match encoding"
+        )
+    return expected
 
 
 def _weighting_from_config(
@@ -1919,14 +2007,6 @@ def _validate_label_policy(
         raise ModelingTrainingEvidenceError(
             "partially labeled oot requires drop_nan_labels confirmation"
         )
-    if oot["labeled_count"] > 0 and (
-        oot["bad_count"] == 0 or oot["good_count"] == 0
-    ):
-        raise ModelingTrainingEvidenceError(
-            "labeled oot requires both good and bad labels; single-class OOT is insufficient data"
-        )
-
-
 def _build_metrics_snapshot(value: object) -> dict[str, Any]:
     values = _metric_values(value)
     return {
@@ -2664,6 +2744,7 @@ def _sha256(value: str | bytes) -> str:
 
 
 __all__ = [
+    "LEGACY_RAW_CLASS_ONE_SCORE_PRODUCT",
     "MAX_TRAINING_EVIDENCE_JSON_BYTES",
     "MAX_TRAINING_EVIDENCE_JSON_DEPTH",
     "MAX_TRAINING_EVIDENCE_JSON_NODES",
@@ -2672,14 +2753,17 @@ __all__ = [
     "MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND",
     "MODELING_TRAINING_EVIDENCE_PRODUCER_VERSION",
     "MODELING_TRAINING_EVIDENCE_SCHEMA_VERSION",
+    "MODEL_TARGET_ENCODING_RULE",
     "MODEL_BINARY_REF_KIND",
     "NON_FINITE_BOUNDARY_TAG",
+    "RAW_BAD_PROBABILITY_SCORE_PRODUCT",
     "RAW_SCORE_PRODUCT",
     "SAMPLE_DESIGN_BUNDLE_ARTIFACT_KIND",
     "SAMPLE_MEMBERSHIP_ARTIFACT_KIND",
     "TRAINING_MASK_HASH_ALGORITHM",
     "ModelingTrainingEvidenceError",
     "build_model_binary_artifact_ref",
+    "build_modeling_target_contract",
     "build_modeling_training_evidence",
     "build_task_artifact_ref",
     "build_training_split_mask_hashes",

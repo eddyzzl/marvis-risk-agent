@@ -21,9 +21,11 @@ from marvis.files import sha256_file
 from marvis.packs.modeling import evidence_tools
 from marvis.packs.modeling import tools as modeling_tools
 from marvis.packs.modeling.evidence import (
+    MODEL_TARGET_ENCODING_RULE,
     MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
     MODEL_BINARY_REF_KIND,
     NON_FINITE_BOUNDARY_TAG,
+    RAW_BAD_PROBABILITY_SCORE_PRODUCT,
     decode_modeling_scoring_woe_maps_boundaries,
 )
 from marvis.packs.modeling.errors import ModelingError
@@ -62,6 +64,8 @@ def _fixture(
     training_split_col: str = "model_split",
     bad_weight_split: str | None = None,
     bad_weight_value: object = None,
+    single_class_oot: str | None = None,
+    single_class_required_split: str | None = None,
 ) -> dict:
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
@@ -150,6 +154,25 @@ def _fixture(
         frame.loc[first_train, "bad"] = None
     if target_bad_value == 0:
         frame["bad"] = frame["bad"].map({0: 1, 1: 0})
+    if single_class_oot is not None:
+        if single_class_oot not in {"good", "bad"}:
+            raise ValueError("single_class_oot must be good or bad")
+        raw_bad = target_bad_value
+        raw_good = 1 - target_bad_value
+        frame.loc[
+            (frame["risk_flag"] == 1) & (frame["model_split"] == "oot"),
+            "bad",
+        ] = raw_good if single_class_oot == "good" else raw_bad
+    if single_class_required_split is not None:
+        if single_class_required_split not in {"train", "test"}:
+            raise ValueError(
+                "single_class_required_split must be train or test"
+            )
+        frame.loc[
+            (frame["risk_flag"] == 1)
+            & (frame["model_split"] == single_class_required_split),
+            "bad",
+        ] = 1 - target_bad_value
     source = tmp_path / "governed_training.parquet"
     frame.to_parquet(source, index=False)
     registry = DatasetRegistry(
@@ -290,7 +313,14 @@ def _fixture(
                 "label_coverage": "fail",
                 "historical_score_coverage": "warn",
                 "group_coverage_gap": "warn",
-                "sufficiency": "fail",
+                "sufficiency": (
+                    "warn"
+                    if (
+                        single_class_oot is not None
+                        or single_class_required_split is not None
+                    )
+                    else "fail"
+                ),
             },
         },
     }
@@ -357,6 +387,30 @@ def _governed_records(fx: dict) -> list[dict]:
         if item["kind"]
         in {MODEL_BINARY_REF_KIND, MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND}
     ]
+
+
+def _binding(fx: dict, output: dict):
+    return evidence_tools.load_modeling_training_evidence_artifacts(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        sample_design_ref=fx["sample_ref"],
+        model_binary_artifact_id=output["artifacts"]["model_binary"][
+            "artifact_id"
+        ],
+        expected_model_binary_artifact_content_hash=output["artifacts"][
+            "model_binary"
+        ]["content_hash"],
+        evidence_artifact_id=output["artifacts"]["training_evidence"][
+            "artifact_id"
+        ],
+        expected_evidence_artifact_content_hash=output["artifacts"][
+            "training_evidence"
+        ]["content_hash"],
+        expected_experiment_id=output["experiment_id"],
+        expected_model_artifact_id=output["model_artifact_id"],
+        expected_evidence_id=output["evidence_id"],
+        expected_evidence_content_hash=output["evidence_content_hash"],
+    )
 
 
 def test_lr_success_publishes_exact_pair_and_risk_subset(tmp_path: Path) -> None:
@@ -439,6 +493,226 @@ def test_lr_success_publishes_exact_pair_and_risk_subset(tmp_path: Path) -> None
         name: row["sample_count"]
         for name, row in baseline["score_distribution"].items()
     } == {"train": 6, "test": 6, "oot": 6}
+
+
+def test_reversed_raw_target_is_encoded_before_real_lr_training(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _fixture(tmp_path, target_bad_value=0)
+    raw_path = fx["runtime"].registry.resolve_path(fx["dataset"].id)
+    raw = fx["runtime"].backend.read_frame(raw_path)
+    expected = (
+        raw.loc[raw["risk_flag"] == 1, ["x1", "bad"]]
+        .assign(bad=lambda value: value["bad"].map({1: 0, 0: 1}))
+        .set_index("x1")["bad"]
+        .sort_index()
+        .astype(float)
+    )
+    original_recipe = evidence_tools._train_recipe
+    observed: dict[str, pd.Series] = {}
+
+    def inspect_encoded_target(
+        recipe,
+        backend,
+        dataset_path,
+        config,
+        *,
+        out_dir,
+    ):
+        private = backend.read_frame(dataset_path)
+        observed["target"] = (
+            private[["x1", config.target_col]]
+            .set_index("x1")[config.target_col]
+            .sort_index()
+            .astype(float)
+        )
+        return original_recipe(
+            recipe,
+            backend,
+            dataset_path,
+            config,
+            out_dir=out_dir,
+        )
+
+    monkeypatch.setattr(
+        evidence_tools,
+        "_train_recipe",
+        inspect_encoded_target,
+    )
+
+    output = _run(fx)
+    binding = _binding(fx, output)
+    target = binding.evidence["training_contract"]["target"]
+
+    pd.testing.assert_series_equal(
+        observed["target"],
+        expected,
+        check_names=False,
+    )
+    assert target["good_value"] == 1
+    assert target["bad_value"] == 0
+    assert target["encoded_good_value"] == 0
+    assert target["encoded_bad_value"] == 1
+    assert target["encoding_rule"] == MODEL_TARGET_ENCODING_RULE
+    assert (
+        binding.evidence["model_artifact"]["scoring_metadata"][
+            "score_product"
+        ]
+        == RAW_BAD_PROBABILITY_SCORE_PRODUCT
+    )
+    assert output["score_product"] == RAW_BAD_PROBABILITY_SCORE_PRODUCT
+
+
+@pytest.mark.parametrize("single_class", ["good", "bad"])
+def test_real_lr_allows_labeled_single_class_oot_without_label_metrics(
+    tmp_path: Path,
+    single_class: str,
+) -> None:
+    fx = _fixture(tmp_path, single_class_oot=single_class)
+
+    output = _run(fx)
+    values = _binding(fx, output).evidence["metrics_snapshot"]["values"]
+
+    assert values["psi_oot_vs_train"] is not None
+    assert values["weighted_psi_oot_vs_train"] is not None
+    assert values["oot_ks"] is None
+    assert values["oot_auc"] is None
+    assert values["weighted_oot_ks"] is None
+    assert values["weighted_oot_auc"] is None
+    assert values["overfit_train_oot_gap"] is None
+    assert values["oot_ks_ci_low"] is None
+    assert values["oot_ks_ci_high"] is None
+    assert values["oot_ks_ci_std"] is None
+    assert values["oot_lift_head_5"] is None
+    assert values["oot_lift_tail_5"] is None
+    assert values["oot_lift_head_10"] is None
+    assert values["oot_lift_tail_10"] is None
+
+
+@pytest.mark.parametrize("split_name", ["train", "test"])
+def test_single_class_train_or_test_fails_before_recipe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    split_name: str,
+) -> None:
+    fx = _fixture(
+        tmp_path,
+        single_class_required_split=split_name,
+    )
+    recipe_calls = 0
+
+    def forbidden_recipe(*args, **kwargs):
+        nonlocal recipe_calls
+        recipe_calls += 1
+        raise AssertionError("single-class train/test must not enter recipe")
+
+    monkeypatch.setattr(evidence_tools, "_train_recipe", forbidden_recipe)
+
+    with pytest.raises(ModelingError, match=f"{split_name}.*both good and bad"):
+        _run(fx)
+
+    assert recipe_calls == 0
+    assert _governed_records(fx) == []
+
+
+def test_training_evidence_ref_round_trips_and_revalidates_in_write_transaction(
+    tmp_path: Path,
+) -> None:
+    fx = _fixture(tmp_path)
+    output = _run(fx)
+    binding = _binding(fx, output)
+
+    reference = evidence_tools.build_training_evidence_ref(binding)
+
+    assert reference["sample_design_ref"] == fx["sample_ref"]
+    assert evidence_tools.load_modeling_training_evidence_artifacts(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        **reference,
+    ).evidence == binding.evidence
+    with connect(fx["settings"].db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        evidence_tools.require_modeling_training_evidence_artifact_binding_on_connection(
+            conn,
+            binding,
+        )
+        conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "sample_artifact_row",
+        "model_artifact_row",
+        "evidence_artifact_row",
+        "experiment_row",
+        "model_row",
+        "model_file",
+        "evidence_file",
+    ],
+)
+def test_transaction_revalidator_rejects_training_binding_drift(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    fx = _fixture(tmp_path)
+    binding = _binding(fx, _run(fx))
+
+    if drift == "model_file":
+        binding.model_binary_path.write_bytes(
+            binding.model_binary_path.read_bytes() + b"tamper"
+        )
+    elif drift == "evidence_file":
+        binding.evidence_path.write_bytes(
+            binding.evidence_path.read_bytes() + b"tamper"
+        )
+    else:
+        with connect(fx["settings"].db_path) as conn:
+            if drift in {
+                "sample_artifact_row",
+                "model_artifact_row",
+                "evidence_artifact_row",
+            }:
+                conn.execute(
+                    "DROP TRIGGER trg_task_artifacts_immutable_update"
+                )
+            if drift == "sample_artifact_row":
+                conn.execute(
+                    "UPDATE task_artifacts SET provenance_json = ? WHERE id = ?",
+                    ("{}", binding.sample.membership_artifact_id),
+                )
+            elif drift == "model_artifact_row":
+                conn.execute(
+                    "UPDATE task_artifacts SET content_hash = ? WHERE id = ?",
+                    ("0" * 64, binding.model_binary_record["id"]),
+                )
+            elif drift == "evidence_artifact_row":
+                conn.execute(
+                    "UPDATE task_artifacts SET provenance_json = ? WHERE id = ?",
+                    ("{}", binding.evidence_record["id"]),
+                )
+            elif drift == "experiment_row":
+                conn.execute(
+                    "UPDATE experiments SET status = ? WHERE id = ?",
+                    ("created", binding.experiment.id),
+                )
+            elif drift == "model_row":
+                conn.execute(
+                    "UPDATE model_artifacts SET params_json = ? WHERE id = ?",
+                    ('{"tampered":true}', binding.model_artifact.id),
+                )
+            else:
+                raise AssertionError(drift)
+
+    with connect(fx["settings"].db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises((ModelingError, RuntimeError), match="changed|drift|invalid"):
+            evidence_tools.require_modeling_training_evidence_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+        conn.rollback()
 
 
 def test_selector_ignores_approval_split_values_and_nullable_split(
@@ -538,18 +812,6 @@ def test_real_scorecard_tags_infinite_woe_boundaries_and_rejects_live_drift(
             runtime=fx["runtime"],
             task_id=fx["task"].id,
         )
-
-
-def test_bad_target_direction_is_rejected_before_training(tmp_path: Path) -> None:
-    fx = _fixture(tmp_path, target_bad_value=0)
-
-    with pytest.raises(ModelingError, match="good=0, bad=1"):
-        _run(fx)
-
-    assert _governed_records(fx) == []
-    assert ModelingRepository(fx["settings"].db_path).list_experiments(
-        fx["task"].id
-    ) == []
 
 
 def test_missing_label_drop_policy_is_bound_from_sample_design(tmp_path: Path) -> None:
@@ -1154,7 +1416,15 @@ def test_post_database_housekeeping_warning_failure_cannot_mask_success(
     ) == 1
 
 
-@pytest.mark.parametrize("drift", ["scoring_metadata", "train_config", "metrics"])
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "scoring_metadata",
+        "train_config",
+        "metrics",
+        "target_encoding",
+    ],
+)
 def test_live_loader_rejects_current_training_snapshot_drift(
     tmp_path: Path,
     drift: str,
@@ -1176,6 +1446,28 @@ def test_live_loader_rejects_current_training_snapshot_drift(
                 },
             },
         )
+    elif drift == "target_encoding":
+        model_record = next(
+            record
+            for record in _governed_records(fx)
+            if record["kind"] == MODEL_BINARY_REF_KIND
+        )
+        provenance = dict(model_record["provenance"])
+        provenance["target_encoding_content_hash"] = "0" * 64
+        with connect(fx["settings"].db_path) as conn:
+            conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+            conn.execute(
+                "UPDATE task_artifacts SET provenance_json = ? WHERE id = ?",
+                (
+                    json.dumps(
+                        provenance,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    model_record["id"],
+                ),
+            )
     else:
         column = "config_json" if drift == "train_config" else "metrics_json"
         with connect(fx["settings"].db_path) as conn:
@@ -1206,7 +1498,7 @@ def test_live_loader_rejects_current_training_snapshot_drift(
                 ),
             )
 
-    with pytest.raises(ModelingError, match="drifted from immutable"):
+    with pytest.raises(ModelingError, match="drifted.*(?:immutable|live)"):
         evidence_tools.validate_train_model_with_evidence_v2_tool_output(
             output,
             runtime=fx["runtime"],
