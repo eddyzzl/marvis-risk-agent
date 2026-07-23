@@ -191,11 +191,33 @@ def post_agent_message(
     task = get_task_or_404(repo, task_id)
     if payload.strategy_input is not None and task.task_type != TASK_TYPE_STRATEGY:
         raise unprocessable("strategy_input 只能用于 strategy 类型任务。")
+    if payload.strategy_request is not None and task.task_type != TASK_TYPE_STRATEGY:
+        raise unprocessable("strategy_request 只能用于 strategy 类型任务。")
     require_agent_task(task, DRIVER_AGENT_TASK_TYPES)
     require_wired_agent_task_type(task, WIRED_AGENT_TASK_TYPES)
     content = payload.content.strip()
     if not content:
         raise unprocessable("message content is required")
+    if payload.strategy_request is not None:
+        mixed_fields = [
+            name
+            for name, value in (
+                ("strategy_input", payload.strategy_input),
+                ("selection", payload.selection),
+                ("dedup_strategies", payload.dedup_strategies),
+                ("adjust_params", payload.adjust_params),
+                ("expected_step_id", payload.expected_step_id),
+            )
+            if value is not None
+        ]
+        if mixed_fields:
+            raise unprocessable(
+                "strategy_request 不能与以下结构化输入同时提交："
+                + "、".join(mixed_fields)
+                + "。"
+            )
+        if is_stop_validation_intent(content):
+            raise unprocessable("停止指令不能与 strategy_request 同时提交。")
     strategy_input = _domain_strategy_input(payload.strategy_input)
     if strategy_input is not None and is_stop_validation_intent(content):
         raise unprocessable("停止指令不能与 strategy_input 同时提交。")
@@ -217,7 +239,13 @@ def post_agent_message(
         capture_user_preference_memory(request, task_id, user_message)
         return handle_agent_stop_message(repo, task)
     if task.task_type in DRIVER_AGENT_TASK_TYPES:
-        agent_client = resolve_driver_agent_client(request, task, payload)
+        # A typed Candidate Lab request is already executable user input. It
+        # must remain usable in agent mode without resolving or calling an LLM.
+        agent_client = (
+            None
+            if payload.strategy_request is not None
+            else resolve_driver_agent_client(request, task, payload)
+        )
         return dispatch_driver_turn(
             request,
             repo,
@@ -230,6 +258,11 @@ def post_agent_message(
             adjust_params=payload.adjust_params,
             expected_step_id=payload.expected_step_id,
             strategy_input=strategy_input,
+            strategy_request=(
+                None
+                if payload.strategy_request is None
+                else payload.strategy_request.model_dump(mode="python")
+            ),
             recovery_model_id=payload.model_id,
             recovery_effort=payload.effort,
         )

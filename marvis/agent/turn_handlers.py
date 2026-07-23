@@ -1432,9 +1432,21 @@ def dispatch_driver_turn(
     dedup_strategies: dict | None = None,
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
+    strategy_request: Mapping[str, object] | None = None,
     confirmation_source: str = CONFIRMATION_SOURCE_HUMAN,
     recovery_bypass: bool = False,
 ) -> dict:
+    # Candidate Lab controls are already a canonical user request. They get
+    # first refusal inside the same task driver-job lock and never pass through
+    # recovery, text intent routing, or an LLM.
+    if strategy_request is not None:
+        return _handle_structured_strategy_request_turn(
+            runtime,
+            repo,
+            task,
+            user_text=user_text,
+            strategy_request=strategy_request,
+        )
     # An unresolved structured failure owns ordinary conversation first.  In
     # particular, “为什么策略分析失败” is a question about existing evidence,
     # not authorization to compile and run a new strategy request.
@@ -1784,6 +1796,128 @@ def _is_strategy_request_intent(text: str) -> bool:
     )
 
 
+_MANUAL_STRATEGY_WORKFLOWS = frozenset(
+    {
+        "univariate_candidate_analysis",
+        "cross_matrix_analysis",
+        "automatic_tree_candidate_build",
+    }
+)
+
+
+def _handle_structured_strategy_request_turn(
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    user_text: str | None,
+    strategy_request: Mapping[str, object],
+) -> dict:
+    """Validate and run one LLM-free Candidate Lab request.
+
+    The HTTP adapter constrains this envelope, while this core boundary keeps
+    direct callers fail-closed. Platform-owned bindings are still selected by
+    the same preparation path used by natural-language requests.
+    """
+
+    if task.task_type != TASK_TYPE_STRATEGY:
+        raise DriverError("strategy_request 只能用于 strategy 类型任务。")
+    workflow = strategy_request.get("workflow")
+    if (
+        not isinstance(workflow, str)
+        or workflow not in _MANUAL_STRATEGY_WORKFLOWS
+    ):
+        raise DriverError("strategy_request 包含未开放的 Candidate Lab workflow。")
+
+    conversation = repo.list_agent_messages(task.id)
+    if _active_plan(runtime.plan_repo, task.id) is not None:
+        raise DriverError("当前策略任务已有进行中的计划，不能启动新的 Candidate Lab 请求。")
+    if latest_open_gate(conversation) is not None:
+        raise DriverError("当前策略任务有待处理确认门，不能启动新的 Candidate Lab 请求。")
+
+    pending = _latest_strategy_request_pending(conversation)
+    if pending is not None:
+        _invalidate_pending_strategy_request(runtime, task, pending)
+
+    source_message = repo.add_agent_message(
+        task.id,
+        role="user",
+        stage="chat",
+        content=str(user_text or "").strip(),
+        metadata={
+            "intent": "strategy_request",
+            "request_source": "manual_ui",
+            "workflow": workflow,
+        },
+    )
+
+    preview = None
+    preview_error = None
+    try:
+        preview = _strategy_dataset_preview(runtime, task)
+    except StrategySetupError as exc:
+        preview_error = str(exc)
+
+    compilation = validate_strategy_request(
+        strategy_request,
+        allowed_columns=_strategy_request_allowed_columns(preview),
+        target_col=None if preview is None else preview.target_col,
+    )
+    if compilation.draft is None:
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code=(
+                compilation.clarification_code
+                or "strategy_request_needs_clarification"
+            ),
+            message=compilation.clarification or "请修正 Candidate Lab 策略请求。",
+            fields=compilation.clarification_fields,
+        )
+    draft = compilation.draft
+    if (
+        not isinstance(draft, StandardWorkflowRequestDraft)
+        or draft.workflow != workflow
+    ):
+        raise DriverError("Candidate Lab 请求未编译为预期的标准 Workflow。")
+
+    preflight = _strategy_request_preflight(runtime, task, draft)
+    if preflight is not None:
+        code, message = preflight
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code=code,
+            message=message,
+        )
+    if _strategy_request_requires_dataset(draft) and preview is None:
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_dataset_context_required",
+            message=preview_error or "当前策略操作需要一个任务内样本。",
+        )
+    if _strategy_request_requires_target(draft) and (
+        preview is None or not preview.target_col
+    ):
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_target_context_required",
+            message="当前策略操作需要明确的二元目标列，请先在任务中指定 target_col。",
+        )
+
+    return _prepare_and_run_validated_strategy_request(
+        runtime,
+        repo,
+        task,
+        draft,
+        preview=preview,
+        auto_start=True,
+        source_message=source_message,
+    )
+
+
 def _maybe_handle_strategy_request_turn(
     runtime: DriverTurnRuntime,
     repo: TaskRepository,
@@ -1987,7 +2121,10 @@ def _maybe_handle_strategy_request_turn(
         role="user",
         stage="chat",
         content=text,
-        metadata={"intent": "strategy_request"},
+        metadata={
+            "intent": "strategy_request",
+            "request_source": "agent_nl",
+        },
     )
     preview = None
     preview_error = None

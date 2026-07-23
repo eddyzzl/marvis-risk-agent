@@ -1,4 +1,4 @@
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     AfterValidator,
@@ -10,6 +10,7 @@ from pydantic import (
     StrictInt,
     StrictStr,
     StringConstraints,
+    model_validator,
 )
 
 from marvis.domain import TASK_TYPE_VALIDATION
@@ -206,6 +207,88 @@ class ReportFieldsUpdateRequest(BaseModel):
     text_values: dict[str, str] = Field(default_factory=dict)
 
 
+ManualStrategyWorkflow = Literal[
+    "univariate_candidate_analysis",
+    "cross_matrix_analysis",
+    "automatic_tree_candidate_build",
+]
+
+_MANUAL_STRATEGY_PLATFORM_FIELDS = frozenset(
+    {
+        "analysis_generation",
+        "artifact_id",
+        "artifact_ids",
+        "candidate_id",
+        "content_hash",
+        "dataset_id",
+        "dataset_ref",
+        "evidence_hash",
+        "expected_artifact_content_hash",
+        "expected_content_hash",
+        "hashes",
+        "metric",
+        "metrics",
+        "output",
+        "outputs",
+        "refs",
+        "result",
+        "results",
+        "revision",
+        "revision_id",
+        "revisions",
+        "sample_design_ref",
+        "semantic_mapping_hash",
+        "source_artifact_id",
+        "task_id",
+        "target_col",
+        "workspace_revision",
+    }
+)
+
+
+class ManualStrategyRequest(BaseModel):
+    """User-owned controls for a deterministic Candidate Lab workflow.
+
+    The envelope deliberately carries the compiler's canonical request shape,
+    but leaves workflow-specific validation to ``validate_strategy_request``.
+    Platform bindings and calculated evidence never cross this API boundary.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    request_kind: Literal["standard_workflow"]
+    workflow: ManualStrategyWorkflow
+    workflow_inputs: dict[StrictCanonicalNonEmptyStr, Any]
+
+    @model_validator(mode="after")
+    def reject_platform_owned_inputs(self) -> Self:
+        forbidden = sorted(
+            key
+            for key in self.workflow_inputs
+            if (
+                key in _MANUAL_STRATEGY_PLATFORM_FIELDS
+                or key.startswith(("artifact_", "dataset_", "expected_", "workspace_"))
+                or key.endswith(
+                    (
+                        "_hash",
+                        "_id",
+                        "_ids",
+                        "_metrics",
+                        "_ref",
+                        "_results",
+                        "_revision",
+                    )
+                )
+            )
+        )
+        if forbidden:
+            raise ValueError(
+                "strategy_request.workflow_inputs cannot include platform-owned "
+                "fields: " + ", ".join(forbidden)
+            )
+        return self
+
+
 class AgentMessageRequest(BaseModel):
     content: str
     model_id: str | None = None
@@ -215,6 +298,10 @@ class AgentMessageRequest(BaseModel):
     # separate from free text so the backend never has to infer business targets
     # or constraints from the conversation.
     strategy_input: StrategyTaskInputRequest | None = None
+    # Candidate Lab manual controls use the same canonical request and trusted
+    # execution kernel as natural-language strategy requests. The free-text
+    # content remains a user-visible action label, not executable business input.
+    strategy_request: ManualStrategyRequest | None = None
     # Optional edited feature set from the §4 interactive screening table; when a
     # screening gate is confirmed this overrides the screen's proposed `selected`.
     selection: list[str] | None = None

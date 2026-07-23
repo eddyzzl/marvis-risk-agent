@@ -13,7 +13,7 @@ here directly.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from fastapi import BackgroundTasks, HTTPException, Request
 
@@ -270,6 +270,7 @@ def dispatch_driver_turn(
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
     strategy_input: StrategyTaskInput | None = None,
+    strategy_request: Mapping[str, object] | None = None,
     recovery_model_id: str | None = None,
     recovery_effort: str | None = None,
 ) -> dict:
@@ -328,8 +329,11 @@ def dispatch_driver_turn(
             auto_accept_enabled=agent_auto_accept(acceptance_mode), selection=selection,
             dedup_strategies=dedup_strategies, adjust_params=adjust_params,
             expected_step_id=expected_step_id,
+            strategy_request=strategy_request,
             confirmation_source=CONFIRMATION_SOURCE_HUMAN,
-            recovery_bypass=strategy_input is not None,
+            recovery_bypass=(
+                strategy_input is not None or strategy_request is not None
+            ),
         )
     except DriverError as exc:
         repo_.finish_job(job_id, status="failed", error_name="DriverError", error_value=str(exc))
