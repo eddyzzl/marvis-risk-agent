@@ -2384,6 +2384,15 @@ def _pool_impact_integrity_failure() -> tuple[str, list[dict]]:
     )
 
 
+def _strategy_report_integrity_failure() -> tuple[str, list[dict]]:
+    return (
+        "**StrategyReportBundle V2 结果完整性校验失败**：计划缓存与 canonical "
+        "report bundle、状态或三个 TaskArtifact 摘要不一致，已停止展示报告"
+        "身份、警告和下载链接。请重新生成报告。",
+        [],
+    )
+
+
 def _sample_design_integrity_failure() -> tuple[str, list[dict]]:
     return (
         "**策略样本设计结果完整性校验失败**：计划缓存与 canonical sample-design "
@@ -3353,6 +3362,40 @@ def _render_measure_pool_impact(o: dict):
             }
         )
     return text, tables
+
+
+def _render_build_strategy_report_bundle_v2(o: dict):
+    """Render only a fully validated governed report publication envelope."""
+
+    from marvis.packs.strategy.errors import StrategyError
+    from marvis.packs.strategy.report_bundle_tools import (
+        validate_build_strategy_report_bundle_v2_tool_output,
+    )
+
+    try:
+        o = validate_build_strategy_report_bundle_v2_tool_output(o)
+    except (StrategyError, RecursionError):
+        return _strategy_report_integrity_failure()
+
+    warnings = o["warnings"]
+    warning_text = "；".join(warnings) if warnings else "无"
+    download_labels = {
+        "json": "JSON",
+        "markdown": "Markdown",
+        "xlsx": "XLSX",
+    }
+    downloads = " · ".join(
+        f"[{download_labels[artifact['format']]}]({artifact['download_url']})"
+        for artifact in o["artifacts"]
+    )
+    text = (
+        f"**StrategyReportBundle V2 已生成**：报告 ID `{o['report_id']}`，"
+        f"revision **{o['report_revision']}**，状态 **{o['status']}**。\n"
+        "- 本步骤只生成受治理报告：**未创建策略、未采纳、未部署或上线**。\n"
+        f"- 完整性警告：{warning_text}\n"
+        f"- 下载：{downloads}"
+    )
+    return text, []
 
 
 def _render_decision_backtest(
@@ -5949,6 +5992,7 @@ _RENDERERS = {
     "reorder_strategy_pool": _render_strategy_pool_mutation,
     "compile_strategy_pool": _render_compile_strategy_pool,
     "measure_pool_impact": _render_measure_pool_impact,
+    "build_report_bundle_v2": _render_build_strategy_report_bundle_v2,
     "materialize_project_context": _render_materialize_project_context,
     "materialize_sample_design": _render_materialize_sample_design,
     "materialize_sample_design_v2": _render_materialize_sample_design_v2,
@@ -6001,6 +6045,8 @@ def render_tool_output(tool: str, output: dict):
     try:
         return renderer(output or {})
     except Exception:
+        if tool == "build_report_bundle_v2":
+            return _strategy_report_integrity_failure()
         if tool == "measure_pool_impact":
             return _pool_impact_integrity_failure()
         if tool == "materialize_sample_design":

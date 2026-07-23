@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 import hashlib
 import json
 import math
@@ -74,6 +75,7 @@ from marvis.agent.strategy_request_compiler import (
     StrategyRequestDraft,
     compile_strategy_request,
     utterance_targets_strategy_project_context,
+    utterance_targets_strategy_report_bundle_v2,
     utterance_targets_strategy_sample_design,
     validate_strategy_request,
 )
@@ -100,7 +102,12 @@ from marvis.data.workspace import (
     DataWorkspaceDraft,
     data_semantic_mapping_hash,
 )
-from marvis.db import DatasetRepository, StrategyRepository, TaskRepository
+from marvis.db import (
+    DatasetRepository,
+    ModelingRepository,
+    StrategyRepository,
+    TaskRepository,
+)
 from marvis.domain import (
     TASK_TYPE_DATA_JOIN,
     TASK_TYPE_FEATURE_ANALYSIS,
@@ -152,10 +159,40 @@ from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
     load_verified_cross_matrix_source_artifact_on_connection,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.modeling.errors import ModelingError
+from marvis.packs.modeling.evidence import (
+    MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
+)
+from marvis.packs.modeling.evidence_tools import (
+    build_training_evidence_ref,
+    load_modeling_training_evidence_artifacts,
+)
+from marvis.packs.modeling.experiment import ExperimentStore
+from marvis.packs.modeling.score_evidence import (
+    MODEL_SCORE_EVIDENCE_ARTIFACT_KIND,
+)
+from marvis.packs.modeling.score_evidence_tools import (
+    load_model_score_evidence_artifacts,
+)
 from marvis.packs.strategy.model_evidence_tools import (
+    MODEL_EVIDENCE_V2_ARTIFACT_KIND,
     _MAX_UNIVARIATE_SOURCES,
     _load_candidate_sources,
     _validate_inputs as _validate_model_evidence_v2_inputs,
+    load_strategy_model_evidence_v2_artifact,
+)
+from marvis.packs.strategy.pool_impact_tools import (
+    POOL_IMPACT_ARTIFACT_KIND,
+    load_strategy_pool_impact_artifact,
+)
+from marvis.packs.strategy.pool_tools import (
+    load_current_strategy_candidate_pool_artifact,
+)
+from marvis.packs.strategy.project_context_tools import (
+    load_current_strategy_project_context_artifact,
+)
+from marvis.packs.strategy.report_bundle_adapters import (
+    build_strategy_report_bundle_source_inputs,
 )
 from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignRef,
@@ -167,6 +204,7 @@ from marvis.packs.strategy.sample_design_tools import (
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
     SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
     SAMPLE_DESIGN_V2_ORIGIN_TOOL,
     load_strategy_sample_design_v2_artifacts,
 )
@@ -192,6 +230,7 @@ from marvis.repositories.strategy_project_context import (
     StrategyProjectContextDataError,
     StrategyProjectContextRepository,
 )
+from marvis.repositories.strategy_reports import StrategyReportRepository
 from marvis.packs.strategy.candidate_asset import (
     canonical_candidate_asset_json,
     validate_candidate_asset,
@@ -1425,6 +1464,7 @@ def dispatch_driver_turn(
     text = str(user_text or "")
     if task.task_type == TASK_TYPE_STRATEGY and (
         utterance_targets_strategy_sample_design(text)
+        or utterance_targets_strategy_report_bundle_v2(text)
         or _STRATEGY_MODEL_EVIDENCE_V2_REQUEST_RE.search(text) is not None
     ):
         strategy_evidence_request = _maybe_handle_strategy_request_turn(
@@ -1941,13 +1981,20 @@ def _maybe_handle_strategy_request_turn(
     preview_error = None
     is_project_context_request = utterance_targets_strategy_project_context(text)
     is_sample_design_request = utterance_targets_strategy_sample_design(text)
+    is_report_bundle_v2_request = utterance_targets_strategy_report_bundle_v2(
+        text
+    )
     is_model_evidence_v2_request = (
         _STRATEGY_MODEL_EVIDENCE_V2_REQUEST_RE.search(text) is not None
     )
     try:
         preview = (
             None
-            if is_project_context_request or is_model_evidence_v2_request
+            if (
+                is_project_context_request
+                or is_model_evidence_v2_request
+                or is_report_bundle_v2_request
+            )
             else (
                 _strategy_pool_impact_dataset_preview(runtime, task)
                 if _STRATEGY_POOL_IMPACT_REQUEST_RE.search(text)
@@ -2490,6 +2537,24 @@ def _run_validated_strategy_request(
                 runtime,
                 task,
                 verify_current=True,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_report_bundle_v2"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_report_bundle_v2",
+            slots=_strategy_report_bundle_v2_plan_slots(
+                runtime,
+                task,
+                draft,
+                source_message=source_message,
             ),
             auto_start=auto_start,
         )
@@ -3390,6 +3455,11 @@ def _standard_workflow_request_preflight(
             return (exc.code, str(exc))
         except StrategySetupError as exc:
             return ("strategy_model_evidence_v2_binding_required", str(exc))
+        return None
+    if draft.workflow == "strategy_report_bundle_v2":
+        # Bind exact refs only once, immediately before plan creation. A
+        # separate preflight read would open a second selection window where
+        # current source/report heads could silently rebind.
         return None
     if draft.workflow == "strategy_pool_impact":
         try:
@@ -4666,6 +4736,723 @@ def _strategy_v2_registry_token(artifacts: Sequence[Mapping]) -> str:
             "Strategy ModelEvidence V2 registry snapshot 无法规范化。",
         ) from exc
     return hashlib.sha256(payload).hexdigest()
+
+
+_STRATEGY_REPORT_POOL_TYPE_PATTERNS = {
+    "approval": re.compile(
+        r"(?:审批|准入)|(?<![A-Za-z0-9_])approval(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "reject": re.compile(
+        r"拒绝|(?<![A-Za-z0-9_])reject(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+}
+
+
+def _strategy_report_bundle_v2_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+    *,
+    source_message: Mapping | None,
+) -> dict[str, object]:
+    """Bind one report plan to immutable, fully authenticated source refs."""
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    read_runtime = _strategy_report_read_runtime(runtime)
+    artifacts = _strategy_report_artifact_snapshot(
+        read_runtime,
+        task_id=task.id,
+    )
+
+    try:
+        project_context = load_current_strategy_project_context_artifact(
+            read_runtime,
+            task_id=task.id,
+        )
+    except (
+        StrategyError,
+        StrategyProjectContextDataError,
+        *_STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_project_context_invalid",
+            "当前 Strategy ProjectContext 未通过 head、artifact、来源或文件完整性复核；"
+            "请先重新整理项目上下文。",
+        ) from exc
+    if project_context is None:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_project_context_required",
+            "生成策略报告前必须先固化当前 Strategy ProjectContext。",
+        )
+
+    sample = _strategy_report_latest_sample_binding(
+        read_runtime,
+        task_id=task.id,
+        artifacts=artifacts,
+    )
+    sample_ref = _strategy_report_sample_ref(sample)
+    requested_pool_type = _strategy_report_requested_pool_type(source_message)
+    pool = _strategy_report_current_pool_binding(
+        read_runtime,
+        task_id=task.id,
+        requested_type=requested_pool_type,
+    )
+    candidate_pool_ref = {
+        "strategy_type": pool.strategy_type,
+        "expected_pool_revision": pool.pool["revision"],
+        "expected_pool_snapshot_hash": pool.pool["snapshot_hash"],
+        "expected_artifact_id": pool.artifact_id,
+        "expected_artifact_content_hash": pool.artifact_content_hash,
+    }
+    impact = _strategy_report_latest_pool_impact_binding(
+        read_runtime,
+        task_id=task.id,
+        artifacts=artifacts,
+        pool=pool,
+    )
+    pool_impact_ref = {
+        "artifact_id": impact.artifact_id,
+        "expected_artifact_content_hash": impact.artifact_content_hash,
+        "expected_assessment_id": impact.assessment["assessment_id"],
+        "expected_assessment_content_hash": impact.assessment["content_hash"],
+    }
+
+    model_evidence, model_evidence_ref = (
+        _strategy_report_optional_model_evidence(
+            read_runtime,
+            task_id=task.id,
+            artifacts=artifacts,
+            sample_ref=sample_ref,
+        )
+    )
+    training_evidence, training_evidence_ref = (
+        _strategy_report_optional_training_evidence(
+            read_runtime,
+            task_id=task.id,
+            artifacts=artifacts,
+            sample_ref=sample_ref,
+        )
+    )
+    score_evidence, score_evidence_ref = _strategy_report_optional_score_evidence(
+        read_runtime,
+        task_id=task.id,
+        artifacts=artifacts,
+        sample_ref=sample_ref,
+        training_ref=training_evidence_ref,
+    )
+
+    strategy_identity = _strategy_report_identity(
+        runtime,
+        task_id=task.id,
+        strategy_type=pool.strategy_type,
+    )
+    strategy_id = (
+        None if strategy_identity is None else strategy_identity["strategy_id"]
+    )
+    try:
+        head = StrategyReportRepository(runtime.settings.db_path).get_head(
+            task_id=task.id,
+            strategy_id=strategy_id,
+        )
+    except Exception as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_head_invalid",
+            "当前策略报告 head/CAS 无法通过完整性复核；本次未创建计划。",
+        ) from exc
+
+    # Reuse the report adapter as the final cross-source preflight.  It proves
+    # that the selected PoolImpact belongs to this exact Pool and V2
+    # risk/development sample, and that every optional model chain matches the
+    # same SampleDesign.
+    try:
+        build_strategy_report_bundle_source_inputs(
+            project_context=project_context,
+            sample_design=sample,
+            candidate_pool=pool,
+            pool_impact=impact,
+            model_evidence=model_evidence,
+            training_evidence=training_evidence,
+            score_evidence=score_evidence,
+        )
+    except (ModelingError, StrategyError, *_STRATEGY_V2_ARTIFACT_ERRORS) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_source_incompatible",
+            "当前 ProjectContext、SampleDesign V2、Strategy Pool、PoolImpact "
+            "或可选模型证据不属于同一条可认证证据链；本次未创建计划。",
+        ) from exc
+
+    return {
+        "title": inputs["title"],
+        "status": inputs["status"],
+        "project_context_ref": {
+            "artifact_id": project_context.artifact_id,
+            "expected_artifact_content_hash": (
+                project_context.artifact_content_hash
+            ),
+            "expected_revision": project_context.revision["revision"],
+            "expected_revision_id": project_context.revision["revision_id"],
+            "expected_state_hash": project_context.revision["state_hash"],
+        },
+        "sample_design_ref": sample_ref,
+        "candidate_pool_ref": candidate_pool_ref,
+        "pool_impact_ref": pool_impact_ref,
+        "report_revision": int(head["current_revision"]) + 1,
+        "previous_report_id": head["current_report_id"],
+        "previous_report_content_hash": head["current_content_hash"],
+        "generated_at": datetime.now(UTC).isoformat(),
+        "strategy_identity": strategy_identity,
+        "model_evidence_ref": model_evidence_ref,
+        "training_evidence_ref": training_evidence_ref,
+        "score_evidence_ref": score_evidence_ref,
+    }
+
+
+def _strategy_report_read_runtime(
+    runtime: DriverTurnRuntime,
+) -> SimpleNamespace:
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    return SimpleNamespace(
+        settings=runtime.settings,
+        backend=backend,
+        registry=registry,
+        task_artifacts=TaskArtifactRepository(runtime.settings.db_path),
+        strategies=StrategyRepository(runtime.settings.db_path),
+        experiments=ExperimentStore(runtime.settings.db_path),
+        modeling_repo=ModelingRepository(runtime.settings.db_path),
+    )
+
+
+def _strategy_report_artifact_snapshot(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+) -> tuple[dict, ...]:
+    try:
+        return tuple(read_runtime.task_artifacts.list_for_task(task_id))
+    except _STRATEGY_V2_ARTIFACT_ERRORS as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_registry_unavailable",
+            "无法完整读取当前任务的 StrategyReportBundle V2 source registry。",
+        ) from exc
+
+
+def _strategy_report_requested_pool_type(
+    source_message: Mapping | None,
+) -> str | None:
+    text = (
+        str(source_message.get("content") or "")
+        if isinstance(source_message, Mapping)
+        else ""
+    )
+    selected = [
+        strategy_type
+        for strategy_type, pattern in _STRATEGY_REPORT_POOL_TYPE_PATTERNS.items()
+        if pattern.search(text)
+    ]
+    if len(selected) > 1:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_pool_type_ambiguous",
+            "同一报告请求同时点名 approval 和 reject Pool；请只选择一种策略类型。",
+        )
+    return selected[0] if selected else None
+
+
+def _strategy_report_current_pool_binding(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    requested_type: str | None,
+):
+    repository = StrategyCandidatePoolRepository(
+        read_runtime.settings.db_path
+    )
+    current: dict[str, Mapping] = {}
+    try:
+        for strategy_type in ("approval", "reject"):
+            pool = repository.get_current(task_id, strategy_type)
+            if pool is not None and pool.get("entries"):
+                current[strategy_type] = pool
+    except Exception as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_pool_invalid",
+            "当前 Strategy Pool head/revision 无法通过完整性复核。",
+        ) from exc
+
+    if requested_type is not None:
+        selected_type = requested_type
+        if selected_type not in current:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_report_bundle_v2_pool_required",
+                f"当前任务没有非空 {selected_type} Strategy Pool。",
+            )
+    elif len(current) == 1:
+        selected_type = next(iter(current))
+    elif not current:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_pool_required",
+            "当前任务没有可用于报告的非空 approval/reject Strategy Pool。",
+        )
+    else:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_pool_type_required",
+            "当前同时存在非空 approval 和 reject Strategy Pool；"
+            "请在报告请求中明确选择审批/准入或拒绝 Pool，平台不会猜测。",
+        )
+
+    selected = current[selected_type]
+    try:
+        return load_current_strategy_candidate_pool_artifact(
+            read_runtime,
+            task_id=task_id,
+            strategy_type=selected_type,
+            expected_pool_revision=selected["revision"],
+            expected_pool_snapshot_hash=strategy_pool_snapshot_hash(selected),
+        )
+    except (StrategyError, *_STRATEGY_V2_ARTIFACT_ERRORS) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_pool_invalid",
+            f"当前 {selected_type} Strategy Pool 的 artifact、来源或数据绑定"
+            "未通过完整性复核。",
+        ) from exc
+
+
+def _strategy_report_latest_sample_binding(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    artifacts: Sequence[Mapping],
+):
+    bundles = [
+        item
+        for item in artifacts
+        if item.get("kind") == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+    ]
+    if not bundles:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_sample_required",
+            "当前任务没有 StrategySampleDesign V2 membership/bundle 证据。",
+        )
+    newest = bundles[-1]
+    provenance = newest.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_sample_invalid",
+            "最新 StrategySampleDesign V2 bundle provenance 已损坏；"
+            "平台不会回退到旧样本设计。",
+        )
+    try:
+        return load_strategy_sample_design_v2_artifacts(
+            read_runtime,
+            task_id=task_id,
+            membership_artifact_id=provenance.get("membership_artifact_id"),
+            expected_membership_artifact_content_hash=provenance.get(
+                "membership_artifact_content_hash"
+            ),
+            bundle_artifact_id=newest.get("id"),
+            expected_bundle_artifact_content_hash=newest.get("content_hash"),
+            expected_bundle_id=provenance.get("bundle_id"),
+            expected_sample_design_id=provenance.get("sample_design_id"),
+            expected_sample_design_content_hash=provenance.get(
+                "sample_design_content_hash"
+            ),
+        )
+    except (
+        StrategyError,
+        TypeError,
+        ValueError,
+        *_STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_sample_invalid",
+            "最新 StrategySampleDesign V2 membership/bundle 未通过文件、"
+            "registry、provenance 或数据漂移复核；平台不会回退到旧版本。",
+        ) from exc
+
+
+def _strategy_report_sample_ref(sample) -> dict[str, object]:
+    design = sample.bundle["sample_design"]
+    return {
+        "membership_artifact_id": sample.membership_artifact_id,
+        "expected_membership_artifact_content_hash": (
+            sample.membership_artifact_content_hash
+        ),
+        "bundle_artifact_id": sample.bundle_artifact_id,
+        "expected_bundle_artifact_content_hash": (
+            sample.bundle_artifact_content_hash
+        ),
+        "expected_bundle_id": sample.bundle["bundle_id"],
+        "expected_sample_design_id": design["sample_design_id"],
+        "expected_sample_design_content_hash": design["content_hash"],
+    }
+
+
+def _strategy_report_latest_pool_impact_binding(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    artifacts: Sequence[Mapping],
+    pool,
+):
+    same_kind = [
+        item
+        for item in artifacts
+        if item.get("kind") == POOL_IMPACT_ARTIFACT_KIND
+    ]
+    exact: list[Mapping] = []
+    for item in same_kind:
+        provenance = item.get("provenance")
+        if not isinstance(provenance, Mapping):
+            if item is same_kind[-1]:
+                raise _StrategyV2EvidenceSetupError(
+                    "strategy_report_bundle_v2_pool_impact_invalid",
+                    "最新 PoolImpact artifact provenance 已损坏；"
+                    "平台不会回退到旧影响证据。",
+                )
+            continue
+        if (
+            provenance.get("pool_id") == pool.pool["pool_id"]
+            and provenance.get("pool_revision") == pool.pool["revision"]
+            and provenance.get("pool_snapshot_hash")
+            == pool.pool["snapshot_hash"]
+        ):
+            exact.append(item)
+    if not exact:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_pool_impact_required",
+            "当前非空 Strategy Pool 没有同 revision/snapshot 的 development "
+            "PoolImpact；请先单独完成影响测算。",
+        )
+    newest = exact[-1]
+    provenance = newest.get("provenance")
+    assert isinstance(provenance, Mapping)
+    try:
+        binding = load_strategy_pool_impact_artifact(
+            read_runtime,
+            task_id=task_id,
+            artifact_id=newest.get("id"),
+            expected_artifact_content_hash=newest.get("content_hash"),
+            expected_assessment_id=provenance.get("assessment_id"),
+            expected_assessment_content_hash=provenance.get(
+                "assessment_content_hash"
+            ),
+        )
+    except (
+        StrategyError,
+        TypeError,
+        ValueError,
+        *_STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_pool_impact_invalid",
+            "最新匹配 PoolImpact 未通过文件、registry、provenance、Pool 或"
+            "样本绑定复核；平台不会回退到旧影响证据。",
+        ) from exc
+    if (
+        binding.stage != "development_backtest"
+        or binding.pool.artifact_id != pool.artifact_id
+        or binding.pool.artifact_content_hash != pool.artifact_content_hash
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_pool_impact_invalid",
+            "最新 PoolImpact 不是当前 Pool 的精确 development 证据。",
+        )
+    return binding
+
+
+def _strategy_report_optional_model_evidence(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    artifacts: Sequence[Mapping],
+    sample_ref: Mapping[str, object],
+) -> tuple[object | None, dict[str, object] | None]:
+    records = [
+        item
+        for item in artifacts
+        if item.get("kind") == MODEL_EVIDENCE_V2_ARTIFACT_KIND
+    ]
+    if not records:
+        return None, None
+    newest = records[-1]
+    provenance = newest.get("provenance")
+    if not isinstance(provenance, Mapping):
+        _raise_corrupt_report_optional("ModelEvidence")
+    try:
+        binding = load_strategy_model_evidence_v2_artifact(
+            read_runtime,
+            task_id=task_id,
+            artifact_id=newest.get("id"),
+            expected_artifact_content_hash=newest.get("content_hash"),
+            expected_bundle_id=provenance.get("bundle_id"),
+            expected_bundle_content_hash=provenance.get("bundle_content_hash"),
+            sample_design_ref=provenance.get("sample_design_ref"),
+        )
+    except (
+        ModelingError,
+        StrategyError,
+        TypeError,
+        ValueError,
+        *_STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        _raise_corrupt_report_optional("ModelEvidence", cause=exc)
+    reference = {
+        "artifact_id": binding.artifact_id,
+        "expected_artifact_content_hash": binding.artifact_content_hash,
+        "expected_bundle_id": binding.bundle["bundle_id"],
+        "expected_bundle_content_hash": binding.bundle["content_hash"],
+    }
+    if _strategy_report_sample_ref(binding.sample_design_binding) != dict(
+        sample_ref
+    ):
+        return None, None
+    return binding, reference
+
+
+def _strategy_report_optional_training_evidence(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    artifacts: Sequence[Mapping],
+    sample_ref: Mapping[str, object],
+) -> tuple[object | None, dict[str, object] | None]:
+    records = [
+        item
+        for item in artifacts
+        if item.get("kind") == MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND
+    ]
+    if not records:
+        return None, None
+    newest = records[-1]
+    try:
+        reference = _strategy_report_training_ref(
+            newest,
+            artifacts=artifacts,
+        )
+        binding = load_modeling_training_evidence_artifacts(
+            read_runtime,
+            task_id=task_id,
+            **reference,
+        )
+        reference = build_training_evidence_ref(binding)
+    except (
+        ModelingError,
+        StrategyError,
+        TypeError,
+        ValueError,
+        *_STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        _raise_corrupt_report_optional("training evidence", cause=exc)
+    if reference["sample_design_ref"] != dict(sample_ref):
+        return None, None
+    return binding, reference
+
+
+def _strategy_report_training_ref(
+    record: Mapping,
+    *,
+    artifacts: Sequence[Mapping],
+) -> dict[str, object]:
+    provenance = record.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("training evidence provenance is invalid")
+    sample_ref = _strategy_report_sample_ref_from_artifacts(
+        artifacts,
+        membership_artifact_id=provenance.get(
+            "sample_membership_artifact_id"
+        ),
+        bundle_artifact_id=provenance.get("sample_bundle_artifact_id"),
+    )
+    return {
+        "sample_design_ref": sample_ref,
+        "model_binary_artifact_id": provenance.get(
+            "model_binary_artifact_id"
+        ),
+        "expected_model_binary_artifact_content_hash": provenance.get(
+            "model_binary_artifact_content_hash"
+        ),
+        "evidence_artifact_id": record.get("id"),
+        "expected_evidence_artifact_content_hash": record.get("content_hash"),
+        "expected_experiment_id": provenance.get("experiment_id"),
+        "expected_model_artifact_id": provenance.get("model_artifact_id"),
+        "expected_evidence_id": provenance.get("evidence_id"),
+        "expected_evidence_content_hash": provenance.get(
+            "evidence_content_hash"
+        ),
+    }
+
+
+def _strategy_report_sample_ref_from_artifacts(
+    artifacts: Sequence[Mapping],
+    *,
+    membership_artifact_id: object,
+    bundle_artifact_id: object,
+) -> dict[str, object]:
+    membership = next(
+        (
+            item
+            for item in artifacts
+            if item.get("id") == membership_artifact_id
+            and item.get("kind")
+            == SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND
+        ),
+        None,
+    )
+    bundle = next(
+        (
+            item
+            for item in artifacts
+            if item.get("id") == bundle_artifact_id
+            and item.get("kind") == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+        ),
+        None,
+    )
+    if membership is None or bundle is None:
+        raise ValueError("training evidence sample artifact pair is missing")
+    provenance = bundle.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("training evidence sample bundle provenance is invalid")
+    return {
+        "membership_artifact_id": membership.get("id"),
+        "expected_membership_artifact_content_hash": membership.get(
+            "content_hash"
+        ),
+        "bundle_artifact_id": bundle.get("id"),
+        "expected_bundle_artifact_content_hash": bundle.get("content_hash"),
+        "expected_bundle_id": provenance.get("bundle_id"),
+        "expected_sample_design_id": provenance.get("sample_design_id"),
+        "expected_sample_design_content_hash": provenance.get(
+            "sample_design_content_hash"
+        ),
+    }
+
+
+def _strategy_report_optional_score_evidence(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    artifacts: Sequence[Mapping],
+    sample_ref: Mapping[str, object],
+    training_ref: Mapping[str, object] | None,
+) -> tuple[object | None, dict[str, object] | None]:
+    records = [
+        item
+        for item in artifacts
+        if item.get("kind") == MODEL_SCORE_EVIDENCE_ARTIFACT_KIND
+    ]
+    if not records:
+        return None, None
+    newest = records[-1]
+    provenance = newest.get("provenance")
+    if not isinstance(provenance, Mapping):
+        _raise_corrupt_report_optional("score evidence")
+    reference = {
+        "evidence_artifact_id": newest.get("id"),
+        "expected_evidence_artifact_content_hash": newest.get("content_hash"),
+        "score_vector_artifact_id": provenance.get(
+            "score_vector_artifact_id"
+        ),
+        "expected_score_vector_artifact_content_hash": provenance.get(
+            "score_vector_artifact_content_hash"
+        ),
+    }
+    try:
+        binding = load_model_score_evidence_artifacts(
+            read_runtime,
+            task_id=task_id,
+            **reference,
+        )
+    except (
+        ModelingError,
+        StrategyError,
+        TypeError,
+        ValueError,
+        *_STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        _raise_corrupt_report_optional("score evidence", cause=exc)
+    bound_training_ref = build_training_evidence_ref(binding.training)
+    if (
+        bound_training_ref["sample_design_ref"] != dict(sample_ref)
+        or (
+            training_ref is not None
+            and bound_training_ref != dict(training_ref)
+        )
+    ):
+        return None, None
+    return binding, {
+        "evidence_artifact_id": binding.evidence_record["id"],
+        "expected_evidence_artifact_content_hash": binding.evidence_record[
+            "content_hash"
+        ],
+        "score_vector_artifact_id": binding.vector_record["id"],
+        "expected_score_vector_artifact_content_hash": binding.vector_record[
+            "content_hash"
+        ],
+    }
+
+
+def _raise_corrupt_report_optional(
+    label: str,
+    *,
+    cause: Exception | None = None,
+) -> None:
+    error = _StrategyV2EvidenceSetupError(
+        "strategy_report_bundle_v2_optional_evidence_invalid",
+        f"最新 {label} artifact 未通过完整认证；平台不会回退到旧证据。",
+    )
+    if cause is None:
+        raise error
+    raise error from cause
+
+
+def _strategy_report_identity(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    strategy_type: str,
+) -> dict[str, str] | None:
+    repository = StrategyRepository(runtime.settings.db_path)
+    try:
+        matches = [
+            item
+            for item in repository.list_meta_for_task(task_id)
+            if item.get("task_id") == task_id
+            and item.get("strategy_type") == strategy_type
+        ]
+    except Exception:
+        return None
+    if len(matches) != 1:
+        return None
+    metadata = matches[0]
+    strategy_id = metadata.get("id")
+    version = metadata.get("version")
+    if (
+        not isinstance(strategy_id, str)
+        or not strategy_id
+        or isinstance(version, bool)
+        or not isinstance(version, int)
+        or version <= 0
+    ):
+        return None
+    try:
+        strategy = repository.get_strategy(strategy_id)
+        spec_hash = repository.get_strategy_spec_hash(strategy_id)
+    except Exception:
+        return None
+    if (
+        strategy is None
+        or strategy.spec is None
+        or strategy.strategy_type != strategy_type
+        or not isinstance(spec_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", spec_hash) is None
+    ):
+        return None
+    return {
+        "strategy_id": strategy_id,
+        "strategy_version": str(version),
+        "strategy_type": strategy_type,
+    }
 
 
 def _latest_matching_strategy_sample_design_ref(
@@ -6252,6 +7039,7 @@ def _strategy_request_requires_dataset(
             *_STRATEGY_POOL_WORKFLOWS,
             "strategy_project_context",
             "strategy_model_evidence_v2",
+            "strategy_report_bundle_v2",
             "automatic_tree_leaf_materialization",
             "cross_matrix_cell_selection",
             "voting_candidate_build",

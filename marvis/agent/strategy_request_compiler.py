@@ -33,7 +33,16 @@ from marvis.packs.strategy.errors import StrategyError
 from marvis.strategy_adoption import AdoptionReasonError, normalize_adoption_reason
 
 
-_SYSTEM = STRATEGY_REQUEST_COMPILER_SYS.text
+_SYSTEM = (
+    STRATEGY_REQUEST_COMPILER_SYS.text
+    + "\nstrategy_report_bundle_v2 只生成当前 task 的受治理策略评审报告。"
+    "workflow_inputs 只能包含用户明确提供的 title/status；缺省时分别使用"
+    "「策略迭代评审报告」和 partial。ProjectContext、SampleDesign、Pool、"
+    "PoolImpact、可选模型证据、策略身份、report head CAS、generated_at、"
+    "artifact 引用和所有指标均由平台绑定，LLM 禁止填写。问句、否定、假设、"
+    "演示、仅历史描述或同轮串联训练、评分、候选、影响测算、采纳、部署、上线"
+    "时必须 clarification。"
+)
 
 
 STRATEGY_OPERATIONS = (
@@ -79,6 +88,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_pool_reorder",
     "strategy_pool_compile",
     "strategy_pool_impact",
+    "strategy_report_bundle_v2",
 )
 LEGACY_REPLAY_STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_sample_design",
@@ -234,6 +244,120 @@ _MODEL_EVIDENCE_PLATFORM_CONTROL_RE = re.compile(
     r"(?:工件|候选|证据|样本设计|bundle|membership)\s*(?:ID|id|hash|哈希|引用)",
     re.IGNORECASE,
 )
+_STRATEGY_REPORT_DEFAULT_TITLE = "策略迭代评审报告"
+_STRATEGY_REPORT_DEFAULT_STATUS = "partial"
+_STRATEGY_REPORT_STATUSES = frozenset({"draft", "partial", "final"})
+_STRATEGY_REPORT_SUBJECT_RE = re.compile(
+    r"(?:策略(?:迭代|开发|分析|项目)?评审报告|"
+    r"受治理(?:的)?策略(?:迭代)?(?:评审)?报告|"
+    r"StrategyReportBundle(?:\s*V2)?|"
+    r"governed\s+strategy\s+report(?:\s+bundle)?|"
+    r"strategy\s+(?:iteration|development|review)\s+report(?:\s+bundle)?|"
+    r"report\s+bundle\s+(?:for|on)\s+(?:the\s+)?(?:current\s+)?strategy)",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_STORED_STRATEGY_RE = re.compile(
+    r"(?:已有|已保存|已创建|现有)"
+    r"[^；;。.!?？\n]{0,24}策略(?:评审)?报告|"
+    r"(?<![A-Za-z0-9_])(?:existing|saved|stored)"
+    r"[^;.!?\n]{0,32}\bstrategy(?:\s+review)?\s+report\b",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_ACTION_RE = re.compile(
+    r"(?:生成|创建|制作|编制|形成|出一份|出个|给我|导出|构建)"
+    r"[^；;。.!?？\n]{0,80}(?:报告|Report)|"
+    r"(?<![A-Za-z0-9_])(?:generate|create|build|produce|prepare|render|export)"
+    r"[^;.!?\n]{0,80}\breport(?:\s+bundle)?\b",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_NEGATED_RE = re.compile(
+    r"(?:不要|不用|无需|先别|先不|暂不|取消|停止|禁止|别|不(?!是))"
+    r"[^；;。.!?？\n]{0,48}(?:生成|创建|制作|编制|形成|导出|报告)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|not|never|cancel|stop)"
+    r"[^;.!?\n]{0,48}(?:generate|create|build|produce|prepare|render|export)"
+    r"[^;.!?\n]{0,32}\breport\b",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_NONCOMMAND_RE = re.compile(
+    r"[?？]|(?:能否|可否|是否|可以吗|能不能|要不要|会不会|如何|怎么|怎样|假设|假如|如果|"
+    r"若|演示|示范|举例|教程|说明一下|解释一下)|"
+    r"(?<![A-Za-z0-9_])(?:can\s+you|could\s+you|would\s+you|"
+    r"should\s+(?:i|we)|is\s+it\s+possible|what\s+if|suppose|assuming|"
+    r"how\s+to|hypothetical(?:ly)?|example|demo|test|tutorial)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_PAST_RE = re.compile(
+    r"(?:昨天|之前|此前|过去|上次|曾经|历史上)|"
+    r"(?:已经|已)\s*(?:生成|创建|制作|编制|形成|导出)|"
+    r"(?<![A-Za-z0-9_])(?:yesterday|previously|earlier|historically|"
+    r"last\s+time|in\s+the\s+past|already\s+(?:generated|created|"
+    r"built|produced|prepared|rendered|exported))(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_CURRENT_RE = re.compile(
+    r"(?:现在|本次|这次|重新|再生成|立即|马上)|"
+    r"(?<![A-Za-z0-9_])(?:now|currently|this\s+time|again|regenerate)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_CHAINED_OPERATION_RE = re.compile(
+    r"(?:训练(?:模型)?|建模|(?:模型|数据)?评分|打分|"
+    r"(?:生成|构建|开发|筛选|分析)(?:策略)?候选|"
+    r"(?:测算|计算|评估|回测)(?:当前)?(?:策略池|Pool)?(?:的)?影响|"
+    r"影响测算|采纳|采用|部署|上线|投产)|"
+    r"(?<![A-Za-z0-9_])(?:train(?:ing)?(?:\s+(?:a\s+)?model)?|"
+    r"score(?:\s+(?:the\s+)?(?:model|data|dataset))|"
+    r"(?:build|create|generate|develop|select|analy[sz]e)\s+"
+    r"(?:a\s+)?(?:strategy\s+)?candidate|"
+    r"(?:measure|calculate|assess|backtest)(?:\s+(?:the\s+)?)?"
+    r"(?:strategy\s+pool\s+)?impact|adopt|deploy|go[-\s]?live|"
+    r"put\s+into\s+production)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_CHAIN_NEGATION_RE = re.compile(
+    r"(?:不要|不用|无需|不再|并未|未|不|禁止|避免)\s*$|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|not|never|without)\s*$",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_PLATFORM_CONTROL_RE = re.compile(
+    r"\b(?:project_context_ref|sample_design_ref|candidate_pool_ref|"
+    r"pool_impact_ref|strategy_identity|model_evidence_ref|"
+    r"training_evidence_ref|score_evidence_ref|report_revision|"
+    r"previous_report_id|previous_report_content_hash|generated_at|"
+    r"strategy_id|strategy_version|artifact_id|content_hash|"
+    r"expected_[a-z0-9_]+|cas|metrics?)\b|"
+    r"(?:项目上下文|样本设计|策略池|影响测算|模型证据|训练证据|评分证据)"
+    r"\s*(?:artifact|工件|产物)?\s*(?:ID|id|hash|哈希|引用)|"
+    r"(?:报告|report)\s*(?:revision|版本)\s*(?:=|:|：)\s*\d+|"
+    r"(?:生成时间|generated\s+at)\s*(?:=|:|：)|"
+    r"(?:通过率|审批率|准入率|坏账率|风险率|逾期率|"
+    r"KS|AUC|PSI|收益|利润|损失)\s*(?:=|:|：|为)\s*[-+]?\d",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_TITLE_RE = re.compile(
+    r"(?:报告标题|标题|report\s+title|title)\s*"
+    r"(?:为|是|叫|is|=|:|：)\s*"
+    r"(?:[“\"'《](?P<quoted>[^”\"'》\n]{1,200})[”\"'》]|"
+    r"(?P<plain>[^，,；;。.!?？\n]{1,200}))",
+    re.IGNORECASE,
+)
+_STRATEGY_REPORT_STATUS_GROUNDING = {
+    "draft": re.compile(
+        r"(?<!不)(?:草稿|草案)(?:版|状态)?|"
+        r"(?<![A-Za-z0-9_])draft(?:\s+status|\s+report)?(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "partial": re.compile(
+        r"(?:阶段性|部分|中间)(?:版|报告|状态)?|"
+        r"(?<![A-Za-z0-9_])partial(?:\s+status|\s+report)?(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "final": re.compile(
+        r"(?:最终|终稿|定稿)(?:版|报告|状态)?|"
+        r"(?<![A-Za-z0-9_])final(?:\s+status|\s+report)?(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+}
 _SAMPLE_V2_POPULATION_ROLE_RE = re.compile(
     r"(?:审批(?:总体|样本)|approval\s+population|"
     r"风险(?:总体|样本)|risk\s+population)",
@@ -1689,6 +1813,7 @@ _NON_REPAIRABLE_CLARIFICATION_CODES = frozenset(
         "candidate_economics_ambiguous",
         "candidate_economics_incomplete",
         "candidate_requires_observed_economics",
+        "strategy_report_bundle_v2_platform_binding_forbidden",
         "strategy_sample_design_v2_native_bootstrap_required",
         "strategy_request_too_complex",
     }
@@ -2534,6 +2659,8 @@ def _validate_standard_workflow_payload(
             )
         elif workflow == "strategy_model_evidence_v2":
             normalized = _validate_strategy_model_evidence_v2_inputs(raw_inputs)
+        elif workflow == "strategy_report_bundle_v2":
+            normalized = _validate_strategy_report_bundle_v2_inputs(raw_inputs)
         elif workflow == "strategy_sample_design":
             normalized = _validate_strategy_sample_design_inputs(
                 raw_inputs,
@@ -2705,6 +2832,48 @@ def _validate_strategy_project_context_inputs(
         field_paths=False,
     )
     return normalized
+
+
+def _validate_strategy_report_bundle_v2_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, str]:
+    """Validate the only two caller-owned report controls."""
+
+    workflow = "strategy_report_bundle_v2"
+    allowed = {"title", "status"}
+    unexpected = sorted(set(inputs) - allowed)
+    if unexpected:
+        raise _DraftValidationError(
+            f"{workflow} workflow_inputs 只允许 title/status；平台字段 "
+            + "、".join(unexpected)
+            + " 由 Agent 在计划创建时绑定。",
+            code="strategy_report_bundle_v2_platform_binding_forbidden",
+            fields=tuple(unexpected),
+        )
+
+    title = inputs.get("title", _STRATEGY_REPORT_DEFAULT_TITLE)
+    if not isinstance(title, str) or not title.strip() or "\x00" in title:
+        raise _DraftValidationError(
+            "strategy_report_bundle_v2 title 必须是非空文本。",
+            code="strategy_report_bundle_v2_title_invalid",
+            fields=("title",),
+        )
+    title = title.strip()
+    if len(title) > 200:
+        raise _DraftValidationError(
+            "strategy_report_bundle_v2 title 最多 200 个字符。",
+            code="strategy_report_bundle_v2_title_invalid",
+            fields=("title",),
+        )
+
+    status = inputs.get("status", _STRATEGY_REPORT_DEFAULT_STATUS)
+    if not isinstance(status, str) or status not in _STRATEGY_REPORT_STATUSES:
+        raise _DraftValidationError(
+            "strategy_report_bundle_v2 status 只能是 draft、partial 或 final。",
+            code="strategy_report_bundle_v2_status_invalid",
+            fields=("status",),
+        )
+    return {"title": title, "status": status}
 
 
 def _project_context_text_list(
@@ -5433,6 +5602,17 @@ def _ground_refinement_request(
     whitelist: tuple[str, ...],
 ) -> StrategyRequestCompilation:
     draft = result.draft
+    if utterance_targets_strategy_report_bundle_v2(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_report_bundle_v2"
+    ):
+        return _clarification(
+            "原话明确要求生成受治理策略评审报告，只能编译为 "
+            "strategy_report_bundle_v2；不能改路由到通用策略报告、训练、"
+            "评分、候选、影响测算、采纳或部署。",
+            code="strategy_report_bundle_v2_workflow_required",
+            fields=("workflow",),
+        )
     if utterance_targets_strategy_project_context(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_project_context"
@@ -5539,6 +5719,8 @@ def _ground_refinement_request(
         )
     if draft.workflow == "strategy_model_evidence_v2":
         return _ground_strategy_model_evidence_v2_request(utterance, result)
+    if draft.workflow == "strategy_report_bundle_v2":
+        return _ground_strategy_report_bundle_v2_request(utterance, result)
     if draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS:
         return _ground_strategy_pool_impact_request(
             utterance,
@@ -5730,6 +5912,110 @@ def utterance_targets_strategy_project_context(utterance: str) -> bool:
         _PROJECT_CONTEXT_SUBJECT_RE.search(utterance)
         and _PROJECT_CONTEXT_ACTION_RE.search(utterance)
     )
+
+
+def utterance_targets_strategy_report_bundle_v2(utterance: str) -> bool:
+    """Recognize a command-shaped governed strategy-report request."""
+
+    return bool(
+        _STRATEGY_REPORT_STORED_STRATEGY_RE.search(utterance) is None
+        and _STRATEGY_REPORT_SUBJECT_RE.search(utterance)
+        and _STRATEGY_REPORT_ACTION_RE.search(utterance)
+    )
+
+
+def _ground_strategy_report_bundle_v2_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+
+    if _STRATEGY_REPORT_NEGATED_RE.search(utterance):
+        return _clarification(
+            "否定的报告请求不会创建或执行报告计划；请在需要执行时单独发出肯定命令。",
+            code="strategy_report_bundle_v2_intent_negated",
+            fields=("report_intent",),
+        )
+    if (
+        not utterance_targets_strategy_report_bundle_v2(utterance)
+        or _STRATEGY_REPORT_NONCOMMAND_RE.search(utterance)
+        or (
+            _STRATEGY_REPORT_PAST_RE.search(utterance)
+            and not _STRATEGY_REPORT_CURRENT_RE.search(utterance)
+        )
+    ):
+        return _clarification(
+            "请单独发出一次立即生成受治理策略评审报告的肯定命令；"
+            "问句、假设、演示或仅历史描述不会创建报告。",
+            code="strategy_report_bundle_v2_positive_command_required",
+            fields=("report_intent",),
+        )
+    if _strategy_report_has_positive_chained_operation(utterance):
+        return _clarification(
+            "本轮只能生成报告；训练、评分、候选构建/分析、影响测算、"
+            "采纳、部署或上线必须作为后续独立受治理请求。",
+            code="strategy_report_bundle_v2_single_operation_required",
+            fields=("next_action",),
+        )
+    if _STRATEGY_REPORT_PLATFORM_CONTROL_RE.search(utterance):
+        return _clarification(
+            "报告只允许用户提供 title/status；ProjectContext、SampleDesign、"
+            "Pool、PoolImpact、模型证据、策略身份、revision/CAS、generated_at、"
+            "artifact id/hash 和指标均由平台绑定。",
+            code="strategy_report_bundle_v2_platform_binding_forbidden",
+            fields=("platform_bindings",),
+        )
+
+    missing: list[str] = []
+    title_mentions = _strategy_report_title_mentions(utterance)
+    if len(title_mentions) > 1:
+        missing.append("title")
+    elif title_mentions:
+        if inputs["title"] != title_mentions[0]:
+            missing.append("title")
+    elif inputs["title"] != _STRATEGY_REPORT_DEFAULT_TITLE:
+        missing.append("title")
+
+    status_mentions = {
+        status
+        for status, pattern in _STRATEGY_REPORT_STATUS_GROUNDING.items()
+        if pattern.search(utterance)
+    }
+    if len(status_mentions) > 1:
+        missing.append("status")
+    elif status_mentions:
+        if inputs["status"] != next(iter(status_mentions)):
+            missing.append("status")
+    elif inputs["status"] != _STRATEGY_REPORT_DEFAULT_STATUS:
+        missing.append("status")
+
+    if missing:
+        return _clarification(
+            "报告标题和状态只能逐字采用用户原话；未提供时平台固定使用"
+            "「策略迭代评审报告」与 partial，不允许模型补写或覆盖。",
+            code="strategy_report_bundle_v2_controls_not_grounded",
+            fields=tuple(dict.fromkeys(missing)),
+        )
+    return result
+
+
+def _strategy_report_has_positive_chained_operation(utterance: str) -> bool:
+    for match in _STRATEGY_REPORT_CHAINED_OPERATION_RE.finditer(utterance):
+        prefix = utterance[max(0, match.start() - 16) : match.start()]
+        if _STRATEGY_REPORT_CHAIN_NEGATION_RE.search(prefix) is None:
+            return True
+    return False
+
+
+def _strategy_report_title_mentions(utterance: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for match in _STRATEGY_REPORT_TITLE_RE.finditer(utterance):
+        value = (match.group("quoted") or match.group("plain") or "").strip()
+        if value and value not in values:
+            values.append(value)
+    return tuple(values)
 
 
 def utterance_targets_strategy_sample_design(utterance: str) -> bool:
@@ -10174,6 +10460,20 @@ def _standard_workflow_confirmation_text(
             "当前只归集 univariate evidence，不训练模型、不比较模型、不生成月度/OOT 模型证据",
             "不报告、不采纳、不部署",
         ]
+    elif draft.workflow == "strategy_report_bundle_v2":
+        details = [
+            "已识别为〔StrategyReportBundle V2 Workflow〕",
+            f"报告标题：{inputs['title']}",
+            f"报告状态：{inputs['status']}",
+            "平台将绑定当前认证 ProjectContext、最新精确 SampleDesign V2、"
+            "当前非空 approval/reject Pool 及其最新精确 PoolImpact",
+            "只有与同一 SampleDesign/模型链完全兼容的最新认证模型证据才会纳入；"
+            "不兼容证据保持缺省，损坏的最新证据不会回退到旧版本",
+            "策略身份、report head revision/CAS、generated_at、artifact id/hash "
+            "和所有指标均由平台拥有",
+            "本步骤只生成 JSON、Markdown、XLSX 三种受治理报告；"
+            "不会创建策略，也不代表采纳或部署",
+        ]
     elif draft.workflow == "strategy_sample_design":
         performance = (
             f"已提供 {inputs['performance_window_days']} 天"
@@ -11067,6 +11367,14 @@ def _user_prompt(
         "模型对比、月度/OOT/验证模型、报告、采纳或部署的正向请求必须 clarification；"
         "明确说不做这些后续动作可以接受；“此前/已有/已认证”只有位于当前归集动作之后时"
         "才视为来源状态；“此前未汇总”“没有汇总”“有没有汇总”必须 clarification。"
+        "对于 strategy_report_bundle_v2，workflow_inputs 只能包含用户明确提供的 title "
+        "和 status；status 仅允许 draft/partial/final。用户未提供时必须使用固定默认值"
+        " title=策略迭代评审报告、status=partial。ProjectContext、SampleDesign、Pool、"
+        "PoolImpact、ModelEvidence/training/score、strategy identity、report revision/"
+        "previous head CAS、generated_at、artifact id/hash、来源引用和所有指标必须省略，"
+        "由平台在计划创建时精确绑定。报告请求必须是当前、肯定、单步骤命令；问句、否定、"
+        "假设、演示、仅历史描述，或同轮串联训练、评分、候选、影响测算、采纳、部署、"
+        "上线时必须 clarification。"
         "对于 automatic_tree_candidate_build，只能抄录用户明确提供的 features、"
         "权重/金额字段、方向和树参数；不得填写平台拥有的数据绑定、目标列、标签策略、"
         "预算、结果、叶子、动作、排名或推荐，也不得串联选叶或 Strategy Pool。"
@@ -11214,6 +11522,7 @@ __all__ = [
     "compile_strategy_request",
     "strategy_request_confirmation_text",
     "utterance_targets_strategy_project_context",
+    "utterance_targets_strategy_report_bundle_v2",
     "utterance_targets_strategy_sample_design",
     "validate_strategy_request",
 ]

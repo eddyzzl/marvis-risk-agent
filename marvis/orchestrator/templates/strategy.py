@@ -1763,6 +1763,133 @@ STRATEGY_POOL_IMPACT = WorkflowTemplate(
 )
 
 
+STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
+    id="strategy_report_bundle_v2",
+    title="生成 StrategyReportBundle V2",
+    goal_patterns=(
+        "生成策略迭代评审报告",
+        "生成受治理策略报告",
+        "generate governed strategy report",
+        "build strategy review report",
+    ),
+    slots=(
+        SlotSpec("title", True, "user", "Explicit or deterministic default report title"),
+        SlotSpec(
+            "status",
+            True,
+            "user",
+            "Explicit or deterministic default draft/partial/final status",
+        ),
+        SlotSpec(
+            "project_context_ref",
+            True,
+            "task_context",
+            "Exact authenticated current ProjectContext artifact and revision",
+        ),
+        SlotSpec(
+            "sample_design_ref",
+            True,
+            "task_context",
+            "Exact latest authenticated StrategySampleDesign V2 pair",
+        ),
+        SlotSpec(
+            "candidate_pool_ref",
+            True,
+            "task_context",
+            "Exact current nonempty approval/reject Candidate Pool",
+        ),
+        SlotSpec(
+            "pool_impact_ref",
+            True,
+            "task_context",
+            "Exact latest development PoolImpact for the bound Pool",
+        ),
+        SlotSpec(
+            "report_revision",
+            True,
+            "task_context",
+            "Next report-head CAS revision",
+        ),
+        SlotSpec(
+            "previous_report_id",
+            False,
+            "task_context",
+            "Exact previous report head id",
+        ),
+        SlotSpec(
+            "previous_report_content_hash",
+            False,
+            "task_context",
+            "Exact previous report head content hash",
+        ),
+        SlotSpec(
+            "generated_at",
+            True,
+            "task_context",
+            "Platform-generated current UTC timestamp",
+        ),
+        SlotSpec(
+            "strategy_identity",
+            False,
+            "task_context",
+            "Unique exact task-owned persisted strategy identity, when resolvable",
+        ),
+        SlotSpec(
+            "model_evidence_ref",
+            False,
+            "task_context",
+            "Optional latest fully authenticated compatible ModelEvidence",
+        ),
+        SlotSpec(
+            "training_evidence_ref",
+            False,
+            "task_context",
+            "Optional latest fully authenticated compatible training evidence",
+        ),
+        SlotSpec(
+            "score_evidence_ref",
+            False,
+            "task_context",
+            "Optional latest fully authenticated compatible score evidence",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="生成受治理策略评审报告",
+            tool_ref=ToolRef("strategy", "build_report_bundle_v2"),
+            inputs_template={
+                "title": "{slot:title}",
+                "status": "{slot:status}",
+                "project_context_ref": "{slot:project_context_ref}",
+                "sample_design_ref": "{slot:sample_design_ref}",
+                "candidate_pool_ref": "{slot:candidate_pool_ref}",
+                "pool_impact_ref": "{slot:pool_impact_ref}",
+                "report_revision": "{slot:report_revision}",
+                "previous_report_id": "{slot:previous_report_id}",
+                "previous_report_content_hash": (
+                    "{slot:previous_report_content_hash}"
+                ),
+                "generated_at": "{slot:generated_at}",
+                "strategy_identity": "{slot:strategy_identity}",
+                "model_evidence_ref": "{slot:model_evidence_ref}",
+                "training_evidence_ref": "{slot:training_evidence_ref}",
+                "score_evidence_ref": "{slot:score_evidence_ref}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "report_id"}),
+                PostCheck("nonempty", {"field": "report_revision"}),
+                PostCheck("nonempty", {"field": "content_hash"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 _LIMIT_PRICING_INPUTS = {
     "dataset_id": "{slot:dataset_id}",
     "sample_design_ref": "{slot:sample_design_ref}",
