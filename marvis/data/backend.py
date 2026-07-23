@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+import numpy as np
 import pandas as pd
+from pandas.api.types import is_bool_dtype, is_numeric_dtype
 
 from marvis.data.contracts import (
     DATE_FORMATS,
@@ -62,6 +64,7 @@ DUCKDB_MEMORY_LIMIT_ENV = "MARVIS_DUCKDB_MEMORY_LIMIT"
 DUCKDB_THREADS_ENV = "MARVIS_DUCKDB_THREADS"
 DEFAULT_DUCKDB_MEMORY_LIMIT = "4GB"
 DUCKDB_TEMP_DIR_NAME = ".duckdb_tmp"
+COMPACT_MISSING_CATEGORY = "__MARVIS_MISSING_CATEGORY__"
 
 
 def default_duckdb_threads() -> int:
@@ -69,6 +72,24 @@ def default_duckdb_threads() -> int:
     co-located local LLM instead of DuckDB claiming every core by default."""
     cpu_count = os.cpu_count() or 2
     return max(2, cpu_count // 2)
+
+
+def _normalize_compact_feature(series: pd.Series) -> pd.Series:
+    """Make non-numeric model features safe for native categorical learners.
+
+    CatBoost rejects null category values (including pandas categorical NaN).
+    Compact loading is an in-memory representation boundary, so replace only
+    the worker copy with a stable reserved category; the registered source
+    parquet remains byte-for-byte unchanged.  Numeric/bool columns retain the
+    existing float32/native path.
+    """
+
+    if is_numeric_dtype(series.dtype) or is_bool_dtype(series.dtype):
+        return series
+    normalized = series.astype("string").fillna(COMPACT_MISSING_CATEGORY)
+    if isinstance(series.dtype, pd.CategoricalDtype):
+        return normalized.astype("category")
+    return normalized.astype(object)
 
 
 def duckdb_runtime_config(temp_directory: Path) -> dict[str, str]:
@@ -383,11 +404,192 @@ class DataBackend:
                 query = f"SELECT {cols_sql} FROM {parquet_rel(path)} LIMIT {int(nrows)}"
                 with self._connect() as conn:
                     return conn.execute(query).df()
+            if selected is not None:
+                # DuckDB is the canonical schema reader and aliases blank parquet
+                # fields (for example ``C0``).  PyArrow keeps the raw blank name.
+                # Map canonical selections back to their physical names, then
+                # restore the public names after the lower-memory PyArrow read.
+                import pyarrow.parquet as pq
+
+                raw_columns = [str(name) for name in pq.ParquetFile(path).schema_arrow.names]
+                canonical_columns = self.column_names(path)
+                canonical_to_raw = dict(zip(canonical_columns, raw_columns, strict=True))
+                physical_selected = [canonical_to_raw[name] for name in selected]
+                frame = pd.read_parquet(path, columns=physical_selected)
+                frame.columns = selected
+                return frame
             return pd.read_parquet(path, columns=selected)
         if suffix == ".feather":
             frame = pd.read_feather(path, columns=selected)
             return frame.head(nrows) if nrows is not None else frame
         raise DataBackendError(f"unsupported dataset format: {path.suffix}")
+
+    def read_compact_numeric_frame(
+        self,
+        path: Path,
+        *,
+        numeric_columns: Sequence[str],
+        other_columns: Sequence[str] = (),
+        batch_size: int = 16,
+    ) -> pd.DataFrame:
+        """Load a wide numeric projection in bounded batches as float32.
+
+        This is an in-memory representation choice for modeling workers only; the
+        source file is never rewritten.  Reading and downcasting one small column
+        batch at a time avoids the float64 + float32 double-allocation peak that can
+        otherwise exceed a governed worker's RSS before tuning even starts.
+        """
+
+        path = self._resolve_path(path)
+        allowed_columns = set(self.column_names(path))
+        requested_features = list(dict.fromkeys(str(column) for column in numeric_columns))
+        other = [
+            column
+            for column in dict.fromkeys(str(column) for column in other_columns)
+            if column not in requested_features
+        ]
+        self._validate_columns([*requested_features, *other], allowed_columns)
+        if not requested_features and not other:
+            raise DataBackendError("compact frame projection requires at least one column")
+        if path.suffix.lower() != ".parquet":
+            frame = self.read_frame(path, columns=[*requested_features, *other])
+            numeric = [
+                column
+                for column in requested_features
+                if is_numeric_dtype(frame[column].dtype) and not is_bool_dtype(frame[column].dtype)
+            ]
+            if numeric:
+                frame[numeric] = frame[numeric].astype("float32")
+            for column in requested_features:
+                if column not in numeric:
+                    frame[column] = _normalize_compact_feature(frame[column])
+            return frame
+
+        import pyarrow.parquet as pq
+
+        parquet_file = pq.ParquetFile(path)
+        raw_columns = [str(name) for name in parquet_file.schema_arrow.names]
+        canonical_columns = self.column_names(path)
+        canonical_to_raw = dict(zip(canonical_columns, raw_columns, strict=True))
+        import pyarrow as pa
+
+        schema = parquet_file.schema_arrow
+        numeric = []
+        preserved_features = []
+        for column in requested_features:
+            arrow_type = schema.field(canonical_to_raw[column]).type
+            if (
+                pa.types.is_integer(arrow_type)
+                or pa.types.is_floating(arrow_type)
+                or pa.types.is_decimal(arrow_type)
+            ) and not pa.types.is_boolean(arrow_type):
+                numeric.append(column)
+            else:
+                preserved_features.append(column)
+
+        def _read(selected: list[str]) -> pd.DataFrame:
+            physical = [canonical_to_raw[name] for name in selected]
+            result = pd.read_parquet(path, columns=physical)
+            result.columns = selected
+            return result
+
+        width = max(1, int(batch_size))
+        row_count = int(parquet_file.metadata.num_rows)
+        if numeric:
+            # Keep every numeric feature in one contiguous float32 allocation.
+            # Concatenating per-batch DataFrames leaves one pandas block per
+            # batch; native learners then rebuild train/test/OOT as contiguous
+            # matrices on every fit/predict call.  On wide real datasets those
+            # temporary matrices remain resident in the allocator and make RSS
+            # grow trial after trial.  Preallocation preserves the bounded
+            # float64->float32 conversion peak while giving pandas/learners one
+            # reusable block for the entire feature matrix.
+            matrix = np.empty((row_count, len(numeric)), dtype=np.float32)
+            for start in range(0, len(numeric), width):
+                batch = numeric[start : start + width]
+                values = _read(batch).to_numpy(dtype=np.float32, copy=False)
+                matrix[:, start : start + len(batch)] = values
+            result = pd.DataFrame(matrix, columns=numeric, copy=False)
+        else:
+            result = pd.DataFrame(index=pd.RangeIndex(row_count))
+        preserved = [*preserved_features, *other]
+        if preserved:
+            extra_frame = _read(preserved)
+            for column in preserved:
+                # Assign categorical/date features and non-feature controls
+                # separately so their native dtype survives while the real
+                # numeric feature block remains one contiguous allocation.
+                series = extra_frame[column]
+                if column in preserved_features:
+                    series = _normalize_compact_feature(series)
+                result[column] = series.array
+        return result.loc[:, [*requested_features, *other]]
+
+    def project_columns_to_parquet(
+        self,
+        path: Path,
+        out_path: Path,
+        columns: Sequence[str],
+    ) -> int:
+        """Stream a column projection to parquet without materializing a DataFrame."""
+
+        path = self._resolve_path(path)
+        out_path = self._resolve_path(out_path)
+        if path.suffix.lower() not in SUPPORTED_DUCKDB_SUFFIXES:
+            raise DataBackendError("column projection requires a CSV or parquet source")
+        allowed_columns = set(self.column_names(path))
+        selected = self._validate_columns(columns, allowed_columns)
+        if not selected:
+            raise DataBackendError("column projection requires at least one column")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if path.suffix.lower() == ".parquet":
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            parquet_file = pq.ParquetFile(path)
+            raw_columns = [str(name) for name in parquet_file.schema_arrow.names]
+            canonical_columns = self.column_names(path)
+            canonical_to_raw = dict(zip(canonical_columns, raw_columns, strict=True))
+            physical_selected = [canonical_to_raw[name] for name in selected]
+            writer = None
+            try:
+                for batch in parquet_file.iter_batches(
+                    batch_size=4_096,
+                    columns=physical_selected,
+                    use_threads=False,
+                ):
+                    canonical_batch = pa.RecordBatch.from_arrays(batch.columns, names=selected)
+                    if writer is None:
+                        writer = pq.ParquetWriter(
+                            out_path,
+                            canonical_batch.schema,
+                            compression="snappy",
+                        )
+                    writer.write_batch(canonical_batch)
+                if writer is None:
+                    fields_by_name = {
+                        str(field.name): field for field in parquet_file.schema_arrow
+                    }
+                    empty_schema = pa.schema(
+                        [
+                            pa.field(name, fields_by_name[canonical_to_raw[name]].type)
+                            for name in selected
+                        ]
+                    )
+                    writer = pq.ParquetWriter(out_path, empty_schema, compression="snappy")
+            finally:
+                if writer is not None:
+                    writer.close()
+            return self.row_count(out_path)
+
+        columns_sql = self._select_columns_sql(selected, allowed_columns)
+        query = (
+            f"COPY (SELECT {columns_sql} FROM {self._duckdb_rel(path)}) "
+            f"TO {sql_string_literal(out_path.as_posix())} (FORMAT parquet)"
+        )
+        with self._connect() as conn:
+            conn.execute(query)
+        return self.row_count(out_path)
 
     def sample_rows(self, path: Path, n: int, *, seed: int) -> pd.DataFrame:
         path = self._resolve_path(path)

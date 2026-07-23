@@ -20,6 +20,291 @@ def _write(tmp_path, frame: pd.DataFrame, name: str = "screen.parquet"):
     return DataBackend(tmp_path), path
 
 
+def test_screen_default_feature_reads_are_memory_bounded(tmp_path, monkeypatch):
+    rows = 80
+    feature_names = [f"f{index}" for index in range(48)]
+    target = np.array(([0, 1] * (rows // 2)))
+    frame = pd.DataFrame(
+        {
+            **{
+                name: target.astype(float) + (index + 1) * np.linspace(0, 0.01, rows)
+                for index, name in enumerate(feature_names)
+            },
+            "y": target,
+        }
+    )
+    backend, path = _write(tmp_path, frame)
+    original_read_frame = DataBackend.read_frame
+    requested_widths: list[int] = []
+
+    def counting_read_frame(self, call_path, *, columns=None, nrows=None):
+        if columns is not None and "y" not in columns:
+            requested_widths.append(len(columns))
+        return original_read_frame(self, call_path, columns=columns, nrows=nrows)
+
+    monkeypatch.setattr(DataBackend, "read_frame", counting_read_frame)
+
+    screen_features(backend, path, features=feature_names, target_col="y", top_k=8)
+
+    assert requested_widths
+    assert max(requested_widths) <= 16
+
+
+def test_screen_hard_excludes_named_post_outcome_fields_before_ks(tmp_path):
+    """A future-performance column is leakage because of when it becomes known, not
+    because its one-variable KS happens to cross a numeric threshold.  Low-KS MOB/FPD
+    outcome columns must therefore be blocked before the statistical screen, while an
+    ordinary pre-loan feature that merely contains ``mob`` remains eligible."""
+    rows = 400
+    rng = np.random.RandomState(20260722)
+    frame = pd.DataFrame({
+        "mob3_ever30": rng.permutation(np.arange(rows, dtype=float)),
+        "mob4_dpd30_amt_fm": rng.permutation(np.arange(rows, dtype=float)),
+        "fpd30": rng.permutation(np.arange(rows, dtype=float)),
+        "label_all": rng.permutation(np.array(([0, 1] * (rows // 2)), dtype=float)),
+        "mob_bureau_query_count": rng.normal(size=rows),
+        "y": np.array(([0, 1] * (rows // 2)), dtype=float),
+    })
+    backend, path = _write(tmp_path, frame)
+
+    result = screen_features(
+        backend,
+        path,
+        features=[
+            "mob3_ever30",
+            "mob4_dpd30_amt_fm",
+            "fpd30",
+            "label_all",
+            "mob_bureau_query_count",
+        ],
+        target_col="y",
+    )
+
+    hard = {feature: reason for feature, _ks, reason in result.leakage}
+    assert set(hard) == {"mob3_ever30", "mob4_dpd30_amt_fm", "fpd30", "label_all"}
+    assert all("semantic/temporal target leakage" in reason for reason in hard.values())
+    assert set(hard).isdisjoint(result.selected)
+    assert "mob_bureau_query_count" in result.selected
+
+
+def test_screen_hard_excludes_deterministic_outcome_subgroup_in_train_only_folds(
+    tmp_path,
+):
+    """A generic alias can leak one target branch while keeping pooled KS low.
+
+    ``outcome_alias=1`` identifies only a minority of bads, so the legacy
+    ``KS >= 0.40`` rule cannot catch it.  Repeating the same sufficiently large,
+    perfectly pure subgroup in two deterministic halves of train is
+    deterministic outcome evidence and must be a hard exclusion even when the
+    column name is harmless. Test labels must not participate in this gate.
+    """
+    train_rows = 1_000
+    test_rows = 800
+    split = np.array(["train"] * train_rows + ["test"] * test_rows)
+    y = np.array(([0, 1] * ((train_rows + test_rows) // 2)), dtype=float)
+    alias = np.zeros(train_rows + test_rows, dtype=float)
+    train_bad = np.flatnonzero((split == "train") & (y == 1))[:110]
+    test_bad = np.flatnonzero((split == "test") & (y == 1))[:110]
+    alias[np.concatenate([train_bad, test_bad])] = 1.0
+    backend, path = _write(
+        tmp_path,
+        pd.DataFrame({"outcome_alias": alias, "y": y, "split": split}),
+        name="deterministic_subgroup.parquet",
+    )
+
+    result = screen_features(
+        backend,
+        path,
+        features=["outcome_alias"],
+        target_col="y",
+        split_col="split",
+    )
+
+    assert result.scores["outcome_alias"]["ks"] < 0.40
+    hard = {feature: reason for feature, _ks, reason in result.leakage}
+    assert "outcome_alias" in hard
+    assert "deterministic outcome subgroup leakage" in hard["outcome_alias"]
+    assert "train fold A 55" in hard["outcome_alias"]
+    assert "train fold B 55" in hard["outcome_alias"]
+    assert "outcome_alias" not in {feature for feature, _ks in result.ranked}
+    assert "outcome_alias" not in result.selected
+
+
+@pytest.mark.parametrize("case", ["small_support", "one_split_only", "normal"])
+def test_screen_deterministic_subgroup_gate_avoids_low_support_and_one_sided_false_positives(
+    tmp_path,
+    case,
+):
+    train_rows = 1_000
+    test_rows = 800
+    split = np.array(["train"] * train_rows + ["test"] * test_rows)
+    y = np.array(([0, 1] * ((train_rows + test_rows) // 2)), dtype=float)
+    values = np.zeros(train_rows + test_rows, dtype=float)
+    train_bad = np.flatnonzero((split == "train") & (y == 1))
+    test_bad = np.flatnonzero((split == "test") & (y == 1))
+
+    if case == "small_support":
+        values[np.concatenate([train_bad[:20], test_bad[:20]])] = 1.0
+    elif case == "one_split_only":
+        # Within the value-stratified train folds, one half is pure good and
+        # the other pure bad. The repeated-subgroup gate requires the same
+        # target class in both train-only folds.
+        values[:220] = 1.0
+    else:
+        # Balanced in both splits: a normal binary feature with no deterministic
+        # target subgroup.
+        values[np.arange(values.size) % 4 < 2] = 1.0
+
+    feature = f"binary_{case}"
+    backend, path = _write(
+        tmp_path,
+        pd.DataFrame({feature: values, "y": y, "split": split}),
+        name=f"{case}.parquet",
+    )
+
+    result = screen_features(
+        backend,
+        path,
+        features=[feature],
+        target_col="y",
+        split_col="split",
+    )
+
+    assert feature not in {column for column, _ks, _reason in result.leakage}
+    assert feature in result.selected
+
+
+def test_binary_screen_top_k_is_fitted_on_train_not_test_labels(tmp_path):
+    """A feature that works only in test cannot enter the automatic candidate set."""
+    rows = 4_000
+    rng = np.random.RandomState(121)
+    split = np.array(["train"] * (rows // 2) + ["test"] * (rows // 2))
+    y = rng.randint(0, 2, size=rows).astype(float)
+    train_signal = rng.normal(size=rows)
+    test_signal = rng.normal(size=rows)
+    train_signal[split == "train"] += y[split == "train"] * 0.55
+    test_signal[split == "test"] += y[split == "test"] * 1.2
+    backend, path = _write(
+        tmp_path,
+        pd.DataFrame({
+            "train_signal": train_signal,
+            "test_signal": test_signal,
+            "y": y,
+            "split": split,
+        }),
+        name="train_only_screen.parquet",
+    )
+
+    result = screen_features(
+        backend,
+        path,
+        features=["test_signal", "train_signal"],
+        target_col="y",
+        split_col="split",
+        leakage_ks=0.99,
+        top_k=1,
+    )
+
+    assert result.selected == ("train_signal",)
+    assert result.scores["test_signal"]["ks_test"] > result.scores["test_signal"]["ks"]
+
+
+def test_non_binary_screen_top_k_is_fitted_on_train_not_test_target(tmp_path):
+    rows = 2_000
+    rng = np.random.RandomState(122)
+    split = np.array(["train"] * (rows // 2) + ["test"] * (rows // 2))
+    target = rng.normal(size=rows)
+    train_signal = rng.normal(size=rows)
+    test_signal = rng.normal(size=rows)
+    train_signal[split == "train"] = target[split == "train"] + rng.normal(
+        scale=0.4, size=(split == "train").sum()
+    )
+    test_signal[split == "test"] = target[split == "test"] + rng.normal(
+        scale=0.05, size=(split == "test").sum()
+    )
+    backend, path = _write(
+        tmp_path,
+        pd.DataFrame({
+            "test_signal": test_signal,
+            "train_signal": train_signal,
+            "target": target,
+            "split": split,
+        }),
+        name="train_only_non_binary_screen.parquet",
+    )
+
+    result = screen_features_non_binary(
+        backend,
+        path,
+        features=["test_signal", "train_signal"],
+        target_col="target",
+        target_type="continuous",
+        split_col="split",
+        top_k=1,
+    )
+
+    assert result.selected == ("train_signal",)
+
+
+def test_screen_hard_excludes_protected_controls_and_explicit_identity_keys(tmp_path):
+    """Even an explicit feature list must not turn the target, split, sample weight, or
+    a strong application-row identifier into model inputs.  These are structural controls,
+    so high cardinality is evidence shown to the user, never the exclusion rule itself."""
+    rows = 120
+    rng = np.random.RandomState(11)
+    frame = pd.DataFrame({
+        "appl_seq_x": np.arange(10_000, 10_000 + rows),
+        "sample_weight": np.where(np.arange(rows) % 3 == 0, 2.0, 1.0),
+        "safe_feature": rng.normal(size=rows),
+        "y": np.array(([0, 1] * (rows // 2)), dtype=float),
+        "split": ["train"] * 80 + ["test"] * 40,
+    })
+    backend, path = _write(tmp_path, frame)
+
+    result = screen_features(
+        backend,
+        path,
+        features=["y", "split", "sample_weight", "appl_seq_x", "safe_feature"],
+        target_col="y",
+        split_col="split",
+        sample_weight_col="sample_weight",
+        holdout_values=(),
+    )
+
+    leakage = {feature: reason for feature, _ks, reason in result.leakage}
+    unusable = dict(result.unusable)
+    assert "y" in leakage
+    assert "protected target column" in leakage["y"]
+    assert "protected split column" in unusable["split"]
+    assert "protected sample-weight column" in unusable["sample_weight"]
+    assert "identity/row key" in unusable["appl_seq_x"]
+    assert result.selected == ("safe_feature",)
+
+
+def test_non_binary_screen_applies_same_semantic_and_identity_hard_exclusions(tmp_path):
+    rows = 100
+    rng = np.random.RandomState(19)
+    frame = pd.DataFrame({
+        "mob6_ever30": rng.permutation(np.arange(rows, dtype=float)),
+        "appl_seq_y": np.arange(rows, dtype=float),
+        "safe": rng.normal(size=rows),
+        "target": np.linspace(100.0, 200.0, rows),
+    })
+    backend, path = _write(tmp_path, frame, name="non_binary_hard_exclusions.parquet")
+
+    result = screen_features_non_binary(
+        backend,
+        path,
+        features=["mob6_ever30", "appl_seq_y", "safe"],
+        target_col="target",
+        target_type="continuous",
+    )
+
+    assert {feature for feature, _ks, _reason in result.leakage} == {"mob6_ever30"}
+    assert dict(result.unusable)["appl_seq_y"].startswith("identity/row key")
+    assert result.selected == ("safe",)
+
+
 def test_screen_flags_split_shift_when_train_test_ks_diverge(tmp_path):
     """FS-4: a feature strongly separating the label in train but not in test (a
     migration-type leak) is flagged in split_shift even though its pooled KS is below the
@@ -106,13 +391,14 @@ def test_screen_records_ks_decay_and_flags_only_when_threshold_set(tmp_path):
 
     display_only = screen_features(
         backend, path, features=["decayer"], target_col="y", split_col="split",
+        leakage_ks=0.99,
     )
     assert "ks_decay" in display_only.scores["decayer"]
     assert display_only.ks_decay_watch == ()  # default: display-only, no flags
 
     gated = screen_features(
         backend, path, features=["decayer"], target_col="y", split_col="split",
-        max_ks_decay=0.9,
+        leakage_ks=0.99, max_ks_decay=0.9,
     )
     decay = gated.scores["decayer"]["ks_decay"]
     if decay is not None and decay < 0.9:

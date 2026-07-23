@@ -93,6 +93,14 @@ def test_load_builtin_templates_registers_sample_echo_idempotently():
     assert not any(step.decision_point for step in standard_modeling.steps)
     assert standard_modeling.success_criteria == ()
     assert "standard_modeling" in builtin_template_ids()
+    feature_analysis = get_template("feature_analysis")
+    assert [step.tool_ref.tool for step in feature_analysis.steps] == [
+        "compute_feature_metrics",
+        "analyze_feature_bins",
+        "generate_feature_report",
+    ]
+    assert feature_analysis.steps[1].needs_confirmation is True
+    assert feature_analysis.steps[2].depends_on_titles == ("特征指标", "可选分箱分析")
 
 
 def test_load_builtin_templates_refreshes_stale_builtin_placeholders():
@@ -232,49 +240,31 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
 
     # valid against the real modeling pack tool catalog
     assert PlanValidator(tool_registry).validate(plan) == []
-    # step order: G1 make_split -> G2 spec -> screen -> refine (FS-1) -> configure -> tune
+    # step order: G1 make_split -> G2 spec -> screen -> special-value governance
+    # -> refine (FS-1) -> configure -> tune
     # -> train -> compare -> select -> report -> delivery
     assert [step.tool_ref for step in plan.steps] == [
         ToolRef("modeling", "make_split"),
         ToolRef("modeling", "choose_modeling_spec"),
         ToolRef("modeling", "screen_features"),
+        ToolRef("modeling", "resolve_special_values"),
         ToolRef("modeling", "select_features"),
         ToolRef("modeling", "configure_tuning"),
         ToolRef("modeling", "tune_hyperparameters"),
         ToolRef("modeling", "train_models"),
         ToolRef("modeling", "compare_experiments"),
         ToolRef("modeling", "select_experiment"),
-        ToolRef("modeling", "generate_model_report"),
+        ToolRef("modeling", "generate_model_reports"),
         ToolRef("modeling", "post_training_action"),
     ]
     # phase tags for right-rail big-step grouping
     assert [step.phase for step in plan.steps] == [
-        "特征",
-        "建模",
-        "特征",
-        "特征",
-        "建模",
-        "建模",
-        "建模",
-        "建模",
-        "建模",
-        "报告",
-        "交付",
+        "特征", "特征", "特征", "特征", "特征", "建模", "建模", "建模", "建模", "建模", "报告", "交付"
     ]
     # gates: confirm split/features/refined-features/tuning config, select final
     # experiment, approve report and delivery.
     assert [step.needs_confirmation for step in plan.steps] == [
-        False,
-        False,
-        True,
-        True,
-        True,
-        True,
-        False,
-        False,
-        True,
-        True,
-        True,
+        False, False, True, True, True, True, True, False, False, True, True, True
     ]
     assert not any(step.decision_point for step in plan.steps)
 
@@ -282,6 +272,7 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
         make_split,
         spec,
         screen,
+        special_values,
         refine,
         tuning_config,
         tune,
@@ -295,17 +286,28 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     split_ref = f"$ref:{make_split.id}.output.result_dataset_id"
     assert spec.inputs["features"] == f"$ref:{make_split.id}.output.feature_cols"
     assert spec.inputs["recipes"] == ["lgb"]
-    assert spec.inputs["n_trials"] == 40
+    assert spec.inputs["n_trials"] == 1
+    # The workflow's explicit one-trial override is propagated uniformly by
+    # choose_modeling_spec to every selected recipe.
     assert screen.inputs["dataset_id"] == split_ref
     assert screen.inputs["features"] == f"$ref:{spec.id}.output.feature_cols"
+    assert screen.inputs["split_col"] == f"$ref:{make_split.id}.output.split_col"
+    assert screen.inputs["holdout_values"] == f"$ref:{make_split.id}.output.holdout_values"
     assert screen.inputs["target_type"] == f"$ref:{spec.id}.output.target_type"
     assert screen.inputs["leakage_ks"] == 0.4
     assert screen.inputs["max_missing_rate"] == 0.95
     assert screen.inputs["top_k"] == 200
+    # An empty recommendation set is a reviewable data-quality outcome, not an
+    # execution failure: the next gate must still render the screening table.
+    assert not screen.post_checks
     # FS-1: multivariate refinement funnel sits between screen and tuning config —
     # IV floor + correlation dedup on the screen's clean candidate set.
-    assert refine.inputs["dataset_id"] == split_ref
-    assert refine.inputs["features"] == f"$ref:{screen.id}.output.selected"
+    assert special_values.inputs["dataset_id"] == split_ref
+    assert special_values.inputs["features"] == f"$ref:{screen.id}.output.selected"
+    assert special_values.inputs["sentinel_columns"] == f"$ref:{screen.id}.output.sentinel_columns"
+    assert special_values.needs_confirmation is True
+    assert refine.inputs["dataset_id"] == f"$ref:{special_values.id}.output.result_dataset_id"
+    assert refine.inputs["features"] == f"$ref:{special_values.id}.output.selected"
     assert refine.inputs["target_type"] == f"$ref:{spec.id}.output.target_type"
     assert refine.inputs["space"] == "raw"
     assert refine.inputs["iv_min"] == 0.02
@@ -314,8 +316,15 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
         refine.inputs["vif_max"] == 1e9
     )  # VIF off by default (tree recipes don't need it)
     assert refine.needs_confirmation is True
-    assert tune.inputs["dataset_id"] == split_ref
-    assert train.inputs["dataset_id"] == split_ref
+    governed_dataset_ref = f"$ref:{special_values.id}.output.result_dataset_id"
+    assert tune.inputs["dataset_id"] == governed_dataset_ref
+    assert train.inputs["dataset_id"] == governed_dataset_ref
+    assert tune.inputs["split_col"] == f"$ref:{make_split.id}.output.split_col"
+    assert tune.inputs["split_values"] == f"$ref:{make_split.id}.output.split_values"
+    assert train.inputs["split_col"] == f"$ref:{make_split.id}.output.split_col"
+    assert train.inputs["split_values"] == f"$ref:{make_split.id}.output.split_values"
+    assert tune.inputs["special_value_governance"] == f"$ref:{special_values.id}.output.governance"
+    assert train.inputs["special_value_governance"] == f"$ref:{special_values.id}.output.governance"
     # tune + train consume the REFINED feature set (not the raw screen output); train
     # consumes tuned params
     assert tuning_config.inputs["recipe"] == f"$ref:{spec.id}.output.recipe"
@@ -341,24 +350,12 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     }
     assert select.inputs["experiment_ids"] == f"$ref:{train.id}.output.experiment_ids"
     assert select.inputs["target_type"] == f"$ref:{spec.id}.output.target_type"
-    assert select.inputs["selection_policy"] == {
-        "require_pmml": True,
-        "require_handoff": True,
-    }
-    assert (
-        report.inputs["experiment_id"]
-        == f"$ref:{select.id}.output.selected_experiment_id"
-    )
-    assert report.inputs["dataset_id"] == "dataset-1"
-    assert (
-        delivery.inputs["experiment_id"]
-        == f"$ref:{select.id}.output.selected_experiment_id"
-    )
-    assert delivery.inputs["sample_dataset_id"] == "dataset-1"
-    assert (
-        delivery.inputs["selection_policy_decision"]
-        == f"$ref:{select.id}.output.policy_decision"
-    )
+    assert select.inputs["selection_policy"] == {"require_pmml": True, "require_handoff": True}
+    assert report.inputs["experiment_ids"] == f"$ref:{train.id}.output.experiment_ids"
+    assert report.inputs["dataset_id"] == governed_dataset_ref
+    assert delivery.inputs["experiment_id"] == f"$ref:{select.id}.output.selected_experiment_id"
+    assert delivery.inputs["sample_dataset_id"] == governed_dataset_ref
+    assert delivery.inputs["selection_policy_decision"] == f"$ref:{select.id}.output.policy_decision"
     assert plan.success_criteria == []
     assert "modeling" in builtin_template_ids()
 
@@ -387,18 +384,19 @@ def test_modeling_template_validates_with_optional_slots_omitted(tmp_path):
     )
 
     assert PlanValidator(tool_registry).validate(plan) == []
+    split = plan.steps[0]
     spec = plan.steps[1]
     screen = plan.steps[2]
-    refine = plan.steps[3]
-    assert "holdout_values" not in screen.inputs  # omitted optional dropped, not None
+    special_values = plan.steps[3]
+    refine = plan.steps[4]
+    assert screen.inputs["split_col"] == f"$ref:{split.id}.output.split_col"
+    assert screen.inputs["holdout_values"] == f"$ref:{split.id}.output.holdout_values"
     assert "holdout_values" not in refine.inputs
     assert "sample_weight_candidates" not in spec.inputs
     assert "params" not in spec.inputs
-    tuning_config = plan.steps[4]
-    assert (
-        tuning_config.inputs["sample_weight_col"]
-        == f"$ref:{spec.id}.output.sample_weight_col"
-    )
+    assert "decisions" not in special_values.inputs
+    tuning_config = plan.steps[5]
+    assert tuning_config.inputs["sample_weight_col"] == f"$ref:{spec.id}.output.sample_weight_col"
     assert tuning_config.inputs["params"] == f"$ref:{spec.id}.output.params"
     report = plan.steps[-2]
     assert "business_columns" not in report.inputs
@@ -441,10 +439,12 @@ def test_modeling_template_select_step_does_not_inherit_screen_holdout(tmp_path)
         task_id="task-1",
     )
 
+    split = plan.steps[0]
     screen = plan.steps[2]
-    refine = plan.steps[3]
-    # screen still holds out OOT only (pools train+test as dev) — untouched
-    assert screen.inputs["holdout_values"] == ["oot"]
+    refine = plan.steps[4]
+    # Screen consumes make_split's authoritative holdout output rather than a
+    # stale task slot, so a gate-adjusted split cannot diverge downstream.
+    assert screen.inputs["holdout_values"] == f"$ref:{split.id}.output.holdout_values"
     # select must not receive the screen's ['oot'] holdout (would leak test labels)
     assert refine.inputs.get("holdout_values") != ["oot"]
     assert "holdout_values" not in refine.inputs
@@ -469,6 +469,9 @@ def test_modeling_templates_select_step_never_binds_holdout_values(tmp_path):
             assert "holdout_values" not in step.inputs_template, (
                 f"{template_id} {step.title} must not bind holdout_values into select"
             )
+            assert step.inputs_template.get("seed") == "$ref:选择建模规格.output.seed", (
+                f"{template_id} {step.title} must preserve the governed random seed"
+            )
         # regression guard: the screen step MUST still bind holdout_values
         screen_steps = [
             step
@@ -479,6 +482,12 @@ def test_modeling_templates_select_step_never_binds_holdout_values(tmp_path):
         for step in screen_steps:
             assert "holdout_values" in step.inputs_template, (
                 f"{template_id} {step.title} must keep its holdout_values binding"
+            )
+            assert "sample_weight_col" in step.inputs_template, (
+                f"{template_id} {step.title} must protect the configured sample weight"
+            )
+            assert not step.post_checks, (
+                f"{template_id} {step.title} must surface an empty recommendation set at the gate"
             )
 
 

@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from marvis.errors import not_found
 
 from marvis.api_report_helpers import (
+    driver_report_artifact,
     latest_driver_report_path,
     require_confirmed_agent_conclusions,
 )
@@ -102,4 +103,21 @@ def download_driver_report(task_id: str, request: Request) -> FileResponse:
         report_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=task_report_download_filename(task, ".xlsx"),
+    )
+
+
+@router.get("/tasks/{task_id}/driver-reports/{report_id}/download")
+def download_driver_report_artifact(
+    task_id: str,
+    report_id: str,
+    request: Request,
+) -> FileResponse:
+    get_task_or_404(_repo(request), task_id)
+    artifact = driver_report_artifact(request.app.state, task_id, report_id)
+    if artifact is None or not artifact.path.is_file():
+        raise not_found("report not generated")
+    return FileResponse(
+        artifact.path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=artifact.path.name,
     )

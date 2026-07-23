@@ -11,12 +11,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Optional
 
 from marvis.feature.candidates import (
-    META_TOKENS,
     candidate_numeric_features,
     excluded_categorical_columns,
+    excluded_numeric_columns,
+    is_meta_column,
 )
 
 # Preferred binary-target name tokens, most-specific first.
@@ -52,6 +54,8 @@ class SetupProposal:
     bad_rate: Optional[float]
     notes: list[str]
     excluded_categorical: list[dict] = None  # type: ignore[assignment]
+    excluded_numeric: list[dict] = None  # type: ignore[assignment]
+    target_candidates: list[str] = None  # type: ignore[assignment]
     # MEM-4: which of target_col/split_col (if any) were picked because they
     # matched a historical field_convention memory hint rather than the
     # deterministic heuristics alone — used only to annotate the gate message
@@ -61,6 +65,10 @@ class SetupProposal:
     def __post_init__(self) -> None:
         if self.excluded_categorical is None:
             self.excluded_categorical = []
+        if self.excluded_numeric is None:
+            self.excluded_numeric = []
+        if self.target_candidates is None:
+            self.target_candidates = []
         if self.memory_matched_fields is None:
             self.memory_matched_fields = []
 
@@ -68,6 +76,30 @@ class SetupProposal:
 def _is_binary(series) -> bool:
     vals = set(series.dropna().unique().tolist())
     return vals.issubset({0, 1, 0.0, 1.0, True, False}) and len(vals) == 2
+
+
+def _target_name_rank(column: str) -> int | None:
+    """Return a conservative target-name rank.
+
+    A bare ``y`` is a useful label name, but treating it as an arbitrary
+    substring made every column containing the letter (and pandas ``*_y`` join
+    suffixes) look like a preferred target.  Multi-word hints still use token
+    boundaries where possible; established names such as ``long_y`` retain
+    their explicit higher-priority entries.
+    """
+
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(column).lower()).strip("_")
+    tokens = set(normalized.split("_"))
+    for index, hint in enumerate(_TARGET_PRIORITY):
+        if hint == "y":
+            matched = normalized == "y"
+        elif "_" in hint:
+            matched = hint in normalized
+        else:
+            matched = hint in tokens or normalized.startswith(f"{hint}_")
+        if matched:
+            return index
+    return None
 
 
 def detect_setup(
@@ -79,6 +111,7 @@ def detect_setup(
     sample_rows: int = 4000,
     target_type: str = "binary",
     field_hints: Optional[dict] = None,
+    include_columns: tuple[str, ...] | list[str] = (),
 ) -> SetupProposal:
     """Propose target column, split column/values and numeric candidate features.
 
@@ -111,6 +144,7 @@ def detect_setup(
 
     # -- target ---------------------------------------------------------------
     target = ""
+    target_candidates: list[str] = []
     if continuous:
         target = _detect_continuous_target(probe, configured_target)
         if not target:
@@ -133,14 +167,26 @@ def detect_setup(
             memory_matched_fields.append("target_col")
         if not target:
             binary_cols = [c for c in probe.columns if _is_binary(probe[c])]
+            target_candidates = [str(column) for column in binary_cols]
             ranked = sorted(
-                binary_cols,
-                key=lambda c: next((i for i, tok in enumerate(_TARGET_PRIORITY) if tok in c.lower()), len(_TARGET_PRIORITY)),
+                ((column, _target_name_rank(str(column))) for column in binary_cols),
+                key=lambda item: (
+                    item[1] is None,
+                    item[1] if item[1] is not None else len(_TARGET_PRIORITY),
+                    binary_cols.index(item[0]),
+                ),
             )
-            prioritised = [c for c in ranked if any(tok in c.lower() for tok in _TARGET_PRIORITY)]
-            target = (prioritised or ranked or [""])[0]
+            named = [item for item in ranked if item[1] is not None]
+            if named:
+                best_rank = named[0][1]
+                best = [column for column, rank in named if rank == best_rank]
+                # Two equally plausible business labels are different target
+                # definitions, not a stable source-order tie-break.  C1 must ask.
+                target = best[0] if len(best) == 1 else ""
+            elif len(binary_cols) == 1:
+                target = binary_cols[0]
         if not target:
-            notes.append("未能自动识别 0/1 目标列，请直接告诉我目标列名。")
+            notes.append("未能唯一识别 0/1 目标列，请直接告诉我目标列名。")
 
     # -- split ----------------------------------------------------------------
     split_col = ""
@@ -176,7 +222,25 @@ def detect_setup(
         target_col=target,
         split_col=split_col,
         sample_rows=sample_rows,
+        include_columns=include_columns,
     )
+    excluded_numeric = excluded_numeric_columns(
+        backend,
+        path,
+        target_col=target,
+        split_col=split_col,
+        sample_rows=sample_rows,
+        include_columns=include_columns,
+    )
+    if excluded_numeric:
+        preview = "、".join(
+            f"{item.column}（{item.reason}）" for item in excluded_numeric[:8]
+        )
+        more = f" 等共 {len(excluded_numeric)} 个" if len(excluded_numeric) > 8 else ""
+        notes.append(
+            f"{len(excluded_numeric)} 个数值技术字段未进入候选:{preview}{more}；"
+            "如确需分析，可在创建任务时显式加入特征列覆盖。"
+        )
 
     # -- excluded categorical columns (PREP-3/FS-3: never silently drop) ------
     excluded_categorical = excluded_categorical_columns(
@@ -222,6 +286,10 @@ def detect_setup(
         excluded_categorical=[
             {"column": item.column, "cardinality": item.cardinality} for item in excluded_categorical
         ],
+        excluded_numeric=[
+            {"column": item.column, "reason": item.reason} for item in excluded_numeric
+        ],
+        target_candidates=target_candidates,
         memory_matched_fields=memory_matched_fields,
     )
 
@@ -242,7 +310,7 @@ def _detect_continuous_target(probe, configured_target: str) -> str:
     for token in _CONTINUOUS_TARGET_TOKENS:
         for col in numeric_cols:
             name = str(col)
-            if _looks_like_split_name(name) or META_TOKENS.search(name):
+            if _looks_like_split_name(name) or is_meta_column(name):
                 continue
             if token in name.lower():
                 return name

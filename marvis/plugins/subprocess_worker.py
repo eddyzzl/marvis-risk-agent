@@ -66,6 +66,13 @@ def worker_main() -> None:
         if detail is not None:
             payload["error_kind"] = str(detail.get("kind") or "execution")
             payload["error_detail"] = detail
+            nested_resource_limits = detail.get("resource_limits")
+            if isinstance(nested_resource_limits, dict):
+                # Preserve a nested recipe worker's concrete RSS/CPU limit
+                # evidence at the standard protocol location.  Otherwise the
+                # outer worker would retain only a generic error_detail and the
+                # host/UI would misclassify the failure as execution/protocol.
+                payload["resource_limits"] = nested_resource_limits
         _emit(payload)
         _hard_exit(1)
 
@@ -142,6 +149,13 @@ def _run_tool(job: dict) -> dict:
         runtime_generation=(
             str(job["runtime_generation"])
             if job.get("runtime_generation") is not None
+            else None
+        ),
+        # Only built-in tools receive the host-issued progress path.  External
+        # plugins cannot turn telemetry into an undeclared workspace write.
+        progress_path=(
+            Path(str(job["progress_path"]))
+            if bool(job.get("builtin")) and job.get("progress_path")
             else None
         ),
     )

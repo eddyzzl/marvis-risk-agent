@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 import re
+import sqlite3
 
 from marvis.db import TaskRepository
 from marvis.domain import (
@@ -9,9 +10,33 @@ from marvis.domain import (
     TaskRecord,
     TaskStatus,
 )
+from marvis.repositories.plans import PlanRepository
 from marvis.safe_paths import safe_filename_component
 
 _UNSET = object()
+
+
+def _latest_workflow_statuses(
+    repo: TaskRepository,
+    task_ids: list[str],
+) -> dict[str, str]:
+    """Read the optional V2 plan projection without breaking V1-only stores.
+
+    Validation-only embeddings and a few supported migration/test fixtures own a
+    task database that predates the orchestration tables.  ``workflow_status`` is
+    additive metadata for those callers, so an absent ``plans`` table means
+    "there is no plan state", not that the otherwise valid task API is unusable.
+    Other SQLite failures still propagate.
+    """
+
+    try:
+        return PlanRepository(repo.db_path).latest_workflow_statuses_for_tasks(
+            task_ids
+        )
+    except sqlite3.OperationalError as exc:
+        if "no such table: plans" not in str(exc).lower():
+            raise
+        return {}
 
 
 def task_payload(
@@ -20,6 +45,7 @@ def task_payload(
     tasks_dir: Path | None = None,
     *,
     active_job_kind: str | None | object = _UNSET,
+    workflow_status: str | None | object = _UNSET,
 ) -> dict:
     """``active_job_kind`` defaults to a sentinel so callers can distinguish "not
     supplied, look it up" from "supplied, and it really is None" (PERF-6: batch
@@ -31,8 +57,14 @@ def task_payload(
         if active_job_kind is _UNSET
         else active_job_kind
     )
+    resolved_workflow_status = (
+        _latest_workflow_statuses(repo, [task.id]).get(task.id)
+        if workflow_status is _UNSET
+        else workflow_status
+    )
     return {
         **task_to_dict(task),
+        "workflow_status": resolved_workflow_status,
         "active_job_kind": resolved_active_job_kind,
         "failure_stage": task_failure_stage(repo, task),
         "failure_reason_code": task_failure_reason_code(task),
@@ -49,14 +81,19 @@ def list_task_payloads(
 ) -> list[dict]:
     """Batched task_payload for the polling task-list endpoint (PERF-6): resolves
     active_job_kind for all tasks with a single query instead of one connection
-    per task, then reuses task_payload's per-task field derivation unchanged."""
-    active_job_kinds = repo.get_active_job_kinds_for_tasks([task.id for task in tasks])
+    per task, then reuses task_payload's per-task field derivation unchanged.
+    The latest plan workflow state is batched the same way so polling does not
+    introduce one plan query per task."""
+    task_ids = [task.id for task in tasks]
+    active_job_kinds = repo.get_active_job_kinds_for_tasks(task_ids)
+    workflow_statuses = _latest_workflow_statuses(repo, task_ids)
     return [
         task_payload(
             repo,
             task,
             tasks_dir,
             active_job_kind=active_job_kinds.get(task.id),
+            workflow_status=workflow_statuses.get(task.id),
         )
         for task in tasks
     ]

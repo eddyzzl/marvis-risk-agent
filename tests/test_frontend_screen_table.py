@@ -182,6 +182,8 @@ def test_modeling_setup_weight_picker_renders_candidates():
                 split_counts: {{ train: 80, test: 10, oot: 10 }},
                 total_rows: 100,
                 warnings: [],
+                split_config: {{ test_size: 0.2, oot_by_time: "applydt", oot_size: 0.1, group_cols: ["phone"] }},
+                available_columns: ["phone", "applydt", "x1"],
               }},
               sample_weight_col: "weight",
               sample_weight_candidates: ["weight", "sample_weight"],
@@ -215,6 +217,10 @@ def test_modeling_setup_weight_picker_renders_candidates():
         assert.equal(html.includes("PMML 可导出"), true);
         assert.equal(html.includes("target mismatch"), true);
         assert.equal(html.includes("样本切分 · split"), true);
+        assert.equal(html.includes("modeling-split-controls"), true);
+        assert.equal(html.includes('value="time" checked'), true);
+        assert.equal(html.includes('value="applydt" selected'), true);
+        assert.equal(html.includes("训练集 / 测试集 / OOT"), true);
         assert.equal(html.includes("TRAIN"), true);
         assert.equal(html.includes("样本权重列已从入模特征中移除。"), true);
         assert.equal(html.includes("modeling-weight-diagnostic"), true);
@@ -254,6 +260,53 @@ def test_modeling_setup_weight_picker_renders_candidates():
     assert output == "ok"
 
 
+def test_modeling_setup_split_adjust_and_unchanged_confirm_are_actionable():
+    output = _run_node(
+        f"""
+        {""}
+        import assert from "node:assert/strict";
+        import {{ submitModelingWeightAdjust }} from "./marvis/static/js/v2/modeling_setup_panel.js";
+        const calls = [];
+        const statuses = [];
+        const context = {{
+          selectedTaskId: "task-1",
+          acceptanceMode: "manual",
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+          api: async (_url, options) => {{ calls.push(JSON.parse(options.body)); return {{ messages: [] }}; }},
+        }};
+        const base = {{
+          dataset: {{ modelingGateStepId: "gate-1", modelingCurrentWeight: "", currentSplitConfig: JSON.stringify({{ test_size: 0.25, group_cols: ["phone"] }}) }},
+          querySelector: (selector) => {{
+            if (selector === ".modeling-target-select") return {{ value: "binary", getAttribute: () => "binary" }};
+            if (selector === ".modeling-n-trials-input") return {{ value: "40", getAttribute: () => "40" }};
+            if (selector === ".modeling-recipe-control") return {{ dataset: {{ currentRecipes: "lgb" }}, querySelectorAll: () => [{{ value: "lgb" }}] }};
+            if (selector === ".modeling-weight-pick:checked") return {{ value: "" }};
+            if (selector === ".modeling-override-reason-input") return {{ value: "" }};
+            if (selector === ".modeling-split-mode:checked") return {{ value: "none" }};
+            if (selector === ".modeling-test-size-input") return {{ value: "20" }};
+            if (selector === ".modeling-oot-size-input") return {{ value: "20" }};
+            if (selector === ".modeling-time-column-select") return {{ value: "" }};
+            return null;
+          }},
+        }};
+        await submitModelingWeightAdjust({{ disabled: false, closest: () => base }}, context);
+        assert.deepEqual(calls[0].adjust_params.split_config, {{ test_size: 0.2, group_cols: ["phone"] }});
+        assert.equal(calls[0].ui_action, "apply_modeling_setup");
+
+        const unchanged = {{ ...base, querySelector: (selector) => {{
+          if (selector === ".modeling-test-size-input") return {{ value: "25" }};
+          return base.querySelector(selector);
+        }} }};
+        await submitModelingWeightAdjust({{ disabled: false, closest: () => unchanged }}, context);
+        assert.equal(calls[1].ui_action, "confirm_gate");
+        assert.equal(calls[1].adjust_params, undefined);
+        assert.equal(calls[1].expected_step_id, "gate-1");
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_modeling_setup_missing_trials_does_not_render_zero():
     output = _run_node(
         """
@@ -276,6 +329,135 @@ def test_modeling_setup_missing_trials_does_not_render_zero():
         assert.equal(input.includes('value=""'), true);
         assert.equal(input.includes('data-current-n-trials=""'), true);
         assert.equal(input.includes('value="0"'), false);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_modeling_setup_classifies_every_supported_regression_and_multiclass_recipe():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderModelingSetupPanel } from "./marvis/static/js/v2/modeling_setup_panel.js";
+
+        const families = {
+          continuous: ["lgb_regressor", "xgb_regressor", "lr_regressor", "mlp_regressor"],
+          multiclass: ["lgb_multiclass", "xgb_multiclass", "lr_multiclass", "mlp_multiclass"],
+        };
+        for (const [targetType, recipes] of Object.entries(families)) {
+          const html = renderModelingSetupPanel({
+            id: `family-${targetType}`,
+            metadata: {
+              step_id: `gate-${targetType}`,
+              modeling_setup: {
+                target_type: targetType,
+                recipe: recipes[0],
+                recipes,
+                eligible_algorithms: recipes,
+                pmml_supported_algorithms: [],
+              },
+            },
+          });
+          for (const recipe of recipes) {
+            assert.equal(
+              html.includes(`<input type="checkbox" class="modeling-recipe-pick" value="${recipe}" checked`),
+              true,
+              `${recipe} should be selectable`,
+            );
+          }
+          assert.equal(
+            html.split(`<small>${targetType} · 原生</small>`).length - 1,
+            recipes.length,
+            `every ${targetType} recipe should render in the correct family`,
+          );
+        }
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_modeling_setup_is_a_progressive_agent_journey():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          activateModelingJourneyStep,
+          renderModelingSetupPanel,
+        } from "./marvis/static/js/v2/modeling_setup_panel.js";
+
+        const html = renderModelingSetupPanel({
+          id: "journey",
+          metadata: {
+            step_id: "gate-journey",
+            modeling_setup: {
+              target_type: "binary",
+              recipe: "lgb",
+              recipes: ["lgb"],
+              eligible_algorithms: ["lgb"],
+              feature_count: 18,
+              n_trials: 20,
+            },
+          },
+        });
+        for (const fragment of [
+          "Agent 建模协作台",
+          "modeling-journey",
+          'data-modeling-stage="split"',
+          'data-modeling-stage="model"',
+          'data-modeling-stage="tuning"',
+          'data-modeling-stage="review"',
+          "确认方案，开始执行",
+        ]) assert.equal(html.includes(fragment), true, fragment);
+
+        const classList = () => {
+          const values = new Set();
+          return { toggle: (name, on) => on ? values.add(name) : values.delete(name), contains: (name) => values.has(name) };
+        };
+        const stages = ["split", "model", "tuning", "review"].map((id) => ({
+          dataset: { modelingStage: id }, classList: classList(), scrollIntoView: () => {},
+        }));
+        const nodes = stages.map(() => ({ classList: classList(), setAttribute: () => {} }));
+        const progress = { style: { setProperty: (_name, value) => { progress.value = value; } } };
+        const form = {
+          dataset: {},
+          querySelectorAll: (selector) => selector.includes("stage") ? stages : nodes,
+          querySelector: (selector) => selector.includes("progress") ? progress : stages.find((item) => item.classList.contains("is-active")),
+        };
+        assert.equal(activateModelingJourneyStep(form, "tuning"), true);
+        assert.equal(form.dataset.modelingActiveStep, "tuning");
+        assert.equal(stages[2].classList.contains("is-active"), true);
+        assert.equal(nodes[0].classList.contains("is-complete"), true);
+        assert.equal(progress.value, "66.66666666666666%");
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_workflow_data_widget_is_reusable_and_interactive():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderWorkflowDataWidget } from "./marvis/static/js/v2/workflow_widgets.js";
+        const html = renderWorkflowDataWidget({
+          title: "特征指标",
+          tableHtml: "<table><tbody><tr><td>x1</td></tr></tbody></table>",
+          rowCount: 12,
+          columnCount: 8,
+          index: 2,
+        });
+        for (const fragment of [
+          "workflow-data-widget",
+          "workflow-widget-glyph",
+          "12 行 · 8 列",
+          "data-workflow-widget-filter",
+          "data-workflow-widget-toggle",
+          "data-gate-passive-control",
+          "筛选当前组件",
+        ]) assert.equal(html.includes(fragment), true, fragment);
+        assert.equal(html.includes("特征指标"), true);
         process.stdout.write("ok");
         """
     )
@@ -685,7 +867,7 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
         const firstButton = {{ disabled: false, closest: () => makeForm({{ pickedWeight: "weight" }}) }};
         await submitModelingWeightAdjust(firstButton, context);
         // busy state is pushed synchronously before the request settles
-        assert.deepEqual(statuses[0], ["正在执行下一步…", "busy"]);
+        assert.deepEqual(statuses[0], ["正在应用建模设置并重新计算…", "busy"]);
         assert.equal(calls[0][0], "/api/tasks/task-1/agent/messages");
         assert.deepEqual(calls[0][1].adjust_params, {{ sample_weight_col: "weight" }});
         assert.equal(calls[0][1].expected_step_id, "gate-modeling");
@@ -713,8 +895,11 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
         assert.equal(calls.length, callsBeforeWeightOnlyAdjust + 1);
         assert.deepEqual(calls.at(-1)[1].adjust_params, {{ sample_weight_col: "weight_v2" }});
 
+        const callsBeforeConfirm = calls.length;
         await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{ currentWeight: "weight", pickedWeight: "weight" }}) }}, context);
-        assert.deepEqual(statuses.at(-1), ["建模设置未变化。", "info"]);
+        assert.equal(calls.length, callsBeforeConfirm + 1);
+        assert.equal(calls.at(-1)[1].ui_action, "confirm_gate");
+        assert.equal(Object.prototype.hasOwnProperty.call(calls.at(-1)[1], "adjust_params"), false);
         await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{
           currentRecipes: "lgb",
           selectedRecipes: [],
@@ -751,7 +936,7 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
         }});
         assert.equal(calls.at(-1)[1].content, "调整建模规格：目标是连续金额预测");
         // this successful submission pushes the busy status before resolving
-        assert.deepEqual(statuses[statusesBeforeStructuralAdjust], ["正在执行下一步…", "busy"]);
+        assert.deepEqual(statuses[statusesBeforeStructuralAdjust], ["正在应用建模设置并重新计算…", "busy"]);
 
         const eventCalls = [];
         let eventPollCalls = 0;
@@ -820,6 +1005,38 @@ def test_screen_table_has_hardcut_coloring_styles():
     assert '.screen-table-wrap[data-screen-readonly="true"]' in css
     assert "font-variant-numeric: tabular-nums" in css
     assert "text-align: right" in css
+
+
+def test_screen_table_shows_backend_hard_exclusion_reasons():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderScreenGateTable } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const message = {
+          id: "reason-msg",
+          metadata: {
+            step_id: "screen-step",
+            screen: {
+              selected: ["safe"],
+              ranked: [["safe", 0.12]],
+              leakage: [["mob3_ever30", null, "semantic/temporal target leakage: post-outcome MOB performance field"]],
+              suspected: [],
+              unusable: [["appl_seq_x", "identity/row key: application sequence key"]],
+              scores: { safe: { ks: 0.12, iv: 0.03, missing_rate: 0, coverage: 1 } },
+              n_screened: 3,
+              thresholds: { leakage_ks: 0.4, max_missing_rate: 0.95 },
+            },
+          },
+        };
+        const html = renderScreenGateTable(message);
+        assert.equal(html.includes("排除/风险原因"), true);
+        assert.equal(html.includes("semantic/temporal target leakage"), true);
+        assert.equal(html.includes("identity/row key"), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
 
 
 def test_screen_table_only_latest_gate_is_interactive():
@@ -920,6 +1137,73 @@ def test_join_c1_only_latest_gate_is_interactive():
     assert output == "ok"
 
 
+def test_join_key_only_latest_gate_has_picker_and_one_submit_action():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { driverManualAnalysisHtml } from "./marvis/static/js/v2/driver_manual_analysis.js";
+        import { renderJoinKeyPicker } from "./marvis/static/js/v2/join_gate_controller.js";
+
+        const joinKeys = {
+          features: [{
+            feature_id: "f1",
+            feature_name: "vars.parquet",
+            current_match_rate: 0.5,
+            current_keys: [
+              { anchor_col: "applydt", feature_col: "dt" },
+              { anchor_col: "phone", feature_col: "mobile" },
+            ],
+            selected_anchor_cols: ["applydt", "phone"],
+            alternatives: [],
+          }],
+        };
+        const messages = [
+          { id: "old-keys", role: "assistant", content: "old", metadata: { kind: "gate", step_id: "gate-old", join_keys: joinKeys } },
+          { id: "new-keys", role: "assistant", content: "new", metadata: { kind: "gate", step_id: "gate-new", join_keys: joinKeys } },
+        ];
+        const html = driverManualAnalysisHtml(messages, {
+          renderAgentMarkdown: (value) => String(value || ""),
+          renderJoinKeyPicker,
+          renderTables: () => "",
+          renderGateConfirm: () => '<button data-duplicate-confirm>重复确认</button>',
+        });
+        assert.equal((html.match(/class="join-key-picker"/g) || []).length, 2);
+        assert.equal((html.match(/data-join-key-readonly="true"/g) || []).length, 1);
+        assert.equal((html.match(/data-join-key-confirm=/g) || []).length, 1);
+        assert.equal(html.includes('data-join-key-gate-step-id="gate-new"'), true);
+        assert.equal(html.includes("data-duplicate-confirm"), false);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_historical_modeling_setup_and_dedup_gates_are_readonly():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { driverManualAnalysisHtml } from "./marvis/static/js/v2/driver_manual_analysis.js";
+
+        const calls = [];
+        const messages = [
+          { id: "old-model", role: "assistant", content: "model", metadata: { kind: "gate", step_id: "model-old", modeling_setup: {} } },
+          { id: "old-dedup", role: "assistant", content: "dedup", metadata: { kind: "gate", step_id: "dedup-old", dedup: { features: [{ feature_id: "f1" }] } } },
+          { id: "latest", role: "assistant", content: "continue", metadata: { kind: "gate", step_id: "plain-new" } },
+        ];
+        driverManualAnalysisHtml(messages, {
+          renderAgentMarkdown: (value) => String(value || ""),
+          renderModelingSetup: (_message, options) => { calls.push(["model", options.interactive]); return "<model/>"; },
+          renderDedupPicker: (_message, options) => { calls.push(["dedup", options.interactive]); return "<dedup/>"; },
+          renderTables: () => "",
+          renderGateConfirm: () => "<confirm/>",
+        });
+        assert.deepEqual(calls, [["model", false], ["dedup", false]]);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_screen_threshold_adjust_rejects_empty_and_posts_valid_payload():
     output = _run_node(
         f"""
@@ -991,13 +1275,17 @@ def test_screen_table_gains_search_sort_chips_bulk_pagination_wiring():
     assert "export function handleScreenPageClick(event, context = {})" in module_js
     assert "export function handleScreenBulkClick(event, context = {})" in module_js
     assert "export function handleScreenPickChange(event, context = {})" in module_js
+    assert "export function handleScreenMetricFilterInput(event, context = {})" in module_js
+    assert "export function handleScreenAgentRecommendClick(event, context = {})" in module_js
     # wired into the app shell via delegated document listeners
     assert 'document.addEventListener("click", handleScreenSortClick)' in app_js
     assert 'document.addEventListener("click", handleScreenChipClick)' in app_js
     assert 'document.addEventListener("click", handleScreenPageClick)' in app_js
     assert 'document.addEventListener("click", handleScreenBulkClick)' in app_js
     assert 'document.addEventListener("input", handleScreenSearchInput)' in app_js
+    assert 'document.addEventListener("input", handleScreenMetricFilterInput)' in app_js
     assert 'document.addEventListener("change", handleScreenPickChange)' in app_js
+    assert 'document.addEventListener("click", handleScreenAgentRecommendClick)' in app_js
     assert "getAgentMessages: () => agentMessages" in app_js
     # CSS for the new toolbar/summary/bulk/pagination affordances
     assert ".screen-toolbar" in css
@@ -1006,6 +1294,115 @@ def test_screen_table_gains_search_sort_chips_bulk_pagination_wiring():
     assert ".screen-bulk-actions" in css
     assert ".screen-pagination" in css
     assert ".screen-sort-btn" in css
+    assert ".screen-metric-filters" in css
+    assert ".screen-recommendation" in css
+
+
+def test_screen_table_renders_metric_sliders_and_agent_recommendations():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderScreenGateTable } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const html = renderScreenGateTable({
+          id: "range-msg",
+          metadata: {
+            step_id: "gate-range",
+            screen: {
+              selected: ["x_good"],
+              ranked: [["x_optional", 0.16]],
+              leakage: [["x_leak", 0.82, "future info"]],
+              suspected: [],
+              unusable: [["x_empty", "missing rate 1.00 >= 0.95"]],
+              scores: {
+                x_good: { ks: 0.23, iv: 0.18, missing_rate: 0.05, coverage: 0.95, psi_split: 0.08 },
+                x_optional: { ks: 0.16, iv: 0.09, missing_rate: 0.02, coverage: 0.98, psi_split: 0.04 },
+                x_leak: { ks: 0.82, iv: 1.4, missing_rate: 0, coverage: 1, psi_split: 0.12 },
+              },
+              thresholds: { leakage_ks: 0.4, max_missing_rate: 0.95 },
+            },
+          },
+        }, { interactive: true });
+
+        assert.match(html, /data-screen-range="ks_min"/);
+        assert.match(html, /data-screen-range="iv_min"/);
+        assert.match(html, /data-screen-range="missing_max"/);
+        assert.match(html, /data-screen-range="psi_max"/);
+        assert.match(html, /应用 Agent 推荐/);
+        assert.match(html, /Agent 推荐/);
+        assert.match(html, /screen-recommendation/);
+        assert.match(html, /x_good/);
+        assert.match(html, /x_optional/);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_screen_metric_slider_and_agent_recommendation_update_selection_table():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          handleScreenAgentRecommendClick,
+          handleScreenMetricFilterInput,
+        } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const message = {
+          id: "interactive-range-msg",
+          metadata: {
+            step_id: "gate-range",
+            screen: {
+              selected: ["x_good"],
+              ranked: [["x_good", 0.42], ["x_optional", 0.12]],
+              leakage: [],
+              suspected: [],
+              unusable: [],
+              scores: {
+                x_good: { ks: 0.42, iv: 0.31, missing_rate: 0.04, psi_split: 0.03 },
+                x_optional: { ks: 0.12, iv: 0.07, missing_rate: 0.01, psi_split: 0.02 },
+              },
+              thresholds: { leakage_ks: 0.6, max_missing_rate: 0.95 },
+            },
+          },
+        };
+        let lastHtml = "";
+        const context = {
+          getAgentMessages: () => [message],
+          applyRerender: (_wrap, html) => { lastHtml = html; },
+        };
+        const wrap = {
+          dataset: { screenForm: message.id, screenReadonly: "false" },
+          querySelector: () => null,
+          querySelectorAll: () => [],
+        };
+        const slider = {
+          value: "0.20",
+          getAttribute: () => "ks_min",
+          closest: (selector) => selector === "[data-screen-range]" ? slider : wrap,
+        };
+        assert.equal(handleScreenMetricFilterInput({ target: slider }, context), true);
+        assert.equal(lastHtml.includes("x_good"), true);
+        assert.equal(lastHtml.includes("x_optional"), false);
+
+        slider.value = "0";
+        handleScreenMetricFilterInput({ target: slider }, context);
+
+        const recommendationButton = {
+          closest: (selector) => selector === "[data-screen-agent-recommend]" ? recommendationButton : wrap,
+        };
+        assert.equal(handleScreenAgentRecommendClick({
+          target: recommendationButton,
+          preventDefault: () => {},
+        }, context), true);
+        const goodRow = lastHtml.slice(lastHtml.indexOf('data-screen-feature="x_good"'));
+        const optionalRow = lastHtml.slice(lastHtml.indexOf('data-screen-feature="x_optional"'));
+        assert.match(goodRow.slice(0, goodRow.indexOf("</tr>")), /value="x_good" checked/);
+        assert.doesNotMatch(optionalRow.slice(0, optionalRow.indexOf("</tr>")), /value="x_optional" checked/);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
 
 
 def test_screen_table_search_filters_by_feature_name():
@@ -1559,7 +1956,7 @@ def test_dedup_picker_posts_strategies():
     assert "expected_step_id: expectedStepId" in module_js
     assert "handleDedupConfirmClick" in app_js
     css = _read("css/v2-workbench.css")
-    assert ".dedup-picker" in css and ".dedup-table" in css
+    assert ".dedup-picker" in css and ".dedup-feature-card" in css
     # UX-1/REL-1: dedup submission shares the same busy-feedback contract
     # (immediate busy pill + streamed poll + plan rail ticks) as the other
     # v2 gate controllers, since it also reruns the driver turn.
@@ -1615,8 +2012,10 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         {""}
         import assert from "node:assert/strict";
         import {{
+          closeC1DatasetPreview,
           renderDedupPicker,
           renderJoinC1Form,
+          showC1DatasetPreview,
           submitC1Assignment,
           submitDedupExclude,
           submitDedupStrategies,
@@ -1652,7 +2051,35 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         assert.equal(c1Html.includes('data-c1-form="c1-msg"'), true);
         assert.equal(c1Html.includes('data-c1-gate-step-id="gate-c1"'), true);
         assert.equal(c1Html.includes('data-c1-dataset="main"'), true);
+        assert.equal(c1Html.includes('data-c1-preview-dataset="main"'), true);
         assert.equal(c1Html.includes('value="bad" selected'), true);
+
+        const previewTitle = {{ textContent: "" }};
+        const previewBody = {{ innerHTML: "" }};
+        const previewDialog = {{ open: false, showModal() {{ this.open = true; }}, close() {{ this.open = false; }} }};
+        const previewDocument = {{
+          getElementById: (id) => ({{
+            c1DatasetPreviewDialog: previewDialog,
+            c1DatasetPreviewTitle: previewTitle,
+            c1DatasetPreviewBody: previewBody,
+          }})[id] || null,
+        }};
+        const previewCalls = [];
+        await showC1DatasetPreview({{
+          dataset: {{ c1PreviewDataset: "main", c1PreviewName: "main.csv" }},
+        }}, {{
+          document: previewDocument,
+          api: async (url) => {{
+            previewCalls.push(url);
+            return {{ columns: ["id", "bad"], rows: [{{ id: "A1", bad: 0 }}], truncated: true }};
+          }},
+        }});
+        assert.deepEqual(previewCalls, ["/api/datasets/main/preview?rows=10"]);
+        assert.equal(previewDialog.open, true);
+        assert.equal(previewTitle.textContent, "main.csv · 前 10 行");
+        assert.equal(previewBody.innerHTML.includes("A1"), true);
+        closeC1DatasetPreview({{ document: previewDocument }});
+        assert.equal(previewDialog.open, false);
         const c1Form = {{
           dataset: {{ c1GateStepId: "gate-c1" }},
           querySelectorAll: (selector) => selector === ".c1-role" ? [
@@ -1674,6 +2101,25 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
           feature_ids: ["feat"],
           target_col: "bad",
         }});
+
+        // C1 happens before a PlanDriver plan exists, so production C1
+        // messages intentionally have no step_id.  The structured assignment
+        // must still be submitted; expected_step_id is only added when the
+        // backend actually supplied one.
+        const prePlanC1Form = {{
+          dataset: {{}},
+          querySelectorAll: (selector) => selector === ".c1-role" ? [
+            {{ getAttribute: () => "main", value: "anchor" }},
+            {{ getAttribute: () => "feat", value: "feature" }},
+          ] : [],
+          querySelector: (selector) => selector === ".c1-target" ? {{ value: "bad" }} : null,
+        }};
+        const prePlanC1Button = {{ disabled: false, closest: () => prePlanC1Form }};
+        await submitC1Assignment(prePlanC1Button, context);
+        assert.equal(prePlanC1Button.disabled, true);
+        assert.equal(calls.length, 2);
+        assert.equal(Object.hasOwn(calls[1][1], "expected_step_id"), false);
+        assert.equal(calls[1][1].content.startsWith("[C1]"), true);
 
         const noAnchorForm = {{
           dataset: {{}},
@@ -1724,9 +2170,12 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         assert.equal(dedupHtml.includes('data-dedup-feature="feat"'), true);
         // UX-6: conflict_columns + a real conflict-value example are rendered, not
         // dropped, and the first/last row-order semantics are stated plainly.
-        assert.equal(dedupHtml.includes("冲突列：amount、city"), true);
-        assert.equal(dedupHtml.includes("k=138xxxx"), true);
-        assert.equal(dedupHtml.includes("amount 两行分别为 500、800"), true);
+        assert.equal(dedupHtml.includes("冲突列"), true);
+        assert.equal(dedupHtml.includes("amount"), true);
+        assert.equal(dedupHtml.includes("city"), true);
+        assert.equal(dedupHtml.includes("138xxxx"), true);
+        assert.equal(dedupHtml.includes("500"), true);
+        assert.equal(dedupHtml.includes("800"), true);
         assert.equal(dedupHtml.includes("按当前文件行序保留"), true);
         // UX-6: an "排除该特征表" exit alongside the strategy select.
         assert.equal(dedupHtml.includes('data-dedup-exclude="feat"'), true);
@@ -1752,10 +2201,11 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         const dedupButton = {{ disabled: false, closest: () => dedupForm }};
         await submitDedupStrategies(dedupButton, context);
         assert.equal(dedupButton.disabled, true);
-        assert.deepEqual(calls[1][1].dedup_strategies, {{ feat: "last" }});
-        assert.equal(calls[1][1].expected_step_id, "gate-dedup");
+        assert.deepEqual(calls[2][1].dedup_strategies, {{ feat: "last" }});
+        assert.equal(calls[2][1].expected_step_id, "gate-dedup");
+        assert.equal(calls[2][1].ui_action, "confirm_dedup");
         assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
-        assert.equal(rendered, 2);
+        assert.equal(rendered, 3);
 
         // UX-2: a read-only (stale) dedup picker must refuse to submit.
         const callsBeforeReadonlyDedup = calls.length;
@@ -1789,6 +2239,56 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
     assert output == "ok"
 
 
+def test_join_key_picker_keeps_two_tables_as_two_cards_and_posts_overrides():
+    output = _run_node(
+        f"""
+        {""}
+        import assert from "node:assert/strict";
+        import {{ renderJoinKeyPicker, submitJoinKeySelection }} from "./marvis/static/js/v2/join_gate_controller.js";
+        const message = {{ id: "m1", metadata: {{ step_id: "gate-1", join_keys: {{
+          features: [
+            {{ feature_id: "f1", feature_name: "vars_1.parquet", current_match_rate: 0,
+               current_keys: [{{ anchor_col: "applydt", feature_col: "huisudate" }}, {{ anchor_col: "phone", feature_col: "mobile" }}, {{ anchor_col: "usedate", feature_col: "huisudate" }}],
+               selected_anchor_cols: ["applydt", "phone", "usedate"],
+               alternatives: [{{ anchor_cols: ["applydt", "phone"], key_pairs: [["applydt", "huisudate"], ["phone", "mobile"]], match_rate: 1, feature_key_unique: false, fan_out_detected: true }}] }},
+            {{ feature_id: "f2", feature_name: "vars_2.parquet", current_match_rate: 0,
+               current_keys: [{{ anchor_col: "applydt", feature_col: "applyDate" }}, {{ anchor_col: "phone", feature_col: "mobile_md5" }}],
+               selected_anchor_cols: ["applydt", "phone"], alternatives: [] }},
+          ],
+        }} }} }};
+        const html = renderJoinKeyPicker(message);
+        assert.equal((html.match(/class="join-key-card"/g) || []).length, 2);
+        assert.equal(html.includes("这里仍是 2 张特征表"), true);
+        assert.equal(html.includes("应用拼接键并重新诊断"), true);
+
+        const cards = [
+          {{ getAttribute: () => "f1", querySelectorAll: () => [{{ value: "applydt" }}, {{ value: "phone" }}] }},
+          {{ getAttribute: () => "f2", querySelectorAll: () => [{{ value: "phone" }}] }},
+        ];
+        const form = {{
+          dataset: {{ joinKeyGateStepId: "gate-1" }},
+          querySelectorAll: (selector) => selector === "[data-join-key-card]" ? cards : [],
+        }};
+        let posted = null;
+        const executionBusy = [];
+        await submitJoinKeySelection({{ disabled: false, closest: () => form }}, {{
+          selectedTaskId: "task-1",
+          acceptanceMode: "manual",
+          api: async (_url, options) => {{ posted = JSON.parse(options.body); return {{ messages: [] }}; }},
+          setAgentMessages: () => {{}},
+          renderAgentConversation: () => {{}},
+          setDriverExecutionBusy: (active, taskId) => executionBusy.push([active, taskId]),
+        }});
+        assert.deepEqual(posted.adjust_params.key_overrides, {{ f1: ["applydt", "phone"], f2: ["phone"] }});
+        assert.equal(posted.expected_step_id, "gate-1");
+        assert.equal(posted.ui_action, "apply_join_keys");
+        assert.deepEqual(executionBusy, [[true, "task-1"], [false, "task-1"]]);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_driver_gate_confirm_controller_renders_and_posts_confirm():
     output = _run_node(
         f"""
@@ -1810,6 +2310,7 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
         assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate", screen: {{ selected: ["x"] }} }} }}), "");
         assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate", dedup: {{ features: [{{ feature_id: "f" }}] }} }} }}), "");
         assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate", modeling_setup: {{}} }} }}), "");
+        assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate", join_keys: {{ features: [{{ feature_id: "f" }}] }} }} }}), "");
         assert.equal(renderDriverGateButton({{ metadata: {{ kind: "done" }} }}), "");
 
         let agentMessages = [];
@@ -1823,6 +2324,7 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
         let pollCalls = 0;
         let resetCalls = 0;
         let stepperCalls = 0;
+        const executionBusy = [];
         const context = {{
           selectedTaskId: "task-1",
           setActionStatus: (message, kind) => statuses.push([message, kind]),
@@ -1835,6 +2337,7 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
           pollAgentMessagesUntilSettled: async () => {{ pollCalls += 1; }},
           resetFetchThrottle: () => {{ resetCalls += 1; }},
           renderWorkflowStepper: () => {{ stepperCalls += 1; }},
+          setDriverExecutionBusy: (active, taskId) => executionBusy.push([active, taskId]),
         }};
         const button = {{
           disabled: false,
@@ -1846,13 +2349,14 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
         // success path leaves the button disabled (no re-enable on success)
         assert.equal(button.disabled, true);
         assert.equal(calls[0][0], "/api/tasks/task-1/agent/messages");
-        assert.deepEqual(calls[0][1], {{ content: "确认", expected_step_id: "gate-1" }});
+        assert.deepEqual(calls[0][1], {{ content: "确认", ui_action: "confirm_gate", expected_step_id: "gate-1" }});
         assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
         assert.equal(rendered, 1);
         // finally-path plan-rail refresh fires at least once on the success path
         assert.equal(pollCalls, 1);
         assert.equal(resetCalls >= 1, true);
         assert.equal(stepperCalls >= 1, true);
+        assert.deepEqual(executionBusy, [[true, "task-1"], [false, "task-1"]]);
 
         // failure path: api rejects, button is re-enabled, and an error status
         // (not just the transient busy status) is surfaced to the user.
@@ -1874,6 +2378,7 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
         // the plan rail is still force-refreshed via the finally path on failure
         assert.equal(failResetCalls >= 1, true);
         assert.equal(failStepperCalls >= 1, true);
+        assert.deepEqual(executionBusy.slice(-2), [[true, "task-1"], [false, "task-1"]]);
 
         const eventButton = {{ disabled: false }};
         const event = {{

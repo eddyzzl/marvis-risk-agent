@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from marvis.data.labels import require_labels_confirmed
@@ -14,6 +15,11 @@ from marvis.feature.errors import FeatureError, FitRequiresSplitError
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
 from marvis.feature.metrics import DEFAULT_IV_BINS, feature_ks, feature_metrics
 from marvis.packs.modeling.prepare import SPLIT_COLUMN
+
+
+DEFAULT_SELECTION_BATCH_SIZE = 16
+DEFAULT_MULTIVARIATE_SAMPLE_ROWS = 50_000
+VIF_DISABLED_THRESHOLD = 1e9
 
 
 @dataclass(frozen=True)
@@ -49,30 +55,24 @@ def select_features(
     enforce_monotonic: bool = True,
     monotonic_direction_request: str = "auto",
     sign_check: bool = True,
+    batch_size: int = DEFAULT_SELECTION_BATCH_SIZE,
+    multivariate_sample_rows: int = DEFAULT_MULTIVARIATE_SAMPLE_ROWS,
 ) -> SelectionResult:
     del seed  # Selection is deterministic; seed is reserved for API symmetry.
     dataset_columns = set(backend.column_names(dataset_path))
     resolved_split_col = split_col or (SPLIT_COLUMN if SPLIT_COLUMN in dataset_columns else None)
-    columns = _unique([*features, target_col, resolved_split_col])
-    frame = backend.read_frame(dataset_path, columns=columns)
-    if split_col and split_value is not None:
-        # Legacy exact-match filter: caller picked a single split value explicitly
-        # (e.g. split_value="train"). This already excludes every holdout row.
-        frame = frame[frame[str(split_col)] == split_value].copy()
-        if frame.empty:
-            raise FeatureError(f"feature selection split has no rows: {split_col}={split_value}")
-        fit_rows = int(len(frame))
-        fit_split = "train"
-    else:
-        fit_mask, fit_split = _selection_fit_mask(
-            frame,
-            split_col=resolved_split_col,
-            holdout_values=holdout_values,
-            allow_full_fit=allow_full_fit,
-            dataset_path=dataset_path,
-        )
-        frame = frame.loc[fit_mask].copy()
-        fit_rows = int(len(frame))
+    frame, fit_rows, fit_split = _read_selection_fit_frame(
+        backend,
+        dataset_path,
+        features=features,
+        target_col=target_col,
+        resolved_split_col=resolved_split_col,
+        explicit_split_col=split_col,
+        split_value=split_value,
+        holdout_values=holdout_values,
+        allow_full_fit=allow_full_fit,
+        batch_size=batch_size,
+    )
     nan_labels_dropped = require_labels_confirmed(
         frame, target_col, drop_nan_labels=drop_nan_labels,
     )
@@ -104,6 +104,7 @@ def select_features(
             sign_check=sign_check,
             fit_rows=fit_rows,
             fit_split=fit_split,
+            multivariate_sample_rows=multivariate_sample_rows,
         )
     if normalized_space != "raw":
         raise FeatureError("select_features space must be 'raw' or 'woe'")
@@ -118,6 +119,7 @@ def select_features(
         nan_labels_dropped=nan_labels_dropped,
         fit_rows=fit_rows,
         fit_split=fit_split,
+        multivariate_sample_rows=multivariate_sample_rows,
     )
 
 
@@ -148,6 +150,51 @@ def _selection_fit_mask(
     return mask, "train"
 
 
+def _read_selection_fit_frame(
+    backend,
+    dataset_path: Path,
+    *,
+    features: list[str],
+    target_col: str,
+    resolved_split_col: str | None,
+    explicit_split_col: str | None,
+    split_value: Any,
+    holdout_values: tuple[str, ...],
+    allow_full_fit: bool,
+    batch_size: int,
+) -> tuple[pd.DataFrame, int, str]:
+    """Read only fit rows and bounded feature batches for wide-table selection."""
+
+    base_columns = _unique([target_col, resolved_split_col])
+    base = backend.read_frame(dataset_path, columns=base_columns)
+    if explicit_split_col and split_value is not None:
+        fit_mask = base[str(explicit_split_col)] == split_value
+        if not fit_mask.any():
+            raise FeatureError(
+                f"feature selection split has no rows: {explicit_split_col}={split_value}"
+            )
+        fit_split = "train"
+    else:
+        fit_mask, fit_split = _selection_fit_mask(
+            base,
+            split_col=resolved_split_col,
+            holdout_values=holdout_values,
+            allow_full_fit=allow_full_fit,
+            dataset_path=dataset_path,
+        )
+
+    fit_base = base.loc[fit_mask, base_columns].copy()
+    width = max(1, int(batch_size))
+    feature_chunks: list[pd.DataFrame] = []
+    for start in range(0, len(features), width):
+        batch = features[start : start + width]
+        raw_chunk = backend.read_frame(dataset_path, columns=batch)
+        feature_chunks.append(raw_chunk.loc[fit_mask, batch].copy())
+
+    frame = pd.concat([*feature_chunks, fit_base], axis=1)
+    return frame, int(len(fit_base)), fit_split
+
+
 def _select_features_raw(
     frame: pd.DataFrame,
     features: list[str],
@@ -160,6 +207,7 @@ def _select_features_raw(
     nan_labels_dropped: int,
     fit_rows: int = 0,
     fit_split: str = "train",
+    multivariate_sample_rows: int = DEFAULT_MULTIVARIATE_SAMPLE_ROWS,
 ) -> SelectionResult:
     kept: list[str] = []
     dropped: list[tuple[str, str]] = []
@@ -184,9 +232,24 @@ def _select_features_raw(
         else:
             kept.append(feature)
 
-    warnings: list[str] = []
-    kept, dropped = _drop_collinear(frame, features, kept, dropped, scores, corr_max, label="")
-    kept, dropped = _drop_high_vif(frame, features, kept, dropped, scores, vif_max, label="", warnings=warnings)
+    multivariate_frame, sample_warning = _multivariate_selection_frame(
+        frame,
+        max_rows=multivariate_sample_rows,
+    )
+    warnings: list[str] = [sample_warning] if sample_warning else []
+    kept, dropped = _drop_collinear(
+        multivariate_frame, features, kept, dropped, scores, corr_max, label="",
+    )
+    kept, dropped = _drop_high_vif(
+        multivariate_frame,
+        features,
+        kept,
+        dropped,
+        scores,
+        vif_max,
+        label="",
+        warnings=warnings,
+    )
     kept, dropped = _apply_top_k(features, kept, dropped, scores, top_k)
     return SelectionResult(
         tuple(kept), tuple(dropped), scores, nan_labels_dropped, tuple(warnings),
@@ -211,6 +274,7 @@ def _select_features_woe(
     sign_check: bool,
     fit_rows: int = 0,
     fit_split: str = "train",
+    multivariate_sample_rows: int = DEFAULT_MULTIVARIATE_SAMPLE_ROWS,
 ) -> SelectionResult:
     target_arr = frame[target_col].to_numpy(dtype=float)
     encoded = pd.DataFrame(index=frame.index)
@@ -253,9 +317,24 @@ def _select_features_woe(
         else:
             kept.append(feature)
 
-    warnings: list[str] = []
-    kept, dropped = _drop_collinear(encoded, features, kept, dropped, scores, corr_max, label="WOE ")
-    kept, dropped = _drop_high_vif(encoded, features, kept, dropped, scores, vif_max, label="WOE ", warnings=warnings)
+    multivariate_frame, sample_warning = _multivariate_selection_frame(
+        encoded,
+        max_rows=multivariate_sample_rows,
+    )
+    warnings: list[str] = [sample_warning] if sample_warning else []
+    kept, dropped = _drop_collinear(
+        multivariate_frame, features, kept, dropped, scores, corr_max, label="WOE ",
+    )
+    kept, dropped = _drop_high_vif(
+        multivariate_frame,
+        features,
+        kept,
+        dropped,
+        scores,
+        vif_max,
+        label="WOE ",
+        warnings=warnings,
+    )
     kept, dropped = _apply_top_k(features, kept, dropped, scores, top_k)
     if sign_check:
         warnings.extend(_woe_sign_warnings(encoded, kept, target_arr, scores, directions))
@@ -299,6 +378,8 @@ def _drop_high_vif(
     label: str,
     warnings: list[str],
 ) -> tuple[list[str], list[tuple[str, str]]]:
+    if vif_max >= VIF_DISABLED_THRESHOLD:
+        return kept, dropped
     vifs = vif(frame, kept)
     for feature in features:
         if feature in vifs:
@@ -323,6 +404,30 @@ def _drop_high_vif(
             f"已跳过 {skipped} 个特征的 VIF 门（其 vif 记为 None）"
         )
     return kept, dropped
+
+
+def _multivariate_selection_frame(
+    frame: pd.DataFrame,
+    *,
+    max_rows: int,
+) -> tuple[pd.DataFrame, str | None]:
+    """Bound O(p²) correlation/VIF work while retaining full-train IV and KS.
+
+    Equal-distance positional sampling is deterministic and spans the complete train
+    period, unlike ``head()``. Fifty thousand rows is ample for a 0.95 correlation
+    dedup gate while keeping a 200-column matrix inside the tool time budget.
+    """
+
+    limit = max(1, int(max_rows))
+    if len(frame) <= limit:
+        return frame, None
+    positions = np.linspace(0, len(frame) - 1, num=limit, dtype=np.int64)
+    sampled = frame.iloc[positions]
+    warning = (
+        f"相关/VIF 基于按行等距抽取的 {len(sampled)}/{len(frame)} 个 train 样本；"
+        "IV/KS 仍使用全部 train 样本"
+    )
+    return sampled, warning
 
 
 def _apply_top_k(
@@ -401,4 +506,9 @@ def _unique(values: list[str | None]) -> list[str]:
     return list(dict.fromkeys(str(value) for value in values if value))
 
 
-__all__ = ["SelectionResult", "select_features"]
+__all__ = [
+    "DEFAULT_MULTIVARIATE_SAMPLE_ROWS",
+    "DEFAULT_SELECTION_BATCH_SIZE",
+    "SelectionResult",
+    "select_features",
+]

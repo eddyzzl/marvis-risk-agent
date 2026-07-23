@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from marvis.agent.adjust_specs import adjust_param_error
+from marvis.agent.adjust_specs import adjust_param_error, normalize_adjust_params
 from marvis.agent.driver_turn import DriverMessage, DriverTurn
 from marvis.agent.gate_payloads import screen_known_features
 from marvis.agent.plan_utils import downstream_step_ids, find_step
@@ -120,7 +120,7 @@ class GateExecutionAdapter:
         """
         deps = [step for step in (find_step(plan, dep_id) for dep_id in (gate.depends_on or [])) if step is not None]
         candidates = [*deps, gate]
-        params = params or {}
+        params = normalize_adjust_params(params)
         if gate.tool_ref.tool == "apply_monitoring_disposition":
             monitoring_error = self._monitoring_adjust_error(plan, gate, params)
             if monitoring_error:
@@ -138,6 +138,11 @@ class GateExecutionAdapter:
         adjusted_ids: list[str] = []
         for dep in candidates:
             overrides = {key: value for key, value in params.items() if key in (dep.inputs or {})}
+            # Backward compatibility for plans created before the join-key picker
+            # declared key_overrides in the builtin templates. Historical pending
+            # gates can still be repaired in place instead of forcing a new task.
+            if dep.tool_ref.tool == "propose_join" and "key_overrides" in params:
+                overrides["key_overrides"] = params["key_overrides"]
             if "sample_weight_col" in overrides:
                 if dep.tool_ref.tool != "choose_modeling_spec":
                     overrides.pop("sample_weight_col", None)

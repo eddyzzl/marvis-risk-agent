@@ -58,6 +58,7 @@ def _effect_target(
         "task_id": meta["task_id"],
         "strategy_type": meta["strategy_type"],
         "strategy_spec_hash": repo.get_strategy_spec_hash(strategy_id),
+        "strategy_description": meta["description"],
         "current_champion_ids": [champion_id],
     }
 

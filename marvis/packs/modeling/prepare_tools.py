@@ -188,6 +188,7 @@ def tool_make_split(inputs: dict, ctx) -> dict:
         "split_values": {key: key for key in split_counts},
         "holdout_values": ["oot"] if "oot" in split_counts else [],
         "feature_cols": feature_cols,
+        "available_columns": [str(column) for column in source_columns],
         "sample_analysis": _json_safe(sample_analysis),
     }
 

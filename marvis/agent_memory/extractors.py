@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from marvis.agent_memory.models import (
+    FEATURE_EXPERIENCE_REQUIRED_FIELDS,
     JOIN_EXPERIENCE_REQUIRED_FIELDS,
     MODEL_EXPERIENCE_REQUIRED_FIELDS,
     RISK_ANALYSIS_EXPERIENCE_REQUIRED_FIELDS,
@@ -76,6 +77,84 @@ def extract_join_experience(result: dict[str, Any]) -> MemoryCandidate | None:
         source_task_id=str(payload["source_task_id"]),
         confidence="high",
         reason="structured join execution result",
+    )
+    return _allow(candidate)
+
+
+def extract_feature_experience(result: dict[str, Any]) -> MemoryCandidate | None:
+    raw_evidence = result.get("recommendation_evidence")
+    evidence = dict(raw_evidence) if isinstance(raw_evidence, dict) else {}
+    payload = {
+        "feature_count": _first_value(result, {}, "feature_count"),
+        "recommended_features": list(result.get("recommended_features") or []),
+        "avoid_features": list(result.get("avoid_features") or []),
+        "recommendation_confidence": str(
+            result.get("recommendation_confidence") or ""
+        ).strip().lower(),
+        "recommendation_evidence": evidence,
+        "target_col": _first_value(result, {}, "target_col"),
+        "scope": _first_value(result, {}, "scope"),
+        "source_task_id": _first_value(result, {}, "source_task_id", "task_id"),
+    }
+    if any(
+        _is_missing(payload[field])
+        for field in FEATURE_EXPERIENCE_REQUIRED_FIELDS
+        if field not in {"recommended_features", "avoid_features"}
+    ):
+        return None
+    target_col = str(payload["target_col"] or "").strip()
+    if str(payload["scope"] or "").strip() != f"feature:target={target_col}":
+        return None
+    recommended_set = {
+        str(feature or "").strip()
+        for feature in payload["recommended_features"]
+        if str(feature or "").strip()
+    }
+    avoid_set = {
+        str(feature or "").strip()
+        for feature in payload["avoid_features"]
+        if str(feature or "").strip()
+    }
+    conflicts = recommended_set & avoid_set
+    payload["recommended_features"] = sorted(recommended_set - conflicts)
+    payload["avoid_features"] = sorted(avoid_set - conflicts)
+    actionable_features = set(payload["recommended_features"]) | set(
+        payload["avoid_features"]
+    )
+    if not actionable_features:
+        return None
+    payload["recommendation_evidence"] = {
+        feature: evidence[feature]
+        for feature in sorted(actionable_features)
+        if feature in evidence and evidence[feature]
+    }
+    recommended = "、".join(str(item) for item in payload["recommended_features"][:8]) or "无明确推荐"
+    avoid = "、".join(str(item) for item in payload["avoid_features"][:8]) or "未识别明显坑点"
+    has_actionable_advice = bool(actionable_features)
+    has_governed_evidence = (
+        set(payload["recommendation_evidence"]) == actionable_features
+    )
+    requested_confidence = payload["recommendation_confidence"]
+    if has_governed_evidence and requested_confidence == "high":
+        confidence = "high"
+    elif has_actionable_advice:
+        confidence = "medium"
+    else:
+        confidence = "low"
+    candidate = MemoryCandidate(
+        memory_type="feature_experience",
+        summary=(
+            f"{payload['scope']}分析 {payload['feature_count']} 个特征；"
+            f"推荐 {recommended}；谨慎使用 {avoid}。"
+        ),
+        payload=payload,
+        source_task_id=str(payload["source_task_id"]),
+        confidence=confidence,
+        reason=(
+            "structured feature analysis result with governed recommendation evidence"
+            if has_governed_evidence
+            else "structured feature analysis result without governed recommendation evidence"
+        ),
     )
     return _allow(candidate)
 

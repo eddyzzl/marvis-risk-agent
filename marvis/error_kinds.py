@@ -56,6 +56,7 @@ class ErrorKind:
     )
     MISSING_BASELINE = "missing_baseline"
     REPORT_SCORE_MISSING = "report_score_missing"
+    SPECIAL_VALUE_DECISION_REQUIRED = "special_value_decision_required"
 
 
 __all__ = ["ErrorKind"]

@@ -2,6 +2,7 @@ import hashlib
 from pathlib import Path
 
 import duckdb
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -72,6 +73,73 @@ def test_backend_counts_columns_frames_and_uniqueness_for_csv_and_parquet(tmp_pa
 
     with pytest.raises(DataSecurityError):
         backend.read_frame(csv_path, columns=["missing"])
+
+
+def test_selected_parquet_read_maps_duckdb_c0_alias_without_duckdb_materialization(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "blank-column.parquet"
+    pd.DataFrame({"": [1, 2, 3], "y": [0, 1, 0]}).to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    assert backend.column_names(path) == ["C0", "y"]
+
+    def reject_duckdb_materialization():
+        raise AssertionError("selected parquet read must stay on the lower-memory path")
+
+    monkeypatch.setattr(backend, "_connect", reject_duckdb_materialization)
+    frame = backend.read_frame(path, columns=["C0", "y"])
+
+    assert list(frame.columns) == ["C0", "y"]
+    assert frame.to_dict("list") == {"C0": [1, 2, 3], "y": [0, 1, 0]}
+
+
+def test_compact_parquet_downcasts_only_true_numeric_features(tmp_path):
+    path = tmp_path / "compact_mixed_features.parquet"
+    pd.DataFrame({
+        "amount": [1.25, 2.5, 3.75, 5.0],
+        "segment": pd.Series(["A", "B", "A", "C"], dtype="category"),
+        "channel": ["app", "web", "branch", "app"],
+        "y": [0, 1, 0, 1],
+        "split": ["train", "train", "test", "oot"],
+    }).to_parquet(path, index=False)
+
+    compact = DataBackend(tmp_path).read_compact_numeric_frame(
+        path,
+        numeric_columns=["amount", "segment", "channel"],
+        other_columns=["y", "split"],
+        batch_size=2,
+    )
+
+    assert list(compact.columns) == ["amount", "segment", "channel", "y", "split"]
+    assert compact["amount"].dtype == np.dtype("float32")
+    assert str(compact["segment"].dtype) == "category"
+    assert compact["segment"].tolist() == ["A", "B", "A", "C"]
+    assert compact["channel"].tolist() == ["app", "web", "branch", "app"]
+    assert compact["y"].dtype == np.dtype("int64")
+
+
+def test_compact_csv_normalizes_null_string_feature_without_rewriting_source(tmp_path):
+    path = tmp_path / "compact_categories.csv"
+    path.write_text(
+        "channel,amount,y,split\napp,1.0,0,train\n,2.0,1,test\nweb,3.0,0,oot\n",
+        encoding="utf-8",
+    )
+    source_before = path.read_bytes()
+
+    compact = DataBackend(tmp_path).read_compact_numeric_frame(
+        path,
+        numeric_columns=["channel", "amount"],
+        other_columns=["y", "split"],
+    )
+
+    assert compact["channel"].tolist() == [
+        "app",
+        "__MARVIS_MISSING_CATEGORY__",
+        "web",
+    ]
+    assert compact["amount"].dtype == np.dtype("float32")
+    assert path.read_bytes() == source_before
 
 
 def test_left_join_preserves_anchor_rows_and_supports_first_and_mean_dedup(tmp_path):

@@ -128,6 +128,25 @@ class TaskRepository:
                 raise KeyError(f"Task not found: {task_id}")
         return self.get_task(task_id)
 
+    def update_target_col(self, task_id: str, target_col: str) -> TaskRecord:
+        """Persist an explicit target selected during conversational setup."""
+
+        value = str(target_col or "").strip()
+        if not value:
+            raise ValueError("target_col must be a non-empty string")
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE tasks
+                   SET target_col = ?, updated_at = ?
+                 WHERE id = ?
+                """,
+                (value, _now(), task_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"Task not found: {task_id}")
+        return self.get_task(task_id)
+
     def update_strategy_input(
         self,
         task_id: str,
@@ -1318,7 +1337,7 @@ def _task_record_from_create(payload: TaskCreate) -> TaskRecord:
         sample_weight_col=payload.sample_weight_col,
         oot_ks_min=payload.oot_ks_min,
         strategy_input=payload.strategy_input,
-        metrics=list(payload.metrics),
+        metrics=None if payload.metrics is None else list(payload.metrics),
         capability_tier=payload.capability_tier,
         notebook_path=payload.notebook_path,
         sample_path=payload.sample_path,
@@ -1346,12 +1365,12 @@ def _insert_task_record_row(
         (
             id, task_type, validation_workflow_version, model_name, model_version, validator, source_dir,
             algorithm, run_mode, target_col, score_col, split_col,
-            time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, oot_ks_min, strategy_input_json, metrics_json, capability_tier, notebook_path, sample_path,
+            time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, oot_ks_min, strategy_input_json, metrics_json, metrics_configured, capability_tier, notebook_path, sample_path,
             pmml_path, dictionary_path, report_values_json,
             report_values_revision, status, status_message,
             status_reason_code, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             record.id,
@@ -1373,7 +1392,8 @@ def _insert_task_record_row(
             record.sample_weight_col,
             record.oot_ks_min,
             _dump_strategy_input(record.strategy_input),
-            _dump_json_list(record.metrics),
+            _dump_json_list(record.metrics or []),
+            0 if record.metrics is None else 1,
             record.capability_tier,
             record.notebook_path,
             record.sample_path,
@@ -1417,7 +1437,12 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         strategy_input=_load_strategy_input(
             row["strategy_input_json"] if "strategy_input_json" in row.keys() else None
         ),
-        metrics=_load_json_list(row["metrics_json"]),
+        metrics=(
+            _load_json_list(row["metrics_json"])
+            if "metrics_configured" not in row.keys()
+            or bool(row["metrics_configured"])
+            else None
+        ),
         capability_tier=(row["capability_tier"] if "capability_tier" in row.keys() else "") or "",
         notebook_path=row["notebook_path"],
         sample_path=row["sample_path"],

@@ -19,6 +19,7 @@ from marvis.orchestrator.contracts import (
 )
 from marvis.orchestrator.validator import METRIC_FIELDS
 from marvis.plugins.errors import SchemaValidationError
+from marvis.plugins.manifest import ToolRef
 from marvis.plugins.schema_validation import validate_against_schema
 
 
@@ -43,6 +44,12 @@ class Reviewer:
     def deterministic_check(self, step: PlanStep, output: dict) -> ReviewVerdict:
         reasons = []
         for post_check in step.post_checks:
+            # Compatibility for plans persisted before screen_features stopped
+            # treating an empty recommendation set as an execution error. The
+            # gate must render the metrics/reasons so the user can review or
+            # repair the data instead of being sent to an internal $ref editor.
+            if _is_reviewable_empty_screen_check(step, post_check):
+                continue
             ok, reason = _run_post_check(post_check, output, step)
             if not ok:
                 reasons.append(reason)
@@ -191,6 +198,14 @@ class Reviewer:
         raw_goal_met = data.get("goal_met")
         llm_goal_met = raw_goal_met if isinstance(raw_goal_met, bool) else None
         return summary, open_items, bool(data.get("goal_doubt", False)), llm_goal_met
+
+
+def _is_reviewable_empty_screen_check(step: PlanStep, post_check: PostCheck) -> bool:
+    return (
+        step.tool_ref == ToolRef("modeling", "screen_features")
+        and post_check.kind == "nonempty"
+        and str(post_check.spec.get("field") or "") == "selected"
+    )
 
 
 def _run_post_check(pc: PostCheck, output: dict, step: PlanStep) -> tuple[bool, str]:

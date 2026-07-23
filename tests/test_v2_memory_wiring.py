@@ -26,11 +26,16 @@ from fastapi.testclient import TestClient
 
 from marvis.agent.memory_bridge import (
     build_memory_anchor,
+    build_workflow_memory_context,
     capture_agent_memory_for_driver_done,
     fetch_field_convention_hints,
 )
 from marvis.agent.sample_setup import detect_setup
+from marvis.agent.driver_turn import DriverMessage, DriverTurn
+from marvis.agent.turn_handlers import append_driver_messages
 from marvis.agent_memory.models import MemoryCandidate
+from marvis.agent_memory.distillation import DistillationEngine, new_distillation
+from marvis.agent_memory.extractors import extract_feature_experience
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.app import create_app
 from marvis.data.backend import DataBackend
@@ -334,24 +339,528 @@ def test_capture_agent_memory_strategy_gated_by_auto_distill(tmp_path: Path):
     assert store.list_entries(memory_type="strategy_experience") == []
 
 
-# -- ARCH-4 kwargs fix regression: feature/vintage now pass settings/task too,
-# but neither has an extractor wired -- must be a silent, exception-free no-op.
+# -- feature completion now captures reusable recommendations; vintage remains no-op.
 
-@pytest.mark.parametrize("task_type", [TASK_TYPE_FEATURE_ANALYSIS, TASK_TYPE_VINTAGE])
-def test_capture_agent_memory_feature_and_vintage_are_noop_not_errors(tmp_path: Path, task_type):
+def test_capture_agent_memory_writes_feature_experience_and_returns_receipt(tmp_path: Path):
     settings = build_settings(tmp_path)
     init_db(settings.db_path)
-    task = _task_record(id=f"task-{task_type}-1", task_type=task_type)
+    task = _task_record(
+        id="task-feature-1",
+        task_type=TASK_TYPE_FEATURE_ANALYSIS,
+        target_col="y",
+    )
 
-    # Must not raise even though there is no extractor for these two types yet.
+    receipts = capture_agent_memory_for_driver_done(
+        settings,
+        task,
+        done_message_content="特征分析完成",
+        done_message_metadata={
+            "tables": [{
+                "title": "Agent 特征建议",
+                "columns": ["特征", "Agent建议", "推荐原因"],
+                "rows": [
+                    ["x1", "推荐", "区分力较好"],
+                    ["x2", "不推荐", "缺失率过高"],
+                ],
+            }],
+        },
+    )
+
+    store = AgentMemoryStore(settings.db_path)
+    entries = store.list_entries(memory_type="feature_experience")
+    assert len(entries) == 1
+    assert entries[0].payload["recommended_features"] == ["x1"]
+    assert entries[0].payload["avoid_features"] == ["x2"]
+    assert entries[0].payload["scope"] == "feature:target=y"
+    assert entries[0].confidence == "medium"
+    assert receipts and receipts[0]["memory_type"] == "feature_experience"
+
+
+def test_capture_feature_memory_keeps_unevaluated_neutral_and_requires_evidence_for_high(
+    tmp_path: Path,
+):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    task = _task_record(
+        id="task-feature-evidence",
+        task_type=TASK_TYPE_FEATURE_ANALYSIS,
+        target_col="bad_flag",
+    )
+
     capture_agent_memory_for_driver_done(
+        settings,
+        task,
+        done_message_metadata={
+            "tables": [{
+                "title": "Agent 特征建议",
+                "columns": [
+                    "特征",
+                    "Agent建议",
+                    "推荐原因",
+                    "建议状态",
+                    "证据置信度",
+                    "支持指标",
+                ],
+                "rows": [
+                    ["x_good", "推荐", "稳定", "recommended", "high", "iv=0.3；psi=0.03"],
+                    ["x_bad", "不推荐", "漂移", "not_recommended", "high", "psi=0.4"],
+                    ["x_unknown", "待评估", "证据不足", "unevaluated", "none", "-"],
+                ],
+            }],
+        },
+    )
+
+    entry = AgentMemoryStore(settings.db_path).list_entries(
+        memory_type="feature_experience"
+    )[0]
+    assert entry.payload["recommended_features"] == ["x_good"]
+    assert entry.payload["avoid_features"] == ["x_bad"]
+    assert "x_unknown" not in entry.payload["recommended_features"]
+    assert entry.confidence == "high"
+    assert set(entry.payload["recommendation_evidence"]) == {"x_good", "x_bad"}
+
+
+def test_capture_feature_memory_does_not_store_all_neutral_advice(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    task = _task_record(
+        id="task-feature-neutral",
+        task_type=TASK_TYPE_FEATURE_ANALYSIS,
+        target_col="bad_flag",
+    )
+
+    receipts = capture_agent_memory_for_driver_done(
+        settings,
+        task,
+        done_message_metadata={
+            "tables": [{
+                "title": "Agent 特征建议",
+                "columns": [
+                    "特征",
+                    "Agent建议",
+                    "推荐原因",
+                    "建议状态",
+                    "证据置信度",
+                    "支持指标",
+                ],
+                "rows": [
+                    ["x_unknown", "待评估", "证据不足", "unevaluated", "none", "-"],
+                ],
+            }],
+        },
+    )
+
+    assert receipts == []
+    assert AgentMemoryStore(settings.db_path).list_entries(
+        memory_type="feature_experience"
+    ) == []
+
+
+def test_feature_memory_partial_evidence_cannot_be_high_confidence(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    task = _task_record(
+        id="task-feature-partial-evidence",
+        task_type=TASK_TYPE_FEATURE_ANALYSIS,
+        target_col="bad_flag",
+    )
+
+    capture_agent_memory_for_driver_done(
+        settings,
+        task,
+        done_message_metadata={
+            "tables": [{
+                "title": "Agent 特征建议",
+                "columns": [
+                    "特征",
+                    "Agent建议",
+                    "推荐原因",
+                    "建议状态",
+                    "证据置信度",
+                    "支持指标",
+                ],
+                "rows": [
+                    ["x_good", "推荐", "稳定", "recommended", "high", "iv=0.3；psi=0.03"],
+                    ["x_bad", "不推荐", "漂移", "not_recommended", "high", "-"],
+                ],
+            }],
+        },
+    )
+
+    entry = AgentMemoryStore(settings.db_path).list_entries(
+        memory_type="feature_experience"
+    )[0]
+    assert entry.confidence == "medium"
+
+
+def test_feature_memory_extractor_rejects_target_scope_mismatch():
+    candidate = extract_feature_experience({
+        "feature_count": 1,
+        "recommended_features": ["x1"],
+        "avoid_features": [],
+        "recommendation_confidence": "high",
+        "recommendation_evidence": {"x1": {"metric": "iv", "value": 0.3}},
+        "target_col": "fraud_flag",
+        "scope": "feature:target=bad_flag",
+        "source_task_id": "task-wrong-scope",
+    })
+
+    assert candidate is None
+
+
+def test_capture_agent_memory_vintage_is_noop_not_error(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    task = _task_record(id="task-vintage-1", task_type=TASK_TYPE_VINTAGE)
+
+    receipts = capture_agent_memory_for_driver_done(
         settings, task, done_message_content="done", done_message_metadata={"tables": []}
     )
 
     store = AgentMemoryStore(settings.db_path)
+    assert receipts == []
     assert store.list_entries(memory_type="model_experience") == []
     assert store.list_entries(memory_type="join_experience") == []
     assert store.list_entries(memory_type="strategy_experience") == []
+
+
+def test_feature_workflow_memory_context_is_visible_and_excludes_current_task(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    store = AgentMemoryStore(settings.db_path)
+    store.create(
+        MemoryCandidate(
+            memory_type="feature_experience",
+            summary="历史特征分析推荐 x1，谨慎使用 x2。",
+            payload={
+                "feature_count": 2,
+                "recommended_features": ["x1"],
+                "avoid_features": ["x2"],
+                "target_col": "bad_flag",
+                "scope": "feature:target=bad_flag",
+                "source_task_id": "task-history",
+            },
+            source_task_id="task-history",
+            confidence="high",
+        )
+    )
+    task = _task_record(
+        id="task-current",
+        task_type=TASK_TYPE_FEATURE_ANALYSIS,
+        model_name="A卡",
+        target_col="bad_flag",
+    )
+
+    context = build_workflow_memory_context(settings, task)
+
+    assert context is not None
+    assert context["category"] == "feature_experience"
+    assert "x1" in context["lines"][0]
+    assert context["references"][0]["use_reason"] == "workflow_insight"
+
+
+def test_append_driver_done_shows_agent_analysis_memory_reference_and_capture_receipt(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    store = AgentMemoryStore(settings.db_path)
+    store.create(
+        MemoryCandidate(
+            memory_type="feature_experience",
+            summary="历史分析提示 x2 缺失率偏高。",
+            payload={
+                "feature_count": 2,
+                "recommended_features": ["x1"],
+                "avoid_features": ["x2"],
+                "target_col": "bad_flag",
+                "scope": "feature:target=bad_flag",
+                "source_task_id": "task-history",
+            },
+            source_task_id="task-history",
+            confidence="high",
+        )
+    )
+    task = _task_record(
+        id="task-current",
+        task_type=TASK_TYPE_FEATURE_ANALYSIS,
+        model_name="A卡",
+        target_col="bad_flag",
+    )
+
+    class Repo:
+        def __init__(self):
+            self.items = []
+
+        def add_agent_message(self, task_id, **payload):
+            item = {"id": f"msg-{len(self.items) + 1}", "task_id": task_id, **payload}
+            self.items.append(item)
+            return item
+
+    class Hooks:
+        def __init__(self):
+            self.events = []
+
+        def dispatch(self, event, payload, *, task_id):
+            self.events.append((event, payload, task_id))
+
+    repo = Repo()
+    hooks = Hooks()
+    tables = [
+        {
+            "title": "特征指标",
+            "columns": ["特征", "IV", "KS", "AUC"],
+            "rows": [["x1", "0.3", "0.25", "0.7"], ["x2", "0.01", "0.02", "0.51"]],
+        },
+        {
+            "title": "Agent 特征建议",
+            "columns": ["特征", "Agent建议", "推荐原因"],
+            "rows": [["x1", "推荐", "区分力较好"], ["x2", "不推荐", "缺失率偏高"]],
+        },
+    ]
+    turn = DriverTurn(
+        plan_id="plan-1",
+        status="done",
+        messages=[DriverMessage("done", "✅ 计划已全部完成。", {"tables": tables})],
+    )
+
+    append_driver_messages(
+        repo,
+        task.id,
+        turn,
+        settings=settings,
+        task=task,
+        hook_dispatcher=hooks,
+    )
+
+    stored = repo.items[-1]
+    assert "本次参考的历史记忆" in stored["content"]
+    assert "特征分析 Agent 解读" in stored["content"]
+    assert "本次记忆沉淀" in stored["content"]
+    assert stored["metadata"]["agent_insight"]["avoid_features"] == ["x2"]
+    assert stored["metadata"]["memory_capture"]["saved"][0]["memory_type"] == "feature_experience"
+    assert hooks.events[0][0] == "memory.after_save"
+
+
+def test_feature_experience_can_be_consolidated_into_visible_distillation(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    store = AgentMemoryStore(settings.db_path)
+    for task_id, recommended, avoid in (
+        ("task-a", ["x1"], ["x2"]),
+        ("task-b", ["x1", "x3"], ["x2"]),
+    ):
+        store.create(
+            MemoryCandidate(
+                memory_type="feature_experience",
+                summary=f"推荐 {recommended}，谨慎 {avoid}",
+                payload={
+                    "feature_count": 3,
+                    "recommended_features": recommended,
+                    "avoid_features": avoid,
+                    "target_col": "bad_flag",
+                    "scope": "feature:target=bad_flag",
+                    "source_task_id": task_id,
+                },
+                source_task_id=task_id,
+                confidence="high",
+            )
+        )
+
+    distilled = DistillationEngine(store).distill_category("feature_experience")
+
+    assert len(distilled) == 1
+    assert distilled[0].confidence == "medium"
+    assert distilled[0].structured["recommended_features"] == ["x1", "x3"]
+    assert distilled[0].structured["avoid_features"] == ["x2"]
+
+
+def test_feature_workflow_memory_context_rejects_other_target_scope(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    store = AgentMemoryStore(settings.db_path)
+    for task_id, target in (("same-target", "bad_flag"), ("other-target", "fraud_flag")):
+        store.create(
+            MemoryCandidate(
+                memory_type="feature_experience",
+                summary=f"{target} 历史推荐 {task_id}",
+                payload={
+                    "feature_count": 1,
+                    "recommended_features": [task_id],
+                    "avoid_features": [],
+                    "target_col": target,
+                    "scope": f"feature:target={target}",
+                    "source_task_id": task_id,
+                },
+                source_task_id=task_id,
+                confidence="high",
+            )
+        )
+
+    context = build_workflow_memory_context(
+        settings,
+        _task_record(
+            id="current",
+            task_type=TASK_TYPE_FEATURE_ANALYSIS,
+            target_col="bad_flag",
+        ),
+    )
+
+    assert context is not None
+    assert context["memories"][0]["source_task_id"] == "same-target"
+    assert "other-target" not in "\n".join(context["lines"])
+    assert context["references"][0]["scope"] == "feature:target=bad_flag"
+
+
+def test_feature_distillation_neutralizes_cross_task_recommendation_conflict(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    store = AgentMemoryStore(settings.db_path)
+    for task_id, recommended, avoid in (
+        ("task-positive", ["x_conflict", "x_good"], []),
+        ("task-negative", [], ["x_conflict", "x_bad"]),
+    ):
+        store.create(
+            MemoryCandidate(
+                memory_type="feature_experience",
+                summary=f"{task_id} feature advice",
+                payload={
+                    "feature_count": 3,
+                    "recommended_features": recommended,
+                    "avoid_features": avoid,
+                    "target_col": "bad_flag",
+                    "scope": "feature:target=bad_flag",
+                    "source_task_id": task_id,
+                },
+                source_task_id=task_id,
+                confidence="high",
+            )
+        )
+
+    distilled = DistillationEngine(store).distill_category("feature_experience")
+
+    assert len(distilled) == 1
+    structured = distilled[0].structured
+    assert structured["recommended_features"] == ["x_good"]
+    assert structured["avoid_features"] == ["x_bad"]
+    assert structured["inconsistent_features"] == ["x_conflict"]
+    assert structured["feature_support"]["x_conflict"] == {
+        "recommended_task_count": 1,
+        "avoid_task_count": 1,
+        "recommended_source_tasks": ["task-positive"],
+        "avoid_source_tasks": ["task-negative"],
+    }
+    assert "结论冲突待复核 x_conflict" in distilled[0].distilled_summary
+
+
+def test_feature_distillation_ignores_llm_recommendation_rewrite(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    store = AgentMemoryStore(settings.db_path)
+    for task_id, recommended, avoid in (
+        ("task-positive", ["x_conflict"], []),
+        ("task-negative", [], ["x_conflict"]),
+    ):
+        store.create(
+            MemoryCandidate(
+                memory_type="feature_experience",
+                summary=f"{task_id} feature advice",
+                payload={
+                    "feature_count": 1,
+                    "recommended_features": recommended,
+                    "avoid_features": avoid,
+                    "target_col": "bad_flag",
+                    "scope": "feature:target=bad_flag",
+                    "source_task_id": task_id,
+                },
+                source_task_id=task_id,
+                confidence="high",
+            )
+        )
+
+    class MisleadingLLM:
+        def complete(self, **_kwargs):
+            return "特征经验：历史推荐 x_conflict。"
+
+    distilled = DistillationEngine(
+        store,
+        llm_factory=lambda: MisleadingLLM(),
+    ).distill_category("feature_experience")
+
+    assert len(distilled) == 1
+    assert "历史推荐 x_conflict" not in distilled[0].distilled_summary
+    assert "结论冲突待复核 x_conflict" in distilled[0].distilled_summary
+
+
+def test_low_confidence_neutral_feature_memory_is_not_distilled_or_retrieved(
+    tmp_path: Path,
+):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    store = AgentMemoryStore(settings.db_path)
+    for index in range(4):
+        store.create(
+            MemoryCandidate(
+                memory_type="feature_experience",
+                summary="全部特征待评估，证据不足。",
+                payload={
+                    "feature_count": 1,
+                    "recommended_features": [],
+                    "avoid_features": [],
+                    "target_col": "bad_flag",
+                    "scope": "feature:target=bad_flag",
+                    "source_task_id": f"neutral-{index}",
+                },
+                source_task_id=f"neutral-{index}",
+                confidence="low",
+            )
+        )
+
+    assert DistillationEngine(store).distill_category("feature_experience") == []
+    context = build_workflow_memory_context(
+        settings,
+        _task_record(
+            id="current",
+            task_type=TASK_TYPE_FEATURE_ANALYSIS,
+            target_col="bad_flag",
+        ),
+    )
+    assert context is None
+
+
+def test_persisted_feature_distillation_text_cannot_override_structured_conflict(
+    tmp_path: Path,
+):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    store = AgentMemoryStore(settings.db_path)
+    store.create_distillation(
+        new_distillation(
+            category="feature_experience",
+            scope_key="feature_experience:feature:target=bad_flag",
+            distilled_summary="特征经验：历史推荐 x_conflict。",
+            structured={
+                "scopes": ["feature:target=bad_flag"],
+                "recommended_features": [],
+                "avoid_features": [],
+                "inconsistent_features": ["x_conflict"],
+                "support": 4,
+            },
+            support_count=4,
+        )
+    )
+
+    context = build_workflow_memory_context(
+        settings,
+        _task_record(
+            id="current",
+            task_type=TASK_TYPE_FEATURE_ANALYSIS,
+            target_col="bad_flag",
+        ),
+    )
+
+    assert context is not None
+    rendered = "\n".join(context["lines"])
+    assert "历史推荐 x_conflict" not in rendered
+    assert "结论冲突待复核 x_conflict" in rendered
 
 
 def test_agent_mode_autodrive_join_halts_at_forced_execute_gate_no_memory_write(
@@ -486,6 +995,31 @@ def test_build_memory_anchor_none_when_no_history(tmp_path: Path):
     task = _task_record(id="task-current", task_type=TASK_TYPE_MODELING, model_name="A卡")
     gate_metadata = {
         "model_delivery": {"source_tool": "select_experiment", "recipe": "lgb", "metrics": {}}
+    }
+
+    assert build_memory_anchor(settings, task, gate_metadata=gate_metadata) is None
+
+
+def test_build_memory_anchor_rejects_same_recipe_from_other_scope(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    _seed_history_entry(
+        settings,
+        ks=0.35,
+        auc=0.75,
+        scope="binary:binary:B卡",
+    )
+    task = _task_record(
+        id="task-current",
+        task_type=TASK_TYPE_MODELING,
+        model_name="A卡",
+    )
+    gate_metadata = {
+        "model_delivery": {
+            "source_tool": "select_experiment",
+            "recipe": "lgb",
+            "metrics": {},
+        }
     }
 
     assert build_memory_anchor(settings, task, gate_metadata=gate_metadata) is None
@@ -807,6 +1341,28 @@ def test_detect_setup_field_hints_ignored_when_configured_target_set(tmp_path: P
 
     assert result.target_col == "target"
     assert result.memory_matched_fields == []
+
+
+def test_detect_setup_does_not_treat_letter_y_as_target_or_break_label_ties(tmp_path: Path):
+    path = tmp_path / "wide_target_shape.parquet"
+    pd.DataFrame(
+        {
+            "cbh_hit_sqandzy_m1rqz_x_m1rqz_30": [0, 1] * 50,
+            "label_sqandzy": [0, 1] * 50,
+            "label_sqandzy_new": [1, 0] * 50,
+            "split_tag": ["train"] * 60 + ["test"] * 20 + ["oot"] * 20,
+            "signal": list(range(100)),
+        }
+    ).to_parquet(path)
+    backend = DataBackend(tmp_path)
+
+    ambiguous = detect_setup(backend, path)
+    explicit = detect_setup(backend, path, configured_target="label_sqandzy_new")
+
+    assert ambiguous.target_col == ""
+    assert ambiguous.split_col == "split_tag"
+    assert any("未能唯一识别" in note for note in ambiguous.notes)
+    assert explicit.target_col == "label_sqandzy_new"
 
 
 # -- FIN-3 #6 (INV-4): memory anchor free-text is sanitized before prompt injection -

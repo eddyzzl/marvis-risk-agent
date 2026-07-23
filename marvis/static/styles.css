@@ -1529,7 +1529,8 @@ body.search-active .app-shell.sidebar-collapsed .delete-task-button {
 .task-list,
 .task-list-wrap,
 .task-form,
-.metric-table-scroll {
+.metric-table-scroll,
+.agent-inline-table-scroll {
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
   scrollbar-width: thin;
 }
@@ -1537,7 +1538,8 @@ body.search-active .app-shell.sidebar-collapsed .delete-task-button {
 .task-list::-webkit-scrollbar,
 .task-list-wrap::-webkit-scrollbar,
 .task-form::-webkit-scrollbar,
-.metric-table-scroll::-webkit-scrollbar {
+.metric-table-scroll::-webkit-scrollbar,
+.agent-inline-table-scroll::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
@@ -1545,14 +1547,16 @@ body.search-active .app-shell.sidebar-collapsed .delete-task-button {
 .task-list::-webkit-scrollbar-track,
 .task-list-wrap::-webkit-scrollbar-track,
 .task-form::-webkit-scrollbar-track,
-.metric-table-scroll::-webkit-scrollbar-track {
+.metric-table-scroll::-webkit-scrollbar-track,
+.agent-inline-table-scroll::-webkit-scrollbar-track {
   background: var(--scrollbar-track);
 }
 
 .task-list::-webkit-scrollbar-thumb,
 .task-list-wrap::-webkit-scrollbar-thumb,
 .task-form::-webkit-scrollbar-thumb,
-.metric-table-scroll::-webkit-scrollbar-thumb {
+.metric-table-scroll::-webkit-scrollbar-thumb,
+.agent-inline-table-scroll::-webkit-scrollbar-thumb {
   border: 2px solid var(--scrollbar-track);
   border-radius: var(--radius-pill);
   background: var(--scrollbar-thumb);
@@ -1561,7 +1565,8 @@ body.search-active .app-shell.sidebar-collapsed .delete-task-button {
 .task-list::-webkit-scrollbar-thumb:hover,
 .task-list-wrap::-webkit-scrollbar-thumb:hover,
 .task-form::-webkit-scrollbar-thumb:hover,
-.metric-table-scroll::-webkit-scrollbar-thumb:hover {
+.metric-table-scroll::-webkit-scrollbar-thumb:hover,
+.agent-inline-table-scroll::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
 }
 
@@ -3905,6 +3910,12 @@ dialog.agent-memory-dialog,
   gap: 10px;
 }
 
+.material-source-section,
+.material-source-panel {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .material-source-segment {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3948,7 +3959,10 @@ dialog.agent-memory-dialog,
 
 .material-upload-dropzone {
   display: grid;
+  min-width: 0;
+  max-width: 100%;
   min-height: 108px;
+  overflow: hidden;
   align-content: center;
   justify-items: center;
   gap: 6px;
@@ -3979,6 +3993,16 @@ dialog.agent-memory-dialog,
 
 .material-upload-dropzone span {
   font-size: 12px;
+}
+
+#materialUploadStatus {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .material-upload-icon {
@@ -4889,7 +4913,10 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
 }
 .task-hero-details-inner {
   min-height: 0;
-  overflow: hidden;
+  max-height: 132px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 .task-hero.is-collapsed .task-hero-details {
   grid-template-rows: 0fr;
@@ -4965,8 +4992,12 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
 @keyframes pill-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.6); } }
 
 .action-error-detail {
+  display: -webkit-box;
   margin: 7px 0 0;
+  overflow: hidden;
   overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.4;
@@ -5029,6 +5060,11 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
 
 .check-icon.failed {
   background: var(--danger);
+}
+
+.check-icon.skipped {
+  border: 1.5px solid var(--text-muted);
+  color: var(--text-muted);
 }
 
 .check-icon.review {
@@ -5174,13 +5210,22 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
 }
 
 .step.succeeded .step-title {
-  text-decoration: line-through;
-  text-decoration-thickness: 1px;
   color: var(--text-muted);
 }
 
 .step.succeeded .step-number,
 .step.succeeded .step-hint {
+  color: var(--text-muted);
+}
+
+.step.skipped .step-title {
+  color: var(--text-muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.step.skipped .step-number,
+.step.skipped .step-hint {
   color: var(--text-muted);
 }
 
@@ -6564,10 +6609,14 @@ body[data-theme="dark"] .progress-rail {
 }
 
 .agent-message.assistant {
+  width: 100%;
+  min-width: 0;
   justify-items: start;
 }
 
 .agent-message.assistant .agent-message-content {
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
   color: var(--text);
   font-size: 15px;
@@ -6713,6 +6762,28 @@ body[data-theme="dark"] .progress-rail {
   gap: 5px;
   margin: 0;
   padding-left: 22px;
+}
+
+.workflow-error-card__recovery {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+}
+
+.workflow-error-card__recovery p {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.workflow-error-card__recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .workflow-error-card__technical {
@@ -6904,131 +6975,6 @@ body[data-theme="dark"] .workflow-ingest-notice {
 
 .agent-message[data-agent-stage="input_confirmation"] .agent-message-content li:last-child {
   border-bottom: 0;
-}
-
-/* VD-2: needs_confirmation gate messages get a distinct "gate card" shell so
-   they read as a blocking decision point, not an ordinary chat bubble with an
-   extra button. Reuses the task-hero glass/backdrop-filter material and the
-   existing pill-pulse breathing animation (keyframes at .task-pill.run::before
-   above) instead of inventing a new visual language. */
-.gate-card {
-  position: relative;
-  width: 100%;
-  max-width: 100%;
-  padding: 14px 16px 14px 18px;
-  border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border));
-  border-left: 3px solid var(--warning);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
-  -webkit-backdrop-filter: blur(12px) saturate(1.4);
-  backdrop-filter: blur(12px) saturate(1.4);
-  box-shadow: var(--glass-edge);
-  /* VD-9: gate cards are appended once per driver turn and never rebuilt
-     in place (the timeline only re-renders on real structural change), so
-     a one-shot entry animation here is always safe - no replay-on-poll
-     risk like the databar/KPI-bar animations above. */
-  animation: gate-card-enter 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
-}
-
-@keyframes gate-card-enter {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-.gate-card[data-gate-tone="review"] {
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
-  border-left-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-}
-.gate-card-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.gate-card-icon {
-  width: 18px;
-  height: 18px;
-  flex: none;
-  color: var(--warning);
-}
-.gate-card[data-gate-tone="review"] .gate-card-icon {
-  color: var(--accent);
-}
-.gate-card-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 9px;
-  border-radius: var(--radius-pill);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: var(--warning);
-  background: color-mix(in srgb, var(--warning) 16%, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
-}
-.gate-card-pill::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  animation: pill-pulse 1.2s ease-in-out infinite;
-}
-.gate-card-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-}
-.gate-card-body {
-  color: var(--text);
-  font-size: 15px;
-  line-height: 1.78;
-}
-.gate-card-redflags {
-  margin-top: 10px;
-  padding: 8px 10px;
-  border-radius: var(--radius-control);
-  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
-}
-.gate-card-redflags-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--warning-strong);
-  margin-bottom: 4px;
-}
-.gate-card-redflags-list {
-  margin: 0;
-  padding-left: 18px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-secondary);
-}
-.gate-card-consequence {
-  margin-top: 10px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .gate-card-pill::before,
-  .gate-card {
-    animation: none;
-  }
-}
-
-body[data-theme="dark"] .gate-card {
-  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
-}
-body[data-theme="dark"] .gate-card[data-gate-tone="review"] {
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
 }
 
 /* Manual-mode analysis: the one still-pending gate section gets the same
@@ -8658,4 +8604,62 @@ body[data-theme="dark"] .score-band-legend {
 [data-v2-artifact-view="true"] .dataset-column-null {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
+}
+
+.dataset-preview th {
+  position: relative;
+}
+
+.dataset-column-name {
+  font-weight: 700;
+}
+
+.dataset-column-info {
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  margin-left: 6px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--text-muted) 55%, transparent);
+  border-radius: 50%;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: help;
+}
+
+.dataset-column-info:hover,
+.dataset-column-info:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: none;
+}
+
+.dataset-column-tooltip {
+  position: absolute;
+  top: calc(100% - 2px);
+  left: 10px;
+  z-index: 8;
+  width: max-content;
+  max-width: 280px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 8px 24px color-mix(in srgb, #000 18%, transparent);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.dataset-column-info:hover + .dataset-column-tooltip,
+.dataset-column-info:focus-visible + .dataset-column-tooltip {
+  opacity: 1;
+  transform: translateY(0);
 }

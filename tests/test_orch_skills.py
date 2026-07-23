@@ -261,8 +261,12 @@ def test_skills_api_lists_reloads_and_validates_user_skills(tmp_path):
     by_id = {entry["id"]: entry for entry in builtin}
     assert len(by_id["data_join"]["slots"]) == 3
     assert [step["title"] for step in by_id["data_join"]["steps"]] == ["拼接诊断", "确认拼接", "执行拼接"]
-    assert len(by_id["feature_analysis"]["steps"]) == 2
-    assert len(by_id["feature_analysis_with_join"]["steps"]) == 5
+    assert [step["title"] for step in by_id["feature_analysis"]["steps"]] == [
+        "特征指标",
+        "可选分箱分析",
+        "生成特征分析报告",
+    ]
+    assert len(by_id["feature_analysis_with_join"]["steps"]) == 6
     assert len(by_id["feature_derivation"]["steps"]) == 4
     assert len(by_id["label_construction"]["steps"]) == 2
     assert [step["tool"] for step in by_id["model_validation"]["steps"]] == [

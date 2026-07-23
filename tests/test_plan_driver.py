@@ -19,8 +19,11 @@ from marvis.agent.plan_driver import (
     is_confirm,
     render_tool_output,
 )
+from marvis.agent.gate_adapters import render_gate_dependencies
+from marvis.agent.gate_param_schema import gate_param_schema
 from marvis.agent.plan_message_composer import PlanMessageComposer
-from marvis.db import PlanRepository, init_db
+from marvis.agent.renderers import _join_trust_rows
+from marvis.db import PlanRepository, connect, init_db
 from marvis.governance.contracts import AuthorizationBinding
 from marvis.governance.repository import GovernanceRepository, canonical_payload_hash
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
@@ -39,6 +42,18 @@ from marvis.plugins.runner import ToolResult
 class FakeLLM:
     def complete(self, **kwargs):
         return '{"summary": "done", "open_items": [], "goal_doubt": false, "goal_met": true}'
+
+
+def test_join_reconciliation_row_counts_render_as_integers():
+    rows = _join_trust_rows([
+        {
+            "feature_name": "vars.parquet",
+            "reconcile": {"primary": 14.0, "secondary": 14.0, "consistent": True},
+            "provenance": {"seed": 0},
+        }
+    ])
+
+    assert rows[0][1:3] == ["14", "14"]
 
 
 class FakeTools:
@@ -530,6 +545,405 @@ def test_driver_failed_message_carries_retry_contract(tmp_path):
         "default": 0.4,
         "type": "number",
     }
+    diagnostic = msg.metadata["error_diagnostic"]
+    assert diagnostic["title"] == "步骤执行失败"
+    assert diagnostic["location"] == "screen"
+    assert diagnostic["retryable"] is True
+    assert "不会从头重跑" in diagnostic["actions"][0]
+    assert "Agent" in msg.content
+
+
+def test_driver_retry_failed_step_resumes_same_plan_from_failure(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[_step("screen", index=0, tool="screen_features", phase="特征")],
+    )
+    repo.create_plan(plan)
+
+    class FailOnceRunner(FakeRunner):
+        def __init__(self):
+            super().__init__([{"selected": ["x1"]}])
+            self.failed = False
+
+        def invoke(self, ref, inputs, *, task_id, execution_context=None):
+            if not self.failed:
+                self.failed = True
+                return ToolResult(ok=False, output=None, error="temporary", error_kind="execution", duration_ms=1)
+            return super().invoke(ref, inputs, task_id=task_id, execution_context=execution_context)
+
+    runner = FailOnceRunner()
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+    repo.confirm_plan("plan-1")
+    failed = driver._run_and_handle("plan-1", run_seq=1)
+
+    retried = driver.retry_failed_step("plan-1", "screen", run_seq=2)
+
+    assert failed.status == PlanStatus.FAILED.value
+    assert retried.status == PlanStatus.DONE.value
+    assert repo.load_plan("plan-1").status is PlanStatus.DONE
+    assert [call[0] for call in runner.calls] == ["screen_features"]
+
+
+def test_driver_retry_failed_step_normalizes_persisted_recipe_alias(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    step = _step("spec", index=0, tool="choose_modeling_spec", phase="特征")
+    step.inputs = {"target_col": "y", "features": ["x1"], "recipes": ["lgb", "xgb", "cat"]}
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[step],
+    )
+    repo.create_plan(plan)
+
+    class FailOnceRunner(FakeRunner):
+        def __init__(self):
+            super().__init__([{"recipes": ["lgb", "xgb", "catboost"]}])
+            self.failed = False
+
+        def invoke(self, ref, inputs, *, task_id, execution_context=None):
+            if not self.failed:
+                self.failed = True
+                return ToolResult(ok=False, output=None, error="invalid cat alias", error_kind="schema", duration_ms=1)
+            return super().invoke(ref, inputs, task_id=task_id, execution_context=execution_context)
+
+    runner = FailOnceRunner()
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=1)
+
+    retried = driver.retry_failed_step("plan-1", "spec", run_seq=2)
+
+    assert retried.status == PlanStatus.DONE.value
+    assert runner.calls[0][1]["recipes"] == ["lgb", "xgb", "catboost"]
+    assert repo.load_plan("plan-1").steps[0].inputs["recipes"] == ["lgb", "xgb", "catboost"]
+
+
+def test_driver_retry_failed_step_keeps_template_recipe_reference(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    configure = _step("configure", index=0, tool="configure_tuning", phase="建模")
+    configure.status = StepStatus.DONE
+    select = _step("select", index=1, tool="select_features", phase="特征")
+    select.status = StepStatus.DONE
+    step = _step(
+        "tune",
+        index=2,
+        tool="tune_hyperparameters",
+        depends_on=["configure", "select"],
+        phase="建模",
+    )
+    step.status = StepStatus.FAILED
+    step.error = "resource limit"
+    step.inputs = {
+        "target_col": "y",
+        "features": "$ref:select.output.selected",
+        "recipes": "$ref:configure.output.recipes",
+    }
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.FAILED,
+        steps=[configure, select, step],
+    )
+    repo.create_plan(plan)
+    configure.output_ref = repo.store_step_output(
+        "configure", {"recipes": ["lgb", "xgb"]}
+    )
+    select.output_ref = repo.store_step_output("select", {"selected": ["x1", "x2"]})
+    repo.update_step(configure)
+    repo.update_step(select)
+    runner = FakeRunner([{"best_params": {"num_leaves": 31}}])
+    executor = PlanExecutor(
+        repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(repo),
+    )
+    driver = PlanDriver(repo, executor)
+
+    retried = driver.retry_failed_step("plan-1", "tune", run_seq=2)
+
+    assert retried.status == PlanStatus.DONE.value
+    assert runner.calls[0][1]["recipes"] == ["lgb", "xgb"]
+    assert repo.load_plan("plan-1").steps[2].inputs["recipes"] == (
+        "$ref:configure.output.recipes"
+    )
+
+
+def _failed_governed_retry_plan() -> Plan:
+    step = _step(
+        "tune",
+        index=0,
+        tool="tune_hyperparameters",
+        needs_confirmation=True,
+        phase="建模",
+    )
+    step.policy = GovernancePolicy(human_decision_gate="required")
+    step.status = StepStatus.FAILED
+    step.error = "tool worker RSS exceeded memory limit"
+    return Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.FAILED,
+        steps=[step],
+    )
+
+
+def test_driver_explicit_retry_preserves_prior_confirmation_on_same_failed_gate(
+    tmp_path,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_failed_governed_retry_plan())
+    governance_repo = GovernanceRepository(db_path)
+    principal = governance_repo.create_local_principal()
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE plan_steps SET status = 'awaiting_confirm', error = NULL "
+            "WHERE id = 'tune'"
+        )
+        conn.execute(
+            "UPDATE plans SET status = 'awaiting_confirm' WHERE id = 'plan-1'"
+        )
+    step = repo.load_plan("plan-1").steps[0]
+    binding = AuthorizationBinding(
+        task_id="task-1",
+        plan_id="plan-1",
+        plan_revision=0,
+        step_id="tune",
+        tool_ref=step.tool_ref.label(),
+        manifest_hash="sha256:test-manifest",
+        policy_hash=governance_policy_hash(step.policy),
+        input_hash=canonical_payload_hash(step.inputs),
+        evidence_hash=canonical_payload_hash([]),
+        effect_target={},
+    )
+    governance_repo.authorize_step(
+        binding,
+        principal=principal,
+        reason="确认调参配置",
+        issue_effect_approval=False,
+    )
+
+    class _PriorAuthorization:
+        @staticmethod
+        def execution_context_for(*, plan, step, inputs):
+            assert canonical_payload_hash(inputs) == binding.input_hash
+            return governance_repo.execution_context_for_binding(binding)
+
+    # The governed decision is now persisted exactly as it would be before the
+    # authorized tuning call.  Simulate that call failing while retaining its
+    # confirmation and authorization evidence.
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE plan_steps SET status = 'failed', "
+            "error = 'tool worker RSS exceeded memory limit' WHERE id = 'tune'"
+        )
+        conn.execute("UPDATE plans SET status = 'failed' WHERE id = 'plan-1'")
+    runner = FakeRunner([{"best_params": {"num_leaves": 31}}])
+    executor = PlanExecutor(
+        repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(repo),
+        authorizer=_PriorAuthorization(),
+    )
+    driver = PlanDriver(repo, executor)
+
+    retried = driver.retry_failed_step(
+        "plan-1",
+        "tune",
+        run_seq=2,
+        preserve_target_confirmation=True,
+    )
+
+    assert retried.status == PlanStatus.DONE.value
+    assert [call[0] for call in runner.calls] == ["tune_hyperparameters"]
+    assert repo.is_step_confirmed("tune") is True
+    audit = repo.list_audit(kind="plan.step.retry")[0]
+    assert audit["detail"]["confirmation_preserved"] is True
+
+
+def test_driver_explicit_retry_reauthorizes_governed_failed_gate(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_failed_governed_retry_plan())
+    with connect(db_path) as conn:
+        conn.execute("UPDATE plan_steps SET confirmed = 1 WHERE id = 'tune'")
+    governance_repo = GovernanceRepository(db_path)
+    principal = governance_repo.create_local_principal()
+    decisions: list[dict] = []
+
+    class _Governance:
+        binding = None
+
+        def authorize_step(self, **kwargs):
+            decisions.append(kwargs)
+            plan = repo.load_plan(kwargs["plan_id"])
+            step = next(item for item in plan.steps if item.id == kwargs["step_id"])
+            self.binding = AuthorizationBinding(
+                task_id=plan.task_id,
+                plan_id=plan.id,
+                plan_revision=plan.replan_count,
+                step_id=step.id,
+                tool_ref=step.tool_ref.label(),
+                manifest_hash="sha256:test-manifest",
+                policy_hash=governance_policy_hash(step.policy),
+                input_hash=canonical_payload_hash(step.inputs),
+                evidence_hash=canonical_payload_hash([]),
+                effect_target={},
+            )
+            return governance_repo.authorize_step(
+                self.binding,
+                principal=kwargs["principal"],
+                reason=kwargs["reason"],
+                issue_effect_approval=False,
+            )
+
+        def execution_context_for(self, *, plan, step, inputs):
+            assert self.binding is not None
+            assert canonical_payload_hash(inputs) == self.binding.input_hash
+            return governance_repo.execution_context_for_binding(self.binding)
+
+    governance = _Governance()
+    runner = FakeRunner([{"best_params": {"num_leaves": 31}}])
+    executor = PlanExecutor(
+        repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(repo),
+        authorizer=governance,
+    )
+    driver = PlanDriver(
+        repo,
+        executor,
+        governance_service=governance,
+        local_principal=principal,
+    )
+
+    retried = driver.retry_failed_step(
+        "plan-1",
+        "tune",
+        run_seq=2,
+        preserve_target_confirmation=True,
+    )
+
+    assert retried.status == PlanStatus.DONE.value
+    assert [call[0] for call in runner.calls] == ["tune_hyperparameters"]
+    assert decisions[0]["reason"] == "人工明确授权从失败步骤重试：tune"
+    assert repo.is_step_confirmed("tune") is True
+    audit = repo.list_audit(kind="plan.step.retry")[0]
+    assert audit["detail"]["confirmation_preserved"] is False
+
+
+def test_driver_explicit_retry_does_not_confirm_never_confirmed_failed_gate(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_failed_governed_retry_plan())
+    runner = FakeRunner([])
+    executor = PlanExecutor(
+        repo,
+        runner,
+        Reviewer(lambda: FakeLLM()),
+        None,
+        FakeHooks(),
+        HarnessState(repo),
+    )
+    driver = PlanDriver(repo, executor)
+
+    retried = driver.retry_failed_step(
+        "plan-1",
+        "tune",
+        run_seq=2,
+        preserve_target_confirmation=True,
+    )
+
+    assert retried.status == PlanStatus.AWAITING_CONFIRM.value
+    assert runner.calls == []
+    assert repo.load_plan("plan-1").steps[0].status == StepStatus.AWAITING_CONFIRM
+    assert repo.is_step_confirmed("tune") is False
+    audit = repo.list_audit(kind="plan.step.retry")[0]
+    assert audit["detail"]["confirmation_preserved"] is False
+
+
+def test_retry_changed_inputs_does_not_preserve_prior_confirmation(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _failed_governed_retry_plan()
+    plan.steps[0].inputs = {"rounds": 40, "recipes": ["lgb", "xgb"]}
+    repo.create_plan(plan)
+    with connect(db_path) as conn:
+        conn.execute("UPDATE plan_steps SET confirmed = 1 WHERE id = 'tune'")
+
+    repo.retry_failed_step(
+        "plan-1",
+        "tune",
+        inputs={"rounds": 80, "recipes": ["lgb", "xgb"]},
+        preserve_target_confirmation=True,
+    )
+
+    assert repo.is_step_confirmed("tune") is False
+    audit = repo.list_audit(kind="plan.step.retry")[0]
+    assert audit["detail"]["inputs_unchanged"] is False
+    assert audit["detail"]["confirmation_preserved"] is False
+
+
+def test_gate_render_failure_degrades_without_marking_successful_tool_as_failed(monkeypatch):
+    from marvis.agent import gate_adapters
+
+    plan = _gated_modeling_plan()
+    plan.steps[0].status = StepStatus.DONE
+    plan.steps[0].output_ref = "metrics:screen"
+    plan.steps[1].status = StepStatus.AWAITING_CONFIRM
+    composer = PlanMessageComposer(load_output=lambda _step_id: {"selected": ["x1"]})
+    monkeypatch.setattr(
+        gate_adapters,
+        "render_tool_output",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(TypeError("display boom")),
+    )
+
+    message = composer.gate_message(plan, plan.steps[1], run_seq=1)
+
+    assert message.stage == "gate"
+    assert "结果已经生成" in message.content
+    assert message.metadata["presentation_warnings"][0]["step_id"] == "screen"
 
 
 def test_driver_resume_non_confirm_holds_at_gate(tmp_path):
@@ -825,6 +1239,7 @@ def test_modeling_setup_payload_includes_split_summary_and_algorithm_controls(tm
             "result_dataset_id": "ds-split",
             "split_col": "split",
             "holdout_values": ["oot"],
+            "available_columns": ["phone", "applydt", "x1"],
             "sample_analysis": {
                 "split_counts": {"train": 90, "test": 10, "oot": 2},
                 "total_rows": 102,
@@ -857,6 +1272,8 @@ def test_modeling_setup_payload_includes_split_summary_and_algorithm_controls(tm
     assert setup["eligible_algorithms"] == ["lgb", "xgb"]
     assert setup["disabled_algorithms"] == [{"recipe": "lgb_regressor", "reason": "target mismatch"}]
     assert setup["split_summary"]["split_counts"] == {"train": 90, "test": 10, "oot": 2}
+    assert setup["split_summary"]["split_config"] == {}
+    assert setup["split_summary"]["available_columns"] == ["phone", "applydt", "x1"]
     assert setup["split_summary"]["warnings"] == ["OOT 占比低于 5%，稳定性结论需谨慎。"]
     guidance_by_id = {item["id"]: item for item in setup["override_guidance"]}
     assert guidance_by_id["split_quality"]["level"] == "warning"
@@ -866,6 +1283,181 @@ def test_modeling_setup_payload_includes_split_summary_and_algorithm_controls(tm
     assert controls["target_type"]["schema"]["enum"] == ["binary", "continuous", "multiclass"]
     assert controls["recipes"]["schema"]["enum"] == ["lgb", "xgb"]
     assert controls["n_trials"]["bounds"] == {"min": 1, "max": 200}
+
+
+def test_tuning_gate_displays_refined_feature_count_instead_of_original_candidates():
+    spec = _step("spec", index=0, tool="choose_modeling_spec", phase="建模")
+    select = _step("select", index=1, tool="select_features", phase="特征")
+    gate = _step(
+        "configure",
+        index=2,
+        tool="configure_tuning",
+        depends_on=["spec", "select"],
+        needs_confirmation=True,
+        phase="建模",
+    )
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[spec, select, gate],
+    )
+    outputs = {
+        "spec": {
+            "target_type": "binary",
+            "recipe": "lgb",
+            "recipes": ["lgb", "xgb"],
+            "feature_count": 401,
+            "n_trials": 40,
+        },
+        "select": {
+            "selected": ["x1", "x2"],
+            "dropped": [["x3", "low IV 0.001"]],
+            "scores": {},
+        },
+    }
+
+    rendered = render_gate_dependencies(plan, gate, outputs.get)
+
+    assert rendered.modeling_setup["feature_count"] == 2
+    assert rendered.modeling_setup["candidate_feature_count"] == 401
+    spec_table = next(table for table in rendered.tables if table.get("title") == "建模规格")
+    assert ["精选后特征数", "2"] in spec_table["rows"]
+
+
+def test_select_experiment_gate_uses_completed_budget_and_trained_feature_count():
+    spec = _step("spec", index=0, tool="choose_modeling_spec", phase="建模")
+    tune = _step("tune", index=1, tool="tune_hyperparameters", phase="建模")
+    compare = _step("compare", index=2, tool="compare_experiments", phase="建模")
+    gate = _step(
+        "select",
+        index=3,
+        tool="select_experiment",
+        depends_on=["spec", "tune", "compare"],
+        needs_confirmation=True,
+        phase="建模",
+    )
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[spec, tune, compare, gate],
+    )
+    refined_features = [f"x{index}" for index in range(187)]
+    outputs = {
+        "spec": {
+            "target_type": "binary",
+            "recipe": "lgb",
+            "recipes": ["lgb", "xgb", "catboost"],
+            "feature_count": 401,
+            "n_trials": 40,
+            "n_trials_by_recipe": {"lgb": 40, "xgb": 40, "catboost": 40},
+        },
+        "tune": {
+            "n_trials": 3,
+            "per_recipe": {
+                "lgb": {"n_trials": 1},
+                "xgb": {"n_trials": 1},
+                "catboost": {"n_trials": 1},
+            },
+        },
+        "compare": {
+            "experiments": [
+                {
+                    "id": "exp-lgb",
+                    "recipe": "lgb",
+                    "feature_count": 187,
+                    "feature_list": refined_features,
+                    "test_ks": 0.58,
+                    "oot_ks": 0.42,
+                    "capabilities": {},
+                },
+            ],
+        },
+    }
+
+    rendered = render_gate_dependencies(plan, gate, outputs.get)
+
+    assert rendered.modeling_setup["feature_count"] == 187
+    assert rendered.modeling_setup["candidate_feature_count"] == 401
+    assert rendered.modeling_setup["n_trials"] == 1
+    assert rendered.modeling_setup["n_trials_by_recipe"] == {
+        "lgb": 1,
+        "xgb": 1,
+        "catboost": 1,
+    }
+    assert rendered.modeling_setup["total_n_trials"] == 3
+    spec_table = next(table for table in rendered.tables if table.get("title") == "建模规格")
+    assert ["精选后特征数", "187"] in spec_table["rows"]
+    assert [
+        "按算法调参预算",
+        "lgb=1、xgb=1、catboost=1（总计 3 轮）",
+    ] in spec_table["rows"]
+
+
+def test_later_modeling_gates_render_split_as_adopted_not_as_pre_screen_preview():
+    split = _step("split", index=0, tool="make_split", phase="特征")
+    screen_gate = _step(
+        "screen",
+        index=1,
+        tool="screen_features",
+        depends_on=["split"],
+        needs_confirmation=True,
+        phase="特征",
+    )
+    select_gate = _step(
+        "select",
+        index=2,
+        tool="select_features",
+        depends_on=["split"],
+        needs_confirmation=True,
+        phase="特征",
+    )
+    tune_gate = _step(
+        "tune",
+        index=3,
+        tool="tune_hyperparameters",
+        depends_on=["split"],
+        needs_confirmation=True,
+        phase="建模",
+    )
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[split, screen_gate, select_gate, tune_gate],
+    )
+    outputs = {
+        "split": {
+            "result_dataset_id": "ds-split",
+            "sample_analysis": {
+                "total_rows": 600,
+                "split_counts": {"train": 300, "test": 120, "oot": 180},
+            },
+        }
+    }
+
+    screen_text = "\n".join(render_gate_dependencies(plan, screen_gate, outputs.get).parts)
+    select_text = "\n".join(render_gate_dependencies(plan, select_gate, outputs.get).parts)
+    tune_text = "\n".join(render_gate_dependencies(plan, tune_gate, outputs.get).parts)
+
+    assert "样本切分预览已生成" in screen_text
+    assert "尚未进入特征筛选或训练" in screen_text
+    for later_text in (select_text, tune_text):
+        assert "已采用的样本切分" in later_text
+        assert "尚未进入特征筛选或训练" not in later_text
 
 
 def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
@@ -1142,6 +1734,153 @@ def test_post_training_gate_merges_report_readiness(tmp_path):
     assert report_readiness["reason"] == "报告章节 1/2 可生成"
 
 
+def test_post_training_gate_merges_plural_report_and_renders_every_report():
+    select = _step("select", index=0, tool="select_experiment", phase="建模")
+    reports = _step(
+        "reports",
+        index=1,
+        tool="generate_model_reports",
+        depends_on=["select"],
+        phase="报告",
+    )
+    post = _step(
+        "post",
+        index=2,
+        tool="post_training_action",
+        depends_on=["select", "reports"],
+        needs_confirmation=True,
+        phase="交付",
+    )
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.AWAITING_CONFIRM,
+        steps=[select, reports, post],
+    )
+    outputs = {
+        "select": {
+            "selected_experiment_id": "exp-lgb",
+            "artifact_id": "art-lgb",
+            "recipe": "lgb",
+            "target_type": "binary",
+            "metrics": {"test_ks": 0.31},
+            "capabilities": {
+                "pmml_supported": True,
+                "handoff_supported": True,
+                "native_model_supported": True,
+            },
+        },
+        "reports": {
+            "report_path": "/tmp/model_report_lgb.xlsx",
+            "reports": [
+                {
+                    "experiment_id": "exp-lgb",
+                    "recipe": "lgb",
+                    "report_path": "/tmp/model_report_lgb.xlsx",
+                },
+                {
+                    "experiment_id": "exp-xgb",
+                    "recipe": "xgb",
+                    "report_path": "/tmp/model_report_xgb.xlsx",
+                },
+            ],
+        },
+    }
+
+    rendered = render_gate_dependencies(plan, post, outputs.get)
+
+    assert rendered.model_delivery is not None
+    assert rendered.model_delivery["report"]["step_id"] == "reports"
+    assert rendered.model_delivery["report"]["report_path"] == "/tmp/model_report_lgb.xlsx"
+    assert rendered.model_delivery["report"]["status"] == "ready"
+    assert any("共 2 份" in part for part in rendered.parts)
+    report_table = next(table for table in rendered.tables if table["title"] == "候选模型报告")
+    assert report_table["rows"] == [
+        ["exp-lgb", "lgb", "已生成", "/tmp/model_report_lgb.xlsx"],
+        ["exp-xgb", "xgb", "已生成", "/tmp/model_report_xgb.xlsx"],
+    ]
+    message = PlanMessageComposer(load_output=outputs.__getitem__).gate_message(
+        plan,
+        post,
+        run_seq=3,
+    )
+    assert [item["recipe"] for item in message.metadata["report_downloads"]] == [
+        "lgb",
+        "xgb",
+    ]
+    assert all(
+        item["download_url"].startswith("/api/tasks/task-1/driver-reports/")
+        for item in message.metadata["report_downloads"]
+    )
+    assert message.metadata["report_download"] == message.metadata["report_downloads"][0]
+
+
+def test_done_message_carries_plural_report_download_and_delivery_summary():
+    reports = _dataclass_replace(
+        _step("reports", index=0, tool="generate_model_reports", phase="报告"),
+        status=StepStatus.DONE,
+        output_ref="out-reports",
+    )
+    post = _dataclass_replace(
+        _step(
+            "post",
+            index=1,
+            tool="post_training_action",
+            depends_on=["reports"],
+            phase="交付",
+        ),
+        status=StepStatus.DONE,
+        output_ref="out-post",
+    )
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.DONE,
+        steps=[reports, post],
+    )
+    outputs = {
+        "reports": {
+            "report_path": "/tmp/model_report_lgb.xlsx",
+            "reports": [
+                {
+                    "experiment_id": "exp-lgb",
+                    "recipe": "lgb",
+                    "report_path": "/tmp/model_report_lgb.xlsx",
+                },
+            ],
+        },
+        "post": {
+            "experiment_id": "exp-lgb",
+            "artifact_id": "art-lgb",
+            "native_model_path": "/tmp/model.pkl",
+            "capabilities": {
+                "pmml_supported": False,
+                "handoff_supported": False,
+                "native_model_supported": True,
+            },
+            "actions": [{"action": "export_pmml", "status": "skipped", "reason": "unsupported"}],
+        },
+    }
+    message = PlanMessageComposer(load_output=outputs.__getitem__).done_message(plan, run_seq=4)
+
+    assert len(message.metadata["report_downloads"]) == 1
+    assert message.metadata["report_downloads"][0]["recipe"] == "lgb"
+    assert message.metadata["report_download"] == message.metadata["report_downloads"][0]
+    assert message.metadata["model_delivery"]["report"]["step_id"] == "reports"
+    assert (
+        message.metadata["model_delivery"]["report"]["report_path"]
+        == "/tmp/model_report_lgb.xlsx"
+    )
+
+
 def test_done_message_carries_post_training_delivery_payload(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -1396,6 +2135,88 @@ def test_driver_modeling_setup_adjust_reruns_spec_and_downstream_screen(tmp_path
     assert turn.messages[-1].metadata["modeling_setup"]["target_type"] == "continuous"
     assert turn.messages[-1].metadata["modeling_setup"]["recipes"] == ["lgb_regressor"]
     assert turn.messages[-1].metadata["modeling_setup"]["n_trials"] == 20
+
+
+def test_driver_modeling_setup_adjust_normalizes_common_recipe_aliases(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_weight_plan()
+    plan.steps[0].inputs = {
+        "target_type": "binary",
+        "recipes": ["lgb"],
+        "n_trials": 12,
+        "sample_weight_col": "",
+        "feature_cols": ["x1", "x2"],
+    }
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "target_type": "binary",
+            "recipes": ["lgb"],
+            "sample_weight_col": "",
+            "sample_weight_candidates": [],
+        },
+        {"selected": ["x1"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
+        {
+            "target_type": "binary",
+            "recipes": ["lgb", "xgb", "catboost"],
+            "sample_weight_col": "",
+            "sample_weight_candidates": [],
+        },
+        {"selected": ["x1"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="LGB、XGBoost、CatBoost 各 40 轮",
+        run_seq=1,
+        adjust_params={"recipes": ["LGB", "XGBoost", "cat"], "n_trials": 40},
+        expected_step_id="tune",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert runner.calls[2][1]["recipes"] == ["lgb", "xgb", "catboost"]
+    assert runner.calls[2][1]["n_trials"] == 40
+    assert "'catboost'" in turn.messages[0].content
+
+
+def test_driver_modeling_setup_adjust_rejects_unknown_recipe_before_reset(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_weight_plan()
+    plan.steps[0].inputs = {
+        "target_type": "binary",
+        "recipes": ["lgb"],
+        "sample_weight_col": "",
+        "feature_cols": ["x1"],
+    }
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {"target_type": "binary", "recipes": ["lgb"], "sample_weight_col": ""},
+        {"selected": ["x1"], "leakage": [], "suspected": [], "n_screened": 1, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="使用未知算法",
+        run_seq=1,
+        adjust_params={"recipes": ["mystery_boost"]},
+        expected_step_id="tune",
+    )
+
+    assert "不支持算法 mystery_boost" in turn.messages[-1].content
+    assert len(runner.calls) == 2
+    assert repo.load_plan("plan-1").steps[0].status == StepStatus.DONE
 
 
 def test_driver_split_config_adjust_reruns_make_split(tmp_path):
@@ -2020,6 +2841,82 @@ class FakeRouterLLM:
         return self.payload
 
 
+def test_driver_recipe_route_exposes_enum_and_normalizes_cat_alias(tmp_path):
+    """The natural-language route sees canonical recipe names and a legacy
+    ``cat`` reply is still normalized before recomputation and persistence."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_weight_plan()
+    plan.steps[0].inputs = {
+        "target_type": "binary",
+        "recipes": ["lgb"],
+        "n_trials": 12,
+        "sample_weight_col": "",
+        "feature_cols": ["x1", "x2"],
+    }
+    recipe_schema = next(
+        item for item in gate_param_schema(plan, plan.steps[2]) if item["name"] == "recipes"
+    )
+    assert recipe_schema["enum"] == sorted(recipe_schema["enum"])
+    assert {"lgb", "xgb", "catboost"}.issubset(recipe_schema["enum"])
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "target_type": "binary",
+            "recipes": ["lgb"],
+            "sample_weight_col": "",
+            "sample_weight_candidates": [],
+        },
+        {
+            "selected": ["x1"],
+            "leakage": [],
+            "suspected": [],
+            "n_screened": 2,
+            "ranked": [],
+            "unusable": [],
+            "scores": {},
+        },
+        {
+            "target_type": "binary",
+            "recipes": ["lgb", "xgb", "catboost"],
+            "sample_weight_col": "",
+            "sample_weight_candidates": [],
+        },
+        {
+            "selected": ["x1"],
+            "leakage": [],
+            "suspected": [],
+            "n_screened": 2,
+            "ranked": [],
+            "unusable": [],
+            "scores": {},
+        },
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    llm = FakeRouterLLM(
+        '{"action":"adjust","params":{"recipes":["lgb","xgb","cat"],"n_trials":40},'
+        '"constraint":"","reason":"使用三种树模型"}'
+    )
+    driver = PlanDriver(repo, executor, llm_client=llm)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="LGB、XGBoost、CatBoost 各 40 轮",
+        run_seq=1,
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert "catboost" in llm.calls[0]["user_prompt"]
+    assert runner.calls[2][1]["recipes"] == ["lgb", "xgb", "catboost"]
+    assert runner.calls[2][1]["n_trials"] == 40
+    persisted = repo.load_plan("plan-1").steps[0].inputs
+    assert persisted["recipes"] == ["lgb", "xgb", "catboost"]
+    assert persisted["n_trials"] == 40
+
+
 def test_driver_adjust_reruns_analysis_step_with_new_params(tmp_path):
     """An agent-mode 'adjust' instruction at a gate re-runs the gate's analysis
     dependency with overridden parameters and re-pauses at the gate (spec §3 调整)."""
@@ -2486,6 +3383,17 @@ def test_is_confirm_matches_common_phrasings():
     assert not is_confirm("把 age 去掉")
 
 
+def test_is_confirm_accepts_explicit_confirmation_with_non_adjusting_context():
+    assert is_confirm("确认，采用上述切分与建模规格，继续执行特征筛选。")
+    assert is_confirm("我确认当前方案，继续执行。")
+
+
+def test_is_confirm_rejects_explicit_confirmation_that_also_requests_adjustment():
+    assert not is_confirm("确认，但是把 age 去掉再继续。")
+    assert not is_confirm("确认，调整算法为 catboost。")
+    assert not is_confirm("确认，如果效果好就继续。")
+
+
 def test_is_confirm_accepts_task_start_shortcuts():
     assert is_confirm("开始数据处理")
     assert is_confirm("请开始特征分析吧")
@@ -2692,16 +3600,16 @@ def test_render_make_split_surfaces_split_counts_and_group_distribution():
             },
         },
     })
-    assert "样本切分完成" in _text
+    assert "样本切分预览已生成" in _text
+    assert "确认后才会采用该方案继续" in _text
     counts = next(t for t in tables if t["title"].startswith("切分计数"))
     assert ["train", 300, "0.5000"] == [counts["rows"][0][0], counts["rows"][0][1], counts["rows"][0][2]]
     dist = next(t for t in tables if "渠道" in t["title"])
     assert "A" in dist["columns"] and "B" in dist["columns"]
 
 
-def test_render_propose_join_surfaces_key_relaxation_proposals():
-    """C2 shows a 择键建议 table (spec §4/§5) when a low-match key can be relaxed by dropping
-    an element — with the reduced key's match/uniqueness/fan-out, as a proposal only."""
+def test_render_propose_join_does_not_flatten_key_alternatives_into_fake_join_rows():
+    """Alternative key sets belong to one feature table and must not look like extra joins."""
     _text, tables = render_tool_output("propose_join", {
         "joins": [{
             "feature_id": "feat_lowmatch",
@@ -2718,11 +3626,9 @@ def test_render_propose_join_surfaces_key_relaxation_proposals():
             },
         }],
     })
-    relax = next(t for t in tables if t["title"].startswith("择键建议"))
-    assert relax["rows"][0][0] == "feat_lowmatch"
-    assert "减「姓名」" in relax["rows"][0][2]
-    assert any("0.98" in str(c) for c in relax["rows"][0])
-    assert "择键建议" in _text  # the relaxation hint fired
+    assert len(next(t for t in tables if t["title"].startswith("拼接诊断"))["rows"]) == 1
+    assert not any(t["title"].startswith("择键建议") for t in tables)
+    assert "每张特征表" in _text
 
 
 def test_render_tune_leaderboard_includes_full_per_trial_matrix():

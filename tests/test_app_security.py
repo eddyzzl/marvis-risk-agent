@@ -358,14 +358,13 @@ def test_static_import_map_covers_every_js_module_and_is_valid_json(tmp_path):
     js_files = sorted(p.name for p in (real_static_dir / "js").glob("*.js"))
     v2_files = sorted(p.name for p in (real_static_dir / "js" / "v2").glob("*.js"))
 
-    for name in js_files:
-        assert f"./js/{name}" in import_map["imports"]
-        assert import_map["imports"][f"./js/{name}"].startswith(f"static/js/{name}?v=")
-    for name in v2_files:
-        assert f"./js/v2/{name}" in import_map["imports"]
-        assert import_map["scopes"]["static/js/v2/"][f"./{name}"].startswith(
-            f"static/js/v2/{name}?v="
-        )
+    expected_keys = {f"./static/js/{name}" for name in js_files}
+    expected_keys.update(f"./static/js/v2/{name}" for name in v2_files)
+
+    assert set(import_map) == {"imports"}
+    assert set(import_map["imports"]) == expected_keys
+    for key in expected_keys:
+        assert import_map["imports"][key].startswith(f"{key}?v={__version__}-")
 
 
 def test_static_response_cache_control_depends_on_version_query_param(tmp_path):

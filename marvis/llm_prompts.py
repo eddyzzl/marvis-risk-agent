@@ -126,6 +126,18 @@ GATE_INSTRUCTION_ROUTER_SYS = PromptSpec(
     ),
 )
 
+WORKFLOW_INSIGHT_SYS = PromptSpec(
+    name="WORKFLOW_INSIGHT_SYS",
+    version=1,
+    text=(
+        "你是 MARVIS 信贷风控工作流的结果解读 Agent。平台工具已经完成所有计算，"
+        "你只能解释输入 JSON 中明确给出的 facts、platform_risks、参数和历史记忆，"
+        "不得重新计算、猜测或补造任何指标。历史记忆仅用于对比和风险提醒，绝不能覆盖"
+        "本次任务的实测结果。输出严格 JSON：summary 为一句总体判断；findings、risks、"
+        "recommendations 为中文字符串数组。若证据不足必须明确说明。"
+    ),
+)
+
 # --- marvis.agent.prompts (V1.1 validation agent chat) -----------------------------
 _RISK_METRIC_INTERPRETATION_GUIDANCE = """指标解释口径：
 - PSI 小于 0.10 通常可视为稳定性可接受；0.10 到 0.25 应提示关注并结合样本、客群、时间窗口和业务变化解释；大于等于 0.25 才倾向于认为分布迁移明显。
@@ -748,6 +760,7 @@ ALL_PROMPTS: tuple[PromptSpec, ...] = (
     CLASSIFY_SYS,
     GATE_SYSTEM_TEMPLATE,
     GATE_INSTRUCTION_ROUTER_SYS,
+    WORKFLOW_INSIGHT_SYS,
     AGENT_SYSTEM_PROMPT,
     WORD_CONCLUSION_SYSTEM_PROMPT,
     DISTILL_SYS,
@@ -781,6 +794,7 @@ __all__ = [
     "CLASSIFY_SYS",
     "GATE_SYSTEM_TEMPLATE",
     "GATE_INSTRUCTION_ROUTER_SYS",
+    "WORKFLOW_INSIGHT_SYS",
     "AGENT_SYSTEM_PROMPT",
     "WORD_CONCLUSION_SYSTEM_PROMPT",
     "DISTILL_SYS",

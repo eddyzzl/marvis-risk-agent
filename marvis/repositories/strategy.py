@@ -173,6 +173,7 @@ def _validate_strategy_effect_authorization(
     status: str,
     asset_status: str,
     strategy_spec_hash: str,
+    strategy_description: str,
 ) -> dict:
     """Validate the one-shot effect receipt and its frozen strategy target.
 
@@ -268,6 +269,7 @@ def _validate_strategy_effect_authorization(
         "task_id": task_id,
         "strategy_type": strategy_type,
         "strategy_spec_hash": strategy_spec_hash,
+        "strategy_description": strategy_description,
     }
     actual = {
         "kind": target.get("kind"),
@@ -280,10 +282,11 @@ def _validate_strategy_effect_authorization(
         "task_id": target.get("task_id"),
         "strategy_type": target.get("strategy_type"),
         "strategy_spec_hash": target.get("strategy_spec_hash"),
+        "strategy_description": target.get("strategy_description"),
     }
     if actual != expected or status != LEGACY_STATUS_DRAFT:
         raise _strategy_effect_conflict(
-            "目标 id/status/asset_status/version/task/type/spec 已漂移"
+            "目标 id/status/asset_status/version/task/type/spec/description 已漂移"
         )
 
     current_champion_ids = _current_local_champion_ids(
@@ -430,7 +433,8 @@ class StrategyRepository:
             row = conn.execute(
                 """
                 SELECT id, task_id, strategy_type, version, status, asset_status,
-                       adopted_at, adoption_reason, parent_strategy_id, created_at
+                       adopted_at, adoption_reason, parent_strategy_id, created_at,
+                       description
                   FROM strategies
                  WHERE id = ?
                 """,
@@ -854,7 +858,8 @@ class StrategyRepository:
             rows = conn.execute(
                 """
                 SELECT id, task_id, strategy_type, version, status, asset_status,
-                       adopted_at, adoption_reason, parent_strategy_id, created_at
+                       adopted_at, adoption_reason, parent_strategy_id, created_at,
+                       description
                   FROM strategies
                  WHERE task_id = ?
                  ORDER BY created_at, id
@@ -969,6 +974,7 @@ class StrategyRepository:
                 status=str(head["status"]),
                 asset_status=current_asset_status,
                 strategy_spec_hash=strategy_spec_hash,
+                strategy_description=str(head["description"]),
             )
         if str(head["status"]) != LEGACY_STATUS_DRAFT or current_asset_status not in {
             ASSET_STATUS_DRAFT,
@@ -2409,6 +2415,7 @@ def _strategy_meta_from_row(row: sqlite3.Row) -> dict:
         "adoption_reason": _optional_str(row["adoption_reason"]),
         "parent_strategy_id": _optional_str(row["parent_strategy_id"]),
         "created_at": str(row["created_at"]),
+        "description": str(row["description"]),
     }
 
 

@@ -132,7 +132,9 @@ class CreateTaskRequest(BaseModel):
     # injected into the plan. Never defaulted to a platform-chosen number.
     oot_ks_min: float | None = None
     strategy_input: StrategyTaskInputRequest | None = None
-    metrics: list[str] = Field(default_factory=list)
+    # None/omitted means a legacy/default metric policy; [] is an explicit
+    # user choice to run no optional metric.  Do not collapse these states.
+    metrics: list[str] | None = None
     # Per-task capability tier (conservative/balanced/aggressive); "" → global default.
     capability_tier: str = ""
     notebook_path: str | None = None
@@ -2094,6 +2096,9 @@ ManualAgentStrategyRequest = Annotated[
 
 class AgentMessageRequest(BaseModel):
     content: str
+    # Set only by an explicit UI control. The backend keeps the action as an
+    # audit message but does not render it as if the user had typed "确认".
+    ui_action: str | None = None
     model_id: str | None = None
     effort: str | None = None
     acceptance_mode: str | None = None

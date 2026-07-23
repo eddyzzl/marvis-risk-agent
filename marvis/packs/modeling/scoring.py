@@ -13,6 +13,7 @@ from marvis.packs.modeling._common import CALIBRATION_PARAMS_KEY, _optional_str,
 from marvis.packs.modeling.artifact import load_model
 from marvis.packs.modeling.contracts import ModelArtifact
 from marvis.packs.modeling.errors import ModelingError
+from marvis.packs.modeling.recipes.common import normalize_multiclass_probabilities
 
 
 def scorecard_points_from_raw_pd(
@@ -321,6 +322,11 @@ class _ModelArtifactScorer:
         self.replay_preprocessing = bool(replay_preprocessing)
 
     def score(self, dataframe: pd.DataFrame, *, use_calibration: bool = True) -> list[float]:
+        if "multiclass" in self.artifact.algorithm:
+            raise ModelingError(
+                "multiclass artifacts do not expose a scalar score; "
+                "use predict_proba() and the persisted class mapping"
+            )
         scores = np.asarray(self.raw_score(dataframe), dtype=float)
         if use_calibration and self.calibration is not None:
             scores = _apply_calibrator(str(self.calibration["method"]), self.calibration["calibrator"], scores)
@@ -329,6 +335,11 @@ class _ModelArtifactScorer:
     def raw_score(self, dataframe: pd.DataFrame) -> list[float]:
         dataframe = self._replay_preprocessing(dataframe)
         features = list(self.artifact.feature_list)
+        if "multiclass" in self.artifact.algorithm:
+            raise ModelingError(
+                "multiclass artifacts do not expose a scalar raw score; "
+                "use predict_proba()"
+            )
         if self.artifact.algorithm == "ensemble" and isinstance(self.model, dict):
             return self._ensemble_raw_score(dataframe, features)
         if self.artifact.algorithm == "xgb" and not hasattr(self.model, "predict_proba"):
@@ -345,6 +356,43 @@ class _ModelArtifactScorer:
         if hasattr(self.model, "predict_proba"):
             return [float(value) for value in self.model.predict_proba(dataframe[features])[:, 1]]
         return [float(value) for value in self.model.predict(dataframe[features])]
+
+    def predict_proba(self, dataframe: pd.DataFrame) -> np.ndarray:
+        """Return the complete N x K probability matrix for a multiclass artifact.
+
+        A multiclass model has no canonical positive class. Returning column 1 as
+        a fake PD silently discards K-1 outcomes, so callers must consume all
+        persisted class columns explicitly.
+        """
+
+        if "multiclass" not in self.artifact.algorithm:
+            raise ModelingError(
+                f"predict_proba is only available for multiclass artifacts: "
+                f"{self.artifact.algorithm}"
+            )
+        dataframe = self._replay_preprocessing(dataframe)
+        features = list(self.artifact.feature_list)
+        if self.artifact.algorithm == "lgb_multiclass":
+            probabilities = np.asarray(
+                self.model.predict(dataframe[features]),
+                dtype=float,
+            )
+        elif hasattr(self.model, "predict_proba"):
+            probabilities = np.asarray(
+                self.model.predict_proba(dataframe[features]),
+                dtype=float,
+            )
+        else:
+            raise ModelingError(
+                f"multiclass artifact cannot produce probabilities: "
+                f"{self.artifact.algorithm}"
+            )
+        classes = list((self.artifact.params or {}).get("classes") or [])
+        return normalize_multiclass_probabilities(
+            probabilities,
+            expected_rows=len(dataframe),
+            expected_classes=len(classes),
+        )
 
     def _ensemble_raw_score(self, dataframe: pd.DataFrame, features: list[str]) -> list[float]:
         """SEL-6: score every member (each loaded fresh via its own algorithm's

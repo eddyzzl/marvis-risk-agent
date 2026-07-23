@@ -26,7 +26,7 @@ from marvis.data.excel_ingest import (
 )
 from marvis.data.profiler import profile_dataset
 from marvis.data.schema_infer import detect_target_column
-from marvis.files import sha256_file
+from marvis.files import sha256_file, write_json_atomic
 
 import logging
 
@@ -84,12 +84,14 @@ class DatasetRegistry:
         if audit_factory is not None:
             self._require_atomic_upload_audit_support()
         source_path = Path(source_path)
+        source_identity = _source_file_identity(source_path)
         dataset_dir = self._dataset_dir(task_id)
         dataset_dir.mkdir(parents=True, exist_ok=True)
         uow = ArtifactUnitOfWork()
         final_name = f"{source_path.stem}_{uuid.uuid4().hex[:8]}.parquet"
         artifact = uow.stage_file(dataset_dir, final_name)
         pending_notice: dict | None = None
+        identity_path: Path | None = None
         try:
             self.last_csv_ingest_report = None
             self._pending_ingest_notice = None
@@ -124,6 +126,12 @@ class DatasetRegistry:
                 created_at=_now_iso(),
                 content_hash=content_hash,
             )
+            # A normalized parquet name deliberately loses the original suffix.
+            # Persist the source-file identity before the database write so a
+            # partial setup retry can reconcile exact uploads instead of
+            # guessing that ``vars.csv`` and ``vars.xlsx`` are interchangeable.
+            identity_path = self._source_identity_path(task_id, dataset.id)
+            write_json_atomic(identity_path, source_identity)
             atomic_result = self._register_upload_atomically(
                 uow,
                 dataset,
@@ -159,7 +167,35 @@ class DatasetRegistry:
         except Exception:
             uow.rollback()
             self._pending_ingest_notice = None
+            if identity_path is not None:
+                identity_path.unlink(missing_ok=True)
+                try:
+                    identity_path.parent.rmdir()
+                except OSError:
+                    pass
             raise
+
+    def source_identity(self, dataset_id: str) -> dict | None:
+        """Return the immutable original-upload identity for ``dataset_id``.
+
+        Legacy/derived datasets have no such record and return ``None``.  Their
+        generated parquet stem is intentionally not treated as source identity.
+        """
+
+        import json
+
+        dataset = self.get(dataset_id)
+        path = self._source_identity_path(dataset.task_id, dataset.id)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        required = ("resolved_path", "original_name", "suffix", "sha256")
+        if any(not str(payload.get(key) or "").strip() for key in required):
+            return None
+        return {key: str(payload[key]) for key in required}
 
     def _register_upload_atomically(
         self,
@@ -589,6 +625,9 @@ class DatasetRegistry:
     def _dataset_dir(self, task_id: str) -> Path:
         return self._root / task_id
 
+    def _source_identity_path(self, task_id: str, dataset_id: str) -> Path:
+        return self._dataset_dir(task_id) / ".source-identities" / f"{dataset_id}.json"
+
     def _relative_path(self, path: Path) -> str:
         return path.resolve().relative_to(self._root.resolve()).as_posix()
 
@@ -697,6 +736,16 @@ def _forget_verified_path(path: Path) -> None:
         for key in tuple(_VERIFIED_FILE_CACHE):
             if key[0] == path_text:
                 del _VERIFIED_FILE_CACHE[key]
+
+
+def _source_file_identity(source_path: Path) -> dict[str, str]:
+    path = Path(source_path).resolve()
+    return {
+        "resolved_path": str(path),
+        "original_name": path.name,
+        "suffix": path.suffix.lower(),
+        "sha256": sha256_file(path),
+    }
 
 
 def _create_dataset(create_dataset, dataset: Dataset) -> Dataset:

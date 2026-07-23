@@ -635,8 +635,22 @@ def is_stop_validation_intent(content: str) -> bool:
     text = content.strip().lower()
     if not text:
         return False
-    negated_phrases = ("不要停止", "不用停止", "无需停止", "别停止")
+    negated_phrases = (
+        "不要停止",
+        "不用停止",
+        "无需停止",
+        "别停止",
+        "先别停止",
+        "不要取消",
+        "不用取消",
+        "别取消",
+        "先别取消",
+        "不要中止",
+        "别中止",
+    )
     if any(phrase in text for phrase in negated_phrases):
+        return False
+    if re.search(r"[?？]|为什么|为何|怎么|如何|是否|有没有|停止了没|停止了吗", text):
         return False
     keywords = (
         "停止",

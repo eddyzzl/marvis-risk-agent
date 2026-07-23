@@ -215,45 +215,26 @@ def _static_asset_version(static_dir: Path) -> str:
 
 
 def _static_import_map(static_dir: Path, version: str) -> str:
-    # PERF-9: app.js and every js/v2/*.js controller import sibling modules
-    # via bare relative specifiers (e.g. "./js/api.js", "../ui-utils.js")
-    # with no version query string, so bumping _static_asset_version alone
-    # does not change the URL the browser fetches those modules from --
-    # only the entry point (app.js) gets a fresh URL, while everything it
-    # imports keeps resolving to the same unversioned path and can keep
-    # running stale code after an upgrade. A browser-native import map
-    # rewrites every "./js/*.js" / "../*.js" specifier actually used in the
-    # tree to a `?v=<version>` URL, so editing any module changes the URL
-    # for every module that (transitively) imports it -- without editing
-    # app.js's or the controllers' source, which a large slice of the
-    # frontend test suite greps verbatim (test_frontend_shell_static.py's
-    # import inventory, etc.) and would otherwise break wholesale.
+    # PERF-9: map each module's fully resolved, document-relative URL to the
+    # same URL with a version query. Import-map keys are resolved against the
+    # document base, not against the importing module, so entries such as
+    # "./js/api.js" do not match app.js resolving that specifier to
+    # "./static/js/api.js". Both keys and values must also be URL-like; a
+    # value such as "static/js/api.js" is a bare specifier and is ignored by
+    # browsers. Keeping the paths document-relative preserves deployments
+    # mounted below a reverse-proxy prefix.
     js_dir = static_dir / "js"
     v2_dir = js_dir / "v2"
     js_files = sorted(p.name for p in js_dir.glob("*.js") if p.is_file())
     v2_files = sorted(p.name for p in v2_dir.glob("*.js") if p.is_file()) if v2_dir.is_dir() else []
 
-    def versioned(relative: str) -> str:
-        return f"static/{relative}?v={version}"
-
-    # Scope for modules importing from static/ itself (app.js).
-    top_imports = {f"./js/{name}": versioned(f"js/{name}") for name in js_files}
-    top_imports.update({f"./js/v2/{name}": versioned(f"js/v2/{name}") for name in v2_files})
-
-    # Scope for modules importing from static/js/ (e.g. create-task-dialog.js).
-    js_scope_imports = {f"./{name}": versioned(f"js/{name}") for name in js_files}
-
-    # Scope for modules importing from static/js/v2/ (e.g. plan_rail_controller.js).
-    v2_scope_imports = {f"./{name}": versioned(f"js/v2/{name}") for name in v2_files}
-    v2_scope_imports.update({f"../{name}": versioned(f"js/{name}") for name in js_files})
-
-    import_map = {
-        "imports": top_imports,
-        "scopes": {
-            "static/js/": js_scope_imports,
-            "static/js/v2/": v2_scope_imports,
-        },
+    module_paths = [f"js/{name}" for name in js_files]
+    module_paths.extend(f"js/v2/{name}" for name in v2_files)
+    imports = {
+        f"./static/{relative}": f"./static/{relative}?v={version}"
+        for relative in module_paths
     }
+    import_map = {"imports": imports}
     return json.dumps(import_map, ensure_ascii=False, separators=(",", ":"))
 
 

@@ -153,3 +153,21 @@ def test_feature_lift_and_feature_metrics_ranges():
     assert metrics.psi is not None and metrics.psi >= 0
     assert metrics.missing_rate == pytest.approx(1 / 6)
     assert metrics.unique_count == 5
+    assert metrics.valid_count == 5
+    assert metrics.zero_rate == 0.0
+    assert metrics.mode_rate == pytest.approx(1 / 5)
+    assert metrics.mean == pytest.approx(3.0)
+    assert metrics.median == pytest.approx(3.0)
+
+
+def test_feature_metrics_quality_rates_use_finite_denominator():
+    values = np.array([0.0, 0.0, 2.0, np.nan, np.inf], dtype=float)
+    target = np.array([0, 1, 1, 0, 1], dtype=float)
+
+    metrics = feature_metrics(values, target, feature="x", bins=2)
+
+    assert metrics.valid_count == 3
+    assert metrics.missing_rate == pytest.approx(2 / 5)
+    assert metrics.zero_rate == pytest.approx(2 / 3)
+    assert metrics.mode_rate == pytest.approx(2 / 3)
+    assert metrics.unique_rate == pytest.approx(2 / 3)

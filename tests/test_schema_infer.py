@@ -1,4 +1,6 @@
 import hashlib
+import json
+from dataclasses import asdict
 
 import pandas as pd
 
@@ -34,6 +36,20 @@ def test_infer_dataset_schema_roles_and_desensitized_samples():
     assert "11010119900101001X" not in profiles["cert_no"].sample_values
     assert profiles["mobile"].null_rate == 1 / 3
     assert profiles["mobile"].cardinality == 2
+
+
+def test_datetime_profile_samples_are_json_serializable_iso_values():
+    profile = infer_column_profile(
+        pd.Series(pd.to_datetime(["2026-01-01 08:30:00", "2026-01-02 09:45:00"])),
+        "apply_date",
+    )
+
+    payload = json.loads(json.dumps(asdict(profile), ensure_ascii=False))
+
+    assert payload["sample_values"] == [
+        "2026-01-01T08:30:00",
+        "2026-01-02T09:45:00",
+    ]
 
 
 def test_person_name_is_an_identity_role_without_over_matching():
@@ -110,9 +126,44 @@ def test_detect_target_column_uses_role_then_binary_name_fallback():
     assert detect_target_column([fallback], frame) == "bad_outcome"
 
 
+def test_detect_target_column_skips_invalid_semantic_candidates_and_rejects_ambiguity():
+    fp = ColumnFingerprint("numeric", None, None, False, None, None, None)
+
+    def profile(name: str, cardinality: int) -> ColumnProfile:
+        return ColumnProfile(
+            name=name,
+            dtype="int64",
+            semantic_role="target",
+            fingerprint=fp,
+            null_rate=0.0,
+            cardinality=cardinality,
+            sample_values=(),
+        )
+
+    frame = pd.DataFrame({
+        "label_multiclass": [0, 1, 2, 0],
+        "label_constant": [1, 1, 1, 1],
+        "label_sqandzy": [0, 1, 0, 1],
+        "label_sqandzy_new": [0, 1, 1, 0],
+    })
+    profiles = [
+        profile("label_multiclass", 3),
+        profile("label_constant", 1),
+        profile("label_sqandzy", 2),
+        profile("label_sqandzy_new", 2),
+    ]
+
+    assert detect_target_column(profiles[:3], frame) == "label_sqandzy"
+    assert detect_target_column(profiles, frame) is None
+
+
 def test_detect_semantic_role_avoids_y_substring_false_positive():
     fp = ColumnFingerprint("date", None, None, False, None, None, "%Y-%m-%d")
     numeric_fp = ColumnFingerprint("numeric", None, None, False, None, None, None)
 
     assert detect_semantic_role("day", fp) == "date"
     assert detect_semantic_role("yearly_income", numeric_fp) == "amount"
+    assert detect_semantic_role("raw_feature_y", numeric_fp) == "numeric"
+    assert detect_semantic_role("long_y", numeric_fp) == "target"
+    assert detect_semantic_role("fission_y", numeric_fp) == "target"
+    assert detect_semantic_role("y", numeric_fp) == "target"

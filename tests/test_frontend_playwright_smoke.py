@@ -531,11 +531,18 @@ def _assert_panel_smoke(page, url: str) -> None:
 
 def _assert_app_shell_smoke(page, url: str, *, expected_theme: str) -> None:
     console_errors: list[str] = []
+    import_map_warnings: list[str] = []
     page_errors: list[str] = []
     page.on(
         "console",
         lambda message: console_errors.append(message.text)
         if message.type == "error" and not message.text.startswith("Failed to load resource:")
+        else None,
+    )
+    page.on(
+        "console",
+        lambda message: import_map_warnings.append(message.text)
+        if message.type == "warning" and "Ignored an import map value" in message.text
         else None,
     )
     page.on("pageerror", lambda error: page_errors.append(str(error)))
@@ -557,6 +564,9 @@ def _assert_app_shell_smoke(page, url: str, *, expected_theme: str) -> None:
             minCardHeight: Math.min(...cards.map((card) => card.height)),
             badText: document.body.innerText.includes("undefined") || document.body.innerText.includes("NaN"),
             overflow: document.documentElement.scrollWidth - window.innerWidth,
+            moduleUrls: performance.getEntriesByType("resource")
+              .map((entry) => entry.name)
+              .filter((resourceUrl) => resourceUrl.includes("/static/js/")),
           };
         }
         """
@@ -569,6 +579,8 @@ def _assert_app_shell_smoke(page, url: str, *, expected_theme: str) -> None:
     assert shell_metrics["minCardHeight"] > 80
     assert shell_metrics["badText"] is False
     assert shell_metrics["overflow"] <= 1
+    assert shell_metrics["moduleUrls"]
+    assert all("?v=" in module_url for module_url in shell_metrics["moduleUrls"])
 
     page.click("#welcomeModelDevelopmentCard")
     page.wait_for_selector("#taskDialog[open]")
@@ -612,6 +624,7 @@ def _assert_app_shell_smoke(page, url: str, *, expected_theme: str) -> None:
     assert dialog_metrics["overflow"] <= 1
     assert not page_errors
     assert not console_errors
+    assert not import_map_warnings
 
 
 def _assert_real_modeling_workspace_smoke(page, url: str) -> None:

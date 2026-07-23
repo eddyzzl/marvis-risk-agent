@@ -33,6 +33,16 @@ def _join_dir(root: Path, n: int = 50) -> Path:
     return src
 
 
+def _join_dir_with_plain_named_excel(root: Path, n: int = 50) -> Path:
+    """Three uploaded data tables, including an xlsx whose name has no role hint."""
+    src = _join_dir(root, n=n)
+    pd.DataFrame({
+        "mobile": [f"138{i:08d}" for i in range(n)],
+        "bureau_score": list(range(600, 600 + n)),
+    }).to_excel(src / "vars.xlsx", index=False)
+    return src
+
+
 def _join_dir_with_conflicts(root: Path, n: int = 50) -> Path:
     """Like _join_dir but the feature table repeats the first 5 keys with a DIFFERENT
     value — a same-key conflict that makes the join key non-unique, so confirm_join
@@ -46,6 +56,23 @@ def _join_dir_with_conflicts(root: Path, n: int = 50) -> Path:
         "phone_md5": md5s + md5s[:5],          # 5 duplicate keys
         "balance": list(range(n)) + [999] * 5,  # ...with a conflicting value
     }).to_parquet(src / "features.parquet")
+    return src
+
+
+def _join_dir_with_two_conflicting_features(root: Path, n: int = 14) -> Path:
+    """Two feature tables both require deduplication, matching the live failure."""
+    src = root / "join_two_conflicts"
+    src.mkdir(parents=True, exist_ok=True)
+    phones = [f"138{i:08d}" for i in range(n)]
+    md5s = [hashlib.md5(phone.encode()).hexdigest() for phone in phones]
+    pd.DataFrame({"mobile": phones, "bad_flag": [i % 2 for i in range(n)]}).to_parquet(
+        src / "sample.parquet"
+    )
+    for suffix, offset in (("a", 0), ("b", 100)):
+        pd.DataFrame({
+            "phone_md5": md5s + md5s[:2],
+            f"balance_{suffix}": list(range(offset, offset + n)) + [999, 1000],
+        }).to_parquet(src / f"features_{suffix}.parquet")
     return src
 
 
@@ -105,10 +132,21 @@ def test_data_join_conversation_end_to_end(client: TestClient, tmp_path: Path):
     assert any(t["title"].startswith("输入文件") for t in c1["metadata"].get("tables", []))
 
     # turn 1 — confirm C1 roles: build the join plan, pause at the plan-overview gate
-    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    resp = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "ui_action": "confirm_roles"},
+    )
     assert resp.status_code == 202, resp.text
-    overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
-    assert "确认「开始」后按计划执行" in overview["content"]
+    role_messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    audit_confirm = next(message for message in role_messages if message["role"] == "user")
+    assert audit_confirm["metadata"]["display_in_timeline"] is False
+    assert any(
+        message["role"] == "assistant" and "收到角色与目标列确认" in message["content"]
+        for message in role_messages
+    )
+    overview = _last_assistant(role_messages)
+    assert "手动模式请点击「开始执行」" in overview["content"]
+    assert "Agent 模式请回复「开始」或「继续」" in overview["content"]
 
     # turn 2 — 开始: run the plan, pause at the C2 diagnostics gate
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
@@ -123,6 +161,84 @@ def test_data_join_conversation_end_to_end(client: TestClient, tmp_path: Path):
     done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "拼接执行完成" in done["content"]
     assert "1:1 保持" in done["content"]
+    result_dataset = done["metadata"]["result_dataset"]
+    assert result_dataset["dataset_id"]
+    assert result_dataset["download_url"] == (
+        f"/api/datasets/{result_dataset['dataset_id']}/download"
+    )
+    download = client.get(result_dataset["download_url"])
+    assert download.status_code == 200
+    assert download.content
+    assert "attachment" in download.headers["content-disposition"]
+
+    # Compatibility: an old completion message has no download metadata.  A
+    # reload recovers it from immutable plan output without changing the audit row.
+    from marvis.db import TaskRepository
+
+    TaskRepository(tmp_path / "marvis.sqlite").update_agent_message(
+        done["id"],
+        content=done["content"],
+        metadata={key: value for key, value in done["metadata"].items() if key != "result_dataset"},
+    )
+    reloaded = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    recovered = reloaded["metadata"]["result_dataset"]
+    assert recovered["dataset_id"] == result_dataset["dataset_id"]
+    assert recovered["recovered_from_plan"] is True
+
+
+def test_data_join_two_conflicting_features_reaches_diagnostic_gate(
+    client: TestClient, tmp_path: Path
+):
+    src = _join_dir_with_two_conflicting_features(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "双特征冲突拼接",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "data_join",
+        "run_mode": "manual",
+    }).json()["id"]
+
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"}
+    )
+
+    assert response.status_code == 202, response.text
+    gate = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    assert "'type' object is not subscriptable" not in gate["content"]
+    assert "拼接诊断完成" in gate["content"]
+    assert len(gate["metadata"]["dedup"]["needs_dedup"]) == 2
+
+
+def test_data_join_c1_lists_all_three_uploaded_tables_including_plain_named_excel(
+    client: TestClient, tmp_path: Path
+):
+    src = _join_dir_with_plain_named_excel(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "三文件拼接",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "data_join",
+        "run_mode": "manual",
+    }).json()["id"]
+
+    response = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert response.status_code == 202, response.text
+    c1 = _last_assistant(
+        client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    )
+    files = c1["metadata"]["join_c1"]["files"]
+
+    assert len(files) == 3
+    names = {item["name"] for item in files}
+    assert any(name.startswith("sample_") for name in names)
+    assert any(name.startswith("features_") for name in names)
+    assert any(name.startswith("vars_") for name in names)
 
 
 def test_data_join_c2_gate_annotates_key_columns_with_dictionary_meaning(client: TestClient, tmp_path: Path):
@@ -256,7 +372,8 @@ def test_data_join_c1_form_assignment_drives_the_join(client: TestClient, tmp_pa
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": f"[C1]{payload}"})
     assert resp.status_code == 202, resp.text
     overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
-    assert "确认「开始」后按计划执行" in overview["content"]
+    assert "手动模式请点击「开始执行」" in overview["content"]
+    assert "Agent 模式请回复「开始」或「继续」" in overview["content"]
     # 开始 → run to the C2 diagnostics gate
     client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
     gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
@@ -474,14 +591,30 @@ def test_data_join_plan_payload_carries_started_at_for_running_step(
     running_step = next(step for step in loaded.steps if step.id == execute_step["id"])
     running_step.status = StepStatus.RUNNING
     repo.update_step(running_step)
-    repo.start_step_run(
+    run_id = repo.start_step_run(
         plan_id=plan["id"],
         step_id=execute_step["id"],
         tool_ref="data_ops.execute_join",
         inputs={},
+    )
+    repo.update_step_run_progress(
+        run_id,
+        {
+            "kind": "model_tuning",
+            "algorithm": "xgb",
+            "trial": 7,
+            "trial_total": 40,
+        },
     )
 
     refreshed = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][-1]
     refreshed_step = next(step for step in refreshed["steps"] if step["id"] == execute_step["id"])
     assert refreshed_step["status"] == "running"
     assert refreshed_step["started_at"]
+    assert refreshed_step["progress"] == {
+        "kind": "model_tuning",
+        "algorithm": "xgb",
+        "trial": 7,
+        "trial_total": 40,
+    }
+    assert refreshed_step["progress_updated_at"]

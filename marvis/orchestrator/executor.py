@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+import threading
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from marvis.governance.errors import AuthorizationError
+from marvis.job_cancellation import JobCancelled
 from marvis.orchestrator.capability import CapabilityTier, resolve_tier
 from marvis.orchestrator.context.observation import summarize_failure, summarize_output
 from marvis.orchestrator.contracts import (
@@ -24,11 +28,194 @@ from marvis.orchestrator.safety import is_safety_step
 from marvis.orchestrator.validator import METRIC_FIELDS
 from marvis.plugins.manifest import manifest_to_dict
 from marvis.plugins.runner import ToolResult
+from marvis.repositories.tasks import TaskRepository
 
 
 MAX_STEP_RETRIES = 1
 NO_PROGRESS_WINDOW = 4
 NO_PROGRESS_THRESHOLD = 2
+
+
+def _accepts_progress_callback(invoke) -> bool:
+    """Keep lightweight test/custom runners source-compatible."""
+
+    try:
+        parameters = inspect.signature(invoke).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "progress_callback"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _accepts_cancellation_check(invoke) -> bool:
+    """Keep lightweight test/custom runners source-compatible."""
+
+    try:
+        parameters = inspect.signature(invoke).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "cancellation_check"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _tool_progress_content(progress: dict, *, status: str) -> str:
+    labels = {
+        "running": "模型调参正在执行",
+        "succeeded": "模型调参已完成",
+        "failed": "模型调参执行失败，已保留最后进度",
+        "cancelled": "模型调参已取消，已保留最后进度",
+        "interrupted": "模型调参已中断，已保留最后进度",
+    }
+    details = []
+    algorithm = str(progress.get("algorithm") or "").strip()
+    if algorithm:
+        details.append(algorithm)
+    trial = progress.get("trial")
+    trial_total = progress.get("trial_total")
+    if trial is not None or trial_total is not None:
+        details.append(f"当前轮次 {trial or 0}/{trial_total or '?'}")
+    completed = progress.get("completed_trials")
+    total = progress.get("total_trials")
+    if completed is not None or total is not None:
+        details.append(f"总进度 {completed or 0}/{total or '?'}")
+    prefix = labels.get(status, labels["running"])
+    return f"{prefix}：{'，'.join(details)}。" if details else f"{prefix}。"
+
+
+class _ToolProgressPublisher:
+    """Mirror one tool run into the run ledger and one stable timeline message."""
+
+    def __init__(
+        self,
+        *,
+        plan_repo,
+        task_repo,
+        fallback_task_repo,
+        task_id: str,
+        plan_id: str,
+        step_id: str,
+        run_id: str,
+    ):
+        self._plan_repo = plan_repo
+        self._task_repo = task_repo
+        self._fallback_task_repo = fallback_task_repo
+        self._task_id = task_id
+        self._plan_id = plan_id
+        self._step_id = step_id
+        self._run_id = run_id
+        self._message_id: str | None = None
+        self._last_progress: dict | None = None
+        self._closed = False
+        self._lock = threading.Lock()
+
+    def publish(self, payload: dict) -> None:
+        if not isinstance(payload, dict):
+            return
+        snapshot = dict(payload)
+        with self._lock:
+            if self._closed:
+                return
+            self._last_progress = snapshot
+            try:
+                self._plan_repo.update_step_run_progress(self._run_id, snapshot)
+            except Exception:
+                # Progress is observability, never a reason to fail the tool.
+                pass
+            self._write_message(snapshot, status="running", streaming=True)
+
+    def flush(self) -> None:
+        """Wait for an in-flight watcher callback before the run is finalized."""
+
+        with self._lock:
+            return
+
+    def finish(self, status: str) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            if self._last_progress is None:
+                self._closed = True
+                return
+            status = self._terminal_status(status)
+            # A transient SQLite lock must not leave a completed run presented
+            # as permanently streaming. Both attempts remain best-effort.
+            for _attempt in range(3):
+                if self._write_message(
+                    self._last_progress,
+                    status=status,
+                    streaming=False,
+                ):
+                    break
+            self._closed = True
+
+    def _terminal_status(self, fallback: str) -> str:
+        if fallback == "cancelled":
+            return fallback
+        try:
+            plan = self._plan_repo.load_plan(self._plan_id)
+        except Exception:
+            return fallback
+        return "cancelled" if plan.status == PlanStatus.CANCELLED else fallback
+
+    def _write_message(
+        self,
+        progress: dict,
+        *,
+        status: str,
+        streaming: bool,
+    ) -> bool:
+        repositories = [
+            repository
+            for repository in (self._task_repo, self._fallback_task_repo)
+            if repository is not None
+        ]
+        if not repositories:
+            return False
+        metadata = {
+            "kind": "tool_progress",
+            "plan_id": self._plan_id,
+            "step_id": self._step_id,
+            "run_id": self._run_id,
+            "status": status,
+            "streaming": streaming,
+            "progress": progress,
+            "progress_updated_at": datetime.now(UTC).isoformat(),
+        }
+        content = _tool_progress_content(progress, status=status)
+        for repository in repositories:
+            try:
+                if self._message_id is None:
+                    message = repository.add_agent_message(
+                        self._task_id,
+                        role="assistant",
+                        stage="chat",
+                        content=content,
+                        metadata=metadata,
+                    )
+                    message_id = (
+                        message.get("id") if isinstance(message, dict) else None
+                    )
+                    if message_id:
+                        self._message_id = str(message_id)
+                        return True
+                    continue
+                repository.update_agent_message(
+                    self._message_id,
+                    content=content,
+                    metadata=metadata,
+                )
+                return True
+            except Exception:
+                # Conversation persistence is best-effort and must not change
+                # the deterministic result. Try the canonical repository next.
+                continue
+        return False
 
 
 @dataclass
@@ -50,6 +237,7 @@ class PlanExecutor:
         harness_state,
         planner=None,
         authorizer=None,
+        task_repo=None,
     ):
         self._repo = plan_repo
         self._runner = tool_runner
@@ -59,9 +247,18 @@ class PlanExecutor:
         self._state = harness_state
         self._planner = planner
         self._authorizer = authorizer
+        self._task_repo = task_repo
+        self._progress_fallback_task_repo = None
+        db_path = getattr(plan_repo, "db_path", None)
+        if db_path is not None:
+            canonical_task_repo = TaskRepository(db_path)
+            if self._task_repo is None:
+                self._task_repo = canonical_task_repo
+            else:
+                self._progress_fallback_task_repo = canonical_task_repo
         self._step_recovery = PlanStepRecovery(plan_repo, reviewer, hook_dispatcher, harness_state)
 
-    def run(self, plan_id: str) -> ExecutionResult:
+    def run(self, plan_id: str, *, cancellation_check=None) -> ExecutionResult:
         plan = self._repo.load_plan(plan_id)
         tier = resolve_tier(plan.tier)
         if plan.status in {PlanStatus.DONE, PlanStatus.FAILED, PlanStatus.CANCELLED}:
@@ -79,6 +276,11 @@ class PlanExecutor:
             PlanStatus.RUNNING,
         }:
             return ExecutionResult(plan.id, plan.status, None, None)
+        try:
+            self._raise_if_cancelled(cancellation_check)
+        except JobCancelled:
+            self._cancel_plan(plan)
+            return ExecutionResult(plan.id, PlanStatus.CANCELLED, None, None)
         if plan.status in {PlanStatus.CONFIRMED, PlanStatus.AWAITING_CONFIRM}:
             self._set_plan_status(plan, PlanStatus.RUNNING)
         self._step_recovery.recover_inflight_steps(plan)
@@ -92,6 +294,11 @@ class PlanExecutor:
                 # externally-applied CANCELLED status here instead of trying
                 # another _set_plan_status transition, which would raise
                 # IllegalPlanTransition since CANCELLED has no further moves.
+                return ExecutionResult(plan.id, PlanStatus.CANCELLED, None, None)
+            try:
+                self._raise_if_cancelled(cancellation_check)
+            except JobCancelled:
+                self._cancel_plan(plan)
                 return ExecutionResult(plan.id, PlanStatus.CANCELLED, None, None)
             failed = [step for step in plan.steps if step.status == StepStatus.FAILED]
             if failed:
@@ -129,13 +336,15 @@ class PlanExecutor:
                 if result.status == PlanStatus.RUNNING:
                     continue
                 return result
-            if self._requires_human_decision(step) and not self._repo.is_step_confirmed(
-                step.id
+            if (
+                self._requires_human_decision(step)
+                and self._special_value_requires_decision(plan, step)
+                and not self._repo.is_step_confirmed(step.id)
             ):
                 self._set_step_status(step, StepStatus.AWAITING_CONFIRM)
                 self._set_plan_status(plan, PlanStatus.AWAITING_CONFIRM)
                 return ExecutionResult(plan.id, PlanStatus.AWAITING_CONFIRM, None, None)
-            self._execute_step(plan, step)
+            self._execute_step(plan, step, cancellation_check=cancellation_check)
             plan = self._repo.load_plan(plan_id)
             last = _find_step(plan, step.id)
             if (
@@ -165,8 +374,9 @@ class PlanExecutor:
                 return step
         return None
 
-    def _execute_step(self, plan: Plan, step: PlanStep) -> None:
+    def _execute_step(self, plan: Plan, step: PlanStep, *, cancellation_check=None) -> None:
         run_id = None
+        progress_publisher = None
         try:
             self._set_step_status(step, StepStatus.RUNNING)
             resolved_inputs = self._resolve_refs(step.inputs)
@@ -176,8 +386,39 @@ class PlanExecutor:
                 tool_ref=step.tool_ref.label(),
                 inputs=resolved_inputs,
             )
-            result = self._invoke_step(plan, step, resolved_inputs)
+            progress_publisher = self._step_progress_publisher(plan, step, run_id)
+            try:
+                result = self._invoke_step(
+                    plan,
+                    step,
+                    resolved_inputs,
+                    progress_callback=(
+                        progress_publisher.publish if progress_publisher else None
+                    ),
+                    cancellation_check=cancellation_check,
+                )
+            except BaseException as exc:
+                if progress_publisher is not None:
+                    progress_publisher.finish(
+                        "cancelled"
+                        if isinstance(exc, JobCancelled) or not isinstance(exc, Exception)
+                        else "failed"
+                    )
+                raise
+            if progress_publisher is not None:
+                progress_publisher.flush()
+            self._raise_if_cancelled(cancellation_check)
             if not result.ok:
+                if result.error_kind == "cancelled":
+                    self._finish_cancelled_step(
+                        plan,
+                        step,
+                        run_id=run_id,
+                        progress_publisher=progress_publisher,
+                        duration_ms=result.duration_ms,
+                        error=result.error,
+                    )
+                    return
                 self._finish_step_run(
                     run_id,
                     status="failed",
@@ -185,6 +426,8 @@ class PlanExecutor:
                     error_kind=result.error_kind,
                     duration_ms=result.duration_ms,
                 )
+                if progress_publisher is not None:
+                    progress_publisher.finish("failed")
                 self._handle_step_failure(step, result)
                 return
 
@@ -217,6 +460,8 @@ class PlanExecutor:
                     error_kind="postcheck",
                     duration_ms=result.duration_ms,
                 )
+                if progress_publisher is not None:
+                    progress_publisher.finish("failed")
                 self._handle_step_failure(step, failed, apply_policy=False)
                 return
 
@@ -226,7 +471,19 @@ class PlanExecutor:
             step.status = StepStatus.DONE
             self._repo.update_step(step)
             self._dispatch_step_completed(plan, step, output)
+            if progress_publisher is not None:
+                progress_publisher.finish("succeeded")
+        except JobCancelled as exc:
+            self._finish_cancelled_step(
+                plan,
+                step,
+                run_id=run_id,
+                progress_publisher=progress_publisher,
+                error=str(exc),
+            )
         except Exception as exc:
+            if progress_publisher is not None:
+                progress_publisher.finish("failed")
             if run_id is not None:
                 try:
                     self._finish_step_run(
@@ -280,9 +537,20 @@ class PlanExecutor:
             "renderer_hint": step.tool_ref.tool,
         }
 
-    def _invoke_step(self, plan: Plan, step: PlanStep, resolved_inputs: dict) -> ToolResult:
+    def _invoke_step(
+        self,
+        plan: Plan,
+        step: PlanStep,
+        resolved_inputs: dict,
+        *,
+        progress_callback=None,
+        cancellation_check=None,
+    ) -> ToolResult:
         policy = self._failure_policy(step)
-        protected_execution = self._is_governed_step(step)
+        protected_execution = (
+            self._is_governed_step(step)
+            and self._special_value_requires_decision(plan, step)
+        )
         attempts = (
             MAX_STEP_RETRIES + 1
             if policy == "retry" and not protected_execution
@@ -322,25 +590,38 @@ class PlanExecutor:
                 )
         last_result = None
         for _attempt in range(attempts):
+            self._raise_if_cancelled(cancellation_check)
             if step.sub_agent_scope:
                 sub = self._subagents.spawn(step, parent_task_id=plan.task_id)
                 step.sub_agent_id = sub.id
                 result = self._subagents.run(sub, goal_inputs=resolved_inputs)
             else:
+                invoke_kwargs = {"task_id": plan.task_id}
+                if protected_execution:
+                    invoke_kwargs["execution_context"] = execution_context
+                if progress_callback is not None and _accepts_progress_callback(
+                    self._runner.invoke
+                ):
+                    invoke_kwargs["progress_callback"] = progress_callback
+                if cancellation_check is not None and _accepts_cancellation_check(
+                    self._runner.invoke
+                ):
+                    invoke_kwargs["cancellation_check"] = cancellation_check
                 if protected_execution:
                     result = self._runner.invoke(
                         step.tool_ref,
                         resolved_inputs,
-                        task_id=plan.task_id,
-                        execution_context=execution_context,
+                        **invoke_kwargs,
                     )
                 else:
                     result = self._runner.invoke(
                         step.tool_ref,
                         resolved_inputs,
-                        task_id=plan.task_id,
+                        **invoke_kwargs,
                     )
             if result.ok:
+                return result
+            if result.error_kind == "cancelled":
                 return result
             last_result = result
         return last_result or ToolResult(
@@ -349,6 +630,86 @@ class PlanExecutor:
             error="step execution failed",
             error_kind="execution",
             duration_ms=0,
+        )
+
+    def _finish_cancelled_step(
+        self,
+        plan: Plan,
+        step: PlanStep,
+        *,
+        run_id: str | None,
+        progress_publisher,
+        duration_ms: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        message = (
+            "用户已停止当前动作；已完成步骤、调参检查点和最后进度均已保留，"
+            "可重新执行当前步骤。"
+        )
+        if run_id is not None:
+            try:
+                self._finish_step_run(
+                    run_id,
+                    status="interrupted",
+                    error=error or message,
+                    error_kind="user_cancelled",
+                    duration_ms=duration_ms,
+                )
+            except KeyError:
+                # A concurrent recovery pass may already have closed the run.
+                pass
+        if progress_publisher is not None:
+            progress_publisher.finish("cancelled")
+        step.error = message
+        if step.status in {StepStatus.RUNNING, StepStatus.CHECKING}:
+            self._set_step_status(step, StepStatus.FAILED)
+        else:
+            self._repo.update_step(step)
+        self._cancel_plan(plan, trigger_step_id=step.id)
+
+    def _cancel_plan(self, plan: Plan, *, trigger_step_id: str | None = None) -> None:
+        latest = self._repo.load_plan(plan.id)
+        if latest.status != PlanStatus.CANCELLED:
+            self._set_plan_status(latest, PlanStatus.CANCELLED)
+        plan.status = PlanStatus.CANCELLED
+        try:
+            self._repo.append_loop_event(
+                plan.id,
+                {
+                    "type": "cancelled",
+                    "reason": "user_cancelled",
+                    "trigger_step_id": trigger_step_id,
+                },
+            )
+        except Exception:
+            pass
+        self._dispatch(
+            "workflow.cancelled",
+            {"plan_id": plan.id, "step_id": trigger_step_id},
+            task_id=plan.task_id,
+        )
+
+    @staticmethod
+    def _raise_if_cancelled(cancellation_check) -> None:
+        if cancellation_check is not None:
+            cancellation_check()
+
+    def _step_progress_publisher(
+        self,
+        plan: Plan,
+        step: PlanStep,
+        run_id: str | None,
+    ) -> _ToolProgressPublisher | None:
+        if run_id is None or step.tool_ref.tool != "tune_hyperparameters":
+            return None
+        return _ToolProgressPublisher(
+            plan_repo=self._repo,
+            task_repo=self._task_repo,
+            fallback_task_repo=self._progress_fallback_task_repo,
+            task_id=plan.task_id,
+            plan_id=plan.id,
+            step_id=step.id,
+            run_id=run_id,
         )
 
     def _handle_step_failure(
@@ -692,6 +1053,53 @@ class PlanExecutor:
         return self._requires_governed_human_decision(step) or bool(
             step.needs_confirmation
         )
+
+    def _special_value_requires_decision(
+        self,
+        plan: Plan,
+        step: PlanStep,
+    ) -> bool:
+        """Return whether ``resolve_special_values`` has a real HITL decision.
+
+        The template marks the step as a canonical human-decision gate so AUTO
+        can never silently choose mask/retain/drop.  That policy is conditional
+        on actual evidence, though: when the completed screen selected no
+        sentinel-bearing columns, the tool is a deterministic no-op and should
+        run without showing an empty confirmation or requiring an authorization
+        binding. Missing/malformed screen evidence fails closed.
+        """
+
+        if step.tool_ref.tool != "resolve_special_values":
+            return True
+        for dependency_id in step.depends_on or []:
+            dependency = _find_step(plan, dependency_id)
+            if (
+                dependency is None
+                or dependency.tool_ref.tool != "screen_features"
+            ):
+                continue
+            try:
+                output = self._repo.load_step_output(dependency.id)
+            except KeyError:
+                return True
+            if not isinstance(output, dict):
+                return True
+            raw_selected = output.get("selected")
+            if not isinstance(raw_selected, list):
+                return True
+            selected = {
+                str(item).strip()
+                for item in raw_selected
+                if str(item).strip()
+            }
+            sentinel_columns = output.get("sentinel_columns")
+            if not isinstance(sentinel_columns, dict):
+                return True
+            return any(
+                str(column) in selected and bool(rows)
+                for column, rows in sentinel_columns.items()
+            )
+        return True
 
     def _requires_governed_human_decision(self, step: PlanStep) -> bool:
         step_policy = getattr(step, "policy", None)

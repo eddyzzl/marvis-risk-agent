@@ -11,6 +11,155 @@ from marvis.modeling_policy_signals import has_monotonic_policy, monotonic_polic
 _DEDUP_EXAMPLE_CAP = 3
 
 
+def build_special_value_payload(output: dict | None, gate) -> dict | None:
+    """Build the pre-execution special-value governance payload.
+
+    Only columns that are both selected by ``screen_features`` and backed by
+    non-empty sentinel evidence are actionable. Detected values and shares are
+    read-only evidence: the frontend submits only action/confirmation/reason,
+    while the tool binds the authoritative values from ``sentinel_columns``.
+    """
+
+    data = output if isinstance(output, dict) else {}
+    selected = [
+        str(item).strip()
+        for item in (data.get("selected") or [])
+        if str(item).strip()
+    ]
+    raw_columns = (
+        data.get("sentinel_columns")
+        if isinstance(data.get("sentinel_columns"), dict)
+        else {}
+    )
+    columns: list[dict] = []
+    for column in selected:
+        rows = raw_columns.get(column)
+        if not isinstance(rows, (list, tuple)) or not rows:
+            continue
+        values: list[dict] = []
+        for row in rows:
+            if isinstance(row, (list, tuple)):
+                if not row:
+                    continue
+                value = row[0]
+                share = row[1] if len(row) > 1 else None
+            elif isinstance(row, dict):
+                value = row.get("value")
+                share = row.get("share")
+            else:
+                value = row
+                share = None
+            if value is None:
+                continue
+            values.append({"value": value, "share": share})
+        if values:
+            columns.append({"column": column, "values": values})
+    if not columns:
+        return None
+    return {
+        "step_id": getattr(gate, "id", None),
+        "columns": columns,
+        "actions": ["mask", "retain", "drop"],
+        "requires_complete_decisions": True,
+        "retain_requires_reason": True,
+    }
+
+
+def build_feature_binning_payload(output: dict | None, gate) -> dict | None:
+    """Build the optional post-univariate binning selector payload.
+
+    The metric output is authoritative for the candidate list: the picker must
+    not offer identifiers, targets, or columns that were excluded from the
+    univariate analysis. No feature is selected by default because this step is
+    explicitly optional.
+    """
+    data = output if isinstance(output, dict) else {}
+    metrics = [item for item in (data.get("metrics") or []) if isinstance(item, dict)]
+    features = []
+    for metric in metrics:
+        feature = str(metric.get("feature") or "").strip()
+        if not feature:
+            continue
+        features.append({
+            "feature": feature,
+            "recommendation": str(metric.get("recommendation") or ""),
+            "recommendation_reason": str(metric.get("recommendation_reason") or ""),
+            "iv": metric.get("iv"),
+            "ks": metric.get("ks"),
+            "auc": metric.get("auc"),
+            "missing_rate": metric.get("missing_rate"),
+        })
+    if not features:
+        return None
+    inputs = getattr(gate, "inputs", None) or {}
+    try:
+        default_bins = int(inputs.get("bins") or 10)
+    except (TypeError, ValueError):
+        default_bins = 10
+    default_bins = min(20, max(3, default_bins))
+    return {
+        "features": features,
+        "selected": [],
+        "default_bins": default_bins,
+        "min_bins": 3,
+        "max_bins": 20,
+        "optional": True,
+    }
+
+
+def build_join_keys_payload(propose_o: dict | None) -> dict | None:
+    """Build one interactive key-selection card per feature table.
+
+    ``key_alternatives`` are alternative key *sets* for an existing feature table,
+    not additional joins.  Keeping them nested under their feature prevents the UI
+    from making two tables with two alternatives look like four pending joins.
+    """
+    propose = propose_o if isinstance(propose_o, dict) else {}
+    joins = [item for item in (propose.get("joins") or []) if isinstance(item, dict)]
+    if not any((item.get("diagnostics") or {}).get("key_alternatives") for item in joins):
+        return None
+    features = []
+    for join in joins:
+        pairs = [pair for pair in (join.get("key_pairs") or []) if isinstance(pair, dict)]
+        if not pairs:
+            continue
+        diagnostics = join.get("diagnostics") if isinstance(join.get("diagnostics"), dict) else {}
+        current_keys = [
+            {
+                "anchor_col": str(pair.get("anchor_col") or ""),
+                "feature_col": str(pair.get("feature_col") or ""),
+                "match_method": str(pair.get("match_method") or ""),
+            }
+            for pair in pairs
+        ]
+        alternatives = []
+        for alt in diagnostics.get("key_alternatives") or []:
+            if not isinstance(alt, dict):
+                continue
+            alternatives.append({
+                "anchor_cols": [str(pair[0]) for pair in (alt.get("key_pairs") or []) if isinstance(pair, (list, tuple)) and pair],
+                "key_pairs": [list(pair[:2]) for pair in (alt.get("key_pairs") or []) if isinstance(pair, (list, tuple)) and len(pair) >= 2],
+                "dropped": str(alt.get("dropped") or ""),
+                "match_rate": alt.get("match_rate"),
+                "feature_key_unique": bool(alt.get("feature_key_unique")),
+                "fan_out_detected": bool(alt.get("fan_out_detected")),
+            })
+        features.append({
+            "feature_id": str(join.get("feature_id") or ""),
+            "feature_name": str(join.get("feature_name") or join.get("feature_id") or ""),
+            "current_keys": current_keys,
+            "selected_anchor_cols": [pair["anchor_col"] for pair in current_keys],
+            "current_match_rate": diagnostics.get("match_rate"),
+            "current_unique": bool(diagnostics.get("feature_key_unique")),
+            "current_fan_out": bool(diagnostics.get("fan_out_detected")),
+            "alternatives": alternatives,
+        })
+    return {
+        "join_plan_id": str(propose.get("join_plan_id") or ""),
+        "features": features,
+    } if features else None
+
+
 def _dedup_examples(sample_keys: list, sample_conflicts: list, key_columns: list[str]) -> list[dict]:
     examples = []
     for key_tuple, values in zip(sample_keys, sample_conflicts):
@@ -35,6 +184,7 @@ def build_dedup_payload(confirm_o: dict | None, propose_o: dict | None) -> dict 
     computes)."""
     confirm = confirm_o if isinstance(confirm_o, dict) else {}
     needs = [str(f) for f in (confirm.get("needs_dedup") or [])]
+    labels = confirm.get("needs_dedup_labels") if isinstance(confirm.get("needs_dedup_labels"), dict) else {}
     if not needs:
         return None
     info: dict[str, dict] = {}
@@ -56,6 +206,7 @@ def build_dedup_payload(confirm_o: dict | None, propose_o: dict | None) -> dict 
     features = [
         {
             "feature_id": fid,
+            "feature_name": str(labels.get(fid) or fid),
             **info.get(fid, {"conflict_keys": 0, "conflict_columns": [], "examples": []}),
         }
         for fid in needs
@@ -147,6 +298,8 @@ def build_modeling_setup_payload(
     dep,
     *,
     split_output: dict | None = None,
+    split_step=None,
+    refined_output: dict | None = None,
 ) -> dict | None:
     """Interactive modeling setup payload.
 
@@ -163,14 +316,30 @@ def build_modeling_setup_payload(
     selected = str(o.get("sample_weight_col") or "").strip()
     if selected and selected not in candidates:
         candidates.insert(0, selected)
-    split_summary = _split_summary(split_output)
-    return {
+    split_summary = _split_summary(split_output, split_step)
+    original_feature_count = o.get("feature_count")
+    refined_selected = (
+        refined_output.get("selected")
+        if isinstance(refined_output, dict)
+        and isinstance(refined_output.get("selected"), list)
+        else None
+    )
+    effective_feature_count = (
+        len(refined_selected) if refined_selected is not None else original_feature_count
+    )
+    trial_budgets = (
+        dict(o.get("n_trials_by_recipe"))
+        if isinstance(o.get("n_trials_by_recipe"), dict)
+        and o.get("n_trials_by_recipe")
+        else {}
+    )
+    payload = {
         "step_id": getattr(dep, "id", None),
         "step_title": getattr(dep, "title", None),
         "target_type": str(o.get("target_type") or "binary"),
         "recipe": str(o.get("recipe") or ""),
         "recipes": [str(item) for item in (o.get("recipes") or [])],
-        "feature_count": o.get("feature_count"),
+        "feature_count": effective_feature_count,
         "n_trials": o.get("n_trials"),
         "metric_policy": str(o.get("metric_policy") or ""),
         "eligible_algorithms": [str(item) for item in (o.get("eligible_algorithms") or [])],
@@ -193,12 +362,22 @@ def build_modeling_setup_payload(
             if isinstance(item, dict)
         ],
         "override_guidance": _modeling_override_guidance(
-            o,
+            {**o, "feature_count": effective_feature_count},
             split_summary=split_summary,
             sample_weight_candidates=candidates,
             sample_weight_col=selected,
         ),
     }
+    if trial_budgets:
+        payload["n_trials_by_recipe"] = trial_budgets
+        payload["total_n_trials"] = sum(
+            int(value)
+            for value in trial_budgets.values()
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        )
+    if refined_selected is not None:
+        payload["candidate_feature_count"] = original_feature_count
+    return payload
 
 
 def build_model_delivery_payload(
@@ -293,7 +472,7 @@ def build_model_delivery_payload(
     }
 
 
-def _split_summary(output: dict | None) -> dict | None:
+def _split_summary(output: dict | None, split_step=None) -> dict | None:
     if not isinstance(output, dict):
         return None
     analysis = output.get("sample_analysis") if isinstance(output.get("sample_analysis"), dict) else {}
@@ -326,6 +505,10 @@ def _split_summary(output: dict | None) -> dict | None:
         "total_rows": total_rows,
         "holdout_values": holdout_values,
         "warnings": warnings,
+        "split_config": dict(
+            (getattr(split_step, "inputs", None) or {}).get("split_config") or {}
+        ),
+        "available_columns": [str(item) for item in (output.get("available_columns") or []) if str(item)],
     }
 
 
@@ -1069,8 +1252,11 @@ def _delivery_readiness(
 
 __all__ = [
     "build_dedup_payload",
+    "build_feature_binning_payload",
+    "build_join_keys_payload",
     "build_model_delivery_payload",
     "build_modeling_setup_payload",
     "build_screen_payload",
+    "build_special_value_payload",
     "screen_known_features",
 ]

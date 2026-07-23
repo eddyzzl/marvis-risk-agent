@@ -117,14 +117,17 @@ export function agentMessageIsScanLead(message) {
 }
 
 export function agentReportMessagesForDisplay(messages = []) {
-  const latestConfirmationIndex = messages.reduce(
+  const visibleMessages = messages.filter(
+    (message) => message?.metadata?.display_in_timeline !== false,
+  );
+  const latestConfirmationIndex = visibleMessages.reduce(
     (latestIndex, message, index) => (
       message?.stage === "word_conclusion_confirmed" ? index : latestIndex
     ),
     -1,
   );
-  if (latestConfirmationIndex < 0) return messages;
-  return messages.filter((message, index) => {
+  if (latestConfirmationIndex < 0) return visibleMessages;
+  return visibleMessages.filter((message, index) => {
     if (index > latestConfirmationIndex) return true;
     return !(message?.stage === "chat" && message?.metadata?.awaiting_confirmation);
   });

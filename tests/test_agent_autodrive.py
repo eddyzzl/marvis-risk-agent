@@ -1173,6 +1173,12 @@ _REAL_GATE_ENVELOPE_FIXTURES = [
         id="strategy-adopt_strategy-confirm",
     ),
     pytest.param(
+        "modeling-generate_model_reports-confirm",
+        {"plan_id": "p1", "step_id": "plan-step-8", "run_seq": 1, "kind": "gate",
+         "gate_source_tool": "generate_model_reports"},
+        id="modeling-generate_model_reports-confirm",
+    ),
+    pytest.param(
         "strategy-apply_monitoring_disposition-confirm",
         {"plan_id": "p1", "step_id": "plan-step-2", "run_seq": 1, "kind": "gate",
          "gate_source_tool": "apply_monitoring_disposition"},

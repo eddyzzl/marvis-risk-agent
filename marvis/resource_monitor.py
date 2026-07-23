@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Callable
 
 try:
@@ -134,7 +135,29 @@ def process_tree_rss(process: Any) -> int:
     return rss
 
 
-def terminate_process_tree(process: Any) -> None:
+def terminate_process_tree_by_pid(
+    pid: int,
+    *,
+    timeout_seconds: float = 2.0,
+) -> bool:
+    """Terminate exactly ``pid`` and its descendants without touching its group."""
+
+    if psutil is None:
+        return False
+    try:
+        process = psutil.Process(int(pid))
+    except Exception:
+        return False
+    terminate_process_tree(process, timeout_seconds=timeout_seconds)
+    return True
+
+
+def terminate_process_tree(
+    process: Any,
+    *,
+    timeout_seconds: float = 2.0,
+) -> None:
+    timeout_seconds = max(0.05, float(timeout_seconds))
     try:
         children = list(process.children(recursive=True))
     except Exception:
@@ -149,18 +172,24 @@ def terminate_process_tree(process: Any) -> None:
     wait_procs = getattr(psutil, "wait_procs", None) if psutil is not None else None
     if callable(wait_procs):
         try:
-            _, alive = wait_procs(targets, timeout=2.0)
+            _, alive = wait_procs(targets, timeout=timeout_seconds / 2)
         except Exception:
             alive = targets
     else:
+        deadline = time.monotonic() + timeout_seconds / 2
         for target in targets:
             try:
-                target.wait(timeout=2.0)
+                target.wait(timeout=max(0.0, deadline - time.monotonic()))
             except Exception:
                 alive.append(target)
     for target in alive:
         try:
             target.kill()
+        except Exception:
+            pass
+    if alive and callable(wait_procs):
+        try:
+            wait_procs(alive, timeout=timeout_seconds / 2)
         except Exception:
             pass
 

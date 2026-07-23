@@ -18,6 +18,14 @@ export function stepCheckerHtml(state) {
       "</span>"
     );
   }
+  if (state === "skipped") {
+    return (
+      '<span class="check-icon skipped" aria-hidden="true">' +
+      '<svg viewBox="0 0 16 16" width="10" height="10"><path d="M3 8h10" fill="none" ' +
+      'stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>' +
+      "</span>"
+    );
+  }
   if (state === "stopped") {
     return '<span class="check-icon stopped" aria-hidden="true"></span>';
   }

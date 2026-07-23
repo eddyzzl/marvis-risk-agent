@@ -32,6 +32,10 @@ _LEGACY_ACTION_TYPES = {
     "approve": "approval",
     "decline": "reject",
     "reject": "reject",
+    # Historical strategy bands and imported reports used ``decline`` as the
+    # row-level label for the same governed reject action.  Keep the label in
+    # ``output_value`` while mapping the action semantics to ``reject``.
+    "decline": "reject",
     "review": "review",
     "limit": "limit",
     "price": "pricing",

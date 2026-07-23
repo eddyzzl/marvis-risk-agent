@@ -3,12 +3,13 @@
 The backend endpoint + 404/200 behavior is covered in test_feature_analysis_api;
 this guards the frontend wiring (button + handler). The interactive 下载报告 button
 now lives in the middle-workspace driver-actions panel (planDriverActionsHtml), NOT
-inline on the narrow rail step row — the rail keeps only a "报告已就绪" status badge
-plus a lightweight locate entry that scrolls to (and flashes) that middle card.
+inline on the narrow rail step row. The rail contains steps and status icons only.
 """
 
 from __future__ import annotations
 
+import subprocess
+import textwrap
 from pathlib import Path
 
 _STATIC = Path(__file__).resolve().parents[1] / "marvis" / "static"
@@ -44,9 +45,12 @@ def test_driver_report_download_button_lives_in_middle_panel_with_handler():
     assert 'data-driver-report-download="1"' in actions_body
     assert "plan-step-download" in actions_body
     assert "下载报告" in actions_body
+    assert "特征分析报告" in actions_body
+    assert "模型开发报告" in actions_body
     # The done-report predicate (which report tools count) lives in doneReportStep.
     report_step_body = _slice_function(plan_rail_js, "function doneReportStep")
     assert "generate_model_report" in report_step_body
+    assert "generate_model_reports" in report_step_body
     assert "generate_feature_report" in report_step_body
     assert "generate_risk_analysis_report" in report_step_body
 
@@ -64,3 +68,60 @@ def test_driver_report_download_button_lives_in_middle_panel_with_handler():
     assert "function handleDriverReportDownloadClick" in app_js
     assert "`/api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`" in app_js
     assert "`api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`" not in app_js
+    # Completion messages also carry their own center-stream download card, so
+    # users do not depend on a rail poll or have to hunt elsewhere on the page.
+    manual_js = _read("js/v2/driver_manual_analysis.js")
+    assert "function agentMessageReportDownloadHtml" in app_js
+    assert "metadata?.report_downloads" in app_js
+    assert "reports.map((report)" in app_js
+    assert 'data-agent-report-download' in app_js
+    assert "renderReportDownload: agentMessageReportDownloadHtml" in app_js
+    assert "renderReportDownload(message)" in manual_js
+    assert (
+        "${renderModelDelivery(message)}${renderTables(message)}"
+        "${renderReportDownload(message)}"
+    ) in manual_js
+
+
+def test_agent_message_report_download_renders_every_report_link():
+    app_js = _read("app.js")
+    function_source = _slice_function(app_js, "function agentMessageReportDownloadHtml")
+    script = f"""
+      import assert from "node:assert/strict";
+      const escapeHtml = (value) => String(value);
+      {function_source}
+      const html = agentMessageReportDownloadHtml({{
+        metadata: {{
+          report_download: {{
+            label: "legacy primary",
+            download_url: "/api/tasks/task-1/driver-report/download",
+          }},
+          report_downloads: [
+            {{
+              label: "下载 lgb 模型报告",
+              download_url: "/api/tasks/task-1/driver-reports/id-lgb/download",
+              recipe: "lgb",
+              experiment_id: "exp-lgb",
+            }},
+            {{
+              label: "下载 xgb 模型报告",
+              download_url: "/api/tasks/task-1/driver-reports/id-xgb/download",
+              recipe: "xgb",
+              experiment_id: "exp-xgb",
+            }},
+          ],
+        }},
+      }});
+      assert.equal((html.match(/data-agent-report-download/g) || []).length, 2);
+      assert.equal(html.includes("/driver-reports/id-lgb/download"), true);
+      assert.equal(html.includes("/driver-reports/id-xgb/download"), true);
+      assert.equal(html.includes("legacy primary"), false);
+      assert.equal(html.includes("已生成 2 份分析报告"), true);
+    """
+    subprocess.run(
+        ["node", "--input-type=module", "-e", textwrap.dedent(script)],
+        cwd=_STATIC.parent.parent,
+        check=True,
+        capture_output=True,
+        text=True,
+    )

@@ -208,9 +208,9 @@ class TaskCreate:
     # an explicit StrategyTaskInput may itself contain unanswered fields so setup
     # can pause for clarification without inventing business defaults.
     strategy_input: StrategyTaskInput | None = None
-    # Optional feature metrics the user selected at creation (e.g. "vif"); empty → base
-    # per-feature metrics only (spec §2: 选了才算). Only used for feature_analysis tasks.
-    metrics: list[str] = field(default_factory=list)
+    # None denotes an omitted/legacy metric contract; [] is an explicit choice
+    # to calculate no optional metrics (FEATURE §2: 选了才算).
+    metrics: list[str] | None = None
     # Per-task capability tier (conservative/balanced/aggressive) — controls only the
     # autonomy budget (max_replan_iterations), never effect/determinism/gates/safety.
     # Empty → the driver falls back to the global settings default.
@@ -252,7 +252,7 @@ class TaskRecord:
     sample_weight_col: str = ""
     oot_ks_min: float | None = None
     strategy_input: StrategyTaskInput | None = None
-    metrics: list[str] = field(default_factory=list)
+    metrics: list[str] | None = None
     capability_tier: str = ""
     validation_workflow_version: int = 0
 

@@ -61,6 +61,48 @@ def test_prepare_modeling_frame_uses_existing_split_and_selected_columns(tmp_pat
     assert out["split"].tolist() == ["train", "train", "test", "oot"]
 
 
+def test_prepare_modeling_frame_reads_duckdb_canonical_name_for_blank_parquet_column(
+    tmp_path,
+    monkeypatch,
+):
+    """DuckDB exposes a blank parquet field as C0; selected reads must use that contract."""
+
+    monkeypatch.setattr("marvis.data.backend.LARGE_ROW_THRESHOLD", 2)
+    count = 5_001
+    frame = pd.DataFrame(
+        {
+            "": range(count),
+            "y": [index % 2 for index in range(count)],
+            "split": ["train"] * 3_000 + ["test"] * 1_500 + ["oot"] * 501,
+        }
+    )
+    backend, registry, dataset = _register_frame(tmp_path, frame)
+    assert backend.column_names(registry.resolve_path(dataset.id))[0] == "C0"
+
+    original_read_frame = backend.read_frame
+
+    def reject_frame_materialization(*_args, **_kwargs):
+        raise AssertionError("existing split projection must not materialize a DataFrame")
+
+    monkeypatch.setattr(backend, "read_frame", reject_frame_materialization)
+
+    result = prepare_modeling_frame(
+        registry,
+        backend,
+        dataset.id,
+        target_col="y",
+        feature_cols=["C0"],
+        split_col="split",
+        split_config=None,
+        seed=3,
+    )
+
+    monkeypatch.setattr(backend, "read_frame", original_read_frame)
+    out = backend.read_frame(registry.resolve_path(result.id))
+    assert list(out.columns) == ["C0", "y", "split"]
+    assert out["C0"].head().tolist() == [0, 1, 2, 3, 4]
+
+
 def test_prepare_modeling_frame_audit_failure_rolls_back_dataset_and_file(tmp_path, monkeypatch):
     frame = pd.DataFrame({
         "x1": [1, 2, 3, 4],

@@ -60,18 +60,30 @@ def prepare_modeling_frame(
     requested = _requested_columns(feature_cols, target_col, split_col, split_config, passthrough)
     _assert_columns_exist(dataset, requested)
 
-    frame = backend.read_frame(dataset_path, columns=requested)
+    prepared_columns = _unique([*feature_cols, *passthrough, target_col, split_col or SPLIT_COLUMN])
+    prepared = None
     if split_col:
-        prepared = frame[_unique([*feature_cols, *passthrough, target_col, split_col])].copy()
+        # An existing train/test/OOT column only needs a projection.  Stream it
+        # directly to parquet so wide production datasets are not materialized
+        # twice in a worker process merely to preserve an unchanged split.
+        project_columns = getattr(backend, "project_columns_to_parquet", None)
     else:
+        project_columns = None
+        frame = backend.read_frame(dataset_path, columns=requested)
         prepared = _make_split(frame, split_config, seed=seed)
-        prepared = prepared[_unique([*feature_cols, *passthrough, target_col, SPLIT_COLUMN])].copy()
+        prepared = prepared[prepared_columns].copy()
 
     out_path = _output_path(registry, dataset)
     uow = ArtifactUnitOfWork()
     artifact = uow.stage_file(out_path.parent, out_path.name)
     try:
-        prepared.to_parquet(artifact.path, index=False)
+        if callable(project_columns):
+            project_columns(dataset_path, artifact.path, prepared_columns)
+        else:
+            if prepared is None:
+                frame = backend.read_frame(dataset_path, columns=requested)
+                prepared = frame[prepared_columns].copy()
+            prepared.to_parquet(artifact.path, index=False)
         # PREP-2: the modeling frame is a derived (narrowed/split) view of ``dataset``;
         # carry its accumulated preprocessing chain forward unchanged so training can
         # collect it into the model artifact for scoring-time replay. Staged via the

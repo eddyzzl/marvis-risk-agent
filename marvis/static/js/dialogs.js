@@ -39,7 +39,9 @@ export function renderMaterialUploadSelection({
 } = {}) {
   const status = getElementById("materialUploadStatus");
   if (!status) return;
-  status.textContent = materialUploadSelectionText(files);
+  const selectionText = materialUploadSelectionText(files);
+  status.textContent = selectionText;
+  status.title = files.length ? selectionText : "";
 }
 
 export function createMaterialSourceController({ $, onFilesChanged }) {

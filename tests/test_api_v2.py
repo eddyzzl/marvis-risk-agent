@@ -533,6 +533,12 @@ def test_report_download_routes_are_served_from_dedicated_router():
     assert routes[("/api/tasks/{task_id}/driver-report/download", ("GET",))] == (
         "marvis.routers.reports"
     )
+    assert routes[
+        (
+            "/api/tasks/{task_id}/driver-reports/{report_id}/download",
+            ("GET",),
+        )
+    ] == "marvis.routers.reports"
 
 
 def test_scan_route_is_served_from_dedicated_router():

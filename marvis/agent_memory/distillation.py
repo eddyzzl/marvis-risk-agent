@@ -137,6 +137,11 @@ class DistillationEngine:
     def _group_by_scope(self, entries: list[Any]) -> dict[str, list[Any]]:
         groups: dict[str, list[Any]] = {}
         for entry in entries:
+            if (
+                _entry_category(entry) == "feature_experience"
+                and _entry_confidence(entry) == "low"
+            ):
+                continue
             groups.setdefault(self._scope_key_for(entry), []).append(entry)
         return groups
 
@@ -170,6 +175,10 @@ class DistillationEngine:
                     scope,
                 ]
             )
+        if category == "feature_experience":
+            return f"feature_experience:{payload.get('scope') or 'general'}"
+        if category in {"join_experience", "strategy_experience"}:
+            return f"{category}:{payload.get('scope') or 'general'}"
         if category == "task_experience":
             return f"task_experience:{payload.get('status') or payload.get('failure_type') or 'general'}"
         if category == "user_preference":
@@ -183,6 +192,15 @@ class DistillationEngine:
         members: list[Any],
     ) -> MemoryDistillation | None:
         structured = self._merge_structured(category, members)
+        if category == "feature_experience" and not any(
+            structured.get(field)
+            for field in (
+                "recommended_features",
+                "avoid_features",
+                "inconsistent_features",
+            )
+        ):
+            return None
         support = self._net_support(members)
         summary = self._summarize(category, scope_key, members, structured)
         summary = summary[:MAX_DISTILLED_SUMMARY_CHARS]
@@ -247,6 +265,8 @@ class DistillationEngine:
                 payloads,
                 _distinct_task_support(members),
             )
+        if category == "feature_experience":
+            return _merge_feature_experience(members)
         if category == "user_preference":
             return {
                 "statements": sorted({str(payload.get("preference")) for payload in payloads if payload.get("preference")}),
@@ -267,6 +287,12 @@ class DistillationEngine:
         members: list[Any],
         structured: dict,
     ) -> str:
+        if category == "feature_experience":
+            # Feature advice is an actionable governed fact. A free-form LLM
+            # rewrite could turn an explicitly inconsistent feature back into
+            # a recommendation, so render the conflict-aware structure
+            # deterministically.
+            return _template_summary(category, structured)
         if self._llm_factory is not None:
             try:
                 raw = self._llm_factory().complete(
@@ -400,6 +426,12 @@ def _template_summary(category: str, structured: dict) -> str:
             f"风险分析经验：{products}的{analysis_kind}分析已有"
             f" {structured.get('support', 0)} 条历史记录。"
         )
+    if category == "feature_experience":
+        recommended = "、".join((structured.get("recommended_features") or [])[:5]) or "暂无稳定推荐"
+        avoid = "、".join((structured.get("avoid_features") or [])[:5]) or "暂无重复坑点"
+        inconsistent = "、".join((structured.get("inconsistent_features") or [])[:5])
+        suffix = f"；结论冲突待复核 {inconsistent}" if inconsistent else ""
+        return f"特征经验：历史推荐 {recommended}；历史谨慎项 {avoid}{suffix}。"
     if category == "user_preference":
         statements = structured.get("statements") or []
         return "用户偏好经验：" + ("；".join(statements[:3]) if statements else "有重复偏好记录。")
@@ -408,12 +440,74 @@ def _template_summary(category: str, structured: dict) -> str:
     return f"{category} 经验已归并。"
 
 
+def render_structured_distillation_summary(
+    category: str,
+    structured: dict[str, Any],
+) -> str:
+    """Render a summary from governed structure rather than persisted prose.
+
+    Read paths use this for actionable feature advice so old/free-form
+    distillation text cannot override a conflict recorded in ``structured``.
+    """
+
+    return _template_summary(category, structured)
+
+
 def _first_present(payloads: list[dict[str, Any]], key: str) -> Any:
     for payload in payloads:
         value = payload.get(key)
         if value not in (None, ""):
             return value
     return None
+
+
+def _merge_feature_experience(members: list[Any]) -> dict[str, Any]:
+    """Merge feature advice without turning contradictory history into certainty.
+
+    Recommendations and warnings are counted at distinct-task grain. A feature
+    seen on both sides is deliberately removed from both actionable lists and
+    surfaced as ``inconsistent_features`` until a human or a later governed
+    analysis resolves the conflict.
+    """
+    positive_tasks: dict[str, set[str]] = {}
+    negative_tasks: dict[str, set[str]] = {}
+    scopes: set[str] = set()
+    for member in members:
+        payload = _entry_payload(member)
+        task_key = _entry_source_task_id(member) or _entry_id(member)
+        scope = str(payload.get("scope") or "").strip()
+        if scope:
+            scopes.add(scope)
+        for feature in payload.get("recommended_features") or []:
+            name = str(feature or "").strip()
+            if name:
+                positive_tasks.setdefault(name, set()).add(task_key)
+        for feature in payload.get("avoid_features") or []:
+            name = str(feature or "").strip()
+            if name:
+                negative_tasks.setdefault(name, set()).add(task_key)
+
+    all_features = sorted(set(positive_tasks) | set(negative_tasks))
+    inconsistent = sorted(set(positive_tasks) & set(negative_tasks))
+    recommended = sorted(set(positive_tasks) - set(negative_tasks))
+    avoid = sorted(set(negative_tasks) - set(positive_tasks))
+    feature_support = {
+        feature: {
+            "recommended_task_count": len(positive_tasks.get(feature, set())),
+            "avoid_task_count": len(negative_tasks.get(feature, set())),
+            "recommended_source_tasks": sorted(positive_tasks.get(feature, set())),
+            "avoid_source_tasks": sorted(negative_tasks.get(feature, set())),
+        }
+        for feature in all_features
+    }
+    return {
+        "scopes": sorted(scopes),
+        "recommended_features": recommended,
+        "avoid_features": avoid,
+        "inconsistent_features": inconsistent,
+        "feature_support": feature_support,
+        "support": _distinct_task_support(members),
+    }
 
 
 def _entry_id(entry: Any) -> str:
@@ -443,6 +537,15 @@ def _entry_payload(entry: Any) -> dict[str, Any]:
 
 def _entry_summary(entry: Any) -> str:
     return str(entry.get("summary") if isinstance(entry, dict) else entry.summary)
+
+
+def _entry_confidence(entry: Any) -> str:
+    value = (
+        entry.get("confidence")
+        if isinstance(entry, dict)
+        else getattr(entry, "confidence", "low")
+    )
+    return str(value or "low").strip().lower()
 
 
 def _now_iso() -> str:

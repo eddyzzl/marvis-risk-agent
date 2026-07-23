@@ -13,7 +13,7 @@ const markdownRenderer = (value) => String(value || "");
 export function stripChatInstructions(content) {
   return String(content || "")
     .split("\n")
-    .filter((line) => !/(回复「确认」|确认请回复|要调整可|可直接说明|请确认.*回复)/.test(line))
+    .filter((line) => !/(回复「|确认请回复|Agent 模式请回复|要调整可|可直接说明|请确认.*回复)/.test(line))
     .join("\n")
     .trim();
 }
@@ -52,6 +52,9 @@ export function driverGateHasWidget(message) {
     || meta.screen
     || meta.modeling_setup
     || meta.dedup
+    || meta.join_keys
+    || meta.feature_binning
+    || meta.special_values
     || meta.editable_input_schema?.properties?.adoption_reason
   );
 }
@@ -70,16 +73,22 @@ export function driverGateHasWidget(message) {
 export function driverGateBodyHtml(message, renderers = {}, options = {}) {
   const renderC1Form = renderers.renderC1Form || emptyRenderer;
   const renderDedupPicker = renderers.renderDedupPicker || emptyRenderer;
+  const renderJoinKeyPicker = renderers.renderJoinKeyPicker || emptyRenderer;
   const renderModelingSetup = renderers.renderModelingSetup || emptyRenderer;
   const renderScreenTable = renderers.renderScreenTable || emptyRenderer;
   const renderAdoptionGate = renderers.renderAdoptionGate || emptyRenderer;
+  const renderFeatureBinning = renderers.renderFeatureBinning || emptyRenderer;
+  const renderSpecialValues = renderers.renderSpecialValues || emptyRenderer;
   const renderTables = renderers.renderTables || emptyRenderer;
   const meta = message?.metadata || {};
   const interactive = options.interactive !== false;
   if (meta.join_c1) return renderC1Form(message, { interactive });
   if (meta.screen) return `${renderModelingSetup(message, { interactive })}${renderScreenTable(message, { interactive })}`;
   if (meta.modeling_setup) return `${renderModelingSetup(message, { interactive })}${renderTables(message)}`;
+  if (meta.join_keys) return `${renderTables(message)}${renderJoinKeyPicker(message, { interactive })}`;
   if (meta.dedup) return `${renderTables(message)}${renderDedupPicker(message, { interactive })}`;
+  if (meta.feature_binning) return `${renderTables(message)}${renderFeatureBinning(message, { interactive })}`;
+  if (meta.special_values) return `${renderTables(message)}${renderSpecialValues(message, { interactive })}`;
   if (meta.editable_input_schema?.properties?.adoption_reason) {
     return `${renderTables(message)}${renderAdoptionGate(message, { interactive })}`;
   }
@@ -94,6 +103,8 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
   const renderMarkdown = renderers.renderAgentMarkdown || markdownRenderer;
   const renderTables = renderers.renderTables || emptyRenderer;
   const renderModelDelivery = renderers.renderModelDelivery || emptyRenderer;
+  const renderResultDataset = renderers.renderResultDataset || emptyRenderer;
+  const renderReportDownload = renderers.renderReportDownload || emptyRenderer;
   const renderStrategyClarification = renderers.renderStrategyClarification || emptyRenderer;
   // The plain-gate confirm control (a gate with no structured widget). In manual
   // mode ALL interactive controls live in this middle region now, so the pending
@@ -163,16 +174,27 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
       continue;
     }
     if (meta.modeling_setup) {
-      const interactive = meta.kind === "gate";
-      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive })}</section>`);
+      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive: isPendingGate })}</section>`);
+      continue;
+    }
+    if (meta.join_keys) {
+      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive: isPendingGate })}</section>`);
       continue;
     }
     if (meta.dedup) {
-      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers)}</section>`);
+      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive: isPendingGate })}</section>`);
+      continue;
+    }
+    if (meta.feature_binning) {
+      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive: isPendingGate })}</section>`);
+      continue;
+    }
+    if (meta.special_values) {
+      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${driverGateBodyHtml(message, renderers, { interactive: isPendingGate })}</section>`);
       continue;
     }
     if (meta.model_delivery) {
-      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${renderModelDelivery(message)}${renderTables(message)}</section>`);
+      sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${renderModelDelivery(message)}${renderTables(message)}${renderReportDownload(message)}</section>`);
       continue;
     }
     const tables = renderTables(message);
@@ -182,7 +204,7 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
     const confirm = isPendingGate ? renderGateConfirm(message) : "";
     const hasIngestNotices = Array.isArray(meta.ingest_notices) && meta.ingest_notices.length > 0;
     if (!String(message.content || "").trim() && !tables && !confirm && !hasIngestNotices) continue;
-    sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${tables}${confirm}</section>`);
+    sections.push(`<section class="${sectionClass}"${gateAttr}>${intro}${tables}${renderResultDataset(message)}${renderReportDownload(message)}${confirm}</section>`);
   }
   return sections.join("") || '<div class="plan-rail-empty">尚无分析结果，请在右侧步骤栏操作。</div>';
 }

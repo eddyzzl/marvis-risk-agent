@@ -20,11 +20,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from marvis.agent.data_setup import reconcile_source_data_tables
 from marvis.data.data_dictionary import resolve_data_dictionary_id
 from marvis.agent.join_setup import propose_roles
 from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole
-from marvis.files import scan_source_dir
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling.prepare import DEFAULT_OOT_SIZE
 
@@ -125,7 +125,23 @@ class ModelingProposal:
 # an explicit opt-in only -- never part of any DEFAULT recipe list (see
 # _default_recipe_for_target_type), selectable by naming it explicitly in
 # `recipes`.
-_SUPPORTED_RECIPES = ("lgb", "xgb", "catboost", "lr", "scorecard", "mlp", "lgb_regressor", "lgb_multiclass", "ensemble")
+_SUPPORTED_RECIPES = (
+    "lgb",
+    "xgb",
+    "catboost",
+    "lr",
+    "scorecard",
+    "mlp",
+    "ensemble",
+    "lgb_regressor",
+    "xgb_regressor",
+    "lr_regressor",
+    "mlp_regressor",
+    "lgb_multiclass",
+    "xgb_multiclass",
+    "lr_multiclass",
+    "mlp_multiclass",
+)
 _BINARY_RECIPES = frozenset({"lgb", "xgb", "catboost", "lr", "scorecard", "mlp", "ensemble"})
 _WEIGHT_NAME_HINTS = ("sample_weight", "sampleweight", "weight", "样本权重", "权重")
 # LT-14: a weight column strongly correlated with the target is a leakage red
@@ -673,12 +689,13 @@ def _generate_split(
 
 
 def _resolve_datasets(registry, task_id: str, source_dir):
-    datasets = [d for d in registry.list_for_task(task_id) if d.role in _DATA_ROLES]
-    if not datasets and source_dir is not None:
-        for artifact in scan_source_dir(Path(source_dir)):
-            if artifact.role == FileRole.SAMPLE:
-                registry.register_from_upload(task_id, Path(artifact.path), role="sample")
-        datasets = [d for d in registry.list_for_task(task_id) if d.role in _DATA_ROLES]
+    datasets = reconcile_source_data_tables(
+        registry,
+        task_id,
+        source_dir,
+        accepted_roles=_DATA_ROLES,
+        registered_role="sample",
+    )
     if not datasets:
         raise ModelingSetupError(f"建模未找到样本文件:{source_dir}")
     return sorted(

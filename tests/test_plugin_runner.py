@@ -1,3 +1,5 @@
+import asyncio
+import io
 import json
 import os
 import signal
@@ -14,6 +16,7 @@ import pytest
 
 from marvis.db import PluginRepository, init_db
 from marvis.governance.errors import ApprovalBindingError, ApprovalStateError
+from marvis.job_cancellation import JobCancellationToken
 from marvis.plugins.contracts import PROTOCOL_VERSION, WORKER_RESULT_SENTINEL
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import (
@@ -27,8 +30,10 @@ from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import (
     _WORKER_ENV_ALLOWLIST,
     _parse_worker_result,
+    _run_worker,
     ToolContext,
     ToolRunner,
+    WorkerTimeoutExpired,
 )
 
 
@@ -67,6 +72,67 @@ def _runtime(tmp_path):
     return runner, repo
 
 
+def test_train_models_dispatch_uses_manifest_timeout_for_wall_cpu_and_audit(
+    tmp_path,
+    monkeypatch,
+):
+    """A heavy modeling batch must never fall back to the generic 600s ceiling."""
+
+    runner, repo = _runtime(tmp_path)
+    observed = {}
+    monkeypatch.setattr("marvis.plugins.runner._available_cpu_count", lambda: 1)
+
+    def fake_run_worker(_python, job, *, timeout, **_kwargs):
+        observed["timeout"] = timeout
+        observed["cpu_limit_seconds"] = job["cpu_limit_seconds"]
+        output = {
+            "experiments": [
+                {"experiment_id": "exp-1", "recipe": "lgb", "metrics": {}}
+            ],
+            "experiment_ids": ["exp-1"],
+            "best_experiment_id": "exp-1",
+            "best_recipe": "lgb",
+            "target_type": "binary",
+            "selection_metric": "test_ks(overfit-penalized)",
+            "eval_metric": "ks_auc",
+            "failed": [],
+        }
+        payload = {
+            "ok": True,
+            "worker_protocol_version": PROTOCOL_VERSION,
+            "output": output,
+        }
+        return subprocess.CompletedProcess(
+            ["worker"],
+            0,
+            stdout=WORKER_RESULT_SENTINEL + json.dumps(payload),
+            stderr="",
+        )
+
+    monkeypatch.setattr("marvis.plugins.runner._run_worker", fake_run_worker)
+    result = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": "dataset-1",
+            "recipes": ["lgb", "xgb", "catboost"],
+            "features": ["x1"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "seed": 23,
+        },
+        task_id="task-1",
+    )
+
+    expected = runner._tools.resolve(ToolRef("modeling", "train_models")).timeout_seconds
+    assert result.ok is True, result.error
+    assert expected > 600
+    assert observed["timeout"] == expected
+    assert observed["cpu_limit_seconds"] == expected + 2
+    started = repo.list_audit(kind="tool.invoke.started")[-1]
+    assert started["detail"]["timeout_seconds"] == expected
+
+
 def test_tool_runner_invokes_sample_echo_in_subprocess(tmp_path):
     runner = _runner(tmp_path)
 
@@ -76,6 +142,24 @@ def test_tool_runner_invokes_sample_echo_in_subprocess(tmp_path):
     assert result.output == {"echoed": "hi"}
     assert result.error is None
     assert result.duration_ms >= 0
+
+
+def test_progress_path_setup_failure_does_not_fail_tool(tmp_path, monkeypatch):
+    runner = _runner(tmp_path)
+    monkeypatch.setattr(
+        "marvis.plugins.runner._new_progress_path",
+        lambda _workspace: (_ for _ in ()).throw(OSError("read only")),
+    )
+
+    result = runner.invoke(
+        ToolRef("_sample", "echo"),
+        {"message": "hi"},
+        task_id="task-1",
+        progress_callback=lambda _payload: None,
+    )
+
+    assert result.ok is True
+    assert result.output == {"echoed": "hi"}
 
 
 def test_tool_runner_fails_closed_before_worker_for_protected_tool_without_context(
@@ -732,6 +816,32 @@ def test_tool_context_load_dataset_path_rejects_parent_escape(tmp_path):
         ctx.load_dataset_path("../outside.parquet")
 
 
+def test_tool_context_reports_progress_atomically_and_never_raises(tmp_path):
+    workspace = tmp_path / "workspace"
+    progress_path = workspace / ".runtime" / "progress" / "run.json"
+    ctx = ToolContext(
+        task_id="task-1",
+        seed=None,
+        datasets_root=tmp_path / "datasets",
+        workspace=workspace,
+        progress_path=progress_path,
+    )
+
+    assert ctx.report_progress({"kind": "model_tuning", "trial": 1}) is True
+    assert json.loads(progress_path.read_text(encoding="utf-8"))["trial"] == 1
+    assert not progress_path.with_name("run.json.tmp").exists()
+    assert ctx.report_progress({"not_json": object()}) is False
+
+    escaped = ToolContext(
+        task_id="task-1",
+        seed=None,
+        datasets_root=tmp_path / "datasets",
+        workspace=workspace,
+        progress_path=tmp_path / "outside.json",
+    )
+    assert escaped.report_progress({"kind": "model_tuning"}) is False
+
+
 def test_worker_tool_context_receives_only_opaque_effect_execution_metadata(
     tmp_path,
     monkeypatch,
@@ -780,9 +890,99 @@ def test_worker_tool_context_receives_only_opaque_effect_execution_metadata(
     }
 
 
+def test_builtin_worker_context_bridges_progress_path(tmp_path, monkeypatch):
+    from marvis.plugins import subprocess_worker
+
+    progress_path = tmp_path / "workspace" / ".runtime" / "progress" / "run.json"
+
+    def tool(_inputs, ctx):
+        assert ctx.report_progress({
+            "kind": "model_tuning",
+            "algorithm": "lgb",
+            "trial": 2,
+        }) is True
+        return {"ok": True}
+
+    monkeypatch.setattr(subprocess_worker, "_install_network_guard", lambda _effects: None)
+    monkeypatch.setattr(subprocess_worker, "_should_install_file_guard", lambda _job: False)
+    monkeypatch.setattr(
+        subprocess_worker,
+        "_load_module",
+        lambda _job: SimpleNamespace(run=tool),
+    )
+
+    result = subprocess_worker._run_tool({
+        "module": "modeling.train_tools",
+        "entrypoint": "run",
+        "inputs": {},
+        "task_id": "task-1",
+        "seed": None,
+        "datasets_root": str(tmp_path / "datasets"),
+        "workspace": str(tmp_path / "workspace"),
+        "plugin_paths": [],
+        "side_effects": [],
+        "builtin": True,
+        "progress_path": str(progress_path),
+    })
+
+    assert result == {"ok": True}
+    assert json.loads(progress_path.read_text(encoding="utf-8"))["trial"] == 2
+
+
+def test_worker_protocol_promotes_nested_resource_limits(monkeypatch):
+    from marvis.plugins import subprocess_worker
+
+    nested_limits = {
+        "cpu_limit_seconds": 123,
+        "cpu_limit_exceeded": True,
+        "termination_signal": "SIGXCPU",
+    }
+
+    class NestedResourceError(Exception):
+        def to_detail(self):
+            return {
+                "kind": "resource_limit",
+                "subkind": "isolated_recipe_cpu_limit",
+                "resource_limits": nested_limits,
+            }
+
+    emitted = []
+    raw_job = json.dumps({"protocol_version": PROTOCOL_VERSION}).encode("utf-8")
+    monkeypatch.setattr(
+        subprocess_worker.sys,
+        "stdin",
+        SimpleNamespace(buffer=io.BytesIO(raw_job)),
+    )
+    monkeypatch.setattr(
+        subprocess_worker,
+        "_apply_resource_limits",
+        lambda *_args, **_kwargs: {"outer": True},
+    )
+    monkeypatch.setattr(
+        subprocess_worker,
+        "_run_tool",
+        lambda _job: (_ for _ in ()).throw(NestedResourceError("limit")),
+    )
+    monkeypatch.setattr(subprocess_worker, "_emit", emitted.append)
+    monkeypatch.setattr(
+        subprocess_worker,
+        "_hard_exit",
+        lambda code: (_ for _ in ()).throw(SystemExit(code)),
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        subprocess_worker.worker_main()
+
+    assert raised.value.code == 1
+    assert emitted[0]["error_kind"] == "resource_limit"
+    assert emitted[0]["error_detail"]["subkind"] == "isolated_recipe_cpu_limit"
+    assert emitted[0]["resource_limits"] == nested_limits
+
+
 def test_tool_runner_starts_worker_with_explicit_utf8_encoding(tmp_path, monkeypatch):
     runner = _runner(tmp_path)
     calls = []
+    monkeypatch.setattr("marvis.plugins.runner._available_cpu_count", lambda: 4)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
     monkeypatch.setenv("PYTHONPATH", "/tmp/shadow")
     monkeypatch.setenv("MARVIS_PROBE_URL", "http://127.0.0.1:9")
@@ -825,9 +1025,43 @@ def test_tool_runner_starts_worker_with_explicit_utf8_encoding(tmp_path, monkeyp
     assert "PYTHONPATH" not in calls[0]["kwargs"]["env"]
     job = json.loads(calls[1]["input"])
     assert job["protocol_version"] == PROTOCOL_VERSION
-    assert job["cpu_limit_seconds"] == 12
+    # RLIMIT_CPU counts aggregate CPU time across native-library threads,
+    # whereas the manifest timeout is wall-clock time.  Give a worker enough
+    # aggregate CPU budget to use every logical core for the full wall budget.
+    assert job["cpu_limit_seconds"] == 48
     assert job["file_size_limit_mb"] == 2048
     assert job["side_effects"] == []
+
+
+def test_tool_runner_classifies_sigxcpu_as_resource_limit(tmp_path, monkeypatch):
+    runner = _runner(tmp_path)
+    monkeypatch.setattr("marvis.plugins.runner._available_cpu_count", lambda: 4)
+    monkeypatch.setattr(
+        "marvis.plugins.runner._run_worker",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=[sys.executable],
+            returncode=-signal.SIGXCPU,
+            stdout="",
+            stderr="",
+        ),
+    )
+
+    result = runner.invoke(
+        ToolRef("_sample", "echo"),
+        {"message": "hi"},
+        task_id="task-1",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "resource_limit"
+    assert "SIGXCPU" in result.error
+    assert "CPU" in result.error
+    assert result.resource_limits == {
+        "cpu_limit_seconds": 48,
+        "cpu_limit_exceeded": True,
+        "termination_signal": "SIGXCPU",
+        "worker_returncode": -signal.SIGXCPU,
+    }
 
 
 def test_tool_runner_records_invocation_audit(tmp_path):
@@ -1893,11 +2127,18 @@ def test_tool_runner_rejects_output_schema_mismatch(tmp_path):
 def test_tool_runner_kills_timed_out_worker(tmp_path):
     runner = _runner(tmp_path)
 
-    result = runner.invoke(ToolRef("_sample", "sleep"), {"seconds": 2}, task_id="task-1")
+    result = runner.invoke(
+        ToolRef("_sample", "sleep"),
+        {"seconds": 2},
+        task_id="task-1",
+        progress_callback=lambda _payload: None,
+    )
 
     assert result.ok is False
     assert result.error_kind == "timeout"
     assert "timed out" in result.error
+    progress_dir = tmp_path / "workspace" / ".runtime" / "progress"
+    assert list(progress_dir.glob("*")) == []
 
 
 def test_tool_runner_kills_worker_process_group_on_timeout(tmp_path, monkeypatch):
@@ -1934,6 +2175,719 @@ def test_tool_runner_kills_worker_process_group_on_timeout(tmp_path, monkeypatch
     assert result.ok is False
     assert result.error_kind == "timeout"
     assert killed == [(4321, signal.SIGKILL)]
+
+
+def test_run_worker_delivers_progress_before_exit_and_callback_errors_are_isolated(
+    tmp_path,
+    monkeypatch,
+):
+    progress_path = tmp_path / "progress.json"
+    callback_seen = threading.Event()
+    events = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = 0
+
+        def __init__(self, args):
+            self.args = args
+
+        def communicate(self, input=None, timeout=None):
+            progress_path.write_text(
+                json.dumps({
+                    "kind": "model_tuning",
+                    "algorithm": "xgb",
+                    "trial": 1,
+                    "trial_total": 2,
+                }),
+                encoding="utf-8",
+            )
+            assert callback_seen.wait(2), "watcher did not publish while worker was running"
+            progress_path.write_text(
+                json.dumps({
+                    "kind": "model_tuning",
+                    "algorithm": "xgb",
+                    "trial": 2,
+                    "trial_total": 2,
+                }),
+                encoding="utf-8",
+            )
+            return "out", "err"
+
+        def poll(self):
+            return self.returncode
+
+    class FakeMonitor:
+        memory_limit_exceeded = False
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def callback(payload):
+        events.append(payload)
+        callback_seen.set()
+        raise RuntimeError("display failed")
+
+    monkeypatch.setattr(
+        "marvis.plugins.runner.subprocess.Popen",
+        lambda args, **_kwargs: FakeProcess(args),
+    )
+    monkeypatch.setattr("marvis.plugins.runner.ProcessTreeResourceMonitor", FakeMonitor)
+
+    completed = _run_worker(
+        sys.executable,
+        {"protocol_version": PROTOCOL_VERSION},
+        timeout=10,
+        progress_path=progress_path,
+        progress_callback=callback,
+    )
+
+    assert completed.returncode == 0
+    assert [event["trial"] for event in events] == [1, 2]
+    assert not progress_path.exists()
+    assert not progress_path.with_name("progress.json.tmp").exists()
+
+
+def test_run_worker_cancellation_terminates_and_reaps_worker_tree(monkeypatch):
+    """A cooperative job cancellation must wake a blocked communicate()."""
+
+    token = JobCancellationToken(job_id="driver-job-1")
+    worker_started = threading.Event()
+    worker_killed = threading.Event()
+    processes = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = None
+
+        def __init__(self, args):
+            self.args = args
+            self.communicate_calls = 0
+
+        def communicate(self, input=None, timeout=None):
+            self.communicate_calls += 1
+            worker_started.set()
+            assert worker_killed.wait(2), "cancellation did not terminate worker"
+            self.returncode = -signal.SIGTERM
+            return "", ""
+
+        def poll(self):
+            return self.returncode
+
+    class FakeMonitor:
+        memory_limit_exceeded = False
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def snapshot(self):
+            return {}
+
+    def fake_popen(args, **_kwargs):
+        process = FakeProcess(args)
+        processes.append(process)
+        return process
+
+    def fake_terminate(process, *, owns_process_group):
+        assert owns_process_group is True
+        worker_killed.set()
+        process.returncode = -signal.SIGTERM
+
+    monkeypatch.setattr("marvis.plugins.runner.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("marvis.plugins.runner.ProcessTreeResourceMonitor", FakeMonitor)
+    monkeypatch.setattr("marvis.plugins.runner._terminate_worker_process", fake_terminate)
+    monkeypatch.setattr(
+        "marvis.plugins.runner._bounded_reap_worker",
+        lambda process, **_kwargs: ("", ""),
+    )
+
+    canceller = threading.Thread(
+        target=lambda: (worker_started.wait(2), token.cancel()),
+        daemon=True,
+    )
+    canceller.start()
+    with pytest.raises(Exception, match="job cancelled"):
+        _run_worker(
+            sys.executable,
+            {"protocol_version": PROTOCOL_VERSION},
+            timeout=30,
+            cancellation_check=token.raise_if_cancelled,
+        )
+    canceller.join(timeout=2)
+
+    assert worker_killed.is_set()
+    assert processes[0].communicate_calls >= 1
+
+
+def test_tool_runner_returns_audited_cancelled_result(tmp_path, monkeypatch):
+    token = JobCancellationToken(job_id="driver-job-1")
+    token.cancel()
+    runner, repo = _runtime(tmp_path)
+
+    result = runner.invoke(
+        ToolRef("_sample", "echo"),
+        {"message": "hi"},
+        task_id="task-1",
+        cancellation_check=token.raise_if_cancelled,
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "cancelled"
+    assert result.error_detail["kind"] == "user_cancelled"
+    audits = repo.list_audit(kind="tool.invoke")
+    assert audits[-1]["outcome"] == "failed"
+    assert audits[-1]["detail"]["error_kind"] == "cancelled"
+
+
+@pytest.mark.parametrize("interruption_type", [KeyboardInterrupt, asyncio.CancelledError])
+def test_run_worker_kills_and_reaps_process_tree_on_interruption(
+    tmp_path,
+    monkeypatch,
+    interruption_type,
+):
+    interruption = interruption_type()
+    killed = []
+    processes = []
+    progress_path = tmp_path / "progress.json"
+
+    class FakeProcess:
+        pid = 4321
+        returncode = None
+
+        def __init__(self, args):
+            self.args = args
+            self.communicate_calls = 0
+
+        def communicate(self, input=None, timeout=None):
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                progress_path.write_text(
+                    json.dumps({"kind": "model_tuning", "trial": 1}),
+                    encoding="utf-8",
+                )
+                raise interruption
+            return "", ""
+
+        def poll(self):
+            return self.returncode
+
+    class FakeMonitor:
+        memory_limit_exceeded = False
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_popen(args, **_kwargs):
+        process = FakeProcess(args)
+        processes.append(process)
+        return process
+
+    def fake_kill_worker_tree(process):
+        killed.append(process)
+        process.returncode = -signal.SIGKILL
+
+    monkeypatch.setattr("marvis.plugins.runner.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("marvis.plugins.runner.ProcessTreeResourceMonitor", FakeMonitor)
+    monkeypatch.setattr("marvis.plugins.runner._kill_worker_tree", fake_kill_worker_tree)
+
+    with pytest.raises(interruption_type) as raised:
+        _run_worker(
+            sys.executable,
+            {"protocol_version": PROTOCOL_VERSION},
+            timeout=10,
+            progress_path=progress_path,
+            progress_callback=lambda _payload: None,
+        )
+
+    assert raised.value is interruption
+    assert killed == processes
+    assert processes[0].communicate_calls == 2
+    assert not progress_path.exists()
+    assert not progress_path.with_name("progress.json.tmp").exists()
+
+
+def test_run_worker_nested_mode_kills_child_without_killing_parent_group(monkeypatch):
+    """Nested recipe workers share the parent group for host-level cleanup.
+
+    Local interruption must therefore kill only the child process; using
+    ``killpg`` here would kill the aggregate worker that is responsible for
+    checkpointing the completed recipes.
+    """
+
+    process_holder = []
+    popen_kwargs = {}
+    terminated = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = None
+
+        def __init__(self, args):
+            self.args = args
+            self.communicate_calls = 0
+            self.kill_calls = 0
+
+        def communicate(self, input=None, timeout=None):
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise KeyboardInterrupt()
+            return "", ""
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.kill_calls += 1
+            self.returncode = -signal.SIGKILL
+
+    class FakeMonitor:
+        memory_limit_exceeded = False
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_popen(args, **kwargs):
+        popen_kwargs.update(kwargs)
+        process = FakeProcess(args)
+        process_holder.append(process)
+        return process
+
+    monkeypatch.setattr("marvis.plugins.runner.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("marvis.plugins.runner.ProcessTreeResourceMonitor", FakeMonitor)
+    monkeypatch.setattr(
+        "marvis.plugins.runner._kill_worker_tree",
+        lambda _process: (_ for _ in ()).throw(AssertionError("must not kill parent group")),
+    )
+    monkeypatch.setattr(
+        "marvis.plugins.runner.terminate_process_tree_by_pid",
+        lambda pid, **_kwargs: terminated.append(pid) or True,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_worker(
+            sys.executable,
+            {"protocol_version": PROTOCOL_VERSION},
+            timeout=10,
+            start_new_session=False,
+        )
+
+    assert popen_kwargs["start_new_session"] is False
+    assert terminated == [4321]
+    assert process_holder[0].kill_calls == 0
+    assert process_holder[0].communicate_calls == 2
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-tree regression")
+def test_nested_termination_kills_grandchild_holding_worker_pipes_with_bounded_reap():
+    from marvis.plugins import runner as runner_module
+
+    grandchild_code = "import time; time.sleep(60)"
+    parent_code = (
+        "import subprocess,sys,time; "
+        "child=subprocess.Popen([sys.executable,'-c',sys.argv[1]]); "
+        "print(child.pid, flush=True); time.sleep(60)"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", parent_code, grandchild_code],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        start_new_session=False,
+    )
+    assert process.stdout is not None
+    grandchild_pid = int(process.stdout.readline().strip())
+    started = time.monotonic()
+    try:
+        runner_module._terminate_worker_process(
+            process,
+            owns_process_group=False,
+        )
+        runner_module._bounded_reap_worker(process, timeout_seconds=2.0)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+        try:
+            grandchild = psutil.Process(grandchild_pid)
+            if grandchild.is_running() and grandchild.status() != psutil.STATUS_ZOMBIE:
+                grandchild.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+    assert time.monotonic() - started < 5.0
+    assert process.poll() is not None
+    try:
+        grandchild = psutil.Process(grandchild_pid)
+        assert not grandchild.is_running() or grandchild.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group regression")
+def test_run_worker_reaps_group_when_crashed_leader_left_live_grandchild(tmp_path):
+    """A native-crashed worker leader must not make group cleanup a no-op.
+
+    The real worker dies by signal after spawning a child that inherits its
+    stdout/stderr pipes.  ``communicate`` therefore reaches the host timeout
+    with ``poll() != None`` for the leader while the descendant is still live —
+    the exact shape that previously skipped ``killpg`` and orphaned learners.
+    """
+
+    module_path = tmp_path / "crash_with_grandchild.py"
+    pid_path = tmp_path / "grandchild.pid"
+    module_path.write_text(
+        "\n".join(
+            [
+                "import os",
+                "from pathlib import Path",
+                "import signal",
+                "import subprocess",
+                "import sys",
+                "",
+                "def run(inputs, _ctx):",
+                "    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])",
+                "    Path(inputs['pid_path']).write_text(str(child.pid), encoding='utf-8')",
+                "    os.kill(os.getpid(), signal.SIGKILL)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    job = {
+        "protocol_version": PROTOCOL_VERSION,
+        "module": "crash_with_grandchild",
+        "entrypoint": "run",
+        "inputs": {"pid_path": str(pid_path)},
+        "task_id": "task-crash",
+        "seed": 1,
+        "datasets_root": str(tmp_path / "datasets"),
+        "workspace": str(tmp_path),
+        "memory_limit_mb": 256,
+        "cpu_limit_seconds": 60,
+        "file_size_limit_mb": 16,
+        "plugin_paths": [str(tmp_path)],
+        "side_effects": ["process:spawn"],
+        "builtin": True,
+    }
+
+    grandchild_pid = None
+    try:
+        with pytest.raises(WorkerTimeoutExpired):
+            _run_worker(sys.executable, job, timeout=1, start_new_session=True)
+        assert pid_path.exists(), "native-crash fixture never spawned its descendant"
+        grandchild_pid = int(pid_path.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and psutil.pid_exists(grandchild_pid):
+            try:
+                child = psutil.Process(grandchild_pid)
+                if child.status() == psutil.STATUS_ZOMBIE:
+                    break
+            except psutil.NoSuchProcess:
+                break
+            time.sleep(0.02)
+        if psutil.pid_exists(grandchild_pid):
+            child = psutil.Process(grandchild_pid)
+            assert child.status() == psutil.STATUS_ZOMBIE
+    finally:
+        if grandchild_pid is not None:
+            try:
+                child = psutil.Process(grandchild_pid)
+                if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                    child.kill()
+            except psutil.NoSuchProcess:
+                pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group regression")
+def test_run_worker_reaps_nested_recipe_immediately_after_aggregate_signal(tmp_path):
+    """Signal cleanup must run on EOF, without waiting for the host timeout.
+
+    The aggregate owns the host-facing stdout pipe, while its nested recipe has
+    independent ``PIPE`` streams just like ``run_tuning_recipe_isolated``.  Once
+    the aggregate dies the host sees EOF immediately even though recipe and
+    grandchild remain live in its process group.
+    """
+
+    module_path = tmp_path / "crash_aggregate_with_recipe.py"
+    recipe_pid_path = tmp_path / "recipe.pid"
+    grandchild_pid_path = tmp_path / "recipe-grandchild.pid"
+    module_path.write_text(
+        "\n".join(
+            [
+                "import os",
+                "from pathlib import Path",
+                "import signal",
+                "import subprocess",
+                "import sys",
+                "import time",
+                "",
+                "def run(inputs, _ctx):",
+                "    recipe_code = (",
+                "        \"import subprocess,sys,time; from pathlib import Path; \"",
+                "        \"child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); \"",
+                "        \"Path(sys.argv[1]).write_text(str(child.pid),encoding='utf-8'); time.sleep(60)\"",
+                "    )",
+                "    recipe = subprocess.Popen(",
+                "        [sys.executable, '-c', ''.join(recipe_code), inputs['grandchild_pid_path']],",
+                "        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,",
+                "    )",
+                "    Path(inputs['recipe_pid_path']).write_text(str(recipe.pid), encoding='utf-8')",
+                "    deadline = time.monotonic() + 5",
+                "    while not Path(inputs['grandchild_pid_path']).exists():",
+                "        if time.monotonic() >= deadline: raise RuntimeError('grandchild did not start')",
+                "        time.sleep(0.01)",
+                "    os.kill(os.getpid(), signal.SIGKILL)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    job = {
+        "protocol_version": PROTOCOL_VERSION,
+        "module": "crash_aggregate_with_recipe",
+        "entrypoint": "run",
+        "inputs": {
+            "recipe_pid_path": str(recipe_pid_path),
+            "grandchild_pid_path": str(grandchild_pid_path),
+        },
+        "task_id": "task-aggregate-crash",
+        "seed": 1,
+        "datasets_root": str(tmp_path / "datasets"),
+        "workspace": str(tmp_path),
+        "memory_limit_mb": 256,
+        "cpu_limit_seconds": 60,
+        "file_size_limit_mb": 16,
+        "plugin_paths": [str(tmp_path)],
+        "side_effects": ["process:spawn"],
+        "builtin": True,
+    }
+
+    descendants = []
+    started = time.monotonic()
+    try:
+        completed = _run_worker(sys.executable, job, timeout=30, start_new_session=True)
+        assert completed.returncode == -signal.SIGKILL
+        assert time.monotonic() - started < 5.0
+        descendants = [
+            int(recipe_pid_path.read_text(encoding="utf-8")),
+            int(grandchild_pid_path.read_text(encoding="utf-8")),
+        ]
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            live = []
+            for pid in descendants:
+                try:
+                    process = psutil.Process(pid)
+                    if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                        live.append(pid)
+                except psutil.NoSuchProcess:
+                    pass
+            if not live:
+                break
+            time.sleep(0.02)
+        for pid in descendants:
+            try:
+                process = psutil.Process(pid)
+                assert not process.is_running() or process.status() == psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                pass
+    finally:
+        for pid in descendants:
+            try:
+                process = psutil.Process(pid)
+                if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                    process.kill()
+            except psutil.NoSuchProcess:
+                pass
+
+
+def test_cached_worker_group_cleanup_refuses_host_process_group(monkeypatch):
+    from marvis.plugins import runner as runner_module
+
+    killed = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = -signal.SIGKILL
+        _marvis_process_group_id = os.getpgrp()
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(runner_module.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    runner_module._kill_worker_tree(FakeProcess())
+
+    assert killed == []
+
+
+def test_nested_worker_windows_fallback_targets_only_child_tree(monkeypatch):
+    from marvis.plugins import runner as runner_module
+
+    taskkill = []
+
+    class FakeProcess:
+        pid = 4321
+
+        @staticmethod
+        def poll():
+            return None
+
+        @staticmethod
+        def kill():
+            raise AssertionError("Windows tree fallback must use taskkill /T")
+
+    monkeypatch.setattr(runner_module.os, "name", "nt")
+    monkeypatch.setattr(
+        runner_module,
+        "terminate_process_tree_by_pid",
+        lambda _pid, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_taskkill_worker_tree",
+        lambda pid: taskkill.append(pid),
+    )
+
+    runner_module._terminate_worker_process(
+        FakeProcess(),
+        owns_process_group=False,
+    )
+
+    assert taskkill == [4321]
+
+
+def test_bounded_reap_closes_inherited_pipes_after_second_timeout():
+    from marvis.plugins import runner as runner_module
+
+    streams = [SimpleNamespace(close_calls=0) for _ in range(3)]
+    for stream in streams:
+        stream.close = lambda stream=stream: setattr(
+            stream,
+            "close_calls",
+            stream.close_calls + 1,
+        )
+
+    class FakeProcess:
+        stdin, stdout, stderr = streams
+
+        def __init__(self):
+            self.kill_calls = 0
+            self.wait_calls = 0
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(
+                ["worker"],
+                timeout,
+                output="partial-out",
+                stderr="partial-err",
+            )
+
+        def kill(self):
+            self.kill_calls += 1
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            return -signal.SIGKILL
+
+    process = FakeProcess()
+    stdout, stderr = runner_module._bounded_reap_worker(
+        process,
+        timeout_seconds=0.05,
+    )
+
+    assert (stdout, stderr) == ("partial-out", "partial-err")
+    assert process.kill_calls == 1
+    assert process.wait_calls == 1
+    assert [stream.close_calls for stream in streams] == [1, 1, 1]
+
+
+def test_nested_sigxcpu_maps_to_typed_resource_limit():
+    from marvis.plugins import runner as runner_module
+
+    if not hasattr(signal, "SIGXCPU"):
+        pytest.skip("SIGXCPU is POSIX-only")
+    completed = subprocess.CompletedProcess(
+        ["worker"],
+        -int(signal.SIGXCPU),
+        stdout="",
+        stderr="",
+    )
+
+    error = runner_module._nested_worker_signal_resource_error(
+        completed,
+        cpu_limit_seconds=123,
+    )
+
+    assert isinstance(error, runner_module.WorkerResourceLimitExceeded)
+    assert error.resource_usage["termination_signal"] == "SIGXCPU"
+    assert error.error_detail["kind"] == "worker_cpu_limit"
+
+
+def test_stale_progress_sweep_is_bounded_to_host_owned_uuid_files(tmp_path):
+    from marvis.plugins import runner as runner_module
+
+    progress = tmp_path / ".runtime" / "progress"
+    progress.mkdir(parents=True)
+    old_json = progress / ("a" * 32 + ".json")
+    old_journal = progress / ("b" * 32 + ".jsonl")
+    recent = progress / ("c" * 32 + ".json")
+    unrelated = progress / "user-notes.json"
+    for path in (old_json, old_journal, recent, unrelated):
+        path.write_text("{}", encoding="utf-8")
+    old_time = time.time() - runner_module.PROGRESS_STALE_AFTER_SECONDS - 10
+    os.utime(old_json, (old_time, old_time))
+    os.utime(old_journal, (old_time, old_time))
+    os.utime(unrelated, (old_time, old_time))
+
+    runner_module._sweep_stale_progress_files(tmp_path)
+
+    assert not old_json.exists()
+    assert not old_journal.exists()
+    assert recent.exists()
+    assert unrelated.exists()
+
+
+def test_progress_sanitizer_preserves_checkpoint_boolean_metadata():
+    from marvis.plugins import runner as runner_module
+
+    payload = runner_module._sanitize_progress_payload(
+        {
+            "kind": "model_tuning",
+            "stage": "checkpoint_saved",
+            "cache_hit": False,
+            "checkpoint_saved": True,
+        }
+    )
+
+    assert payload["kind"] == "model_tuning"
+    assert payload["stage"] == "checkpoint_saved"
+    assert payload["cache_hit"] is False
+    assert payload["checkpoint_saved"] is True
 
 
 def test_tool_runner_invokes_adhoc_module_in_subprocess_and_audits_draft(tmp_path):

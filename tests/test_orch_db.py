@@ -3,6 +3,7 @@ import json
 import pytest
 
 from marvis.db import PlanRepository, connect, init_db
+import marvis.db_schema as db_schema_module
 import marvis.repositories.plans as plan_repo_module
 from marvis.orchestrator.contracts import (
     AgentStatus,
@@ -256,6 +257,18 @@ def test_plan_repository_records_step_run_lifecycle(tmp_path):
     assert len(running) == 1
     assert running[0]["id"] == run_id
     assert running[0]["input"] == {"message": "hi"}
+    assert running[0]["progress"] == {}
+    assert repo.update_step_run_progress(
+        run_id,
+        {"kind": "model_tuning", "algorithm": "lgb", "trial": 3},
+    ) is True
+    running = repo.list_running_step_runs("plan-1")
+    assert running[0]["progress"] == {
+        "kind": "model_tuning",
+        "algorithm": "lgb",
+        "trial": 3,
+    }
+    assert running[0]["progress_updated_at"]
     repo.finish_step_run(
         run_id,
         status="succeeded",
@@ -274,6 +287,41 @@ def test_plan_repository_records_step_run_lifecycle(tmp_path):
     assert runs[0]["output_ref"] == "metrics:step-1:v1"
     assert runs[0]["duration_ms"] == 12
     assert runs[0]["side_effects"] == ["artifact:report"]
+    assert runs[0]["progress"]["trial"] == 3
+    assert repo.update_step_run_progress(run_id, {"trial": 4}) is False
+
+
+def test_migration_008_adds_step_run_progress_columns_to_v7_database(tmp_path):
+    db_path = tmp_path / "legacy.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE plan_step_runs (
+                id TEXT PRIMARY KEY,
+                plan_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                tool_ref TEXT NOT NULL,
+                status TEXT NOT NULL,
+                input_json TEXT NOT NULL DEFAULT '{}',
+                side_effects_json TEXT NOT NULL DEFAULT '[]',
+                started_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("PRAGMA user_version = 7")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        columns = {
+            row[1]: row[2]
+            for row in conn.execute("PRAGMA table_info(plan_step_runs)").fetchall()
+        }
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert columns["progress_json"] == "TEXT"
+    assert columns["progress_updated_at"] == "TEXT"
+    assert version == db_schema_module.SCHEMA_VERSION
 
 
 def test_start_step_run_rejects_step_not_running(tmp_path):
@@ -445,6 +493,31 @@ def test_plan_repository_retry_failed_step_can_replace_target_inputs(tmp_path):
     assert loaded.steps[0].inputs == {"message": "retry with new cutoff"}
     assert loaded.steps[1].inputs == {"seconds": "$ref:step-1.output.seconds"}
     assert repo.list_audit(kind="plan.step.retry")[0]["detail"]["inputs_replaced"] is True
+
+
+def test_plan_repository_retry_cancelled_step_reopens_same_plan(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _plan()
+    plan.status = PlanStatus.CANCELLED
+    plan.steps[0].status = StepStatus.DONE
+    plan.steps[0].output_ref = "metrics:step-1:v1"
+    plan.steps[1].status = StepStatus.FAILED
+    plan.steps[1].error = "用户已停止当前动作"
+    repo.create_plan(plan)
+
+    reset_step_ids = repo.retry_failed_step("plan-1", "step-2")
+
+    loaded = repo.load_plan("plan-1")
+    assert reset_step_ids == ["step-2"]
+    assert loaded.status == PlanStatus.RUNNING
+    assert loaded.steps[0].status == StepStatus.DONE
+    assert loaded.steps[0].output_ref == "metrics:step-1:v1"
+    assert loaded.steps[1].status == StepStatus.PENDING
+    assert loaded.steps[1].error is None
+    audit = repo.list_audit(kind="plan.step.retry")[0]
+    assert audit["detail"]["from_plan_status"] == PlanStatus.CANCELLED.value
 
 
 def test_plan_repository_retry_failed_step_rejects_non_failed_plan_or_step(tmp_path):

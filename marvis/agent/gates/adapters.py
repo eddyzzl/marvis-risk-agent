@@ -107,6 +107,51 @@ class GateReplyContext:
     def rule_candidate_count(self) -> int:
         return _rule_candidate_count(self.plan, self.gate, self.load_output)
 
+    def feature_metric_candidates(self) -> list[str]:
+        for dep_id in self.gate.depends_on or []:
+            dep = find_step(self.plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "compute_feature_metrics":
+                continue
+            output = self.load_output(dep.id)
+            if not isinstance(output, dict):
+                return []
+            return [
+                str(item.get("feature")).strip()
+                for item in (output.get("metrics") or [])
+                if isinstance(item, dict) and str(item.get("feature") or "").strip()
+            ]
+        return []
+
+    def special_value_context(self) -> tuple[list[str], dict[str, list]]:
+        """Return the current screen selection and its detected sentinel rows.
+
+        ``resolve_special_values`` is deliberately a gate *after*
+        ``screen_features``.  Keeping this lookup in the adapter context lets
+        both natural-language parsing and JSON-schema rendering consume the
+        same persisted screen evidence without teaching PlanDriver how to
+        interpret a specific tool's output.
+        """
+        for dep_id in self.gate.depends_on or []:
+            dep = find_step(self.plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "screen_features":
+                continue
+            output = self.load_output(dep.id)
+            if not isinstance(output, dict):
+                return [], {}
+            selected = [
+                str(item).strip()
+                for item in (output.get("selected") or [])
+                if str(item).strip()
+            ]
+            raw_columns = output.get("sentinel_columns")
+            sentinel_columns = {
+                str(column): list(rows)
+                for column, rows in (raw_columns.items() if isinstance(raw_columns, dict) else [])
+                if isinstance(rows, (list, tuple)) and rows
+            }
+            return selected, sentinel_columns
+        return [], {}
+
 
 class GateReplyAdapter(Protocol):
     """The minimal interface PlanDriver dispatches through."""
@@ -522,6 +567,291 @@ class _AdoptionReasonAdapter:
 
 
 # ---------------------------------------------------------------------------
+# optional feature-binning adapter (analyze_feature_bins gate)
+# ---------------------------------------------------------------------------
+_BINNING_SKIP = re.compile(r"(跳过|不做|不用|无需|不需要).{0,8}(分箱)?|直接.{0,6}报告", re.IGNORECASE)
+_BINNING_MENTION = re.compile(r"(分箱|箱分析|binning|bins?)", re.IGNORECASE)
+_BIN_COUNT = re.compile(r"(?:分|做|按)?\s*(\d{1,2})\s*箱|(?:bins?|箱数)\s*[=:：]?\s*(\d{1,2})", re.IGNORECASE)
+
+
+class _FeatureBinningAdapter:
+    tool = "analyze_feature_bins"
+
+    def parse_reply(self, text: str, ctx: GateReplyContext) -> dict | None:
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+        candidates = ctx.feature_metric_candidates()
+        count_match = _BIN_COUNT.search(raw)
+        bins = int(next(group for group in count_match.groups() if group)) if count_match else 10
+        if _BINNING_SKIP.search(raw):
+            return {"features": [], "bins": bins}
+        selected = [
+            feature for feature in candidates
+            if re.search(rf"(?<![\w]){re.escape(feature)}(?![\w])", raw, re.IGNORECASE)
+        ]
+        if selected and (_BINNING_MENTION.search(raw) or count_match):
+            return {"features": selected, "bins": bins}
+        return None
+
+    def apply(self, driver, plan: Plan, gate: PlanStep, parsed: dict, *, run_seq) -> DriverTurn:
+        error = driver._feature_binning_adjust_error(plan, gate, parsed["features"])
+        if not 3 <= int(parsed["bins"]) <= 20:
+            error = "分箱数必须是 3 到 20 之间的整数。"
+        if error:
+            return DriverTurn(
+                plan.id,
+                plan.status.value,
+                [driver._composer.instruction_message(plan, gate, run_seq=run_seq, text=error)],
+            )
+        driver._confirm_gate(
+            plan,
+            gate,
+            reason=(
+                f"用户通过自然语言选择 {len(parsed['features'])} 个特征进行 {parsed['bins']} 箱分析"
+                if parsed["features"]
+                else "用户通过自然语言选择跳过可选分箱分析"
+            ),
+            input_updates={"features": parsed["features"], "bins": parsed["bins"]},
+        )
+        return driver._run_and_handle(plan.id, run_seq=run_seq)
+
+    def adjust_schema(self, plan: Plan, gate: PlanStep, load_output: Callable[[str], Any]) -> dict:
+        ctx = GateReplyContext(plan=plan, gate=gate, load_output=load_output)
+        candidates = ctx.feature_metric_candidates()
+        return {
+            "type": "object",
+            "properties": {
+                "features": {
+                    "type": "array",
+                    "title": "需要分箱分析的特征（可为空）",
+                    "items": {"type": "string", "enum": candidates},
+                    "uniqueItems": True,
+                },
+                "bins": {
+                    "type": "integer",
+                    "title": "分箱数",
+                    "minimum": 3,
+                    "maximum": 20,
+                    "default": 10,
+                },
+            },
+            "required": ["features", "bins"],
+            "additionalProperties": False,
+        }
+
+
+# ---------------------------------------------------------------------------
+# special-value governance adapter (resolve_special_values gate)
+# ---------------------------------------------------------------------------
+_SPECIAL_MASK = re.compile(
+    r"(?:转(?:为)?(?:空值?|缺失值?)|置空|设为(?:空|缺失)|按缺失处理|替换为\s*(?:nan|na)|\bmask\b|\bnan\b)",
+    re.IGNORECASE,
+)
+_SPECIAL_DROP = re.compile(r"(?:删除|剔除|去掉|移除|不用|不使用|\bdrop\b|\bremove\b)", re.IGNORECASE)
+_SPECIAL_RETAIN = re.compile(r"(?:保留|原样|照常使用|\bretain\b|\bkeep\b)", re.IGNORECASE)
+_SPECIAL_ALL = re.compile(r"(?:全部|所有|都|all)", re.IGNORECASE)
+_SPECIAL_REASON = re.compile(r"(?:原因|理由)\s*[:：]\s*(.+)$", re.IGNORECASE)
+_SPECIAL_NEGATED_ACTION = re.compile(
+    r"(?:不|不要|别|勿|无需|不需要)\s*"
+    r"(?:转(?:为)?(?:空值?|缺失值?)|置空|设为(?:空|缺失)|按缺失处理|"
+    r"删除|剔除|去掉|移除|保留|原样|照常使用|mask|drop|remove|retain|keep)"
+    r"|(?:do\s+not|don't|dont)\s+(?:mask|drop|remove|retain|keep)",
+    re.IGNORECASE,
+)
+
+
+def _special_action(text: str) -> str | None:
+    if _SPECIAL_NEGATED_ACTION.search(text):
+        return None
+    matches = [
+        action
+        for action, pattern in (
+            ("mask", _SPECIAL_MASK),
+            ("drop", _SPECIAL_DROP),
+            ("retain", _SPECIAL_RETAIN),
+        )
+        if pattern.search(text)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _special_reason(text: str) -> str:
+    match = _SPECIAL_REASON.search(text)
+    return str(match.group(1) if match else "").strip(" \t，,。；;")
+
+
+def _special_unknown_column_hint(clause: str) -> str:
+    """Return a stable label for an action clause naming no known column.
+
+    Unknown clauses must survive parsing so the driver can reject them against
+    persisted screen evidence. Silently dropping ``ghost 删除`` would otherwise
+    let a message that also covered every real column advance the gate.
+    """
+
+    candidate = _SPECIAL_REASON.sub("", str(clause or ""))
+    for pattern in (_SPECIAL_MASK, _SPECIAL_DROP, _SPECIAL_RETAIN):
+        candidate = pattern.sub("", candidate)
+    candidate = re.sub(
+        r"(?:请|把|将|对|字段|特征|变量|这一?列|该列)",
+        " ",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    candidate = candidate.strip(" \t，,。；;:：")
+    return candidate[:128] or "__unknown_instruction__"
+
+
+def _special_named_columns(text: str, columns: list[str]) -> list[str]:
+    """Find exact column mentions without treating ``x1`` as part of ``x10``."""
+
+    named: list[str] = []
+    for column in columns:
+        escaped = re.escape(column)
+        prefix = r"(?<![A-Za-z0-9_])" if column[:1].isalnum() or column.startswith("_") else ""
+        suffix = r"(?![A-Za-z0-9_])" if column[-1:].isalnum() or column.endswith("_") else ""
+        if re.search(prefix + escaped + suffix, text):
+            named.append(column)
+    return named
+
+
+def parse_special_value_instruction(
+    text: str,
+    *,
+    selected: list[str],
+    sentinel_columns: dict[str, list],
+) -> dict[str, dict] | None:
+    """Compile a concise natural-language policy into tool decisions.
+
+    Supported examples include ``全部转空`` and
+    ``x1 转空；x2 删除；x3 保留，原因：业务约定值``.  Ambiguous clauses or
+    incomplete coverage return ``None``/a partial mapping so the adapter can
+    ask for a precise decision instead of guessing.
+    """
+    raw = str(text or "").strip()
+    relevant = [column for column in selected if column in sentinel_columns]
+    if not raw or not relevant:
+        return None
+
+    decisions: dict[str, dict] = {}
+    explicitly_named = _special_named_columns(raw, relevant)
+    global_action = (
+        _special_action(raw)
+        if _SPECIAL_ALL.search(raw) and not explicitly_named
+        else None
+    )
+    if global_action:
+        reason = _special_reason(raw)
+        if global_action == "retain" and not reason:
+            return None
+        for column in relevant:
+            decision = {
+                "action": global_action,
+                "values": [
+                    row[0] if isinstance(row, (list, tuple)) and row else row
+                    for row in sentinel_columns[column]
+                ],
+            }
+            if global_action == "retain":
+                decision.update({"confirmed": True, "reason": reason})
+            decisions[column] = decision
+        return decisions
+
+    clauses = [
+        clause.strip()
+        for clause in re.split(r"[\n；;]+", raw)
+        if clause.strip()
+    ]
+    for clause in clauses:
+        named = _special_named_columns(clause, relevant)
+        action = _special_action(clause)
+        if action is None:
+            continue
+        if not named:
+            decisions[_special_unknown_column_hint(clause)] = {"action": action}
+            continue
+        reason = _special_reason(clause)
+        if action == "retain" and not reason:
+            continue
+        for column in named:
+            decision = {
+                "action": action,
+                "values": [
+                    row[0] if isinstance(row, (list, tuple)) and row else row
+                    for row in sentinel_columns[column]
+                ],
+            }
+            if action == "retain":
+                decision.update({"confirmed": True, "reason": reason})
+            decisions[column] = decision
+    return decisions or None
+
+
+class _SpecialValueAdapter:
+    tool = "resolve_special_values"
+
+    def parse_reply(self, text: str, ctx: GateReplyContext) -> dict | None:
+        selected, sentinel_columns = ctx.special_value_context()
+        return parse_special_value_instruction(
+            text,
+            selected=selected,
+            sentinel_columns=sentinel_columns,
+        )
+
+    def apply(self, driver, plan: Plan, gate: PlanStep, parsed: dict, *, run_seq) -> DriverTurn:
+        error = driver._special_value_adjust_error(plan, gate, parsed)
+        if error:
+            return DriverTurn(
+                plan.id,
+                plan.status.value,
+                [driver._composer.instruction_message(plan, gate, run_seq=run_seq, text=error)],
+            )
+        driver._confirm_gate(
+            plan,
+            gate,
+            reason="用户通过自然语言确认特殊值治理策略",
+            input_updates={"decisions": parsed},
+        )
+        return driver._run_and_handle(plan.id, run_seq=run_seq)
+
+    def adjust_schema(self, plan: Plan, gate: PlanStep, load_output: Callable[[str], Any]) -> dict:
+        ctx = GateReplyContext(plan=plan, gate=gate, load_output=load_output)
+        selected, sentinel_columns = ctx.special_value_context()
+        relevant = [column for column in selected if column in sentinel_columns]
+        decision_properties = {
+            column: {
+                "type": "object",
+                "title": f"{column} 特殊值策略",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["mask", "retain", "drop"],
+                    },
+                    "confirmed": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            }
+            for column in relevant
+        }
+        return {
+            "type": "object",
+            "properties": {
+                "decisions": {
+                    "type": "object",
+                    "title": "特殊值治理决策",
+                    "properties": decision_properties,
+                    "required": relevant,
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["decisions"],
+            "additionalProperties": False,
+        }
+
+
+# ---------------------------------------------------------------------------
 # registry
 # ---------------------------------------------------------------------------
 _ADAPTERS: dict[str, GateReplyAdapter] = {
@@ -531,6 +861,8 @@ _ADAPTERS: dict[str, GateReplyAdapter] = {
         _RuleSelectionAdapter(),
         _MonitoringDispositionAdapter(),
         _AdoptionReasonAdapter(),
+        _FeatureBinningAdapter(),
+        _SpecialValueAdapter(),
     )
 }
 
@@ -564,6 +896,7 @@ __all__ = [
     "get_gate_adapter",
     "monitoring_plain_confirm_error",
     "parse_dedup_instruction",
+    "parse_special_value_instruction",
     "parse_monitoring_disposition",
     "parse_rule_selection_instruction",
 ]

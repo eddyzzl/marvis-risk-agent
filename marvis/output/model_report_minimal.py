@@ -24,7 +24,7 @@ _METRIC_SPECS: dict[str, list[tuple[str, str]]] = {
 _TARGET_LABEL = {"continuous": "回归(连续型)", "multiclass": "多分类"}
 
 
-def render_minimal_model_report(experiment, out_path: Path) -> Path:
+def render_minimal_model_report(experiment, out_path: Path, *, artifact=None) -> Path:
     out_path = Path(out_path)
     config = experiment.config
     metrics = experiment.metrics
@@ -65,6 +65,42 @@ def render_minimal_model_report(experiment, out_path: Path) -> Path:
         for col, split in zip("BCD", ("train", "test", "oot")):
             value = getattr(metrics, f"{split}_{stem}", None) if metrics is not None else None
             sheet[f"{col}{row}"] = "n/a" if value is None else round(float(value), 6)
+
+    if target_type == "multiclass":
+        detail = workbook.create_sheet("多分类明细")
+        headers = ("数据集", "类别", "召回率", "精确率", "样本数")
+        for column, header in enumerate(headers, start=1):
+            cell = detail.cell(row=1, column=column, value=header)
+            cell.font = Font(bold=True)
+        per_class = (
+            artifact.params.get("per_class")
+            if artifact is not None and isinstance(getattr(artifact, "params", None), dict)
+            else {}
+        )
+        output_row = 2
+        for split in ("train", "test", "oot"):
+            split_rows = per_class.get(split) if isinstance(per_class, dict) else None
+            if not isinstance(split_rows, dict):
+                continue
+            for class_name, row in split_rows.items():
+                row = row if isinstance(row, dict) else {}
+                detail.cell(row=output_row, column=1, value=split)
+                detail.cell(row=output_row, column=2, value=str(class_name))
+                detail.cell(
+                    row=output_row,
+                    column=3,
+                    value="n/a" if row.get("recall") is None else round(float(row["recall"]), 6),
+                )
+                detail.cell(
+                    row=output_row,
+                    column=4,
+                    value="n/a" if row.get("precision") is None else round(float(row["precision"]), 6),
+                )
+                detail.cell(row=output_row, column=5, value=int(row.get("support") or 0))
+                output_row += 1
+        if output_row == 2:
+            detail["A2"] = "n/a"
+            detail["B2"] = "模型产物未记录逐类别指标"
 
     artifact = TransactionalArtifactStore(out_path.parent).stage(out_path.name)
     try:

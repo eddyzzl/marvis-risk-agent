@@ -78,6 +78,27 @@ def test_reviewer_deterministic_check_passes_known_post_checks():
 
     assert verdict.reviewer == "deterministic"
     assert verdict.passed is True
+
+
+def test_reviewer_allows_legacy_screen_plan_to_render_empty_recommendations():
+    step = PlanStep(
+        id="screen-1",
+        plan_id="plan-1",
+        index=0,
+        title="特征筛选",
+        tool_ref=ToolRef("modeling", "screen_features"),
+        inputs={},
+        depends_on=[],
+        post_checks=[PostCheck("nonempty", {"field": "selected"})],
+    )
+
+    verdict = Reviewer(lambda: FakeLLM("{}")).deterministic_check(
+        step,
+        {"selected": [], "ranked": [], "unusable": [["x1", "全为空"]]},
+    )
+
+    assert verdict.passed is True
+    assert verdict.reasons == []
     assert verdict.reasons == []
 
 

@@ -408,12 +408,12 @@ def _pick_best_comparison_row(
     if delivery_ready:
         rows = delivery_ready
     if target_type == "continuous":
-        return max(rows, key=lambda row: _score_first(row, ("oot_rmse", "test_rmse"), minimize=True)), "oot_rmse"
+        return max(rows, key=lambda row: _score_first(row, ("test_rmse",), minimize=True)), "test_rmse"
     if target_type == "multiclass":
-        auc_best = max(rows, key=lambda row: _score_first(row, ("oot_macro_auc", "test_macro_auc")))
-        if _score_first(auc_best, ("oot_macro_auc", "test_macro_auc")) != float("-inf"):
-            return auc_best, "oot_macro_auc"
-        return max(rows, key=lambda row: _score_first(row, ("oot_logloss", "test_logloss"), minimize=True)), "oot_logloss"
+        auc_best = max(rows, key=lambda row: _score_first(row, ("test_macro_auc",)))
+        if _score_first(auc_best, ("test_macro_auc",)) != float("-inf"):
+            return auc_best, "test_macro_auc"
+        return max(rows, key=lambda row: _score_first(row, ("test_logloss",), minimize=True)), "test_logloss"
     metric_score, selection_metric = _binary_selection_score_and_metric(eval_metric)
     return max(rows, key=metric_score), selection_metric
 
@@ -429,9 +429,9 @@ def _selection_metric_basis(target_type: str, *, eval_metric: str = "ks_auc") ->
     comparison cares about (relative ranking, not the exact champion score)."""
     target_type = str(target_type or "binary")
     if target_type == "continuous":
-        return "oot_rmse", True
+        return "test_rmse", True
     if target_type == "multiclass":
-        return "oot_macro_auc", False
+        return "test_macro_auc", False
     if str(eval_metric or "").strip() == "response_lift":
         return "test_lift_head_10", False
     return "test_ks", False

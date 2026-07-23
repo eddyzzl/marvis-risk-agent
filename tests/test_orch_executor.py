@@ -3,9 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from marvis.db import PlanRepository, connect, init_db
+from marvis.db import PlanRepository, TaskRepository, connect, init_db
+from marvis.domain import TASK_TYPE_MODELING, TaskCreate
 from marvis.llm_client import LLMClientError
 from marvis.llm_settings import LLMSettingsError
+from marvis.job_cancellation import JobCancellationToken
 from marvis.orchestrator.contracts import (
     AgentStatus,
     LoopEvent,
@@ -223,6 +225,26 @@ def _repo(tmp_path, plan):
     return repo
 
 
+def _repo_with_agent_task(tmp_path, plan):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task_repo = TaskRepository(db_path)
+    task = task_repo.create_task(
+        TaskCreate(
+            model_name="模型",
+            model_version="v1",
+            validator="建模人员",
+            source_dir=str(tmp_path),
+            task_type=TASK_TYPE_MODELING,
+            run_mode="agent",
+        )
+    )
+    plan.task_id = task.id
+    repo = PlanRepository(db_path)
+    repo.create_plan(plan)
+    return repo, task_repo, task.id
+
+
 def _force_confirmed_bit(repo, step_id):
     """Simulate a legacy/tampered raw confirmation without governance proof."""
 
@@ -254,7 +276,15 @@ def _seed_run_for_checking_step(repo, step_id, *, inputs=None):
     return run_id
 
 
-def _executor(repo, runner, reviewer=None, subagents=None, hooks=None, authorizer=None):
+def _executor(
+    repo,
+    runner,
+    reviewer=None,
+    subagents=None,
+    hooks=None,
+    authorizer=None,
+    task_repo=None,
+):
     return PlanExecutor(
         repo,
         runner,
@@ -263,6 +293,7 @@ def _executor(repo, runner, reviewer=None, subagents=None, hooks=None, authorize
         hooks or FakeHooks(),
         HarnessState(repo),
         authorizer=authorizer,
+        task_repo=task_repo,
     )
 
 
@@ -334,6 +365,395 @@ def test_plan_executor_runs_linear_plan_resolves_refs_and_finalizes(tmp_path):
     assert evidence["input_hash"].startswith("sha256:")
     assert evidence["input_summary"] == {"message": "hi"}
     assert evidence["parent_output_refs"] == ["metrics:step-1:v1"]
+
+
+def test_plan_executor_persists_tuning_progress_without_changing_step_result(tmp_path):
+    class ProgressRunner:
+        def __init__(self, task_repo):
+            self._tools = FakeTools()
+            self._task_repo = task_repo
+            self.message_ids = []
+
+        def invoke(self, ref, inputs, *, task_id, progress_callback=None):
+            assert progress_callback is not None
+            progress_callback(
+                {
+                    "kind": "model_tuning",
+                    "algorithm": "xgb",
+                    "trial": 4,
+                    "trial_total": 40,
+                    "completed_trials": 4,
+                    "total_trials": 40,
+                }
+            )
+            self.message_ids.append(
+                self._task_repo.list_agent_messages(task_id)[0]["id"]
+            )
+            progress_callback(
+                {
+                    "kind": "model_tuning",
+                    "algorithm": "xgb",
+                    "trial": 5,
+                    "trial_total": 40,
+                    "completed_trials": 5,
+                    "total_trials": 40,
+                }
+            )
+            messages = self._task_repo.list_agent_messages(task_id)
+            assert len(messages) == 1
+            self.message_ids.append(messages[0]["id"])
+            return _ok({"best_params": {"max_depth": 4}})
+
+    repo, task_repo, task_id = _repo_with_agent_task(
+        tmp_path,
+        _plan(_step("step-tune", plugin="modeling", tool="tune_hyperparameters")),
+    )
+    runner = ProgressRunner(task_repo)
+
+    result = _executor(repo, runner, task_repo=task_repo).run("plan-1")
+
+    assert result.status == PlanStatus.DONE
+    assert runner.message_ids[0] == runner.message_ids[1]
+    runs = repo.list_step_runs("step-tune")
+    assert runs[0]["status"] == "succeeded"
+    assert runs[0]["progress"] == {
+        "kind": "model_tuning",
+        "algorithm": "xgb",
+        "trial": 5,
+        "trial_total": 40,
+        "completed_trials": 5,
+        "total_trials": 40,
+    }
+    messages = task_repo.list_agent_messages(task_id)
+    assert len(messages) == 1
+    assert messages[0]["id"] == runner.message_ids[0]
+    assert messages[0]["metadata"]["kind"] == "tool_progress"
+    assert messages[0]["metadata"]["plan_id"] == "plan-1"
+    assert messages[0]["metadata"]["step_id"] == "step-tune"
+    assert messages[0]["metadata"]["run_id"] == runs[0]["id"]
+    assert messages[0]["metadata"]["status"] == "succeeded"
+    assert messages[0]["metadata"]["streaming"] is False
+    assert messages[0]["metadata"]["progress"] == runs[0]["progress"]
+
+
+def test_plan_executor_closes_tuning_progress_message_on_failure(tmp_path):
+    class ProgressRunner:
+        def __init__(self):
+            self._tools = FakeTools()
+
+        def invoke(self, ref, inputs, *, task_id, progress_callback=None):
+            assert progress_callback is not None
+            progress_callback(
+                {
+                    "kind": "model_tuning",
+                    "algorithm": "lgb",
+                    "trial": 3,
+                    "trial_total": 40,
+                }
+            )
+            return _fail("tuning failed")
+
+    repo, task_repo, task_id = _repo_with_agent_task(
+        tmp_path,
+        _plan(_step("step-tune", plugin="modeling", tool="tune_hyperparameters")),
+    )
+
+    result = _executor(repo, ProgressRunner(), task_repo=task_repo).run("plan-1")
+
+    assert result.status == PlanStatus.FAILED
+    messages = task_repo.list_agent_messages(task_id)
+    assert len(messages) == 1
+    assert messages[0]["metadata"]["status"] == "failed"
+    assert messages[0]["metadata"]["streaming"] is False
+    assert messages[0]["metadata"]["progress"]["trial"] == 3
+
+
+def test_plan_executor_closes_tuning_progress_message_on_cancellation(tmp_path):
+    class TuningCancelled(BaseException):
+        pass
+
+    class ProgressRunner:
+        def __init__(self):
+            self._tools = FakeTools()
+
+        def invoke(self, ref, inputs, *, task_id, progress_callback=None):
+            assert progress_callback is not None
+            progress_callback(
+                {
+                    "kind": "model_tuning",
+                    "algorithm": "catboost",
+                    "trial": 2,
+                    "trial_total": 40,
+                }
+            )
+            raise TuningCancelled("cancelled")
+
+    repo, task_repo, task_id = _repo_with_agent_task(
+        tmp_path,
+        _plan(_step("step-tune", plugin="modeling", tool="tune_hyperparameters")),
+    )
+
+    with pytest.raises(TuningCancelled):
+        _executor(repo, ProgressRunner(), task_repo=task_repo).run("plan-1")
+
+    messages = task_repo.list_agent_messages(task_id)
+    assert len(messages) == 1
+    assert messages[0]["metadata"]["status"] == "cancelled"
+    assert messages[0]["metadata"]["streaming"] is False
+    assert messages[0]["metadata"]["progress"]["trial"] == 2
+
+
+def test_plan_executor_marks_progress_cancelled_for_cooperative_plan_cancel(tmp_path):
+    repo, task_repo, task_id = _repo_with_agent_task(
+        tmp_path,
+        _plan(_step("step-tune", plugin="modeling", tool="tune_hyperparameters")),
+    )
+
+    class CancellingRunner:
+        def __init__(self):
+            self._tools = FakeTools()
+
+        def invoke(self, ref, inputs, *, task_id, progress_callback=None):
+            assert progress_callback is not None
+            progress_callback(
+                {
+                    "kind": "model_tuning",
+                    "algorithm": "xgb",
+                    "trial": 7,
+                    "trial_total": 40,
+                }
+            )
+            repo.set_plan_status("plan-1", PlanStatus.CANCELLED)
+            return _ok({"best_params": {"max_depth": 3}})
+
+    result = _executor(repo, CancellingRunner(), task_repo=task_repo).run("plan-1")
+
+    assert result.status == PlanStatus.CANCELLED
+    messages = task_repo.list_agent_messages(task_id)
+    assert len(messages) == 1
+    assert messages[0]["metadata"]["status"] == "cancelled"
+    assert messages[0]["metadata"]["streaming"] is False
+    assert messages[0]["metadata"]["progress"]["trial"] == 7
+
+
+def test_plan_executor_user_cancellation_interrupts_current_step_and_plan(tmp_path):
+    token = JobCancellationToken(job_id="driver-job-1")
+
+    class CancellableRunner:
+        def __init__(self):
+            self._tools = FakeTools()
+
+        def invoke(
+            self,
+            ref,
+            inputs,
+            *,
+            task_id,
+            progress_callback=None,
+            cancellation_check=None,
+        ):
+            assert progress_callback is not None
+            assert cancellation_check is not None
+            progress_callback(
+                {
+                    "kind": "model_tuning",
+                    "algorithm": "lgb",
+                    "trial": 8,
+                    "trial_total": 40,
+                    "checkpoint_saved": True,
+                }
+            )
+            token.cancel()
+            cancellation_check()
+            raise AssertionError("unreachable")
+
+    repo, task_repo, task_id = _repo_with_agent_task(
+        tmp_path,
+        _plan(_step("step-tune", plugin="modeling", tool="tune_hyperparameters")),
+    )
+
+    result = _executor(repo, CancellableRunner(), task_repo=task_repo).run(
+        "plan-1",
+        cancellation_check=token.raise_if_cancelled,
+    )
+
+    assert result.status == PlanStatus.CANCELLED
+    plan = repo.load_plan("plan-1")
+    assert plan.status == PlanStatus.CANCELLED
+    assert plan.steps[0].status == StepStatus.FAILED
+    assert "用户" in str(plan.steps[0].error)
+    runs = repo.list_step_runs("step-tune")
+    assert len(runs) == 1
+    assert runs[0]["status"] == "interrupted"
+    assert runs[0]["error_kind"] == "user_cancelled"
+    assert runs[0]["progress"]["checkpoint_saved"] is True
+    messages = task_repo.list_agent_messages(task_id)
+    assert messages[0]["metadata"]["status"] == "cancelled"
+    assert messages[0]["metadata"]["streaming"] is False
+
+
+def test_plan_executor_retries_transient_terminal_progress_message_update(tmp_path):
+    class ProgressRunner:
+        def __init__(self):
+            self._tools = FakeTools()
+
+        def invoke(self, ref, inputs, *, task_id, progress_callback=None):
+            assert progress_callback is not None
+            progress_callback(
+                {
+                    "kind": "model_tuning",
+                    "algorithm": "lgb",
+                    "trial": 40,
+                    "trial_total": 40,
+                }
+            )
+            return _ok({"best_params": {}})
+
+    class FlakyTaskRepository:
+        def __init__(self, delegate):
+            self._delegate = delegate
+            self.update_calls = 0
+
+        def add_agent_message(self, *args, **kwargs):
+            return self._delegate.add_agent_message(*args, **kwargs)
+
+        def update_agent_message(self, *args, **kwargs):
+            self.update_calls += 1
+            if self.update_calls == 1:
+                raise RuntimeError("database is temporarily locked")
+            return self._delegate.update_agent_message(*args, **kwargs)
+
+    repo, task_repo, task_id = _repo_with_agent_task(
+        tmp_path,
+        _plan(_step("step-tune", plugin="modeling", tool="tune_hyperparameters")),
+    )
+    flaky_repo = FlakyTaskRepository(task_repo)
+
+    result = _executor(repo, ProgressRunner(), task_repo=flaky_repo).run("plan-1")
+
+    assert result.status == PlanStatus.DONE
+    # The injected publisher fails once; the canonical TaskRepository fallback
+    # closes the same message id without changing the tool result.
+    assert flaky_repo.update_calls == 1
+    messages = task_repo.list_agent_messages(task_id)
+    assert len(messages) == 1
+    assert messages[0]["metadata"]["status"] == "succeeded"
+    assert messages[0]["metadata"]["streaming"] is False
+
+
+def test_plan_executor_waits_for_delayed_progress_before_finalizing_run(
+    tmp_path,
+    monkeypatch,
+):
+    import threading
+    import time
+
+    progress_started = threading.Event()
+
+    class DelayedProgressRunner:
+        def __init__(self):
+            self._tools = FakeTools()
+            self.thread = None
+
+        def invoke(self, ref, inputs, *, task_id, progress_callback=None):
+            assert progress_callback is not None
+            payload = {
+                "kind": "model_tuning",
+                "algorithm": "xgb",
+                "trial": 11,
+                "trial_total": 40,
+            }
+            self.thread = threading.Thread(
+                target=lambda: progress_callback(payload),
+                daemon=True,
+            )
+            self.thread.start()
+            assert progress_started.wait(timeout=1)
+            return _ok({"best_params": {}})
+
+    repo, task_repo, task_id = _repo_with_agent_task(
+        tmp_path,
+        _plan(_step("step-tune", plugin="modeling", tool="tune_hyperparameters")),
+    )
+    original_update = repo.update_step_run_progress
+
+    def delayed_update(run_id, payload):
+        progress_started.set()
+        time.sleep(0.05)
+        return original_update(run_id, payload)
+
+    monkeypatch.setattr(repo, "update_step_run_progress", delayed_update)
+    runner = DelayedProgressRunner()
+
+    result = _executor(repo, runner, task_repo=task_repo).run("plan-1")
+    runner.thread.join(timeout=1)
+
+    assert result.status == PlanStatus.DONE
+    run = repo.list_step_runs("step-tune")[0]
+    message = task_repo.list_agent_messages(task_id)[0]
+    assert run["progress"]["trial"] == 11
+    assert message["metadata"]["progress"] == run["progress"]
+    assert message["metadata"]["streaming"] is False
+
+
+def test_plan_executor_ignores_progress_persistence_failure(tmp_path, monkeypatch):
+    class ProgressRunner:
+        def __init__(self):
+            self._tools = FakeTools()
+
+        def invoke(self, ref, inputs, *, task_id, progress_callback=None):
+            assert progress_callback is not None
+            progress_callback({"kind": "model_tuning", "trial": 1})
+            return _ok({"best_params": {}})
+
+    repo = _repo(
+        tmp_path,
+        _plan(_step("step-tune", plugin="modeling", tool="tune_hyperparameters")),
+    )
+    monkeypatch.setattr(
+        repo,
+        "update_step_run_progress",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("db unavailable")),
+    )
+
+    result = _executor(repo, ProgressRunner()).run("plan-1")
+
+    assert result.status == PlanStatus.DONE
+    assert repo.load_plan("plan-1").steps[0].status == StepStatus.DONE
+
+
+def test_plan_executor_ignores_tool_progress_message_publisher_failure(tmp_path):
+    class ProgressRunner:
+        def __init__(self):
+            self._tools = FakeTools()
+
+        def invoke(self, ref, inputs, *, task_id, progress_callback=None):
+            assert progress_callback is not None
+            progress_callback({"kind": "model_tuning", "trial": 1})
+            progress_callback({"kind": "model_tuning", "trial": 2})
+            return _ok({"best_params": {}})
+
+    class FailingTaskRepository:
+        def add_agent_message(self, *_args, **_kwargs):
+            raise RuntimeError("message database unavailable")
+
+        def update_agent_message(self, *_args, **_kwargs):
+            raise RuntimeError("message database unavailable")
+
+    repo = _repo(
+        tmp_path,
+        _plan(_step("step-tune", plugin="modeling", tool="tune_hyperparameters")),
+    )
+
+    result = _executor(
+        repo,
+        ProgressRunner(),
+        task_repo=FailingTaskRepository(),
+    ).run("plan-1")
+
+    assert result.status == PlanStatus.DONE
+    assert repo.load_plan("plan-1").steps[0].status == StepStatus.DONE
+    assert repo.list_step_runs("step-tune")[0]["progress"]["trial"] == 2
 
 
 def test_plan_executor_resolves_numeric_array_indices_in_ref_paths(tmp_path):

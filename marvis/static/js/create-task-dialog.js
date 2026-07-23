@@ -8,6 +8,18 @@ import { formatDateInput } from "./ui-utils.js";
 // case this is for) clear this easily.
 const MATERIAL_UPLOAD_PERCENT_THRESHOLD_BYTES = 10 * 1024 * 1024;
 
+export function modelRecipeFamily(recipe) {
+  const normalized = String(recipe || "").trim().toLowerCase();
+  if (normalized.endsWith("_regressor")) return "continuous";
+  if (normalized.endsWith("_multiclass")) return "multiclass";
+  return "binary";
+}
+
+export function modelTargetTypeForRecipes(recipes = []) {
+  const families = new Set((recipes || []).map(modelRecipeFamily));
+  return families.size === 1 ? [...families][0] : null;
+}
+
 export function createCreateTaskDialogController({
   $,
   materialSourceController,
@@ -78,7 +90,16 @@ export function createCreateTaskDialogController({
     const definition = taskTypeDefinition($("taskType")?.value || activeTaskType || defaultTaskType);
     const runMode = document.querySelector('input[name="runMode"]:checked')?.value;
     toggleConditionalField("createTaskAlgorithmField", Boolean(definition.algorithmField) && runMode === "manual");
-    toggleConditionalField("createTaskMetricField", Boolean(definition.metricField) && runMode === "manual");
+    // Feature metric selection is one contract in both modes. Agent mode may
+    // explain/suggest, but it must not silently replace the user's checked set.
+    toggleConditionalField("createTaskMetricField", Boolean(definition.metricField));
+    const meaningMetric = document.querySelector(
+      'input[name="featureMetric"][value="meaning_consistency"]',
+    );
+    if (meaningMetric) {
+      meaningMetric.disabled = runMode !== "agent";
+      if (meaningMetric.disabled) meaningMetric.checked = false;
+    }
     toggleConditionalField("createTaskTierField", Boolean(definition.tierField) && runMode === "agent");
     toggleConditionalField("createTaskStrategyField", Boolean(definition.strategyField));
   }
@@ -101,8 +122,14 @@ export function createCreateTaskDialogController({
   }
 
   function resetModelAlgorithmChoices() {
-    document.querySelectorAll('input[name="modelAlgorithm"], input[name="featureMetric"]').forEach((input) => {
+    document.querySelectorAll('input[name="modelAlgorithm"]').forEach((input) => {
       input.checked = false;
+    });
+    document.querySelectorAll('input[name="featureMetric"]').forEach((input) => {
+      // Reset to the product defaults declared in the markup. Using
+      // ``defaultChecked`` means reopening the dialog does not accidentally
+      // turn an explicit all-metric choice into an empty payload.
+      input.checked = Boolean(input.defaultChecked);
     });
     const weightPolicy = $("modelSampleWeightPolicy");
     if (weightPolicy) weightPolicy.value = "none";
@@ -215,12 +242,6 @@ export function createCreateTaskDialogController({
     weightInput.disabled = !explicit;
     weightInput.classList.toggle("is-disabled", !explicit);
     if (!explicit) weightInput.value = "";
-  }
-
-  function modelRecipeFamily(recipe) {
-    if (recipe === "lgb_regressor") return "continuous";
-    if (recipe === "lgb_multiclass") return "multiclass";
-    return "binary";
   }
 
   function normalizeModelAlgorithmFamilies(changedInput = null) {
@@ -439,12 +460,12 @@ export function createCreateTaskDialogController({
         setCreateStatus("请至少选择一个建模算法。", "error");
         return null;
       }
-      const families = new Set(payload.recipes.map(modelRecipeFamily));
-      if (families.size > 1) {
+      const targetType = modelTargetTypeForRecipes(payload.recipes);
+      if (!targetType) {
         setCreateStatus("二分类、回归与多分类算法不能混选。", "error");
         return null;
       }
-      payload.target_type = [...families][0] || "binary";
+      payload.target_type = targetType;
       const sampleWeightPolicy = $("modelSampleWeightPolicy")?.value || "none";
       if (sampleWeightPolicy === "explicit") {
         const sampleWeightCol = $("modelSampleWeightCol")?.value.trim();
@@ -471,7 +492,7 @@ export function createCreateTaskDialogController({
         payload.oot_ks_min = ootKsMin;
       }
     }
-    if (definition.metricField && selectedRunMode === "manual") {
+    if (definition.metricField) {
       payload.metrics = [...document.querySelectorAll('input[name="featureMetric"]:checked')].map((box) => box.value);
     }
     if (definition.tierField && selectedRunMode === "agent") {

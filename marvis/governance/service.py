@@ -348,6 +348,10 @@ class GovernanceService:
             "task_id": target_task_id,
             "strategy_type": strategy_type,
             "strategy_spec_hash": strategy_spec_hash,
+            # The semantic strategy hash intentionally ignores display metadata,
+            # but the description was still part of the target reviewed by the
+            # approver and must not be mutable between approval and commit.
+            "strategy_description": str(meta.get("description") or ""),
             "current_champion_ids": champion_ids,
         }
 

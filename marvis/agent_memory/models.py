@@ -12,6 +12,7 @@ MEMORY_TYPES = (
     "validation_pitfall",
     "task_experience",
     "model_experience",
+    "feature_experience",
     "join_experience",
     "strategy_experience",
     "risk_analysis_experience",
@@ -29,6 +30,13 @@ MODEL_EXPERIENCE_REQUIRED_FIELDS = (
     "scope",
     "source_task_id",
     "important_feature_sources",
+)
+FEATURE_EXPERIENCE_REQUIRED_FIELDS = (
+    "feature_count",
+    "recommended_features",
+    "avoid_features",
+    "scope",
+    "source_task_id",
 )
 JOIN_EXPERIENCE_REQUIRED_FIELDS = (
     "match_rate",
@@ -110,6 +118,21 @@ def validate_join_experience_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if missing:
         joined = ", ".join(missing)
         raise ValueError(f"missing required join_experience fields: {joined}")
+    return payload
+
+
+def validate_feature_experience_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    missing = [
+        field_name
+        for field_name in FEATURE_EXPERIENCE_REQUIRED_FIELDS
+        if _is_missing(payload.get(field_name)) and field_name not in {"recommended_features", "avoid_features"}
+    ]
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(f"missing required feature_experience fields: {joined}")
+    for field_name in ("recommended_features", "avoid_features"):
+        if not isinstance(payload.get(field_name), list):
+            raise ValueError(f"feature_experience {field_name} must be a list")
     return payload
 
 
@@ -257,6 +280,8 @@ class MemoryCandidate:
         object.__setattr__(self, "memory_type", normalized_type)
         if normalized_type == "model_experience":
             validate_model_experience_payload(self.payload)
+        elif normalized_type == "feature_experience":
+            validate_feature_experience_payload(self.payload)
         elif normalized_type == "join_experience":
             validate_join_experience_payload(self.payload)
         elif normalized_type == "strategy_experience":

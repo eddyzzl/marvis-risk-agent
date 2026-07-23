@@ -1,4 +1,5 @@
 import { escapeHtml } from "../ui-utils.js";
+import { datasetTableHtml } from "./artifact_view.js";
 
 const DEDUP_STRATEGY_LABELS = { first: "保留首条（first）", last: "保留末条（last）" };
 // UX-6: first/last follows raw file row order (not a business timestamp), so the
@@ -21,6 +22,7 @@ function joinGateContext(context = {}) {
     pollAgentMessagesUntilSettled: context.pollAgentMessagesUntilSettled || (() => Promise.resolve()),
     resetFetchThrottle: context.resetFetchThrottle || (() => {}),
     renderWorkflowStepper: context.renderWorkflowStepper || (() => {}),
+    setDriverExecutionBusy: context.setDriverExecutionBusy || (() => {}),
   };
 }
 
@@ -30,7 +32,14 @@ function joinGateContext(context = {}) {
 // step content streams in, and force the plan rail to re-fetch on a short
 // interval so the running step doesn't look frozen.
 function withDriverTurnBusyFeedback(taskId, context, run) {
-  const { setActionStatus, pollAgentMessagesUntilSettled, resetFetchThrottle, renderWorkflowStepper } = context;
+  const {
+    setActionStatus,
+    pollAgentMessagesUntilSettled,
+    resetFetchThrottle,
+    renderWorkflowStepper,
+    setDriverExecutionBusy,
+  } = context;
+  setDriverExecutionBusy(true, taskId);
   setActionStatus("正在执行下一步…", "busy");
   let planRailTimer = null;
   if (typeof setInterval === "function") {
@@ -41,6 +50,7 @@ function withDriverTurnBusyFeedback(taskId, context, run) {
   }
   const stopPlanRailTicker = () => {
     if (planRailTimer !== null) clearInterval(planRailTimer);
+    setDriverExecutionBusy(false, taskId);
     resetFetchThrottle(taskId);
     renderWorkflowStepper({ force: true });
   };
@@ -71,7 +81,7 @@ export function renderJoinC1Form(message, options = {}) {
   const rows = c1.files
     .map(
       (file) => `<tr>
-      <td class="c1-file">${escapeHtml(file.name || "")}</td>
+      <td class="c1-file"><button type="button" class="c1-file-preview" data-c1-preview-dataset="${escapeHtml(file.dataset_id || "")}" data-c1-preview-name="${escapeHtml(file.name || "")}" title="预览前 10 行">${escapeHtml(file.name || "")}</button></td>
       <td>${escapeHtml(String(file.row_count ?? ""))}</td>
       <td>${escapeHtml(String(file.n_cols ?? ""))}</td>
       <td>${file.has_target ? "✓" : ""}</td>
@@ -101,11 +111,55 @@ export function renderJoinC1Form(message, options = {}) {
       <thead><tr><th>文件</th><th>行数</th><th>列数</th><th>含目标</th><th>角色</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <div class="c1-form-foot">
+    <div class="c1-form-foot gate-action-bar">
       <label class="c1-target-label">目标列 <select class="c1-target"${disabledAttr}>${targetOptions}</select></label>
       <button type="button" class="button compact primary c1-confirm"${interactive ? ` data-c1-confirm="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "确认角色" : "历史结果"}</button>
     </div>
   </div>`;
+}
+
+function c1PreviewDocument(context = {}) {
+  if (context.document) return context.document;
+  return typeof document !== "undefined" ? document : null;
+}
+
+export async function showC1DatasetPreview(button, context = {}) {
+  const doc = c1PreviewDocument(context);
+  const dialog = doc?.getElementById?.("c1DatasetPreviewDialog");
+  const title = doc?.getElementById?.("c1DatasetPreviewTitle");
+  const body = doc?.getElementById?.("c1DatasetPreviewBody");
+  const datasetId = button?.dataset?.c1PreviewDataset || "";
+  const name = button?.dataset?.c1PreviewName || "数据文件";
+  if (!dialog || !title || !body || !datasetId || typeof context.api !== "function") return;
+
+  title.textContent = `${name} · 前 10 行`;
+  body.innerHTML = '<div class="c1-preview-loading" role="status">正在读取预览…</div>';
+  if (!dialog.open) dialog.showModal();
+  try {
+    const preview = await context.api(`/api/datasets/${encodeURIComponent(datasetId)}/preview?rows=10`);
+    body.innerHTML = datasetTableHtml(preview);
+  } catch (error) {
+    body.innerHTML = `<div class="c1-preview-error" role="alert">${escapeHtml(error?.message || "预览读取失败")}</div>`;
+  }
+}
+
+export function closeC1DatasetPreview(context = {}) {
+  const dialog = c1PreviewDocument(context)?.getElementById?.("c1DatasetPreviewDialog");
+  if (dialog?.open) dialog.close();
+}
+
+export function handleC1PreviewClick(event, context = {}) {
+  const closeButton = event.target?.closest?.("[data-c1-preview-close]");
+  if (closeButton) {
+    event.preventDefault();
+    closeC1DatasetPreview(context);
+    return true;
+  }
+  const previewButton = event.target?.closest?.("[data-c1-preview-dataset]");
+  if (!previewButton) return false;
+  event.preventDefault();
+  void showC1DatasetPreview(previewButton, context);
+  return true;
 }
 
 export async function submitC1Assignment(button, rawContext = {}) {
@@ -133,21 +187,23 @@ export async function submitC1Assignment(button, rawContext = {}) {
   }
   const targetCol = form.querySelector(".c1-target")?.value || "";
   const expectedStepId = form.dataset.c1GateStepId || "";
-  if (!expectedStepId) {
-    setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
-    return;
-  }
   button.disabled = true;
   const context = joinGateContext(rawContext);
   try {
     await withDriverTurnBusyFeedback(taskId, context, async (pollAgentMessagesUntilSettled) => {
+      const body = {
+        content: "[C1]" + JSON.stringify({ anchor_id: anchorIds[0], anchor_ids: anchorIds, feature_ids: featureIds, target_col: targetCol }),
+        ui_action: "confirm_roles",
+        acceptance_mode: acceptanceMode,
+      };
+      // C1 is a pre-plan role-assignment gate and therefore normally has no
+      // PlanDriver step id.  Keep stale-step protection for any future / legacy
+      // C1 message that does carry one, but do not reject the canonical
+      // pre-plan contract used by data, feature and modeling workflows.
+      if (expectedStepId) body.expected_step_id = expectedStepId;
       const requestPromise = api(`/api/tasks/${taskId}/agent/messages`, {
         method: "POST",
-        body: JSON.stringify({
-          content: "[C1]" + JSON.stringify({ anchor_id: anchorIds[0], anchor_ids: anchorIds, feature_ids: featureIds, target_col: targetCol }),
-          expected_step_id: expectedStepId,
-          acceptance_mode: acceptanceMode,
-        }),
+        body: JSON.stringify(body),
       });
       const streamPollPromise = pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true });
       const result = await requestPromise;
@@ -166,6 +222,132 @@ export function handleC1ConfirmClick(event, context = {}) {
   if (!button) return false;
   event.preventDefault();
   void submitC1Assignment(button, context);
+  return true;
+}
+
+function joinKeyRate(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${(number * 100).toFixed(2)}%` : "n/a";
+}
+
+export function renderJoinKeyPicker(message, options = {}) {
+  const payload = message?.metadata?.join_keys;
+  if (!payload || !Array.isArray(payload.features) || !payload.features.length) return "";
+  const interactive = options.interactive !== false;
+  const disabledAttr = interactive ? "" : ' disabled aria-disabled="true"';
+  const messageId = String(message?.id || "");
+  const stepId = String(message?.metadata?.step_id || "");
+  const cards = payload.features.map((feature) => {
+    const featureId = String(feature.feature_id || "");
+    const featureName = String(feature.feature_name || featureId);
+    const selected = new Set((feature.selected_anchor_cols || []).map(String));
+    const currentKeys = (feature.current_keys || []).map((pair) => {
+      const anchorCol = String(pair.anchor_col || "");
+      const featureCol = String(pair.feature_col || "");
+      return `<label class="join-key-option">
+        <input type="checkbox" data-join-key-feature="${escapeHtml(featureId)}" value="${escapeHtml(anchorCol)}"${selected.has(anchorCol) ? " checked" : ""}${disabledAttr}>
+        <span><code>${escapeHtml(anchorCol)}</code><span aria-hidden="true"> = </span><code>${escapeHtml(featureCol)}</code></span>
+      </label>`;
+    }).join("");
+    const alternatives = (feature.alternatives || []).map((alternative) => {
+      const anchorCols = (alternative.anchor_cols || []).map(String);
+      const pairLabel = (alternative.key_pairs || []).map((pair) => `${pair[0]}=${pair[1]}`).join(" + ");
+      const risks = [
+        alternative.feature_key_unique ? "键唯一" : "键不唯一",
+        alternative.fan_out_detected ? "会膨胀" : "不膨胀",
+      ].join(" · ");
+      return `<button type="button" class="join-key-suggestion${alternative.fan_out_detected ? " is-risk" : ""}"
+        data-join-key-suggestion="${escapeHtml(featureId)}"
+        data-join-key-columns="${escapeHtml(JSON.stringify(anchorCols))}"${disabledAttr}>
+        <span>${escapeHtml(pairLabel || anchorCols.join(" + "))}</span>
+        <small>命中 ${escapeHtml(joinKeyRate(alternative.match_rate))} · ${escapeHtml(risks)}</small>
+      </button>`;
+    }).join("");
+    return `<article class="join-key-card" data-join-key-card="${escapeHtml(featureId)}">
+      <header><div><strong>${escapeHtml(featureName)}</strong>${featureName !== featureId ? `<small>${escapeHtml(featureId)}</small>` : ""}</div>
+        <span>当前命中 ${escapeHtml(joinKeyRate(feature.current_match_rate))}</span></header>
+      <div class="join-key-options" role="group" aria-label="${escapeHtml(featureName)} 拼接键">${currentKeys}</div>
+      ${alternatives ? `<div class="join-key-alternatives"><span>Agent 候选方案（点击即可选中）</span>${alternatives}</div>` : ""}
+    </article>`;
+  }).join("");
+  return `<section class="join-key-picker" data-join-key-form="${escapeHtml(messageId)}" data-join-key-gate-step-id="${escapeHtml(stepId)}"${interactive ? "" : ' data-join-key-readonly="true"'}>
+    <div class="join-key-picker-intro"><strong>逐表确认拼接键</strong><p>这里仍是 ${payload.features.length} 张特征表；每张表只能生成一个最终拼接方案。选择后会先重新诊断，不会立即拼接。</p></div>
+    <div class="join-key-card-list">${cards}</div>
+    <div class="gate-action-bar">${interactive
+    ? `<button type="button" class="button compact primary" data-join-key-confirm="${escapeHtml(messageId)}">应用拼接键并重新诊断</button>`
+    : '<span class="gate-history-label" aria-label="历史拼接键结果">历史结果</span>'}</div>
+  </section>`;
+}
+
+export async function submitJoinKeySelection(button, rawContext = {}) {
+  const form = button.closest(".join-key-picker");
+  const context = joinGateContext(rawContext);
+  const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = context;
+  if (!form || !taskId || typeof api !== "function") return;
+  if (form.dataset.joinKeyReadonly === "true") {
+    setActionStatus("这是历史拼接键结果，请使用最新待确认步骤。", "error");
+    return;
+  }
+  const keyOverrides = {};
+  for (const card of form.querySelectorAll("[data-join-key-card]")) {
+    const featureId = card.getAttribute("data-join-key-card");
+    const selected = [...card.querySelectorAll("[data-join-key-feature]:checked")].map((input) => input.value);
+    if (!selected.length) {
+      setActionStatus("每张特征表至少选择一个拼接键。", "error");
+      return;
+    }
+    keyOverrides[featureId] = selected;
+  }
+  const expectedStepId = form.dataset.joinKeyGateStepId || "";
+  if (!expectedStepId) {
+    setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
+    return;
+  }
+  button.disabled = true;
+  try {
+    await withDriverTurnBusyFeedback(taskId, context, async (pollAgentMessagesUntilSettled) => {
+      const requestPromise = api(`/api/tasks/${taskId}/agent/messages`, {
+        method: "POST",
+        body: JSON.stringify({
+          content: "重新诊断拼接键",
+          ui_action: "apply_join_keys",
+          adjust_params: { key_overrides: keyOverrides },
+          expected_step_id: expectedStepId,
+          acceptance_mode: acceptanceMode,
+        }),
+      });
+      const streamPollPromise = pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true });
+      const result = await requestPromise;
+      await streamPollPromise;
+      setAgentMessages(result.messages);
+      renderAgentConversation();
+    });
+  } catch (error) {
+    button.disabled = false;
+    setActionStatus(error?.message || "拼接键重诊断失败", "error");
+  }
+}
+
+export function handleJoinKeyConfirmClick(event, context = {}) {
+  const suggestion = event.target?.closest?.("[data-join-key-suggestion]");
+  if (suggestion) {
+    event.preventDefault();
+    const form = suggestion.closest(".join-key-picker");
+    if (form?.dataset.joinKeyReadonly === "true") return true;
+    const featureId = suggestion.getAttribute("data-join-key-suggestion");
+    let selected = [];
+    try { selected = JSON.parse(suggestion.getAttribute("data-join-key-columns") || "[]"); } catch { selected = []; }
+    for (const input of form?.querySelectorAll("[data-join-key-feature]") || []) {
+      if (input.getAttribute("data-join-key-feature") === featureId) {
+        input.checked = selected.includes(input.value);
+      }
+    }
+    return true;
+  }
+  const button = event.target?.closest?.("[data-join-key-confirm]");
+  if (!button) return false;
+  event.preventDefault();
+  void submitJoinKeySelection(button, context);
   return true;
 }
 
@@ -188,8 +370,10 @@ function dedupConflictColumnsHtml(feature, dictionary) {
   if (!columns.length) return "";
   const shown = columns.slice(0, DEDUP_CONFLICT_COLUMNS_DISPLAY_CAP);
   const more = columns.length > shown.length ? ` 等 ${columns.length} 列` : "";
-  const labels = shown.map((column) => dedupColumnLabel(column, dictionary)).join("、");
-  return `<div class="dedup-conflict-columns">冲突列：${labels}${more}</div>`;
+  const labels = shown
+    .map((column) => `<span class="dedup-conflict-chip">${dedupColumnLabel(column, dictionary)}</span>`)
+    .join("");
+  return `<div class="dedup-conflict-columns"><span class="dedup-evidence-label">冲突列</span><div class="dedup-conflict-chips">${labels}${more ? `<span class="dedup-conflict-more">${escapeHtml(more.trim())}</span>` : ""}</div></div>`;
 }
 
 // UX-6: one real conflicting-value example per feature (e.g. "k=138... 时 balance
@@ -201,11 +385,16 @@ function dedupExampleHtml(feature) {
   if (!examples.length) return "";
   const example = examples[0];
   const values = example?.values && typeof example.values === "object" ? example.values : {};
-  const valueParts = Object.entries(values)
-    .map(([col, vals]) => `${col} 两行分别为 ${(Array.isArray(vals) ? vals : [vals]).join("、")}`)
-    .join("；");
-  if (!valueParts) return "";
-  return `<div class="dedup-example">示例：k=${escapeHtml(String(example.key || ""))} 时 ${escapeHtml(valueParts)}</div>`;
+  const valueRows = Object.entries(values).map(([col, rawValues]) => {
+    const items = Array.isArray(rawValues) ? rawValues : [rawValues];
+    const protectedValue = items.some((item) => /\[REDACTED(?:_[A-Z]+)?\]/.test(String(item)));
+    const valueHtml = protectedValue
+      ? '<span class="dedup-value-protected">敏感字段，示例值已保护；两行实际值不同</span>'
+      : `<span class="dedup-value-pair">${items.map((item) => `<code>${escapeHtml(String(item ?? "空值"))}</code>`).join('<span aria-hidden="true">→</span>')}</span>`;
+    return `<div class="dedup-value-row"><span class="dedup-value-column">${escapeHtml(col)}</span>${valueHtml}</div>`;
+  }).join("");
+  if (!valueRows) return "";
+  return `<div class="dedup-example"><div class="dedup-example-key"><span class="dedup-evidence-label">冲突样例</span><code>${escapeHtml(String(example.key || ""))}</code></div><div class="dedup-value-list">${valueRows}</div></div>`;
 }
 
 export function renderDedupPicker(message, options = {}) {
@@ -219,9 +408,10 @@ export function renderDedupPicker(message, options = {}) {
   const interactive = options.interactive !== false;
   const disabledAttr = interactive ? "" : " disabled aria-disabled=\"true\"";
   const strategies = Array.isArray(dedup.strategies) && dedup.strategies.length ? dedup.strategies : ["first", "last"];
-  const rows = dedup.features
+  const cards = dedup.features
     .map((feature) => {
       const fid = String(feature.feature_id);
+      const featureName = String(feature.feature_name || fid);
       const conflicts = feature.conflict_keys ? `${feature.conflict_keys} 个同键冲突` : "拼接键不唯一";
       const options = strategies
         .map((strategy) => {
@@ -235,24 +425,26 @@ export function renderDedupPicker(message, options = {}) {
       // driver already routes adjust/replan through (agent mode acts on it; manual
       // mode — no LLM — shows the existing canned "回复「确认」或调参" hint, which is
       // still an honest, non-broken response).
-      return `<tr>
-      <td class="dedup-feat">${escapeHtml(fid)}${evidence}</td>
-      <td>${escapeHtml(conflicts)}</td>
-      <td>
+      return `<article class="dedup-feature-card">
+      <header class="dedup-feature-head">
+        <div><strong>${escapeHtml(featureName)}</strong>${featureName !== fid ? `<small>${escapeHtml(fid)}</small>` : ""}</div>
+        <span class="dedup-conflict-count">${escapeHtml(conflicts)}</span>
+      </header>
+      <div class="dedup-feature-evidence">${evidence}</div>
+      <div class="dedup-feature-actions">
+        <label><span>去重策略</span>
         <select class="dedup-strategy" data-dedup-feature="${escapeHtml(fid)}"${disabledAttr}>${options}</select>
+        </label>
         <button type="button" class="button compact secondary dedup-exclude" data-dedup-exclude="${escapeHtml(fid)}"${disabledAttr}>排除该特征表</button>
-      </td>
-    </tr>`;
+      </div>
+    </article>`;
     })
     .join("");
   return `<div class="dedup-picker" data-dedup-form="${escapeHtml(messageId)}" data-dedup-gate-step-id="${escapeHtml(gateStepId)}"${interactive ? "" : ' data-dedup-readonly="true"'}>
     <p class="dedup-note">以下特征表的拼接键不唯一（同键多行），请选择去重策略后再拼接:</p>
     <p class="dedup-strategy-note">${escapeHtml(DEDUP_STRATEGY_NOTE)}</p>
-    <table class="dedup-table">
-      <thead><tr><th>特征表</th><th>冲突</th><th>去重策略</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <div class="dedup-foot">
+    <div class="dedup-feature-list">${cards}</div>
+    <div class="dedup-foot gate-action-bar">
       <button type="button" class="button compact primary dedup-confirm"${interactive ? ` data-dedup-confirm="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "应用去重并确认" : "历史结果"}</button>
     </div>
   </div>`;
@@ -284,6 +476,7 @@ export async function submitDedupStrategies(button, rawContext = {}) {
         method: "POST",
         body: JSON.stringify({
           content: "确认",
+          ui_action: "confirm_dedup",
           dedup_strategies: dedupStrategies,
           expected_step_id: expectedStepId,
           acceptance_mode: acceptanceMode,

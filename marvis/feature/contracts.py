@@ -37,6 +37,17 @@ class FeatureMetrics:
     missing_rate: float
     unique_count: int
     lift_top_bin: float
+    valid_count: int = 0
+    unique_rate: float = 0.0
+    mode_rate: float = 0.0
+    zero_rate: float = 0.0
+    mean: float | None = None
+    std: float | None = None
+    min: float | None = None
+    q25: float | None = None
+    median: float | None = None
+    q75: float | None = None
+    max: float | None = None
 
 
 @dataclass(frozen=True)

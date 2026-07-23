@@ -39,6 +39,13 @@ const METRIC_ORDER = [
 export function renderModelDeliveryPanel(message, options = {}) {
   const delivery = message?.metadata?.model_delivery;
   if (!delivery || typeof delivery !== "object") return "";
+  const taskId = String(
+    delivery.task_id
+    || message?.task_id
+    || message?.metadata?.task_id
+    || options.taskId
+    || ""
+  );
   const compact = options.compact === true;
   const sourceTool = String(delivery.source_tool || "");
   const title = sourceTool === "post_training_action"
@@ -69,7 +76,7 @@ export function renderModelDeliveryPanel(message, options = {}) {
   const candidatesHtml = candidateTable(delivery.candidates);
   const actionsHtml = actionTable(delivery.actions);
   const reportHtml = reportSummary(delivery.report);
-  const artifactsHtml = artifactList(delivery);
+  const artifactsHtml = artifactList(delivery, { taskId });
   return `<div class="model-delivery-panel" data-model-delivery-source="${escapeHtml(sourceTool)}">
     <div class="model-delivery-head">
       <span>${escapeHtml(title)}</span>
@@ -263,26 +270,61 @@ function actionLabel(action) {
   }[key] || key || "-";
 }
 
-function artifactList(delivery) {
+function artifactList(delivery, { taskId = "" } = {}) {
   const artifacts = [
-    ["原生模型", delivery.native_model_path],
-    ["模型报告", delivery.report?.report_path],
-    ["模型卡", delivery.model_card_markdown_path || delivery.model_card_path],
-    ["审批包", delivery.approval_package_markdown_path || delivery.approval_package_path],
+    ["原生模型", delivery.native_model_path, "native_model"],
+    ["PMML", delivery.pmml_path, "pmml"],
+    ["模型卡", delivery.model_card_markdown_path || delivery.model_card_path, "model_card"],
+    ["审批包", delivery.approval_package_markdown_path || delivery.approval_package_path, "approval_package"],
     ...(delivery.approval_package_markdown_path && delivery.approval_package_path
       ? [["审批包JSON", delivery.approval_package_path]]
       : []),
+    ["模型报告", delivery.report?.report_path],
     ["监控策略", delivery.monitoring_policy_markdown_path || delivery.monitoring_policy_path],
     ["Champion对比", delivery.challenger_comparison_markdown_path || delivery.challenger_comparison_path],
     ["Challenger/Backtest", delivery.challenger_task_id],
     ["Challenger/Backtest包", delivery.challenger_package_markdown_path || delivery.challenger_package_path],
-    ["PMML", delivery.pmml_path],
     ["验证任务", delivery.validation_task_id],
   ].filter(([, value]) => String(value || ""));
   if (!artifacts.length) return "";
-  return `<div class="model-delivery-artifacts">${artifacts.map(([label, value]) => (
-    `<div><span>${escapeHtml(label)}</span><code>${escapeHtml(String(value))}</code></div>`
-  )).join("")}</div>`;
+  return `<div class="model-delivery-artifacts">${artifacts.map(([label, value, downloadKind]) => {
+    const href = downloadKind ? taskArtifactDownloadUrl(value, taskId) : "";
+    const downloadLabel = label === "PMML" ? "下载 PMML" : `下载${label}`;
+    return `<div><span>${escapeHtml(label)}</span><code>${escapeHtml(String(value))}</code>${href ? (
+      `<a class="button compact secondary" data-model-delivery-download="${escapeHtml(downloadKind)}" href="${escapeHtml(href)}" download>${escapeHtml(downloadLabel)}</a>`
+    ) : ""}</div>`;
+  }).join("")}</div>`;
+}
+
+function taskArtifactDownloadUrl(value, taskId) {
+  const relativePath = taskArtifactRelativePath(value, taskId);
+  return relativePath ? `/api/artifacts/${encodeURIComponent(relativePath)}` : "";
+}
+
+function taskArtifactRelativePath(value, taskId) {
+  const safeTaskId = String(taskId || "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(safeTaskId)) return "";
+  const raw = String(value || "").trim().replaceAll("\\", "/");
+  if (!raw) return "";
+  const taskPrefix = `tasks/${safeTaskId}/`;
+  const absoluteMarker = `/${taskPrefix}`;
+  const markerIndex = raw.lastIndexOf(absoluteMarker);
+  let relativePath = "";
+  if (markerIndex >= 0) {
+    relativePath = raw.slice(markerIndex + 1);
+  } else if (raw.startsWith(taskPrefix)) {
+    relativePath = raw;
+  } else if (raw.startsWith("modeling_artifacts/")) {
+    relativePath = `${taskPrefix}${raw}`;
+  } else if (!raw.includes("/")) {
+    relativePath = `${taskPrefix}modeling_artifacts/${raw}`;
+  }
+  const segments = relativePath.split("/");
+  if (
+    !relativePath.startsWith(taskPrefix)
+    || segments.some((segment) => !segment || segment === "." || segment === "..")
+  ) return "";
+  return relativePath;
 }
 
 function reportSummary(report) {

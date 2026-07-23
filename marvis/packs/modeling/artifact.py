@@ -17,6 +17,13 @@ from marvis.packs.modeling.errors import ModelingError
 _MODEL_SUFFIX = {
     "lgb": ".pkl",
     "lgb_regressor": ".txt",
+    "xgb_regressor": ".joblib",
+    "lr_regressor": ".joblib",
+    "mlp_regressor": ".joblib",
+    "lgb_multiclass": ".txt",
+    "xgb_multiclass": ".joblib",
+    "lr_multiclass": ".joblib",
+    "mlp_multiclass": ".joblib",
     "xgb": ".pkl",
     "catboost": ".pkl",
     "lr": ".joblib",
@@ -29,13 +36,15 @@ _MODEL_SUFFIX = {
 }
 
 
-def score_direction_for_algorithm(algorithm: str) -> str:
+def score_direction_for_algorithm(algorithm: str) -> str | None:
     """S1a: direction of ModelArtifact.score() / raw_score() -- a compile-time
-    constant of the implementation (predict_proba[:, 1] / tree raw margin is
-    higher-is-riskier for every algorithm this platform trains), not a
-    statistical inference. Single source of truth for save_model() and every
-    recipes/*.py artifact-construction site, so the two can never drift apart.
+    constant of the implementation for binary PD models. Regression predictions
+    and multiclass probability vectors have no universal one-dimensional risk
+    direction, so they deliberately return ``None`` instead of pretending that
+    an arbitrary numeric/class column is a PD score.
     """
+    if algorithm.endswith("_regressor") or "multiclass" in algorithm:
+        return None
     return "higher_is_riskier"
 
 
@@ -222,7 +231,7 @@ def load_model(artifact: ModelArtifact, *, base_dir: Path):
         import lightgbm as lgb
 
         return lgb.Booster(model_file=path.as_posix())
-    if artifact.algorithm == "lgb_regressor":
+    if artifact.algorithm in {"lgb_regressor", "lgb_multiclass"}:
         import lightgbm as lgb
 
         return lgb.Booster(model_file=path.as_posix())
@@ -234,7 +243,19 @@ def load_model(artifact: ModelArtifact, *, base_dir: Path):
         model = xgb.Booster()
         model.load_model(path)
         return model
-    if artifact.algorithm in {"catboost", "lr", "scorecard", "mlp", "ensemble"}:
+    if artifact.algorithm in {
+        "catboost",
+        "lr",
+        "scorecard",
+        "mlp",
+        "ensemble",
+        "xgb_regressor",
+        "lr_regressor",
+        "mlp_regressor",
+        "xgb_multiclass",
+        "lr_multiclass",
+        "mlp_multiclass",
+    }:
         return joblib.load(path)
     raise ModelingError(f"unsupported model algorithm: {artifact.algorithm}")
 
@@ -265,7 +286,6 @@ def export_pmml(
         raise ModelingError("PMML export requires sklearn2pmml and pypmml") from exc
 
     model = load_model(artifact, base_dir=base_dir)
-    schema_sample = _read_schema_sample(Path(dataset_path), list(artifact.feature_list))
     target_name = _target_name(
         Path(dataset_path),
         list(artifact.feature_list),
@@ -273,6 +293,7 @@ def export_pmml(
         ignored_fields=_pmml_ignored_fields(artifact),
     )
     if artifact.algorithm == "scorecard":
+        schema_sample = _read_schema_sample(Path(dataset_path), list(artifact.feature_list))
         pipeline = _scorecard_pmml_pipeline(
             model,
             list(artifact.feature_list),
@@ -408,7 +429,15 @@ def _safe_transform_name(feature: str) -> str:
 def _read_schema_sample(path: Path, columns: list[str]) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix == ".parquet":
-        return pd.read_parquet(path, columns=columns)
+        # A PMML schema sample is only needed to fit the scorecard's WOE
+        # transformation metadata.  Reading every row of a production parquet
+        # (hundreds of columns × hundreds of thousands of rows) used to keep a
+        # multi-gigabyte frame alive while the JPMML subprocess was also running.
+        # Use the backend's LIMIT projection so this remains a bounded schema
+        # sample instead of silently becoming a second full training-data load.
+        from marvis.data.backend import DataBackend
+
+        return DataBackend(path.parent).read_frame(path, columns=columns, nrows=100)
     if suffix == ".csv":
         return pd.read_csv(path, usecols=columns, nrows=100)
     raise ModelingError(f"unsupported dataset format for PMML export: {path.suffix}")
@@ -426,7 +455,9 @@ def _target_name(
         return explicit
     suffix = path.suffix.lower()
     if suffix == ".parquet":
-        columns = list(pd.read_parquet(path).columns)
+        import pyarrow.parquet as pq
+
+        columns = [str(name) for name in pq.ParquetFile(path).schema_arrow.names]
     elif suffix == ".csv":
         columns = list(pd.read_csv(path, nrows=0).columns)
     else:

@@ -535,6 +535,46 @@ def tool_propose_join(inputs: dict, ctx) -> dict:
         ctx.task_id,
         seed=seed,
     )
+    key_overrides = inputs.get("key_overrides")
+    if isinstance(key_overrides, dict) and key_overrides:
+        anchor = runtime.registry.get(anchor_id)
+        anchor_path = runtime.registry.resolve_path(anchor_id)
+        for spec in plan.joins:
+            requested = key_overrides.get(spec.feature_dataset_id)
+            if requested is None:
+                continue
+            selected = [str(column) for column in requested]
+            selected_set = set(selected)
+            if not selected or len(selected_set) != len(selected):
+                raise ValueError(f"feature {spec.feature_dataset_id} must select one or more unique join keys")
+            known = {pair.anchor_col for pair in spec.key_pairs}
+            unknown = sorted(selected_set - known)
+            if unknown:
+                raise ValueError(
+                    f"feature {spec.feature_dataset_id} has unknown anchor join keys: {', '.join(unknown)}"
+                )
+            pairs = [pair for pair in spec.key_pairs if pair.anchor_col in selected_set]
+            feature = runtime.registry.get(spec.feature_dataset_id)
+            feature_path = runtime.registry.resolve_path(feature.id)
+            spec.key_pairs = runtime.join_engine.recompute_key_pairs(
+                anchor,
+                anchor_path,
+                feature,
+                feature_path,
+                pairs,
+                seed=seed,
+            )
+            spec.diagnostics = runtime.join_engine.diagnose_join(
+                anchor,
+                anchor_path,
+                feature,
+                feature_path,
+                spec.key_pairs,
+                seed=seed,
+                recompute_match=True,
+            )
+            runtime.repo.update_join_spec(plan.id, spec)
+        plan = runtime.repo.load_join_plan(plan.id)
     payload = _join_plan_payload(plan)
     for join in payload.get("joins", []):
         join["feature_name"] = _friendly_name(runtime.registry, join.get("feature_id"))

@@ -8,7 +8,8 @@ import pytest
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository, PluginRepository, init_db
+from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
+from marvis.domain import TaskCreate
 from marvis.feature.metrics import feature_metrics
 from marvis.packs.feature import tools as feature_tools
 from marvis.plugins.loader import load_builtin_packs
@@ -541,6 +542,324 @@ def test_feature_metrics_computes_collinear_only_when_vif_selected(tmp_path):
     assert collinear["collinear_pairs"]  # x1/x2 are strongly correlated in the fixture
 
 
+def test_feature_metrics_explicit_selection_does_not_compute_unchecked_base_metrics(
+    tmp_path,
+):
+    """FEATURE §2: an explicit metric list is authoritative, including base metrics."""
+
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    result = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1"],
+            "target_col": "y",
+            "metrics": ["ks"],
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["selected_metrics"] == ["ks"]
+    row = result.output["metrics"][0]
+    assert "ks" in row
+    for unchecked in (
+        "iv",
+        "auc",
+        "coverage",
+        "missing_rate",
+        "lift_top_bin",
+        "psi",
+    ):
+        assert unchecked not in row
+
+
+def test_feature_metrics_computes_four_selected_psi_views(tmp_path):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "x": [
+            0.0, 0.1, 0.2, 0.3,
+            0.0, 0.4, 0.8, 1.2,
+            0.2, 0.8, 1.4, 2.0,
+        ],
+        "y": [0, 1, 0, 1] * 3,
+        "apply_month": [202601] * 4 + [202602] * 4 + [202603] * 4,
+        "split": ["train"] * 4 + ["test"] * 4 + ["oot"] * 4,
+    })
+    path = tmp_path / "psi_views.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x"],
+            "target_col": "y",
+            "metrics": [
+                "psi_month_first",
+                "psi_month_last",
+                "psi_month_previous",
+                "psi_split",
+            ],
+            "time_col": "apply_month",
+            "split_col": "split",
+            "bins": 3,
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    row = result.output["metrics"][0]
+    assert len(row["psi_month_first_series"]) == 2
+    assert len(row["psi_month_last_series"]) == 2
+    assert len(row["psi_month_previous_series"]) == 2
+    assert len(row["psi_split_series"]) == 2
+    for view in (
+        "psi_month_first",
+        "psi_month_last",
+        "psi_month_previous",
+        "psi_split",
+    ):
+        assert row[view] == max(item["psi"] for item in row[f"{view}_series"])
+        assert row[view] >= 0.0
+    assert "iv" not in row and "ks" not in row and "auc" not in row
+
+
+def test_selected_psi_without_dependency_columns_returns_structured_na(tmp_path):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    result = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1"],
+            "target_col": "y",
+            "metrics": ["psi_month_first", "psi_split"],
+            "time_col": "not_a_column",
+            "split_col": "not_a_column",
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    row = result.output["metrics"][0]
+    for view, dependency in (
+        ("psi_month_first", "time_col"),
+        ("psi_split", "split_col"),
+    ):
+        assert row[view] is None
+        reason = row[f"{view}_reason"]
+        assert reason["code"] == "missing_dependency"
+        assert reason["metric_dependency"] == dependency
+        assert isinstance(reason["message"], str) and reason["message"]
+
+
+def test_meaning_consistency_without_llm_decision_is_conservatively_uncertain(tmp_path):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    settings = build_settings(tmp_path / "workspace")
+    task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="含义方向",
+            model_version="",
+            validator="qa",
+            source_dir=str(tmp_path),
+            task_type="feature_analysis",
+            run_mode="agent",
+        )
+    )
+    sample = tmp_path / "agent_meaning.csv"
+    pd.DataFrame({
+        "overdue_count": [0, 0, 1, 1, 2, 2, 3, 4],
+        "y": [0, 0, 0, 0, 1, 1, 1, 1],
+    }).to_csv(sample, index=False)
+    dataset = registry.register_from_upload(task.id, sample, role="sample")
+    dictionary = tmp_path / "字段字典.csv"
+    pd.DataFrame({
+        "特征名": ["overdue_count"],
+        "含义": ["历史逾期次数，越高风险越大"],
+    }).to_csv(dictionary, index=False)
+    registry.register_from_upload(task.id, dictionary, role="feature_dictionary")
+
+    result = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["overdue_count"],
+            "target_col": "y",
+            "metrics": ["meaning_consistency"],
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is True, result.error
+    row = result.output["metrics"][0]
+    assert row["business_meaning"].startswith("历史逾期次数")
+    assert row["expected_direction"] == "uncertain"
+    assert row["actual_direction"] == "positive"
+    assert row["meaning_consistency"] == "需人工看"
+    assert row["meaning_judgement_source"] == "no_llm_fallback"
+
+
+def test_unselected_signal_metrics_remain_neutral_with_no_recommendation_evidence(
+    tmp_path,
+):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    result = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1"],
+            "target_col": "y",
+            "metrics": [],
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["selected_metrics"] == []
+    row = result.output["metrics"][0]
+    assert row["recommendation"] == "待评估"
+    assert row["recommendation_state"] == "unevaluated"
+    assert row["recommendation_confidence"] == "none"
+    assert row["recommendation_evidence"] == []
+
+
+def test_recommendation_state_mapping_is_closed():
+    assert feature_tools._RECOMMENDATION_STATES == {
+        "推荐": "recommended",
+        "候选": "candidate",
+        "待评估": "unevaluated",
+        "谨慎": "caution",
+        "暂不推荐": "not_recommended",
+        "不推荐": "not_recommended",
+    }
+
+
+def test_meaning_consistency_uses_bounded_llm_direction_but_measures_actual_deterministically(
+    tmp_path,
+):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    settings = build_settings(tmp_path / "workspace")
+    task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="LLM 语义判向",
+            model_version="",
+            validator="qa",
+            source_dir=str(tmp_path),
+            task_type="feature_analysis",
+            run_mode="agent",
+        )
+    )
+    sample = tmp_path / "meaning.csv"
+    pd.DataFrame({
+        "overdue_count": [0, 0, 1, 1, 2, 2, 3, 4],
+        "y": [0, 0, 0, 0, 1, 1, 1, 1],
+    }).to_csv(sample, index=False)
+    dataset = registry.register_from_upload(task.id, sample, role="sample")
+    dictionary = tmp_path / "字段字典.csv"
+    pd.DataFrame({
+        "特征名": ["overdue_count"],
+        "含义": ["历史逾期次数，越高风险越大"],
+    }).to_csv(dictionary, index=False)
+    registry.register_from_upload(task.id, dictionary, role="feature_dictionary")
+
+    result = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["overdue_count"],
+            "target_col": "y",
+            "metrics": ["meaning_consistency"],
+            "meaning_directions": {
+                "overdue_count": {
+                    "business_meaning": "历史逾期次数，越高风险越大",
+                    "expected_direction": "positive",
+                    "confidence": "high",
+                    "rationale": "逾期次数增加通常代表风险升高。",
+                    "judgement_source": "llm_semantic_direction",
+                    "model": "fake-model",
+                    "prompt_name": "feature_meaning_direction",
+                    "prompt_version": 1,
+                }
+            },
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is True, result.error
+    row = result.output["metrics"][0]
+    assert row["expected_direction"] == "positive"
+    assert row["actual_direction"] == "positive"
+    assert row["meaning_consistency"] == "一致"
+    assert row["meaning_judgement_source"] == "llm_semantic_direction"
+    assert row["meaning_direction_model"] == "fake-model"
+    assert row["meaning_direction_prompt"] == {
+        "name": "feature_meaning_direction",
+        "version": 1,
+    }
+
+
+def test_u_shape_meaning_uses_governed_bin_bad_rate_shape(tmp_path):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    settings = build_settings(tmp_path / "workspace")
+    task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="U 型语义判向",
+            model_version="",
+            validator="qa",
+            source_dir=str(tmp_path),
+            task_type="feature_analysis",
+            run_mode="agent",
+        )
+    )
+    values = np.linspace(-3.0, 3.0, 700)
+    target = (np.abs(values) >= 1.5).astype(int)
+    sample = tmp_path / "u_shape.csv"
+    pd.DataFrame({"age_gap": values, "y": target}).to_csv(sample, index=False)
+    dataset = registry.register_from_upload(task.id, sample, role="sample")
+    dictionary = tmp_path / "字段字典.csv"
+    pd.DataFrame({
+        "特征名": ["age_gap"],
+        "含义": ["年龄偏差过高或过低均有风险"],
+    }).to_csv(dictionary, index=False)
+    registry.register_from_upload(task.id, dictionary, role="feature_dictionary")
+
+    result = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["age_gap"],
+            "target_col": "y",
+            "metrics": ["meaning_consistency"],
+            "meaning_directions": {
+                "age_gap": {
+                    "business_meaning": "年龄偏差过高或过低均有风险",
+                    "expected_direction": "u_shape",
+                    "confidence": "high",
+                    "rationale": "两端偏离均应提高风险。",
+                    "judgement_source": "llm_semantic_direction",
+                    "model": "fake-model",
+                    "prompt_name": "feature_meaning_direction",
+                    "prompt_version": 1,
+                }
+            },
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is True, result.error
+    row = result.output["metrics"][0]
+    assert row["actual_direction"] == "u_shape"
+    assert row["meaning_consistency"] == "一致"
+    assert row["u_shape_evidence"]["actual_bins"] >= 3
+
+
 def test_head_tail_lift_is_risk_direction_aware_and_deterministic():
     """head/tail lift slices by RISK direction (corr sign), not raw feature magnitude,
     so a feature and its negation report the same high-risk head. Tiny N → None."""
@@ -825,7 +1144,7 @@ def test_screen_features_continuous_skips_leakage_and_keeps_all(tmp_path):
     assert set(result.output["selected"]) == {"x1", "x2", "missing"}
     assert result.output["leakage"] == []
     assert result.output["suspected"] == []
-    assert result.output["note"] == "非二分类目标：跳过泄漏KS筛选，已剔除常量/高缺失列"
+    assert result.output["note"] == "非二分类目标：跳过统计型泄漏KS筛选；语义/时序泄漏与控制列仍硬剔除"
     # Continuous screen reports missing_rate/unique_count only — KS is None (not computed).
     assert result.output["scores"]["x1"]["ks"] is None
     assert "missing_rate" in result.output["scores"]["x1"]

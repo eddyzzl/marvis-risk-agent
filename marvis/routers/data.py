@@ -18,6 +18,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
+from fastapi.responses import FileResponse
 from marvis.errors import (
     bad_request,
     conflict,
@@ -31,8 +32,8 @@ from marvis.errors import (
 from marvis.api_data_payloads import (
     dataset_payload,
     dataset_preview_profiles,
+    dataset_preview_records,
     join_plan_payload,
-    masked_preview_records,
 )
 from marvis.api_schemas import (
     DataWorkspaceSnapshotResponse,
@@ -766,8 +767,8 @@ def _dataset_preview_payload(
     frame = frame.head(rows)
     return {
         "columns": [str(column) for column in frame.columns],
-        "column_profiles": dataset_preview_profiles(dataset),
-        "rows": masked_preview_records(frame, dataset),
+        "column_profiles": dataset_preview_profiles(dataset, frame),
+        "rows": dataset_preview_records(frame),
         "truncated": truncated,
     }
 
@@ -786,6 +787,21 @@ def preview_task_dataset(
 @router.get("/datasets/{dataset_id}/preview")
 def preview_dataset(dataset_id: str, request: Request, rows: int = 50) -> dict:
     return _dataset_preview_payload(dataset_id, request, rows)
+
+
+@router.get("/datasets/{dataset_id}/download")
+def download_dataset(dataset_id: str, request: Request) -> FileResponse:
+    """Download the exact registered dataset artifact produced by a workflow."""
+    _repo_data, _backend, registry, _join_engine = _data_runtime(request)
+    try:
+        path = registry.resolve_path(dataset_id)
+    except KeyError as exc:
+        raise not_found("dataset not found") from exc
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        filename=path.name,
+    )
 
 
 @router.post("/tasks/{task_id}/joins/propose", status_code=201)

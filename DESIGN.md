@@ -2,7 +2,7 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-07-08
+- Last refreshed: 2026-07-24
 - Primary product surfaces: local MARVIS credit-risk-agent workbench, V2 workflow task entries, Agent-driven plan/gate execution, model-validation compatibility flow, structured evidence, downloads/reports, audit history, Agent memory, and runtime branding.
 - Evidence reviewed: current `README.md`, `README.zh-CN.md`, `docs/roadmap.md`, `docs/versioning.md`, `docs/branding.md`, `docs/notebook_contract.md`, `docs/runbook.md`, and the static FastAPI-served frontend.
 - Roadmap reference: use `docs/roadmap.md` for version phases and Plugin/Tool/Hook/Workflow terminology. Keep this file focused on product experience and interface decisions.
@@ -10,7 +10,11 @@
 ## Brand
 - Personality: restrained local professional tool, closer to Xcode or Finder utility panels than SaaS landing pages.
 - Trust signals: clear task state, human-readable execution evidence, stable report output paths, visible errors near the triggering action, and auditable Agent statements.
-- Avoid: marketing hero pages, decorative glass effects, heavy shadows, redundant rails, generic AI claims, and JSON as the default user-facing result.
+- Avoid: marketing hero pages, full-page or purely decorative glass effects, heavy
+  shadows without hierarchy, redundant rails, generic AI claims, and JSON as
+  the default user-facing result. Functional workflow widgets may use the
+  controlled glass treatment defined below when translucency communicates
+  grouping, progress, filtering, or drill-down behavior.
 - Default public brand: `MARVIS-全能风控智能体`.
 - Branding must be runtime-configurable without source-code edits. The configurable surface is logo, favicon/web logo, primary theme color, platform display name, and browser page title.
 - Private/customer branding belongs in `workspace/branding/brand.json` plus sibling assets, and must not be required for the open-source checkout to run.
@@ -52,25 +56,38 @@
 - Color: neutral light background and white panels. The default primary color is neutral charcoal (`#343438`); configured primary color drives primary actions such as create-task and Agent send.
 - Typography: system font, 12 / 14 / 17 / 22 / 28 size scale, 400 / 500 / 700 weights.
 - Spacing/layout rhythm: resizable workbench, central evidence console, right document canvas, 8px grid where practical.
-- Shape/radius/elevation: one 8px radius token; border-first surfaces with minimal shadow.
-- Motion: no hover translation; loading state changes text and spinner only.
+- Shape/radius/elevation: 8px is the base control radius. Functional workflow
+  widgets may use the documented 12 / 16 / 18 / 22px component radii to express
+  nested hierarchy; they remain border-first and use a single low-opacity
+  elevation layer.
+- Motion: generic surfaces do not translate on hover. Functional controls may
+  use color/elevation feedback and a maximum 1px pressed movement; workflow
+  widgets may use one short entrance transition. Loading state changes text,
+  progress, and spinner without moving surrounding layout.
 - Imagery/iconography: logo and favicon only for the current internal tool; avoid decorative art.
 
 ## Components
 - Existing components to reuse: static FastAPI-served HTML/CSS/JS, current task/report API ids, existing task evidence sections, current Agent conversation UI.
+- Functional glass components: reusable workflow data widget, modeling journey
+  stage, progress widget, filter rail, and artifact download card. Their glass
+  treatment is scoped to the component, must carry an interaction or state,
+  and must not be used to wrap ordinary Agent prose.
 - Existing Agent components: LLM settings, center-column conversation, asymmetric user/Agent messages, staged evidence summaries, Word conclusion confirmation gate.
 - Branding components: runtime brand loader, brand config schema, sidebar logo/name binding, favicon/title binding, CSS primary-color token, and public default MARVIS logo/favicon.
 - Memory components: inline memory-aware Agent statements, expandable memory references on Agent messages, memory management/audit view, memory disable/delete actions, and memory-use audit metadata.
 - Workflow/runtime components: plugin registry, tool run evidence panel, hook run evidence panel, workflow plan/right-rail view, extension metric tables, extension report sections, and plugin output display declarations.
 - Variants and states: primary/secondary/disabled/loading/error/success buttons; empty/loading/error/success summaries; high/medium/low confidence memory comparison states; disabled memory state; deleted-memory reference state.
-- Token/component ownership: `marvis/static/styles.css`.
+- Token/component ownership: global tokens and shell components live in
+  `marvis/static/styles.css`; V2 workflow components live in
+  `marvis/static/css/v2-workbench.css` and consume the same global tokens.
 
 ## Accessibility
 - Target standard: practical WCAG AA for contrast and keyboard focus on the local tool.
 - Keyboard/focus behavior: visible `:focus-visible`, task list keyboard navigation, Enter task creation, Cmd/Ctrl+S save report text where supported.
 - Contrast/readability: muted text must remain readable on white; long names wrap instead of being clipped.
 - Screen-reader semantics: status and alert areas near the relevant actions; raw data and memory references are labelled.
-- Reduced motion and sensory considerations: no layout-shifting hover motion.
+- Reduced motion and sensory considerations: no layout-shifting hover motion;
+  entrance and progress animation must stop under `prefers-reduced-motion`.
 
 ## Responsive behavior
 - Supported breakpoints/devices: desktop, 13-inch laptop, tablet/narrow browser, mobile emergency use.
@@ -95,7 +112,10 @@
 - Framework/styling system: plain HTML/CSS/JS served by FastAPI.
 - Design-token constraints: no new frontend dependency; keep proxy-safe relative paths.
 - Branding config should live outside committed source defaults under `workspace/branding/`.
-- Performance constraints: avoid unnecessary `backdrop-filter`, heavy shadows, and repeated DOM rewrites during polling.
+- Performance constraints: avoid unnecessary `backdrop-filter`, heavy shadows,
+  and repeated DOM rewrites during polling. Controlled glass is limited to
+  functional workflow components, capped at 22px blur, and must retain an
+  opaque fallback/background for unsupported or reduced-motion environments.
 - Compatibility constraints: preserve existing API endpoints and legacy DOM ids used by tests unless a task explicitly migrates them.
 - Test/screenshot expectations: smoke tests plus browser viewport verification after frontend changes.
 - Memory constraints: memory can support explanation, comparison, field suggestions, pitfall warnings, report wording, and future workflow planning, but cannot alter deterministic validation metrics. Memory references must carry source, category, confidence, and audit metadata.

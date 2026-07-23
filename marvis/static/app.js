@@ -83,29 +83,61 @@ import {
 } from "./js/v2/driver_gate_confirm.js";
 import { mountGovernanceExtensionPanels } from "./js/v2/governance_extensions.js";
 import {
+  handleDatasetTablePointerOut,
+  handleDatasetTablePointerOver,
+} from "./js/v2/artifact_view.js";
+import {
   handleC1ConfirmClick as handleC1ConfirmClickController,
+  handleC1PreviewClick as handleC1PreviewClickController,
   handleDedupConfirmClick as handleDedupConfirmClickController,
   handleDedupExcludeClick as handleDedupExcludeClickController,
+  handleJoinKeyConfirmClick as handleJoinKeyConfirmClickController,
   renderDedupPicker,
+  renderJoinKeyPicker,
   renderJoinC1Form,
   submitC1Assignment as submitC1AssignmentController,
   submitDedupExclude as submitDedupExcludeController,
   submitDedupStrategies as submitDedupStrategiesController,
+  submitJoinKeySelection as submitJoinKeySelectionController,
 } from "./js/v2/join_gate_controller.js";
 import {
+  handleModelingSetupInteraction,
   handleModelingWeightAdjustClick as handleModelingWeightAdjustClickController,
   renderModelingSetupPanel,
   submitModelingWeightAdjust as submitModelingWeightAdjustController,
 } from "./js/v2/modeling_setup_panel.js";
 import { renderModelDeliveryPanel } from "./js/v2/model_delivery_panel.js";
-import { createPlanRailController, taskUsesPlanRail } from "./js/v2/plan_rail_controller.js";
+import {
+  hideSupersededTuningThinking,
+  normalizeModelTuningProgress,
+  renderModelTuningMessageProgress,
+} from "./js/v2/model_tuning_progress.js";
+import {
+  mountWorkflowWidgetInteractions,
+  renderWorkflowDataWidget,
+} from "./js/v2/workflow_widgets.js";
+import {
+  handleFeatureBinningClick as handleFeatureBinningClickController,
+  renderFeatureBinningGate,
+} from "./js/v2/feature_binning_gate.js";
+import {
+  handleSpecialValueClick as handleSpecialValueClickController,
+  renderSpecialValueGate,
+} from "./js/v2/special_value_gate.js";
+import {
+  createPlanRailController,
+  taskUsesPlanRail,
+  workflowStatusSnapshot,
+} from "./js/v2/plan_rail_controller.js";
 import { renderPluginManager } from "./js/v2/plugin_manager.js";
 import {
   handleScreenAdjustClick as handleScreenAdjustClickController,
+  handleScreenAgentRecommendClick as handleScreenAgentRecommendClickController,
   handleScreenBulkClick as handleScreenBulkClickController,
   handleScreenChipClick as handleScreenChipClickController,
   handleScreenConfirmClick as handleScreenConfirmClickController,
   handleScreenPageClick as handleScreenPageClickController,
+  handleScreenMetricFilterInput as handleScreenMetricFilterInputController,
   handleScreenPickChange as handleScreenPickChangeController,
   handleScreenSearchInput as handleScreenSearchInputController,
   handleScreenSortClick as handleScreenSortClickController,
@@ -280,6 +312,12 @@ const planRailController = createPlanRailController({
   stepCheckerHtml,
   getSelectedTask: () => selectedTask,
   getSelectedTaskId: () => selectedTaskId,
+  getTaskBusyAction: () => taskBusyAction(selectedTaskId),
+  setDriverExecutionBusy: (active, taskId) => setBusy(
+    active ? "driver_execute" : null,
+    active ? "正在执行下一步…" : "",
+    taskId,
+  ),
   getAgentMessages: () => agentMessages,
   isAgentMode: selectedTaskIsAgentMode,
   renderWorkflowStepper,
@@ -328,6 +366,10 @@ const taskSearchIsActive = taskSearchController.isActive;
 
 const PET_REACTION_DURATION_MS = 6500;
 const AGENT_STREAM_POLL_INTERVAL_MS = 180;
+const AGENT_STREAM_POLL_IDLE_INTERVAL_MS = 1000;
+const AGENT_STREAM_POLL_LONG_INTERVAL_MS = 3000;
+const AGENT_STREAM_POLL_IDLE_AFTER_MS = 2000;
+const AGENT_STREAM_POLL_LONG_AFTER_MS = 15000;
 const AGENT_TYPEWRITER_INTERVAL_MS = 12;
 const AGENT_TYPEWRITER_CHARS_PER_TICK = 2;
 // When the typewriter falls far behind a streamed message, drain the backlog
@@ -516,6 +558,7 @@ function currentTaskSignature(task) {
     task.id || "",
     task.name || "",
     task.status || "",
+    task.workflow_status || "",
     task.failure_stage || "",
     task.active_job_kind || "",
     task.status_message || "",
@@ -567,6 +610,12 @@ function taskListSignature(tasks, totalTaskCount) {
       task.name || "",
       task.task_type || "",
       task.status || "",
+      // Driver task rows display the active plan's derived status while the
+      // task record itself commonly remains `created`.  Include that derived
+      // state so a recovered plan (failed -> running) invalidates the list's
+      // render guard instead of leaving the old failure pill behind.
+      taskStatusLabel(task),
+      taskStatusTone(task),
       task.updated_at || "",
       task.active_job_kind || "",
       task.validator || "",
@@ -1373,13 +1422,23 @@ function actionStatusPill(message, kind) {
   if (kind === "stopped") return { label: "停止", tone: "neutral" };
   if (kind === "busy") return { label: "进行中", tone: "run" };
   if (kind === "success") return { label: "已完成", tone: "ok" };
+  if (kind === "info" && /(?:等待|待).*确认/.test(message)) {
+    return { label: "待确认", tone: "review" };
+  }
   return { label: "待处理", tone: "neutral" };
 }
 
 function describeActionStatus(message, kind, detail) {
   if (!message) return "";
-  if (detail && detail !== message) return `${message} · ${detail}`;
+  const compactDetail = compactActionStatusDetail(detail);
+  if (compactDetail && compactDetail !== message) return `${message} · ${compactDetail}`;
   return message;
+}
+
+function compactActionStatusDetail(value, maxChars = 180) {
+  const firstLine = String(value || "").split(/\r?\n/, 1)[0].trim();
+  if (firstLine.length <= maxChars) return firstLine;
+  return `${firstLine.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
 function setActionErrorDetail(message = "", kind = "info") {
@@ -1590,6 +1649,8 @@ function taskActionStatusSnapshot(task = selectedTask) {
   if (task.active_job_kind === "driver") {
     return { message: "正在执行下一步…", kind: "busy", detail: "当前步骤：执行工作流任务。" };
   }
+  const workflowSnapshot = taskPlanWorkflowStatusSnapshot(task);
+  if (workflowSnapshot) return workflowSnapshot;
   switch (task.status) {
     case "created":
       return { message: "任务已创建。", kind: "info", detail: "当前步骤：等待材料识别。" };
@@ -1666,8 +1727,22 @@ function statusLabel(status) {
   return statusLabels[status] || status || "未知";
 }
 
+function taskPlanWorkflowStatusSnapshot(task) {
+  if (
+    typeof taskUsesPlanRail === "function"
+    && typeof planRailController !== "undefined"
+    && taskUsesPlanRail(task)
+  ) {
+    const planSnapshot = planRailController.statusSnapshot(task?.id);
+    if (planSnapshot) return planSnapshot;
+  }
+  return workflowStatusSnapshot(task?.workflow_status);
+}
+
 function taskStatusLabel(task) {
   if (taskStopped(task)) return "停止";
+  const planSnapshot = taskPlanWorkflowStatusSnapshot(task);
+  if (planSnapshot?.label) return planSnapshot.label;
   return statusLabel(task?.status);
 }
 
@@ -1681,6 +1756,8 @@ function statusTone(status) {
 
 function taskStatusTone(task) {
   if (taskStopped(task)) return "";
+  const planSnapshot = taskPlanWorkflowStatusSnapshot(task);
+  if (planSnapshot) return planSnapshot.tone || "";
   if (task?.status === "writing_artifacts") {
     return task.active_job_kind === "report" ? "run" : "success";
   }
@@ -3520,7 +3597,6 @@ function renderWorkflowStepper({ force = false } = {}) {
     return;
   }
   progressRail?.setAttribute("aria-label", "验证步骤");
-  planRailController.clearArtifactPanel();
   planRailController.clearRetryPanel();
   planRailController.clearDriverActionsPanel();
   if (railTitle) railTitle.textContent = "验证步骤";
@@ -4967,7 +5043,9 @@ function renderAgentConversation() {
   // DOM when the messages actually changed, so the entry animation does not
   // re-fire each tick and in-progress draft edits are never wiped.
   const visibleStages = agentTimelineVisibleStages();
-  const displayedMessages = agentReportMessagesForDisplay(agentMessages);
+  const displayedMessages = hideSupersededTuningThinking(
+    agentReportMessagesForDisplay(agentMessages),
+  );
   const structuralSignature = agentStructuralSignature(displayedMessages, visibleStages);
   const signature = JSON.stringify({
     messages: agentMessages,
@@ -5055,6 +5133,17 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
         awaiting_next_stage: metadata.awaiting_next_stage || "",
         intent: metadata.intent || "",
         tool_call_name: metadata.tool_call?.name || "",
+        // Live tuning messages commonly keep one stable message id while only
+        // metadata.progress changes. The in-place fast path patches prose only,
+        // so progress must participate in the structural key to rebuild the
+        // reusable card/rail readout on every real progress advance.
+        tool_progress: metadata.kind === "tool_progress"
+          ? {
+            status: metadata.status || "",
+            streaming: Boolean(metadata.streaming),
+            progress: metadata.progress || metadata,
+          }
+          : null,
         // Structured recovery/error cards must be rebuilt as a unit. The
         // streaming fast path only patches .agent-message-content with plain
         // Markdown, so include their content + metadata in the structural key
@@ -5214,6 +5303,8 @@ function agentPersistentTimelineElementIds() {
     "metricSection",
     "reportSection",
     "agentConversationPanel",
+    "planRetryPanel",
+    "planDriverActions",
   ];
 }
 
@@ -5310,7 +5401,15 @@ function renderAgentTimeline(messages = []) {
     createFrozenSnapshotElement: createAgentFrozenSnapshotElement,
     persistentElementIds: agentPersistentTimelineElementIds(),
     agentStageLabel,
-    agentMessageHtml,
+    // Agent mode has exactly one continuation channel: natural-language chat.
+    // Manual driver mode never reaches this timeline (it uses
+    // renderDriverManualAnalysis), so mark every message rendered here as
+    // conversation-only and keep gate widgets evidence-only.
+    agentMessageHtml: (message, labelStage, options = {}) => agentMessageHtml(
+      message,
+      labelStage,
+      { ...options, conversationOnly: true },
+    ),
   });
 }
 
@@ -5323,11 +5422,16 @@ function driverManualAnalysisHtml(messages) {
     renderAgentMarkdown,
     renderC1Form: agentMessageC1FormHtml,
     renderDedupPicker: agentMessageDedupPickerHtml,
+    renderJoinKeyPicker: agentMessageJoinKeyPickerHtml,
     renderModelingSetup: agentMessageModelingSetupHtml,
     renderScreenTable: agentMessageScreenTableHtml,
     renderTables: agentMessageTablesHtml,
     renderModelDelivery: agentMessageModelDeliveryHtml,
+    renderResultDataset: agentMessageResultDatasetHtml,
+    renderReportDownload: agentMessageReportDownloadHtml,
     renderAdoptionGate: agentMessageAdoptionGateHtml,
+    renderFeatureBinning: agentMessageFeatureBinningHtml,
+    renderSpecialValues: agentMessageSpecialValuesHtml,
     renderStrategyClarification: agentMessageStrategyClarificationHtml,
     // The plain-gate confirm control now lives in the middle analysis section
     // (not the rail). renderDriverGateButton already returns "" for gates that
@@ -5507,7 +5611,13 @@ function driverColumnKindFromHeader(headerLabel) {
   if (/^PSI$/i.test(label)) return "psi";
   if (/(匹配率|命中率|缺失率|占比|比例|坏率|坏账率|审批率|通过率)/i.test(label)) return "databar-percent";
   if (/^(KS|KS\(%\)|AUC|AUC\(%\)|IV|VIF|重要性|相关系数|预期利润|Gain|Lift|lift)/i.test(label)) return "databar";
+  if (/(行数|列数|样本数|记录数|新增列|特征数|数量|个数)/i.test(label)) return "integer";
   return "text";
+}
+
+function driverIntegerText(value) {
+  const numeric = parseNumeric(value);
+  return numeric === null ? String(value ?? "") : String(Math.trunc(numeric));
 }
 
 // Champion / winning candidate rows in comparison tables (候选模型对比 etc.) are
@@ -5537,6 +5647,9 @@ function driverTableCellHtml(value, rowIndex, columnIndex, headerLabel, kind, fr
         + `<span class="psi-strip"><span></span><span></span><span></span>${stripMarker}</span>`
         + `</span>`,
     };
+  }
+  if (kind === "integer") {
+    return { cls: "cell-number cell-integer", html: escapeHtml(driverIntegerText(raw)) };
   }
   if (kind === "databar" || kind === "databar-percent") {
     const fraction = fractionsForColumn.get(rowIndex);
@@ -5577,7 +5690,11 @@ function agentMessageTablesHtml(message) {
   const tables = message?.metadata?.tables;
   if (!Array.isArray(tables) || !tables.length) return "";
   const blocks = tables
-    .map((table) => {
+    // Historical gates may have persisted the old flattened alternatives table.
+    // It made two key candidates for one feature look like two additional joins;
+    // the per-feature join-key picker is now the single authoritative surface.
+    .filter((table) => !String(table?.title || "").startsWith("择键建议"))
+    .map((table, tableIndex) => {
       const columns = Array.isArray(table?.columns) ? table.columns : [];
       const rows = Array.isArray(table?.rows) ? table.rows.map((row) => (Array.isArray(row) ? row : [row])) : [];
       if (!columns.length && !rows.length) return "";
@@ -5607,11 +5724,16 @@ function agentMessageTablesHtml(message) {
           return `<tr>${tds.join("")}</tr>`;
         })
         .join("")}</tbody>`;
-      const caption = table?.title
-        ? `<div class="agent-inline-table-title">${escapeHtml(String(table.title))}</div>`
-        : "";
       const chartHtml = driverTableChartHtml(table?.chart);
-      return `<div class="agent-inline-table">${caption}${chartHtml}<div class="agent-inline-table-scroll"><table>${head}${body}</table></div></div>`;
+      const title = String(table?.title || `结果组件 ${tableIndex + 1}`);
+      return `<div class="agent-inline-table">${renderWorkflowDataWidget({
+        title,
+        chartHtml,
+        tableHtml: `<table>${head}${body}</table>`,
+        rowCount: rows.length,
+        columnCount: columns.length,
+        index: tableIndex,
+      })}</div>`;
     })
     .join("");
   return blocks ? `<div class="agent-message-tables">${blocks}</div>` : "";
@@ -5649,6 +5771,14 @@ function agentMessageAdoptionGateHtml(message, options = {}) {
   return renderAdoptionGate(message, options);
 }
 
+function agentMessageFeatureBinningHtml(message, options = {}) {
+  return renderFeatureBinningGate(message, options);
+}
+
+function agentMessageSpecialValuesHtml(message, options = {}) {
+  return renderSpecialValueGate(message, options);
+}
+
 function agentMessageStrategyClarificationHtml(message, options = {}) {
   return renderStrategyClarification(message, options);
 }
@@ -5679,6 +5809,14 @@ function handleAdoptionConfirmClick(event) {
   return handleAdoptionConfirmClickController(event, driverConfirmControllerContext());
 }
 
+function handleFeatureBinningClick(event) {
+  return handleFeatureBinningClickController(event, driverConfirmControllerContext());
+}
+
+function handleSpecialValueClick(event) {
+  return handleSpecialValueClickController(event, driverConfirmControllerContext());
+}
+
 async function submitModelingWeightAdjust(button) {
   return submitModelingWeightAdjustController(button, modelingSetupControllerContext());
 }
@@ -5705,11 +5843,21 @@ function modelingSetupControllerContext() {
     pollAgentMessagesUntilSettled,
     resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
     renderWorkflowStepper,
+    setDriverExecutionBusy: (active, taskId) => setBusy(
+      active ? "driver_execute" : null,
+      active ? "正在执行下一步…" : "",
+      taskId,
+    ),
   };
 }
 if (typeof document !== "undefined") {
+  mountWorkflowWidgetInteractions(document);
+  document.addEventListener("click", handleModelingSetupInteraction);
+  document.addEventListener("input", handleModelingSetupInteraction);
   document.addEventListener("click", handleModelingWeightAdjustClick);
   document.addEventListener("click", handleAdoptionConfirmClick);
+  document.addEventListener("click", handleFeatureBinningClick);
+  document.addEventListener("click", handleSpecialValueClick);
   document.addEventListener("click", handleStrategyClarificationSubmit);
   document.addEventListener("change", handleStrategyClarificationChange);
 }
@@ -5724,6 +5872,10 @@ async function submitC1Assignment(button) {
 
 function handleC1ConfirmClick(event) {
   return handleC1ConfirmClickController(event, joinGateControllerContext());
+}
+
+function handleC1PreviewClick(event) {
+  return handleC1PreviewClickController(event, joinGateControllerContext());
 }
 
 function joinGateControllerContext() {
@@ -5744,10 +5896,18 @@ function joinGateControllerContext() {
     pollAgentMessagesUntilSettled,
     resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
     renderWorkflowStepper,
+    setDriverExecutionBusy: (active, taskId) => setBusy(
+      active ? "driver_execute" : null,
+      active ? "正在执行下一步…" : "",
+      taskId,
+    ),
   };
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleC1ConfirmClick);
+  document.addEventListener("click", handleC1PreviewClick);
+  document.addEventListener("mouseover", handleDatasetTablePointerOver);
+  document.addEventListener("mouseout", handleDatasetTablePointerOut);
 }
 
 function agentMessageScreenTableHtml(message, options = {}) {
@@ -5792,6 +5952,11 @@ function screenGateControllerContext() {
     pollAgentMessagesUntilSettled,
     resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
     renderWorkflowStepper,
+    setDriverExecutionBusy: (active, taskId) => setBusy(
+      active ? "driver_execute" : null,
+      active ? "正在执行下一步…" : "",
+      taskId,
+    ),
   };
 }
 function handleScreenSearchInput(event) {
@@ -5809,6 +5974,12 @@ function handleScreenPageClick(event) {
 function handleScreenBulkClick(event) {
   return handleScreenBulkClickController(event, screenGateControllerContext());
 }
+function handleScreenAgentRecommendClick(event) {
+  return handleScreenAgentRecommendClickController(event, screenGateControllerContext());
+}
+function handleScreenMetricFilterInput(event) {
+  return handleScreenMetricFilterInputController(event, screenGateControllerContext());
+}
 function handleScreenPickChange(event) {
   return handleScreenPickChangeController(event, screenGateControllerContext());
 }
@@ -5819,12 +5990,26 @@ if (typeof document !== "undefined") {
   document.addEventListener("click", handleScreenChipClick);
   document.addEventListener("click", handleScreenPageClick);
   document.addEventListener("click", handleScreenBulkClick);
+  document.addEventListener("click", handleScreenAgentRecommendClick);
   document.addEventListener("input", handleScreenSearchInput);
+  document.addEventListener("input", handleScreenMetricFilterInput);
   document.addEventListener("change", handleScreenPickChange);
 }
 
 function agentMessageDedupPickerHtml(message, options = {}) {
   return renderDedupPicker(message, options);
+}
+
+function agentMessageJoinKeyPickerHtml(message, options = {}) {
+  return renderJoinKeyPicker(message, options);
+}
+
+async function submitJoinKeySelection(button) {
+  return submitJoinKeySelectionController(button, joinGateControllerContext());
+}
+
+function handleJoinKeyConfirmClick(event) {
+  return handleJoinKeyConfirmClickController(event, joinGateControllerContext());
 }
 
 async function submitDedupStrategies(button) {
@@ -5843,6 +6028,7 @@ function handleDedupExcludeClick(event) {
   return handleDedupExcludeClickController(event, joinGateControllerContext());
 }
 if (typeof document !== "undefined") {
+  document.addEventListener("click", handleJoinKeyConfirmClick);
   document.addEventListener("click", handleDedupConfirmClick);
   document.addEventListener("click", handleDedupExcludeClick);
 }
@@ -5879,6 +6065,11 @@ function driverConfirmControllerContext() {
     pollAgentMessagesUntilSettled,
     resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
     renderWorkflowStepper,
+    setDriverExecutionBusy: (active, taskId) => setBusy(
+      active ? "driver_execute" : null,
+      active ? "正在执行下一步…" : "",
+      taskId,
+    ),
   };
 }
 if (typeof document !== "undefined") {
@@ -5891,25 +6082,75 @@ function handleDriverReportDownloadClick(event) {
   event.preventDefault();
   window.location.href = `/api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`;
 }
+
+function agentMessageResultDatasetHtml(message) {
+  const result = message?.metadata?.result_dataset;
+  const datasetId = String(result?.dataset_id || "").trim();
+  if (!datasetId) return "";
+  const href = String(result?.download_url || `/api/datasets/${encodeURIComponent(datasetId)}/download`);
+  return [
+    '<section class="result-dataset-download">',
+    '<div class="result-dataset-download-copy">',
+    '<strong>拼接结果已生成</strong>',
+    `<span>数据集 ${escapeHtml(datasetId)}</span>`,
+    '</div>',
+    `<a class="button compact primary" data-result-dataset-download href="${escapeHtml(href)}" download>下载拼接结果</a>`,
+    '</section>',
+  ].join("");
+}
+
+function agentMessageReportDownloadHtml(message) {
+  const multiple = Array.isArray(message?.metadata?.report_downloads)
+    ? message.metadata.report_downloads
+    : [];
+  const fallback = message?.metadata?.report_download;
+  const reports = (multiple.length ? multiple : [fallback])
+    .filter((report) => String(report?.download_url || "").trim());
+  if (!reports.length) return "";
+  const links = reports.map((report) => {
+    const href = String(report.download_url || "").trim();
+    const label = String(report.label || "下载分析报告");
+    const detail = [report.recipe, report.experiment_id].filter(Boolean).join(" · ");
+    return [
+      '<div class="report-result-download-item">',
+      detail ? `<span>${escapeHtml(detail)}</span>` : "",
+      `<a class="button compact primary" data-agent-report-download href="${escapeHtml(href)}" download>${escapeHtml(label)}</a>`,
+      '</div>',
+    ].join("");
+  }).join("");
+  return [
+    '<section class="result-dataset-download report-result-download">',
+    '<div class="result-dataset-download-copy">',
+    `<strong>${reports.length > 1 ? `已生成 ${reports.length} 份分析报告` : "分析报告已生成"}</strong>`,
+    '<span>Excel 报告包含完整指标、说明和 Agent 建议</span>',
+    '</div>',
+    `<div class="report-result-download-list">${links}</div>`,
+    '</section>',
+  ].join("");
+}
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleDriverReportDownloadClick);
-  planRailController.installArtifactHandlers(document);
 }
 
-// VD-2: needs_confirmation gate messages get a distinct "gate card" shell
-// (left tone bar + glass tint + header pill + red-flag checklist + consequence
-// line) instead of looking like an ordinary chat bubble with one extra button.
-// Red flags are read from the backend's already-emitted "⚠️" markers (message
-// text lines + inline-table cells) — a pure presentation read, no new backend
-// data (INV-1).
-function shieldGateIconHtml() {
-  return '<svg class="gate-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
-    + ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-    + '<path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6z"/>'
-    + '<path d="M9.5 12l1.8 1.8L15 10"/>'
-    + '</svg>';
+function handleWorkflowRecoveryCommandClick(event) {
+  const button = event.target?.closest?.("[data-workflow-recovery-command]");
+  if (!button || !selectedTaskId) return;
+  event.preventDefault();
+  const command = String(button.dataset.workflowRecoveryCommand || "").trim();
+  const input = $("agentComposerInput");
+  if (!command || !input) return;
+  input.value = command;
+  autoGrowComposerInput();
+  updateAgentSendDisabled();
+  runAction(startAgentValidation, { actionId: "agent", busyText: "Agent 正在恢复当前步骤..." });
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleWorkflowRecoveryCommandClick);
 }
 
+// Red flags are read from the backend's already-emitted "⚠️" markers for the
+// compact task status.  Agent prose itself remains unboxed; structured widgets
+// own their individual visual surfaces.
 function driverGateRedFlags(message) {
   const flags = [];
   const content = String(message?.content || "");
@@ -5936,56 +6177,6 @@ function driverGateRedFlags(message) {
   return flags;
 }
 
-function driverGateRedFlagsHtml(flags) {
-  if (!flags.length) return "";
-  return [
-    '<div class="gate-card-redflags" data-tone="warn">',
-    '<div class="gate-card-redflags-title">⚠️ 需要留意</div>',
-    '<ul class="gate-card-redflags-list">',
-    ...flags.map((flag) => `<li>${flag.includes("<") ? flag : escapeHtml(flag)}</li>`),
-    "</ul>",
-    "</div>",
-  ].join("");
-}
-
-function driverGateConsequenceHtml(message) {
-  const next = typeof planRailController?.nextStepAfter === "function"
-    ? planRailController.nextStepAfter(message?.metadata || {})
-    : null;
-  if (!next?.title) return "";
-  return `<div class="gate-card-consequence">确认后将执行：${escapeHtml(String(next.title))}</div>`;
-}
-
-function driverGateCardHeaderHtml(message) {
-  const step = agentMessagePlanStep(message?.metadata || {});
-  const stepTitle = step?.title || message?.metadata?.step_title || "";
-  return [
-    '<div class="gate-card-header">',
-    shieldGateIconHtml(),
-    '<span class="gate-card-pill">⏸ 等待确认</span>',
-    stepTitle ? `<span class="gate-card-title">待确认：${escapeHtml(String(stepTitle))}</span>` : "",
-    "</div>",
-  ].join("");
-}
-
-// Wraps an already-rendered gate message body in the gate-card shell. Shared by
-// both agent-mode chat bubbles (agentMessageHtml) and manual-mode analysis
-// sections (driverManualAnalysisHtml), so the card form is identical in both
-// modes — only the confirm control differs (chat button vs. step-rail button).
-function driverGateCardHtml(message, innerHtml) {
-  const redFlags = driverGateRedFlags(message);
-  return [
-    '<div class="gate-card" data-gate-tone="' + (redFlags.length ? "warn" : "review") + '">',
-    driverGateCardHeaderHtml(message),
-    '<div class="gate-card-body">',
-    innerHtml,
-    "</div>",
-    driverGateRedFlagsHtml(redFlags),
-    driverGateConsequenceHtml(message),
-    "</div>",
-  ].join("");
-}
-
 // UX-2: agent-mode gate widgets reuse the exact renderers + widget/table
 // placement manual mode uses (driverGateBodyHtmlController), instead of a
 // separate agent-only render branch, so a screening table / dedup picker /
@@ -5996,15 +6187,48 @@ function driverGateCardHtml(message, innerHtml) {
 // expected_step_id). Free text in the composer remains a second channel that
 // can advance the same gate (agent mode's LLM-routing value is kept, not
 // replaced).
-function agentMessageGateBodyHtml(message, interactive) {
-  return driverGateBodyHtmlController(message, {
+function agentGateUsesConversationOnly(options = {}) {
+  return options.conversationOnly === true;
+}
+
+function stripGateButtonsHtml(html) {
+  // Gate widgets remain valuable evidence in Agent mode, but every clickable
+  // continuation/adjustment must go through chat. Passive component controls
+  // (collapse, local inspection) do not advance the workflow and remain useful.
+  // The markup is generated by our own renderers, so this allow-list stays
+  // deterministic and keeps the manual-mode components unchanged.
+  return String(html || "").replace(
+    /<button\b(?![^>]*\bdata-gate-passive-control\b)[^>]*>[\s\S]*?<\/button>/gi,
+    "",
+  );
+}
+
+function normalizeAgentConversationGateContent(content) {
+  return String(content || "")
+    .replace(
+      /确认请回复「确认」继续；可直接操作下方控件，或用文字说明要调整的参数。/g,
+      "Agent 模式请回复「继续」或「确认」；如需调整，直接用自然语言说明。",
+    )
+    .replace(
+      /确认无误回复「确认」；要改就用下方控件选好角色\/目标列后点「确认角色」。/g,
+      "确认无误请回复「确认」；如需修改角色或目标列，请直接说明。",
+    );
+}
+
+function agentMessageGateBodyHtml(message, interactive, options = {}) {
+  const conversationOnly = agentGateUsesConversationOnly(options);
+  const html = driverGateBodyHtmlController(message, {
     renderC1Form: agentMessageC1FormHtml,
     renderDedupPicker: agentMessageDedupPickerHtml,
+    renderJoinKeyPicker: agentMessageJoinKeyPickerHtml,
     renderModelingSetup: agentMessageModelingSetupHtml,
     renderScreenTable: agentMessageScreenTableHtml,
     renderTables: agentMessageTablesHtml,
     renderAdoptionGate: agentMessageAdoptionGateHtml,
-  }, { interactive });
+    renderFeatureBinning: agentMessageFeatureBinningHtml,
+    renderSpecialValues: agentMessageSpecialValuesHtml,
+  }, { interactive: conversationOnly ? false : interactive });
+  return conversationOnly ? stripGateButtonsHtml(html) : html;
 }
 
 function agentMessageStrategyClarificationBodyHtml(message, interactive) {
@@ -6013,6 +6237,9 @@ function agentMessageStrategyClarificationBodyHtml(message, interactive) {
 
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const role = message.role === "user" ? "user" : "assistant";
+  const isTuningProgress = role === "assistant"
+    && String(message?.metadata?.kind || "") === "tool_progress"
+    && Boolean(normalizeModelTuningProgress(message));
   const hasWorkflowError = role === "assistant"
     && hasWorkflowErrorDiagnostic(message?.metadata || {});
   const isStrategyClarification = role === "assistant"
@@ -6026,14 +6253,19 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     && !hasWorkflowError
     && (message?.metadata?.kind === "gate" || Boolean(message?.metadata?.join_c1));
   const hasWidget = isGate && driverGateHasWidgetController(message);
+  const agentConversationOnly = agentGateUsesConversationOnly(options);
+  const conversationOnly = isGate && agentConversationOnly;
   const className = role === "user"
     ? "agent-message user"
-    : `agent-message assistant${isGate ? " has-gate-card" : ""}${isStrategyClarification ? " has-strategy-clarification" : ""}${hasWorkflowError ? " has-workflow-error" : ""}`;
+    : `agent-message assistant${isGate ? " has-gate" : ""}${conversationOnly ? " conversation-only-gate" : ""}${isStrategyClarification ? " has-strategy-clarification" : ""}${hasWorkflowError ? " has-workflow-error" : ""}`;
   const streaming = agentMessageIsStreaming(message);
   const thinking = agentMessageIsThinking(message);
+  const visibleContent = agentConversationOnly && isGate
+    ? normalizeAgentConversationGateContent(agentVisibleContent(message))
+    : agentVisibleContent(message);
   const legacyContentHtml = thinking
     ? ""
-    : formatAgentMessageContent(agentVisibleContent(message), { markdown: role === "assistant" });
+    : formatAgentMessageContent(visibleContent, { markdown: role === "assistant" });
   const contentHtml = thinking
     ? agentThinkingHtml()
     : role === "assistant"
@@ -6052,23 +6284,35 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   // its widgets as interactive; earlier gate cards render the same widgets as
   // read-only snapshots so a stale card cannot be actioned against an
   // already-advanced step.
-  const interactive = hasWidget && Boolean(options.isLatestGate);
-  const clarificationInteractive = isStrategyClarification
+  const interactive = hasWidget && Boolean(options.isLatestGate) && !conversationOnly;
+  const clarificationInteractive = !agentConversationOnly && isStrategyClarification
     && Boolean(messageId)
     && messageId === lastAssistantMessageIdController(agentMessages);
-  const bodyHtml = [
+  const rawBodyHtml = [
     `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
     isStrategyClarification
       ? agentMessageStrategyClarificationBodyHtml(message, clarificationInteractive)
       : "",
-    role === "assistant" && hasWidget ? agentMessageGateBodyHtml(message, interactive) : "",
-    role === "assistant" && !hasWidget ? `${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}` : "",
-    role === "assistant" ? agentMessageGateButtonHtml(message) : "",
+    role === "assistant" && hasWidget
+      ? agentMessageGateBodyHtml(message, interactive, { conversationOnly })
+      : "",
+    role === "assistant" ? renderModelTuningMessageProgress(message) : "",
+    role === "assistant" && !hasWidget ? `${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}${agentMessageResultDatasetHtml(message)}${agentMessageReportDownloadHtml(message)}` : "",
+    role === "assistant" && !conversationOnly ? agentMessageGateButtonHtml(message) : "",
   ].join("");
+  const bodyHtml = agentConversationOnly
+    && role === "assistant"
+    && (isGate || hasWorkflowError || isStrategyClarification)
+    ? stripGateButtonsHtml(rawBodyHtml)
+    : rawBodyHtml;
   return [
     `<article class="${className}"${idAttr}${stageAttr}>`,
-    role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentMessageMetaLabel(message, labelStage))}</div>` : "",
-    isGate ? driverGateCardHtml(message, bodyHtml) : bodyHtml,
+    role === "assistant" && (!options.hideMeta || isTuningProgress) ? `<div class="agent-message-meta">${escapeHtml(agentMessageMetaLabel(message, labelStage))}</div>` : "",
+    // Agent prose stays in the normal conversation flow.  Functional widgets
+    // inside bodyHtml (ingest notice, C1 table, screening panel, etc.) retain
+    // their own visual shells; the entire reply is no longer wrapped in a
+    // large coloured gate card.
+    bodyHtml,
     memoryReferencesHtml,
     "</article>",
   ].join("");
@@ -6092,6 +6336,10 @@ function agentStageLabel(_stage) {
 }
 
 function agentMessageMetaLabel(message, labelStage = message?.stage) {
+  if (String(message?.metadata?.kind || "") === "tool_progress") {
+    const tuningProgress = normalizeModelTuningProgress(message);
+    if (tuningProgress) return tuningProgress.statusLabel;
+  }
   const pieces = [agentStageLabel(labelStage)];
   const metadata = message?.metadata || {};
   const step = agentMessagePlanStep(metadata);
@@ -6156,19 +6404,69 @@ async function loadAgentMessages(taskId = selectedTaskId, { preserveOptimistic =
   renderAgentConversation();
 }
 
+// Small, stable polling fingerprint: streamed prose changes its length/tail;
+// long-running tools change metadata.progress while keeping one message id.
+// Avoid serializing every full historical message body on every poll.
+function agentMessagePollSignature(messages = agentMessages) {
+  if (!Array.isArray(messages)) return "[]";
+  return JSON.stringify(messages.map((message) => {
+    const content = String(message?.content || "");
+    const metadata = message?.metadata || {};
+    return [
+      message?.id || "",
+      message?.role || "",
+      message?.stage || "",
+      content.length,
+      content.slice(-96),
+      Boolean(metadata.streaming),
+      metadata.kind || "",
+      metadata.progress_updated_at || "",
+      metadata.progress || null,
+    ];
+  }));
+}
+
+function agentStreamPollDelay(unchangedForMs = 0) {
+  if (unchangedForMs >= AGENT_STREAM_POLL_LONG_AFTER_MS) {
+    return AGENT_STREAM_POLL_LONG_INTERVAL_MS;
+  }
+  if (unchangedForMs >= AGENT_STREAM_POLL_IDLE_AFTER_MS) {
+    return AGENT_STREAM_POLL_IDLE_INTERVAL_MS;
+  }
+  return AGENT_STREAM_POLL_INTERVAL_MS;
+}
+
 async function pollAgentMessagesUntilSettled(taskId, pendingPromise, { preserveOptimistic = false } = {}) {
   let settled = false;
+  let unchangedForMs = 0;
+  let messageSignature = agentMessagePollSignature();
+  let resolveSettlement;
+  const settlementSignal = new Promise((resolve) => {
+    resolveSettlement = resolve;
+  });
   pendingPromise.then(
-    () => { settled = true; },
-    () => { settled = true; },
+    () => { settled = true; resolveSettlement("settled"); },
+    () => { settled = true; resolveSettlement("settled"); },
   );
   while (!settled && selectedTaskId === taskId) {
-    await sleep(AGENT_STREAM_POLL_INTERVAL_MS);
-    if (settled || selectedTaskId !== taskId) break;
+    const delay = agentStreamPollDelay(unchangedForMs);
+    const wakeReason = await Promise.race([
+      sleep(delay).then(() => "poll"),
+      settlementSignal,
+    ]);
+    if (wakeReason === "settled" || settled || selectedTaskId !== taskId) break;
     try {
       await loadAgentMessages(taskId, { preserveOptimistic });
+      const nextSignature = agentMessagePollSignature();
+      if (nextSignature === messageSignature) {
+        unchangedForMs += delay;
+      } else {
+        messageSignature = nextSignature;
+        unchangedForMs = 0;
+      }
     } catch (_error) {
       // The primary request path owns user-visible errors.
+      unchangedForMs += delay;
     }
   }
 }
@@ -6330,6 +6628,33 @@ async function stopAgentValidation(taskId = selectedTaskId) {
     return;
   }
   setActionStatus(result.message || "已停止当前动作，请问有什么指示？", "success");
+}
+
+async function stopAgentValidationByMessage(content, taskId = selectedTaskId) {
+  const normalizedTaskId = requireTaskId(taskId || selectedTaskId, "Agent 停止");
+  const text = String(content || "").trim();
+  if (!agentComposerStopIntent(text)) {
+    setAgentComposerNotice("请输入明确的停止指令，例如“停止当前动作”。", "info");
+    return;
+  }
+  const input = $("agentComposerInput");
+  if (input) {
+    input.value = "";
+    autoGrowComposerInput();
+    updateAgentSendDisabled();
+  }
+  const result = await api(`api/tasks/${normalizedTaskId}/agent/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content: text }),
+  });
+  agentMessages = result.messages || agentMessages;
+  renderAgentConversation();
+  updateAgentSendDisabled();
+  if (result.status === "cancel_requested") {
+    await waitForAgentValidation(normalizedTaskId, { stopping: true });
+    return;
+  }
+  setActionStatus(result.message || "当前没有可停止的 Agent 动作。", "info");
 }
 
 async function waitForAgentValidation(taskId, { stopping = false } = {}) {
@@ -7204,7 +7529,18 @@ $("sendAgentMessageButton").onclick = () => {
 $("agentComposerInput").addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
   event.preventDefault();
-  if (agentSendIsStopMode()) return;
+  if (agentSendIsStopMode()) {
+    const content = event.currentTarget.value.trim();
+    if (!agentComposerStopIntent(content)) {
+      setAgentComposerNotice("Agent 正在执行中；此时可输入“停止当前动作”并按 Enter。", "info");
+      return;
+    }
+    runAction(
+      () => stopAgentValidationByMessage(content),
+      { actionId: "agent", busyText: "Agent 正在停止..." },
+    );
+    return;
+  }
   if ($("sendAgentMessageButton")?.disabled) return;
   runAction(startAgentValidation, { actionId: "agent", busyText: "Agent 正在处理..." });
 });
@@ -7223,6 +7559,21 @@ function autoGrowComposerInput() {
 
 function agentSendIsStopMode() {
   return Boolean(selectedTaskIsAgentMode() && taskBusyAction(selectedTaskId) === "agent");
+}
+
+function agentComposerStopIntent(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return false;
+  const negated = [
+    "不要停止", "不用停止", "无需停止", "别停止", "先别停止",
+    "不要取消", "不用取消", "别取消", "先别取消", "不要中止", "别中止",
+  ];
+  if (negated.some((phrase) => text.includes(phrase))) return false;
+  if (/[?？]|为什么|为何|怎么|如何|是否|有没有|停止了没|停止了吗/.test(text)) return false;
+  return [
+    "停止", "停下", "终止", "中止", "取消", "别跑", "不用跑",
+    "stop", "cancel", "abort", "terminate",
+  ].some((keyword) => text.includes(keyword));
 }
 
 function renderAgentSendButtonState() {

@@ -8,6 +8,24 @@
 
 对每一份接入的真实业务数据集，逐项执行、记录实测值与外部口径值、签字。任一项对不上 → 阻断收口，回到对应修复项排查。
 
+### 先跑机器预检
+
+机器预检读取已完成计划、步骤证据信封、模型卡和真实产物，自动核对
+A/B/C/D 中能从仓库证据确定的部分，但**不会填写外部口径或签字**：
+
+```bash
+python scripts/closure_acceptance.py \
+  --workspace workspace \
+  --task-id <completed-real-material-task-id> \
+  --output docs/reviews/closure-real-materials-machine-check-2026-07-24.md \
+  --json-output <temporary-output.json>
+```
+
+- 最新机器预检：[closure-real-materials-machine-check-2026-07-24.md](../reviews/closure-real-materials-machine-check-2026-07-24.md)
+- `PASS/FAIL/N/A` 来自持久化证据；`MANUAL` 只用于确实需要外部口径的项。
+- 当前机器失败必须先修复；修复后，**B1-B4 的外部口径对账及本页责任人签字是唯一允许保留的人工阻断**。
+- 不得把合成数据、平台自身输出或 Agent 文字总结写进“外部口径来源”，也不得代签。
+
 ---
 
 ## A. 数据契约与脏形状（对应 T1，接入即查）
@@ -52,6 +70,7 @@
 ## 签字与结论
 
 - 数据集标识：____________　接入日期：____________　执行人：____________
+- 机器预检报告：____________　机器预检结论：____________
 - 全部 A/B/C/D 通过 → 该数据集的 headline 数字可直接进决策。
 - 任一项不通过 → 记录、阻断、回对应修复项排查，修复后重跑本清单。
 

@@ -380,8 +380,8 @@
 | 状态 | ID | 事项 |
 |---|---|---|
 | ✅ | T4-1 | 对抗形状注入器（全部已知脏形状，进 CI fast tier，T1 每项绑定用例） |
-| ✅ | T4-2 | 公开数据集端到端（GiveMeSomeCredit+Home Credit）+ KS 基线地面真值实验与达标线 |
-| ✅ | T4-3 | 真实材料人工对账 checklist（vintage 对财务口径/EL 对拨备/bad_rate 对报表） |
+| ⬜ | T4-2 | **harness 已完成，验收未完成**：2026-07-24 在当前 worktree/workspace 与本次核验所用的本地数据暂存位置未找到 GiveMeSomeCredit/Home Credit 原始文件，两个公开基线仍为 `null`；以 `python scripts/ks_baseline.py --status` 为机器门，必须补真实文件、可追溯人工精调基线并达标后才能打勾 |
+| ⬜ | T4-3 | **checklist 与机器预检已完成，人工验收未完成**：可机器验证项见 `docs/reviews/closure-real-materials-machine-check-2026-07-24.md`；外部财务/风险口径与责任人签字为空，至少一份全项签字前不得打勾 |
 | ✅ | T4-4 | DoD-11 文本改写落地；DoD-7 产品选择清单追加（反欺诈留口、评分 API/监控调度/征信解析显式推迟） |
 
 **Phase C（Phase T 收口后启动）**

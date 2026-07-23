@@ -330,6 +330,14 @@ _HIGH_RISK_GATE_SOURCE_TOOLS: dict[str, tuple[str, ...]] = {
     "render_reports": ("validation_report_approval",),
     "monitor_run": ("monitoring_run_alarm_approval",),
     "generate_model_report": ("model_report_approval",),
+    "generate_model_reports": ("model_report_approval",),
+    # Sentinel handling changes the physical training data (mask), the feature
+    # universe (drop), or explicitly accepts a known risky value (retain).
+    # AUTO must stop and wait for an auditable human policy decision.
+    "resolve_special_values": ("special_value_policy_approval",),
+    # Optional binning is an explicit user-choice checkpoint: AUTO must not
+    # silently choose business-facing report detail on the user's behalf.
+    "analyze_feature_bins": ("feature_binning_approval",),
 }
 
 #: step_id substrings for the same forced gates, used when meta carries only a
@@ -400,6 +408,78 @@ def infer_gate_envelope(meta: Mapping[str, Any]) -> GateEnvelope:
         allowed = ["confirm", "adjust", "clarify", "halt"]
         controls.append(GateControl(id="dedup_strategies", kind="map", label="Dedup strategies"))
         render_blocks.append(GateRenderBlock(kind="dedup_table", title="Join deduplication"))
+    elif isinstance(meta.get("join_keys"), Mapping):
+        controls.append(GateControl(id="key_overrides", kind="map", label="Join keys"))
+        render_blocks.append(GateRenderBlock(kind="join_key_picker", title="Join key selection"))
+    elif isinstance(meta.get("special_values"), Mapping):
+        allowed = ["confirm", "adjust", "clarify", "halt"]
+        special_values = _dict(meta.get("special_values"))
+        column_names = [
+            _clean_str(item.get("column"))
+            for item in special_values.get("columns") or []
+            if isinstance(item, Mapping) and _clean_str(item.get("column"))
+        ]
+        decision_schema = {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["mask", "retain", "drop"],
+                },
+                "confirmed": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        }
+        controls.append(GateControl(
+            id="decisions",
+            kind="map",
+            label="Special-value decisions",
+            default={},
+            schema={
+                "type": "object",
+                "properties": {
+                    column: dict(decision_schema)
+                    for column in column_names
+                },
+                "required": column_names,
+                "additionalProperties": False,
+            },
+            required=True,
+        ))
+        render_blocks.append(
+            GateRenderBlock(
+                kind="special_value_policy",
+                title="Special-value governance",
+            )
+        )
+    elif isinstance(meta.get("feature_binning"), Mapping):
+        allowed = ["confirm", "adjust", "clarify", "halt"]
+        binning = _dict(meta.get("feature_binning"))
+        feature_names = [
+            _clean_str(item.get("feature"))
+            for item in binning.get("features") or []
+            if isinstance(item, Mapping) and _clean_str(item.get("feature"))
+        ]
+        controls.extend((
+            GateControl(
+                id="features",
+                kind="multi_select",
+                label="Binning features",
+                default=[],
+                schema={"items": "string", "enum": feature_names},
+                required=False,
+            ),
+            GateControl(
+                id="bins",
+                kind="number",
+                label="Number of bins",
+                default=binning.get("default_bins", 10),
+                bounds={"min": binning.get("min_bins", 3), "max": binning.get("max_bins", 20)},
+            ),
+        ))
+        render_blocks.append(GateRenderBlock(kind="feature_binning_picker", title="Optional binning analysis"))
     elif kind == "gate":
         allowed = ["confirm", "replan", "clarify", "halt"]
 

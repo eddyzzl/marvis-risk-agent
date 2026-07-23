@@ -71,6 +71,16 @@ PAYLOAD_FIELD_ALLOWLISTS = {
         "source_task_id",
         "important_feature_sources",
     }),
+    "feature_experience": frozenset({
+        "feature_count",
+        "recommended_features",
+        "avoid_features",
+        "recommendation_confidence",
+        "recommendation_evidence",
+        "target_col",
+        "scope",
+        "source_task_id",
+    }),
     "join_experience": frozenset({
         "match_rate",
         "anchor_rows",

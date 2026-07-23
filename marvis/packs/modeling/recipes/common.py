@@ -37,6 +37,7 @@ PREPROCESSING_STEPS_PARAM_KEY = "preprocessing_steps"
 #: sidecar at all (as opposed to a sidecar with zero steps) — surfaced on the model
 #: card as "预处理链不可追溯" rather than silently implying no preprocessing occurred.
 PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY = "preprocessing_chain_traceable"
+SPECIAL_VALUE_GOVERNANCE_PARAM_KEY = "special_value_governance"
 _MONOTONE_CONSTRAINT_KEYS = ("monotone_constraints", "monotonic_constraints")
 
 
@@ -80,7 +81,7 @@ REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY = "refit_on_train_plus_test"
 
 _PLATFORM_ONLY_PARAM_KEYS = frozenset({
     PREPROCESSING_STEPS_PARAM_KEY, PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY, VALID_GROUP_COLS_PARAM_KEY,
-    REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY,
+    REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY, SPECIAL_VALUE_GOVERNANCE_PARAM_KEY,
 })
 
 
@@ -158,7 +159,16 @@ def _resolve_valid_group_cols(config: TrainConfig) -> list[str]:
 
 def _group_ids(frame: pd.DataFrame, group_cols: list[str]) -> np.ndarray:
     if group_cols:
-        return frame.groupby(group_cols, sort=False).ngroup().to_numpy()
+        # ``dropna=True`` (pandas' default) assigns NaN rather than an integer
+        # group id to rows with a null identity.  Those NaNs can later reach
+        # ``int(group)`` and, even when they do not, silently bypass the grouped
+        # holdout contract.  Treat the null tuple as one deterministic group.
+        return frame.groupby(
+            group_cols,
+            sort=False,
+            dropna=False,
+            observed=True,
+        ).ngroup().to_numpy(dtype=np.int64)
     return np.arange(len(frame))
 
 
@@ -375,6 +385,9 @@ def artifact_params(params: dict, config: TrainConfig) -> dict:
         out[PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY] = False
     if config.params.get(REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY):
         out[REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY] = True
+    governance = config.params.get(SPECIAL_VALUE_GOVERNANCE_PARAM_KEY)
+    if isinstance(governance, dict) and governance:
+        out[SPECIAL_VALUE_GOVERNANCE_PARAM_KEY] = governance
     return out
 
 
@@ -819,12 +832,41 @@ def _proba_2d(
     frame: pd.DataFrame,
     classes: tuple,
 ) -> np.ndarray:
-    proba = np.asarray(proba_fn(frame), dtype=float)
-    if proba.ndim != 2 or proba.shape[0] != len(frame) or proba.shape[1] != len(classes):
+    return normalize_multiclass_probabilities(
+        proba_fn(frame),
+        expected_rows=len(frame),
+        expected_classes=len(classes),
+    )
+
+
+def normalize_multiclass_probabilities(
+    probabilities,
+    *,
+    expected_rows: int,
+    expected_classes: int,
+) -> np.ndarray:
+    """Validate and normalize an N x K multiclass probability matrix."""
+
+    proba = np.asarray(probabilities, dtype=float)
+    if (
+        proba.ndim != 2
+        or proba.shape[0] != expected_rows
+        or proba.shape[1] != expected_classes
+    ):
         raise ModelingError(
-            f"proba shape {proba.shape} does not match rows {len(frame)} / classes {len(classes)}"
+            f"proba shape {proba.shape} does not match rows "
+            f"{expected_rows} / classes {expected_classes}"
         )
-    return proba
+    if not np.isfinite(proba).all():
+        raise ModelingError("multiclass probabilities contain non-finite values")
+    tolerance = 1e-7
+    if np.any(proba < -tolerance) or np.any(proba > 1.0 + tolerance):
+        raise ModelingError("multiclass probabilities fall outside [0, 1]")
+    proba = np.clip(proba, 0.0, 1.0)
+    row_sums = proba.sum(axis=1)
+    if np.any(row_sums <= np.finfo(float).eps):
+        raise ModelingError("multiclass probabilities contain an empty row")
+    return proba / row_sums[:, None]
 
 
 def _scores(score_fn: Callable[[pd.DataFrame], np.ndarray], frame: pd.DataFrame) -> np.ndarray:
@@ -859,6 +901,7 @@ __all__ = [
     "compute_multiclass_model_metrics",
     "compute_regression_metrics",
     "model_params",
+    "normalize_multiclass_probabilities",
     "normalize_monotone_constraints_value",
     "normalized_monotone_constraints",
     "pop_boost_rounds",

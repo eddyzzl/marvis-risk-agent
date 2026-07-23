@@ -15,6 +15,12 @@ from marvis.feature.iv import compute_woe_iv
 # FS-9: the equal-frequency IV binning convention used by feature_metrics() by default.
 DEFAULT_IV_BINS = 10
 
+# Public metric names accepted by ``selected_feature_metrics``.  The ordinary
+# ``feature_metrics`` function below intentionally keeps its historical
+# all-in-one contract for modeling/report callers; the V2 feature-analysis tool
+# uses this selected variant so an unchecked metric does not incur hidden work.
+SELECTABLE_BASE_METRICS = frozenset({"iv", "ks", "auc", "coverage", "lift"})
+
 
 def feature_ks(scores: np.ndarray, target: np.ndarray) -> float:
     scores_arr, target_arr = _finite_binary_pairs(scores, target)
@@ -296,6 +302,10 @@ def feature_metrics(
     compare_values: np.ndarray | None = None,
 ) -> FeatureMetrics:
     values_arr = np.asarray(values, dtype=float)
+    finite_values = values_arr[np.isfinite(values_arr)]
+    valid_count = int(finite_values.size)
+    unique_values, value_counts = np.unique(finite_values, return_counts=True)
+    unique_count = int(unique_values.size)
     edges = equal_frequency_edges(values_arr, bins)
     try:
         iv = compute_woe_iv(values_arr, target, edges, feature=feature).total_iv
@@ -310,9 +320,124 @@ def feature_metrics(
         auc=feature_auc(values_arr, target, direction_agnostic=True),
         psi=psi,
         missing_rate=float(np.mean(~np.isfinite(values_arr))),
-        unique_count=int(np.unique(values_arr[np.isfinite(values_arr)]).size),
+        unique_count=unique_count,
         lift_top_bin=lift[0] if lift else 0.0,
+        valid_count=valid_count,
+        unique_rate=float(unique_count / valid_count) if valid_count else 0.0,
+        mode_rate=float(value_counts.max() / valid_count) if valid_count else 0.0,
+        zero_rate=float(np.mean(finite_values == 0)) if valid_count else 0.0,
+        mean=float(np.mean(finite_values)) if valid_count else None,
+        std=float(np.std(finite_values, ddof=1)) if valid_count > 1 else (0.0 if valid_count else None),
+        min=float(np.min(finite_values)) if valid_count else None,
+        q25=float(np.quantile(finite_values, 0.25)) if valid_count else None,
+        median=float(np.median(finite_values)) if valid_count else None,
+        q75=float(np.quantile(finite_values, 0.75)) if valid_count else None,
+        max=float(np.max(finite_values)) if valid_count else None,
     )
+
+
+def selected_feature_metrics(
+    values: np.ndarray,
+    target: np.ndarray | None,
+    *,
+    feature: str,
+    selected: set[str] | frozenset[str],
+    bins: int = DEFAULT_IV_BINS,
+    compare_values: np.ndarray | None = None,
+) -> dict:
+    """Compute only explicitly selected per-feature metrics.
+
+    ``feature_metrics`` predates the FEATURE spec's checkbox contract and
+    always computes IV, KS, AUC, lift, quality statistics and optional PSI.
+    Keeping that API intact avoids changing modeling callers.  This companion
+    is the strict opt-in seam used by ``feature.compute_feature_metrics``:
+    omitted metrics are absent from the returned mapping and their underlying
+    algorithms are never called.
+
+    A missing target produces a structured ``*_reason`` payload for selected
+    supervised metrics instead of failing unrelated unsupervised metrics such
+    as coverage.  The caller can therefore surface an auditable ``n/a``.
+    """
+
+    requested = {str(item).strip().lower() for item in selected}
+    row: dict = {"feature": str(feature)}
+    values_arr = np.asarray(values, dtype=float)
+
+    if "coverage" in requested:
+        finite_values = values_arr[np.isfinite(values_arr)]
+        valid_count = int(finite_values.size)
+        unique_values, value_counts = np.unique(finite_values, return_counts=True)
+        unique_count = int(unique_values.size)
+        total_count = int(values_arr.size)
+        row.update({
+            "coverage": float(valid_count / total_count) if total_count else 0.0,
+            "missing_rate": float(np.mean(~np.isfinite(values_arr))) if total_count else 0.0,
+            "valid_count": valid_count,
+            "unique_count": unique_count,
+            "unique_rate": float(unique_count / valid_count) if valid_count else 0.0,
+            "mode_rate": float(value_counts.max() / valid_count) if valid_count else 0.0,
+            "zero_rate": float(np.mean(finite_values == 0)) if valid_count else 0.0,
+            "mean": float(np.mean(finite_values)) if valid_count else None,
+            "std": (
+                float(np.std(finite_values, ddof=1))
+                if valid_count > 1
+                else (0.0 if valid_count else None)
+            ),
+            "min": float(np.min(finite_values)) if valid_count else None,
+            "q25": float(np.quantile(finite_values, 0.25)) if valid_count else None,
+            "median": float(np.median(finite_values)) if valid_count else None,
+            "q75": float(np.quantile(finite_values, 0.75)) if valid_count else None,
+            "max": float(np.max(finite_values)) if valid_count else None,
+        })
+
+    supervised = requested & {"iv", "ks", "auc", "lift"}
+    if supervised and target is None:
+        reason = {
+            "code": "missing_dependency",
+            "metric_dependency": "target_col",
+            "message": "未提供可用目标列；该指标需要 0/1 目标列。",
+        }
+        for metric in sorted(supervised):
+            output_key = "lift_top_bin" if metric == "lift" else metric
+            row[output_key] = None
+            row[f"{output_key}_reason"] = dict(reason)
+        return row
+
+    target_arr = None if target is None else np.asarray(target, dtype=float)
+    if "iv" in requested:
+        edges = equal_frequency_edges(values_arr, bins)
+        try:
+            row["iv"] = compute_woe_iv(
+                values_arr,
+                target_arr,
+                edges,
+                feature=feature,
+            ).total_iv
+        except FeatureError as exc:
+            row["iv"] = None
+            row["iv_reason"] = {
+                "code": "metric_unavailable",
+                "message": str(exc),
+            }
+    if "ks" in requested:
+        row["ks"] = feature_ks(values_arr, target_arr)
+    if "auc" in requested:
+        row["auc"] = feature_auc(values_arr, target_arr, direction_agnostic=True)
+    if "lift" in requested:
+        lift = feature_lift(values_arr, target_arr, bins=bins)
+        row["lift_top_bin"] = lift[0] if lift else 0.0
+    if "psi" in requested:
+        if compare_values is None:
+            row["psi"] = None
+            row["psi_reason"] = {
+                "code": "missing_dependency",
+                "metric_dependency": "compare_dataset_id",
+                "message": "未提供对比数据集；PSI 需要基准样本和对比样本。",
+            }
+        else:
+            edges = equal_frequency_edges(values_arr, bins)
+            row["psi"] = feature_psi(values_arr, compare_values, edges)
+    return row
 
 
 def _bin_distribution(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
@@ -383,6 +508,8 @@ __all__ = [
     "feature_ks",
     "feature_lift",
     "feature_metrics",
+    "selected_feature_metrics",
+    "SELECTABLE_BASE_METRICS",
     "feature_psi",
     "head_tail_lift",
     "weighted_feature_auc",
