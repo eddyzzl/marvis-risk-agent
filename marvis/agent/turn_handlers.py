@@ -200,6 +200,7 @@ from marvis.packs.strategy.project_context_tools import (
 )
 from marvis.packs.strategy.report_bundle_adapters import (
     build_strategy_report_bundle_source_inputs,
+    validate_candidate_stability_report_compatibility,
 )
 from marvis.packs.strategy.report_bundle_tools import (
     load_strategy_impact_cube_artifact,
@@ -249,6 +250,8 @@ from marvis.packs.strategy.candidate_asset_tools import (
     load_verified_candidate_refinement_source,
 )
 from marvis.packs.strategy.candidate_stability_tools import (
+    ARTIFACT_KIND as CANDIDATE_STABILITY_ARTIFACT_KIND,
+    load_candidate_stability_artifact,
     resolve_candidate_monthly_stability_inputs,
 )
 from marvis.repositories.data_workspace import (
@@ -5975,6 +5978,31 @@ def _strategy_report_bundle_v2_plan_slots(
         "expected_artifact_id": pool.artifact_id,
         "expected_artifact_content_hash": pool.artifact_content_hash,
     }
+    candidate_stability = (
+        _strategy_report_latest_candidate_stability_binding(
+            read_runtime,
+            task_id=task.id,
+            artifacts=artifacts,
+            sample=sample,
+            pool=pool,
+        )
+    )
+    candidate_stability_ref = (
+        None
+        if candidate_stability is None
+        else {
+            "artifact_id": candidate_stability.artifact_id,
+            "expected_artifact_content_hash": (
+                candidate_stability.artifact_content_hash
+            ),
+            "expected_stability_id": candidate_stability.stability[
+                "stability_id"
+            ],
+            "expected_stability_content_hash": (
+                candidate_stability.stability["content_hash"]
+            ),
+        }
+    )
     impact_cube = _strategy_report_latest_impact_cube_binding(
         read_runtime,
         task_id=task.id,
@@ -6071,6 +6099,7 @@ def _strategy_report_bundle_v2_plan_slots(
             project_context=project_context,
             sample_design=sample,
             candidate_pool=pool,
+            candidate_stability=candidate_stability,
             pool_impact=impact,
             impact_cube=impact_cube,
             model_evidence=model_evidence,
@@ -6099,6 +6128,7 @@ def _strategy_report_bundle_v2_plan_slots(
         },
         "sample_design_ref": sample_ref,
         "candidate_pool_ref": candidate_pool_ref,
+        "candidate_stability_ref": candidate_stability_ref,
         "pool_impact_ref": pool_impact_ref,
         "impact_cube_ref": impact_cube_ref,
         "report_revision": int(head["current_revision"]) + 1,
@@ -6390,6 +6420,70 @@ def _strategy_report_sample_ref(sample) -> dict[str, object]:
         "expected_sample_design_id": design["sample_design_id"],
         "expected_sample_design_content_hash": design["content_hash"],
     }
+
+
+def _strategy_report_latest_candidate_stability_binding(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    artifacts: Sequence[Mapping],
+    sample,
+    pool,
+):
+    """Select the newest authenticated stability evidence for current sources.
+
+    Every stability artifact is authenticated before its source identity is
+    inspected.  A valid artifact for another Pool/SampleDesign is skipped; a
+    corrupt candidate fails closed because its actual source cannot be trusted
+    and the selector must not silently fall back to older evidence.
+    """
+
+    records = [
+        item
+        for item in artifacts
+        if item.get("kind") == CANDIDATE_STABILITY_ARTIFACT_KIND
+    ]
+    for item in reversed(records):
+        provenance = item.get("provenance")
+        try:
+            binding = load_candidate_stability_artifact(
+                read_runtime,
+                task_id=task_id,
+                artifact_id=item.get("id"),
+                expected_artifact_content_hash=item.get("content_hash"),
+                expected_stability_id=(
+                    provenance.get("stability_id")
+                    if isinstance(provenance, Mapping)
+                    else None
+                ),
+                expected_stability_content_hash=(
+                    provenance.get("stability_content_hash")
+                    if isinstance(provenance, Mapping)
+                    else None
+                ),
+            )
+        except (
+            StrategyError,
+            TypeError,
+            ValueError,
+            *_STRATEGY_V2_ARTIFACT_ERRORS,
+        ) as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_report_bundle_v2_candidate_stability_invalid",
+                "最新待判定的候选逐月稳定性 artifact 未通过文件、registry、"
+                "provenance 或内容完整性复核；其真实 Pool/SampleDesign "
+                "身份无法确认，平台不会回退到旧稳定性证据。",
+            ) from exc
+        try:
+            validate_candidate_stability_report_compatibility(
+                candidate_stability=binding,
+                sample_design=sample,
+                candidate_pool=pool,
+            )
+        except StrategyError:
+            continue
+        return binding
+    return None
 
 
 def _strategy_report_latest_impact_cube_binding(

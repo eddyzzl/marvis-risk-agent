@@ -12,6 +12,11 @@ import pytest
 from marvis.db import TaskRepository
 from marvis.output.strategy_report_bundle import render_strategy_report_bundle
 from marvis.packs.strategy import tools as strategy_tools
+from marvis.packs.strategy.candidate_stability_tools import (
+    ARTIFACT_KIND as CANDIDATE_STABILITY_ARTIFACT_KIND,
+    resolve_candidate_monthly_stability_inputs,
+    run_measure_candidate_monthly_stability,
+)
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.impact_cube_tools import (
     IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,
@@ -329,6 +334,37 @@ def _setup_impact_cube_report(tmp_path: Path) -> dict:
     }
 
 
+def _attach_candidate_stability(fixture: dict) -> dict:
+    pool = load_current_strategy_candidate_pool_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        strategy_type="approval",
+    )
+    entry = pool.pool["entries"][0]
+    exact_inputs = resolve_candidate_monthly_stability_inputs(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        user_pointer={
+            "source_kind": "pool_entry",
+            "strategy_type": "approval",
+            "entry_id": entry["entry_id"],
+        },
+    )
+    output = run_measure_candidate_monthly_stability(
+        exact_inputs,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    artifact = output["artifacts"][0]
+    fixture["request"]["candidate_stability_ref"] = {
+        "artifact_id": artifact["artifact_id"],
+        "expected_artifact_content_hash": artifact["content_hash"],
+        "expected_stability_id": output["stability_id"],
+        "expected_stability_content_hash": output["content_hash"],
+    }
+    return output
+
+
 def _run(fixture: dict) -> dict:
     return run_build_strategy_report_bundle_v2(
         fixture["request"],
@@ -430,6 +466,50 @@ def test_build_report_bundle_publishes_four_exact_governed_outputs(
         label="report bundle input",
     )
     validate_against_schema(output, tool.output_schema, label="report bundle output")
+
+
+def test_report_bundle_projects_exact_candidate_stability_into_all_outputs(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    stability = _attach_candidate_stability(fixture)
+
+    output = _run(fixture)
+
+    candidate_section = next(
+        section
+        for section in output["bundle"]["sections"]
+        if section["key"] == "candidate_combinations"
+    )
+    table = next(
+        item
+        for item in candidate_section["tables"]
+        if item["table_id"] == "candidate_monthly_stability"
+    )
+    assert table["sheet_key"] == "appendix_candidate_stability"
+    assert table["content_class"] == "monthly_summary"
+    assert table["effect_stage"] == "backtested"
+    assert table["rows"][0]["row_id"] == "candidate-stability-baseline"
+    assert len(table["rows"]) == stability["month_count"] + 1
+    assert any(
+        flag["level"] == "amber"
+        and "低样本" in flag["message"]
+        for flag in candidate_section["red_flags"]
+    )
+    rendered = render_strategy_report_bundle(output["bundle"])
+    assert "候选逐月稳定性" in rendered["markdown"].decode("utf-8")
+    assert set(rendered) == {"json", "markdown", "xlsx", "docx"}
+    audit = json.loads(str(_audit_rows(fixture)[0]["detail_json"]))
+    assert audit["source_artifacts"]["candidate_stability"] == {
+        "artifact_id": fixture["request"]["candidate_stability_ref"][
+            "artifact_id"
+        ],
+        "content_hash": fixture["request"]["candidate_stability_ref"][
+            "expected_artifact_content_hash"
+        ],
+        "stability_id": stability["stability_id"],
+        "stability_content_hash": stability["content_hash"],
+    }
 
 
 def test_report_bundle_manifest_accepts_exactly_supported_impact_source_shapes(
@@ -897,6 +977,44 @@ def test_build_report_bundle_revalidates_source_tamper_before_commit(
         tampering_render,
     )
     with pytest.raises(StrategyError, match="impact|artifact|hash|bytes"):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
+def test_build_report_bundle_revalidates_candidate_stability_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    stability = _attach_candidate_stability(fixture)
+    original_render = report_tools.render_strategy_report_bundle
+    stability_path = Path(
+        next(
+            item
+            for item in fixture["runtime"].task_artifacts.list_for_task(
+                fixture["task"].id
+            )
+            if item["kind"] == CANDIDATE_STABILITY_ARTIFACT_KIND
+            and item["id"] == stability["artifacts"][0]["artifact_id"]
+        )["path"]
+    )
+
+    def tampering_render(bundle):
+        rendered = original_render(bundle)
+        stability_path.write_bytes(b"{}")
+        return rendered
+
+    monkeypatch.setattr(
+        report_tools,
+        "render_strategy_report_bundle",
+        tampering_render,
+    )
+    with pytest.raises(
+        StrategyError,
+        match="stability|artifact|hash|bytes",
+    ):
         _run(fixture)
 
     assert _report_rows(fixture) == []

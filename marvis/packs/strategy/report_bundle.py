@@ -172,7 +172,13 @@ _STAGE_REF_KINDS = {
     "scenario_ref": frozenset({"strategy_scenario"}),
     "estimated_result_ref": frozenset({"pool_impact", "strategy_impact"}),
     "dataset_ref": frozenset({"dataset"}),
-    "frozen_artifact_ref": frozenset({"strategy", "strategy_candidate_pool"}),
+    "frozen_artifact_ref": frozenset(
+        {
+            "strategy",
+            "strategy_candidate_asset",
+            "strategy_candidate_pool",
+        }
+    ),
     "backtest_result_ref": frozenset(
         {"backtest", "pool_impact", "strategy_impact"}
     ),

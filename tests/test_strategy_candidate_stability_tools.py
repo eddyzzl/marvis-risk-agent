@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -23,6 +24,9 @@ from marvis.packs.strategy.candidate_stability import (
 )
 from marvis.packs.strategy.candidate_stability_tools import (
     ARTIFACT_KIND,
+    StrategyCandidateStabilityArtifactBinding,
+    load_candidate_stability_artifact,
+    require_candidate_stability_artifact_binding_on_connection,
     resolve_candidate_monthly_stability_inputs,
     run_measure_candidate_monthly_stability,
 )
@@ -541,3 +545,324 @@ def test_registration_rejects_workspace_drift_after_preflight(
         for record in repository.list_for_task(fixture["task"].id)
         if record["kind"] == ARTIFACT_KIND
     ]
+
+
+def test_report_consumer_loads_and_revalidates_authenticated_stability(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    resolved = resolve_candidate_monthly_stability_inputs(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        user_pointer={
+            "source_kind": "univariate_asset",
+            "asset_id": fixture["first"]["asset_id"],
+        },
+    )
+    output = run_measure_candidate_monthly_stability(
+        resolved,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    artifact = output["artifacts"][0]
+
+    binding = load_candidate_stability_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        artifact_id=artifact["artifact_id"],
+        expected_artifact_content_hash=artifact["content_hash"],
+        expected_stability_id=output["stability_id"],
+        expected_stability_content_hash=output["content_hash"],
+    )
+
+    assert isinstance(binding, StrategyCandidateStabilityArtifactBinding)
+    assert binding.task_id == fixture["task"].id
+    assert binding.artifact_id == artifact["artifact_id"]
+    assert binding.artifact_content_hash == artifact["content_hash"]
+    assert binding.stability == output["stability"]
+    assert binding.artifact_path == Path(
+        fixture["settings"].tasks_dir,
+        fixture["task"].id,
+        "strategy_candidate_stability",
+        f"{output['stability_id']}.json",
+    )
+    with fixture["runtime"].task_artifacts.transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        require_candidate_stability_artifact_binding_on_connection(
+            conn,
+            binding,
+        )
+        conn.commit()
+
+
+def test_report_consumer_rejects_cross_task_registry_lookup(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    resolved = resolve_candidate_monthly_stability_inputs(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        user_pointer={
+            "source_kind": "univariate_asset",
+            "asset_id": fixture["first"]["asset_id"],
+        },
+    )
+    output = run_measure_candidate_monthly_stability(
+        resolved,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    artifact = output["artifacts"][0]
+    foreign_task = TaskRepository(fixture["settings"].db_path).create_task(
+        TaskCreate(
+            model_name="foreign-candidate-stability",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "foreign-source"),
+            task_type="strategy",
+            target_col="bad",
+        )
+    )
+
+    with pytest.raises(StrategyError, match="registry row is invalid"):
+        load_candidate_stability_artifact(
+            fixture["runtime"],
+            task_id=foreign_task.id,
+            artifact_id=artifact["artifact_id"],
+            expected_artifact_content_hash=artifact["content_hash"],
+            expected_stability_id=output["stability_id"],
+            expected_stability_content_hash=output["content_hash"],
+        )
+
+
+@pytest.mark.parametrize("tamper", ["file_bytes", "provenance_encoding"])
+def test_report_consumer_rejects_persisted_artifact_tamper(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    fixture = _setup(tmp_path)
+    resolved = resolve_candidate_monthly_stability_inputs(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        user_pointer={
+            "source_kind": "univariate_asset",
+            "asset_id": fixture["first"]["asset_id"],
+        },
+    )
+    output = run_measure_candidate_monthly_stability(
+        resolved,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    artifact = output["artifacts"][0]
+    record = TaskArtifactRepository(
+        fixture["settings"].db_path
+    ).get_for_task(
+        fixture["task"].id,
+        artifact["artifact_id"],
+    )
+    assert record is not None
+    if tamper == "file_bytes":
+        Path(record["path"]).write_bytes(b"{}")
+        expected_error = "content hash drifted"
+    else:
+        with fixture["runtime"].task_artifacts.transaction() as conn:
+            conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+            row = conn.execute(
+                "SELECT provenance_json FROM task_artifacts WHERE id = ?",
+                (artifact["artifact_id"],),
+            ).fetchone()
+            assert row is not None
+            conn.execute(
+                "UPDATE task_artifacts SET provenance_json = ? WHERE id = ?",
+                (" " + str(row["provenance_json"]), artifact["artifact_id"]),
+            )
+            conn.commit()
+        expected_error = "registry binding changed"
+
+    with pytest.raises(StrategyError, match=expected_error):
+        load_candidate_stability_artifact(
+            fixture["runtime"],
+            task_id=fixture["task"].id,
+            artifact_id=artifact["artifact_id"],
+            expected_artifact_content_hash=artifact["content_hash"],
+            expected_stability_id=output["stability_id"],
+            expected_stability_content_hash=output["content_hash"],
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_json",
+    ["duplicate_key", "non_finite", "invalid_utf8", "oversized"],
+)
+def test_report_consumer_rejects_non_strict_json(
+    tmp_path: Path,
+    invalid_json: str,
+) -> None:
+    fixture = _setup(tmp_path)
+    resolved = resolve_candidate_monthly_stability_inputs(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        user_pointer={
+            "source_kind": "univariate_asset",
+            "asset_id": fixture["first"]["asset_id"],
+        },
+    )
+    output = run_measure_candidate_monthly_stability(
+        resolved,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    artifact = output["artifacts"][0]
+    record = TaskArtifactRepository(
+        fixture["settings"].db_path
+    ).get_for_task(
+        fixture["task"].id,
+        artifact["artifact_id"],
+    )
+    assert record is not None
+    if invalid_json == "duplicate_key":
+        raw = Path(record["path"]).read_text("utf-8")
+        encoded = (
+            '{"schema_version":'
+            + json.dumps(output["stability"]["schema_version"])
+            + ","
+            + raw[1:]
+        ).encode("utf-8")
+        expected_error = "duplicate key"
+    elif invalid_json == "non_finite":
+        forged = json.loads(Path(record["path"]).read_text("utf-8"))
+        forged["summary"]["max_psi"] = float("nan")
+        encoded = json.dumps(
+            forged,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        expected_error = "non-finite"
+    elif invalid_json == "invalid_utf8":
+        encoded = b"\xff"
+        expected_error = "JSON is invalid"
+    else:
+        encoded = b" " * (2 * 1024 * 1024)
+        expected_error = "JSON byte budget"
+    forged_artifact_hash = hashlib.sha256(encoded).hexdigest()
+    Path(record["path"]).write_bytes(encoded)
+    with fixture["runtime"].task_artifacts.transaction() as conn:
+        conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+        conn.execute(
+            "UPDATE task_artifacts SET content_hash = ? WHERE id = ?",
+            (forged_artifact_hash, artifact["artifact_id"]),
+        )
+        conn.commit()
+
+    with pytest.raises(StrategyError, match=expected_error):
+        load_candidate_stability_artifact(
+            fixture["runtime"],
+            task_id=fixture["task"].id,
+            artifact_id=artifact["artifact_id"],
+            expected_artifact_content_hash=forged_artifact_hash,
+            expected_stability_id=output["stability_id"],
+            expected_stability_content_hash=output["content_hash"],
+        )
+
+
+def test_report_consumer_rejects_symlinked_canonical_artifact(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    resolved = resolve_candidate_monthly_stability_inputs(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        user_pointer={
+            "source_kind": "univariate_asset",
+            "asset_id": fixture["first"]["asset_id"],
+        },
+    )
+    output = run_measure_candidate_monthly_stability(
+        resolved,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    artifact = output["artifacts"][0]
+    record = TaskArtifactRepository(
+        fixture["settings"].db_path
+    ).get_for_task(
+        fixture["task"].id,
+        artifact["artifact_id"],
+    )
+    assert record is not None
+    artifact_path = Path(record["path"])
+    retained = tmp_path / "retained-candidate-stability.json"
+    artifact_path.rename(retained)
+    artifact_path.symlink_to(retained)
+
+    with pytest.raises(StrategyError, match="regular file"):
+        load_candidate_stability_artifact(
+            fixture["runtime"],
+            task_id=fixture["task"].id,
+            artifact_id=artifact["artifact_id"],
+            expected_artifact_content_hash=artifact["content_hash"],
+            expected_stability_id=output["stability_id"],
+            expected_stability_content_hash=output["content_hash"],
+        )
+
+
+def test_report_consumer_binding_enforces_transaction_database_and_row_cas(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    resolved = resolve_candidate_monthly_stability_inputs(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        user_pointer={
+            "source_kind": "univariate_asset",
+            "asset_id": fixture["first"]["asset_id"],
+        },
+    )
+    output = run_measure_candidate_monthly_stability(
+        resolved,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    artifact = output["artifacts"][0]
+    binding = load_candidate_stability_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        artifact_id=artifact["artifact_id"],
+        expected_artifact_content_hash=artifact["content_hash"],
+        expected_stability_id=output["stability_id"],
+        expected_stability_content_hash=output["content_hash"],
+    )
+
+    with fixture["runtime"].task_artifacts.transaction() as conn:
+        with pytest.raises(StrategyError, match="caller-owned transaction"):
+            require_candidate_stability_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+
+    foreign_settings = build_settings(tmp_path / "foreign-workspace")
+    init_db(foreign_settings.db_path)
+    with TaskArtifactRepository(foreign_settings.db_path).transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(StrategyError, match="database changed"):
+            require_candidate_stability_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+        conn.rollback()
+
+    with fixture["runtime"].task_artifacts.transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+        conn.execute(
+            "UPDATE task_artifacts SET origin_tool = ? WHERE id = ?",
+            ("forged.origin", binding.artifact_id),
+        )
+        with pytest.raises(StrategyError, match="registry binding changed"):
+            require_candidate_stability_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+        conn.rollback()

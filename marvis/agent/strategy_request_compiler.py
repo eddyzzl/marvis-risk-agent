@@ -322,7 +322,8 @@ _STRATEGY_REPORT_CHAIN_NEGATION_RE = re.compile(
 )
 _STRATEGY_REPORT_PLATFORM_CONTROL_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:project_context_ref|sample_design_ref|candidate_pool_ref|"
-    r"pool_impact_ref|impact_cube_ref|strategy_identity|model_evidence_ref|"
+    r"candidate_stability_ref|pool_impact_ref|impact_cube_ref|"
+    r"strategy_identity|model_evidence_ref|"
     r"training_evidence_ref|score_evidence_ref|report_revision|"
     r"previous_report_id|previous_report_content_hash|generated_at|"
     r"strategy_id|strategy_version|artifact_id|content_hash|"

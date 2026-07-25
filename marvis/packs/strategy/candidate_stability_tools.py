@@ -89,6 +89,50 @@ _ASSET_POINTER_FIELDS = frozenset({"source_kind", "asset_id"})
 _POOL_POINTER_FIELDS = frozenset({"source_kind", "strategy_type", "entry_id"})
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+_STABILITY_ID_RE = re.compile(r"^candidate-stability-[0-9a-f]{24}$")
+_TASK_ARTIFACT_RECORD_FIELDS = frozenset(
+    {
+        "id",
+        "task_id",
+        "kind",
+        "path",
+        "content_hash",
+        "origin_tool",
+        "provenance",
+        "created_at",
+    }
+)
+_ARTIFACT_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "producer_version",
+        "task_id",
+        "stability_id",
+        "stability_content_hash",
+        "basis",
+        "source_kind",
+        "source_artifact_id",
+        "source_artifact_content_hash",
+        "source_id",
+        "source_hash",
+        "rule_id",
+        "entry_id",
+        "pool_id",
+        "pool_revision",
+        "pool_revision_id",
+        "dataset_id",
+        "dataset_content_hash",
+        "workspace_revision",
+        "workspace_generation",
+        "semantic_mapping_hash",
+        "target_col",
+        "month_col",
+        "sample_design_ref",
+        "sample_context_hash",
+        "sample_partition",
+    }
+)
+_MAX_CANDIDATE_STABILITY_ARTIFACT_BYTES = 1024 * 1024
 _BOUNDARY_ERRORS = (
     TaskArtifactConflictError,
     TaskArtifactDataError,
@@ -113,6 +157,234 @@ class _ExecutionBinding:
     @property
     def dataset(self):
         return self.candidate.dataset
+
+
+@dataclass(frozen=True)
+class StrategyCandidateStabilityArtifactBinding:
+    """Authenticated candidate-stability evidence for a downstream writer."""
+
+    task_id: str
+    artifact_id: str
+    artifact_path: Path
+    artifact_content_hash: str
+    artifact_provenance: dict[str, Any]
+    artifact_provenance_json: str
+    stability: dict[str, Any]
+    tasks_root: Path
+    db_path: Path
+
+    @property
+    def path(self) -> Path:
+        """Compatibility alias used by bindings that call this field ``path``."""
+
+        return self.artifact_path
+
+    @property
+    def provenance(self) -> dict[str, Any]:
+        """Compatibility alias for the authenticated registry provenance."""
+
+        return self.artifact_provenance
+
+    @property
+    def provenance_json(self) -> str:
+        """Compatibility alias for the byte-canonical provenance."""
+
+        return self.artifact_provenance_json
+
+
+def load_candidate_stability_artifact(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+    expected_stability_id: str,
+    expected_stability_content_hash: str,
+) -> StrategyCandidateStabilityArtifactBinding:
+    """Load and authenticate one persisted candidate-stability artifact."""
+
+    try:
+        normalized_task = _safe_id(task_id, "task_id")
+        normalized_artifact_id = _hash(artifact_id, "artifact_id")
+        artifact_content_hash = _hash(
+            expected_artifact_content_hash,
+            "expected_artifact_content_hash",
+        )
+        stability_id = _stability_id(
+            expected_stability_id,
+            "expected_stability_id",
+        )
+        stability_content_hash = _hash(
+            expected_stability_content_hash,
+            "expected_stability_content_hash",
+        )
+        tasks_root = Path(runtime.settings.tasks_dir).absolute()
+        db_path = Path(runtime.settings.db_path).absolute()
+        expected_path = _expected_artifact_path(
+            tasks_root,
+            task_id=normalized_task,
+            stability_id=stability_id,
+        )
+        record = _load_artifact_record(
+            runtime,
+            task_id=normalized_task,
+            artifact_id=normalized_artifact_id,
+            expected_content_hash=artifact_content_hash,
+        )
+        artifact_path = Path(str(record["path"]))
+        if artifact_path != expected_path:
+            raise StrategyError(
+                "candidate stability artifact path is not canonical"
+            )
+        raw = _read_candidate_stability_artifact(
+            artifact_path,
+            root=tasks_root,
+            expected_content_hash=artifact_content_hash,
+        )
+        stability = _candidate_stability_from_bytes(raw)
+        canonical = canonical_candidate_stability_artifact_json(stability).encode(
+            "utf-8"
+        )
+        if raw != canonical:
+            raise StrategyError(
+                "candidate stability artifact bytes are not canonical"
+            )
+        if not hmac.compare_digest(
+            hashlib.sha256(canonical).hexdigest(),
+            artifact_content_hash,
+        ):
+            raise StrategyError(
+                "candidate stability artifact content hash changed"
+            )
+        if (
+            stability["identity"]["task_id"] != normalized_task
+            or stability["stability_id"] != stability_id
+            or not hmac.compare_digest(
+                stability["content_hash"],
+                stability_content_hash,
+            )
+        ):
+            raise StrategyError(
+                "candidate stability artifact embedded identity changed"
+            )
+        provenance = _validate_artifact_provenance(
+            record["provenance"],
+            task_id=normalized_task,
+            stability=stability,
+        )
+        provenance_json = _canonical_json(provenance)
+        binding = StrategyCandidateStabilityArtifactBinding(
+            task_id=normalized_task,
+            artifact_id=normalized_artifact_id,
+            artifact_path=artifact_path,
+            artifact_content_hash=artifact_content_hash,
+            artifact_provenance=provenance,
+            artifact_provenance_json=provenance_json,
+            stability=stability,
+            tasks_root=tasks_root,
+            db_path=db_path,
+        )
+        with runtime.task_artifacts.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_candidate_stability_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+            conn.commit()
+        return binding
+    except StrategyError:
+        raise
+    except _BOUNDARY_ERRORS as exc:
+        raise StrategyError(str(exc)) from exc
+
+
+def require_candidate_stability_artifact_binding_on_connection(
+    conn,
+    binding: StrategyCandidateStabilityArtifactBinding,
+) -> None:
+    """Re-authenticate stability evidence while a report writer owns the lock."""
+
+    if not isinstance(binding, StrategyCandidateStabilityArtifactBinding):
+        raise StrategyError("candidate stability artifact binding is invalid")
+    if not isinstance(binding.db_path, Path) or not isinstance(
+        binding.tasks_root,
+        Path,
+    ):
+        raise StrategyError("candidate stability artifact roots changed")
+    _require_binding_connection(
+        conn,
+        db_path=binding.db_path,
+    )
+    task_id = _safe_id(binding.task_id, "binding.task_id")
+    artifact_id = _hash(binding.artifact_id, "binding.artifact_id")
+    artifact_content_hash = _hash(
+        binding.artifact_content_hash,
+        "binding.artifact_content_hash",
+    )
+    stability = validate_candidate_stability_artifact(binding.stability)
+    if stability != binding.stability:
+        raise StrategyError("candidate stability binding payload changed")
+    stability_id = _stability_id(
+        stability["stability_id"],
+        "binding.stability_id",
+    )
+    if stability["identity"]["task_id"] != task_id:
+        raise StrategyError(
+            "candidate stability binding belongs to another task"
+        )
+    expected_path = _expected_artifact_path(
+        binding.tasks_root,
+        task_id=task_id,
+        stability_id=stability_id,
+    )
+    if (
+        binding.tasks_root != binding.tasks_root.absolute()
+        or not isinstance(binding.artifact_path, Path)
+        or binding.artifact_path != expected_path
+    ):
+        raise StrategyError(
+            "candidate stability artifact governed task root changed"
+        )
+    canonical = canonical_candidate_stability_artifact_json(stability).encode(
+        "utf-8"
+    )
+    if not hmac.compare_digest(
+        hashlib.sha256(canonical).hexdigest(),
+        artifact_content_hash,
+    ):
+        raise StrategyError(
+            "candidate stability binding artifact hash changed"
+        )
+    provenance = _validate_artifact_provenance(
+        binding.artifact_provenance,
+        task_id=task_id,
+        stability=stability,
+    )
+    provenance_json = _canonical_json(provenance)
+    if (
+        provenance != binding.artifact_provenance
+        or binding.artifact_provenance_json != provenance_json
+    ):
+        raise StrategyError(
+            "candidate stability binding provenance changed"
+        )
+    _require_artifact_row_on_connection(
+        conn,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        path=binding.artifact_path,
+        content_hash=artifact_content_hash,
+        provenance_json=provenance_json,
+    )
+    raw = _read_candidate_stability_artifact(
+        binding.artifact_path,
+        root=binding.tasks_root,
+        expected_content_hash=artifact_content_hash,
+    )
+    if raw != canonical:
+        raise StrategyError(
+            "candidate stability artifact canonical bytes changed"
+        )
 
 
 def resolve_candidate_monthly_stability_inputs(
@@ -749,6 +1021,399 @@ def _artifact_provenance(
     }
 
 
+def _expected_artifact_provenance(
+    *,
+    task_id: str,
+    stability: Mapping[str, Any],
+) -> dict[str, Any]:
+    identity = stability["identity"]
+    source = stability["source_ref"]
+    bindings = stability["bindings"]
+    sample_ref = stability["sample_design_ref"]
+    return {
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "producer_version": stability["producer_version"],
+        "task_id": task_id,
+        "stability_id": stability["stability_id"],
+        "stability_content_hash": stability["content_hash"],
+        "basis": stability["basis"],
+        "source_kind": source["source_kind"],
+        "source_artifact_id": source["artifact_id"],
+        "source_artifact_content_hash": source["artifact_content_hash"],
+        "source_id": (
+            source["asset_id"]
+            if source["source_kind"] == "univariate_asset"
+            else source["pool_id"]
+        ),
+        "source_hash": (
+            source["asset_hash"]
+            if source["source_kind"] == "univariate_asset"
+            else source["snapshot_hash"]
+        ),
+        "rule_id": source["rule_id"],
+        "entry_id": source.get("entry_id"),
+        "pool_id": source.get("pool_id"),
+        "pool_revision": source.get("revision"),
+        "pool_revision_id": source.get("revision_id"),
+        "dataset_id": identity["dataset_id"],
+        "dataset_content_hash": identity["dataset_content_hash"],
+        "workspace_revision": identity["workspace_revision"],
+        "workspace_generation": identity["workspace_generation"],
+        "semantic_mapping_hash": identity["semantic_mapping_hash"],
+        "target_col": bindings["target_col"],
+        "month_col": bindings["month_col"],
+        "sample_design_ref": sample_ref,
+        "sample_context_hash": identity["sample_context_hash"],
+        "sample_partition": sample_ref["partition"],
+    }
+
+
+def _load_artifact_record(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+) -> dict[str, Any]:
+    record = runtime.task_artifacts.get_for_task(task_id, artifact_id)
+    if (
+        record is None
+        or not isinstance(record, Mapping)
+        or set(record) != _TASK_ARTIFACT_RECORD_FIELDS
+    ):
+        raise StrategyError(
+            "candidate stability artifact registry row is invalid"
+        )
+    if (
+        record["id"] != artifact_id
+        or record["task_id"] != task_id
+        or record["kind"] != ARTIFACT_KIND
+        or record["origin_tool"] != ORIGIN_TOOL
+        or not hmac.compare_digest(
+            str(record["content_hash"]),
+            expected_content_hash,
+        )
+    ):
+        raise StrategyError(
+            "candidate stability artifact registry binding changed"
+        )
+    if (
+        not isinstance(record["path"], str)
+        or not isinstance(record["provenance"], Mapping)
+        or record["created_at"]
+        != _text(record["created_at"], "artifact.created_at")
+    ):
+        raise StrategyError(
+            "candidate stability artifact registry row is invalid"
+        )
+    expected_id = _stable_task_artifact_id(
+        task_id=task_id,
+        path=record["path"],
+    )
+    if not hmac.compare_digest(artifact_id, expected_id):
+        raise StrategyError(
+            "candidate stability artifact registry identity changed"
+        )
+    return dict(record)
+
+
+def _validate_artifact_provenance(
+    value: object,
+    *,
+    task_id: str,
+    stability: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise StrategyError(
+            "candidate stability artifact provenance must be an object"
+        )
+    try:
+        normalized = json.loads(_canonical_json(dict(value)))
+    except (
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        RecursionError,
+    ) as exc:
+        raise StrategyError(
+            "candidate stability artifact provenance is invalid"
+        ) from exc
+    if (
+        not isinstance(normalized, dict)
+        or set(normalized) != _ARTIFACT_PROVENANCE_FIELDS
+    ):
+        raise StrategyError(
+            "candidate stability artifact provenance fields changed"
+        )
+    expected = _expected_artifact_provenance(
+        task_id=task_id,
+        stability=stability,
+    )
+    if normalized != expected:
+        raise StrategyError(
+            "candidate stability artifact provenance changed"
+        )
+    return normalized
+
+
+def _expected_artifact_path(
+    tasks_root: Path,
+    *,
+    task_id: str,
+    stability_id: str,
+) -> Path:
+    if not tasks_root.is_absolute():
+        raise StrategyError(
+            "candidate stability task root must be absolute"
+        )
+    return (
+        tasks_root
+        / _safe_id(task_id, "task_id")
+        / "strategy_candidate_stability"
+        / f"{_stability_id(stability_id, 'stability_id')}.json"
+    )
+
+
+def _read_candidate_stability_artifact(
+    path: Path,
+    *,
+    root: Path,
+    expected_content_hash: str,
+) -> bytes:
+    _require_artifact_storage_path(path, root=root)
+    descriptor = -1
+    chunks: list[bytes] = []
+    digest = hashlib.sha256()
+    try:
+        before_path = os.lstat(path)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        after_open = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(after_open.st_mode)
+            or _file_identity(before_path) != _file_identity(opened)
+            or _file_identity(opened) != _file_identity(after_open)
+            or _stable_file_stat(before_path) != _stable_file_stat(opened)
+            or _stable_file_stat(opened) != _stable_file_stat(after_open)
+        ):
+            raise StrategyError(
+                "candidate stability artifact changed while opening"
+            )
+        if (
+            int(opened.st_size) < 0
+            or int(opened.st_size)
+            > _MAX_CANDIDATE_STABILITY_ARTIFACT_BYTES
+        ):
+            raise StrategyError(
+                "candidate stability artifact exceeds the JSON byte budget"
+            )
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_CANDIDATE_STABILITY_ARTIFACT_BYTES:
+                raise StrategyError(
+                    "candidate stability artifact exceeds the JSON byte budget"
+                )
+            digest.update(chunk)
+            chunks.append(chunk)
+        after_read = os.fstat(descriptor)
+        live_path = os.lstat(path)
+        if (
+            total != int(opened.st_size)
+            or _stable_file_stat(opened) != _stable_file_stat(after_read)
+            or _stable_file_stat(after_read) != _stable_file_stat(live_path)
+        ):
+            raise StrategyError(
+                "candidate stability artifact changed while reading"
+            )
+    except StrategyError:
+        raise
+    except OSError as exc:
+        raise StrategyError(
+            "candidate stability artifact could not be read"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    raw = b"".join(chunks)
+    if not hmac.compare_digest(
+        digest.hexdigest(),
+        expected_content_hash,
+    ):
+        raise StrategyError(
+            "candidate stability artifact content hash drifted"
+        )
+    return raw
+
+
+def _require_artifact_storage_path(path: Path, *, root: Path) -> None:
+    if (
+        not root.is_absolute()
+        or not path.is_absolute()
+        or path != Path(os.path.abspath(path))
+    ):
+        raise StrategyError(
+            "candidate stability artifact path is not canonical"
+        )
+    try:
+        path.relative_to(root)
+        root_stat = os.lstat(root)
+        if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+            raise StrategyError(
+                "candidate stability task root must be a regular directory"
+            )
+        current = path.parent
+        while current != root:
+            current_stat = os.lstat(current)
+            if (
+                not stat.S_ISDIR(current_stat.st_mode)
+                or stat.S_ISLNK(current_stat.st_mode)
+            ):
+                raise StrategyError(
+                    "candidate stability artifact path traverses a symlink"
+                )
+            if current == current.parent:
+                raise StrategyError(
+                    "candidate stability artifact escaped task storage"
+                )
+            current = current.parent
+        file_stat = os.lstat(path)
+    except StrategyError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise StrategyError(
+            "candidate stability artifact is unavailable"
+        ) from exc
+    if not stat.S_ISREG(file_stat.st_mode) or stat.S_ISLNK(file_stat.st_mode):
+        raise StrategyError(
+            "candidate stability artifact must be a regular file"
+        )
+
+
+def _candidate_stability_from_bytes(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_json_constant,
+        )
+        return validate_candidate_stability_artifact(value)
+    except StrategyError:
+        raise
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+    ) as exc:
+        raise StrategyError(
+            "candidate stability artifact JSON is invalid"
+        ) from exc
+
+
+def _object_without_duplicate_keys(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise StrategyError(
+                f"candidate stability artifact JSON has duplicate key: {key}"
+            )
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str):
+    raise StrategyError(
+        f"candidate stability artifact JSON has non-finite value: {value}"
+    )
+
+
+def _require_artifact_row_on_connection(
+    conn,
+    *,
+    task_id: str,
+    artifact_id: str,
+    path: Path,
+    content_hash: str,
+    provenance_json: str,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT id, task_id, kind, path, content_hash, origin_tool,
+               provenance_json
+          FROM task_artifacts
+         WHERE task_id = ? AND id = ?
+        """,
+        (task_id, artifact_id),
+    ).fetchone()
+    if row is None:
+        raise StrategyError(
+            "candidate stability artifact is no longer registered"
+        )
+    if (
+        str(row["id"]) != artifact_id
+        or str(row["task_id"]) != task_id
+        or str(row["kind"]) != ARTIFACT_KIND
+        or str(row["path"]) != str(path)
+        or not hmac.compare_digest(str(row["content_hash"]), content_hash)
+        or str(row["origin_tool"]) != ORIGIN_TOOL
+        or str(row["provenance_json"]) != provenance_json
+        or not hmac.compare_digest(
+            artifact_id,
+            _stable_task_artifact_id(task_id=task_id, path=str(path)),
+        )
+    ):
+        raise StrategyError(
+            "candidate stability artifact registry binding changed"
+        )
+
+
+def _require_binding_connection(conn, *, db_path: Path) -> None:
+    if not conn.in_transaction:
+        raise StrategyError(
+            "candidate stability binding requires a caller-owned transaction"
+        )
+    if not db_path.is_absolute():
+        raise StrategyError(
+            "candidate stability binding database changed"
+        )
+    database = conn.execute(
+        "SELECT file FROM pragma_database_list WHERE name = 'main'"
+    ).fetchone()
+    if (
+        database is None
+        or not str(database["file"])
+        or Path(str(database["file"])).absolute() != db_path
+    ):
+        raise StrategyError(
+            "candidate stability binding database changed"
+        )
+
+
+def _stable_task_artifact_id(*, task_id: str, path: str) -> str:
+    identity = json.dumps(
+        [task_id, ARTIFACT_KIND, path],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(
+        f"marvis.task_artifact.v1:{identity}".encode("utf-8")
+    ).hexdigest()
+
+
 def _tool_output(
     artifact: Mapping[str, Any],
     *,
@@ -1116,11 +1781,23 @@ def _safe_id(value: object, name: str) -> str:
     return normalized
 
 
+def _stability_id(value: object, name: str) -> str:
+    normalized = _text(value, name)
+    if _STABILITY_ID_RE.fullmatch(normalized) is None:
+        raise StrategyError(
+            f"{name} must be a canonical candidate stability id"
+        )
+    return normalized
+
+
 __all__ = [
     "ARTIFACT_KIND",
     "ARTIFACT_SCHEMA_VERSION",
     "ORIGIN_TOOL",
+    "StrategyCandidateStabilityArtifactBinding",
     "TOOL_SCHEMA_VERSION",
+    "load_candidate_stability_artifact",
+    "require_candidate_stability_artifact_binding_on_connection",
     "resolve_candidate_monthly_stability_inputs",
     "run_measure_candidate_monthly_stability",
 ]

@@ -29,6 +29,15 @@ from marvis.packs.modeling.score_evidence_tools import (
 from marvis.packs.strategy.candidate_fragment import (
     build_verified_candidate_fragment,
 )
+from marvis.packs.strategy.candidate_stability import (
+    CANDIDATE_STABILITY_PRODUCER_VERSION,
+    build_candidate_stability_artifact,
+    canonical_candidate_stability_artifact_json,
+)
+from marvis.packs.strategy.candidate_stability_tools import (
+    ARTIFACT_SCHEMA_VERSION as CANDIDATE_STABILITY_ARTIFACT_SCHEMA_VERSION,
+    StrategyCandidateStabilityArtifactBinding,
+)
 from marvis.packs.strategy.impact_cube import (
     build_strategy_impact_cube,
     canonical_strategy_impact_cube_json,
@@ -82,6 +91,7 @@ from marvis.packs.strategy.report_bundle import (
 from marvis.packs.strategy.report_bundle_adapters import (
     StrategyImpactCubeArtifactBinding,
     build_strategy_report_bundle_source_inputs,
+    validate_candidate_stability_report_compatibility,
 )
 from marvis.packs.strategy.sample_design_v2 import (
     build_strategy_sample_design_v2,
@@ -447,6 +457,136 @@ def _pool_and_impact_bindings(
         db_path=tmp_path / "marvis.sqlite",
     )
     return pool_binding, impact_binding
+
+
+def _candidate_stability_binding(
+    tmp_path: Path,
+    sample: StrategySampleDesignV2ArtifactBinding,
+    pool: StrategyCandidatePoolArtifactBinding,
+    *,
+    source_kind: str = "pool_entry",
+    low_sample_month: bool = False,
+) -> StrategyCandidateStabilityArtifactBinding:
+    entry = pool.pool["entries"][0]
+    entry_source = entry["source"]
+    month_counts = (20, 40) if low_sample_month else (30, 30)
+    months = [
+        month
+        for month, count in zip(
+            ("202601", "202602"),
+            month_counts,
+            strict=True,
+        )
+        for _ in range(count)
+    ]
+    frame = pd.DataFrame(
+        {
+            "apply_month": months,
+            "target": [index % 2 for index in range(len(months))],
+        }
+    )
+    identity = {
+        "task_id": sample.task_id,
+        **entry_source["evidence_identity"],
+    }
+    if source_kind == "pool_entry":
+        basis = "pool_entry_incremental_first_match"
+        source_ref = {
+            "source_kind": "pool_entry",
+            "artifact_id": pool.artifact_id,
+            "artifact_content_hash": pool.artifact_content_hash,
+            "pool_id": pool.pool["pool_id"],
+            "revision": pool.pool["revision"],
+            "revision_id": pool.pool["revision_id"],
+            "snapshot_hash": pool.pool["snapshot_hash"],
+            "entry_id": entry["entry_id"],
+            "rule_id": entry["rule_id"],
+        }
+    elif source_kind == "univariate_asset":
+        basis = "asset_rule_hit"
+        source_ref = {
+            "source_kind": "univariate_asset",
+            "artifact_id": entry_source["artifact_id"],
+            "artifact_content_hash": entry_source["artifact_content_hash"],
+            "asset_id": entry_source["asset_id"],
+            "asset_hash": entry_source["asset_hash"],
+            "rule_id": entry["rule_id"],
+        }
+    else:  # pragma: no cover - fixture contract
+        raise AssertionError(f"unsupported source kind: {source_kind}")
+    stability = build_candidate_stability_artifact(
+        frame=frame,
+        month_col="apply_month",
+        target_col="target",
+        hit_mask=np.asarray(
+            [index % 3 == 0 for index in range(len(frame))],
+            dtype=bool,
+        ),
+        basis=basis,
+        identity=identity,
+        source_ref=source_ref,
+        sample_design_ref=sample.bundle["sample_design"]["compatibility"][
+            "legacy_development_ref"
+        ],
+    )
+    canonical = canonical_candidate_stability_artifact_json(stability)
+    provenance = {
+        "schema_version": CANDIDATE_STABILITY_ARTIFACT_SCHEMA_VERSION,
+        "producer_version": CANDIDATE_STABILITY_PRODUCER_VERSION,
+        "task_id": sample.task_id,
+        "stability_id": stability["stability_id"],
+        "stability_content_hash": stability["content_hash"],
+        "basis": stability["basis"],
+        "source_kind": source_ref["source_kind"],
+        "source_artifact_id": source_ref["artifact_id"],
+        "source_artifact_content_hash": source_ref["artifact_content_hash"],
+        "source_id": (
+            source_ref["asset_id"]
+            if source_kind == "univariate_asset"
+            else source_ref["pool_id"]
+        ),
+        "source_hash": (
+            source_ref["asset_hash"]
+            if source_kind == "univariate_asset"
+            else source_ref["snapshot_hash"]
+        ),
+        "rule_id": source_ref["rule_id"],
+        "entry_id": source_ref.get("entry_id"),
+        "pool_id": source_ref.get("pool_id"),
+        "pool_revision": source_ref.get("revision"),
+        "pool_revision_id": source_ref.get("revision_id"),
+        "dataset_id": identity["dataset_id"],
+        "dataset_content_hash": identity["dataset_content_hash"],
+        "workspace_revision": identity["workspace_revision"],
+        "workspace_generation": identity["workspace_generation"],
+        "semantic_mapping_hash": identity["semantic_mapping_hash"],
+        "target_col": "target",
+        "month_col": "apply_month",
+        "sample_design_ref": stability["sample_design_ref"],
+        "sample_context_hash": identity["sample_context_hash"],
+        "sample_partition": "development",
+    }
+    provenance_json = json.dumps(
+        provenance,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return StrategyCandidateStabilityArtifactBinding(
+        task_id=sample.task_id,
+        artifact_id=_hash(
+            "candidate-stability-artifact"
+            f"-{source_kind}-{low_sample_month}"
+        ),
+        artifact_path=tmp_path / f"candidate-stability-{source_kind}.json",
+        artifact_content_hash=_file_hash(canonical),
+        artifact_provenance=provenance,
+        artifact_provenance_json=provenance_json,
+        stability=stability,
+        tasks_root=tmp_path,
+        db_path=tmp_path / "marvis.sqlite",
+    )
 
 
 def _bindings(
@@ -1789,3 +1929,232 @@ def test_adapter_rejects_untyped_or_forged_bindings(
             candidate_pool=pool,
             pool_impact=impact,
         )
+
+
+@pytest.mark.parametrize("source_kind", ["pool_entry", "univariate_asset"])
+def test_candidate_stability_compatibility_accepts_exact_current_pool_sources(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    _project, sample, pool, _impact = _bindings(tmp_path)
+    binding = _candidate_stability_binding(
+        tmp_path,
+        sample,
+        pool,
+        source_kind=source_kind,
+    )
+
+    stability = validate_candidate_stability_report_compatibility(
+        candidate_stability=binding,
+        sample_design=sample,
+        candidate_pool=pool,
+    )
+
+    assert stability == binding.stability
+    assert stability["source_ref"]["source_kind"] == source_kind
+    assert stability["lifecycle"] == {
+        "candidate_stage": "development",
+        "observation_stage": "backtested",
+        "validation_status": "unvalidated",
+        "not_created_strategy": True,
+        "not_adopted": True,
+        "not_deployed": True,
+    }
+
+
+def test_candidate_stability_compatibility_rejects_another_current_pool_artifact(
+    tmp_path: Path,
+) -> None:
+    _project, sample, pool, _impact = _bindings(tmp_path)
+    binding = _candidate_stability_binding(tmp_path, sample, pool)
+    another_pool_artifact = replace(pool, artifact_id="a" * 64)
+
+    with pytest.raises(
+        StrategyReportBundleError,
+        match="exact current Candidate Pool entry",
+    ):
+        validate_candidate_stability_report_compatibility(
+            candidate_stability=binding,
+            sample_design=sample,
+            candidate_pool=another_pool_artifact,
+        )
+
+
+def test_adapter_projects_candidate_stability_summary_table_and_sources(
+    tmp_path: Path,
+) -> None:
+    project, sample, pool, impact = _bindings(tmp_path)
+    binding = _candidate_stability_binding(tmp_path, sample, pool)
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        candidate_stability=binding,
+        pool_impact=impact,
+    )
+
+    section = result["sections"][4]
+    fields = {
+        item["field_id"]: item["field"]["value"]
+        for item in section["summary_fields"]
+    }
+    assert fields["candidate_stability_population_count"] == 60
+    assert fields["candidate_stability_month_count"] == 2
+    assert fields["candidate_stability_max_psi_month"] in {
+        "202601",
+        "202602",
+    }
+    table = next(
+        item
+        for item in section["tables"]
+        if item["table_id"] == "candidate_monthly_stability"
+    )
+    assert table["title"] == "候选逐月稳定性（开发回测，未独立验证）"
+    assert table["sheet_key"] == "appendix_candidate_stability"
+    assert table["content_class"] == "monthly_summary"
+    assert table["effect_stage"] == "backtested"
+    assert [row["row_id"] for row in table["rows"]] == [
+        "candidate-stability-baseline",
+        "candidate-stability-month-202601",
+        "candidate-stability-month-202602",
+    ]
+    assert [
+        row["cells"]["sample_count"]["value"]
+        for row in table["rows"]
+    ] == [60, 30, 30]
+    assert set(table["rows"][0]["cells"]) == {
+        "period",
+        "sample_count",
+        "hit_count",
+        "not_hit_count",
+        "hit_share",
+        "not_hit_share",
+        "labeled_count",
+        "label_coverage",
+        "hit_labeled_count",
+        "hit_bad_count",
+        "hit_bad_rate",
+        "psi_vs_development",
+    }
+    stability_ref = {
+        "kind": "backtest",
+        "ref_id": binding.artifact_id,
+        "content_hash": binding.artifact_content_hash,
+    }
+    assert table["source_refs"] == [stability_ref]
+    assert stability_ref in result["strategy_artifact_refs"]
+    assert section["stage_evidence"] == [
+        {
+            "effect_stage": "backtested",
+            "population": "risk",
+            "partition": "development",
+            "binding": {
+                "kind": "development_backtest",
+                "dataset_ref": result["dataset_refs"][0],
+                "frozen_artifact_ref": {
+                    "kind": "strategy_candidate_pool",
+                    "ref_id": pool.artifact_id,
+                    "content_hash": pool.artifact_content_hash,
+                },
+                "result_ref": stability_ref,
+            },
+        }
+    ]
+    bundle = build_strategy_report_bundle(
+        task_id=project.task_id,
+        report_revision=1,
+        strategy_id=None,
+        strategy_version=None,
+        strategy_type="approval",
+        title=_present("候选稳定性报告", stability_ref),
+        status="partial",
+        generated_at="2026-07-25T12:00:00+08:00",
+        **result,
+    )
+    assert bundle["schema_version"] == "strategy.report-bundle.v2"
+    assert bundle["effect_stages"] == ["backtested"]
+
+
+def test_adapter_binds_standalone_stability_to_exact_candidate_asset(
+    tmp_path: Path,
+) -> None:
+    project, sample, pool, impact = _bindings(tmp_path)
+    binding = _candidate_stability_binding(
+        tmp_path,
+        sample,
+        pool,
+        source_kind="univariate_asset",
+    )
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        candidate_stability=binding,
+        pool_impact=impact,
+    )
+
+    source = binding.stability["source_ref"]
+    asset_ref = {
+        "kind": "strategy_candidate_asset",
+        "ref_id": source["artifact_id"],
+        "content_hash": source["artifact_content_hash"],
+    }
+    stability_ref = {
+        "kind": "backtest",
+        "ref_id": binding.artifact_id,
+        "content_hash": binding.artifact_content_hash,
+    }
+    candidate_section = result["sections"][4]
+    stage = candidate_section["stage_evidence"][0]
+    assert stage["binding"]["frozen_artifact_ref"] == asset_ref
+    assert asset_ref in candidate_section["source_refs"]
+    assert asset_ref in result["strategy_artifact_refs"]
+    assert stage["binding"]["frozen_artifact_ref"] != {
+        "kind": "strategy_candidate_pool",
+        "ref_id": pool.artifact_id,
+        "content_hash": pool.artifact_content_hash,
+    }
+
+    bundle = build_strategy_report_bundle(
+        task_id=project.task_id,
+        report_revision=1,
+        strategy_id=None,
+        strategy_version=None,
+        strategy_type="approval",
+        title=_present("独立候选稳定性报告", stability_ref),
+        status="partial",
+        generated_at="2026-07-25T12:00:00+08:00",
+        **result,
+    )
+    assert bundle["effect_stages"] == ["backtested"]
+
+
+def test_adapter_projects_low_sample_stability_flags_as_amber(
+    tmp_path: Path,
+) -> None:
+    project, sample, pool, impact = _bindings(tmp_path)
+    binding = _candidate_stability_binding(
+        tmp_path,
+        sample,
+        pool,
+        low_sample_month=True,
+    )
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        candidate_stability=binding,
+        pool_impact=impact,
+    )
+
+    red_flags = result["sections"][4]["red_flags"]
+    assert len(red_flags) == 1
+    assert red_flags[0]["code"] == (
+        "candidate_stability_insufficient_month_rows"
+    )
+    assert red_flags[0]["level"] == "amber"
+    assert "202601" in red_flags[0]["message"]
+    assert "低样本" in red_flags[0]["message"]

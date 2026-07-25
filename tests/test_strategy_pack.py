@@ -208,6 +208,45 @@ def test_task_analysis_artifact_registration_failure_rolls_back_files_and_rows(
     assert repository.list_for_task(task.id) == []
 
 
+def test_report_bundle_manifest_accepts_only_exact_optional_candidate_stability_ref(
+    tmp_path,
+) -> None:
+    manifest = _real_builtin_registry(tmp_path).get("strategy")
+    tool = next(
+        item for item in manifest.tools if item.name == "build_report_bundle_v2"
+    )
+    schema = tool.input_schema
+    candidate_schema = {
+        **schema["$defs"]["candidate_stability_ref"],
+        "$defs": {"sha256": schema["$defs"]["sha256"]},
+    }
+    candidate_ref = {
+        "artifact_id": "a" * 64,
+        "expected_artifact_content_hash": "b" * 64,
+        "expected_stability_id": "candidate-stability-" + ("1" * 24),
+        "expected_stability_content_hash": "c" * 64,
+    }
+
+    assert schema["properties"]["candidate_stability_ref"] == {
+        "$ref": "#/$defs/candidate_stability_ref"
+    }
+    assert "candidate_stability_ref" not in schema["required"]
+    assert set(candidate_schema["properties"]) == set(candidate_ref)
+    assert set(candidate_schema["required"]) == set(candidate_ref)
+    assert candidate_schema["additionalProperties"] is False
+    validate_against_schema(
+        candidate_ref,
+        candidate_schema,
+        label="candidate_stability_ref",
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {**candidate_ref, "forged_metric": 0.99},
+            candidate_schema,
+            label="candidate_stability_ref",
+        )
+
+
 def test_strategy_v2_materializers_are_thin_runtime_forwarders(monkeypatch):
     ctx = object()
     runtime = object()

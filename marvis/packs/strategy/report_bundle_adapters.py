@@ -32,6 +32,15 @@ from marvis.packs.modeling.score_evidence import (
 from marvis.packs.modeling.score_evidence_tools import (
     ModelScoreEvidenceArtifactBinding,
 )
+from marvis.packs.strategy.candidate_stability import (
+    CANDIDATE_STABILITY_PRODUCER_VERSION,
+    canonical_candidate_stability_artifact_json,
+    validate_candidate_stability_artifact,
+)
+from marvis.packs.strategy.candidate_stability_tools import (
+    ARTIFACT_SCHEMA_VERSION as CANDIDATE_STABILITY_ARTIFACT_SCHEMA_VERSION,
+    StrategyCandidateStabilityArtifactBinding,
+)
 from marvis.packs.strategy.model_evidence import (
     canonical_strategy_model_evidence_bundle_json,
     validate_strategy_model_evidence_bundle,
@@ -134,6 +143,44 @@ _IMPACT_CUBE_PROVENANCE_FIELDS = frozenset(
         "producer_run",
     }
 )
+_CANDIDATE_STABILITY_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "producer_version",
+        "task_id",
+        "stability_id",
+        "stability_content_hash",
+        "basis",
+        "source_kind",
+        "source_artifact_id",
+        "source_artifact_content_hash",
+        "source_id",
+        "source_hash",
+        "rule_id",
+        "entry_id",
+        "pool_id",
+        "pool_revision",
+        "pool_revision_id",
+        "dataset_id",
+        "dataset_content_hash",
+        "workspace_revision",
+        "workspace_generation",
+        "semantic_mapping_hash",
+        "target_col",
+        "month_col",
+        "sample_design_ref",
+        "sample_context_hash",
+        "sample_partition",
+    }
+)
+_CANDIDATE_STABILITY_LIFECYCLE = {
+    "candidate_stage": "development",
+    "observation_stage": "backtested",
+    "validation_status": "unvalidated",
+    "not_created_strategy": True,
+    "not_adopted": True,
+    "not_deployed": True,
+}
 
 
 @dataclass(frozen=True)
@@ -159,11 +206,42 @@ def validate_strategy_impact_cube_artifact_binding(
     return _authenticated_impact_cube(binding)
 
 
+def validate_candidate_stability_report_compatibility(
+    *,
+    candidate_stability: StrategyCandidateStabilityArtifactBinding,
+    sample_design: StrategySampleDesignV2ArtifactBinding,
+    candidate_pool: StrategyCandidatePoolArtifactBinding,
+) -> dict[str, Any]:
+    """Authenticate stability evidence and bind it to the exact report sources.
+
+    Agent preflight may use this pure helper to distinguish an authentic but
+    unrelated historical result from evidence for the current SampleDesign V2
+    and Candidate Pool.  It performs no reads, writes, or report projection.
+    """
+
+    stability = _authenticated_candidate_stability(candidate_stability)
+    sample = _authenticated_sample_design(sample_design)
+    pool, _compiled = _authenticated_candidate_pool(candidate_pool)
+    _require_same_task(
+        candidate_stability.task_id,
+        sample_design=sample_design,
+        candidate_pool=candidate_pool,
+    )
+    _require_candidate_stability_identity(
+        stability=stability,
+        sample=sample,
+        pool=pool,
+        pool_binding=candidate_pool,
+    )
+    return stability
+
+
 def build_strategy_report_bundle_source_inputs(
     *,
     project_context: StrategyProjectContextArtifactBinding,
     sample_design: StrategySampleDesignV2ArtifactBinding,
     candidate_pool: StrategyCandidatePoolArtifactBinding,
+    candidate_stability: StrategyCandidateStabilityArtifactBinding | None = None,
     pool_impact: StrategyPoolImpactArtifactBinding | None = None,
     impact_cube: StrategyImpactCubeArtifactBinding | None = None,
     model_evidence: StrategyModelEvidenceV2ArtifactBinding | None = None,
@@ -184,6 +262,7 @@ def build_strategy_report_bundle_source_inputs(
         task_id,
         sample_design=sample_design,
         candidate_pool=candidate_pool,
+        candidate_stability=candidate_stability,
         pool_impact=(
             None if impact_cube is not None else pool_impact
         ),
@@ -194,6 +273,15 @@ def build_strategy_report_bundle_source_inputs(
     )
     sample = _authenticated_sample_design(sample_design)
     pool, design = _authenticated_candidate_pool(candidate_pool)
+    stability = (
+        None
+        if candidate_stability is None
+        else validate_candidate_stability_report_compatibility(
+            candidate_stability=candidate_stability,
+            sample_design=sample_design,
+            candidate_pool=candidate_pool,
+        )
+    )
     if impact_cube is None and pool_impact is None:
         raise StrategyReportBundleError(
             "an authenticated ImpactCube or legacy PoolImpact is required"
@@ -265,6 +353,19 @@ def build_strategy_report_bundle_source_inputs(
             impact=impact,
         )
 
+    pool_ref = _artifact_ref(
+        "strategy_candidate_pool",
+        candidate_pool.artifact_id,
+        candidate_pool.artifact_content_hash,
+    )
+    stability_source_ref = (
+        None
+        if stability is None
+        else _candidate_stability_frozen_artifact_ref(
+            stability,
+            pool_ref=pool_ref,
+        )
+    )
     refs = _EvidenceRefs(
         project=_artifact_ref(
             "strategy_project_context",
@@ -276,11 +377,7 @@ def build_strategy_report_bundle_source_inputs(
             sample_design.bundle_artifact_id,
             sample_design.bundle_artifact_content_hash,
         ),
-        pool=_artifact_ref(
-            "strategy_candidate_pool",
-            candidate_pool.artifact_id,
-            candidate_pool.artifact_content_hash,
-        ),
+        pool=pool_ref,
         impact=_artifact_ref(
             "strategy_impact" if cube is not None else "pool_impact",
             (
@@ -321,6 +418,16 @@ def build_strategy_report_bundle_source_inputs(
                 _record_text(score_evidence.evidence_record, "content_hash"),
             )
         ),
+        stability=(
+            None
+            if candidate_stability is None
+            else _artifact_ref(
+                "backtest",
+                candidate_stability.artifact_id,
+                candidate_stability.artifact_content_hash,
+            )
+        ),
+        stability_source=stability_source_ref,
     )
     state = project["state"]
     pre_impact_sections = {
@@ -336,7 +443,11 @@ def build_strategy_report_bundle_source_inputs(
         "candidate_combinations": _candidate_section(
             pool=pool,
             compiled_design=design,
-            source_ref=refs.pool,
+            pool_ref=refs.pool,
+            stability=stability,
+            stability_ref=refs.stability,
+            stability_source_ref=refs.stability_source,
+            dataset_ref=_dataset_ref_from_sample(sample),
         ),
     }
     allow_oot_validated = not _has_validation_blocker(
@@ -383,6 +494,11 @@ def build_strategy_report_bundle_source_inputs(
         [
             *snapshot["dataset_refs"],
             _dataset_ref_from_sample(sample),
+            *(
+                []
+                if stability is None
+                else [_dataset_ref_from_candidate_stability(stability)]
+            ),
             (
                 _dataset_ref_from_impact_cube(cube)
                 if cube is not None
@@ -415,7 +531,18 @@ def build_strategy_report_bundle_source_inputs(
             for key in REPORT_SECTION_KEYS
         ],
         "dataset_refs": dataset_refs,
-        "strategy_artifact_refs": _dedupe_refs([refs.pool, refs.impact]),
+        "strategy_artifact_refs": _dedupe_refs(
+            [
+                refs.pool,
+                refs.impact,
+                *([] if refs.stability is None else [refs.stability]),
+                *(
+                    []
+                    if refs.stability_source is None
+                    else [refs.stability_source]
+                ),
+            ]
+        ),
         "tool_run_refs": tool_run_refs,
         "missing_information": list(state["missing_information_records"]),
     }
@@ -430,6 +557,8 @@ class _EvidenceRefs:
         "model",
         "training",
         "score",
+        "stability",
+        "stability_source",
     )
 
     def __init__(
@@ -442,6 +571,8 @@ class _EvidenceRefs:
         model: dict[str, str] | None,
         training: dict[str, str] | None,
         score: dict[str, str] | None,
+        stability: dict[str, str] | None,
+        stability_source: dict[str, str] | None,
     ) -> None:
         self.project = project
         self.sample = sample
@@ -450,6 +581,8 @@ class _EvidenceRefs:
         self.model = model
         self.training = training
         self.score = score
+        self.stability = stability
+        self.stability_source = stability_source
 
 
 def _authenticated_project_context(
@@ -531,6 +664,276 @@ def _authenticated_candidate_pool(
         "candidate-pool",
     )
     return pool, compiled
+
+
+def _authenticated_candidate_stability(
+    binding: StrategyCandidateStabilityArtifactBinding,
+) -> dict[str, Any]:
+    _require_binding_type(
+        binding,
+        StrategyCandidateStabilityArtifactBinding,
+        "candidate-stability",
+    )
+    try:
+        stability = validate_candidate_stability_artifact(binding.stability)
+    except StrategyError as exc:
+        raise StrategyReportBundleError(
+            "candidate-stability evidence is invalid"
+        ) from exc
+    if (
+        stability != binding.stability
+        or stability["identity"]["task_id"] != binding.task_id
+    ):
+        raise StrategyReportBundleError(
+            "candidate-stability binding identity changed"
+        )
+    _require_canonical_artifact_hash(
+        binding.artifact_content_hash,
+        canonical_candidate_stability_artifact_json(stability),
+        "candidate-stability",
+    )
+    _require_candidate_stability_provenance(binding, stability)
+    return stability
+
+
+def _require_candidate_stability_provenance(
+    binding: StrategyCandidateStabilityArtifactBinding,
+    stability: Mapping[str, Any],
+) -> None:
+    try:
+        canonical = json.dumps(
+            binding.artifact_provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        provenance = json.loads(canonical)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise StrategyReportBundleError(
+            "candidate-stability artifact provenance is invalid"
+        ) from exc
+    if (
+        not isinstance(provenance, dict)
+        or set(provenance) != _CANDIDATE_STABILITY_PROVENANCE_FIELDS
+        or binding.artifact_provenance_json != canonical
+    ):
+        raise StrategyReportBundleError(
+            "candidate-stability artifact provenance fields changed"
+        )
+
+    source = stability["source_ref"]
+    identity = stability["identity"]
+    bindings = stability["bindings"]
+    expected = {
+        "schema_version": CANDIDATE_STABILITY_ARTIFACT_SCHEMA_VERSION,
+        "producer_version": CANDIDATE_STABILITY_PRODUCER_VERSION,
+        "task_id": binding.task_id,
+        "stability_id": stability["stability_id"],
+        "stability_content_hash": stability["content_hash"],
+        "basis": stability["basis"],
+        "source_kind": source["source_kind"],
+        "source_artifact_id": source["artifact_id"],
+        "source_artifact_content_hash": source["artifact_content_hash"],
+        "source_id": (
+            source["asset_id"]
+            if source["source_kind"] == "univariate_asset"
+            else source["pool_id"]
+        ),
+        "source_hash": (
+            source["asset_hash"]
+            if source["source_kind"] == "univariate_asset"
+            else source["snapshot_hash"]
+        ),
+        "rule_id": source["rule_id"],
+        "entry_id": source.get("entry_id"),
+        "pool_id": source.get("pool_id"),
+        "pool_revision": source.get("revision"),
+        "pool_revision_id": source.get("revision_id"),
+        "dataset_id": identity["dataset_id"],
+        "dataset_content_hash": identity["dataset_content_hash"],
+        "workspace_revision": identity["workspace_revision"],
+        "workspace_generation": identity["workspace_generation"],
+        "semantic_mapping_hash": identity["semantic_mapping_hash"],
+        "target_col": bindings["target_col"],
+        "month_col": bindings["month_col"],
+        "sample_design_ref": stability["sample_design_ref"],
+        "sample_context_hash": identity["sample_context_hash"],
+        "sample_partition": "development",
+    }
+    if provenance != expected:
+        raise StrategyReportBundleError(
+            "candidate-stability artifact provenance identity changed"
+        )
+
+
+def _require_candidate_stability_identity(
+    *,
+    stability: Mapping[str, Any],
+    sample: Mapping[str, Any],
+    pool: Mapping[str, Any],
+    pool_binding: StrategyCandidatePoolArtifactBinding,
+) -> None:
+    identity = stability["identity"]
+    design = sample["sample_design"]
+    dataset = design["identity"]["dataset_ref"]
+    workspace = design["identity"]["workspace_ref"]
+    expected_identity = {
+        "task_id": design["identity"]["task_id"],
+        "dataset_id": dataset["dataset_id"],
+        "dataset_content_hash": dataset["content_hash"],
+        "workspace_revision": workspace["revision"],
+        "workspace_generation": workspace["generation"],
+        "semantic_mapping_hash": workspace["semantic_mapping_hash"],
+    }
+    if any(identity[key] != value for key, value in expected_identity.items()):
+        raise StrategyReportBundleError(
+            "candidate-stability dataset or workspace identity differs "
+            "from SampleDesign V2"
+        )
+
+    compatibility = design["compatibility"]
+    if (
+        compatibility["maps_to"] != "risk/development"
+        or stability["sample_design_ref"]
+        != compatibility["legacy_development_ref"]
+    ):
+        raise StrategyReportBundleError(
+            "candidate-stability is not bound to the SampleDesign V2 "
+            "risk/development compatibility sample"
+        )
+
+    target = design["target_selector"]
+    month_col = design["sample_semantics"]["field_bindings"]["month_field"]
+    bindings = stability["bindings"]
+    if (
+        target["status"] != "resolved"
+        or target["column"] != bindings["target_col"]
+        or target["bad_value"] != bindings["target_bad_value"]
+        or not isinstance(month_col, str)
+        or not month_col
+        or month_col != bindings["month_col"]
+    ):
+        raise StrategyReportBundleError(
+            "candidate-stability target or month semantics differ "
+            "from SampleDesign V2"
+        )
+    if stability["lifecycle"] != _CANDIDATE_STABILITY_LIFECYCLE:
+        raise StrategyReportBundleError(
+            "candidate-stability must remain development, backtested, "
+            "unvalidated, and non-mutating"
+        )
+
+    entry = _candidate_stability_pool_entry(
+        stability=stability,
+        pool=pool,
+        pool_binding=pool_binding,
+    )
+    entry_source = entry["source"]
+    if (
+        entry_source["candidate_stage"] != "development"
+        or entry_source["observation_stage"] != "backtested"
+        or entry_source["validation_status"] != "unvalidated"
+    ):
+        raise StrategyReportBundleError(
+            "candidate-stability Pool source must remain "
+            "development/backtested/unvalidated"
+        )
+    evidence_identity = {
+        key: identity[key]
+        for key in (
+            "dataset_id",
+            "dataset_content_hash",
+            "workspace_revision",
+            "workspace_generation",
+            "semantic_mapping_hash",
+            "sample_context_hash",
+        )
+    }
+    if entry_source["evidence_identity"] != evidence_identity:
+        raise StrategyReportBundleError(
+            "candidate-stability evidence identity differs "
+            "from the current Pool entry source"
+        )
+
+
+def _candidate_stability_pool_entry(
+    *,
+    stability: Mapping[str, Any],
+    pool: Mapping[str, Any],
+    pool_binding: StrategyCandidatePoolArtifactBinding,
+) -> Mapping[str, Any]:
+    source = stability["source_ref"]
+    if source["source_kind"] == "pool_entry":
+        entries = [
+            entry
+            for entry in pool["entries"]
+            if entry["entry_id"] == source["entry_id"]
+        ]
+        expected_source = {
+            "source_kind": "pool_entry",
+            "artifact_id": pool_binding.artifact_id,
+            "artifact_content_hash": pool_binding.artifact_content_hash,
+            "pool_id": pool["pool_id"],
+            "revision": pool["revision"],
+            "revision_id": pool["revision_id"],
+            "snapshot_hash": pool["snapshot_hash"],
+            "entry_id": source["entry_id"],
+            "rule_id": entries[0]["rule_id"] if len(entries) == 1 else None,
+        }
+        if len(entries) != 1 or source != expected_source:
+            raise StrategyReportBundleError(
+                "candidate-stability does not reference the exact current "
+                "Candidate Pool entry"
+            )
+        return entries[0]
+
+    entries = [
+        entry
+        for entry in pool["entries"]
+        if source
+        == {
+            "source_kind": "univariate_asset",
+            "artifact_id": entry["source"]["artifact_id"],
+            "artifact_content_hash": entry["source"][
+                "artifact_content_hash"
+            ],
+            "asset_id": entry["source"]["asset_id"],
+            "asset_hash": entry["source"]["asset_hash"],
+            "rule_id": entry["rule_id"],
+        }
+    ]
+    if len(entries) != 1:
+        raise StrategyReportBundleError(
+            "candidate-stability univariate source is not the exact source "
+            "of one current Candidate Pool entry"
+        )
+    return entries[0]
+
+
+def _candidate_stability_frozen_artifact_ref(
+    stability: Mapping[str, Any],
+    *,
+    pool_ref: Mapping[str, str],
+) -> dict[str, str]:
+    """Return the exact artifact whose rules produced the stability mask."""
+
+    source = stability["source_ref"]
+    if source["source_kind"] == "pool_entry":
+        return _artifact_ref(
+            pool_ref["kind"],
+            pool_ref["ref_id"],
+            pool_ref["content_hash"],
+        )
+    if source["source_kind"] == "univariate_asset":
+        return _artifact_ref(
+            "strategy_candidate_asset",
+            source["artifact_id"],
+            source["artifact_content_hash"],
+        )
+    raise StrategyReportBundleError(
+        "candidate-stability frozen source kind is unsupported"
+    )
 
 
 def _authenticated_pool_impact(
@@ -1561,8 +1964,13 @@ def _candidate_section(
     *,
     pool: Mapping[str, Any],
     compiled_design: Mapping[str, Any],
-    source_ref: Mapping[str, str],
+    pool_ref: Mapping[str, str],
+    stability: Mapping[str, Any] | None,
+    stability_ref: Mapping[str, str] | None,
+    stability_source_ref: Mapping[str, str] | None,
+    dataset_ref: Mapping[str, str],
 ) -> dict[str, Any]:
+    source_ref = pool_ref
     candidate_rows = [
         {
             "row_id": entry["entry_id"],
@@ -1632,45 +2040,247 @@ def _candidate_section(
         rows=strategy_rows,
         source_refs=[source_ref],
     )
+    summary_fields = [
+        _named(
+            "candidate_count",
+            "候选规则数",
+            _present_field(len(pool["entries"]), source_ref),
+        ),
+        _named(
+            "pool_status",
+            "策略池状态",
+            _present_field(pool["status"], source_ref),
+        ),
+        _named(
+            "pool_validation_status",
+            "策略池验证状态",
+            _present_field(pool["validation_status"], source_ref),
+        ),
+        _named(
+            "compiled_design_hash",
+            "候选设计哈希",
+            _present_field(compiled_design["design_hash"], source_ref),
+        ),
+        _named(
+            "adoption_status",
+            "采纳状态",
+            _present_field("not_adopted", source_ref),
+        ),
+        _named(
+            "deployment_status",
+            "部署状态",
+            _present_field("not_deployed", source_ref),
+        ),
+    ]
+    tables = [candidates, strategy]
+    stage_evidence: list[dict[str, Any]] = []
+    red_flags: list[dict[str, Any]] = []
+    section_refs = [pool_ref]
+    if stability is not None:
+        if stability_ref is None or stability_source_ref is None:
+            raise StrategyReportBundleError(
+                "candidate-stability projection requires an authenticated "
+                "backtest and frozen source reference"
+            )
+        stability_summary = stability["summary"]
+        summary_fields.extend(
+            [
+                _named(
+                    "candidate_stability_id",
+                    "候选稳定性证据ID",
+                    _present_field(stability["stability_id"], stability_ref),
+                ),
+                _named(
+                    "candidate_stability_basis",
+                    "候选稳定性测算口径",
+                    _present_field(stability["basis"], stability_ref),
+                ),
+                _named(
+                    "candidate_stability_population_count",
+                    "稳定性开发样本数",
+                    _present_field(
+                        stability_summary["population_count"],
+                        stability_ref,
+                    ),
+                ),
+                _named(
+                    "candidate_stability_month_count",
+                    "稳定性月份数",
+                    _present_field(
+                        stability_summary["month_count"],
+                        stability_ref,
+                    ),
+                ),
+                _named(
+                    "candidate_stability_max_psi",
+                    "最大逐月PSI",
+                    _present_field(stability_summary["max_psi"], stability_ref),
+                ),
+                _named(
+                    "candidate_stability_max_psi_month",
+                    "最大PSI月份",
+                    _present_field(
+                        stability_summary["max_psi_month"],
+                        stability_ref,
+                    ),
+                ),
+                _named(
+                    "candidate_stability_insufficient_month_count",
+                    "低样本月份数",
+                    _present_field(
+                        stability_summary["insufficient_month_count"],
+                        stability_ref,
+                    ),
+                ),
+                _named(
+                    "candidate_stability_validation_status",
+                    "稳定性验证状态",
+                    _present_field(
+                        stability["lifecycle"]["validation_status"],
+                        stability_ref,
+                    ),
+                ),
+            ]
+        )
+        tables.append(
+            _candidate_stability_table(
+                stability=stability,
+                source_ref=stability_ref,
+            )
+        )
+        stage_evidence.append(
+            {
+                "effect_stage": "backtested",
+                "population": "risk",
+                "partition": "development",
+                "binding": {
+                    "kind": "development_backtest",
+                    "dataset_ref": dataset_ref,
+                    "frozen_artifact_ref": stability_source_ref,
+                    "result_ref": stability_ref,
+                },
+            }
+        )
+        red_flags.extend(
+            {
+                "code": "candidate_stability_insufficient_month_rows",
+                "level": "amber",
+                "message": (
+                    f"候选逐月稳定性月份 {item['month']} 为低样本："
+                    f"{item['observed_rows']} 行，低于最小 "
+                    f"{item['minimum_rows']} 行；仅提示证据强度。"
+                ),
+                "source_refs": [stability_ref],
+            }
+            for item in stability["red_flags"]
+        )
+        section_refs = _dedupe_refs(
+            [pool_ref, dataset_ref, stability_source_ref, stability_ref]
+        )
     return build_strategy_report_section(
         key="candidate_combinations",
         title=_SECTION_TITLES["candidate_combinations"],
         availability="present",
-        summary_fields=[
-            _named(
-                "candidate_count",
-                "候选规则数",
-                _present_field(len(pool["entries"]), source_ref),
-            ),
-            _named(
-                "pool_status",
-                "策略池状态",
-                _present_field(pool["status"], source_ref),
-            ),
-            _named(
-                "pool_validation_status",
-                "策略池验证状态",
-                _present_field(pool["validation_status"], source_ref),
-            ),
-            _named(
-                "compiled_design_hash",
-                "候选设计哈希",
-                _present_field(compiled_design["design_hash"], source_ref),
-            ),
-            _named(
-                "adoption_status",
-                "采纳状态",
-                _present_field("not_adopted", source_ref),
-            ),
-            _named(
-                "deployment_status",
-                "部署状态",
-                _present_field("not_deployed", source_ref),
-            ),
+        summary_fields=summary_fields,
+        tables=tables,
+        stage_evidence=stage_evidence,
+        red_flags=red_flags,
+        source_refs=section_refs,
+    )
+
+
+def _candidate_stability_table(
+    *,
+    stability: Mapping[str, Any],
+    source_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    rows = [
+        {
+            "row_id": "candidate-stability-baseline",
+            "cells": {
+                "period": _present_field("development_baseline", source_ref),
+                **_candidate_stability_metric_cells(
+                    stability["baseline"],
+                    source_ref,
+                ),
+            },
+        },
+        *[
+            {
+                "row_id": f"candidate-stability-month-{item['month']}",
+                "cells": {
+                    "period": _present_field(item["month"], source_ref),
+                    **_candidate_stability_metric_cells(item, source_ref),
+                },
+            }
+            for item in stability["monthly"]
         ],
-        tables=[candidates, strategy],
+    ]
+    return build_strategy_report_table(
+        table_id="candidate_monthly_stability",
+        title="候选逐月稳定性（开发回测，未独立验证）",
+        sheet_key="appendix_candidate_stability",
+        granularity="aggregate",
+        content_class="monthly_summary",
+        effect_stage="backtested",
+        columns=[
+            _column("period", "月份/基线"),
+            _column("sample_count", "样本数", unit="count", precision=0),
+            _column("hit_count", "命中数", unit="count", precision=0),
+            _column("not_hit_count", "未命中数", unit="count", precision=0),
+            _column("hit_share", "命中占比", unit="%", precision=6),
+            _column("not_hit_share", "未命中占比", unit="%", precision=6),
+            _column("labeled_count", "有标签样本数", unit="count", precision=0),
+            _column("label_coverage", "标签覆盖率", unit="%", precision=6),
+            _column(
+                "hit_labeled_count",
+                "命中且有标签数",
+                unit="count",
+                precision=0,
+            ),
+            _column(
+                "hit_bad_count",
+                "命中坏样本数",
+                unit="count",
+                precision=0,
+            ),
+            _column("hit_bad_rate", "命中坏率", unit="%", precision=6),
+            _column("psi_vs_development", "相对开发集PSI", precision=6),
+        ],
+        rows=rows,
         source_refs=[source_ref],
     )
+
+
+def _candidate_stability_metric_cells(
+    metrics: Mapping[str, Any],
+    source_ref: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    return {
+        "sample_count": _present_field(metrics["sample_count"], source_ref),
+        "hit_count": _present_field(metrics["hit_count"], source_ref),
+        "not_hit_count": _present_field(metrics["not_hit_count"], source_ref),
+        "hit_share": _present_field(metrics["hit_share"], source_ref),
+        "not_hit_share": _present_field(metrics["not_hit_share"], source_ref),
+        "labeled_count": _present_field(metrics["labeled_count"], source_ref),
+        "label_coverage": _present_field(metrics["label_coverage"], source_ref),
+        "hit_labeled_count": _present_field(
+            metrics["hit_labeled_count"],
+            source_ref,
+        ),
+        "hit_bad_count": _present_field(
+            metrics["hit_bad_count"],
+            source_ref,
+        ),
+        "hit_bad_rate": _nullable_metric_field(
+            metrics["hit_bad_rate"],
+            source_ref,
+        ),
+        "psi_vs_development": _present_field(
+            metrics["psi_vs_development"],
+            source_ref,
+        ),
+    }
 
 
 def _impact_cube_section(
@@ -3457,6 +4067,17 @@ def _dataset_ref_from_sample(
     )
 
 
+def _dataset_ref_from_candidate_stability(
+    stability: Mapping[str, Any],
+) -> dict[str, str]:
+    identity = stability["identity"]
+    return _artifact_ref(
+        "dataset",
+        identity["dataset_id"],
+        identity["dataset_content_hash"],
+    )
+
+
 def _dataset_ref_from_impact(
     impact: Mapping[str, Any],
 ) -> dict[str, str]:
@@ -3597,5 +4218,6 @@ def _require_canonical_artifact_hash(
 __all__ = [
     "StrategyImpactCubeArtifactBinding",
     "build_strategy_report_bundle_source_inputs",
+    "validate_candidate_stability_report_compatibility",
     "validate_strategy_impact_cube_artifact_binding",
 ]

@@ -308,6 +308,32 @@ def test_report_rejects_every_llm_owned_platform_binding() -> None:
     }
 
 
+def test_report_rejects_llm_owned_candidate_stability_reference() -> None:
+    result = validate_strategy_request(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_report_bundle_v2",
+            "workflow_inputs": {
+                "title": "策略迭代评审报告",
+                "status": "partial",
+                "candidate_stability_ref": {
+                    "artifact_id": "a" * 64,
+                    "expected_artifact_content_hash": "b" * 64,
+                    "expected_stability_id": "invented-stability",
+                    "expected_stability_content_hash": "c" * 64,
+                },
+            },
+        },
+        allowed_columns=None,
+    )
+
+    assert result.draft is None
+    assert result.clarification_code == (
+        "strategy_report_bundle_v2_platform_binding_forbidden"
+    )
+    assert result.clarification_fields == ("candidate_stability_ref",)
+
+
 def test_report_utterance_cannot_override_platform_cas() -> None:
     result = _compile(
         "请生成当前策略评审报告，report revision: 7。",
@@ -320,7 +346,14 @@ def test_report_utterance_cannot_override_platform_cas() -> None:
     )
 
 
-@pytest.mark.parametrize("platform_field", ["impact_cube_ref", "pool_impact_ref"])
+@pytest.mark.parametrize(
+    "platform_field",
+    [
+        "candidate_stability_ref",
+        "impact_cube_ref",
+        "pool_impact_ref",
+    ],
+)
 def test_report_utterance_rejects_platform_field_next_to_chinese(
     platform_field: str,
 ) -> None:
@@ -338,6 +371,9 @@ def test_report_utterance_rejects_platform_field_next_to_chinese(
 @pytest.mark.parametrize(
     "ordinary_identifier",
     [
+        "candidate_stability_reference",
+        "candidate_stability_ref_backup",
+        "my_candidate_stability_ref",
         "impact_cube_reference",
         "pool_impact_ref_backup",
         "my_impact_cube_ref",

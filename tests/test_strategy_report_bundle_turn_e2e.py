@@ -41,6 +41,7 @@ from marvis.packs.strategy.report_bundle_tools import (
 from marvis.plugins.manifest import ToolRef
 from marvis.repositories.strategy_reports import StrategyReportRepository
 from test_strategy_report_bundle_tools import (
+    _attach_candidate_stability,
     _run,
     _setup,
     _setup_impact_cube_report,
@@ -108,6 +109,7 @@ def test_report_turn_binds_exact_current_sources_and_first_head(
     ):
         assert slots[field] == fixture["request"][field]
     assert slots["impact_cube_ref"] is None
+    assert slots["candidate_stability_ref"] is None
     assert slots["report_revision"] == 1
     assert slots["previous_report_id"] is None
     assert slots["previous_report_content_hash"] is None
@@ -117,6 +119,55 @@ def test_report_turn_binds_exact_current_sources_and_first_head(
     assert slots["score_evidence_ref"] is None
     generated_at = datetime.fromisoformat(slots["generated_at"])
     assert generated_at.utcoffset() == timedelta(0)
+
+
+def test_report_turn_selects_latest_compatible_candidate_stability(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    stability = _attach_candidate_stability(fixture)
+
+    slots = _strategy_report_bundle_v2_plan_slots(
+        _runtime(fixture),
+        fixture["task"],
+        _draft(),
+        source_message={"content": "请生成当前审批策略迭代评审报告。"},
+    )
+
+    assert slots["candidate_stability_ref"] == {
+        "artifact_id": stability["artifacts"][0]["artifact_id"],
+        "expected_artifact_content_hash": stability["artifacts"][0][
+            "content_hash"
+        ],
+        "expected_stability_id": stability["stability_id"],
+        "expected_stability_content_hash": stability["content_hash"],
+    }
+
+
+def test_report_turn_corrupt_candidate_stability_fails_without_fallback(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    stability = _attach_candidate_stability(fixture)
+    record = fixture["runtime"].task_artifacts.get_for_task(
+        fixture["task"].id,
+        stability["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    Path(record["path"]).write_bytes(b"{}")
+
+    with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
+        _strategy_report_bundle_v2_plan_slots(
+            _runtime(fixture),
+            fixture["task"],
+            _draft(),
+            source_message={"content": "请生成当前审批策略迭代评审报告。"},
+        )
+
+    assert (
+        raised.value.code
+        == "strategy_report_bundle_v2_candidate_stability_invalid"
+    )
 
 
 def test_report_turn_reloads_next_exact_report_head(

@@ -2065,6 +2065,12 @@ STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
             "Preferred latest exact authenticated ImpactCube for the bound Pool",
         ),
         SlotSpec(
+            "candidate_stability_ref",
+            False,
+            "task_context",
+            "Optional exact authenticated candidate monthly stability evidence",
+        ),
+        SlotSpec(
             "report_revision",
             True,
             "task_context",
@@ -2125,6 +2131,7 @@ STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
                 "candidate_pool_ref": "{slot:candidate_pool_ref}",
                 "pool_impact_ref": "{slot:pool_impact_ref}",
                 "impact_cube_ref": "{slot:impact_cube_ref}",
+                "candidate_stability_ref": "{slot:candidate_stability_ref}",
                 "report_revision": "{slot:report_revision}",
                 "previous_report_id": "{slot:previous_report_id}",
                 "previous_report_content_hash": (

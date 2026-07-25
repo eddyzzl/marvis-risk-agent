@@ -40,6 +40,11 @@ from marvis.packs.modeling.score_evidence_tools import (
     load_model_score_evidence_artifacts,
     require_model_score_evidence_artifact_binding_on_connection,
 )
+from marvis.packs.strategy.candidate_stability_tools import (
+    StrategyCandidateStabilityArtifactBinding,
+    load_candidate_stability_artifact,
+    require_candidate_stability_artifact_binding_on_connection,
+)
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.impact_cube import (
     MAX_IMPACT_CUBE_JSON_BYTES,
@@ -122,6 +127,7 @@ _INPUT_FIELDS = frozenset(
         "project_context_ref",
         "sample_design_ref",
         "candidate_pool_ref",
+        "candidate_stability_ref",
         "pool_impact_ref",
         "impact_cube_ref",
         "strategy_identity",
@@ -169,6 +175,14 @@ _POOL_REF_FIELDS = frozenset(
         "expected_pool_snapshot_hash",
         "expected_artifact_id",
         "expected_artifact_content_hash",
+    }
+)
+_CANDIDATE_STABILITY_REF_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "expected_artifact_content_hash",
+        "expected_stability_id",
+        "expected_stability_content_hash",
     }
 )
 _IMPACT_REF_FIELDS = frozenset(
@@ -249,6 +263,9 @@ _OUTPUT_ARTIFACT_FIELDS = frozenset(
 )
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _REPORT_ID_RE = re.compile(r"^strategy-report-[0-9a-f]{24}$")
+_CANDIDATE_STABILITY_ID_RE = re.compile(
+    r"^candidate-stability-[0-9a-f]{24}$"
+)
 _IMPACT_CUBE_ID_RE = re.compile(
     r"^strategy-impact-cube-[0-9a-f]{24}$"
 )
@@ -286,6 +303,7 @@ class _ReportSources:
     project_context: StrategyProjectContextArtifactBinding
     sample_design: StrategySampleDesignV2ArtifactBinding
     candidate_pool: StrategyCandidatePoolArtifactBinding
+    candidate_stability: StrategyCandidateStabilityArtifactBinding | None
     pool_impact: StrategyPoolImpactArtifactBinding | None
     impact_cube: StrategyImpactCubeArtifactBinding | None
     model_evidence: StrategyModelEvidenceV2ArtifactBinding | None
@@ -309,6 +327,7 @@ def run_build_strategy_report_bundle_v2(inputs, ctx, runtime) -> dict[str, Any]:
             project_context=sources.project_context,
             sample_design=sources.sample_design,
             candidate_pool=sources.candidate_pool,
+            candidate_stability=sources.candidate_stability,
             pool_impact=sources.pool_impact,
             impact_cube=sources.impact_cube,
             model_evidence=sources.model_evidence,
@@ -491,6 +510,15 @@ def _load_sources(
         task_id=task_id,
         **request["candidate_pool_ref"],
     )
+    candidate_stability = (
+        None
+        if request["candidate_stability_ref"] is None
+        else load_candidate_stability_artifact(
+            runtime,
+            task_id=task_id,
+            **request["candidate_stability_ref"],
+        )
+    )
     impact_cube = (
         None
         if request["impact_cube_ref"] is None
@@ -560,6 +588,7 @@ def _load_sources(
         project_context=project_context,
         sample_design=sample_design,
         candidate_pool=candidate_pool,
+        candidate_stability=candidate_stability,
         pool_impact=pool_impact,
         impact_cube=impact_cube,
         model_evidence=model_evidence,
@@ -1092,6 +1121,11 @@ def _revalidate_sources(conn, sources: _ReportSources) -> None:
         conn,
         sources.candidate_pool,
     )
+    if sources.candidate_stability is not None:
+        require_candidate_stability_artifact_binding_on_connection(
+            conn,
+            sources.candidate_stability,
+        )
     if sources.impact_cube is not None:
         _require_strategy_impact_cube_artifact_binding_on_connection(
             conn,
@@ -1216,6 +1250,7 @@ def _audit_source_artifacts(sources: _ReportSources) -> dict[str, Any]:
             "artifact_id": sources.candidate_pool.artifact_id,
             "content_hash": sources.candidate_pool.artifact_content_hash,
         },
+        "candidate_stability": None,
         "pool_impact": None,
         "impact_cube": None,
         "model_evidence": None,
@@ -1240,6 +1275,19 @@ def _audit_source_artifacts(sources: _ReportSources) -> dict[str, Any]:
         result["pool_impact"] = {
             "artifact_id": sources.pool_impact.artifact_id,
             "content_hash": sources.pool_impact.artifact_content_hash,
+        }
+    if sources.candidate_stability is not None:
+        result["candidate_stability"] = {
+            "artifact_id": sources.candidate_stability.artifact_id,
+            "content_hash": (
+                sources.candidate_stability.artifact_content_hash
+            ),
+            "stability_id": sources.candidate_stability.stability[
+                "stability_id"
+            ],
+            "stability_content_hash": sources.candidate_stability.stability[
+                "content_hash"
+            ],
         }
     if sources.model_evidence is not None:
         result["model_evidence"] = {
@@ -1381,6 +1429,9 @@ def _validate_inputs(value: object) -> dict[str, Any]:
     )
     request["sample_design_ref"] = _sample_ref(request["sample_design_ref"])
     request["candidate_pool_ref"] = _pool_ref(request["candidate_pool_ref"])
+    request["candidate_stability_ref"] = _optional_candidate_stability_ref(
+        request["candidate_stability_ref"]
+    )
     request["impact_cube_ref"] = _optional_impact_cube_ref(
         request["impact_cube_ref"]
     )
@@ -1523,6 +1574,41 @@ def _pool_ref(value: object) -> dict[str, Any]:
         "expected_artifact_content_hash": _hash(
             obj["expected_artifact_content_hash"],
             "candidate_pool_ref.expected_artifact_content_hash",
+        ),
+    }
+
+
+def _optional_candidate_stability_ref(
+    value: object,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    obj = _exact_object(
+        value,
+        _CANDIDATE_STABILITY_REF_FIELDS,
+        "candidate_stability_ref",
+    )
+    stability_id = _text(
+        obj["expected_stability_id"],
+        "candidate_stability_ref.expected_stability_id",
+    )
+    if _CANDIDATE_STABILITY_ID_RE.fullmatch(stability_id) is None:
+        raise StrategyError(
+            "candidate_stability_ref.expected_stability_id is not canonical"
+        )
+    return {
+        "artifact_id": _hash(
+            obj["artifact_id"],
+            "candidate_stability_ref.artifact_id",
+        ),
+        "expected_artifact_content_hash": _hash(
+            obj["expected_artifact_content_hash"],
+            "candidate_stability_ref.expected_artifact_content_hash",
+        ),
+        "expected_stability_id": stability_id,
+        "expected_stability_content_hash": _hash(
+            obj["expected_stability_content_hash"],
+            "candidate_stability_ref.expected_stability_content_hash",
         ),
     }
 

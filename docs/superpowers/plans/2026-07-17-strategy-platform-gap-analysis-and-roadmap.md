@@ -568,6 +568,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **七步 Strategy Report Bundle 纵切（已完成，2026-07-23）**：`strategy_report_bundle_v2` 会从 task-owned project context、历史策略、`StrategySampleDesign`、单变量/模型证据、候选/Pool、ImpactCube 和用户补充的 report fields 组装固定七节、不可变 revision。可选信息缺失或用户明确“暂缺”时保留 typed availability 并在读者报告中留空，空白与数值 0 严格区分；缺少会改变策略语义、样本或确定性结果的 binding 时失败关闭。输出为同一 revision 的 canonical JSON、Markdown、模块化 XLSX 与可解析 DOCX，参考用户提供的迭代评审模板和两份项目报告，但不复制其人工操作界面；四个 artifact 使用内容 hash、task ownership、canonical path、provenance 和审计绑定原子登记，任一格式渲染/登记失败会回滚整套报告登记而不回滚上游策略 evidence。DOCX 使用固定业务简报结构、可审计 evidence 标识和安全文本投影，不允许外链、字段代码或用户文本注入媒体。额度/定价专属扩展、独立 OOT 章节和完整 browser/API 旅程仍须继续完成。
 
+**候选逐月稳定性报告接入（已完成，2026-07-25）**：`strategy_report_bundle_v2` 新增平台注入的可选精确 stability ref，用户和 LLM 仍只提供 title/status。Agent 按 registry 稳定顺序从新到旧先认证 artifact，再选择与当前 Pool entry、SampleDesign V2 `risk/development`、dataset/workspace、target/month 和 evidence identity 完全一致的最新结果；有效但无关的历史证据可以跳过，无法认证的待判定证据失败关闭且不回退。适配层在“候选组合与策略设计”加入 development baseline 与最多 240 个月的命中/未命中、标签覆盖、命中坏率和 PSI 表，使用 `backtested` stage binding，低于 30 行的月份生成 amber 提醒；其中 standalone asset stability 的 frozen ref 必须指向精确候选 asset artifact，只有 `pool_entry_incremental_first_match` 才能指向当前 Pool revision，避免错误宣称独立 rule-hit 已验证 Pool waterfall。XLSX 放入 `appendix_candidate_stability`，其他三种格式复用同一表。发布前后在同一数据库事务内复核 stability registry、canonical path、文件 bytes、registry hash、领域 content hash 与 provenance；审计保存两层 hash。上方 2026-07-23 稳定性段落中“正式报告接入待续”的状态由本纵切覆盖；树/Voting/Cross/评分卡候选和独立 OOT 稳定性仍待后续。
+
 交付：
 
 1. 单规则、组合规则、n-of-k、稳定 rule id、增删、删除、完整 reorder、指标预览和单规则回测；
@@ -766,7 +768,7 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 42. 单规则/策略逐月、件数和金额回测（approval/reject 当前 Pool 的总体、逐月、规则 incremental、标签/金额覆盖、基线 delta、成熟 development Sample Design 强绑定及 `target_bad_value=0|1` 已完成；direct backtest 仅保留兼容边界，V2 Workflow 必须注入 ref；单规则独立视图、分群×月及其余类型待续）；
 43. 分群操作符与分群×月；
 44. 策略/漏斗/月度/分群/code tabs；
-45. `StrategyReportBundle`、七步 Workflow、模块化 Excel/JSON/Markdown/DOCX、额度定价扩展与结构化 provenance（固定七节、不可变 revision、四格式原子登记已完成；额度/定价专属扩展和独立 OOT 章节待续）；
+45. `StrategyReportBundle`、七步 Workflow、模块化 Excel/JSON/Markdown/DOCX、额度定价扩展与结构化 provenance（固定七节、不可变 revision、四格式原子登记及当前单变量/Pool-entry stability appendix 已完成；额度/定价专属扩展、其他候选稳定性和独立 OOT 章节待续）；
 46. Python/SQL/JSON codegen 和逐行 equivalence；
 47. 分析产物列写回与修改后数据导出。
 

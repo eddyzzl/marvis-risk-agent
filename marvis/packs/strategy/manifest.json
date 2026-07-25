@@ -5756,6 +5756,29 @@
             ],
             "additionalProperties": false
           },
+          "candidate_stability_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_stability_id": {
+                "type": "string",
+                "pattern": "^candidate-stability-[0-9a-f]{24}$"
+              },
+              "expected_stability_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "expected_artifact_content_hash",
+              "expected_stability_id",
+              "expected_stability_content_hash"
+            ],
+            "additionalProperties": false
+          },
           "strategy_identity": {
             "type": "object",
             "properties": {
@@ -5899,6 +5922,9 @@
           },
           "impact_cube_ref": {
             "$ref": "#/$defs/impact_cube_ref"
+          },
+          "candidate_stability_ref": {
+            "$ref": "#/$defs/candidate_stability_ref"
           },
           "strategy_identity": {
             "oneOf": [
