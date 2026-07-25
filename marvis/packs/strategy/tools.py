@@ -77,6 +77,9 @@ from marvis.packs.strategy.pool_tools import (
     run_set_pool_entry_action,
 )
 from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
+from marvis.packs.strategy.candidate_stability_tools import (
+    run_measure_candidate_monthly_stability,
+)
 from marvis.packs.strategy.pool_validation_tools import (
     run_measure_strategy_pool_validation,
 )
@@ -897,6 +900,12 @@ def tool_measure_pool_impact(inputs: dict, ctx) -> dict:
     """Measure governed first-match and monthly impact for the current Pool."""
 
     return run_measure_pool_impact(inputs, ctx, _runtime(ctx))
+
+
+def tool_measure_candidate_monthly_stability(inputs: dict, ctx) -> dict:
+    """Publish governed monthly hit-distribution stability for one candidate."""
+
+    return run_measure_candidate_monthly_stability(inputs, ctx, _runtime(ctx))
 
 
 def tool_measure_strategy_pool_validation(inputs: dict, ctx) -> dict:

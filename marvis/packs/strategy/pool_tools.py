@@ -334,6 +334,44 @@ class StrategyCandidatePoolArtifactBinding:
 
 
 @dataclass(frozen=True)
+class VerifiedUnivariateCandidateLineageBinding:
+    """Authenticated task-owned univariate asset and its complete source lineage.
+
+    Downstream deterministic evidence tools may consume the canonical asset,
+    evidence, dataset binding, and verified fragment exposed here.  They must
+    re-authenticate this binding with
+    :func:`require_verified_univariate_candidate_lineage_on_connection` while
+    holding their artifact-registration transaction.
+    """
+
+    task_id: str
+    lineage: _UnivariateCandidateLineage
+    tasks_root: Path
+    datasets_root: Path
+    db_path: Path
+
+    @property
+    def asset(self) -> dict[str, Any]:
+        return self.lineage.asset
+
+    @property
+    def evidence(self) -> dict[str, Any]:
+        return self.lineage.evidence
+
+    @property
+    def dataset(self) -> Any:
+        return self.lineage.dataset
+
+    @property
+    def verified_fragment(self) -> dict[str, Any]:
+        return self.lineage.verified_fragment
+
+    @property
+    def source_binding(self) -> dict[str, Any]:
+        return self.lineage.source_binding
+
+
+@dataclass(frozen=True)
 class _PoolArtifactSourceBinding:
     artifact_id: str
     task_id: str
@@ -820,6 +858,104 @@ def load_current_strategy_candidate_pool_artifact(
         raise
     except _BOUNDARY_ERRORS as exc:
         raise StrategyError(str(exc)) from exc
+
+
+def load_verified_univariate_candidate_lineage(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+    expected_asset_id: str,
+    expected_asset_hash: str,
+) -> VerifiedUnivariateCandidateLineageBinding:
+    """Load one exact task-owned refined univariate asset for downstream use."""
+
+    try:
+        normalized_task = _required_text(task_id, "task_id")
+        lineage = _load_candidate_lineage(
+            runtime,
+            task_id=normalized_task,
+            artifact_id=_required_hash(artifact_id, "artifact_id"),
+            expected_content_hash=_required_hash(
+                expected_content_hash,
+                "expected_content_hash",
+            ),
+            expected_asset_id=_required_text(
+                expected_asset_id,
+                "expected_asset_id",
+            ),
+            expected_asset_hash=_required_hash(
+                expected_asset_hash,
+                "expected_asset_hash",
+            ),
+        )
+        if not isinstance(lineage, _UnivariateCandidateLineage):
+            raise StrategyError(
+                "candidate source must be a refined univariate asset"
+            )
+        binding = VerifiedUnivariateCandidateLineageBinding(
+            task_id=normalized_task,
+            lineage=lineage,
+            tasks_root=Path(runtime.settings.tasks_dir).absolute(),
+            datasets_root=Path(runtime.settings.datasets_dir).absolute(),
+            db_path=Path(runtime.settings.db_path).absolute(),
+        )
+        with runtime.task_artifacts.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_verified_univariate_candidate_lineage_on_connection(
+                conn,
+                binding,
+            )
+            conn.commit()
+        return binding
+    except StrategyError:
+        raise
+    except _BOUNDARY_ERRORS as exc:
+        raise StrategyError(str(exc)) from exc
+
+
+def require_verified_univariate_candidate_lineage_on_connection(
+    conn,
+    binding: VerifiedUnivariateCandidateLineageBinding,
+) -> None:
+    """Re-authenticate one refined candidate lineage under a caller-owned lock."""
+
+    if not isinstance(binding, VerifiedUnivariateCandidateLineageBinding):
+        raise StrategyError("verified univariate candidate binding is invalid")
+    _require_binding_connection(
+        conn,
+        db_path=binding.db_path,
+        name="verified univariate candidate",
+    )
+    task_id = _required_text(binding.task_id, "candidate binding.task_id")
+    task = conn.execute(
+        "SELECT id, task_type FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if (
+        task is None
+        or str(task["id"]) != task_id
+        or str(task["task_type"]) != "strategy"
+    ):
+        raise StrategyError("verified univariate candidate task ownership changed")
+    if (
+        binding.tasks_root != binding.tasks_root.absolute()
+        or binding.datasets_root != binding.datasets_root.absolute()
+        or binding.lineage.asset_record.task_id != task_id
+    ):
+        raise StrategyError("verified univariate candidate binding changed")
+    cache = _LineageCache.empty()
+    _require_lineage_on_connection(
+        conn,
+        binding.lineage,
+        tasks_root=binding.tasks_root,
+        cache=cache,
+    )
+    _require_lineage_dataset_paths(
+        binding.lineage,
+        datasets_root=binding.datasets_root,
+    )
 
 
 def require_strategy_candidate_pool_artifact_binding_on_connection(
@@ -2708,8 +2844,11 @@ __all__ = [
     "POOL_ARTIFACT_KIND",
     "POOL_ARTIFACT_SCHEMA_VERSION",
     "StrategyCandidatePoolArtifactBinding",
+    "VerifiedUnivariateCandidateLineageBinding",
     "load_current_strategy_candidate_pool_artifact",
+    "load_verified_univariate_candidate_lineage",
     "require_strategy_candidate_pool_artifact_binding_on_connection",
+    "require_verified_univariate_candidate_lineage_on_connection",
     "run_add_candidate_to_pool",
     "run_compile_strategy_pool",
     "run_remove_pool_entry",

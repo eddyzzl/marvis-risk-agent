@@ -1418,6 +1418,103 @@ STRATEGY_UNIVARIATE_CANDIDATE_REFINEMENT_EXISTING = WorkflowTemplate(
 )
 
 
+STRATEGY_CANDIDATE_MONTHLY_STABILITY = WorkflowTemplate(
+    id="strategy_candidate_monthly_stability",
+    title="测算候选逐月稳定性",
+    goal_patterns=(
+        "候选逐月稳定性",
+        "候选逐月 PSI",
+        "candidate monthly stability",
+        "candidate monthly PSI",
+    ),
+    slots=(
+        SlotSpec(
+            "source_kind",
+            True,
+            "task_context",
+            "Platform-verified univariate asset or Pool-entry source kind",
+        ),
+        SlotSpec(
+            "source_artifact_id",
+            False,
+            "task_context",
+            "Exact task-owned univariate candidate asset artifact",
+        ),
+        SlotSpec(
+            "expected_artifact_content_hash",
+            False,
+            "task_context",
+            "Exact candidate asset artifact content hash",
+        ),
+        SlotSpec(
+            "expected_asset_id",
+            False,
+            "task_context",
+            "Verified univariate candidate asset id",
+        ),
+        SlotSpec(
+            "expected_asset_hash",
+            False,
+            "task_context",
+            "Verified univariate candidate asset hash",
+        ),
+        SlotSpec(
+            "strategy_type",
+            False,
+            "task_context",
+            "Verified current Pool type for a Pool-entry source",
+        ),
+        SlotSpec(
+            "expected_pool_revision",
+            False,
+            "task_context",
+            "Exact current Pool revision",
+        ),
+        SlotSpec(
+            "expected_pool_snapshot_hash",
+            False,
+            "task_context",
+            "Exact current Pool snapshot hash",
+        ),
+        SlotSpec(
+            "entry_id",
+            False,
+            "task_context",
+            "Verified univariate entry in the exact current Pool revision",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="测算候选逐月稳定性",
+            tool_ref=ToolRef("strategy", "measure_candidate_monthly_stability"),
+            inputs_template={
+                "source_kind": "{slot:source_kind}",
+                "source_artifact_id": "{slot:source_artifact_id}",
+                "expected_artifact_content_hash": (
+                    "{slot:expected_artifact_content_hash}"
+                ),
+                "expected_asset_id": "{slot:expected_asset_id}",
+                "expected_asset_hash": "{slot:expected_asset_hash}",
+                "strategy_type": "{slot:strategy_type}",
+                "expected_pool_revision": "{slot:expected_pool_revision}",
+                "expected_pool_snapshot_hash": (
+                    "{slot:expected_pool_snapshot_hash}"
+                ),
+                "entry_id": "{slot:entry_id}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "stability_id"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_POOL_ADD_CANDIDATE = WorkflowTemplate(
     id="strategy_pool_add_candidate",
     title="候选资产加入 Strategy Pool",

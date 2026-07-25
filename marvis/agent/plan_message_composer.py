@@ -130,7 +130,7 @@ class PlanMessageComposer:
                     output,
                     trusted_task_id=plan.task_id,
                     trusted_inputs=terminal.inputs,
-                    trusted_artifacts=self._trusted_delivery_artifacts(
+                    trusted_artifacts=self._trusted_terminal_artifacts(
                         plan.task_id,
                         terminal,
                         output,
@@ -252,6 +252,43 @@ class PlanMessageComposer:
                 return None
             trusted[name] = dict(record)
         return trusted
+
+    def _trusted_terminal_artifacts(
+        self,
+        task_id: str,
+        step: PlanStep,
+        output: object,
+    ) -> dict[str, dict] | None:
+        if step.tool_ref.tool == "measure_candidate_monthly_stability":
+            return self._trusted_candidate_stability_artifact(
+                task_id,
+                output,
+            )
+        return self._trusted_delivery_artifacts(task_id, step, output)
+
+    def _trusted_candidate_stability_artifact(
+        self,
+        task_id: str,
+        output: object,
+    ) -> dict[str, dict] | None:
+        if self._load_task_artifact is None or not isinstance(output, Mapping):
+            return None
+        artifacts = output.get("artifacts")
+        if not isinstance(artifacts, list) or len(artifacts) != 1:
+            return None
+        artifact = artifacts[0]
+        if not isinstance(artifact, Mapping):
+            return None
+        artifact_id = artifact.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            return None
+        try:
+            record = self._load_task_artifact(task_id, artifact_id)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not isinstance(record, Mapping):
+            return None
+        return {"stability": dict(record)}
 
 
 __all__ = ["PlanMessageComposer"]

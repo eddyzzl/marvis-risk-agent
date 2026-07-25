@@ -309,6 +309,11 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     measure_pool_impact_tool = next(
         tool for tool in manifest.tools if tool.name == "measure_pool_impact"
     )
+    candidate_stability_tool = next(
+        tool
+        for tool in manifest.tools
+        if tool.name == "measure_candidate_monthly_stability"
+    )
     measure_pool_validation_tool = next(
         tool
         for tool in manifest.tools
@@ -366,6 +371,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "reorder_strategy_pool",
         "compile_strategy_pool",
         "measure_pool_impact",
+        "measure_candidate_monthly_stability",
         "measure_strategy_pool_validation",
         "measure_strategy_impact_cube",
         "export_strategy_delivery",
@@ -883,6 +889,40 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     }
     for boundary in ("not_created_strategy", "not_adopted", "not_deployed"):
         assert measure_pool_impact_tool.output_schema["properties"][boundary] == {
+            "const": True
+        }
+    assert candidate_stability_tool.determinism == "deterministic"
+    assert candidate_stability_tool.failure_policy == "fail"
+    assert candidate_stability_tool.policy.human_decision_gate == "none"
+    assert candidate_stability_tool.policy.effect_authorization == "none"
+    assert set(candidate_stability_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+    }
+    stability_inputs = candidate_stability_tool.input_schema["oneOf"]
+    assert len(stability_inputs) == 2
+    assert {
+        branch["properties"]["source_kind"]["const"]
+        for branch in stability_inputs
+    } == {"univariate_asset", "pool_entry"}
+    assert all(
+        branch["additionalProperties"] is False
+        and "dataset_id" not in branch["properties"]
+        and "month_col" not in branch["properties"]
+        and "sample_design_ref" not in branch["properties"]
+        for branch in stability_inputs
+    )
+    assert candidate_stability_tool.output_schema["additionalProperties"] is False
+    assert candidate_stability_tool.output_schema["properties"][
+        "schema_version"
+    ] == {"const": "strategy.measure-candidate-monthly-stability-tool.v1"}
+    assert candidate_stability_tool.output_schema["properties"]["max_psi"] == {
+        "type": "number",
+        "minimum": 0,
+    }
+    for boundary in ("not_created_strategy", "not_adopted", "not_deployed"):
+        assert candidate_stability_tool.output_schema["properties"][boundary] == {
             "const": True
         }
     assert measure_pool_validation_tool.determinism == "deterministic"

@@ -518,6 +518,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 ### Phase 3：完整 Candidate Lab（V2.x，18-28 人日）
 
+**候选逐月稳定性首纵切（已完成，2026-07-23）**：新增自然语言可达的 `candidate_monthly_stability` Workflow 和 `strategy.measure_candidate_monthly_stability`。用户只允许提供一个完整单变量候选 asset id，或五类当前 Strategy Pool 的明确类型与一个由单变量 refinement 产生的完整 entry id；平台在计划前恢复并验证 source artifact/hash、asset/hash 或 Pool revision/snapshot、同源成熟 development `StrategySampleDesignRef`、活动 dataset/workspace 和 month/target binding，拒绝用户或 LLM 注入平台字段。单变量资产按直接 rule hit，Pool 条目按当前完整 waterfall 的 incremental first-match hit；两者都以完整 development 样本命中/未命中分布为固定 PSI 基线，逐月给出件数、命中占比、标签覆盖、命中坏率和 PSI，低于 30 行的月份仅标记证据强度，不自动解释为业务风险。执行在读取前限制 1,000,000 行、最多 240 个月，写入前再次复核候选、Pool、Sample Design、workspace 和 dataset bytes；canonical JSON 使用双层内容 hash 与 task-owned registry 原子登记。Agent renderer 只展示通过 canonical 校验且与 Tool envelope、artifact 摘要一致的数字和下载链接，任一篡改均 fail closed。结果保持 `development/backtested/unvalidated`，不创建策略、不修改 Pool、不采纳、不部署。树叶、Voting、Cross、评分卡候选、Candidate Lab 手工启动器、独立 OOT 稳定性和正式报告接入仍待后续纵切。
+
 **目标**：完整覆盖单规则、自动树、交互树、标准评分卡、voting 和 cross 分析，而不是只提供高层搜索内核。
 
 **报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 只产出 report-ready candidate evidence，不在报告层复制算法。
@@ -748,7 +750,7 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 ### Phase 3：Candidate Lab
 
-32. 单规则四分箱、类别箱、全指标和选箱入池（确定性分析、证据与 JSON/XLSX、证据绑定的选箱/合并、不可变候选资产及其 Strategy Pool 入池已完成；候选级逐月稳定性待续）；
+32. 单规则四分箱、类别箱、全指标和选箱入池（确定性分析、证据与 JSON/XLSX、证据绑定的选箱/合并、不可变候选资产及其 Strategy Pool 入池已完成；单变量 asset 与其当前 Pool entry 的 development 逐月命中分布/PSI 已完成，其他候选类型、手工入口与 OOT 稳定性待续）；
 33. 加权自动规则树、方向检查、树图和写回（受限完整树、叶选择/入池及自然语言 full-tree apply 已完成；交互展示、代码和列写回待续）；
 34. 交互树节点/候选/手工分裂内核；
 35. 交互树删节点、自动续建、可视化、代码和入池；

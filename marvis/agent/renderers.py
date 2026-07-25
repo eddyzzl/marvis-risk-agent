@@ -9,8 +9,13 @@ in one small module.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
 import json
+import os
+from pathlib import Path
+import re
 from typing import Any
+from urllib.parse import quote
 
 
 # ---------------------------------------------------------------------------
@@ -2385,6 +2390,15 @@ def _pool_impact_integrity_failure() -> tuple[str, list[dict]]:
     )
 
 
+def _candidate_stability_integrity_failure() -> tuple[str, list[dict]]:
+    return (
+        "**候选逐月稳定性结果完整性校验失败**：计划缓存与 canonical "
+        "stability evidence 或 TaskArtifact 摘要不一致，已停止展示来源、"
+        "月份、PSI、样本指标和下载链接。请重新运行候选逐月稳定性测算。",
+        [],
+    )
+
+
 def _strategy_report_integrity_failure() -> tuple[str, list[dict]]:
     return (
         "**StrategyReportBundle V2 结果完整性校验失败**：计划缓存与 canonical "
@@ -2885,6 +2899,420 @@ def _render_materialize_model_evidence_v2(o: dict):
             "rows": _strategy_model_v2_evidence_rows(bundle),
         }
     ]
+    return text, tables
+
+
+def _validate_candidate_stability_tool_output(
+    value: object,
+    *,
+    trusted_task_id: str | None,
+    trusted_inputs: Mapping[str, Any] | None,
+    trusted_artifacts: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Authenticate Tool output against plan inputs and the artifact registry."""
+
+    from marvis.packs.strategy.candidate_stability import (
+        canonical_candidate_stability_artifact_json,
+        validate_candidate_stability_artifact,
+    )
+    from marvis.packs.strategy.candidate_stability_tools import (
+        ARTIFACT_KIND,
+        ARTIFACT_SCHEMA_VERSION,
+        ORIGIN_TOOL,
+        TOOL_SCHEMA_VERSION,
+    )
+    from marvis.packs.strategy.pool import strategy_pool_id
+
+    if not isinstance(value, Mapping):
+        raise ValueError("candidate stability Tool output must be an object")
+    expected_fields = {
+        "schema_version",
+        "stability_id",
+        "content_hash",
+        "basis",
+        "source_kind",
+        "month_col",
+        "population_count",
+        "month_count",
+        "max_psi",
+        "stability",
+        "warnings",
+        "artifacts",
+        "not_created_strategy",
+        "not_adopted",
+        "not_deployed",
+    }
+    if set(value) != expected_fields:
+        raise ValueError("candidate stability Tool output fields changed")
+    if value["schema_version"] != TOOL_SCHEMA_VERSION:
+        raise ValueError("candidate stability Tool output schema changed")
+
+    stability = validate_candidate_stability_artifact(value["stability"])
+    source = stability["source_ref"]
+    summary = stability["summary"]
+    lifecycle = stability["lifecycle"]
+    if (
+        not isinstance(trusted_task_id, str)
+        or not trusted_task_id
+        or stability["identity"]["task_id"] != trusted_task_id
+    ):
+        raise ValueError("candidate stability task identity changed")
+    if not isinstance(trusted_inputs, Mapping):
+        raise ValueError("candidate stability terminal inputs are unavailable")
+    if source["source_kind"] == "univariate_asset":
+        expected_inputs = {
+            "source_kind": "univariate_asset",
+            "source_artifact_id": source["artifact_id"],
+            "expected_artifact_content_hash": source[
+                "artifact_content_hash"
+            ],
+            "expected_asset_id": source["asset_id"],
+            "expected_asset_hash": source["asset_hash"],
+        }
+        if (
+            dict(trusted_inputs) != expected_inputs
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                expected_inputs["source_artifact_id"],
+            )
+            is None
+        ):
+            raise ValueError(
+                "candidate stability terminal asset inputs changed"
+            )
+    else:
+        strategy_type = trusted_inputs.get("strategy_type")
+        expected_inputs = {
+            "source_kind": "pool_entry",
+            "strategy_type": strategy_type,
+            "expected_pool_revision": source["revision"],
+            "expected_pool_snapshot_hash": source["snapshot_hash"],
+            "entry_id": source["entry_id"],
+        }
+        if (
+            not isinstance(strategy_type, str)
+            or dict(trusted_inputs) != expected_inputs
+            or strategy_pool_id(trusted_task_id, strategy_type)
+            != source["pool_id"]
+        ):
+            raise ValueError(
+                "candidate stability terminal Pool inputs changed"
+            )
+    expected_outer = {
+        "stability_id": stability["stability_id"],
+        "content_hash": stability["content_hash"],
+        "basis": stability["basis"],
+        "source_kind": source["source_kind"],
+        "month_col": stability["bindings"]["month_col"],
+        "population_count": summary["population_count"],
+        "month_count": summary["month_count"],
+        "max_psi": summary["max_psi"],
+        "not_created_strategy": lifecycle["not_created_strategy"],
+        "not_adopted": lifecycle["not_adopted"],
+        "not_deployed": lifecycle["not_deployed"],
+    }
+    for field, expected in expected_outer.items():
+        if value[field] != expected:
+            raise ValueError(
+                f"candidate stability Tool output {field} changed"
+            )
+    for field in ("population_count", "month_count"):
+        if type(value[field]) is not int:
+            raise ValueError(
+                f"candidate stability Tool output {field} must be an integer"
+            )
+    if type(value["max_psi"]) is not float:
+        raise ValueError(
+            "candidate stability Tool output max_psi must be a float"
+        )
+    for field in (
+        "not_created_strategy",
+        "not_adopted",
+        "not_deployed",
+    ):
+        if value[field] is not True:
+            raise ValueError(
+                f"candidate stability Tool output {field} changed"
+            )
+
+    expected_warnings = [
+        (
+            f"month {flag['month']} has {flag['observed_rows']} rows, "
+            f"below minimum {flag['minimum_rows']}"
+        )
+        for flag in stability["red_flags"]
+    ]
+    if (
+        not isinstance(value["warnings"], list)
+        or value["warnings"] != expected_warnings
+    ):
+        raise ValueError("candidate stability Tool warnings changed")
+
+    artifacts = value["artifacts"]
+    if not isinstance(artifacts, list) or len(artifacts) != 1:
+        raise ValueError(
+            "candidate stability Tool output must contain one artifact"
+        )
+    artifact = artifacts[0]
+    expected_artifact_fields = {
+        "artifact_id",
+        "kind",
+        "format",
+        "filename",
+        "content_hash",
+        "download_url",
+    }
+    if not isinstance(artifact, Mapping) or set(artifact) != expected_artifact_fields:
+        raise ValueError("candidate stability artifact fields changed")
+    if any(not isinstance(artifact[field], str) for field in artifact):
+        raise ValueError("candidate stability artifact fields must be text")
+
+    artifact_id = artifact["artifact_id"]
+    if re.fullmatch(r"[0-9a-f]{64}", artifact_id) is None:
+        raise ValueError("candidate stability artifact id changed")
+    canonical = canonical_candidate_stability_artifact_json(stability).encode(
+        "utf-8"
+    )
+    expected_file_hash = hashlib.sha256(canonical).hexdigest()
+    expected_download_url = (
+        f"/api/tasks/{quote(stability['identity']['task_id'], safe='')}"
+        f"/task-artifacts/{quote(artifact_id, safe='')}/download"
+    )
+    expected_artifact = {
+        "artifact_id": artifact_id,
+        "kind": ARTIFACT_KIND,
+        "format": "json",
+        "filename": f"{stability['stability_id']}.json",
+        "content_hash": expected_file_hash,
+        "download_url": expected_download_url,
+    }
+    if dict(artifact) != expected_artifact:
+        raise ValueError("candidate stability artifact summary changed")
+
+    if (
+        not isinstance(trusted_artifacts, Mapping)
+        or set(trusted_artifacts) != {"stability"}
+    ):
+        raise ValueError(
+            "candidate stability registry artifact is unavailable"
+        )
+    record = trusted_artifacts["stability"]
+    expected_record_fields = {
+        "id",
+        "task_id",
+        "kind",
+        "path",
+        "content_hash",
+        "origin_tool",
+        "provenance",
+        "created_at",
+    }
+    if (
+        not isinstance(record, Mapping)
+        or set(record) != expected_record_fields
+        or not isinstance(record["path"], str)
+        or not isinstance(record["created_at"], str)
+        or not record["created_at"]
+    ):
+        raise ValueError(
+            "candidate stability registry record fields changed"
+        )
+    path = Path(record["path"])
+    canonical_path = Path(os.path.abspath(path))
+    if (
+        not path.is_absolute()
+        or path != canonical_path
+        or tuple(canonical_path.parts[-3:])
+        != (
+            trusted_task_id,
+            "strategy_candidate_stability",
+            artifact["filename"],
+        )
+    ):
+        raise ValueError("candidate stability registry path changed")
+    registry_identity = json.dumps(
+        [trusted_task_id, ARTIFACT_KIND, str(canonical_path)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    expected_registry_id = hashlib.sha256(
+        f"marvis.task_artifact.v1:{registry_identity}".encode("utf-8")
+    ).hexdigest()
+    if (
+        record["id"] != artifact["artifact_id"]
+        or record["id"] != expected_registry_id
+        or record["task_id"] != trusted_task_id
+        or record["kind"] != ARTIFACT_KIND
+        or record["origin_tool"] != ORIGIN_TOOL
+        or record["content_hash"] != expected_file_hash
+    ):
+        raise ValueError(
+            "candidate stability registry identity changed"
+        )
+
+    identity = stability["identity"]
+    bindings = stability["bindings"]
+    sample_ref = stability["sample_design_ref"]
+    expected_provenance = {
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "producer_version": stability["producer_version"],
+        "task_id": trusted_task_id,
+        "stability_id": stability["stability_id"],
+        "stability_content_hash": stability["content_hash"],
+        "basis": stability["basis"],
+        "source_kind": source["source_kind"],
+        "source_artifact_id": source["artifact_id"],
+        "source_artifact_content_hash": source["artifact_content_hash"],
+        "source_id": (
+            source["asset_id"]
+            if source["source_kind"] == "univariate_asset"
+            else source["pool_id"]
+        ),
+        "source_hash": (
+            source["asset_hash"]
+            if source["source_kind"] == "univariate_asset"
+            else source["snapshot_hash"]
+        ),
+        "rule_id": source["rule_id"],
+        "entry_id": source.get("entry_id"),
+        "pool_id": source.get("pool_id"),
+        "pool_revision": source.get("revision"),
+        "pool_revision_id": source.get("revision_id"),
+        "dataset_id": identity["dataset_id"],
+        "dataset_content_hash": identity["dataset_content_hash"],
+        "workspace_revision": identity["workspace_revision"],
+        "workspace_generation": identity["workspace_generation"],
+        "semantic_mapping_hash": identity["semantic_mapping_hash"],
+        "target_col": bindings["target_col"],
+        "month_col": bindings["month_col"],
+        "sample_design_ref": sample_ref,
+        "sample_context_hash": identity["sample_context_hash"],
+        "sample_partition": sample_ref["partition"],
+    }
+    if (
+        not isinstance(record["provenance"], Mapping)
+        or dict(record["provenance"]) != expected_provenance
+    ):
+        raise ValueError(
+            "candidate stability registry provenance changed"
+        )
+    return stability, dict(artifact)
+
+
+def _render_measure_candidate_monthly_stability(
+    o: dict,
+    *,
+    trusted_task_id: str | None,
+    trusted_inputs: Mapping[str, Any] | None,
+    trusted_artifacts: Mapping[str, Any] | None,
+):
+    """Render only canonical candidate stability evidence and its artifact."""
+
+    from marvis.packs.strategy.errors import StrategyError
+
+    try:
+        stability, artifact = _validate_candidate_stability_tool_output(
+            o,
+            trusted_task_id=trusted_task_id,
+            trusted_inputs=trusted_inputs,
+            trusted_artifacts=trusted_artifacts,
+        )
+    except (StrategyError, TypeError, ValueError, RecursionError):
+        return _candidate_stability_integrity_failure()
+
+    source = stability["source_ref"]
+    summary = stability["summary"]
+    bindings = stability["bindings"]
+    if source["source_kind"] == "univariate_asset":
+        source_text = (
+            f"单变量候选资产 `{source['asset_id']}`（rule `{source['rule_id']}`；"
+            "直接规则命中/未命中分布）"
+        )
+    else:
+        source_text = (
+            f"Strategy Pool `{source['pool_id']}` revision "
+            f"{source['revision']} 的当前顺序条目 `{source['entry_id']}`"
+            f"（rule `{source['rule_id']}`；增量 first-match 命中/未命中分布）"
+        )
+
+    text = (
+        f"**候选逐月稳定性测算完成**：来源为{source_text}。\n"
+        f"- 月份列 `{bindings['month_col']}`；完整 development 样本 "
+        f"**{_num(summary['population_count'])}** 行，共 "
+        f"**{_num(summary['month_count'])}** 个月。\n"
+        f"- 最大逐月 PSI **{_num(summary['max_psi'])}**，发生在 "
+        f"`{summary['max_psi_month']}`。\n"
+        "- PSI 基线是完整 development 样本的命中/未命中分布；这里只展示"
+        "确定性分布漂移证据，不据此推断风险、收益或采纳结论。"
+    )
+    red_flags = stability["red_flags"]
+    if red_flags:
+        text += "\n- **低样本提醒**：" + "；".join(
+            f"`{flag['month']}` {flag['observed_rows']} 行 < "
+            f"minimum_rows={flag['minimum_rows']}"
+            for flag in red_flags
+        ) + "。低样本只标记证据强度，不夸大为业务风险结论。"
+    else:
+        text += (
+            "\n- **低样本提醒**：无；各月样本数均达到 "
+            f"minimum_rows={bindings['minimum_month_rows']}。"
+        )
+
+    lifecycle = stability["lifecycle"]
+    text += (
+        f"\n- 这是只读 `{lifecycle['candidate_stage']} / "
+        f"{lifecycle['observation_stage']} / "
+        f"{lifecycle['validation_status']}` 证据；**未创建策略、未修改 "
+        "Strategy Pool、未采纳、未部署。**\n\n"
+        f"**候选稳定性 artifact**："
+        f"[{artifact['filename']}]({artifact['download_url']})"
+        f"（registry SHA-256 `{artifact['content_hash']}`）"
+    )
+
+    monthly_rows = [
+        [
+            row["month"],
+            _num(row["sample_count"]),
+            _num(row["hit_count"]),
+            _num(row["not_hit_count"]),
+            _pct(row["hit_share"]),
+            _pct(row["label_coverage"]),
+            _pct(row["hit_bad_rate"]),
+            _num(row["psi_vs_development"]),
+        ]
+        for row in stability["monthly"]
+    ]
+    tables: list[dict] = [
+        {
+            "title": "候选逐月稳定性（完整 development 基线）",
+            "columns": [
+                "月份",
+                "样本数",
+                "命中数",
+                "未命中数",
+                "命中占比",
+                "标签覆盖率",
+                "命中坏账率",
+                "PSI vs development",
+            ],
+            "rows": monthly_rows,
+        }
+    ]
+    if red_flags:
+        tables.append(
+            {
+                "title": "候选逐月稳定性低样本提醒",
+                "columns": ["月份", "观测行数", "最低行数"],
+                "rows": [
+                    [
+                        flag["month"],
+                        _num(flag["observed_rows"]),
+                        _num(flag["minimum_rows"]),
+                    ]
+                    for flag in red_flags
+                ],
+            }
+        )
     return text, tables
 
 
@@ -6093,6 +6521,9 @@ _RENDERERS = {
     "set_pool_entry_action": _render_strategy_pool_mutation,
     "reorder_strategy_pool": _render_strategy_pool_mutation,
     "compile_strategy_pool": _render_compile_strategy_pool,
+    "measure_candidate_monthly_stability": (
+        _render_measure_candidate_monthly_stability
+    ),
     "measure_pool_impact": _render_measure_pool_impact,
     "build_report_bundle_v2": _render_build_strategy_report_bundle_v2,
     "export_strategy_delivery": _render_export_strategy_delivery,
@@ -6153,7 +6584,10 @@ def render_tool_output(
     """Render a tool's raw output to (text, tables); falls back to generic."""
     renderer = _RENDERERS.get(tool, _render_generic)
     try:
-        if tool == "export_strategy_delivery":
+        if tool in {
+            "export_strategy_delivery",
+            "measure_candidate_monthly_stability",
+        }:
             return renderer(
                 output or {},
                 trusted_task_id=trusted_task_id,
@@ -6168,6 +6602,8 @@ def render_tool_output(
             return _strategy_delivery_integrity_failure()
         if tool == "measure_pool_impact":
             return _pool_impact_integrity_failure()
+        if tool == "measure_candidate_monthly_stability":
+            return _candidate_stability_integrity_failure()
         if tool == "materialize_sample_design":
             return _sample_design_integrity_failure()
         if tool == "materialize_sample_design_v2":

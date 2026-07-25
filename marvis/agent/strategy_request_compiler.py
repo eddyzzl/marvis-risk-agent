@@ -67,6 +67,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "limit_pricing_matrix",
     "univariate_candidate_analysis",
     "univariate_candidate_refinement",
+    "candidate_monthly_stability",
     "automatic_tree_candidate_build",
     "automatic_tree_apply",
     "automatic_tree_leaf_materialization",
@@ -653,6 +654,64 @@ AUTOMATIC_TREE_DIRECTIONS = (
 )
 _CANDIDATE_ID_RE = re.compile(r"^candidate-[0-9a-f]{32}$")
 _CANDIDATE_ASSET_ID_RE = re.compile(r"^candidate-asset-[0-9a-f]{32}$")
+_POOL_ENTRY_ID_RE = re.compile(r"^pool-entry-[0-9a-f]{32}$")
+_CANDIDATE_STABILITY_ASSET_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])candidate-asset-[0-9a-f]{32}(?![A-Za-z0-9_-])"
+)
+_CANDIDATE_STABILITY_POOL_ENTRY_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])pool-entry-[0-9a-f]{32}(?![A-Za-z0-9_-])"
+)
+_CANDIDATE_STABILITY_SUBJECT_RE = re.compile(
+    r"(?:候选(?:资产|规则)?|策略池(?:条目|规则)|Pool\s*(?:entry|条目)|"
+    r"candidate(?:\s+asset)?|candidate-asset-|pool-entry-)",
+    re.IGNORECASE,
+)
+_CANDIDATE_STABILITY_MEASUREMENT_RE = re.compile(
+    r"(?:逐月|按月|月度|跨月)[^；;。.!?？\n]{0,40}"
+    r"(?:稳定性|分布稳定|PSI)|"
+    r"(?:稳定性|分布稳定|PSI)[^；;。.!?？\n]{0,40}"
+    r"(?:逐月|按月|月度|跨月)|"
+    r"(?<![A-Za-z0-9_])monthly[^;.!?\n]{0,40}"
+    r"(?:stability|PSI)|"
+    r"(?<![A-Za-z0-9_])(?:stability|PSI)[^;.!?\n]{0,40}"
+    r"monthly(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CANDIDATE_STABILITY_ACTION_RE = re.compile(
+    r"(?:做|计算|测算|分析|评估|检查|生成|查看)|"
+    r"(?<![A-Za-z0-9_])(?:compute|calculate|measure|analy[sz]e|"
+    r"assess|evaluate|check|build|show)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CANDIDATE_STABILITY_NOT_AUTHORIZED_RE = re.compile(
+    r"[?？]|(?:不要|不用|无需|别|禁止|取消|先不|暂不|"
+    r"能否|可否|是否|可以吗|能不能|如何|怎么|怎样|假设|假如|如果|"
+    r"以后|未来|将来|稍后|明天|下周|下月|之前|此前|过去|上次)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cancel|can\s+you|"
+    r"could\s+you|would\s+you|how\s+to|what\s+if|later|tomorrow|"
+    r"previously|in\s+the\s+future)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CANDIDATE_STABILITY_SECOND_OPERATION_RE = re.compile(
+    r"(?:入池|加入(?:策略)?池|删除|移除|改动作|重排|编译|"
+    r"写回|回写|生成报告|形成报告|出报告|采纳|采用|部署|上线|投产)|"
+    r"(?<![A-Za-z0-9_])(?:add\s+to\s+(?:the\s+)?(?:strategy\s+)?pool|"
+    r"remove|delete|reorder|compile|write[-\s]*back|"
+    r"generate\s+(?:a\s+)?report|adopt|deploy|go[-\s]?live)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CANDIDATE_STABILITY_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:source_kind|source_artifact_id|"
+    r"expected_(?:artifact_)?content_hash|expected_asset_(?:id|hash)|"
+    r"expected_pool_(?:revision|snapshot_hash)|dataset_id|"
+    r"expected_dataset_content_hash|workspace_(?:revision|generation)|"
+    r"analysis_generation|semantic_mapping_hash|sample_design_ref|"
+    r"target_col|month_col)(?![A-Za-z0-9_])|"
+    r"(?:artifact|数据集|workspace|工作区|样本设计|月份列)"
+    r"\s*(?:ID|id|hash|哈希|revision|版本|字段|列)\s*(?:=|:|：)",
+    re.IGNORECASE,
+)
 _AUTOMATIC_TREE_LEAF_SELECTION_ID_RE = re.compile(
     r"^automatic-tree-leaf-selection-[0-9a-f]{32}$"
 )
@@ -2951,6 +3010,8 @@ def _validate_standard_workflow_payload(
                 whitelist,
                 target_col=target_col,
             )
+        elif workflow == "candidate_monthly_stability":
+            normalized = _validate_candidate_monthly_stability_inputs(raw_inputs)
         elif workflow == "automatic_tree_candidate_build":
             normalized = _validate_automatic_tree_candidate_build_inputs(
                 raw_inputs,
@@ -5016,6 +5077,94 @@ def _validate_univariate_refinement_workflow_inputs(
     return normalized
 
 
+def _validate_candidate_monthly_stability_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate only the user's immutable source pointer.
+
+    Artifact identity, Pool CAS, active workspace, SampleDesign and month
+    semantics are deliberately absent.  The Agent preflight rehydrates those
+    platform-owned controls immediately before creating the plan.
+    """
+
+    workflow = "candidate_monthly_stability"
+    if any(not isinstance(key, str) for key in inputs):
+        raise _DraftValidationError(f"{workflow} 字段名必须是文本。")
+    fields = set(inputs)
+    if fields == {"asset_id"}:
+        asset_id = _required_text(
+            inputs["asset_id"],
+            name=f"{workflow} asset_id",
+        )
+        if _CANDIDATE_ASSET_ID_RE.fullmatch(asset_id) is None:
+            raise _DraftValidationError(
+                f"{workflow} asset_id 必须是 candidate-asset- 后接 "
+                "32 位小写十六进制字符。"
+            )
+        return {"asset_id": asset_id}
+    if fields == {"strategy_type", "entry_id"}:
+        strategy_type = _required_text(
+            inputs["strategy_type"],
+            name=f"{workflow} strategy_type",
+        )
+        if strategy_type not in STRATEGY_TYPES:
+            raise _DraftValidationError(
+                f"{workflow} strategy_type 只能是："
+                + "、".join(STRATEGY_TYPES)
+                + "。"
+            )
+        entry_id = _required_text(
+            inputs["entry_id"],
+            name=f"{workflow} entry_id",
+        )
+        if _POOL_ENTRY_ID_RE.fullmatch(entry_id) is None:
+            raise _DraftValidationError(
+                f"{workflow} entry_id 必须是 pool-entry- 后接 "
+                "32 位小写十六进制字符。"
+            )
+        return {
+            "strategy_type": strategy_type,
+            "entry_id": entry_id,
+        }
+    platform_fields = sorted(
+        fields
+        & {
+            "source_kind",
+            "source_artifact_id",
+            "expected_artifact_content_hash",
+            "expected_asset_id",
+            "expected_asset_hash",
+            "expected_pool_revision",
+            "expected_pool_snapshot_hash",
+            "dataset_id",
+            "expected_dataset_content_hash",
+            "workspace_revision",
+            "workspace_generation",
+            "analysis_generation",
+            "semantic_mapping_hash",
+            "sample_design_ref",
+            "target_col",
+            "month_col",
+            "metrics",
+            "psi",
+        }
+    )
+    if platform_fields:
+        raise _DraftValidationError(
+            f"{workflow} 包含平台拥有的字段："
+            + "、".join(platform_fields)
+            + "；这些字段必须由 preflight 恢复。",
+            code="candidate_monthly_stability_platform_binding_forbidden",
+            fields=platform_fields,
+        )
+    raise _DraftValidationError(
+        f"{workflow} 必须且只能提供一个完整 asset_id，"
+        "或同时提供明确 strategy_type 与一个完整 entry_id。",
+        code="candidate_monthly_stability_source_required",
+        fields=("asset_id", "strategy_type", "entry_id"),
+    )
+
+
 def _candidate_merge_groups(value: object, *, name: str) -> list[list[str]]:
     if (
         not isinstance(value, Sequence)
@@ -6294,6 +6443,102 @@ def _is_canonical_stored_strategy_report_request(
     )
 
 
+def utterance_targets_candidate_monthly_stability(utterance: str) -> bool:
+    """Reserve candidate/Pool-entry monthly PSI for its governed Workflow."""
+
+    return bool(
+        _CANDIDATE_STABILITY_SUBJECT_RE.search(utterance)
+        and _CANDIDATE_STABILITY_MEASUREMENT_RE.search(utterance)
+    )
+
+
+def _ground_candidate_monthly_stability_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if not utterance_targets_candidate_monthly_stability(utterance):
+        return _clarification(
+            "原话没有同时明确候选/Pool 条目和逐月稳定性或 PSI；"
+            "本 Workflow 不会替代 Pool 影响、通用监控或其他候选操作。",
+            code="candidate_monthly_stability_measurement_required",
+            fields=("measurement_intent",),
+        )
+    if (
+        _CANDIDATE_STABILITY_NOT_AUTHORIZED_RE.search(utterance)
+        or _CANDIDATE_STABILITY_ACTION_RE.search(utterance) is None
+    ):
+        return _clarification(
+            "请用当前轮、肯定式命令明确要求计算一个已有单变量候选资产，"
+            "或当前 Strategy Pool 某条目的逐月稳定性/PSI。",
+            code="candidate_monthly_stability_positive_command_required",
+            fields=("measurement_intent",),
+        )
+    if _CANDIDATE_STABILITY_SECOND_OPERATION_RE.search(utterance):
+        return _clarification(
+            "候选逐月稳定性必须是当前轮唯一操作；入池、删改、重排、编译、"
+            "写回、报告、采纳或部署请拆成后续请求。",
+            code="candidate_monthly_stability_single_operation_required",
+            fields=("workflow",),
+        )
+    if _CANDIDATE_STABILITY_PLATFORM_CONTROL_RE.search(utterance):
+        return _clarification(
+            "候选逐月稳定性的 artifact/hash、Pool revision、活动 workspace、"
+            "SampleDesign 与月份字段只能由平台恢复，请不要在请求中指定。",
+            code="candidate_monthly_stability_platform_binding_forbidden",
+            fields=("platform_binding",),
+        )
+
+    asset_ids = tuple(
+        match.group(0)
+        for match in _CANDIDATE_STABILITY_ASSET_ID_TOKEN_RE.finditer(utterance)
+    )
+    entry_ids = tuple(
+        match.group(0)
+        for match in _CANDIDATE_STABILITY_POOL_ENTRY_ID_TOKEN_RE.finditer(
+            utterance
+        )
+    )
+    if "asset_id" in inputs:
+        expected = str(inputs["asset_id"])
+        if (
+            len(asset_ids) != 1
+            or asset_ids[0] != expected
+            or entry_ids
+        ):
+            return _clarification(
+                "请逐字提供且只提供一个完整的单变量 candidate-asset ID；"
+                "代词、缺失、多个 ID 或同时出现 Pool entry 时平台不会猜测。",
+                code="candidate_monthly_stability_source_not_grounded",
+                fields=("asset_id",),
+            )
+        return result
+
+    expected_entry = str(inputs.get("entry_id") or "")
+    strategy_type = str(inputs.get("strategy_type") or "")
+    mentioned_types = {
+        item[0] for item in _voting_strategy_type_mentions(utterance)
+    }
+    type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    if (
+        asset_ids
+        or len(entry_ids) != 1
+        or entry_ids[0] != expected_entry
+        or type_pattern is None
+        or type_pattern.search(utterance) is None
+        or mentioned_types != {strategy_type}
+    ):
+        return _clarification(
+            "Pool 条目逐月稳定性需要在同一请求中明确且唯一提供 Strategy Pool "
+            "类型与一个完整 pool-entry ID；平台不会从动作、历史或其他 Pool 猜测。",
+            code="candidate_monthly_stability_source_not_grounded",
+            fields=("strategy_type", "entry_id"),
+        )
+    return result
+
+
 def _ground_refinement_request(
     utterance: str,
     result: StrategyRequestCompilation,
@@ -6357,6 +6602,17 @@ def _ground_refinement_request(
             code="strategy_model_evidence_v2_workflow_required",
             fields=("workflow",),
         )
+    if utterance_targets_candidate_monthly_stability(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "candidate_monthly_stability"
+    ):
+        return _clarification(
+            "原话明确要求候选资产或 Strategy Pool 条目的逐月稳定性/PSI，"
+            "只能编译为 candidate_monthly_stability；不能改路由到通用监控、"
+            "Pool 影响测算或其他 Workflow。",
+            code="candidate_monthly_stability_workflow_required",
+            fields=("workflow",),
+        )
     if _utterance_targets_automatic_tree_apply(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "automatic_tree_apply"
@@ -6381,8 +6637,13 @@ def _ground_refinement_request(
         )
     if _utterance_targets_strategy_pool_impact(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
-        and draft.workflow
-        in {"strategy_pool_impact", "strategy_impact_cube"}
+        and (
+            draft.workflow in {"strategy_pool_impact", "strategy_impact_cube"}
+            or (
+                draft.workflow == "candidate_monthly_stability"
+                and utterance_targets_candidate_monthly_stability(utterance)
+            )
+        )
     ):
         return _clarification(
             "原话明确要求 Strategy Pool 影响测算，只能编译为 strategy_pool_impact；"
@@ -6445,6 +6706,8 @@ def _ground_refinement_request(
         )
     if draft.workflow == "strategy_model_evidence_v2":
         return _ground_strategy_model_evidence_v2_request(utterance, result)
+    if draft.workflow == "candidate_monthly_stability":
+        return _ground_candidate_monthly_stability_request(utterance, result)
     if draft.workflow == "strategy_dsl_delivery":
         return _ground_strategy_dsl_delivery_request(utterance, result)
     if draft.workflow == "strategy_report_bundle_v2":
@@ -12112,6 +12375,37 @@ def _standard_workflow_confirmation_text(
                     for feature, points in inputs["manual_breakpoints"].items()
                 )
             )
+    elif draft.workflow == "candidate_monthly_stability":
+        details = [
+            "已识别为〔候选逐月稳定性 Workflow〕",
+        ]
+        if "asset_id" in inputs:
+            details.extend(
+                [
+                    f"来源：已有单变量候选资产 {inputs['asset_id']}",
+                    "统计口径：该候选规则命中/未命中的逐月分布与 PSI",
+                ]
+            )
+        else:
+            details.extend(
+                [
+                    (
+                        "来源：当前 "
+                        f"{inputs['strategy_type']} Strategy Pool 条目 "
+                        f"{inputs['entry_id']}"
+                    ),
+                    "统计口径：该条目按当前 Pool 精确顺序的增量首次命中/未命中分布与 PSI",
+                ]
+            )
+        details.extend(
+            [
+                "平台将在计划创建前恢复并认证 artifact/Pool CAS、活动 workspace、"
+                "成熟 development SampleDesign 与月份字段",
+                "基准固定为完整 development 样本；每个 YYYYMM 与同一基准比较，"
+                "不会滚动改基准",
+                "本步骤只生成只读稳定性证据；不会修改 Pool、入池、采纳或部署",
+            ]
+        )
     elif draft.workflow == "cross_matrix_analysis":
         details = [
             "已识别为〔二维 Cross Matrix 候选分析 Workflow〕",
@@ -12902,6 +13196,13 @@ def _user_prompt(
         "Voting/n-of-k 构建命令；‘最好规则’‘刚才那些’等启发式引用，或同一句串联入池、"
         "动作、采纳、部署、写回时必须澄清。问句、假设/未来/历史描述、演示文本、句尾"
         "撤销以及多个 strategy_type/n 候选也必须澄清；显式 k 必须与 rule_ids 数量一致。"
+        "对于 candidate_monthly_stability，workflow_inputs 必须严格二选一：只抄录"
+        "用户原话中唯一完整的 asset_id，或只抄录用户明确的 strategy_type 与唯一完整"
+        "entry_id。禁止输出 source_kind、source artifact/hash、asset hash、Pool "
+        "revision/hash、dataset/workspace/semantic、SampleDesign、target、month_col、"
+        "基准、指标或结果；这些值由平台在 preflight 恢复。代词、多个 pointer、"
+        "问句、否定、历史/未来/假设描述，或同轮串联入池、删改、重排、编译、写回、"
+        "报告、采纳、部署时必须 clarification。"
         "对于 cross_matrix_analysis，只能抄录两个明确轴字段、各自方法及用户明确给出的"
         "单变量分析参数；不得输出平台数据绑定、目标列、预算、边界、cell、condition、"
         "指标、artifact/asset/effect/rule id、动作或推荐。它只构建二维矩阵证据，不能"
@@ -13039,6 +13340,7 @@ __all__ = [
     "StandardWorkflowRequestDraft",
     "compile_strategy_request",
     "strategy_request_confirmation_text",
+    "utterance_targets_candidate_monthly_stability",
     "utterance_targets_strategy_dsl_delivery",
     "utterance_targets_strategy_project_context",
     "utterance_targets_strategy_report_bundle_v2",

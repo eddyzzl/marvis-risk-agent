@@ -74,6 +74,7 @@ from marvis.agent.strategy_request_compiler import (
     StandardWorkflowRequestDraft,
     StrategyRequestDraft,
     compile_strategy_request,
+    utterance_targets_candidate_monthly_stability,
     utterance_targets_strategy_dsl_delivery,
     utterance_targets_strategy_impact_cube,
     utterance_targets_strategy_project_context,
@@ -246,6 +247,9 @@ from marvis.packs.strategy.candidate_asset import (
 )
 from marvis.packs.strategy.candidate_asset_tools import (
     load_verified_candidate_refinement_source,
+)
+from marvis.packs.strategy.candidate_stability_tools import (
+    resolve_candidate_monthly_stability_inputs,
 )
 from marvis.repositories.data_workspace import (
     DataWorkspaceDataError,
@@ -1487,7 +1491,8 @@ def dispatch_driver_turn(
         return dataset_export
     text = str(user_text or "")
     if task.task_type == TASK_TYPE_STRATEGY and (
-        utterance_targets_strategy_sample_design(text)
+        utterance_targets_candidate_monthly_stability(text)
+        or utterance_targets_strategy_sample_design(text)
         or utterance_targets_strategy_dsl_delivery(text)
         or utterance_targets_strategy_report_bundle_v2(text)
         or utterance_targets_strategy_impact_cube(text)
@@ -1790,7 +1795,8 @@ def _is_strategy_request_intent(text: str) -> bool:
     """Recognize standard strategy requests plus narrow tree-build shorthand."""
 
     return bool(
-        utterance_targets_strategy_dsl_delivery(text)
+        utterance_targets_candidate_monthly_stability(text)
+        or utterance_targets_strategy_dsl_delivery(text)
         or _STRATEGY_AUTOMATIC_TREE_SHORTHAND_RE.search(text)
         or (
             _STRATEGY_REQUEST_ACTION_RE.search(text)
@@ -2137,6 +2143,9 @@ def _maybe_handle_strategy_request_turn(
     is_report_bundle_v2_request = utterance_targets_strategy_report_bundle_v2(
         text
     )
+    is_candidate_stability_request = (
+        utterance_targets_candidate_monthly_stability(text)
+    )
     is_impact_cube_request = utterance_targets_strategy_impact_cube(text)
     is_model_evidence_v2_request = (
         _STRATEGY_MODEL_EVIDENCE_V2_REQUEST_RE.search(text) is not None
@@ -2148,6 +2157,7 @@ def _maybe_handle_strategy_request_turn(
                 is_project_context_request
                 or is_model_evidence_v2_request
                 or is_report_bundle_v2_request
+                or is_candidate_stability_request
             )
             else (
                 _strategy_impact_cube_dataset_preview(runtime, task)
@@ -2654,6 +2664,23 @@ def _run_validated_strategy_request(
             task,
             template_id="strategy_voting_candidate_build",
             slots=_strategy_voting_candidate_plan_slots(runtime, task, draft),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "candidate_monthly_stability"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_candidate_monthly_stability",
+            slots=_candidate_monthly_stability_plan_slots(
+                runtime,
+                task,
+                draft,
+            ),
             auto_start=auto_start,
         )
 
@@ -3702,6 +3729,18 @@ def _standard_workflow_request_preflight(
         except StrategySetupError as exc:
             return ("strategy_model_evidence_v2_binding_required", str(exc))
         return None
+    if draft.workflow == "candidate_monthly_stability":
+        try:
+            _candidate_monthly_stability_plan_slots(runtime, task, draft)
+        except StrategySetupError as exc:
+            message = str(exc)
+            code = (
+                "candidate_monthly_stability_month_required"
+                if "月份字段" in message or "month field" in message
+                else "candidate_monthly_stability_binding_required"
+            )
+            return (code, message)
+        return None
     if draft.workflow == "strategy_report_bundle_v2":
         # Bind exact refs only once, immediately before plan creation. A
         # separate preflight read would open a second selection window where
@@ -3806,6 +3845,60 @@ def _standard_workflow_request_preflight(
             "额度定价矩阵只能关联当前任务中的额度或定价策略。",
         )
     return None
+
+
+def _candidate_monthly_stability_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Resolve a user pointer to one exact, executable Tool input branch."""
+
+    if draft.workflow != "candidate_monthly_stability":
+        raise StrategySetupError(
+            "候选逐月稳定性 slots 收到了错误的 Workflow。"
+        )
+    inputs = draft.to_dict()["workflow_inputs"]
+    if set(inputs) == {"asset_id"}:
+        user_pointer: dict[str, object] = {
+            "source_kind": "univariate_asset",
+            "asset_id": inputs["asset_id"],
+        }
+    elif set(inputs) == {"strategy_type", "entry_id"}:
+        user_pointer = {
+            "source_kind": "pool_entry",
+            "strategy_type": inputs["strategy_type"],
+            "entry_id": inputs["entry_id"],
+        }
+    else:  # pragma: no cover - compiler validation owns this shape
+        raise StrategySetupError(
+            "候选逐月稳定性必须提供唯一候选资产，或 Pool 类型与唯一 entry。"
+        )
+    try:
+        resolved = resolve_candidate_monthly_stability_inputs(
+            _strategy_v2_read_runtime(runtime),
+            task_id=task.id,
+            user_pointer=user_pointer,
+        )
+    except (
+        StrategyError,
+        OSError,
+        KeyError,
+        TypeError,
+        ValueError,
+        *_STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        message = str(exc)
+        if "month field" in message:
+            raise StrategySetupError(
+                "当前受治理 StrategySampleDesign 没有唯一且非空的月份字段；"
+                "请先补充并重新固化 month 口径，再测算候选逐月稳定性。"
+            ) from exc
+        raise StrategySetupError(
+            "候选逐月稳定性来源、活动 workspace、SampleDesign 或 lineage "
+            f"未通过完整认证：{message}"
+        ) from exc
+    return dict(resolved)
 
 
 def _candidate_source_artifact_slots(
@@ -8403,6 +8496,7 @@ def _strategy_request_requires_dataset(
             "strategy_model_evidence_v2",
             "strategy_report_bundle_v2",
             "strategy_impact_cube",
+            "candidate_monthly_stability",
             "automatic_tree_leaf_materialization",
             "cross_matrix_cell_selection",
             "voting_candidate_build",
