@@ -1515,6 +1515,133 @@ STRATEGY_CANDIDATE_MONTHLY_STABILITY = WorkflowTemplate(
 )
 
 
+STRATEGY_SCORECARD_BAND_BUILD = WorkflowTemplate(
+    id="strategy_scorecard_band_build",
+    title="构建 Scorecard 完整分数带",
+    goal_patterns=(
+        "构建 Scorecard 分数带",
+        "生成评分卡分数带",
+        "build scorecard bands",
+    ),
+    slots=(
+        SlotSpec(
+            "score_evidence_ref",
+            True,
+            "task_context",
+            "Latest fully authenticated task-owned score evidence and vector",
+        ),
+        SlotSpec(
+            "sample_design_ref",
+            True,
+            "task_context",
+            "Latest fully authenticated compatible StrategySampleDesign V2 pair",
+        ),
+        SlotSpec(
+            "banding",
+            False,
+            "user",
+            "Canonical equal-frequency banding derived from explicit bin_count",
+        ),
+        SlotSpec(
+            "raw_pd_band_edges",
+            False,
+            "user",
+            "Explicit complete raw-PD band edges",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="构建 Scorecard 完整分数带",
+            tool_ref=ToolRef("strategy", "build_scorecard_band_asset"),
+            inputs_template={
+                "score_evidence_ref": "{slot:score_evidence_ref}",
+                "sample_design_ref": "{slot:sample_design_ref}",
+                "banding": "{slot:banding}",
+                "raw_pd_band_edges": "{slot:raw_pd_band_edges}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "asset_id"}),
+                PostCheck("nonempty", {"field": "asset_hash"}),
+                PostCheck("nonempty", {"field": "scorecard_band_asset"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STRATEGY_SCORECARD_CUTOFF_SELECTION = WorkflowTemplate(
+    id="strategy_scorecard_cutoff_selection",
+    title="物化 Scorecard 精确 cutoff 选择",
+    goal_patterns=(
+        "选择 Scorecard cutoff",
+        "物化评分卡通过线",
+        "select scorecard cutoff",
+    ),
+    slots=(
+        SlotSpec(
+            "source_artifact_id",
+            True,
+            "task_context",
+            "Exact authenticated scorecard-band artifact id",
+        ),
+        SlotSpec(
+            "expected_source_artifact_content_hash",
+            True,
+            "task_context",
+            "Exact scorecard-band artifact content hash",
+        ),
+        SlotSpec(
+            "expected_asset_id",
+            True,
+            "task_context",
+            "Verified scorecard-band asset id",
+        ),
+        SlotSpec(
+            "expected_asset_hash",
+            True,
+            "task_context",
+            "Verified scorecard-band asset hash",
+        ),
+        SlotSpec("cutoff_id", True, "user", "Exact cutoff pointer selected by user"),
+        SlotSpec("reason", False, "user", "Optional verbatim selection rationale"),
+    ),
+    steps=(
+        StepTemplate(
+            title="物化 Scorecard 精确 cutoff 选择",
+            tool_ref=ToolRef(
+                "strategy",
+                "materialize_scorecard_cutoff_selection",
+            ),
+            inputs_template={
+                "source_artifact_id": "{slot:source_artifact_id}",
+                "expected_source_artifact_content_hash": (
+                    "{slot:expected_source_artifact_content_hash}"
+                ),
+                "expected_asset_id": "{slot:expected_asset_id}",
+                "expected_asset_hash": "{slot:expected_asset_hash}",
+                "cutoff_id": "{slot:cutoff_id}",
+                "reason": "{slot:reason}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "selection_id"}),
+                PostCheck("nonempty", {"field": "selection_hash"}),
+                PostCheck("nonempty", {"field": "cutoff_id"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_POOL_ADD_CANDIDATE = WorkflowTemplate(
     id="strategy_pool_add_candidate",
     title="候选资产加入 Strategy Pool",

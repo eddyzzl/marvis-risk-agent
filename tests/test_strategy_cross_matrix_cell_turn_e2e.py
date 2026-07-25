@@ -14,6 +14,9 @@ from marvis.agent.turn_handlers import _strategy_request_requires_dataset
 from marvis.app import create_app
 from marvis.db import StrategyRepository
 from marvis.repositories.strategy_pool import StrategyCandidatePoolRepository
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 class _PayloadLLM:
@@ -72,6 +75,7 @@ def test_cross_matrix_exact_cells_enter_pool_only_on_separate_third_turn(
 ) -> None:
     client = TestClient(create_app(tmp_path))
     task_id = _create_task(client, tmp_path)
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
     llm = _PayloadLLM(
         {
             "request_kind": "standard_workflow",
@@ -97,7 +101,8 @@ def test_cross_matrix_exact_cells_enter_pool_only_on_separate_third_turn(
         json={"content": "构建 age 等距 3 箱 × score 等距 3 箱的二维交叉矩阵"},
     )
     assert built.status_code == 202, built.text
-    build_plan = client.app.state.plan_repo.list_plans_for_task(task_id)[0]
+    build_plan = client.app.state.plan_repo.list_plans_for_task(task_id)[-1]
+    assert build_plan.template_id == "strategy_cross_matrix_analysis"
     cross = client.app.state.plan_repo.load_step_output(build_plan.steps[1].id)
     asset_id = cross["asset_id"]
     source_cells = [
@@ -127,6 +132,7 @@ def test_cross_matrix_exact_cells_enter_pool_only_on_separate_third_turn(
     assert selected.status_code == 202, selected.text
     plans = client.app.state.plan_repo.list_plans_for_task(task_id)
     assert [plan.template_id for plan in plans] == [
+        "strategy_sample_design",
         "strategy_cross_matrix_analysis",
         "strategy_cross_matrix_cell_selection",
     ]
@@ -171,6 +177,7 @@ def test_cross_matrix_exact_cells_enter_pool_only_on_separate_third_turn(
     assert added.status_code == 202, added.text
     plans = client.app.state.plan_repo.list_plans_for_task(task_id)
     assert [plan.template_id for plan in plans] == [
+        "strategy_sample_design",
         "strategy_cross_matrix_analysis",
         "strategy_cross_matrix_cell_selection",
         "strategy_pool_add_candidate",

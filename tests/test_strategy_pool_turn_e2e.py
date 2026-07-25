@@ -19,6 +19,9 @@ from marvis.db import StrategyRepository
 from marvis.repositories.strategy_pool import ABSENT_POOL_SNAPSHOT_HASH
 from marvis.repositories.strategy_pool import StrategyCandidatePoolRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 ASSET_ID = "candidate-asset-" + "a" * 32
@@ -229,6 +232,7 @@ def test_natural_language_add_and_read_only_compile_auto_complete(
     )
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
 
     refinement_llm = _PayloadLLM(
         {
@@ -254,7 +258,11 @@ def test_natural_language_add_and_read_only_compile_auto_complete(
         json={"content": "选择 score 等距分析中观测坏率大于等于 50% 的候选箱"},
     )
     assert refined.status_code == 202, refined.text
-    refinement_plan = client.app.state.plan_repo.list_plans_for_task(task_id)[0]
+    refinement_plan = client.app.state.plan_repo.list_plans_for_task(task_id)[-1]
+    assert (
+        refinement_plan.template_id
+        == "strategy_univariate_candidate_refinement"
+    )
     asset_output = client.app.state.plan_repo.load_step_output(
         refinement_plan.steps[-1].id
     )
@@ -287,7 +295,11 @@ def test_natural_language_add_and_read_only_compile_auto_complete(
     )
     assert opened.status_code == 202, opened.text
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
-    assert len(plans) == 2, [
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design",
+        "strategy_univariate_candidate_refinement",
+        "strategy_pool_add_candidate",
+    ], [
         (message.get("content"), message.get("metadata"))
         for message in opened.json()["messages"]
     ]

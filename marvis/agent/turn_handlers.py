@@ -75,6 +75,8 @@ from marvis.agent.strategy_request_compiler import (
     StrategyRequestDraft,
     compile_strategy_request,
     utterance_targets_candidate_monthly_stability,
+    utterance_targets_scorecard_band_build,
+    utterance_targets_scorecard_cutoff_selection,
     utterance_targets_strategy_dsl_delivery,
     utterance_targets_strategy_impact_cube,
     utterance_targets_strategy_project_context,
@@ -168,6 +170,7 @@ from marvis.packs.strategy.dsl_delivery import MAX_EQUIVALENCE_ROWS
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.evidence import (
     MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
+    RAW_SCORE_PRODUCT,
 )
 from marvis.packs.modeling.evidence_tools import (
     build_training_evidence_ref,
@@ -176,9 +179,25 @@ from marvis.packs.modeling.evidence_tools import (
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.score_evidence import (
     MODEL_SCORE_EVIDENCE_ARTIFACT_KIND,
+    MODEL_SCORE_VECTOR_ARTIFACT_KIND,
 )
 from marvis.packs.modeling.score_evidence_tools import (
+    MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL,
     load_model_score_evidence_artifacts,
+)
+from marvis.packs.strategy.candidate_fragment import verified_fragment_pool_parts
+from marvis.packs.strategy.scorecard_candidate import (
+    SCORECARD_BAND_ASSET_ARTIFACT_KIND,
+    SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
+    SCORECARD_BAND_ASSET_ORIGIN_TOOL,
+    SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+    SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
+    scorecard_cutoff_selection_to_verified_candidate_fragment,
+)
+from marvis.packs.strategy.scorecard_candidate_tools import (
+    load_scorecard_band_asset_artifact,
+    load_scorecard_cutoff_selection_artifact,
 )
 from marvis.packs.strategy.model_evidence_tools import (
     MODEL_EVIDENCE_V2_ARTIFACT_KIND,
@@ -1498,6 +1517,8 @@ def dispatch_driver_turn(
     text = str(user_text or "")
     if task.task_type == TASK_TYPE_STRATEGY and (
         utterance_targets_candidate_monthly_stability(text)
+        or utterance_targets_scorecard_band_build(text)
+        or utterance_targets_scorecard_cutoff_selection(text)
         or utterance_targets_strategy_sample_design(text)
         or utterance_targets_strategy_dsl_delivery(text)
         or utterance_targets_strategy_report_bundle_v2(text)
@@ -1802,6 +1823,8 @@ def _is_strategy_request_intent(text: str) -> bool:
 
     return bool(
         utterance_targets_candidate_monthly_stability(text)
+        or utterance_targets_scorecard_band_build(text)
+        or utterance_targets_scorecard_cutoff_selection(text)
         or utterance_targets_strategy_dsl_delivery(text)
         or _STRATEGY_AUTOMATIC_TREE_SHORTHAND_RE.search(text)
         or (
@@ -1817,6 +1840,8 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "cross_matrix_analysis",
         "automatic_tree_candidate_build",
         "univariate_candidate_refinement",
+        "scorecard_band_build",
+        "scorecard_cutoff_selection",
     }
 )
 
@@ -2152,6 +2177,10 @@ def _maybe_handle_strategy_request_turn(
     is_candidate_stability_request = (
         utterance_targets_candidate_monthly_stability(text)
     )
+    is_scorecard_request = (
+        utterance_targets_scorecard_band_build(text)
+        or utterance_targets_scorecard_cutoff_selection(text)
+    )
     is_impact_cube_request = utterance_targets_strategy_impact_cube(text)
     is_model_evidence_v2_request = (
         _STRATEGY_MODEL_EVIDENCE_V2_REQUEST_RE.search(text) is not None
@@ -2164,6 +2193,7 @@ def _maybe_handle_strategy_request_turn(
                 or is_model_evidence_v2_request
                 or is_report_bundle_v2_request
                 or is_candidate_stability_request
+                or is_scorecard_request
             )
             else (
                 _strategy_impact_cube_dataset_preview(runtime, task)
@@ -2686,6 +2716,36 @@ def _run_validated_strategy_request(
                 runtime,
                 task,
                 draft,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "scorecard_band_build"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_scorecard_band_build",
+            slots=_scorecard_band_build_plan_slots(runtime, task, draft),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "scorecard_cutoff_selection"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_scorecard_cutoff_selection",
+            slots=_scorecard_cutoff_selection_plan_slots(
+                runtime,
+                task_id=task.id,
+                draft=draft,
             ),
             auto_start=auto_start,
         )
@@ -3905,6 +3965,406 @@ def _candidate_monthly_stability_plan_slots(
             f"未通过完整认证：{message}"
         ) from exc
     return dict(resolved)
+
+
+def _scorecard_registry_token(
+    artifacts: Sequence[Mapping],
+) -> str:
+    """CAS all score/sample rows that may change a Scorecard source choice."""
+
+    supported = {
+        (
+            MODEL_SCORE_EVIDENCE_ARTIFACT_KIND,
+            MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL,
+        ),
+        (
+            MODEL_SCORE_VECTOR_ARTIFACT_KIND,
+            MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL,
+        ),
+        (
+            SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
+            SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+        ),
+        (
+            SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+            SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+        ),
+        (
+            SCORECARD_BAND_ASSET_ARTIFACT_KIND,
+            SCORECARD_BAND_ASSET_ORIGIN_TOOL,
+        ),
+        (
+            SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+            SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
+        ),
+    }
+    relevant = [
+        {
+            "id": artifact.get("id"),
+            "kind": artifact.get("kind"),
+            "content_hash": artifact.get("content_hash"),
+            "origin_tool": artifact.get("origin_tool"),
+            "provenance": artifact.get("provenance"),
+            "created_at": artifact.get("created_at"),
+        }
+        for artifact in artifacts
+        if (artifact.get("kind"), artifact.get("origin_tool")) in supported
+    ]
+    try:
+        payload = json.dumps(
+            relevant,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_registry_invalid",
+            "Scorecard source artifact registry 无法规范化；本次未创建计划。",
+        ) from exc
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _scorecard_artifact_snapshot(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+) -> tuple[Mapping, ...]:
+    try:
+        artifacts = tuple(read_runtime.task_artifacts.list_for_task(task_id))
+    except _STRATEGY_V2_ARTIFACT_ERRORS as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_registry_unavailable",
+            "无法读取当前任务的 Scorecard source artifact registry。",
+        ) from exc
+    if any(not isinstance(artifact, Mapping) for artifact in artifacts):
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_registry_invalid",
+            "Scorecard source artifact registry 含无效记录。",
+        )
+    return artifacts
+
+
+def _scorecard_ref_hash(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_source_ref_invalid",
+            f"最新 Scorecard source 的 {field} 缺少完整 64 位 hash。",
+        )
+    return value
+
+
+def _scorecard_score_evidence_ref(record: Mapping) -> dict[str, str]:
+    provenance = record.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_band_score_evidence_invalid",
+            "待判定模型评分证据缺少完整 provenance；平台不会静默跳过或"
+            "回退旧 Scorecard 证据。",
+        )
+    return {
+        "evidence_artifact_id": _scorecard_ref_hash(
+            record.get("id"),
+            field="evidence_artifact_id",
+        ),
+        "expected_evidence_artifact_content_hash": _scorecard_ref_hash(
+            record.get("content_hash"),
+            field="expected_evidence_artifact_content_hash",
+        ),
+        "score_vector_artifact_id": _scorecard_ref_hash(
+            provenance.get("score_vector_artifact_id"),
+            field="score_vector_artifact_id",
+        ),
+        "expected_score_vector_artifact_content_hash": _scorecard_ref_hash(
+            provenance.get("score_vector_artifact_content_hash"),
+            field="expected_score_vector_artifact_content_hash",
+        ),
+    }
+
+
+def _scorecard_score_evidence_contract(score: object) -> bool:
+    """Return False only for a fully authenticated, clearly non-scorecard model."""
+
+    try:
+        training = score.training
+        evidence = training.evidence
+        evidence_experiment = evidence["experiment"]
+        evidence_model = evidence["model_artifact"]
+        identities = (
+            training.experiment.recipe_id,
+            training.model_artifact.algorithm,
+            evidence_experiment["recipe_id"],
+            evidence_model["algorithm"],
+        )
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_band_score_evidence_invalid",
+            "待判定模型评分证据缺少一致的 recipe/algorithm 身份。",
+        ) from exc
+    scorecard_flags = tuple(value == "scorecard" for value in identities)
+    if not any(scorecard_flags):
+        return False
+    if not all(scorecard_flags):
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_band_score_evidence_invalid",
+            "待判定评分证据的 Scorecard recipe/algorithm 身份不一致。",
+        )
+    metadata = evidence_model.get("scoring_metadata")
+    envelope = getattr(score, "envelope", None)
+    scoring_contract = (
+        envelope.get("scoring_contract")
+        if isinstance(envelope, Mapping)
+        else None
+    )
+    if (
+        not isinstance(metadata, Mapping)
+        or not isinstance(envelope, Mapping)
+        or not isinstance(scoring_contract, Mapping)
+        or envelope.get("score_product") != RAW_SCORE_PRODUCT
+        or metadata.get("score_product") != RAW_SCORE_PRODUCT
+        or scoring_contract.get("score_direction") != "higher_is_riskier"
+        or metadata.get("score_direction") != "higher_is_riskier"
+        or metadata.get("points_direction") != "higher_is_better"
+        or metadata.get("calibration_status") != "not_applied"
+        or not isinstance(metadata.get("scorecard_table"), list)
+        or not metadata["scorecard_table"]
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_band_score_contract_invalid",
+            "最新 Scorecard 评分证据必须包含 raw uncalibrated bad probability、"
+            "higher-is-riskier 分数方向、higher-is-better points 与完整"
+            " scorecard_table。",
+        )
+    return True
+
+
+def _scorecard_band_build_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Bind the newest exact score evidence and latest compatible sample."""
+
+    if draft.workflow != "scorecard_band_build":
+        raise StrategySetupError("Scorecard 分数带 slots 收到了错误的 Workflow。")
+    inputs = draft.to_dict()["workflow_inputs"]
+    read_runtime = _strategy_report_read_runtime(runtime)
+    artifacts = _scorecard_artifact_snapshot(read_runtime, task_id=task.id)
+    registry_token = _scorecard_registry_token(artifacts)
+    try:
+        sample = _latest_verified_strategy_sample_design_v2_binding(
+            read_runtime,
+            task_id=task.id,
+            artifacts=artifacts,
+        )
+        sample_ref = _strategy_report_sample_ref(sample)
+    except _StrategyV2EvidenceSetupError as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_band_sample_invalid",
+            "Scorecard 分数带需要最新且完整认证的 StrategySampleDesign V2；"
+            "平台不会回退到旧样本。",
+        ) from exc
+
+    score_records = [
+        artifact
+        for artifact in artifacts
+        if artifact.get("kind") == MODEL_SCORE_EVIDENCE_ARTIFACT_KIND
+        and artifact.get("origin_tool")
+        == MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL
+    ]
+    if not score_records:
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_band_score_evidence_required",
+            "当前任务还没有可用于 Scorecard 分数带的模型评分证据；"
+            "请先生成受治理的 raw bad-probability score evidence。",
+        )
+    score_ref: dict[str, str] | None = None
+    for record in reversed(score_records):
+        candidate_ref = _scorecard_score_evidence_ref(record)
+        try:
+            candidate = load_model_score_evidence_artifacts(
+                read_runtime,
+                task_id=task.id,
+                **candidate_ref,
+            )
+        except (
+            ModelingError,
+            OSError,
+            KeyError,
+            TypeError,
+            ValueError,
+            *_STRATEGY_V2_ARTIFACT_ERRORS,
+        ) as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "scorecard_band_score_evidence_invalid",
+                "最新待判定模型评分证据未通过文件、hash、registry、模型或"
+                "分数向量完整认证；平台不会静默跳过或回退旧 Scorecard 证据。",
+            ) from exc
+        if not _scorecard_score_evidence_contract(candidate):
+            # A fully authenticated non-scorecard result cannot satisfy this
+            # workflow and is safe to skip while searching backward.
+            continue
+        try:
+            training_ref = build_training_evidence_ref(candidate.training)
+        except (ModelingError, KeyError, TypeError, ValueError) as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "scorecard_band_score_evidence_invalid",
+                "最新 Scorecard 评分证据的 TrainingEvidence 引用不完整。",
+            ) from exc
+        if training_ref.get("sample_design_ref") != sample_ref:
+            raise _StrategyV2EvidenceSetupError(
+                "scorecard_band_sample_incompatible",
+                "最新 Scorecard 评分证据与最新 StrategySampleDesign V2 "
+                "不属于同一不可变样本；请基于当前样本重新生成评分证据。",
+            )
+        score_ref = candidate_ref
+        break
+    if score_ref is None:
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_band_score_evidence_required",
+            "当前任务的模型评分证据均不是完整认证的 Scorecard raw-PD "
+            "评分证据；请先完成 Scorecard 训练与评分证据物化。",
+        )
+
+    refreshed = _scorecard_artifact_snapshot(read_runtime, task_id=task.id)
+    if _scorecard_registry_token(refreshed) != registry_token:
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_band_source_changed",
+            "Scorecard 的评分证据或 SampleDesign 在计划创建前发生变化；"
+            "请基于最新证据重试。",
+        )
+
+    slots: dict[str, object] = {
+        "score_evidence_ref": score_ref,
+        "sample_design_ref": sample_ref,
+    }
+    if "bin_count" in inputs:
+        slots["banding"] = {
+            "method": "equal_frequency",
+            "bin_count": inputs["bin_count"],
+        }
+    elif "raw_pd_band_edges" in inputs:
+        slots["raw_pd_band_edges"] = list(inputs["raw_pd_band_edges"])
+    return slots
+
+
+def _scorecard_cutoff_selection_plan_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Bind one explicit asset/cutoff pair to one authenticated full band."""
+
+    if draft.workflow != "scorecard_cutoff_selection":
+        raise StrategySetupError(
+            "Scorecard cutoff selection slots 收到了错误的 Workflow。"
+        )
+    inputs = draft.to_dict()["workflow_inputs"]
+    asset_id = inputs.get("asset_id")
+    cutoff_id = inputs.get("cutoff_id")
+    read_runtime = _strategy_report_read_runtime(runtime)
+    artifacts = _scorecard_artifact_snapshot(read_runtime, task_id=task_id)
+    registry_token = _scorecard_registry_token(artifacts)
+    matches = []
+    for artifact in artifacts:
+        provenance = artifact.get("provenance")
+        if (
+            artifact.get("kind") == SCORECARD_BAND_ASSET_ARTIFACT_KIND
+            and artifact.get("origin_tool") == SCORECARD_BAND_ASSET_ORIGIN_TOOL
+            and isinstance(provenance, Mapping)
+            and provenance.get("schema_version")
+            == SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION
+            and provenance.get("asset_id") == asset_id
+        ):
+            matches.append(artifact)
+    if not matches:
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_cutoff_source_required",
+            f"当前任务没有完整 Scorecard 分数带 {asset_id}；"
+            "请从最新结果复制完整 asset ID。",
+        )
+    if len(matches) != 1:
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_cutoff_source_ambiguous",
+            f"Scorecard 分数带 {asset_id} 对应多个 artifact，"
+            "当前不能安全选择来源。",
+        )
+    record = matches[0]
+    provenance = record["provenance"]
+    assert isinstance(provenance, Mapping)
+    artifact_id = _scorecard_ref_hash(
+        record.get("id"),
+        field="source_artifact_id",
+    )
+    content_hash = _scorecard_ref_hash(
+        record.get("content_hash"),
+        field="expected_source_artifact_content_hash",
+    )
+    asset_hash = _scorecard_ref_hash(
+        provenance.get("asset_hash"),
+        field="expected_asset_hash",
+    )
+    try:
+        binding = load_scorecard_band_asset_artifact(
+            read_runtime,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            expected_artifact_content_hash=content_hash,
+            expected_asset_id=str(asset_id),
+            expected_asset_hash=asset_hash,
+        )
+    except (
+        StrategyError,
+        OSError,
+        KeyError,
+        TypeError,
+        ValueError,
+        *_STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_cutoff_source_invalid",
+            "用户点名的完整 Scorecard 分数带未通过文件、hash、registry、"
+            "score evidence 或 SampleDesign 完整认证。",
+        ) from exc
+    cutoffs = binding.asset.get("cutoffs")
+    if (
+        binding.asset.get("asset_id") != asset_id
+        or binding.asset.get("asset_hash") != asset_hash
+        or not isinstance(cutoffs, Sequence)
+        or isinstance(cutoffs, str | bytes | bytearray)
+        or len(
+            [
+                cutoff
+                for cutoff in cutoffs
+                if isinstance(cutoff, Mapping)
+                and cutoff.get("cutoff_id") == cutoff_id
+            ]
+        )
+        != 1
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_cutoff_pointer_invalid",
+            "用户点名的 cutoff 不属于该完整 Scorecard 分数带；"
+            "平台不会替换、排名或推荐其他 cutoff。",
+        )
+    refreshed = _scorecard_artifact_snapshot(read_runtime, task_id=task_id)
+    if _scorecard_registry_token(refreshed) != registry_token:
+        raise _StrategyV2EvidenceSetupError(
+            "scorecard_cutoff_source_changed",
+            "Scorecard 分数带在 selection 计划创建前发生变化；请重试。",
+        )
+    slots: dict[str, object] = {
+        "source_artifact_id": binding.artifact_id,
+        "expected_source_artifact_content_hash": binding.content_hash,
+        "expected_asset_id": str(asset_id),
+        "expected_asset_hash": asset_hash,
+        "cutoff_id": str(cutoff_id),
+    }
+    if "reason" in inputs:
+        slots["reason"] = inputs["reason"]
+    return slots
 
 
 def _candidate_source_artifact_slots(
@@ -7693,9 +8153,133 @@ def _candidate_selection_artifact_slots(
             task_id=task_id,
             selection_id=selection_id,
         )
+    if re.fullmatch(
+        r"scorecard-cutoff-selection-[0-9a-f]{32}", selection_id
+    ) is not None:
+        return _scorecard_cutoff_selection_artifact_slots(
+            runtime,
+            task_id=task_id,
+            selection_id=selection_id,
+        )
     raise StrategySetupError(
         "selection ID 格式无效；只支持完整 automatic-tree leaf selection 或 "
-        "Cross Matrix cell selection ID。"
+        "Cross Matrix cell selection、Scorecard cutoff selection ID。"
+    )
+
+
+def _scorecard_cutoff_selection_artifact_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    selection_id: str,
+) -> tuple[dict[str, str], str]:
+    """Replay one authenticated Scorecard pointer back to its full band."""
+
+    read_runtime = _strategy_report_read_runtime(runtime)
+    artifacts = _scorecard_artifact_snapshot(read_runtime, task_id=task_id)
+    registry_token = _scorecard_registry_token(artifacts)
+    matches = []
+    for artifact in artifacts:
+        provenance = artifact.get("provenance")
+        if (
+            artifact.get("kind")
+            == SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND
+            and artifact.get("origin_tool")
+            == SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL
+            and isinstance(provenance, Mapping)
+            and provenance.get("schema_version")
+            == SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION
+            and provenance.get("selection_id") == selection_id
+        ):
+            matches.append(artifact)
+    if not matches:
+        raise StrategySetupError(
+            f"当前任务没有 Scorecard cutoff selection {selection_id}。"
+        )
+    if len(matches) != 1:
+        raise StrategySetupError(
+            f"Scorecard cutoff selection {selection_id} 对应多个 artifact，"
+            "当前不能安全绑定来源。"
+        )
+    record = matches[0]
+    provenance = record["provenance"]
+    assert isinstance(provenance, Mapping)
+    artifact_id = _scorecard_ref_hash(
+        record.get("id"),
+        field="selection_artifact_id",
+    )
+    content_hash = _scorecard_ref_hash(
+        record.get("content_hash"),
+        field="selection_artifact_content_hash",
+    )
+    selection_hash = _scorecard_ref_hash(
+        provenance.get("selection_hash"),
+        field="selection_hash",
+    )
+    try:
+        verified = load_scorecard_cutoff_selection_artifact(
+            read_runtime,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            expected_artifact_content_hash=content_hash,
+            expected_selection_id=selection_id,
+            expected_selection_hash=selection_hash,
+        )
+        source = verified.source_asset_binding
+        fragment = scorecard_cutoff_selection_to_verified_candidate_fragment(
+            verified.selection,
+            source.asset,
+            selection_artifact_binding=verified.to_domain_binding(),
+            source_artifact_binding=source.to_domain_binding(),
+        )
+        pool_source, _rule_id, _execution = verified_fragment_pool_parts(
+            fragment
+        )
+    except (
+        StrategyError,
+        OSError,
+        KeyError,
+        TypeError,
+        ValueError,
+        *_STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        raise StrategySetupError(
+            f"Scorecard cutoff selection {selection_id} 未通过 selection、"
+            "完整 band、score evidence、SampleDesign 或 fragment 回放，"
+            "不能加入 Strategy Pool。"
+        ) from exc
+    asset_id = source.asset.get("asset_id")
+    asset_hash = source.asset.get("asset_hash")
+    fragment_id = pool_source.get("fragment_id")
+    if (
+        verified.selection.get("selection_id") != selection_id
+        or not isinstance(asset_id, str)
+        or re.fullmatch(r"scorecard-band-asset-[0-9a-f]{32}", asset_id)
+        is None
+        or not isinstance(asset_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", asset_hash) is None
+        or not isinstance(fragment_id, str)
+        or not fragment_id
+        or pool_source.get("asset_id") != asset_id
+        or pool_source.get("asset_hash") != asset_hash
+    ):
+        raise StrategySetupError(
+            "Scorecard cutoff selection 缺少一致的完整 band/fragment 绑定。"
+        )
+    refreshed = _scorecard_artifact_snapshot(read_runtime, task_id=task_id)
+    if _scorecard_registry_token(refreshed) != registry_token:
+        raise StrategySetupError(
+            "Scorecard cutoff selection 或完整 band 在入池计划创建前"
+            "发生变化；请基于最新 evidence 重试。"
+        )
+    return (
+        {
+            "source_artifact_id": verified.artifact_id,
+            "expected_artifact_content_hash": verified.content_hash,
+            "expected_asset_id": asset_id,
+            "expected_asset_hash": asset_hash,
+        },
+        fragment_id,
     )
 
 
@@ -8602,6 +9186,8 @@ def _strategy_request_requires_dataset(
             "strategy_report_bundle_v2",
             "strategy_impact_cube",
             "candidate_monthly_stability",
+            "scorecard_band_build",
+            "scorecard_cutoff_selection",
             "automatic_tree_leaf_materialization",
             "cross_matrix_cell_selection",
             "voting_candidate_build",

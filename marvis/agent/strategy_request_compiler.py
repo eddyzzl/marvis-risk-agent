@@ -68,6 +68,8 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "univariate_candidate_analysis",
     "univariate_candidate_refinement",
     "candidate_monthly_stability",
+    "scorecard_band_build",
+    "scorecard_cutoff_selection",
     "automatic_tree_candidate_build",
     "automatic_tree_apply",
     "automatic_tree_leaf_materialization",
@@ -713,6 +715,64 @@ _CANDIDATE_STABILITY_PLATFORM_CONTROL_RE = re.compile(
     r"\s*(?:ID|id|hash|哈希|revision|版本|字段|列)\s*(?:=|:|：)",
     re.IGNORECASE,
 )
+_SCORECARD_SUBJECT_RE = re.compile(
+    r"(?:Scorecard|评分卡).{0,20}"
+    r"(?:分数带|评分带|分档|档位|分带|分成\s*\d+\s*档|cutoff|通过线)|"
+    r"(?:分数带|评分带|分档|档位|分带|cutoff|通过线)"
+    r".{0,20}(?:Scorecard|评分卡)",
+    re.IGNORECASE,
+)
+_SCORECARD_BUILD_ACTION_RE = re.compile(
+    r"(?:构建|生成|创建|计算|设计|物化|分成|划分(?:为|成)?)|"
+    r"(?<![A-Za-z0-9_])(?:build|create|generate|compute|design|materialize)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_SCORECARD_SELECTION_ACTION_RE = re.compile(
+    r"(?:选择|选取|物化)|"
+    r"(?<![A-Za-z0-9_])(?:select|choose|materialize)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_SCORECARD_NOT_AUTHORIZED_RE = re.compile(
+    r"[?？]|(?:不要|不用|无需|先不|暂不|取消|撤销|禁止|"
+    r"能否|可否|是否|可以吗|能不能|如何|怎么|假设|假如|如果|"
+    r"以后|未来|将来|稍后|之前|此前|过去|上次)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cancel|can\s+you|"
+    r"could\s+you|how\s+to|what\s+if|later|previously|"
+    r"in\s+the\s+future)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_SCORECARD_HEURISTIC_SELECTION_RE = re.compile(
+    r"(?:最好|最优|最佳|最差|风险最高|坏率最高|自动(?:选择|挑选|推荐)|"
+    r"按(?:坏率|通过率|KS|AUC|Lift|收益|利润).{0,16}(?:选择|推荐))|"
+    r"(?<![A-Za-z0-9_])(?:best|worst|top[- ]?\d*|highest[- ]risk|"
+    r"automatically\s+(?:select|choose|recommend)|recommend)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_SCORECARD_SECOND_OPERATION_RE = re.compile(
+    r"(?:加入|放入|写入|纳入)[^，,；;。\n]{0,20}(?:策略池|规则池|Pool)|"
+    r"(?:入池|应用|写回|回写|采纳|采用|部署|上线|投产|生成报告|出报告)|"
+    r"(?<![A-Za-z0-9_])(?:add\s+to\s+(?:the\s+)?(?:strategy\s+)?pool|"
+    r"apply|write[-\s]*back|adopt|deploy|go[-\s]?live|"
+    r"generate\s+(?:a\s+)?report)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_SCORECARD_BIN_COUNT_RE = re.compile(
+    r"(?:等频\s*)?(?P<count>\d+)\s*(?:档|带|bands?)",
+    re.IGNORECASE,
+)
+_SCORECARD_RAW_PD_EDGES_RE = re.compile(
+    r"(?:raw\s*pd|原始\s*PD|原始坏账概率)"
+    r"(?:\s*(?:分带)?(?:边界|切点|edges?))?\s*(?:为|是|=|:|：)?\s*"
+    r"[\[【](?P<body>[^\]】]{1,500})[\]】]",
+    re.IGNORECASE,
+)
+_SCORECARD_SELECTION_REASON_RE = re.compile(
+    r"(?:选择理由|理由|原因|说明|reason)\s*(?:为|是|=|:|：)\s*"
+    r"(?P<reason>[^；;。.!?？\n]{1,500})",
+    re.IGNORECASE,
+)
 _AUTOMATIC_TREE_LEAF_SELECTION_ID_RE = re.compile(
     r"^automatic-tree-leaf-selection-[0-9a-f]{32}$"
 )
@@ -727,15 +787,36 @@ _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])cross-matrix-cell-selection-[0-9a-f]{32}"
     r"(?![A-Za-z0-9_-])"
 )
+_SCORECARD_BAND_ASSET_ID_RE = re.compile(
+    r"^scorecard-band-asset-[0-9a-f]{32}$"
+)
+_SCORECARD_BAND_ASSET_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])scorecard-band-asset-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])"
+)
+_SCORECARD_CUTOFF_ID_RE = re.compile(
+    r"^scorecard-cutoff-[0-9a-f]{32}$"
+)
+_SCORECARD_CUTOFF_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])scorecard-cutoff-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])"
+)
+_SCORECARD_CUTOFF_SELECTION_ID_RE = re.compile(
+    r"^scorecard-cutoff-selection-[0-9a-f]{32}$"
+)
+_SCORECARD_CUTOFF_SELECTION_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])scorecard-cutoff-selection-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])"
+)
 _POOL_SOURCE_LIKE_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:candidate-asset|automatic-tree-leaf-selection|"
-    r"cross-matrix-cell-selection)-"
+    r"cross-matrix-cell-selection|scorecard-cutoff-selection)-"
     r"[A-Za-z0-9_-]+(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
 _POOL_SOURCE_PREFIX_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:candidate-asset|automatic-tree-leaf-selection|"
-    r"cross-matrix-cell-selection)-",
+    r"cross-matrix-cell-selection|scorecard-cutoff-selection)-",
     re.IGNORECASE,
 )
 _POOL_SOURCE_CONFUSABLE_TRANSLATION = str.maketrans(
@@ -3013,6 +3094,10 @@ def _validate_standard_workflow_payload(
             )
         elif workflow == "candidate_monthly_stability":
             normalized = _validate_candidate_monthly_stability_inputs(raw_inputs)
+        elif workflow == "scorecard_band_build":
+            normalized = _validate_scorecard_band_build_inputs(raw_inputs)
+        elif workflow == "scorecard_cutoff_selection":
+            normalized = _validate_scorecard_cutoff_selection_inputs(raw_inputs)
         elif workflow == "automatic_tree_candidate_build":
             normalized = _validate_automatic_tree_candidate_build_inputs(
                 raw_inputs,
@@ -5166,6 +5251,108 @@ def _validate_candidate_monthly_stability_inputs(
     )
 
 
+def _validate_scorecard_band_build_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate only user-owned scorecard banding controls."""
+
+    workflow = "scorecard_band_build"
+    allowed = {"bin_count", "raw_pd_band_edges"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    if set(inputs) == allowed:
+        raise _DraftValidationError(
+            f"{workflow} bin_count 与 raw_pd_band_edges 必须二选一；"
+            "也可均省略以使用平台默认等频 10 档。"
+        )
+    if "bin_count" in inputs:
+        value = inputs["bin_count"]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 2 <= value <= 20
+        ):
+            raise _DraftValidationError(
+                f"{workflow} bin_count 必须是 2 到 20 的整数。"
+            )
+        return {"bin_count": value}
+    if "raw_pd_band_edges" not in inputs:
+        return {}
+    raw = inputs["raw_pd_band_edges"]
+    if (
+        not isinstance(raw, Sequence)
+        or isinstance(raw, str | bytes | bytearray)
+        or not 3 <= len(raw) <= 21
+    ):
+        raise _DraftValidationError(
+            f"{workflow} raw_pd_band_edges 必须包含 3 到 21 个数字。"
+        )
+    edges: list[float] = []
+    for value in raw:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(float(value))
+        ):
+            raise _DraftValidationError(
+                f"{workflow} raw_pd_band_edges 只能包含有限数字。"
+            )
+        edges.append(float(value))
+    if edges[0] != 0.0 or edges[-1] != 1.0:
+        raise _DraftValidationError(
+            f"{workflow} raw_pd_band_edges 必须从 0.0 开始并以 1.0 结束。"
+        )
+    if any(left >= right for left, right in zip(edges, edges[1:])):
+        raise _DraftValidationError(
+            f"{workflow} raw_pd_band_edges 必须严格递增。"
+        )
+    return {"raw_pd_band_edges": edges}
+
+
+def _validate_scorecard_cutoff_selection_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one exact human-selected cutoff pointer."""
+
+    workflow = "scorecard_cutoff_selection"
+    allowed = {"asset_id", "cutoff_id", "reason"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted({"asset_id", "cutoff_id"} - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+    asset_id = _required_text(
+        inputs["asset_id"],
+        name=f"{workflow} asset_id",
+    )
+    cutoff_id = _required_text(
+        inputs["cutoff_id"],
+        name=f"{workflow} cutoff_id",
+    )
+    if _SCORECARD_BAND_ASSET_ID_RE.fullmatch(asset_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} asset_id 必须是 scorecard-band-asset- 后接 "
+            "32 位小写十六进制字符。"
+        )
+    if _SCORECARD_CUTOFF_ID_RE.fullmatch(cutoff_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} cutoff_id 必须是 scorecard-cutoff- 后接 "
+            "32 位小写十六进制字符。"
+        )
+    normalized = {"asset_id": asset_id, "cutoff_id": cutoff_id}
+    if "reason" in inputs:
+        reason = _required_text(
+            inputs["reason"],
+            name=f"{workflow} reason",
+        )
+        if len(reason) > 500:
+            raise _DraftValidationError(
+                f"{workflow} reason 最多 500 个字符。"
+            )
+        normalized["reason"] = reason
+    return normalized
+
+
 def _candidate_merge_groups(value: object, *, name: str) -> list[list[str]]:
     if (
         not isinstance(value, Sequence)
@@ -5317,10 +5504,12 @@ def _validate_strategy_pool_workflow_inputs(
             source_field == "selection_id"
             and _AUTOMATIC_TREE_LEAF_SELECTION_ID_RE.fullmatch(source_id) is None
             and _CROSS_MATRIX_CELL_SELECTION_ID_RE.fullmatch(source_id) is None
+            and _SCORECARD_CUTOFF_SELECTION_ID_RE.fullmatch(source_id) is None
         ):
             raise _DraftValidationError(
                 f"{workflow} selection_id 必须是 automatic-tree-leaf-selection- "
-                "或 cross-matrix-cell-selection- 后接 32 位小写十六进制字符。"
+                "、cross-matrix-cell-selection- 或 "
+                "scorecard-cutoff-selection- 后接 32 位小写十六进制字符。"
             )
         normalized.update(
             {
@@ -6453,6 +6642,176 @@ def utterance_targets_candidate_monthly_stability(utterance: str) -> bool:
     )
 
 
+def utterance_targets_scorecard_cutoff_selection(utterance: str) -> bool:
+    """Reserve explicit scorecard cutoff materialization for its pointer Workflow."""
+
+    scorecard_context = bool(
+        _SCORECARD_SUBJECT_RE.search(utterance)
+        or _SCORECARD_BAND_ASSET_ID_TOKEN_RE.search(utterance)
+    )
+    return bool(
+        scorecard_context
+        and re.search(r"(?:cutoff|通过线|分数线)", utterance, re.IGNORECASE)
+        and _SCORECARD_SELECTION_ACTION_RE.search(utterance)
+    )
+
+
+def utterance_targets_scorecard_band_build(utterance: str) -> bool:
+    """Reserve complete scorecard-band generation without cutoff selection."""
+
+    return bool(
+        not utterance_targets_scorecard_cutoff_selection(utterance)
+        and _SCORECARD_SUBJECT_RE.search(utterance)
+        and _SCORECARD_BUILD_ACTION_RE.search(utterance)
+    )
+
+
+def _scorecard_raw_pd_edge_mentions(
+    utterance: str,
+) -> tuple[tuple[float, ...], ...] | None:
+    """Parse only explicitly labelled raw-PD arrays; malformed arrays fail closed."""
+
+    mentions: list[tuple[float, ...]] = []
+    for match in _SCORECARD_RAW_PD_EDGES_RE.finditer(utterance):
+        tokens = [
+            token.strip()
+            for token in re.split(r"[,，]", match.group("body"))
+        ]
+        if not tokens or any(not token for token in tokens):
+            return None
+        values: list[float] = []
+        for token in tokens:
+            try:
+                value = float(Decimal(token))
+            except (InvalidOperation, OverflowError, ValueError):
+                return None
+            if not math.isfinite(value):
+                return None
+            values.append(value)
+        mentions.append(tuple(values))
+    return tuple(mentions)
+
+
+def _ground_scorecard_band_build(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if _SCORECARD_HEURISTIC_SELECTION_RE.search(
+        utterance
+    ) or _SCORECARD_SECOND_OPERATION_RE.search(utterance):
+        return _clarification(
+            "Scorecard 分数带构建必须是单独一步；自动选择/排名 cutoff、"
+            "入池、应用、写回、报告、采纳或部署必须拆成后续请求。",
+            code="scorecard_band_single_step_required",
+            fields=("workflow",),
+        )
+    if (
+        _SCORECARD_NOT_AUTHORIZED_RE.search(utterance)
+        or _SCORECARD_BUILD_ACTION_RE.search(utterance) is None
+    ):
+        return _clarification(
+            "请用当前轮、肯定式命令明确要求构建 Scorecard 完整分数带。",
+            code="scorecard_band_positive_command_required",
+            fields=("build_intent",),
+        )
+    bin_counts = tuple(
+        int(match.group("count"))
+        for match in _SCORECARD_BIN_COUNT_RE.finditer(utterance)
+    )
+    raw_edges = _scorecard_raw_pd_edge_mentions(utterance)
+    expected_count = inputs.get("bin_count")
+    expected_edges = inputs.get("raw_pd_band_edges")
+    if (
+        raw_edges is None
+        or (expected_count is not None and bin_counts != (expected_count,))
+        or (expected_count is None and bin_counts)
+        or (
+            expected_edges is not None
+            and raw_edges != (tuple(float(value) for value in expected_edges),)
+        )
+        or (expected_edges is None and raw_edges)
+    ):
+        return _clarification(
+            "bin_count 或 raw_pd_band_edges 只能逐字采用本轮唯一显式值；"
+            "两者均未提供时才使用 Tool 默认等频 10 档。",
+            code="scorecard_band_controls_not_grounded",
+            fields=("bin_count", "raw_pd_band_edges"),
+        )
+    return result
+
+
+def _ground_scorecard_cutoff_selection(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    assets = tuple(
+        match.group(0)
+        for match in _SCORECARD_BAND_ASSET_ID_TOKEN_RE.finditer(utterance)
+    )
+    cutoffs = tuple(
+        match.group(0)
+        for match in _SCORECARD_CUTOFF_ID_TOKEN_RE.finditer(utterance)
+    )
+    if len(assets) != 1 or len(cutoffs) != 1:
+        return _clarification(
+            "Scorecard cutoff 选择必须逐字提供且只提供一个完整 "
+            "scorecard-band-asset ID 与一个完整 scorecard-cutoff ID；"
+            "不能按最好、坏率、排名或推荐自动挑选。",
+            code="scorecard_cutoff_explicit_id_required",
+            fields=("asset_id", "cutoff_id"),
+        )
+    if _SCORECARD_SECOND_OPERATION_RE.search(utterance):
+        return _clarification(
+            "Scorecard cutoff 选择必须是单独一步；入池、应用、写回、"
+            "报告、采纳或部署必须拆成后续请求。",
+            code="scorecard_cutoff_single_step_required",
+            fields=("workflow",),
+        )
+    if (
+        _SCORECARD_NOT_AUTHORIZED_RE.search(utterance)
+        or _SCORECARD_SELECTION_ACTION_RE.search(utterance) is None
+    ):
+        return _clarification(
+            "请用当前轮、肯定式命令明确选择一个 Scorecard cutoff。",
+            code="scorecard_cutoff_positive_command_required",
+            fields=("selection_intent",),
+        )
+    if (
+        _SCORECARD_HEURISTIC_SELECTION_RE.search(utterance)
+        or assets != (inputs["asset_id"],)
+        or cutoffs != (inputs["cutoff_id"],)
+    ):
+        return _clarification(
+            "Scorecard asset/cutoff 必须与用户原话中的唯一完整 pointer "
+            "逐字一致；平台不会替换、补全、排名或推荐。",
+            code="scorecard_cutoff_controls_not_grounded",
+            fields=("asset_id", "cutoff_id"),
+        )
+    reasons = tuple(
+        match.group("reason").strip()
+        for match in _SCORECARD_SELECTION_REASON_RE.finditer(utterance)
+    )
+    reason = inputs.get("reason")
+    if bool(reasons or reason is not None) and (
+        len(reasons) != 1
+        or not isinstance(reason, str)
+        or reasons[0] != reason
+    ):
+        return _clarification(
+            "可选 reason 必须与用户以“选择理由/理由/原因/说明”明确标注的"
+            "唯一文本逐字一致；未标注时必须省略。",
+            code="scorecard_cutoff_reason_not_grounded",
+            fields=("reason",),
+        )
+    return result
+
+
 def _ground_candidate_monthly_stability_request(
     utterance: str,
     result: StrategyRequestCompilation,
@@ -6614,6 +6973,32 @@ def _ground_refinement_request(
             code="candidate_monthly_stability_workflow_required",
             fields=("workflow",),
         )
+    if (
+        utterance_targets_scorecard_cutoff_selection(utterance)
+        and not (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow
+            in {"scorecard_band_build", "scorecard_cutoff_selection"}
+        )
+    ):
+        return _clarification(
+            "原话明确要求从完整 Scorecard 分数带中精确选择一个 cutoff，"
+            "只能编译为 scorecard_cutoff_selection；不能改路由到分数带构建、"
+            "自动推荐、Strategy Pool、采纳或部署。",
+            code="scorecard_cutoff_selection_workflow_required",
+            fields=("workflow",),
+        )
+    if utterance_targets_scorecard_band_build(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "scorecard_band_build"
+    ):
+        return _clarification(
+            "原话明确要求构建完整 Scorecard 分数带，只能编译为 "
+            "scorecard_band_build；不能改路由到 cutoff 选择、自动推荐、"
+            "Strategy Pool、采纳或部署。",
+            code="scorecard_band_build_workflow_required",
+            fields=("workflow",),
+        )
     if _utterance_targets_automatic_tree_apply(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "automatic_tree_apply"
@@ -6709,6 +7094,10 @@ def _ground_refinement_request(
         return _ground_strategy_model_evidence_v2_request(utterance, result)
     if draft.workflow == "candidate_monthly_stability":
         return _ground_candidate_monthly_stability_request(utterance, result)
+    if draft.workflow == "scorecard_band_build":
+        return _ground_scorecard_band_build(utterance, result)
+    if draft.workflow == "scorecard_cutoff_selection":
+        return _ground_scorecard_cutoff_selection(utterance, result)
     if draft.workflow == "strategy_dsl_delivery":
         return _ground_strategy_dsl_delivery_request(utterance, result)
     if draft.workflow == "strategy_report_bundle_v2":
@@ -10905,6 +11294,7 @@ def _pool_add_unconsumed_text(utterance: str) -> str:
             _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE,
             _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE,
             _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE,
+            _SCORECARD_CUTOFF_SELECTION_ID_TOKEN_RE,
         )
         for match in pattern.finditer(utterance)
     )
@@ -11597,6 +11987,7 @@ def _ground_strategy_pool_add_request(
         for pattern in (
             _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE,
             _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE,
+            _SCORECARD_CUTOFF_SELECTION_ID_TOKEN_RE,
         )
         for match in pattern.finditer(utterance)
     )
@@ -11667,8 +12058,9 @@ def _ground_strategy_pool_add_request(
             )
         return _clarification(
             "请逐字提供且只提供一个完整 candidate_asset_id 或 selection_id；"
-            "selection_id 必须是 automatic-tree-leaf-selection- 后接 32 位"
-            "小写十六进制字符，不能同时给出两类来源。",
+            "selection_id 必须是 automatic-tree-leaf-selection-、"
+            "cross-matrix-cell-selection- 或 scorecard-cutoff-selection- "
+            "后接 32 位小写十六进制字符，不能同时给出两类来源。",
             code="strategy_pool_add_source_required",
             fields=("candidate_asset_id", "selection_id"),
         )
@@ -12407,6 +12799,37 @@ def _standard_workflow_confirmation_text(
                 "本步骤只生成只读稳定性证据；不会修改 Pool、入池、采纳或部署",
             ]
         )
+    elif draft.workflow == "scorecard_band_build":
+        if "bin_count" in inputs:
+            banding = f"等频 {inputs['bin_count']} 档"
+        elif "raw_pd_band_edges" in inputs:
+            banding = (
+                "raw PD 边界 ["
+                + "、".join(f"{value:g}" for value in inputs["raw_pd_band_edges"])
+                + "]"
+            )
+        else:
+            banding = "省略用户分带参数，由受控 Tool 使用默认等频 10 档"
+        details = [
+            "已识别为〔Scorecard 完整分数带 Workflow〕",
+            f"分带方式：{banding}",
+            "平台将绑定最新精确兼容且完整认证的 ScoreEvidence、原始分数向量"
+            "和 StrategySampleDesign V2；损坏的最新证据不会回退",
+            "本步骤只生成全部分带及全部可选 cutoff 证据；不会自动选择、"
+            "排名或推荐 cutoff",
+            "不会入池、应用、采纳或部署",
+        ]
+    elif draft.workflow == "scorecard_cutoff_selection":
+        details = [
+            "已识别为〔Scorecard cutoff 精确选择 Workflow〕",
+            f"完整分数带资产 pointer：{inputs['asset_id']}",
+            f"精确 cutoff pointer：{inputs['cutoff_id']}",
+            "平台将从当前任务严格恢复 source artifact/hash 与完整分数带；"
+            "不会自动排名或推荐",
+            "本步骤只物化 pointer，不复制全部分带；不会入池、应用、采纳或部署",
+        ]
+        if "reason" in inputs:
+            details.append(f"用户原话选择说明：{inputs['reason']}")
     elif draft.workflow == "cross_matrix_analysis":
         details = [
             "已识别为〔二维 Cross Matrix 候选分析 Workflow〕",
@@ -13342,6 +13765,8 @@ __all__ = [
     "compile_strategy_request",
     "strategy_request_confirmation_text",
     "utterance_targets_candidate_monthly_stability",
+    "utterance_targets_scorecard_band_build",
+    "utterance_targets_scorecard_cutoff_selection",
     "utterance_targets_strategy_dsl_delivery",
     "utterance_targets_strategy_project_context",
     "utterance_targets_strategy_report_bundle_v2",

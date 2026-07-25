@@ -6484,6 +6484,169 @@ def _render_evaluate_rule_set(o: dict):
     return text, tables
 
 
+def _scorecard_download_text(o: Mapping, *, fallback: str) -> str:
+    artifacts = [
+        item for item in (o.get("artifacts") or []) if isinstance(item, Mapping)
+    ]
+    artifact = next(
+        (item for item in artifacts if item.get("download_url")),
+        None,
+    )
+    if artifact is None:
+        return ""
+    label = str(artifact.get("filename") or artifact.get("kind") or fallback)
+    return f"\n\n**受治理 JSON**：[{label}]({artifact['download_url']})"
+
+
+def _render_build_scorecard_band_asset(o: dict):
+    """Render the complete measured band/cutoff set without choosing one."""
+
+    asset = (
+        o.get("scorecard_band_asset")
+        if isinstance(o.get("scorecard_band_asset"), Mapping)
+        else {}
+    )
+    bands = [
+        item for item in (asset.get("bands") or []) if isinstance(item, Mapping)
+    ]
+    cutoffs = [
+        item for item in (asset.get("cutoffs") or []) if isinstance(item, Mapping)
+    ]
+    performance = (
+        o.get("performance") if isinstance(o.get("performance"), Mapping) else {}
+    )
+    banding = o.get("banding") if isinstance(o.get("banding"), Mapping) else {}
+    text = (
+        f"**Scorecard 完整分数带已构建**：资产 `{o.get('asset_id', '')}`，"
+        f"asset hash `{o.get('asset_hash', '')}`；已固化 "
+        f"**{_fmt(o.get('band_count', len(bands)))}** 个分数带和 "
+        f"**{_fmt(o.get('cutoff_count', len(cutoffs)))}** 个内部 cutoff。\n"
+        f"- 分档方法 `{banding.get('method', 'n/a')}`；请求 "
+        f"{_fmt(banding.get('requested_bin_count', 'n/a'))} 档，实际 "
+        f"{_fmt(banding.get('effective_bin_count', len(bands)))} 档。\n"
+        f"- risk/development 样本 {_fmt(o.get('development_count'))} 行，"
+        f"有标签 {_fmt(o.get('labeled_count'))} 行，坏样本 "
+        f"{_fmt(o.get('bad_count'))}；AUC {_num(performance.get('auc'))}，"
+        f"KS {_num(performance.get('ks'))}。\n"
+        "**本步骤只生成完整、确定性的分数带证据：不会自动选择、排名或推荐 "
+        "cutoff；未入池、未应用、未采纳、未部署。**"
+    )
+    text += _scorecard_download_text(o, fallback="scorecard-band.json")
+    band_rows = [
+        [
+            str(band.get("band_id") or band.get("bin_id") or ""),
+            _num(band.get("lower_bound")),
+            _num(band.get("upper_bound")),
+            _fmt(band.get("count")),
+            _pct(band.get("share")),
+            _fmt(band.get("labeled_count")),
+            _fmt(band.get("bad_count")),
+            _pct(band.get("bad_rate")),
+            _num(band.get("average_pd")),
+        ]
+        for band in bands
+    ]
+    cutoff_rows = []
+    for cutoff in cutoffs:
+        lower = (
+            cutoff.get("lower_risk")
+            if isinstance(cutoff.get("lower_risk"), Mapping)
+            else {}
+        )
+        higher = (
+            cutoff.get("higher_risk")
+            if isinstance(cutoff.get("higher_risk"), Mapping)
+            else {}
+        )
+        cutoff_rows.append(
+            [
+                str(cutoff.get("cutoff_id") or ""),
+                _num(cutoff.get("execution_pd")),
+                _num(cutoff.get("display_points")),
+                _fmt(lower.get("count")),
+                _pct(lower.get("bad_rate")),
+                _fmt(higher.get("count")),
+                _pct(higher.get("bad_rate")),
+                "是" if cutoff.get("mask_equivalence") is True else "否",
+            ]
+        )
+    tables = []
+    if band_rows:
+        tables.append(
+            {
+                "title": "Scorecard 分数带",
+                "columns": [
+                    "Band ID",
+                    "Raw PD 下界",
+                    "Raw PD 上界",
+                    "样本数",
+                    "占比",
+                    "有标签",
+                    "坏样本",
+                    "坏率",
+                    "平均 PD",
+                ],
+                "rows": band_rows,
+            }
+        )
+    if cutoff_rows:
+        tables.append(
+            {
+                "title": "Scorecard cutoff 全量证据",
+                "columns": [
+                    "Cutoff ID",
+                    "执行 PD",
+                    "展示分",
+                    "低风险样本",
+                    "低风险坏率",
+                    "高风险样本",
+                    "高风险坏率",
+                    "PD/Points 等价",
+                ],
+                "rows": cutoff_rows,
+            }
+        )
+    return text, tables
+
+
+def _render_materialize_scorecard_cutoff_selection(o: dict):
+    """Render one explicit pointer without implying Pool admission or action."""
+
+    reason = o.get("selection_reason")
+    text = (
+        "**Scorecard cutoff 精确选择已物化。**"
+        f"已从完整分数带 `{o.get('source_asset_id', '')}` 创建 cutoff "
+        f"`{o.get('cutoff_id', '')}` 的 pointer-only 不可变引用。"
+        "该步骤不会自动排名或推荐，不复制完整分数带或指标，也不生成业务动作；"
+        "**未入池、未应用、未采纳、未部署。**"
+    )
+    text += _scorecard_download_text(
+        o,
+        fallback="scorecard-cutoff-selection.json",
+    )
+    return text, [
+        {
+            "title": "Scorecard cutoff 选择引用",
+            "columns": ["字段", "值"],
+            "rows": [
+                ["Selection ID", str(o.get("selection_id") or "")],
+                ["Selection Hash", str(o.get("selection_hash") or "")],
+                ["Source Asset ID", str(o.get("source_asset_id") or "")],
+                ["Source Asset Hash", str(o.get("source_asset_hash") or "")],
+                ["Cutoff ID", str(o.get("cutoff_id") or "")],
+                [
+                    "Selection Reason",
+                    str(reason) if reason is not None else "未提供",
+                ],
+                ["Not Admitted", str(o.get("not_admitted"))],
+                ["Not Applied", str(o.get("not_applied"))],
+                ["Not Adopted", str(o.get("not_adopted"))],
+                ["Not Deployed", str(o.get("not_deployed"))],
+            ],
+        }
+    ]
+
+
 _RENDERERS = {
     "make_split": _render_make_split,
     "choose_modeling_spec": _render_choose_modeling_spec,
@@ -6514,6 +6677,10 @@ _RENDERERS = {
     "build_cross_matrix_candidate": _render_build_cross_matrix_candidate,
     "materialize_cross_matrix_cell_selection": (
         _render_materialize_cross_matrix_cell_selection
+    ),
+    "build_scorecard_band_asset": _render_build_scorecard_band_asset,
+    "materialize_scorecard_cutoff_selection": (
+        _render_materialize_scorecard_cutoff_selection
     ),
     "refine_univariate_candidate": _render_refine_univariate_candidate,
     "add_candidate_to_pool": _render_strategy_pool_mutation,

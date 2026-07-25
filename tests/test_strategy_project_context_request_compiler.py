@@ -85,7 +85,7 @@ def test_project_context_compiler_grounding_accepts_exact_user_facts() -> None:
     assert result.draft is not None
     assert result.draft.workflow == "strategy_project_context"
     assert len(llm.calls) == 1
-    assert llm.calls[0]["prompt_version"] == 32
+    assert llm.calls[0]["prompt_version"] == 35
     assert "strategy_project_context" in llm.calls[0]["system_prompt"]
 
 
