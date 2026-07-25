@@ -403,6 +403,8 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "build_voting_candidate",
         "build_cross_matrix_candidate",
         "materialize_cross_matrix_cell_selection",
+        "build_scorecard_band_asset",
+        "materialize_scorecard_cutoff_selection",
         "refine_univariate_candidate",
         "add_candidate_to_pool",
         "remove_pool_entry",
@@ -434,7 +436,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "apply_monitoring_disposition",
         "render_monitoring_report",
     }
-    assert manifest.version == "0.18.0"
+    assert manifest.version == "0.19.0"
     assert delivery_tool.determinism == "deterministic"
     assert delivery_tool.failure_policy == "fail"
     assert delivery_tool.policy.human_decision_gate == "none"
@@ -881,7 +883,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "write:artifact",
     }
     assert "manual" in refinement_tool.input_schema["properties"]["method"]["enum"]
-    assert manifest.version == "0.18.0"
+    assert manifest.version == "0.19.0"
     assert "refined univariate asset" in add_pool_tool.summary
     assert "automatic-tree leaf selection" in add_pool_tool.summary
     assert "Voting n-of-k candidate" in add_pool_tool.summary

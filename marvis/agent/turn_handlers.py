@@ -195,6 +195,9 @@ from marvis.packs.strategy.pool_impact_tools import (
 from marvis.packs.strategy.pool_tools import (
     load_current_strategy_candidate_pool_artifact,
 )
+from marvis.packs.strategy.pool_requirement_resolver import (
+    resolve_pool_requirements,
+)
 from marvis.packs.strategy.project_context_tools import (
     load_current_strategy_project_context_artifact,
 )
@@ -4601,11 +4604,19 @@ def _strategy_impact_cube_plan_slots(
             "或 lineage 未通过完整认证。",
         ) from exc
     if pool.compiled_design.get("requirements"):
-        raise _StrategyV2EvidenceSetupError(
-            "strategy_impact_cube_pool_unresolved",
-            "当前 Strategy Pool 仍有未解析的类型化业务动作要求；"
-            "请先补全动作后再测算影响。",
-        )
+        try:
+            resolve_pool_requirements(
+                read_runtime,
+                task_id=task.id,
+                compiled_design=pool.compiled_design,
+                sample_design=sample,
+            )
+        except StrategyError as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_impact_cube_pool_requirement_invalid",
+                "当前 Strategy Pool 的模型评分要求无法绑定到最新 "
+                "StrategySampleDesign V2；请重新生成评分证据或候选。",
+            ) from exc
     if pool.artifact_id not in {
         item.get("id") for item in artifacts
     }:

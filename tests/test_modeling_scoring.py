@@ -11,9 +11,105 @@ import pandas as pd
 import pytest
 
 from marvis.db import ModelingRepository, PluginRepository
+from marvis.packs.modeling.errors import ModelingError
+from marvis.packs.modeling.scoring import (
+    raw_pd_from_scorecard_points,
+    scorecard_points_from_raw_pd,
+)
 from marvis.plugins.manifest import ToolRef
 
 from test_modeling_pack import _runtime
+
+
+def test_scorecard_points_public_converters_follow_the_worked_pdo_scale() -> None:
+    factor = 72.13475204444818
+    offset = 317.80719051126374
+    raw_pd = np.array([1.0 / 101.0, 1.0 / 51.0, 1.0 / 26.0])
+
+    points = scorecard_points_from_raw_pd(raw_pd, factor=factor, offset=offset)
+
+    assert points.tolist() == pytest.approx([650.0, 600.0, 550.0])
+    assert points.dtype == np.dtype("float64")
+    assert points.flags.writeable is False
+
+    restored = raw_pd_from_scorecard_points(points, factor=factor, offset=offset)
+
+    assert restored.tolist() == pytest.approx(raw_pd.tolist())
+    assert restored.dtype == np.dtype("float64")
+    assert restored.flags.writeable is False
+
+
+def test_scorecard_points_public_converters_handle_endpoints_and_extreme_points_stably() -> None:
+    with np.errstate(divide="raise", invalid="raise", over="raise"):
+        points = scorecard_points_from_raw_pd(
+            np.array([0.0, 0.5, 1.0]),
+            factor=72.13475204444818,
+            offset=317.80719051126374,
+        )
+        raw_pd = raw_pd_from_scorecard_points(
+            np.array([-1.0e308, 317.80719051126374, 1.0e308]),
+            factor=72.13475204444818,
+            offset=317.80719051126374,
+        )
+
+    assert points.tolist() == [np.inf, 317.80719051126374, -np.inf]
+    assert raw_pd.tolist() == [1.0, 0.5, 0.0]
+
+
+@pytest.mark.parametrize(
+    ("converter", "values", "factor", "offset", "message"),
+    [
+        (scorecard_points_from_raw_pd, 0.5, 50.0, 300.0, "one-dimensional numeric"),
+        (scorecard_points_from_raw_pd, [[0.5]], 50.0, 300.0, "one-dimensional numeric"),
+        (scorecard_points_from_raw_pd, ["0.5"], 50.0, 300.0, "one-dimensional numeric"),
+        (scorecard_points_from_raw_pd, [True], 50.0, 300.0, "one-dimensional numeric"),
+        (scorecard_points_from_raw_pd, [np.nan], 50.0, 300.0, "finite"),
+        (scorecard_points_from_raw_pd, [np.inf], 50.0, 300.0, "finite"),
+        (scorecard_points_from_raw_pd, [-0.01], 50.0, 300.0, r"\[0, 1\]"),
+        (scorecard_points_from_raw_pd, [1.01], 50.0, 300.0, r"\[0, 1\]"),
+        (scorecard_points_from_raw_pd, [0.5], 0.0, 300.0, "factor"),
+        (scorecard_points_from_raw_pd, [0.5], "50", 300.0, "factor"),
+        (scorecard_points_from_raw_pd, [0.5], 50.0, np.nan, "offset"),
+        (scorecard_points_from_raw_pd, [0.5], 50.0, "300", "offset"),
+        (raw_pd_from_scorecard_points, 600.0, 50.0, 300.0, "one-dimensional numeric"),
+        (raw_pd_from_scorecard_points, [[600.0]], 50.0, 300.0, "one-dimensional numeric"),
+        (raw_pd_from_scorecard_points, ["600"], 50.0, 300.0, "one-dimensional numeric"),
+        (raw_pd_from_scorecard_points, [True], 50.0, 300.0, "one-dimensional numeric"),
+        (raw_pd_from_scorecard_points, [np.nan], 50.0, 300.0, "finite"),
+        (raw_pd_from_scorecard_points, [np.inf], 50.0, 300.0, "finite"),
+        (raw_pd_from_scorecard_points, [600.0], 0.0, 300.0, "factor"),
+        (raw_pd_from_scorecard_points, [600.0], -1.0, 300.0, "factor"),
+        (raw_pd_from_scorecard_points, [600.0], np.nan, 300.0, "factor"),
+        (raw_pd_from_scorecard_points, [600.0], np.inf, 300.0, "factor"),
+        (raw_pd_from_scorecard_points, [600.0], True, 300.0, "factor"),
+        (raw_pd_from_scorecard_points, [600.0], 50.0, np.nan, "offset"),
+        (raw_pd_from_scorecard_points, [600.0], 50.0, np.inf, "offset"),
+        (raw_pd_from_scorecard_points, [600.0], 50.0, True, "offset"),
+    ],
+)
+def test_scorecard_points_public_converters_reject_invalid_contract_values(
+    converter,
+    values,
+    factor,
+    offset,
+    message,
+) -> None:
+    with pytest.raises(ModelingError, match=message):
+        converter(values, factor=factor, offset=offset)
+
+
+def test_scorecard_points_cutoff_mask_is_the_inverse_of_raw_pd_cutoff_mask() -> None:
+    raw_pd = np.array([0.0, 1.0 / 101.0, 1.0 / 51.0, 1.0 / 26.0, 1.0])
+    expected_approved = [True, True, True, False, False]
+
+    points = scorecard_points_from_raw_pd(
+        raw_pd,
+        factor=72.13475204444818,
+        offset=317.80719051126374,
+    )
+
+    assert (raw_pd <= (1.0 / 51.0)).tolist() == expected_approved
+    assert (points >= 600.0).tolist() == expected_approved
 
 
 def _linearly_separable_frame(rows: int = 240) -> pd.DataFrame:

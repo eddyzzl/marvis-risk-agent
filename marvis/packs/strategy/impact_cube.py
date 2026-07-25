@@ -503,9 +503,10 @@ def build_strategy_impact_cube(
         raise StrategyError("cannot build ImpactCube from an empty Strategy Pool")
     if len(current_pool["entries"]) > MAX_IMPACT_CUBE_RULES:
         raise StrategyError("ImpactCube rule budget exceeded")
+    # The governed Tool boundary authenticates compiled requirements and
+    # hydrates their virtual fields on the full row universe before slicing.
+    # This pure kernel evaluates only the already materialized frames.
     compiled = compile_strategy_pool(current_pool)
-    if compiled["requirements"]:
-        raise StrategyError("ImpactCube cannot execute unresolved Pool requirements")
     new_spec = parse_strategy_spec(compiled["strategy_spec"])
 
     risk_frames = _partition_frames(partition_frames)

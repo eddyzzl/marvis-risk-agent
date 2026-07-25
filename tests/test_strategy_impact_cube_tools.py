@@ -28,7 +28,10 @@ from marvis.packs.strategy.pool import compile_strategy_pool
 from marvis.packs.strategy.strategy import build_strategy_from_spec
 from marvis.packs.strategy.dsl import strategy_spec_hash
 from marvis.repositories.task_artifacts import TaskArtifactRepository
-from tests.test_strategy_pool_validation_tools import _setup as _pool_setup
+from tests.test_strategy_pool_validation_tools import (
+    _controlled_score_requirement,
+    _setup as _pool_setup,
+)
 
 
 def _setup(tmp_path: Path) -> dict:
@@ -81,6 +84,193 @@ def _validate_output(fx: dict, output: dict) -> dict:
         trusted_producer_run_id=producer_run["run_id"],
         trusted_producer_run_content_hash=producer_run["content_hash"],
     )
+
+
+def test_measure_impact_cube_hydrates_score_requirement_before_all_masks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    original_load = impact_tools._load_pool_binding
+    base_binding = original_load(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["impact_request"],
+    )
+    controlled_binding, resolved = _controlled_score_requirement(
+        pool_binding=base_binding,
+    )
+    virtual_field = resolved.virtual_fields[0]
+    original_read = impact_tools.pd.read_parquet
+    original_build = impact_tools.build_strategy_impact_cube
+    calls = {"hydrate": 0, "cas": 0}
+
+    def load_with_requirement(*args, **kwargs):
+        return controlled_binding
+
+    def hydrate(frame: pd.DataFrame, *, resolved: object) -> pd.DataFrame:
+        assert resolved is score_requirements
+        assert len(frame) == fx["dataset"].row_count
+        assert isinstance(frame.index, pd.RangeIndex)
+        assert virtual_field not in frame.columns
+        calls["hydrate"] += 1
+        hydrated = frame.copy(deep=True)
+        hydrated[virtual_field] = [
+            index / max(1, len(frame) - 1) for index in range(len(frame))
+        ]
+        return hydrated
+
+    def read_snapshot(source, *args, **kwargs):
+        assert virtual_field not in kwargs["columns"]
+        return original_read(source, *args, **kwargs)
+
+    def build(**kwargs):
+        frames = [
+            *kwargs["partition_frames"].values(),
+            *kwargs["approval_partition_frames"].values(),
+        ]
+        assert frames
+        assert all(virtual_field in frame.columns for frame in frames)
+        assert all(len(frame) < fx["dataset"].row_count for frame in frames)
+        return original_build(**kwargs)
+
+    def require_on_connection(conn, received):
+        assert received is resolved
+        assert conn.in_transaction
+        calls["cas"] += 1
+
+    def requirement_provenance(received):
+        assert received is resolved
+        return {
+            "requirements_hash": resolved.requirements_hash,
+            "requirements": list(resolved.requirements),
+            "virtual_fields": list(resolved.virtual_fields),
+        }
+
+    score_requirements = resolved
+    monkeypatch.setattr(impact_tools, "_load_pool_binding", load_with_requirement)
+    monkeypatch.setattr(
+        impact_tools,
+        "resolve_pool_requirements",
+        lambda *args, **kwargs: resolved,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        impact_tools,
+        "hydrate_requirement_fields",
+        hydrate,
+        raising=False,
+    )
+    monkeypatch.setattr(impact_tools.pd, "read_parquet", read_snapshot)
+    monkeypatch.setattr(impact_tools, "build_strategy_impact_cube", build)
+    monkeypatch.setattr(
+        impact_tools,
+        "require_resolved_pool_requirements_on_connection",
+        require_on_connection,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        impact_tools,
+        "pool_requirement_bindings_provenance",
+        requirement_provenance,
+    )
+    monkeypatch.setattr(
+        impact_tools,
+        "require_strategy_candidate_pool_artifact_binding_on_connection",
+        lambda conn, binding: None,
+    )
+
+    output = run_measure_strategy_impact_cube(
+        fx["impact_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+
+    assert output["slice_count"] > 0
+    validation_risk = next(
+        row
+        for row in output["cube"]["slices"]
+        if row["family"] == "overall"
+        and row["population_role"] == "risk"
+        and row["dimensions"]["partition"]["value"] == "validation"
+    )
+    assert validation_risk["new"]["value"]["metrics"]["reject_count"] == 1
+    assert calls["hydrate"] == 1
+    assert calls["cas"] >= 4
+    provenance = _artifacts(fx)[0]["provenance"]
+    assert provenance["requirement_bindings"]["requirements_hash"] == (
+        resolved.requirements_hash
+    )
+    assert provenance["requirement_bindings"]["virtual_fields"] == [
+        virtual_field
+    ]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "virtual score field conflicts with physical dataset column",
+        "model score evidence and SampleDesign V2 differ",
+    ],
+)
+def test_measure_impact_cube_fails_closed_on_requirement_resolution_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    fx = _setup(tmp_path)
+
+    def reject_requirement(*args, **kwargs):
+        raise StrategyError(message)
+
+    monkeypatch.setattr(
+        impact_tools,
+        "resolve_pool_requirements",
+        reject_requirement,
+    )
+
+    with pytest.raises(StrategyError, match=message):
+        run_measure_strategy_impact_cube(
+            fx["impact_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+    assert _artifacts(fx) == []
+
+
+def test_measure_impact_cube_requirement_cas_drift_rolls_back_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    real_require = impact_tools.require_resolved_pool_requirements_on_connection
+    calls = 0
+
+    def drift_on_final_write(conn, resolved):
+        nonlocal calls
+        calls += 1
+        real_require(conn, resolved)
+        if calls == 2:
+            raise StrategyError(
+                "model score vector disappeared before ImpactCube commit"
+            )
+
+    monkeypatch.setattr(
+        impact_tools,
+        "require_resolved_pool_requirements_on_connection",
+        drift_on_final_write,
+    )
+
+    with pytest.raises(StrategyError, match="disappeared"):
+        run_measure_strategy_impact_cube(
+            fx["impact_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert calls == 2
+    assert _artifacts(fx) == []
+    assert _measurement_audits(fx) == []
 
 
 def test_measure_impact_cube_publishes_exact_aggregate_only_evidence(

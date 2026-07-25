@@ -44,6 +44,7 @@ from marvis.packs.strategy.impact_cube import (
 )
 from marvis.packs.strategy.impact_cube_tools import (
     IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION,
+    IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION,
     build_impact_cube_producer_run,
 )
 from marvis.packs.strategy.model_evidence import (
@@ -618,6 +619,8 @@ def _pool_binding_for_strategy_type(
     tmp_path: Path,
     sample: StrategySampleDesignV2ArtifactBinding,
     strategy_type: str,
+    *,
+    score_requirement: dict | None = None,
 ) -> StrategyCandidatePoolArtifactBinding:
     design = sample.bundle["sample_design"]
     dataset = design["identity"]["dataset_ref"]
@@ -648,14 +651,24 @@ def _pool_binding_for_strategy_type(
         },
         fragment_type="strategy_rule",
         rule_id=f"rule-{strategy_type}",
-        condition={
-            "op": "compare",
-            "field": "customer_id",
-            "operator": "==",
-            "value": "PII-CUSTOMER-0001",
-            "missing": "no_match",
-        },
-        requirements=[],
+        condition=(
+            {
+                "op": "compare",
+                "field": "customer_id",
+                "operator": "==",
+                "value": "PII-CUSTOMER-0001",
+                "missing": "no_match",
+            }
+            if score_requirement is None
+            else {
+                "op": "compare",
+                "field": score_requirement["virtual_field"],
+                "operator": ">=",
+                "value": 0.5,
+                "missing": "no_match",
+            }
+        ),
+        requirements=([] if score_requirement is None else [score_requirement]),
         effect_id=f"{strategy_type}-effect",
         evidence_id=f"{strategy_type}-evidence",
         evidence_hash=_hash(f"{strategy_type}-evidence"),
@@ -765,6 +778,9 @@ def _impact_cube_binding(
             "utilization": [0.50, 0.40, 0.60],
         }
     )
+    for outer in pool.compiled_design["requirements"]:
+        virtual_field = outer["requirement"]["virtual_field"]
+        frame[virtual_field] = [0.8, 0.2, 0.9]
     approval_frames = {
         partition: frame.iloc[: counts["approval"][partition]].reset_index(
             drop=True
@@ -935,8 +951,13 @@ def _impact_cube_binding(
         artifact_filename=f"{cube['cube_id']}.json",
         artifact_content_hash=artifact_hash,
     )
+    requirements = pool.compiled_design["requirements"]
     provenance = {
-        "schema_version": IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": (
+            IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION
+            if requirements
+            else IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION
+        ),
         "producer_version": cube["producer_version"],
         "task_id": sample.task_id,
         "cube_id": cube["cube_id"],
@@ -960,6 +981,22 @@ def _impact_cube_binding(
         "lifecycle": dict(cube["lifecycle"]),
         "producer_run": producer_run,
     }
+    if requirements:
+        provenance["requirement_bindings"] = {
+            "requirements_hash": hashlib.sha256(
+                json.dumps(
+                    requirements,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            "requirements": requirements,
+            "virtual_fields": [
+                item["requirement"]["virtual_field"]
+                for item in requirements
+            ],
+        }
     return StrategyImpactCubeArtifactBinding(
         task_id=sample.task_id,
         artifact_id=artifact_id,
@@ -1350,6 +1387,84 @@ def test_adapter_prefers_impact_cube_and_projects_all_populations_partitions(
     serialized = json.dumps(result, ensure_ascii=False, sort_keys=True)
     assert legacy_impact.artifact_id not in serialized
     assert "PII-CUSTOMER" not in serialized
+
+
+def test_adapter_accepts_exact_score_requirements_and_rejects_ref_drift(
+    tmp_path: Path,
+) -> None:
+    project, sample, _plain_pool, legacy_impact = _bindings(tmp_path)
+    vector_id = "1" * 64
+    requirement = {
+        "type": "model_score_vector.v1",
+        "virtual_field": "__marvis_model_pd_" + vector_id[:16],
+        "score_product": "raw_native_uncalibrated_bad_probability",
+        "score_evidence_artifact_id": "2" * 64,
+        "score_evidence_artifact_content_hash": "3" * 64,
+        "score_vector_artifact_id": vector_id,
+        "score_vector_artifact_content_hash": "4" * 64,
+    }
+    pool = _pool_binding_for_strategy_type(
+        tmp_path,
+        sample,
+        "approval",
+        score_requirement=requirement,
+    )
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        pool_impact=legacy_impact,
+        impact_cube=impact_cube,
+    )
+
+    assert any(
+        item["kind"] == "strategy_impact"
+        for item in result["strategy_artifact_refs"]
+    )
+
+    forged_provenance = json.loads(
+        json.dumps(impact_cube.artifact_provenance)
+    )
+    forged_requirements = forged_provenance["requirement_bindings"][
+        "requirements"
+    ]
+    forged_requirements[0]["requirement"][
+        "score_evidence_artifact_id"
+    ] = "f" * 64
+    forged_provenance["requirement_bindings"]["requirements_hash"] = (
+        hashlib.sha256(
+            json.dumps(
+                forged_requirements,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+    forged = replace(
+        impact_cube,
+        artifact_provenance=forged_provenance,
+        artifact_provenance_json=json.dumps(
+            forged_provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ),
+    )
+    with pytest.raises(
+        StrategyReportBundleError,
+        match="requirement",
+    ):
+        build_strategy_report_bundle_source_inputs(
+            project_context=project,
+            sample_design=sample,
+            candidate_pool=pool,
+            pool_impact=legacy_impact,
+            impact_cube=forged,
+        )
 
 
 def test_adapter_suppresses_oot_claims_but_keeps_partition_results_when_blocked(

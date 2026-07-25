@@ -18,6 +18,7 @@ import math
 from pathlib import Path
 import re
 import stat
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 
@@ -27,6 +28,8 @@ import pandas as pd
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.errors import DataLayerError
 from marvis.data.labels import resolve_labeled_frame
+from marvis.db import ModelingRepository
+from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.strategy.candidate_evidence import MetricObservation
 from marvis.packs.strategy.candidate_fragment import (
     sample_context_hash_from_candidate_evidence,
@@ -38,6 +41,12 @@ from marvis.packs.strategy.dsl import canonicalize_expression
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.evaluator import evaluate_expression_frame
 from marvis.packs.strategy.pool import validate_strategy_pool
+from marvis.packs.strategy.pool_requirement_resolver import (
+    ResolvedPoolRequirements,
+    hydrate_requirement_fields,
+    require_resolved_pool_requirements_on_connection,
+    resolve_pool_requirements,
+)
 from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignExecutionBinding,
     StrategySampleDesignRef,
@@ -48,6 +57,9 @@ from marvis.packs.strategy.sample_design_binding import (
 )
 from marvis.packs.strategy.sample_design_tools import (
     load_strategy_sample_design_artifact,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    StrategySampleDesignV2ArtifactBinding,
 )
 from marvis.packs.strategy.voting_candidate import (
     VOTING_CANDIDATE_ASSET_TYPE,
@@ -216,6 +228,7 @@ class _SampleBinding:
     overdue_amount_col: str | None
     sample_context_hash: str
     sample_design: StrategySampleDesignExecutionBinding
+    sample_design_v2: StrategySampleDesignV2ArtifactBinding | None
 
 
 def run_build_voting_candidate(inputs: object, ctx, runtime) -> dict[str, Any]:
@@ -276,7 +289,7 @@ def run_build_voting_candidate(inputs: object, ctx, runtime) -> dict[str, Any]:
             selected_lineages,
             selected_entries=selected_entries,
         )
-        frame = _read_exact_sample_frame(
+        frame, resolved_requirements = _read_exact_sample_frame(
             runtime,
             sample=sample,
             entries=selected_entries,
@@ -319,6 +332,7 @@ def run_build_voting_candidate(inputs: object, ctx, runtime) -> dict[str, Any]:
             pool_artifact=pool_artifact,
             lineages=selected_lineages,
             sample=sample,
+            resolved_requirements=resolved_requirements,
             document=document,
         )
     except StrategyError:
@@ -342,7 +356,7 @@ def require_voting_snapshot_marginal_reachability(
         [anchor_lineage],
         selected_entries=[anchor_entry],
     )
-    frame = _read_exact_sample_frame(
+    frame, _resolved_requirements = _read_exact_sample_frame(
         runtime,
         sample=sample,
         entries=entries,
@@ -767,6 +781,12 @@ def _recover_sample_binding(
             )
         if item.path != first.path:
             raise StrategyError("selected Pool entries resolve different dataset paths")
+        if _sample_design_v2_identity(
+            item.sample_design_v2
+        ) != _sample_design_v2_identity(first.sample_design_v2):
+            raise StrategyError(
+                "selected Pool entries do not share one exact SampleDesign V2"
+            )
     for entry in selected_entries:
         identity = entry["source"]["evidence_identity"]
         comparisons = {
@@ -788,12 +808,50 @@ def _recover_sample_binding(
     return first
 
 
+def _sample_design_v2_identity(
+    binding: StrategySampleDesignV2ArtifactBinding | None,
+) -> tuple[object, ...] | None:
+    if binding is None:
+        return None
+    design = binding.bundle["sample_design"]
+    header = binding.membership["header"]
+    source = binding.source_binding
+    return (
+        binding.task_id,
+        binding.membership_artifact_id,
+        binding.membership_artifact_content_hash,
+        binding.bundle_artifact_id,
+        binding.bundle_artifact_content_hash,
+        binding.bundle["bundle_id"],
+        design["sample_design_id"],
+        design["content_hash"],
+        header["membership_id"],
+        header["content_hash"],
+        header["payload_hash"],
+        header["row_count"],
+        source.dataset_id,
+        source.dataset_content_hash,
+        source.workspace_revision,
+        source.workspace_generation,
+        source.semantic_mapping_hash,
+    )
+
+
 def _sample_from_lineage(runtime, lineage: Any) -> _SampleBinding:
     # These concrete classes are intentionally detected structurally.  It
     # avoids importing pool_tools at module import time and therefore keeps the
     # future explicit Voting adapter free of an import cycle.
     if hasattr(lineage, "evidence") and hasattr(lineage, "asset_record"):
         return _sample_from_univariate_lineage(runtime, lineage)
+    if (
+        hasattr(lineage, "asset")
+        and hasattr(lineage, "selection")
+        and isinstance(
+            getattr(lineage.asset, "sample_design", None),
+            StrategySampleDesignV2ArtifactBinding,
+        )
+    ):
+        return _sample_from_scorecard_lineage(lineage)
     if hasattr(lineage, "tree") and hasattr(lineage, "selection"):
         return _sample_from_automatic_tree_lineage(runtime, lineage)
     raise StrategyError("unsupported Voting candidate source lineage")
@@ -864,6 +922,135 @@ def _sample_from_univariate_lineage(runtime, lineage: Any) -> _SampleBinding:
         overdue_amount_col=sample_design.overdue_amount_col,
         sample_context_hash=sample_hash,
         sample_design=sample_design,
+        sample_design_v2=None,
+    )
+
+
+def _sample_from_scorecard_lineage(lineage: Any) -> _SampleBinding:
+    band_binding = lineage.asset
+    sample_design_v2 = band_binding.sample_design
+    source = sample_design_v2.source_binding
+    sample_design = source.legacy
+    dataset = lineage.dataset
+    asset = band_binding.asset
+    identity = asset["identity"]
+    vector = asset["score_vector"]
+    design = sample_design_v2.bundle["sample_design"]
+    target = design["target_selector"]
+    if target.get("status") != "resolved":
+        raise StrategyError("scorecard Voting target selector is unresolved")
+    target_col = _required_text(
+        target.get("column"),
+        "scorecard Voting target_col",
+    )
+    if (
+        target_col != sample_design.target_col
+        or target.get("bad_value") != sample_design.target_bad_value
+        or target.get("drop_missing") is not sample_design.drop_nan_labels
+    ):
+        raise StrategyError(
+            "scorecard target semantics changed from governed sample design"
+        )
+
+    expected_sample_ref = {
+        "membership_artifact_id": sample_design_v2.membership_artifact_id,
+        "expected_membership_artifact_content_hash": (
+            sample_design_v2.membership_artifact_content_hash
+        ),
+        "bundle_artifact_id": sample_design_v2.bundle_artifact_id,
+        "expected_bundle_artifact_content_hash": (
+            sample_design_v2.bundle_artifact_content_hash
+        ),
+        "expected_bundle_id": sample_design_v2.bundle["bundle_id"],
+        "expected_sample_design_id": design["sample_design_id"],
+        "expected_sample_design_content_hash": design["content_hash"],
+    }
+    if asset["sample_design_ref"] != expected_sample_ref:
+        raise StrategyError(
+            "scorecard sample-design V2 reference changed from source binding"
+        )
+
+    identity_comparisons = {
+        "task_id": sample_design_v2.task_id,
+        "dataset_id": source.dataset_id,
+        "dataset_content_hash": source.dataset_content_hash,
+        "workspace_revision": source.workspace_revision,
+        "workspace_generation": source.workspace_generation,
+        "semantic_mapping_hash": source.semantic_mapping_hash,
+    }
+    if any(identity[field] != expected for field, expected in identity_comparisons.items()):
+        raise StrategyError(
+            "scorecard candidate identity changed from governed sample design"
+        )
+    dataset_comparisons = {
+        "task_id": source.task_id,
+        "dataset_id": source.dataset_id,
+        "content_hash": source.dataset_content_hash,
+        "registry_metadata_hash": source.dataset_registry_metadata_hash,
+        "columns": source.columns,
+        "row_count": source.row_count,
+    }
+    if (
+        any(
+            getattr(dataset, field) != expected
+            for field, expected in dataset_comparisons.items()
+        )
+        or Path(dataset.path) != source.dataset_path
+        or dataset.source_path != source.dataset_source_path
+    ):
+        raise StrategyError(
+            "scorecard candidate dataset changed from governed sample design"
+        )
+
+    development_count = _positive_int(
+        vector["development_count"],
+        "scorecard development_count",
+    )
+    labeled_count = _positive_int(
+        vector["labeled_count"],
+        "scorecard labeled_count",
+    )
+    if (
+        vector["row_count"] != source.row_count
+        or development_count != sample_design.development_population_count
+        or labeled_count > development_count
+        or development_count
+        != int(
+            np.count_nonzero(
+                sample_design_v2.membership["masks"]["risk/development"]
+            )
+        )
+    ):
+        raise StrategyError(
+            "scorecard candidate measurement sample changed"
+        )
+    missing = development_count - labeled_count
+    if missing and not sample_design.drop_nan_labels:
+        raise StrategyError(
+            "scorecard candidate dropped labels without sample authorization"
+        )
+    source_hash = lineage.verified_fragment["evidence"]["identity"][
+        "sample_context_hash"
+    ]
+    if not hmac.compare_digest(identity["sample_context_hash"], source_hash):
+        raise StrategyError("scorecard candidate sample context hash changed")
+    return _SampleBinding(
+        dataset=dataset,
+        path=Path(dataset.path),
+        dataset_id=str(dataset.dataset_id),
+        dataset_content_hash=str(dataset.content_hash),
+        registry_metadata_hash=str(dataset.registry_metadata_hash),
+        columns=tuple(dataset.columns),
+        row_count=int(dataset.row_count),
+        target_col=target_col,
+        drop_nan_labels=sample_design.drop_nan_labels,
+        nan_labels_dropped=missing,
+        labeled_row_count=labeled_count,
+        loan_amount_col=sample_design.loan_amount_col,
+        overdue_amount_col=sample_design.overdue_amount_col,
+        sample_context_hash=str(identity["sample_context_hash"]),
+        sample_design=sample_design,
+        sample_design_v2=sample_design_v2,
     )
 
 
@@ -938,6 +1125,7 @@ def _sample_from_automatic_tree_lineage(runtime, lineage: Any) -> _SampleBinding
         overdue_amount_col=overdue_col,
         sample_context_hash=str(identity["sample_context_hash"]),
         sample_design=sample_design,
+        sample_design_v2=None,
     )
 
 
@@ -946,10 +1134,25 @@ def _read_exact_sample_frame(
     *,
     sample: _SampleBinding,
     entries: Sequence[Mapping[str, Any]],
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, ResolvedPoolRequirements | None]:
+    requirements = _pool_requirements_from_entries(entries)
+    resolved: ResolvedPoolRequirements | None = None
+    if requirements:
+        if sample.sample_design_v2 is None:
+            raise StrategyError(
+                "Voting score requirements require one exact SampleDesign V2"
+            )
+        resolved = resolve_pool_requirements(
+            _modeling_runtime(runtime),
+            task_id=sample.sample_design_v2.task_id,
+            compiled_design={"requirements": requirements},
+            sample_design=sample.sample_design_v2,
+        )
+    virtual_fields = set(() if resolved is None else resolved.virtual_fields)
     fields: set[str] = set()
     for entry in entries:
         fields.update(_expression_fields(entry["execution"]["condition"]))
+    fields -= virtual_fields
     fields.add(sample.target_col)
     if sample.sample_design.split_column is not None:
         fields.add(sample.sample_design.split_column)
@@ -964,6 +1167,9 @@ def _read_exact_sample_frame(
     frame = runtime.backend.read_frame(sample.path, columns=sorted(fields))
     if len(frame) != sample.row_count:
         raise StrategyError("Voting source dataset row count changed")
+    frame = frame.reset_index(drop=True)
+    if resolved is not None:
+        frame = hydrate_requirement_fields(frame, resolved=resolved)
     # Full pool lineage replay has already checked the registry row and bytes.
     # Do one more independent byte verification immediately around evaluation.
     _require_file_hash(
@@ -971,10 +1177,88 @@ def _read_exact_sample_frame(
         sample.dataset_content_hash,
         "Voting source dataset content hash changed",
     )
-    return bind_strategy_development_frame(
-        frame,
-        binding=sample.sample_design,
+    return (
+        bind_strategy_development_frame(
+            frame,
+            binding=sample.sample_design,
+        ),
+        resolved,
     )
+
+
+def _pool_requirements_from_entries(
+    entries: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project entry requirements into the resolver's canonical outer shape.
+
+    Voting fragments preserve each selected member requirement in a lineage
+    envelope.  The resolver consumes the terminal executable requirement;
+    this projection does not mutate the Pool entry or the Voting asset.
+    """
+
+    envelope_fields = {
+        "entry_id",
+        "rule_id",
+        "fragment_id",
+        "requirement",
+    }
+    projected: list[dict[str, Any]] = []
+    for entry in entries:
+        execution = entry.get("execution")
+        source = entry.get("source")
+        if not isinstance(execution, Mapping) or not isinstance(source, Mapping):
+            raise StrategyError("Voting Pool entry execution lineage is invalid")
+        raw_requirements = execution.get("requirements")
+        if isinstance(
+            raw_requirements,
+            str | bytes | bytearray,
+        ) or not isinstance(raw_requirements, Sequence):
+            raise StrategyError("Voting Pool entry requirements must be an array")
+        outer_rule_id = _required_text(entry.get("rule_id"), "Voting rule_id")
+        outer_fragment_id = _required_text(
+            source.get("fragment_id"),
+            "Voting fragment_id",
+        )
+        for raw in raw_requirements:
+            rule_id = outer_rule_id
+            fragment_id = outer_fragment_id
+            requirement = raw
+            while (
+                isinstance(requirement, Mapping)
+                and set(requirement) == envelope_fields
+            ):
+                _required_text(
+                    requirement.get("entry_id"),
+                    "Voting requirement entry_id",
+                )
+                rule_id = _required_text(
+                    requirement.get("rule_id"),
+                    "Voting requirement rule_id",
+                )
+                fragment_id = _required_text(
+                    requirement.get("fragment_id"),
+                    "Voting requirement fragment_id",
+                )
+                requirement = requirement.get("requirement")
+            projected.append(
+                {
+                    "rule_id": rule_id,
+                    "fragment_id": fragment_id,
+                    "requirement": requirement,
+                }
+            )
+    return projected
+
+
+def _modeling_runtime(runtime):
+    """Add score-evidence repositories without mutating the pack runtime."""
+
+    if hasattr(runtime, "experiments") and hasattr(runtime, "modeling_repo"):
+        return runtime
+    proxy = SimpleNamespace(**vars(runtime))
+    proxy.experiments = ExperimentStore(runtime.settings.db_path)
+    proxy.modeling_repo = ModelingRepository(runtime.settings.db_path)
+    return proxy
 
 
 def _measure_voting(
@@ -1263,6 +1547,7 @@ def _persist_voting_candidate(
     pool_artifact: Mapping[str, Any],
     lineages: Sequence[Any],
     sample: _SampleBinding,
+    resolved_requirements: ResolvedPoolRequirements | None,
     document: Mapping[str, Any],
 ) -> dict[str, Any]:
     from marvis.packs.strategy import pool_tools
@@ -1338,6 +1623,11 @@ def _persist_voting_candidate(
                     conn,
                     sample.sample_design,
                 )
+                if resolved_requirements is not None:
+                    require_resolved_pool_requirements_on_connection(
+                        conn,
+                        resolved_requirements,
+                    )
                 verify_voting_candidate_asset_against_pool(asset, locked_pool)
                 _require_existing_artifact_consistent(
                     conn,
@@ -1370,6 +1660,11 @@ def _persist_voting_candidate(
                     content_hash=content_hash,
                     provenance=provenance,
                 )
+                if resolved_requirements is not None:
+                    require_resolved_pool_requirements_on_connection(
+                        conn,
+                        resolved_requirements,
+                    )
                 conn.commit()
                 db_committed = True
             except Exception:

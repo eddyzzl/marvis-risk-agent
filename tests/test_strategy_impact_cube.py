@@ -390,6 +390,97 @@ def test_impact_cube_keeps_approval_and_risk_denominators_separate() -> None:
     }
 
 
+def test_impact_cube_executes_a_pre_hydrated_governed_pool_requirement() -> None:
+    virtual_field = "__marvis_model_pd_" + "1" * 16
+    requirement = {
+        "type": "model_score_vector.v1",
+        "virtual_field": virtual_field,
+        "score_product": "raw_native_uncalibrated_bad_probability",
+        "score_evidence_artifact_id": "2" * 64,
+        "score_evidence_artifact_content_hash": "3" * 64,
+        "score_vector_artifact_id": "1" * 64,
+        "score_vector_artifact_content_hash": "4" * 64,
+    }
+    fragment = build_verified_candidate_fragment(
+        artifact={
+            "artifact_id": "scorecard-selection",
+            "artifact_kind": "strategy_scorecard_cutoff_selection_json",
+            "artifact_schema_version": (
+                "strategy.scorecard-cutoff-selection-artifact.v1"
+            ),
+            "artifact_content_hash": "5" * 64,
+            "origin_tool": "strategy.materialize_scorecard_cutoff_selection",
+        },
+        asset={
+            "schema_version": "strategy.scorecard-band-asset.v1",
+            "asset_id": "scorecard-band-asset-" + "6" * 32,
+            "asset_hash": "7" * 64,
+            "asset_type": "scorecard_band",
+        },
+        fragment_type="strategy_rule",
+        rule_id="scorecard-cutoff-rule-" + "8" * 32,
+        condition={
+            "op": "compare",
+            "field": virtual_field,
+            "operator": ">=",
+            "value": 0.5,
+            "missing": "no_match",
+        },
+        requirements=[requirement],
+        effect_id="scorecard-cutoff-effect-" + "9" * 32,
+        evidence_id="scorecard-band-asset-" + "6" * 32,
+        evidence_hash="7" * 64,
+        evidence_identity={
+            "dataset_id": "dataset-1",
+            "dataset_content_hash": HASH_A,
+            "workspace_revision": 3,
+            "workspace_generation": 1,
+            "semantic_mapping_hash": HASH_B,
+            "sample_context_hash": HASH_C,
+        },
+    )
+    pool = add_verified_candidate_fragment(
+        None,
+        task_id="task-1",
+        strategy_type="approval",
+        default_action=_typed_action("approval", "approve"),
+        verified_candidate_fragment=fragment,
+        action=_typed_action("approval", "reject"),
+    )
+    compiled = compile_strategy_pool(pool)
+    assert compiled["requirements"][0]["requirement"] == requirement
+
+    frame = _frame()
+    frame[virtual_field] = [0.1, 0.6, 0.4, 0.8, 0.2, 0.9]
+    cube = build_strategy_impact_cube(
+        pool=pool,
+        approval_partition_frames={
+            "development": frame.iloc[:3].reset_index(drop=True),
+            "validation": frame.iloc[3:].reset_index(drop=True),
+        },
+        partition_frames={
+            "development": frame.iloc[:3].reset_index(drop=True),
+            "validation": frame.iloc[3:].reset_index(drop=True),
+        },
+        pool_artifact_ref=_pool_artifact_ref(),
+        sample_design_v2_ref=_sample_design_v2_ref(),
+        dataset_binding=_dataset_binding(),
+        legacy_development_ref=_legacy_ref(),
+        target_col="bad",
+        target_bad_value=1,
+        month_col=None,
+        group_col=None,
+        segment_col=None,
+        current_strategy_spec=None,
+        current_strategy_ref=None,
+        economics_bindings=None,
+    )
+
+    assert validate_strategy_impact_cube(cube) == cube
+    overall = _overall(cube)
+    assert overall["new"]["value"]["population_count"] == 3
+
+
 def test_impact_cube_preserves_amount_coverage_sums_and_waterfall_conservation() -> None:
     cube = _build("approval")
     approval = _slices(

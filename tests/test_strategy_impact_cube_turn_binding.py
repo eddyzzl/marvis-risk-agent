@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 from marvis.agent.strategy_request_compiler import StandardWorkflowRequestDraft
 from marvis.agent.strategy_setup import StrategySetupError
 from marvis.agent.turn_handlers import _strategy_impact_cube_plan_slots
+import marvis.agent.turn_handlers as turn_handlers
 from marvis.app import create_app
 from marvis.packs.strategy.dsl import strategy_spec_hash
 from marvis.packs.strategy.pool import compile_strategy_pool
@@ -138,6 +140,67 @@ def test_impact_cube_turn_binds_explicit_partitions_economics_and_current_strate
         "ead": {"kind": "column", "column": "loan_amount"},
         "lgd": {"kind": "scalar", "value": 0.5},
     }
+
+
+def test_impact_cube_turn_allows_pool_with_resolvable_score_requirement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    original_load = (
+        turn_handlers.load_current_strategy_candidate_pool_artifact
+    )
+    binding = original_load(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        strategy_type="approval",
+        expected_pool_revision=fx["pool"]["revision"],
+        expected_pool_snapshot_hash=fx["pool"]["snapshot_hash"],
+    )
+    requirement = {
+        "rule_id": binding.pool["entries"][0]["rule_id"],
+        "fragment_id": binding.pool["entries"][0]["source"]["fragment_id"],
+        "requirement": {
+            "type": "model_score_vector.v1",
+            "virtual_field": "__marvis_model_pd_" + "1" * 16,
+            "score_product": "raw_native_uncalibrated_bad_probability",
+            "score_evidence_artifact_id": "2" * 64,
+            "score_evidence_artifact_content_hash": "3" * 64,
+            "score_vector_artifact_id": "1" * 64,
+            "score_vector_artifact_content_hash": "4" * 64,
+        },
+    }
+    controlled = replace(
+        binding,
+        compiled_design={
+            **binding.compiled_design,
+            "requirements": [requirement],
+        },
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "load_current_strategy_candidate_pool_artifact",
+        lambda *args, **kwargs: controlled,
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "resolve_pool_requirements",
+        lambda *args, **kwargs: SimpleNamespace(
+            requirements=tuple(controlled.compiled_design["requirements"])
+        ),
+    )
+    draft = StandardWorkflowRequestDraft(
+        workflow="strategy_impact_cube",
+        workflow_inputs={"strategy_type": "approval"},
+    )
+
+    slots = _strategy_impact_cube_plan_slots(
+        _runtime(fx),
+        fx["task"],
+        draft,
+    )
+
+    assert slots["pool_ref"]["expected_pool_id"] == binding.pool["pool_id"]
 
 
 def test_impact_cube_turn_rejects_sensitive_or_unknown_dimension(

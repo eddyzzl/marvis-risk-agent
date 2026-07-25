@@ -88,6 +88,21 @@ from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
     load_verified_cross_matrix_source_artifact,
     load_verified_cross_matrix_source_artifact_on_connection,
 )
+from marvis.packs.strategy.scorecard_candidate import (
+    SCORECARD_BAND_ASSET_ARTIFACT_KIND,
+    SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
+    SCORECARD_BAND_ASSET_ORIGIN_TOOL,
+    SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+    SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
+    scorecard_cutoff_selection_to_verified_candidate_fragment,
+)
+from marvis.packs.strategy.scorecard_candidate_tools import (
+    ScorecardBandAssetArtifactBinding,
+    ScorecardCutoffSelectionArtifactBinding,
+    load_scorecard_cutoff_selection_artifact,
+    require_scorecard_cutoff_selection_artifact_binding_on_connection,
+)
 from marvis.packs.strategy.voting_candidate import (
     VOTING_CANDIDATE_ASSET_TYPE,
     verify_voting_candidate_asset_against_pool,
@@ -289,6 +304,27 @@ class _CrossMatrixCandidateLineage:
 
 
 @dataclass(frozen=True)
+class _ScorecardDatasetBinding:
+    dataset_id: str
+    task_id: str
+    source_path: str
+    path: Path
+    content_hash: str
+    registry_metadata_hash: str
+    columns: tuple[str, ...]
+    row_count: int
+
+
+@dataclass(frozen=True)
+class _ScorecardCandidateLineage:
+    selection: ScorecardCutoffSelectionArtifactBinding
+    asset: ScorecardBandAssetArtifactBinding
+    dataset: _ScorecardDatasetBinding
+    verified_fragment: dict[str, Any]
+    source_binding: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class _VotingCandidateLineage:
     candidate: VerifiedVotingCandidateArtifact
     parent_pool: dict[str, Any]
@@ -302,6 +338,7 @@ _CandidateLineage = (
     _UnivariateCandidateLineage
     | _AutomaticTreeCandidateLineage
     | _CrossMatrixCandidateLineage
+    | _ScorecardCandidateLineage
     | _VotingCandidateLineage
 )
 
@@ -455,7 +492,7 @@ def _require_snapshot_voting_marginals(
 
 
 def run_add_candidate_to_pool(inputs, ctx, runtime) -> dict[str, Any]:
-    """Add a verified univariate, tree-leaf, Cross group, or Voting candidate."""
+    """Add one verified concrete candidate through the generic Pool seam."""
 
     try:
         normalized = _validate_add_inputs(inputs)
@@ -1307,6 +1344,16 @@ def _load_candidate_lineage(
         CROSS_MATRIX_ASSET_ORIGIN_TOOL,
         CROSS_MATRIX_ASSET_ARTIFACT_V2_SCHEMA_VERSION,
     )
+    scorecard_selection_triple = (
+        SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+        SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
+        SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    )
+    scorecard_asset_triple = (
+        SCORECARD_BAND_ASSET_ARTIFACT_KIND,
+        SCORECARD_BAND_ASSET_ORIGIN_TOOL,
+        SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
+    )
     if triple == univariate_triple:
         return _load_univariate_candidate_lineage(
             runtime,
@@ -1341,6 +1388,20 @@ def _load_candidate_lineage(
         raise StrategyError(
             "complete Cross Matrix assets cannot be admitted directly; "
             "materialize a cell selection first"
+        )
+    if triple == scorecard_selection_triple:
+        return _load_scorecard_candidate_lineage(
+            runtime,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            expected_content_hash=expected_content_hash,
+            expected_asset_id=expected_asset_id,
+            expected_asset_hash=expected_asset_hash,
+        )
+    if triple == scorecard_asset_triple:
+        raise StrategyError(
+            "complete scorecard band assets cannot be admitted directly; "
+            "materialize a cutoff selection first"
         )
     if triple in {voting_triple, legacy_voting_triple}:
         return _load_voting_candidate_lineage(
@@ -1800,6 +1861,91 @@ def _require_cross_matrix_groups_disjoint(
         )
 
 
+def _load_scorecard_candidate_lineage(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+    expected_asset_id: str,
+    expected_asset_hash: str,
+) -> _ScorecardCandidateLineage:
+    record = runtime.task_artifacts.get_for_task(task_id, artifact_id)
+    if record is None:
+        raise StrategyError("scorecard cutoff selection artifact not found")
+    source_record = _normalize_source_record(record)
+    provenance = source_record.provenance
+    selection = load_scorecard_cutoff_selection_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_artifact_content_hash=expected_content_hash,
+        expected_selection_id=_required_text(
+            provenance.get("selection_id"),
+            "scorecard selection provenance.selection_id",
+        ),
+        expected_selection_hash=_required_hash(
+            provenance.get("selection_hash"),
+            "scorecard selection provenance.selection_hash",
+        ),
+    )
+    asset = selection.source_asset_binding
+    if asset.asset["asset_id"] != expected_asset_id or not hmac.compare_digest(
+        asset.asset["asset_hash"],
+        expected_asset_hash,
+    ):
+        raise StrategyError(
+            "scorecard cutoff selection source asset identity changed"
+        )
+    source = asset.sample_design.source_binding
+    identity = asset.asset["identity"]
+    if (
+        selection.task_id != task_id
+        or asset.task_id != task_id
+        or identity["task_id"] != task_id
+        or source.task_id != task_id
+        or source.dataset_id != identity["dataset_id"]
+        or not hmac.compare_digest(
+            source.dataset_content_hash,
+            identity["dataset_content_hash"],
+        )
+        or source.workspace_revision != identity["workspace_revision"]
+        or source.workspace_generation != identity["workspace_generation"]
+        or not hmac.compare_digest(
+            source.semantic_mapping_hash,
+            identity["semantic_mapping_hash"],
+        )
+    ):
+        raise StrategyError(
+            "scorecard cutoff selection sample or dataset identity changed"
+        )
+    verified_fragment = scorecard_cutoff_selection_to_verified_candidate_fragment(
+        selection.selection,
+        asset.asset,
+        selection_artifact_binding=selection.to_domain_binding(),
+        source_artifact_binding=asset.to_domain_binding(),
+    )
+    source_binding, _rule_id, _execution = verified_fragment_pool_parts(
+        verified_fragment
+    )
+    return _ScorecardCandidateLineage(
+        selection=selection,
+        asset=asset,
+        dataset=_ScorecardDatasetBinding(
+            dataset_id=source.dataset_id,
+            task_id=source.task_id,
+            source_path=source.dataset_source_path,
+            path=source.dataset_path,
+            content_hash=source.dataset_content_hash,
+            registry_metadata_hash=source.dataset_registry_metadata_hash,
+            columns=source.columns,
+            row_count=source.row_count,
+        ),
+        verified_fragment=verified_fragment,
+        source_binding=source_binding,
+    )
+
+
 def _load_voting_candidate_lineage(
     runtime,
     *,
@@ -2114,6 +2260,12 @@ def _require_lineage_on_connection(
             cache=cache if cache is not None else _LineageCache.empty(),
         )
         return
+    if isinstance(lineage, _ScorecardCandidateLineage):
+        _require_scorecard_lineage_on_connection(
+            conn,
+            lineage,
+        )
+        return
     if isinstance(lineage, _VotingCandidateLineage):
         _require_voting_lineage_on_connection(
             conn,
@@ -2123,6 +2275,49 @@ def _require_lineage_on_connection(
         )
         return
     raise StrategyError("unsupported candidate lineage type")
+
+
+def _require_scorecard_lineage_on_connection(
+    conn,
+    lineage: _ScorecardCandidateLineage,
+) -> None:
+    require_scorecard_cutoff_selection_artifact_binding_on_connection(
+        conn,
+        lineage.selection,
+    )
+    asset = lineage.selection.source_asset_binding
+    if asset is not lineage.asset:
+        raise StrategyError(
+            "scorecard cutoff selection source binding changed before Pool persistence"
+        )
+    source = asset.sample_design.source_binding
+    dataset = _ScorecardDatasetBinding(
+        dataset_id=source.dataset_id,
+        task_id=source.task_id,
+        source_path=source.dataset_source_path,
+        path=source.dataset_path,
+        content_hash=source.dataset_content_hash,
+        registry_metadata_hash=source.dataset_registry_metadata_hash,
+        columns=source.columns,
+        row_count=source.row_count,
+    )
+    verified_fragment = scorecard_cutoff_selection_to_verified_candidate_fragment(
+        lineage.selection.selection,
+        asset.asset,
+        selection_artifact_binding=lineage.selection.to_domain_binding(),
+        source_artifact_binding=asset.to_domain_binding(),
+    )
+    source_binding, _rule_id, _execution = verified_fragment_pool_parts(
+        verified_fragment
+    )
+    if (
+        dataset != lineage.dataset
+        or verified_fragment != lineage.verified_fragment
+        or source_binding != lineage.source_binding
+    ):
+        raise StrategyError(
+            "scorecard candidate lineage changed before Pool persistence"
+        )
 
 
 def _require_univariate_lineage_on_connection(

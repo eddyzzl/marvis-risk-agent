@@ -39,6 +39,14 @@ from marvis.packs.strategy.pool_tools import (
     load_current_strategy_candidate_pool_artifact,
     require_strategy_candidate_pool_artifact_binding_on_connection,
 )
+from marvis.packs.strategy.pool_requirement_resolver import (
+    ResolvedPoolRequirements,
+    hydrate_requirement_fields,
+    pool_requirement_bindings_provenance,
+    require_resolved_pool_requirements_on_connection,
+    resolve_pool_requirements,
+    validate_pool_requirement_bindings_provenance,
+)
 from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
@@ -60,6 +68,9 @@ from marvis.repositories.task_artifacts import (
 IMPACT_CUBE_TOOL_SCHEMA_VERSION = "strategy.measure-impact-cube-tool.v3"
 IMPACT_CUBE_ARTIFACT_KIND = "strategy_impact_cube_json"
 IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION = "strategy.impact-cube-artifact.v3"
+IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION = (
+    "strategy.impact-cube-artifact.v4"
+)
 IMPACT_CUBE_ORIGIN_TOOL = "strategy.measure_strategy_impact_cube"
 IMPACT_CUBE_MEASUREMENT_RUN_SCHEMA_VERSION = (
     "strategy.impact-cube-measurement-run.v1"
@@ -190,6 +201,9 @@ _PROVENANCE_FIELDS = frozenset(
         "producer_run",
     }
 )
+_REQUIREMENTS_PROVENANCE_FIELDS = _PROVENANCE_FIELDS | {
+    "requirement_bindings"
+}
 _PRODUCER_RUN_FIELDS = frozenset(
     {
         "schema_version",
@@ -275,6 +289,12 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
             task_id=task_id,
             request=request,
         )
+        resolved_requirements = resolve_pool_requirements(
+            runtime,
+            task_id=task_id,
+            compiled_design=pool.compiled_design,
+            sample_design=sample,
+        )
         semantics = _require_sample_contract(
             pool=pool,
             sample=sample,
@@ -292,6 +312,7 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
             sample=sample,
             current=current,
             task_id=task_id,
+            resolved_requirements=resolved_requirements,
         )
         population_frames = _read_partition_frames(
             runtime,
@@ -302,6 +323,7 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
             target_col=semantics["target_col"],
             loan_amount_col=semantics["loan_amount_col"],
             overdue_amount_col=semantics["overdue_amount_col"],
+            resolved_requirements=resolved_requirements,
         )
         cube = build_strategy_impact_cube(
             pool=pool.pool,
@@ -350,6 +372,7 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
             pool=pool,
             sample=sample,
             current=current,
+            resolved_requirements=resolved_requirements,
             cube=cube,
         )
     except StrategyError:
@@ -715,10 +738,6 @@ def _load_pool_binding(
         raise StrategyError("current Strategy Pool identity changed")
     if not binding.pool["entries"]:
         raise StrategyError("cannot measure an empty Strategy Pool")
-    if binding.compiled_design["requirements"]:
-        raise StrategyError(
-            "ImpactCube cannot execute unresolved Pool requirements"
-        )
     return binding
 
 
@@ -875,6 +894,7 @@ def _require_bindings_under_lock(
     sample: StrategySampleDesignV2ArtifactBinding,
     current: _CurrentStrategyBinding | None,
     task_id: str,
+    resolved_requirements: ResolvedPoolRequirements,
 ) -> None:
     with runtime.task_artifacts.transaction() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -884,6 +904,7 @@ def _require_bindings_under_lock(
             sample=sample,
             current=current,
             task_id=task_id,
+            resolved_requirements=resolved_requirements,
         )
         _require_dataset_unchanged(sample)
         conn.commit()
@@ -896,6 +917,7 @@ def _require_bindings_on_connection(
     sample: StrategySampleDesignV2ArtifactBinding,
     current: _CurrentStrategyBinding | None,
     task_id: str,
+    resolved_requirements: ResolvedPoolRequirements,
 ) -> None:
     require_strategy_candidate_pool_artifact_binding_on_connection(conn, pool)
     require_strategy_sample_design_v2_artifact_binding_on_connection(
@@ -906,6 +928,10 @@ def _require_bindings_on_connection(
         conn,
         current=current,
         task_id=task_id,
+    )
+    require_resolved_pool_requirements_on_connection(
+        conn,
+        resolved_requirements,
     )
 
 
@@ -954,6 +980,7 @@ def _read_partition_frames(
     target_col: str,
     loan_amount_col: str | None,
     overdue_amount_col: str | None,
+    resolved_requirements: ResolvedPoolRequirements,
 ) -> dict[str, dict[str, pd.DataFrame]]:
     path = sample.source_binding.dataset_path
     _require_dataset_path(
@@ -982,7 +1009,9 @@ def _read_partition_frames(
         for binding in economics.values()
         if binding["kind"] == "column"
     )
-    unknown = sorted(fields - set(sample.source_binding.columns))
+    virtual_fields = set(resolved_requirements.virtual_fields)
+    physical_fields = fields - virtual_fields
+    unknown = sorted(physical_fields - set(sample.source_binding.columns))
     if unknown:
         raise StrategyError(
             "ImpactCube dataset is missing columns: " + ", ".join(unknown)
@@ -991,7 +1020,7 @@ def _read_partition_frames(
         path,
         root=Path(runtime.settings.datasets_dir).absolute(),
         expected_content_hash=sample.source_binding.dataset_content_hash,
-        columns=sorted(fields),
+        columns=sorted(physical_fields),
     )
     if not isinstance(frame, pd.DataFrame) or len(frame) != (
         sample.source_binding.row_count
@@ -999,6 +1028,10 @@ def _read_partition_frames(
         raise StrategyError(
             "ImpactCube analysis universe row count changed"
         )
+    frame = hydrate_requirement_fields(
+        frame,
+        resolved=resolved_requirements,
+    )
 
     masks: dict[str, dict[str, np.ndarray]] = {
         "approval": {},
@@ -1540,6 +1573,7 @@ def _persist_cube(
     pool: StrategyCandidatePoolArtifactBinding,
     sample: StrategySampleDesignV2ArtifactBinding,
     current: _CurrentStrategyBinding | None,
+    resolved_requirements: ResolvedPoolRequirements,
     cube: Mapping[str, Any],
 ) -> dict[str, Any]:
     canonical = canonical_strategy_impact_cube_json(cube).encode("utf-8")
@@ -1567,7 +1601,11 @@ def _persist_cube(
     )
     sources = cube["source_bindings"]
     provenance = {
-        "schema_version": IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": (
+            IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION
+            if resolved_requirements.requirements
+            else IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION
+        ),
         "producer_version": STRATEGY_IMPACT_CUBE_PRODUCER_VERSION,
         "task_id": task_id,
         "cube_id": cube["cube_id"],
@@ -1596,6 +1634,10 @@ def _persist_cube(
         "lifecycle": dict(_LIFECYCLE),
         "producer_run": producer_run,
     }
+    if resolved_requirements.requirements:
+        provenance["requirement_bindings"] = (
+            pool_requirement_bindings_provenance(resolved_requirements)
+        )
     _validate_provenance(provenance)
     uow = ArtifactUnitOfWork()
     staged = uow.stage_file(out_dir, final_path.name)
@@ -1624,6 +1666,7 @@ def _persist_cube(
                     sample=sample,
                     current=current,
                     task_id=task_id,
+                    resolved_requirements=resolved_requirements,
                 )
                 _require_dataset_unchanged(sample)
                 row = _select_artifact_row(
@@ -1672,6 +1715,7 @@ def _persist_cube(
                     sample=sample,
                     current=current,
                     task_id=task_id,
+                    resolved_requirements=resolved_requirements,
                 )
                 _require_dataset_unchanged(sample)
                 retained_fd, retained_identity = _open_retained_exact_file(
@@ -1719,6 +1763,7 @@ def _persist_cube(
                     sample=sample,
                     current=current,
                     task_id=task_id,
+                    resolved_requirements=resolved_requirements,
                 )
                 _require_dataset_unchanged(sample)
                 _require_retained_exact_file(
@@ -1850,8 +1895,19 @@ def _tool_output(
 
 def _validate_provenance(value: object) -> dict[str, Any]:
     obj = _json_object(value, "ImpactCube provenance")
-    _exact_fields(obj, _PROVENANCE_FIELDS, "ImpactCube provenance")
-    if obj["schema_version"] != IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION:
+    schema_version = obj.get("schema_version")
+    if schema_version == IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION:
+        _exact_fields(obj, _PROVENANCE_FIELDS, "ImpactCube provenance")
+    elif schema_version == IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION:
+        _exact_fields(
+            obj,
+            _REQUIREMENTS_PROVENANCE_FIELDS,
+            "ImpactCube provenance",
+        )
+        validate_pool_requirement_bindings_provenance(
+            obj["requirement_bindings"]
+        )
+    else:
         raise StrategyError("ImpactCube provenance schema_version is invalid")
     if obj["producer_version"] != STRATEGY_IMPACT_CUBE_PRODUCER_VERSION:
         raise StrategyError("ImpactCube provenance producer_version is invalid")
@@ -2656,6 +2712,7 @@ def _finite_number(value: object, name: str) -> int | float:
 __all__ = [
     "IMPACT_CUBE_ARTIFACT_KIND",
     "IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION",
+    "IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION",
     "IMPACT_CUBE_MEASUREMENT_AUDIT_KIND",
     "IMPACT_CUBE_MEASUREMENT_RUN_SCHEMA_VERSION",
     "IMPACT_CUBE_ORIGIN_TOOL",

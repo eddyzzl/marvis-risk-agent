@@ -45,6 +45,9 @@ _BINDING_FIELDS = frozenset(
         "asset_hash",
     }
 )
+_FRAGMENT_REQUIREMENT_FIELDS = frozenset(
+    {"entry_id", "rule_id", "fragment_id", "requirement"}
+)
 
 
 class VotingCandidateFragmentError(StrategyError):
@@ -68,6 +71,9 @@ def voting_candidate_to_verified_fragment(
     lifecycle = asset["lifecycle"]
     fragment = asset["fragment"]
     evidence = asset["candidate_evidence"]
+    requirements = _generic_execution_requirements(
+        fragment["requirements"]
+    )
     try:
         return build_verified_candidate_fragment(
             artifact={
@@ -87,7 +93,7 @@ def voting_candidate_to_verified_fragment(
             fragment_id=fragment["fragment_id"],
             rule_id=fragment["rule_id"],
             condition=fragment["condition"],
-            requirements=fragment["requirements"],
+            requirements=requirements,
             effect_id=fragment["effect_id"],
             evidence_id=evidence["candidate_id"],
             evidence_hash=evidence["evidence_hash"],
@@ -100,6 +106,31 @@ def voting_candidate_to_verified_fragment(
         raise VotingCandidateFragmentError(
             "Voting candidate failed generic fragment projection"
         ) from exc
+
+
+def _generic_execution_requirements(value: object) -> list[dict[str, Any]]:
+    """Unwrap Voting lineage envelopes into Pool-executable typed leaves."""
+
+    if not isinstance(value, list):
+        raise VotingCandidateFragmentError(
+            "Voting fragment requirements must be an array"
+        )
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != _FRAGMENT_REQUIREMENT_FIELDS
+        ):
+            raise VotingCandidateFragmentError(
+                f"Voting fragment requirements[{index}] lineage is invalid"
+            )
+        requirement = item["requirement"]
+        if not isinstance(requirement, Mapping) or "type" not in requirement:
+            raise VotingCandidateFragmentError(
+                f"Voting fragment requirements[{index}] leaf is not typed"
+            )
+        result.append(dict(requirement))
+    return result
 
 
 def _binding(

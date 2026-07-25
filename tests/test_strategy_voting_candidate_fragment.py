@@ -32,7 +32,7 @@ SAMPLE_DESIGN_REF = {
 }
 
 
-def _source(index: int) -> dict:
+def _source(index: int, *, requirement: dict | None = None) -> dict:
     digest = str(index + 1) * 64
     return build_verified_candidate_fragment(
         artifact={
@@ -52,12 +52,16 @@ def _source(index: int) -> dict:
         rule_id=f"source-rule-{index}",
         condition={
             "op": "compare",
-            "field": f"score_{index}",
+            "field": (
+                f"score_{index}"
+                if requirement is None
+                else requirement["virtual_field"]
+            ),
             "operator": ">=",
-            "value": 1,
+            "value": 1 if requirement is None else 0.5,
             "missing": "no_match",
         },
-        requirements=[],
+        requirements=[] if requirement is None else [requirement],
         effect_id=f"source-effect-{index}",
         evidence_id=f"source-evidence-{index}",
         evidence_hash=digest,
@@ -131,6 +135,81 @@ def test_verified_voting_asset_projects_without_business_action() -> None:
     assert fragment["fragment"]["effect_id"] == asset["effect"]["effect_id"]
     assert fragment["asset"]["asset_id"] == asset["asset_id"]
     assert "action" not in fragment
+
+
+def test_voting_projection_preserves_typed_leaf_requirements_for_pool_execution(
+) -> None:
+    vector_id = "1" * 64
+    requirement = {
+        "type": "model_score_vector.v1",
+        "virtual_field": "__marvis_model_pd_" + vector_id[:16],
+        "score_product": "raw_native_uncalibrated_bad_probability",
+        "score_evidence_artifact_id": "2" * 64,
+        "score_evidence_artifact_content_hash": "3" * 64,
+        "score_vector_artifact_id": vector_id,
+        "score_vector_artifact_content_hash": "4" * 64,
+    }
+    pool = None
+    for index in range(2):
+        pool = add_verified_candidate_fragment(
+            pool,
+            task_id="task-1",
+            strategy_type="approval",
+            default_action={"type": "approval", "value": "approve"},
+            verified_candidate_fragment=_source(
+                index,
+                requirement=requirement if index == 0 else None,
+            ),
+            action={"type": "reject", "value": "reject"},
+        )
+    assert pool is not None
+    selected_ids = [entry["entry_id"] for entry in pool["entries"]]
+    asset = build_voting_candidate_asset(
+        pool,
+        selected_entry_ids=selected_ids,
+        n=1,
+        target_col="bad",
+        sample_design_ref=SAMPLE_DESIGN_REF,
+        effect={
+            "population_count": 10,
+            "labeled_count": 10,
+            "matched_count": 2,
+            "matched_rate": 0.2,
+            "matched_bad_count": 1,
+            "matched_bad_rate": 0.5,
+            "unmatched_count": 8,
+            "unmatched_bad_count": 1,
+            "unmatched_bad_rate": 0.125,
+            "bad_capture_rate": 0.5,
+            "lift": 2.5,
+        },
+    )
+    assert asset["fragment"]["requirements"][0]["requirement"] == requirement
+
+    fragment = voting_candidate_to_verified_fragment(
+        asset,
+        artifact_binding=_binding(asset),
+    )
+
+    assert fragment["fragment"]["requirements"] == [requirement]
+    placed = add_verified_candidate_fragment(
+        pool,
+        task_id="task-1",
+        strategy_type="approval",
+        default_action={"type": "approval", "value": "approve"},
+        verified_candidate_fragment=fragment,
+        action={"type": "review", "value": "review"},
+        placement_mode="replace_selected_members",
+        selected_entry_ids=selected_ids,
+    )
+    compiled = compile_strategy_pool(placed)
+    assert compiled["requirements"] == [
+        {
+            "rule_id": fragment["fragment"]["rule_id"],
+            "fragment_id": fragment["fragment"]["fragment_id"],
+            "requirement": requirement,
+        }
+    ]
 
 
 def test_voting_fragment_rejects_forged_artifact_binding() -> None:

@@ -2,22 +2,39 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import copy
+from dataclasses import replace
+import hashlib
+import json
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from marvis.data.workspace import data_semantic_mapping_hash
 from marvis.files import sha256_file
 from marvis.packs.strategy import tools as strategy_tools
+from marvis.packs.strategy.candidate_fragment import (
+    build_verified_candidate_fragment,
+)
 from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.pool import ABSENT_POOL_SNAPSHOT_HASH
+from marvis.packs.strategy.pool import (
+    ABSENT_POOL_SNAPSHOT_HASH,
+    add_verified_candidate_fragment,
+    compile_strategy_pool,
+)
 from marvis.packs.strategy.pool_tools import run_add_candidate_to_pool
+from marvis.packs.strategy.pool_requirement_resolver import (
+    ResolvedPoolRequirements,
+)
 from marvis.packs.strategy.pool_validation import (
     canonical_strategy_pool_validation_json,
 )
 from marvis.packs.strategy.pool_validation_tools import (
     POOL_VALIDATION_ARTIFACT_KIND,
+    POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION,
+    POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION,
     POOL_VALIDATION_TOOL_SCHEMA_VERSION,
     run_measure_strategy_pool_validation,
     validate_measure_strategy_pool_validation_tool_output,
@@ -196,6 +213,308 @@ def _validation_artifacts(fx: dict) -> list[dict]:
     ]
 
 
+def _controlled_score_requirement(
+    *,
+    pool_binding,
+    virtual_field: str = "__marvis_model_pd_0123456789abcdef",
+) -> tuple[object, ResolvedPoolRequirements]:
+    requirement = {
+        "type": "model_score_vector.v1",
+        "virtual_field": virtual_field,
+        "score_product": "raw_native_uncalibrated_bad_probability",
+        "score_evidence_artifact_id": "1" * 64,
+        "score_evidence_artifact_content_hash": "2" * 64,
+        "score_vector_artifact_id": "0123456789abcdef" + "3" * 48,
+        "score_vector_artifact_content_hash": "4" * 64,
+    }
+    source = pool_binding.pool["entries"][0]["source"]
+    fragment = build_verified_candidate_fragment(
+        artifact={
+            "artifact_id": source["artifact_id"],
+            "artifact_kind": source["artifact_kind"],
+            "artifact_schema_version": source["artifact_schema_version"],
+            "artifact_content_hash": source["artifact_content_hash"],
+            "origin_tool": source["origin_tool"],
+        },
+        asset={
+            "schema_version": source["asset_schema_version"],
+            "asset_id": source["asset_id"],
+            "asset_hash": source["asset_hash"],
+            "asset_type": source["asset_type"],
+        },
+        fragment_type=source["fragment_type"],
+        rule_id="scorecard-cutoff-rule",
+        condition={
+            "op": "compare",
+            "field": virtual_field,
+            "operator": ">=",
+            "value": 0.5,
+            "missing": "no_match",
+        },
+        requirements=[requirement],
+        effect_id=source["effect_id"],
+        evidence_id=source["evidence_id"],
+        evidence_hash=source["evidence_hash"],
+        evidence_identity=source["evidence_identity"],
+    )
+    score_pool = add_verified_candidate_fragment(
+        None,
+        task_id=pool_binding.task_id,
+        strategy_type=pool_binding.strategy_type,
+        default_action=pool_binding.pool["default_action"],
+        verified_candidate_fragment=fragment,
+        action=pool_binding.pool["entries"][0]["action"],
+    )
+    compiled = compile_strategy_pool(score_pool)
+    outer = compiled["requirements"][0]
+    controlled_binding = replace(
+        pool_binding,
+        pool=score_pool,
+        compiled_design=compiled,
+    )
+    evidence_binding = SimpleNamespace(
+        evidence_record={
+            "id": requirement["score_evidence_artifact_id"],
+            "content_hash": requirement[
+                "score_evidence_artifact_content_hash"
+            ],
+        },
+        vector_record={
+            "id": requirement["score_vector_artifact_id"],
+            "content_hash": requirement[
+                "score_vector_artifact_content_hash"
+            ],
+        },
+    )
+    resolved = ResolvedPoolRequirements(
+        task_id=pool_binding.task_id,
+        requirements=(outer,),
+        requirements_hash=hashlib.sha256(
+            json.dumps(
+                [outer],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        field_bindings=((virtual_field, evidence_binding),),
+    )
+    return controlled_binding, resolved
+
+
+def test_measure_pool_validation_hydrates_score_requirement_before_partition_mask(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    original_load = validation_tools._load_pool_binding
+    base_binding = original_load(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+    controlled_binding, resolved = _controlled_score_requirement(
+        pool_binding=base_binding,
+    )
+    outer = controlled_binding.compiled_design["requirements"][0]
+    original_build = validation_tools.build_strategy_pool_validation_evidence
+    original_read = validation_tools.pd.read_parquet
+    calls = {"hydrate": 0, "cas": 0}
+
+    def load_with_requirement(*args, **kwargs):
+        return controlled_binding
+
+    def resolve_requirements(
+        runtime,
+        *,
+        task_id,
+        compiled_design,
+        sample_design,
+    ):
+        assert runtime is fx["runtime"]
+        assert task_id == fx["task"].id
+        assert compiled_design["requirements"] == [outer]
+        assert sample_design.task_id == fx["task"].id
+        return resolved
+
+    def hydrate(frame: pd.DataFrame, *, resolved: object) -> pd.DataFrame:
+        assert resolved is globals_resolved
+        assert len(frame) == fx["dataset"].row_count
+        assert isinstance(frame.index, pd.RangeIndex)
+        assert globals_resolved.virtual_fields[0] not in frame.columns
+        calls["hydrate"] += 1
+        hydrated = frame.copy(deep=True)
+        hydrated[globals_resolved.virtual_fields[0]] = [
+            index / max(1, len(frame) - 1) for index in range(len(frame))
+        ]
+        return hydrated
+
+    def read_snapshot(source, *args, **kwargs):
+        assert resolved.virtual_fields[0] not in kwargs["columns"]
+        return original_read(source, *args, **kwargs)
+
+    def build(**kwargs):
+        frame = kwargs["frame"]
+        assert resolved.virtual_fields[0] in frame.columns
+        assert len(frame) < fx["dataset"].row_count
+        return original_build(**kwargs)
+
+    def require_on_connection(conn, received):
+        assert received is resolved
+        assert conn.in_transaction
+        calls["cas"] += 1
+
+    def requirement_provenance(received):
+        assert received is resolved
+        return {
+            "requirements_hash": resolved.requirements_hash,
+            "requirements": list(resolved.requirements),
+            "virtual_fields": list(resolved.virtual_fields),
+        }
+
+    globals_resolved = resolved
+    monkeypatch.setattr(validation_tools, "_load_pool_binding", load_with_requirement)
+    monkeypatch.setattr(
+        validation_tools,
+        "resolve_pool_requirements",
+        resolve_requirements,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        validation_tools,
+        "hydrate_requirement_fields",
+        hydrate,
+        raising=False,
+    )
+    monkeypatch.setattr(validation_tools.pd, "read_parquet", read_snapshot)
+    monkeypatch.setattr(
+        validation_tools,
+        "build_strategy_pool_validation_evidence",
+        build,
+    )
+    monkeypatch.setattr(
+        validation_tools,
+        "require_resolved_pool_requirements_on_connection",
+        require_on_connection,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        validation_tools,
+        "pool_requirement_bindings_provenance",
+        requirement_provenance,
+    )
+    monkeypatch.setattr(
+        validation_tools,
+        "require_strategy_candidate_pool_artifact_binding_on_connection",
+        lambda conn, binding: None,
+    )
+
+    output = run_measure_strategy_pool_validation(
+        fx["validation_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+
+    assert output["population_count"] == 2
+    assert output["evidence"]["waterfall"][0]["incremental"][
+        "population_count"
+    ] == 1
+    assert calls["hydrate"] == 1
+    assert calls["cas"] >= 4
+    provenance = _validation_artifacts(fx)[0]["provenance"]
+    assert (
+        provenance["schema_version"]
+        == POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION
+    )
+    bindings = provenance["field_bindings"]["requirements"]
+    assert bindings["requirements_hash"] == resolved.requirements_hash
+    assert bindings["virtual_fields"] == list(resolved.virtual_fields)
+    assert bindings["requirements"] == list(resolved.requirements)
+    forged_v1 = copy.deepcopy(provenance)
+    forged_v1["schema_version"] = POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION
+    with pytest.raises(StrategyError, match="field bindings|schema"):
+        validation_tools._validate_provenance(forged_v1)
+    forged_v2 = copy.deepcopy(provenance)
+    del forged_v2["field_bindings"]["requirements"]
+    with pytest.raises(StrategyError, match="field bindings|schema"):
+        validation_tools._validate_provenance(forged_v2)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "virtual score field conflicts with physical dataset column",
+        "model score evidence and SampleDesign V2 differ",
+    ],
+)
+def test_measure_pool_validation_fails_closed_on_requirement_resolution_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    fx = _setup(tmp_path)
+
+    def reject_requirement(*args, **kwargs):
+        raise StrategyError(message)
+
+    monkeypatch.setattr(
+        validation_tools,
+        "resolve_pool_requirements",
+        reject_requirement,
+    )
+
+    with pytest.raises(StrategyError, match=message):
+        run_measure_strategy_pool_validation(
+            fx["validation_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+    assert _validation_artifacts(fx) == []
+
+
+def test_measure_pool_validation_requirement_cas_drift_rolls_back_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    real_require = (
+        validation_tools.require_resolved_pool_requirements_on_connection
+    )
+    calls = 0
+
+    def drift_on_final_write(conn, resolved):
+        nonlocal calls
+        calls += 1
+        real_require(conn, resolved)
+        if calls == 2:
+            raise StrategyError(
+                "model score vector disappeared before validation commit"
+            )
+
+    monkeypatch.setattr(
+        validation_tools,
+        "require_resolved_pool_requirements_on_connection",
+        drift_on_final_write,
+    )
+
+    with pytest.raises(StrategyError, match="disappeared"):
+        run_measure_strategy_pool_validation(
+            fx["validation_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert calls == 2
+    assert _validation_artifacts(fx) == []
+    assert not list(
+        (
+            fx["settings"].tasks_dir
+            / fx["task"].id
+            / "strategy_pool_validations"
+        ).glob("*.json")
+    )
+
+
 @pytest.mark.parametrize(
     ("partition", "population_count", "labelled_count"),
     [("validation", 2, 2), ("oot", 2, 1)],
@@ -251,6 +570,11 @@ def test_measure_pool_validation_publishes_exact_independent_evidence(
     )
     assert sha256_file(path) == output["artifact"]["content_hash"]
     assert record["origin_tool"] == "strategy.measure_strategy_pool_validation"
+    assert (
+        record["provenance"]["schema_version"]
+        == POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION
+    )
+    assert "requirements" not in record["provenance"]["field_bindings"]
     assert fx["runtime"].strategies.list_for_task(fx["task"].id) == []
 
 

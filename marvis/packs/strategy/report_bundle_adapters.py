@@ -57,6 +57,7 @@ from marvis.packs.strategy.impact_cube import (
 )
 from marvis.packs.strategy.impact_cube_tools import (
     IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION,
+    IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION,
     impact_cube_producer_run_ref,
     validate_impact_cube_producer_run,
 )
@@ -74,6 +75,9 @@ from marvis.packs.strategy.pool_impact_tools import (
 )
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
+)
+from marvis.packs.strategy.pool_requirement_resolver import (
+    validate_pool_requirement_bindings_provenance,
 )
 from marvis.packs.strategy.project_context import (
     build_report_field,
@@ -142,6 +146,9 @@ _IMPACT_CUBE_PROVENANCE_FIELDS = frozenset(
         "lifecycle",
         "producer_run",
     }
+)
+_IMPACT_CUBE_REQUIREMENTS_PROVENANCE_FIELDS = (
+    _IMPACT_CUBE_PROVENANCE_FIELDS | {"requirement_bindings"}
 )
 _CANDIDATE_STABILITY_PROVENANCE_FIELDS = frozenset(
     {
@@ -1011,18 +1018,43 @@ def _require_impact_cube_provenance(
         raise StrategyReportBundleError(
             "ImpactCube artifact provenance is invalid"
         ) from exc
+    schema_version = (
+        provenance.get("schema_version")
+        if isinstance(provenance, dict)
+        else None
+    )
+    expected_fields = (
+        _IMPACT_CUBE_PROVENANCE_FIELDS
+        if schema_version == IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION
+        else _IMPACT_CUBE_REQUIREMENTS_PROVENANCE_FIELDS
+        if schema_version == IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION
+        else None
+    )
     if (
-        not isinstance(provenance, dict)
-        or set(provenance) != _IMPACT_CUBE_PROVENANCE_FIELDS
+        expected_fields is None
+        or set(provenance) != expected_fields
         or binding.artifact_provenance_json != canonical
     ):
         raise StrategyReportBundleError(
             "ImpactCube artifact provenance fields changed"
         )
+    if schema_version == IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION:
+        try:
+            requirement_bindings = (
+                validate_pool_requirement_bindings_provenance(
+                    provenance["requirement_bindings"]
+                )
+            )
+        except StrategyError as exc:
+            raise StrategyReportBundleError(
+                "ImpactCube requirement bindings are invalid"
+            ) from exc
+        if not requirement_bindings["requirements"]:
+            raise StrategyReportBundleError(
+                "ImpactCube requirements provenance must not be empty"
+            )
     if (
-        provenance["schema_version"]
-        != IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION
-        or provenance["producer_version"]
+        provenance["producer_version"]
         != STRATEGY_IMPACT_CUBE_PRODUCER_VERSION
         or provenance["task_id"] != binding.task_id
         or provenance["cube_id"] != cube["cube_id"]
@@ -1428,6 +1460,45 @@ def _require_impact_cube_identity(
     if any(identity[key] != value for key, value in expected_pool.items()):
         raise StrategyReportBundleError(
             "ImpactCube candidate-pool identity changed"
+        )
+    requirements = compiled_design["requirements"]
+    requirement_bindings = impact_binding.artifact_provenance.get(
+        "requirement_bindings"
+    )
+    if requirements:
+        virtual_fields: list[str] = []
+        for outer in requirements:
+            field = outer["requirement"]["virtual_field"]
+            if field not in virtual_fields:
+                virtual_fields.append(field)
+        expected_requirement_bindings = {
+            "requirements_hash": hashlib.sha256(
+                json.dumps(
+                    requirements,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "requirements": requirements,
+            "virtual_fields": virtual_fields,
+        }
+        if (
+            impact_binding.artifact_provenance.get("schema_version")
+            != IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION
+            or requirement_bindings != expected_requirement_bindings
+        ):
+            raise StrategyReportBundleError(
+                "ImpactCube requirement bindings differ from the Candidate Pool"
+            )
+    elif (
+        impact_binding.artifact_provenance.get("schema_version")
+        != IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION
+        or requirement_bindings is not None
+    ):
+        raise StrategyReportBundleError(
+            "ImpactCube requirement bindings differ from the Candidate Pool"
         )
     source = cube["source_bindings"]
     if source["pool_artifact"] != {

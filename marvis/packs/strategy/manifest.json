@@ -1,11 +1,1406 @@
 {
   "name": "strategy",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "display_name": "Strategy Pack",
-  "description": "Vintage, roll-rate, profitability, governed sample design, univariate, automatic-tree, Voting n-of-k, and complete two-dimensional Cross Matrix candidate development with explicit leaf and Cross cell-group materialization, Strategy Pool assembly, unified deterministic ImpactCube and independent validation/OOT replay evidence, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
+  "description": "Vintage, roll-rate, profitability, governed sample design, univariate, scorecard band/cutoff, automatic-tree, Voting n-of-k, and complete two-dimensional Cross Matrix candidate development with explicit cutoff, leaf, and Cross cell-group materialization, Strategy Pool assembly, unified deterministic ImpactCube and independent validation/OOT replay evidence, strategy construction, deterministic application, backtesting, and tradeoff analysis tools.",
   "module": "marvis.packs.strategy.tools",
   "python_requires": ">=3.10,<3.14",
   "tools": [
+    {
+      "name": "build_scorecard_band_asset",
+      "summary": "Build one complete immutable scorecard band asset from exact governed score evidence and sample-design bindings without selecting a cutoff, changing a Strategy Pool, applying, adopting, or deploying.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "score_evidence_ref": {
+            "$ref": "#/$defs/score_evidence_input_ref"
+          },
+          "sample_design_ref": {
+            "$ref": "#/$defs/sample_design_ref"
+          },
+          "banding": {
+            "type": "object",
+            "properties": {
+              "method": {
+                "const": "equal_frequency"
+              },
+              "bin_count": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 20
+              }
+            },
+            "required": [
+              "method",
+              "bin_count"
+            ],
+            "additionalProperties": false
+          },
+          "raw_pd_band_edges": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 21,
+            "items": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "required": [
+          "score_evidence_ref",
+          "sample_design_ref"
+        ],
+        "not": {
+          "required": [
+            "banding",
+            "raw_pd_band_edges"
+          ]
+        },
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "score_evidence_input_ref": {
+            "type": "object",
+            "properties": {
+              "evidence_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_evidence_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "score_vector_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_score_vector_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "evidence_artifact_id",
+              "expected_evidence_artifact_content_hash",
+              "score_vector_artifact_id",
+              "expected_score_vector_artifact_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "membership_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_membership_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "bundle_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_bundle_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_bundle_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "membership_artifact_id",
+              "expected_membership_artifact_content_hash",
+              "bundle_artifact_id",
+              "expected_bundle_artifact_content_hash",
+              "expected_bundle_id",
+              "expected_sample_design_id",
+              "expected_sample_design_content_hash"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.build-scorecard-band-asset-tool.v1"
+          },
+          "asset_id": {
+            "$ref": "#/$defs/asset_id"
+          },
+          "asset_hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sample_design_ref": {
+            "$ref": "#/$defs/sample_design_ref"
+          },
+          "score_evidence_ref": {
+            "$ref": "#/$defs/evidence_ref"
+          },
+          "score_vector_ref": {
+            "$ref": "#/$defs/vector_ref"
+          },
+          "population_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000000
+          },
+          "development_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000000
+          },
+          "labeled_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000000
+          },
+          "bad_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000000
+          },
+          "banding": {
+            "$ref": "#/$defs/banding"
+          },
+          "band_count": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 20
+          },
+          "cutoff_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 19
+          },
+          "performance": {
+            "$ref": "#/$defs/performance"
+          },
+          "scorecard_band_asset": {
+            "$ref": "#/$defs/scorecard_band_asset"
+          },
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "$ref": "#/$defs/band_artifact"
+            }
+          },
+          "not_selected": {
+            "const": true
+          },
+          "not_admitted": {
+            "const": true
+          },
+          "not_applied": {
+            "const": true
+          },
+          "not_adopted": {
+            "const": true
+          },
+          "not_deployed": {
+            "const": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "asset_id",
+          "asset_hash",
+          "dataset_id",
+          "sample_design_ref",
+          "score_evidence_ref",
+          "score_vector_ref",
+          "population_count",
+          "development_count",
+          "labeled_count",
+          "bad_count",
+          "banding",
+          "band_count",
+          "cutoff_count",
+          "performance",
+          "scorecard_band_asset",
+          "artifacts",
+          "not_selected",
+          "not_admitted",
+          "not_applied",
+          "not_adopted",
+          "not_deployed"
+        ],
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "asset_id": {
+            "type": "string",
+            "pattern": "^scorecard-band-asset-[0-9a-f]{32}$"
+          },
+          "cutoff_id": {
+            "type": "string",
+            "pattern": "^scorecard-cutoff-[0-9a-f]{32}$"
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "membership_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_membership_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "bundle_artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_bundle_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_bundle_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_sample_design_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "membership_artifact_id",
+              "expected_membership_artifact_content_hash",
+              "bundle_artifact_id",
+              "expected_bundle_artifact_content_hash",
+              "expected_bundle_id",
+              "expected_sample_design_id",
+              "expected_sample_design_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "evidence_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "evidence_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "evidence_id",
+              "evidence_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "vector_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "banding": {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "enum": [
+                  "equal_frequency",
+                  "manual_raw_pd"
+                ]
+              },
+              "requested_bin_count": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 20
+              },
+              "effective_bin_count": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 20
+              },
+              "internal_edges": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 19,
+                "uniqueItems": true,
+                "items": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "exclusiveMaximum": 1
+                }
+              }
+            },
+            "required": [
+              "method",
+              "requested_bin_count",
+              "effective_bin_count",
+              "internal_edges"
+            ],
+            "additionalProperties": false
+          },
+          "performance": {
+            "type": "object",
+            "properties": {
+              "auc": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "ks": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": [
+              "auc",
+              "ks"
+            ],
+            "additionalProperties": false
+          },
+          "identity": {
+            "type": "object",
+            "properties": {
+              "task_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dataset_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dataset_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "workspace_revision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "workspace_generation": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "semantic_mapping_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "sample_context_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "task_id",
+              "dataset_id",
+              "dataset_content_hash",
+              "workspace_revision",
+              "workspace_generation",
+              "semantic_mapping_hash",
+              "sample_context_hash"
+            ],
+            "additionalProperties": false
+          },
+          "source_refs": {
+            "type": "object",
+            "properties": {
+              "training_evidence": {
+                "$ref": "#/$defs/evidence_ref"
+              },
+              "score_evidence": {
+                "$ref": "#/$defs/evidence_ref"
+              },
+              "score_vector": {
+                "$ref": "#/$defs/vector_ref"
+              }
+            },
+            "required": [
+              "training_evidence",
+              "score_evidence",
+              "score_vector"
+            ],
+            "additionalProperties": false
+          },
+          "scale": {
+            "type": "object",
+            "properties": {
+              "base_score": {
+                "type": "integer"
+              },
+              "pdo": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "base_odds": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "factor": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "offset": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "base_score",
+              "pdo",
+              "base_odds",
+              "factor",
+              "offset"
+            ],
+            "additionalProperties": false
+          },
+          "base_scorecard_row": {
+            "type": "object",
+            "properties": {
+              "feature": {
+                "const": "__base__"
+              },
+              "bin_index": {
+                "const": -999
+              },
+              "bin_label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "lower": {
+                "type": "null"
+              },
+              "upper": {
+                "type": "null"
+              },
+              "count": {
+                "type": "null"
+              },
+              "bad_count": {
+                "type": "null"
+              },
+              "good_count": {
+                "type": "null"
+              },
+              "bad_rate": {
+                "type": "null"
+              },
+              "woe": {
+                "type": "null"
+              },
+              "iv_contribution": {
+                "type": "null"
+              },
+              "coefficient": {
+                "type": "null"
+              },
+              "monotonic_direction": {
+                "type": "null"
+              },
+              "points": {
+                "type": "number"
+              },
+              "base_score": {
+                "type": "integer"
+              },
+              "pdo": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "base_odds": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "factor": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "offset": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "feature",
+              "bin_index",
+              "bin_label",
+              "lower",
+              "upper",
+              "count",
+              "bad_count",
+              "good_count",
+              "bad_rate",
+              "woe",
+              "iv_contribution",
+              "coefficient",
+              "monotonic_direction",
+              "points",
+              "base_score",
+              "pdo",
+              "base_odds",
+              "factor",
+              "offset"
+            ],
+            "additionalProperties": false
+          },
+          "feature_scorecard_row": {
+            "type": "object",
+            "properties": {
+              "feature": {
+                "type": "string",
+                "minLength": 1,
+                "not": {
+                  "const": "__base__"
+                }
+              },
+              "bin_index": {
+                "type": "integer"
+              },
+              "bin_label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "lower": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "upper": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "bad_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "good_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "bad_rate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "woe": {
+                "type": "number"
+              },
+              "iv_contribution": {
+                "type": "number"
+              },
+              "coefficient": {
+                "type": "number"
+              },
+              "monotonic_direction": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "increasing",
+                  "decreasing",
+                  null
+                ]
+              },
+              "points": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "feature",
+              "bin_index",
+              "bin_label",
+              "lower",
+              "upper",
+              "count",
+              "bad_count",
+              "good_count",
+              "bad_rate",
+              "woe",
+              "iv_contribution",
+              "coefficient",
+              "monotonic_direction",
+              "points"
+            ],
+            "additionalProperties": false
+          },
+          "score_contract": {
+            "type": "object",
+            "properties": {
+              "score_product": {
+                "const": "raw_native_uncalibrated_bad_probability"
+              },
+              "score_direction": {
+                "const": "higher_is_riskier"
+              },
+              "points_direction": {
+                "const": "higher_is_better"
+              },
+              "scale": {
+                "$ref": "#/$defs/scale"
+              },
+              "scorecard_table": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 100000,
+                "items": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/base_scorecard_row"
+                    },
+                    {
+                      "$ref": "#/$defs/feature_scorecard_row"
+                    }
+                  ]
+                }
+              },
+              "scorecard_table_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "score_product",
+              "score_direction",
+              "points_direction",
+              "scale",
+              "scorecard_table",
+              "scorecard_table_hash"
+            ],
+            "additionalProperties": false
+          },
+          "score_vector": {
+            "type": "object",
+            "properties": {
+              "row_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2000000
+              },
+              "development_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2000000
+              },
+              "labeled_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2000000
+              },
+              "bad_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2000000
+              },
+              "raw_pd_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "row_count",
+              "development_count",
+              "labeled_count",
+              "bad_count",
+              "raw_pd_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "band": {
+            "type": "object",
+            "properties": {
+              "ordinal": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 19
+              },
+              "bin_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "lower_bound": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 1
+              },
+              "upper_bound": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 1
+              },
+              "lower_inclusive": {
+                "type": "boolean"
+              },
+              "upper_inclusive": {
+                "const": false
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2000000
+              },
+              "share": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 1
+              },
+              "labeled_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2000000
+              },
+              "bad_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2000000
+              },
+              "bad_rate": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 1
+              },
+              "average_pd": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": [
+              "ordinal",
+              "bin_id",
+              "lower_bound",
+              "upper_bound",
+              "lower_inclusive",
+              "upper_inclusive",
+              "count",
+              "share",
+              "labeled_count",
+              "bad_count",
+              "bad_rate",
+              "average_pd"
+            ],
+            "additionalProperties": false
+          },
+          "cutoff_side": {
+            "type": "object",
+            "properties": {
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2000000
+              },
+              "labeled_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2000000
+              },
+              "bad_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2000000
+              },
+              "bad_rate": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": [
+              "count",
+              "labeled_count",
+              "bad_count",
+              "bad_rate"
+            ],
+            "additionalProperties": false
+          },
+          "cutoff": {
+            "type": "object",
+            "properties": {
+              "ordinal": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18
+              },
+              "cutoff_id": {
+                "$ref": "#/$defs/cutoff_id"
+              },
+              "execution_pd": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "exclusiveMaximum": 1
+              },
+              "display_points": {
+                "type": "number"
+              },
+              "lower_risk": {
+                "$ref": "#/$defs/cutoff_side"
+              },
+              "higher_risk": {
+                "$ref": "#/$defs/cutoff_side"
+              },
+              "mask_equivalence": {
+                "const": true
+              }
+            },
+            "required": [
+              "ordinal",
+              "cutoff_id",
+              "execution_pd",
+              "display_points",
+              "lower_risk",
+              "higher_risk",
+              "mask_equivalence"
+            ],
+            "additionalProperties": false
+          },
+          "lifecycle": {
+            "type": "object",
+            "properties": {
+              "candidate_stage": {
+                "const": "development"
+              },
+              "observation_stage": {
+                "const": "backtested"
+              },
+              "validation_status": {
+                "const": "unvalidated"
+              }
+            },
+            "required": [
+              "candidate_stage",
+              "observation_stage",
+              "validation_status"
+            ],
+            "additionalProperties": false
+          },
+          "governance": {
+            "type": "object",
+            "properties": {
+              "best_cutoff_recommended": {
+                "const": false
+              },
+              "selected": {
+                "const": false
+              },
+              "adopted": {
+                "const": false
+              },
+              "deployed": {
+                "const": false
+              }
+            },
+            "required": [
+              "best_cutoff_recommended",
+              "selected",
+              "adopted",
+              "deployed"
+            ],
+            "additionalProperties": false
+          },
+          "resource_budget": {
+            "type": "object",
+            "properties": {
+              "max_rows": {
+                "const": 2000000
+              },
+              "rows_processed": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2000000
+              },
+              "max_bands": {
+                "const": 20
+              },
+              "bands_used": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 20
+              },
+              "max_scorecard_table_rows": {
+                "const": 100000
+              },
+              "scorecard_table_rows": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 100000
+              }
+            },
+            "required": [
+              "max_rows",
+              "rows_processed",
+              "max_bands",
+              "bands_used",
+              "max_scorecard_table_rows",
+              "scorecard_table_rows"
+            ],
+            "additionalProperties": false
+          },
+          "scorecard_band_asset": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "const": "strategy.scorecard-band-asset.v1"
+              },
+              "producer_version": {
+                "const": "strategy.scorecard-band-asset/1"
+              },
+              "asset_type": {
+                "const": "scorecard_band"
+              },
+              "identity": {
+                "$ref": "#/$defs/identity"
+              },
+              "sample_design_ref": {
+                "$ref": "#/$defs/sample_design_ref"
+              },
+              "source_refs": {
+                "$ref": "#/$defs/source_refs"
+              },
+              "score_contract": {
+                "$ref": "#/$defs/score_contract"
+              },
+              "score_vector": {
+                "$ref": "#/$defs/score_vector"
+              },
+              "bands": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 20,
+                "items": {
+                  "$ref": "#/$defs/band"
+                }
+              },
+              "performance": {
+                "$ref": "#/$defs/performance"
+              },
+              "cutoffs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 19,
+                "items": {
+                  "$ref": "#/$defs/cutoff"
+                }
+              },
+              "lifecycle": {
+                "$ref": "#/$defs/lifecycle"
+              },
+              "governance": {
+                "$ref": "#/$defs/governance"
+              },
+              "resource_budget": {
+                "$ref": "#/$defs/resource_budget"
+              },
+              "asset_id": {
+                "$ref": "#/$defs/asset_id"
+              },
+              "asset_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "schema_version",
+              "producer_version",
+              "asset_type",
+              "identity",
+              "sample_design_ref",
+              "source_refs",
+              "score_contract",
+              "score_vector",
+              "bands",
+              "performance",
+              "cutoffs",
+              "lifecycle",
+              "governance",
+              "resource_budget",
+              "asset_id",
+              "asset_hash"
+            ],
+            "additionalProperties": false
+          },
+          "band_artifact": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "kind": {
+                "const": "strategy_scorecard_band_asset_json"
+              },
+              "format": {
+                "const": "json"
+              },
+              "filename": {
+                "type": "string",
+                "pattern": "^scorecard-band-asset-[0-9a-f]{32}\\.json$"
+              },
+              "content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "download_url": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "artifact_id",
+              "kind",
+              "format",
+              "filename",
+              "content_hash",
+              "download_url"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 1800,
+      "failure_policy": "fail",
+      "entrypoint": "tool_build_scorecard_band_asset",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:task",
+        "read:artifacts",
+        "read:dataset",
+        "read:experiment",
+        "read:model",
+        "write:artifact"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "materialize_scorecard_cutoff_selection",
+      "summary": "Persist one explicit pointer-only scorecard cutoff selection without copying the source bands, changing a Strategy Pool, applying, adopting, or deploying.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source_artifact_id": {
+            "$ref": "#/$defs/sha256"
+          },
+          "expected_source_artifact_content_hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "expected_asset_id": {
+            "$ref": "#/$defs/asset_id"
+          },
+          "expected_asset_hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "cutoff_id": {
+            "$ref": "#/$defs/cutoff_id"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "source_artifact_id",
+          "expected_source_artifact_content_hash",
+          "expected_asset_id",
+          "expected_asset_hash",
+          "cutoff_id"
+        ],
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "asset_id": {
+            "type": "string",
+            "pattern": "^scorecard-band-asset-[0-9a-f]{32}$"
+          },
+          "cutoff_id": {
+            "type": "string",
+            "pattern": "^scorecard-cutoff-[0-9a-f]{32}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.materialize-scorecard-cutoff-selection-tool.v1"
+          },
+          "selection_id": {
+            "$ref": "#/$defs/selection_id"
+          },
+          "selection_hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "source_asset_id": {
+            "$ref": "#/$defs/asset_id"
+          },
+          "source_asset_hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "cutoff_id": {
+            "$ref": "#/$defs/cutoff_id"
+          },
+          "selection_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "selection": {
+            "$ref": "#/$defs/selection"
+          },
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "$ref": "#/$defs/selection_artifact"
+            }
+          },
+          "not_admitted": {
+            "const": true
+          },
+          "not_applied": {
+            "const": true
+          },
+          "not_adopted": {
+            "const": true
+          },
+          "not_deployed": {
+            "const": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "selection_id",
+          "selection_hash",
+          "source_asset_id",
+          "source_asset_hash",
+          "cutoff_id",
+          "selection_reason",
+          "selection",
+          "artifacts",
+          "not_admitted",
+          "not_applied",
+          "not_adopted",
+          "not_deployed"
+        ],
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "asset_id": {
+            "type": "string",
+            "pattern": "^scorecard-band-asset-[0-9a-f]{32}$"
+          },
+          "cutoff_id": {
+            "type": "string",
+            "pattern": "^scorecard-cutoff-[0-9a-f]{32}$"
+          },
+          "selection_id": {
+            "type": "string",
+            "pattern": "^scorecard-cutoff-selection-[0-9a-f]{32}$"
+          },
+          "source_asset_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "task_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "const": "strategy_scorecard_band_asset_json"
+              },
+              "artifact_schema_version": {
+                "const": "strategy.scorecard-band-asset-artifact.v1"
+              },
+              "artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "origin_tool": {
+                "const": "strategy.build_scorecard_band_asset"
+              },
+              "asset_schema_version": {
+                "const": "strategy.scorecard-band-asset.v1"
+              },
+              "asset_type": {
+                "const": "scorecard_band"
+              },
+              "asset_id": {
+                "$ref": "#/$defs/asset_id"
+              },
+              "asset_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "task_id",
+              "kind",
+              "artifact_schema_version",
+              "artifact_content_hash",
+              "origin_tool",
+              "asset_schema_version",
+              "asset_type",
+              "asset_id",
+              "asset_hash"
+            ],
+            "additionalProperties": false
+          },
+          "selection": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "const": "strategy.scorecard-cutoff-selection.v1"
+              },
+              "producer_version": {
+                "const": "strategy.scorecard-cutoff-selection/1"
+              },
+              "source_asset_ref": {
+                "$ref": "#/$defs/source_asset_ref"
+              },
+              "cutoff_id": {
+                "$ref": "#/$defs/cutoff_id"
+              },
+              "selection_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "selection_id": {
+                "$ref": "#/$defs/selection_id"
+              },
+              "selection_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "schema_version",
+              "producer_version",
+              "source_asset_ref",
+              "cutoff_id",
+              "selection_reason",
+              "selection_id",
+              "selection_hash"
+            ],
+            "additionalProperties": false
+          },
+          "selection_artifact": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/$defs/sha256"
+              },
+              "kind": {
+                "const": "strategy_scorecard_cutoff_selection_json"
+              },
+              "format": {
+                "const": "json"
+              },
+              "filename": {
+                "type": "string",
+                "pattern": "^scorecard-cutoff-selection-[0-9a-f]{32}\\.json$"
+              },
+              "content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "download_url": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "artifact_id",
+              "kind",
+              "format",
+              "filename",
+              "content_hash",
+              "download_url"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_materialize_scorecard_cutoff_selection",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:task",
+        "read:artifacts",
+        "read:dataset",
+        "read:experiment",
+        "read:model",
+        "write:artifact"
+      ],
+      "memory_limit_mb": 4096
+    },
     {
       "name": "vintage_curve",
       "summary": "Compute a strategy-facing vintage curve from the shared deterministic vintage core.",
@@ -9546,6 +10941,8 @@
   "permissions": [
     "read:artifacts",
     "read:dataset",
+    "read:experiment",
+    "read:model",
     "read:strategy",
     "read:task",
     "write:artifact",

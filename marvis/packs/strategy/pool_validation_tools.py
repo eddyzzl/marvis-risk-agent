@@ -26,6 +26,14 @@ from marvis.packs.strategy.pool_tools import (
     load_current_strategy_candidate_pool_artifact,
     require_strategy_candidate_pool_artifact_binding_on_connection,
 )
+from marvis.packs.strategy.pool_requirement_resolver import (
+    ResolvedPoolRequirements,
+    hydrate_requirement_fields,
+    pool_requirement_bindings_provenance,
+    require_resolved_pool_requirements_on_connection,
+    resolve_pool_requirements,
+    validate_pool_requirement_bindings_provenance,
+)
 from marvis.packs.strategy.pool_validation import (
     STRATEGY_POOL_VALIDATION_PRODUCER_VERSION,
     build_strategy_pool_validation_evidence,
@@ -51,6 +59,9 @@ POOL_VALIDATION_TOOL_SCHEMA_VERSION = (
 POOL_VALIDATION_ARTIFACT_KIND = "strategy_pool_validation_json"
 POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION = (
     "strategy.pool-validation-artifact.v1"
+)
+POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION = (
+    "strategy.pool-validation-artifact.v2"
 )
 POOL_VALIDATION_ORIGIN_TOOL = "strategy.measure_strategy_pool_validation"
 
@@ -145,6 +156,9 @@ _PROVENANCE_FIELDS = frozenset(
         "validation_status",
     }
 )
+_PHYSICAL_FIELD_BINDING_FIELDS = frozenset(
+    {"month_col", "loan_amount_col", "overdue_amount_col"}
+)
 _TASK_ARTIFACT_ROW_FIELDS = (
     "id",
     "task_id",
@@ -180,12 +194,23 @@ def run_measure_strategy_pool_validation(inputs, ctx, runtime) -> dict[str, Any]
             task_id=task_id,
             request=request,
         )
+        resolved_requirements = resolve_pool_requirements(
+            runtime,
+            task_id=task_id,
+            compiled_design=pool.compiled_design,
+            sample_design=sample,
+        )
         semantics = _require_independent_sample_contract(
             pool=pool,
             sample=sample,
             partition=request["partition"],
         )
-        _require_bindings_under_lock(runtime, pool=pool, sample=sample)
+        _require_bindings_under_lock(
+            runtime,
+            pool=pool,
+            sample=sample,
+            resolved_requirements=resolved_requirements,
+        )
         selected = _read_selected_partition(
             runtime,
             pool=pool,
@@ -195,6 +220,7 @@ def run_measure_strategy_pool_validation(inputs, ctx, runtime) -> dict[str, Any]
             month_col=semantics["month_col"],
             loan_amount_col=semantics["loan_amount_col"],
             overdue_amount_col=semantics["overdue_amount_col"],
+            resolved_requirements=resolved_requirements,
         )
         evidence = build_strategy_pool_validation_evidence(
             pool=pool.pool,
@@ -232,6 +258,7 @@ def run_measure_strategy_pool_validation(inputs, ctx, runtime) -> dict[str, Any]
             request=request,
             pool=pool,
             sample=sample,
+            resolved_requirements=resolved_requirements,
             evidence=evidence,
         )
     except StrategyError:
@@ -455,10 +482,6 @@ def _load_pool_binding(
         raise StrategyError("current Strategy Pool identity changed")
     if not binding.pool["entries"]:
         raise StrategyError("cannot validate an empty Strategy Pool")
-    if binding.compiled_design["requirements"]:
-        raise StrategyError(
-            "Strategy Pool validation cannot execute unresolved requirements"
-        )
     return binding
 
 
@@ -565,6 +588,7 @@ def _require_bindings_under_lock(
     *,
     pool: StrategyCandidatePoolArtifactBinding,
     sample: StrategySampleDesignV2ArtifactBinding,
+    resolved_requirements: ResolvedPoolRequirements,
 ) -> None:
     with runtime.task_artifacts.transaction() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -576,6 +600,10 @@ def _require_bindings_under_lock(
             conn,
             sample,
         )
+        require_resolved_pool_requirements_on_connection(
+            conn,
+            resolved_requirements,
+        )
         conn.commit()
 
 
@@ -584,11 +612,16 @@ def _require_bindings_on_connection(
     *,
     pool: StrategyCandidatePoolArtifactBinding,
     sample: StrategySampleDesignV2ArtifactBinding,
+    resolved_requirements: ResolvedPoolRequirements,
 ) -> None:
     require_strategy_candidate_pool_artifact_binding_on_connection(conn, pool)
     require_strategy_sample_design_v2_artifact_binding_on_connection(
         conn,
         sample,
+    )
+    require_resolved_pool_requirements_on_connection(
+        conn,
+        resolved_requirements,
     )
 
 
@@ -602,6 +635,7 @@ def _read_selected_partition(
     month_col: str | None,
     loan_amount_col: str | None,
     overdue_amount_col: str | None,
+    resolved_requirements: ResolvedPoolRequirements,
 ) -> pd.DataFrame:
     path = sample.source_binding.dataset_path
     _require_dataset_path(
@@ -615,7 +649,9 @@ def _read_selected_partition(
         for value in (month_col, loan_amount_col, overdue_amount_col)
         if value is not None
     )
-    unknown = sorted(fields - set(sample.source_binding.columns))
+    virtual_fields = set(resolved_requirements.virtual_fields)
+    physical_fields = fields - virtual_fields
+    unknown = sorted(physical_fields - set(sample.source_binding.columns))
     if unknown:
         raise StrategyError(
             "Strategy Pool rules reference missing V2 dataset columns: "
@@ -625,7 +661,7 @@ def _read_selected_partition(
         path,
         root=Path(runtime.settings.datasets_dir).absolute(),
         expected_content_hash=sample.source_binding.dataset_content_hash,
-        columns=sorted(fields),
+        columns=sorted(physical_fields),
     )
     if not isinstance(frame, pd.DataFrame) or len(frame) != (
         sample.source_binding.row_count
@@ -633,6 +669,10 @@ def _read_selected_partition(
         raise StrategyError(
             "Strategy Pool validation analysis universe row count changed"
         )
+    frame = hydrate_requirement_fields(
+        frame,
+        resolved=resolved_requirements,
+    )
     mask = np.asarray(
         sample.membership["masks"][f"risk/{partition}"],
         dtype=np.bool_,
@@ -854,6 +894,7 @@ def _persist_evidence(
     request: Mapping[str, Any],
     pool: StrategyCandidatePoolArtifactBinding,
     sample: StrategySampleDesignV2ArtifactBinding,
+    resolved_requirements: ResolvedPoolRequirements,
     evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
     canonical = canonical_strategy_pool_validation_json(evidence).encode(
@@ -867,7 +908,11 @@ def _persist_evidence(
     final_path = out_dir / f"{evidence['evidence_id']}.json"
     sources = evidence["source_bindings"]
     provenance = {
-        "schema_version": POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": (
+            POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION
+            if resolved_requirements.requirements
+            else POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION
+        ),
         "producer_version": STRATEGY_POOL_VALIDATION_PRODUCER_VERSION,
         "task_id": task_id,
         "evidence_id": evidence["evidence_id"],
@@ -880,7 +925,10 @@ def _persist_evidence(
         "sample_design_ref": dict(request["sample_design_ref"]),
         "dataset_binding": dict(sources["dataset"]),
         "target_binding": dict(sources["target"]),
-        "field_bindings": dict(sources["fields"]),
+        "field_bindings": _provenance_field_bindings(
+            sources["fields"],
+            resolved_requirements=resolved_requirements,
+        ),
         "partition": evidence["partition"],
         "population": "risk",
         "comparison_mode": "absolute",
@@ -909,6 +957,7 @@ def _persist_evidence(
                     conn,
                     pool=pool,
                     sample=sample,
+                    resolved_requirements=resolved_requirements,
                 )
                 row = _select_artifact_row(
                     conn,
@@ -952,6 +1001,7 @@ def _persist_evidence(
                     conn,
                     pool=pool,
                     sample=sample,
+                    resolved_requirements=resolved_requirements,
                 )
                 record = runtime.task_artifacts.register_on_connection(
                     conn,
@@ -966,6 +1016,7 @@ def _persist_evidence(
                     conn,
                     pool=pool,
                     sample=sample,
+                    resolved_requirements=resolved_requirements,
                 )
                 conn.commit()
                 db_committed = True
@@ -1039,6 +1090,20 @@ def _tool_output(
     }
 
 
+def _provenance_field_bindings(
+    physical: Mapping[str, Any],
+    *,
+    resolved_requirements: ResolvedPoolRequirements,
+) -> dict[str, Any]:
+    result = dict(physical)
+    if not resolved_requirements.requirements:
+        return result
+    result["requirements"] = pool_requirement_bindings_provenance(
+        resolved_requirements
+    )
+    return result
+
+
 def _validate_provenance(value: object) -> dict[str, Any]:
     obj = _json_object(value, "Strategy Pool validation provenance")
     _exact_fields(
@@ -1046,7 +1111,11 @@ def _validate_provenance(value: object) -> dict[str, Any]:
         _PROVENANCE_FIELDS,
         "Strategy Pool validation provenance",
     )
-    if obj["schema_version"] != POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION:
+    schema_version = obj["schema_version"]
+    if schema_version not in {
+        POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION,
+        POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION,
+    }:
         raise StrategyError(
             "Strategy Pool validation provenance schema_version is invalid"
         )
@@ -1070,6 +1139,26 @@ def _validate_provenance(value: object) -> dict[str, Any]:
     ):
         raise StrategyError(
             "Strategy Pool validation provenance lifecycle changed"
+        )
+    fields = _json_object(
+        obj["field_bindings"],
+        "Strategy Pool validation provenance.field_bindings",
+    )
+    if (
+        schema_version == POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION
+        and set(fields) == _PHYSICAL_FIELD_BINDING_FIELDS
+    ):
+        pass
+    elif (
+        schema_version
+        == POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION
+        and set(fields)
+        == _PHYSICAL_FIELD_BINDING_FIELDS | {"requirements"}
+    ):
+        validate_pool_requirement_bindings_provenance(fields["requirements"])
+    else:
+        raise StrategyError(
+            "Strategy Pool validation provenance field bindings changed"
         )
     return obj
 
@@ -1367,6 +1456,7 @@ def _positive_int(value: object, name: str) -> int:
 __all__ = [
     "POOL_VALIDATION_ARTIFACT_KIND",
     "POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION",
+    "POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION",
     "POOL_VALIDATION_ORIGIN_TOOL",
     "POOL_VALIDATION_TOOL_SCHEMA_VERSION",
     "run_measure_strategy_pool_validation",
