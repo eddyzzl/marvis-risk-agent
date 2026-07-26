@@ -1932,8 +1932,7 @@
                           <label class="candidate-lab-field">
                             <span>Strategy Pool 类型 <b aria-hidden="true">*</b></span>
                             <select data-candidate-lab-field="pool_validation_strategy_type">
-                              <option value="approval" selected>审批 / 准入 Pool</option>
-                              <option value="reject">拒绝 Pool</option>
+                              <option value="">等待当前非空审批 / 拒绝 Pool 受认证投影</option>
                             </select>
                           </label>
                           <label class="candidate-lab-field">
@@ -1944,11 +1943,148 @@
                             </select>
                           </label>
                         </div>
+                        <p class="candidate-lab-field-help" data-candidate-lab-pool-validation-help>
+                          当前任务尚无可验证的受认证非空审批或拒绝 Pool。
+                        </p>
                         <p class="candidate-lab-boundary-note">
                           本操作只生成 independent replay evidence，展示所选独立分区的实际动作、风险、金额和逐月结果；不修改 Pool、不创建策略，也不晋级、采纳或部署。
                         </p>
                         <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
                         <button type="submit" class="button compact primary">执行独立样本回放验证</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>编译预览当前 Pool</strong><small>生成当前完整规则瀑布的确定性策略设计</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_pool_compile">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Strategy Pool <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_compile_strategy_type">
+                            <option value="">等待当前非空 Pool 受认证投影</option>
+                          </select>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-pool-compile-help>
+                          当前任务尚无可编译的非空 Strategy Pool。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          编译只生成当前完整 Pool 的确定性预览，不修改 Pool，也不采纳、发布或部署策略。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">编译预览当前 Pool</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>移除当前 Pool 条目</strong><small>从受认证投影中明确选择一个 Entry</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_pool_remove_entry">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Strategy Pool <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_remove_strategy_type">
+                            <option value="">等待当前非空 Pool 受认证投影</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Pool Entry <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_remove_entry_id">
+                            <option value="">请先选择 Strategy Pool</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>移除理由</span>
+                          <textarea rows="2" maxlength="500" data-candidate-lab-field="pool_remove_reason" placeholder="可选；记录本次治理理由"></textarea>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-pool-remove-help>
+                          当前任务尚无可移除条目的非空 Strategy Pool。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          这是 task-scoped Pool 变更；只提交当前投影中的类型与 Entry ID，不采纳、发布或部署策略。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">移除所选 Entry</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>修改当前 Pool 条目动作</strong><small>按 Pool 类型设置最小 typed action</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_pool_set_action">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Strategy Pool <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_action_strategy_type">
+                            <option value="">等待当前非空 Pool 受认证投影</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Pool Entry <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_action_entry_id">
+                            <option value="">请先选择 Strategy Pool</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>动作类型 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_action_type">
+                            <option value="">请先选择 Strategy Pool</option>
+                          </select>
+                        </label>
+                        <div class="hidden" data-candidate-lab-pool-action-value-panel aria-hidden="true">
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>动作值 <b aria-hidden="true">*</b></span>
+                            <input autocomplete="off" data-candidate-lab-field="pool_action_value" placeholder="额度、0～1 定价值或客群标签">
+                          </label>
+                        </div>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>修改理由</span>
+                          <textarea rows="2" maxlength="500" data-candidate-lab-field="pool_action_reason" placeholder="可选；记录本次治理理由"></textarea>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-pool-action-help>
+                          当前任务尚无可修改动作的非空 Strategy Pool。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          审批与拒绝 Pool 只允许 approval、reject、review；额度、定价与分群 Pool 分别只允许 limit、pricing、segment。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">修改所选 Entry 动作</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>完整重排当前 Pool</strong><small>用上移、下移形成全部 Entry 的明确排列</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_pool_reorder">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Strategy Pool <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_reorder_strategy_type">
+                            <option value="">等待当前非空 Pool 受认证投影</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>完整 Entry 顺序 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_reorder_ordered_ids" size="7">
+                            <option value="">请先选择 Strategy Pool</option>
+                          </select>
+                        </label>
+                        <div class="candidate-lab-form-actions" aria-label="调整 Pool Entry 顺序">
+                          <button type="button" class="button compact secondary" data-candidate-lab-pool-reorder-move="up">上移</button>
+                          <button type="button" class="button compact secondary" data-candidate-lab-pool-reorder-move="down">下移</button>
+                        </div>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>重排理由</span>
+                          <textarea rows="2" maxlength="500" data-candidate-lab-field="pool_reorder_reason" placeholder="可选；记录瀑布顺序调整理由"></textarea>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-pool-reorder-help>
+                          当前任务尚无可重排的非空 Strategy Pool。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          页面始终提交当前 Pool 全部 Entry ID 的完整、无重复排列；遗漏不会被解释为删除。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">提交完整重排</button>
                       </form>
                     </details>
 

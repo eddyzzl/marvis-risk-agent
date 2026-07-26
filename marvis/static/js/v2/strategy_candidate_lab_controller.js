@@ -12,6 +12,10 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "scorecard_band_build",
   "scorecard_cutoff_selection",
   "candidate_monthly_stability",
+  "strategy_pool_compile",
+  "strategy_pool_remove_entry",
+  "strategy_pool_set_action",
+  "strategy_pool_reorder",
   "strategy_pool_apply",
   "strategy_pool_validation",
   "voting_candidate_search",
@@ -29,6 +33,10 @@ const WORKFLOW_LABELS = Object.freeze({
   scorecard_band_build: "生成评分卡分档证据",
   scorecard_cutoff_selection: "记录评分卡 Cutoff 选择",
   candidate_monthly_stability: "测算候选逐月稳定性",
+  strategy_pool_compile: "编译预览当前 Strategy Pool",
+  strategy_pool_remove_entry: "从当前 Strategy Pool 移除条目",
+  strategy_pool_set_action: "修改当前 Strategy Pool 条目动作",
+  strategy_pool_reorder: "完整重排当前 Strategy Pool",
   strategy_pool_apply: "应用当前 Strategy Pool",
   strategy_pool_validation: "执行 Strategy Pool 独立样本回放验证",
   voting_candidate_search: "搜索 Voting 组合",
@@ -119,6 +127,20 @@ const STRATEGY_POOL_TYPES = Object.freeze([
   "pricing",
   "segmentation",
 ]);
+const STRATEGY_POOL_ACTION_TYPES = Object.freeze({
+  approval: Object.freeze(["approval", "reject", "review"]),
+  reject: Object.freeze(["approval", "reject", "review"]),
+  limit: Object.freeze(["limit"]),
+  pricing: Object.freeze(["pricing"]),
+  segmentation: Object.freeze(["segment"]),
+});
+const STRATEGY_POOL_OPERATION_WORKFLOWS = Object.freeze([
+  "strategy_pool_compile",
+  "strategy_pool_remove_entry",
+  "strategy_pool_set_action",
+  "strategy_pool_reorder",
+]);
+const STRATEGY_POOL_ENTRY_ID_RE = /^pool-entry-[0-9a-f]{32}$/;
 const STRATEGY_POOL_APPLY_PREFIX_RE = /^[A-Za-z_][A-Za-z0-9_]{0,47}$/;
 
 const FIELD_LABELS = Object.freeze({
@@ -1568,7 +1590,10 @@ function collectCandidateMonthlyStabilityInputs(form) {
 }
 
 function collectStrategyPoolValidationInputs(form) {
-  const strategyType = formValue(form, "pool_validation_strategy_type");
+  const strategyType = selectedStrategyPoolType(
+    form,
+    "pool_validation_strategy_type",
+  );
   const partition = formValue(form, "pool_validation_partition");
   if (!["approval", "reject"].includes(strategyType)) {
     throw new Error(
@@ -1611,6 +1636,164 @@ function collectStrategyPoolApplyInputs(form) {
     }
     inputs.output_prefix = outputPrefix;
   }
+  return inputs;
+}
+
+function selectedStrategyPoolType(form, fieldName) {
+  const selected = selectedProjectionOption(
+    form,
+    fieldName,
+    "当前非空 Strategy Pool",
+  );
+  const strategyType = nonEmptyText(selected.value);
+  if (
+    !STRATEGY_POOL_TYPES.includes(strategyType)
+    || nonEmptyText(selected.dataset?.strategyType) !== strategyType
+  ) {
+    throw new Error(
+      "Strategy Pool 必须来自当前任务受认证的非空 Pool 投影。",
+    );
+  }
+  return strategyType;
+}
+
+function selectedStrategyPoolEntry(form, fieldName, strategyType) {
+  const selected = selectedProjectionOption(
+    form,
+    fieldName,
+    "当前 Strategy Pool 条目",
+  );
+  const entryId = nonEmptyText(selected.value);
+  if (
+    !STRATEGY_POOL_ENTRY_ID_RE.test(entryId)
+    || nonEmptyText(selected.dataset?.strategyType) !== strategyType
+    || nonEmptyText(selected.dataset?.entryId) !== entryId
+  ) {
+    throw new Error(
+      "Strategy Pool 条目必须来自所选 Pool 的当前受认证投影。",
+    );
+  }
+  return entryId;
+}
+
+function optionalStrategyPoolReason(inputs, form, fieldName) {
+  const reason = formValue(form, fieldName);
+  if (!reason) return;
+  if (reason.length > 500) {
+    throw new Error("Strategy Pool 操作理由最多 500 个字符。");
+  }
+  inputs.reason = reason;
+}
+
+function collectStrategyPoolCompileInputs(form) {
+  return {
+    strategy_type: selectedStrategyPoolType(
+      form,
+      "pool_compile_strategy_type",
+    ),
+  };
+}
+
+function collectStrategyPoolRemoveEntryInputs(form) {
+  const strategyType = selectedStrategyPoolType(
+    form,
+    "pool_remove_strategy_type",
+  );
+  const inputs = {
+    strategy_type: strategyType,
+    entry_id: selectedStrategyPoolEntry(
+      form,
+      "pool_remove_entry_id",
+      strategyType,
+    ),
+  };
+  optionalStrategyPoolReason(inputs, form, "pool_remove_reason");
+  return inputs;
+}
+
+function strategyPoolAction(form, strategyType) {
+  const actionType = formValue(form, "pool_action_type");
+  const allowed = STRATEGY_POOL_ACTION_TYPES[strategyType] || [];
+  if (!allowed.includes(actionType)) {
+    throw new Error(
+      `${actionType || "所选"}动作不适用于 ${strategyType} Strategy Pool。`,
+    );
+  }
+  if (["approval", "reject", "review"].includes(actionType)) {
+    return { type: actionType };
+  }
+  const rawValue = formValue(form, "pool_action_value");
+  if (!rawValue) {
+    throw new Error(`${actionType} 动作必须填写动作值。`);
+  }
+  if (actionType === "segment") {
+    return { type: actionType, value: rawValue };
+  }
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) {
+    throw new Error(`${actionType} 动作值必须是有限数字。`);
+  }
+  if (actionType === "limit" && value < 0) {
+    throw new Error("额度动作值必须是非负有限数字。");
+  }
+  if (actionType === "pricing" && (value < 0 || value > 1)) {
+    throw new Error("定价动作值必须是 0 到 1 之间的有限数字。");
+  }
+  return { type: actionType, value };
+}
+
+function collectStrategyPoolSetActionInputs(form) {
+  const strategyType = selectedStrategyPoolType(
+    form,
+    "pool_action_strategy_type",
+  );
+  const inputs = {
+    strategy_type: strategyType,
+    entry_id: selectedStrategyPoolEntry(
+      form,
+      "pool_action_entry_id",
+      strategyType,
+    ),
+    action: strategyPoolAction(form, strategyType),
+  };
+  optionalStrategyPoolReason(inputs, form, "pool_action_reason");
+  return inputs;
+}
+
+function collectStrategyPoolReorderInputs(form) {
+  const strategyType = selectedStrategyPoolType(
+    form,
+    "pool_reorder_strategy_type",
+  );
+  const orderField = formField(form, "pool_reorder_ordered_ids");
+  const options = Array.from(orderField?.options || []);
+  if (options.length < 1 || options.length > 200) {
+    throw new Error(
+      "Strategy Pool 完整重排必须包含当前全部 1 到 200 个条目。",
+    );
+  }
+  const orderedIds = options.map((option) => {
+    const entryId = nonEmptyText(option.value);
+    if (
+      option.dataset?.candidateLabProjection !== "1"
+      || !STRATEGY_POOL_ENTRY_ID_RE.test(entryId)
+      || nonEmptyText(option.dataset?.strategyType) !== strategyType
+      || nonEmptyText(option.dataset?.entryId) !== entryId
+    ) {
+      throw new Error(
+        "Strategy Pool 完整重排只能使用当前受认证投影中的 Entry ID。",
+      );
+    }
+    return entryId;
+  });
+  if (new Set(orderedIds).size !== orderedIds.length) {
+    throw new Error("Strategy Pool 完整重排不能包含重复 Entry ID。");
+  }
+  const inputs = {
+    strategy_type: strategyType,
+    ordered_ids: orderedIds,
+  };
+  optionalStrategyPoolReason(inputs, form, "pool_reorder_reason");
   return inputs;
 }
 
@@ -1918,6 +2101,10 @@ export function collectStrategyCandidateLabRequest(form) {
     scorecard_band_build: collectScorecardBandInputs,
     scorecard_cutoff_selection: collectScorecardCutoffSelectionInputs,
     candidate_monthly_stability: collectCandidateMonthlyStabilityInputs,
+    strategy_pool_compile: collectStrategyPoolCompileInputs,
+    strategy_pool_remove_entry: collectStrategyPoolRemoveEntryInputs,
+    strategy_pool_set_action: collectStrategyPoolSetActionInputs,
+    strategy_pool_reorder: collectStrategyPoolReorderInputs,
     strategy_pool_apply: collectStrategyPoolApplyInputs,
     strategy_pool_validation: collectStrategyPoolValidationInputs,
     voting_candidate_search: collectVotingCandidateSearchInputs,
@@ -2841,6 +3028,405 @@ function syncStrategyPoolApplyControls(form, payload) {
   }
 }
 
+function strategyPoolCompileForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_pool_compile"]',
+  ) || null;
+}
+
+function strategyPoolValidationForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_pool_validation"]',
+  ) || null;
+}
+
+function strategyPoolRemoveEntryForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_pool_remove_entry"]',
+  ) || null;
+}
+
+function strategyPoolSetActionForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_pool_set_action"]',
+  ) || null;
+}
+
+function strategyPoolReorderForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_pool_reorder"]',
+  ) || null;
+}
+
+function strategyPoolOperationPools(payload) {
+  const pools = collectionItems(isRecord(payload?.pools) ? payload.pools : {});
+  const byType = new Map();
+  const duplicates = new Set();
+  for (const pool of pools) {
+    const strategyType = nonEmptyText(pool?.strategy_type);
+    const entries = Array.isArray(pool?.entries)
+      ? pool.entries.filter(isRecord)
+      : [];
+    const entryIds = entries.map((entry) => nonEmptyText(entry.entry_id));
+    const completeEntries = (
+      entries.length > 0
+      && entries.length <= 200
+      && pool?.total === entries.length
+      && pool?.truncated !== true
+      && new Set(entryIds).size === entryIds.length
+      && entries.every((entry, index) => (
+        STRATEGY_POOL_ENTRY_ID_RE.test(nonEmptyText(entry.entry_id))
+        && entry.position === index
+        && isRecord(entry.action)
+        && nonEmptyText(entry.action.type)
+      ))
+    );
+    if (
+      pool?.kind !== "candidate_pool"
+      || !STRATEGY_POOL_TYPES.includes(strategyType)
+      || !completeEntries
+    ) {
+      continue;
+    }
+    if (byType.has(strategyType)) {
+      duplicates.add(strategyType);
+      continue;
+    }
+    byType.set(strategyType, {
+      strategyType,
+      entries: entries.map((entry) => ({
+        entryId: nonEmptyText(entry.entry_id),
+        position: entry.position,
+        action: { ...entry.action },
+      })),
+    });
+  }
+  for (const strategyType of duplicates) byType.delete(strategyType);
+  return STRATEGY_POOL_TYPES
+    .filter((strategyType) => byType.has(strategyType))
+    .map((strategyType) => byType.get(strategyType));
+}
+
+function syncStrategyPoolTypeSelect(select, pools) {
+  if (!select) return "";
+  const previousType = nonEmptyText(select.value);
+  select.innerHTML = [
+    '<option value="">请选择当前非空 Strategy Pool</option>',
+    ...pools.map((pool) => projectionOptionHtml(
+      pool.strategyType,
+      `${pool.strategyType} · ${pool.entries.length} 条当前规则`,
+      {
+        "candidate-lab-projection": "1",
+        "strategy-type": pool.strategyType,
+      },
+    )),
+  ].join("");
+  if (previousType && selectContainsValue(select, previousType)) {
+    select.value = previousType;
+  } else if (pools.length === 1) {
+    select.value = pools[0].strategyType;
+  } else {
+    select.value = "";
+  }
+  return nonEmptyText(select.value);
+}
+
+function syncStrategyPoolValidationControls(form, payload) {
+  if (!form) return;
+  const pools = strategyPoolOperationPools(payload).filter((pool) => (
+    ["approval", "reject"].includes(pool.strategyType)
+  ));
+  const selectedType = syncStrategyPoolTypeSelect(
+    formField(form, "pool_validation_strategy_type"),
+    pools,
+  );
+  const help = form.querySelector?.(
+    "[data-candidate-lab-pool-validation-help]",
+  );
+  if (help) {
+    help.textContent = pools.length === 0
+      ? "当前任务尚无可验证的受认证非空审批或拒绝 Pool。"
+      : pools.length === 1
+        ? `已选择当前唯一的 ${selectedType} Pool；请选择 validation 或 OOT 分区。`
+        : "当前存在多个可验证的非空 Pool，请明确选择 approval 或 reject。";
+  }
+}
+
+function strategyPoolEntryLabel(entry, displayPosition = entry.position) {
+  const actionType = nonEmptyText(entry?.action?.type) || "unknown";
+  return `#${displayPosition + 1} · ${entry.entryId} · ${actionType}`;
+}
+
+function syncStrategyPoolEntrySelect(
+  select,
+  pool,
+  { preserveEntry = true } = {},
+) {
+  if (!select) return;
+  const previousEntryId = nonEmptyText(select.value);
+  const previousType = nonEmptyText(
+    Array.from(select.selectedOptions || [])[0]?.dataset?.strategyType,
+  );
+  const entries = pool?.entries || [];
+  select.innerHTML = [
+    '<option value="">请选择当前 Pool Entry</option>',
+    ...entries.map((entry) => projectionOptionHtml(
+      entry.entryId,
+      strategyPoolEntryLabel(entry),
+      {
+        "candidate-lab-projection": "1",
+        "strategy-type": pool.strategyType,
+        "entry-id": entry.entryId,
+      },
+    )),
+  ].join("");
+  if (
+    preserveEntry
+    && previousType === pool?.strategyType
+    && selectContainsValue(select, previousEntryId)
+  ) {
+    select.value = previousEntryId;
+  } else {
+    select.value = "";
+  }
+}
+
+function setStrategyPoolActionValuePanelVisible(form, visible) {
+  const panel = form?.querySelector?.(
+    "[data-candidate-lab-pool-action-value-panel]",
+  );
+  if (!panel) return;
+  panel.classList?.toggle?.("hidden", !visible);
+  panel.setAttribute?.("aria-hidden", visible ? "false" : "true");
+  const controls = panel.querySelectorAll?.("input, select, textarea") || [];
+  for (const control of controls) control.disabled = !visible;
+}
+
+function syncStrategyPoolActionTypes(
+  form,
+  strategyType,
+  { preserveAction = true } = {},
+) {
+  const select = formField(form, "pool_action_type");
+  if (!select) return;
+  const previousAction = nonEmptyText(select.value);
+  const allowed = STRATEGY_POOL_ACTION_TYPES[strategyType] || [];
+  select.innerHTML = [
+    '<option value="">请选择兼容动作</option>',
+    ...allowed.map((actionType) => projectionOptionHtml(
+      actionType,
+      actionType,
+      { "candidate-lab-action-type": "1" },
+    )),
+  ].join("");
+  if (
+    preserveAction
+    && previousAction
+    && allowed.includes(previousAction)
+    && selectContainsValue(select, previousAction)
+  ) {
+    select.value = previousAction;
+  } else if (allowed.length === 1) {
+    select.value = allowed[0];
+  } else {
+    select.value = "";
+  }
+  setStrategyPoolActionValuePanelVisible(
+    form,
+    ["limit", "pricing", "segment"].includes(nonEmptyText(select.value)),
+  );
+}
+
+function syncStrategyPoolCompileControls(form, pools) {
+  if (!form) return;
+  const selectedType = syncStrategyPoolTypeSelect(
+    formField(form, "pool_compile_strategy_type"),
+    pools,
+  );
+  const help = form.querySelector?.("[data-candidate-lab-pool-compile-help]");
+  if (help) {
+    help.textContent = pools.length
+      ? selectedType
+        ? "将编译当前受认证非空 Pool 的完整规则瀑布。"
+        : "当前存在多个非空 Pool，请明确选择要编译的策略类型。"
+      : "当前没有可编译的非空 Strategy Pool；确定性内核不能编译空 Pool。";
+  }
+}
+
+function syncStrategyPoolRemoveEntryControls(
+  form,
+  pools,
+  { preserveEntry = true } = {},
+) {
+  if (!form) return;
+  const selectedType = syncStrategyPoolTypeSelect(
+    formField(form, "pool_remove_strategy_type"),
+    pools,
+  );
+  const pool = pools.find((item) => item.strategyType === selectedType);
+  syncStrategyPoolEntrySelect(
+    formField(form, "pool_remove_entry_id"),
+    pool,
+    { preserveEntry },
+  );
+  const help = form.querySelector?.("[data-candidate-lab-pool-remove-help]");
+  if (help) {
+    help.textContent = pools.length
+      ? selectedType
+        ? "请明确选择一个当前受认证 Entry；平台不会按顺序自动代选。"
+        : "当前存在多个非空 Pool，请先明确选择策略类型。"
+      : "当前没有可移除条目的非空 Strategy Pool。";
+  }
+}
+
+function syncStrategyPoolSetActionControls(
+  form,
+  pools,
+  {
+    preserveEntry = true,
+    preserveAction = true,
+  } = {},
+) {
+  if (!form) return;
+  const selectedType = syncStrategyPoolTypeSelect(
+    formField(form, "pool_action_strategy_type"),
+    pools,
+  );
+  const pool = pools.find((item) => item.strategyType === selectedType);
+  syncStrategyPoolEntrySelect(
+    formField(form, "pool_action_entry_id"),
+    pool,
+    { preserveEntry },
+  );
+  syncStrategyPoolActionTypes(
+    form,
+    selectedType,
+    { preserveAction },
+  );
+  const help = form.querySelector?.("[data-candidate-lab-pool-action-help]");
+  if (help) {
+    help.textContent = pools.length
+      ? selectedType
+        ? "请明确选择一个当前受认证 Entry，并设置与 Pool 类型兼容的动作。"
+        : "当前存在多个非空 Pool，请先明确选择策略类型。"
+      : "当前没有可修改动作的非空 Strategy Pool。";
+  }
+}
+
+function syncStrategyPoolReorderControls(form, pools) {
+  if (!form) return;
+  const selectedType = syncStrategyPoolTypeSelect(
+    formField(form, "pool_reorder_strategy_type"),
+    pools,
+  );
+  const pool = pools.find((item) => item.strategyType === selectedType);
+  renderStrategyPoolReorderOrder(form, pool);
+  const help = form.querySelector?.("[data-candidate-lab-pool-reorder-help]");
+  if (help) {
+    help.textContent = pools.length
+      ? selectedType
+        ? "选择一个 Entry 后使用上移、下移；提交始终包含当前完整 Entry 集合。"
+        : "当前存在多个非空 Pool，请先明确选择策略类型。"
+      : "当前没有可重排的非空 Strategy Pool。";
+  }
+}
+
+function strategyPoolOrderMatches(pool, orderedIds) {
+  if (!pool || !Array.isArray(orderedIds)) return false;
+  const currentIds = pool.entries.map((entry) => entry.entryId);
+  return (
+    orderedIds.length === currentIds.length
+    && new Set(orderedIds).size === orderedIds.length
+    && currentIds.every((entryId) => orderedIds.includes(entryId))
+  );
+}
+
+function renderStrategyPoolReorderOrder(
+  form,
+  pool,
+  orderedIds = null,
+  selectedEntryId = "",
+) {
+  const orderSelect = formField(form, "pool_reorder_ordered_ids");
+  if (orderSelect) {
+    const order = (
+      strategyPoolOrderMatches(pool, orderedIds)
+        ? orderedIds
+        : pool?.entries.map((entry) => entry.entryId)
+    ) || [];
+    const byId = new Map(
+      (pool?.entries || []).map((entry) => [entry.entryId, entry]),
+    );
+    orderSelect.innerHTML = pool
+      ? order.map((entryId, index) => {
+        const entry = byId.get(entryId);
+        return projectionOptionHtml(
+          entry.entryId,
+          strategyPoolEntryLabel(entry, index),
+          {
+            "candidate-lab-projection": "1",
+            "strategy-type": pool.strategyType,
+            "entry-id": entry.entryId,
+          },
+        );
+      }).join("")
+      : '<option value="">请先选择 Strategy Pool</option>';
+    orderSelect.value = (
+      selectedEntryId && selectContainsValue(orderSelect, selectedEntryId)
+        ? selectedEntryId
+        : ""
+    );
+  }
+}
+
+function syncStrategyPoolOperationForms(root, payload) {
+  const pools = strategyPoolOperationPools(payload);
+  syncStrategyPoolCompileControls(strategyPoolCompileForm(root), pools);
+  syncStrategyPoolRemoveEntryControls(
+    strategyPoolRemoveEntryForm(root),
+    pools,
+  );
+  syncStrategyPoolSetActionControls(
+    strategyPoolSetActionForm(root),
+    pools,
+  );
+  syncStrategyPoolReorderControls(strategyPoolReorderForm(root), pools);
+}
+
+function strategyPoolOperationRequestIsCurrent(request, payload) {
+  if (!STRATEGY_POOL_OPERATION_WORKFLOWS.includes(request?.workflow)) {
+    return true;
+  }
+  const inputs = isRecord(request?.workflow_inputs)
+    ? request.workflow_inputs
+    : {};
+  const pool = strategyPoolOperationPools(payload).find(
+    (item) => item.strategyType === inputs.strategy_type,
+  );
+  if (!pool) return false;
+  if (request.workflow === "strategy_pool_compile") return true;
+  if (
+    request.workflow === "strategy_pool_remove_entry"
+    || request.workflow === "strategy_pool_set_action"
+  ) {
+    return pool.entries.some((entry) => entry.entryId === inputs.entry_id);
+  }
+  return strategyPoolOrderMatches(pool, inputs.ordered_ids);
+}
+
+function strategyPoolValidationRequestIsCurrent(request, payload) {
+  if (request?.workflow !== "strategy_pool_validation") return true;
+  const strategyType = nonEmptyText(
+    request?.workflow_inputs?.strategy_type,
+  );
+  return (
+    ["approval", "reject"].includes(strategyType)
+    && strategyPoolOperationPools(payload).some(
+      (pool) => pool.strategyType === strategyType,
+    )
+  );
+}
+
 function votingSearchForm(root) {
   return root?.querySelector?.(
     '[data-candidate-lab-workflow="voting_candidate_search"]',
@@ -3122,10 +3708,14 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       const stabilityPanel = control.closest?.(
         "[data-candidate-lab-stability-panel]",
       );
+      const poolActionValuePanel = control.closest?.(
+        "[data-candidate-lab-pool-action-value-panel]",
+      );
       const hiddenByMode = Boolean(
         refinementPanel?.classList?.contains?.("hidden")
         || scorecardPanel?.classList?.contains?.("hidden")
-        || stabilityPanel?.classList?.contains?.("hidden"),
+        || stabilityPanel?.classList?.contains?.("hidden")
+        || poolActionValuePanel?.classList?.contains?.("hidden"),
       );
       control.disabled = Boolean(reason) || hiddenByMode;
     }
@@ -3173,10 +3763,15 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       candidateStabilityForm(root),
       state.payload,
     );
+    syncStrategyPoolValidationControls(
+      strategyPoolValidationForm(root),
+      state.payload,
+    );
     syncStrategyPoolApplyControls(
       strategyPoolApplyForm(root),
       state.payload,
     );
+    syncStrategyPoolOperationForms(root, state.payload);
     syncVotingForms(root, state.payload);
     syncInteractiveTreeRevisionControls(
       interactiveTreeForm(root),
@@ -3206,10 +3801,15 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       candidateStabilityForm(root),
       state.payload,
     );
+    syncStrategyPoolValidationControls(
+      strategyPoolValidationForm(root),
+      state.payload,
+    );
     syncStrategyPoolApplyControls(
       strategyPoolApplyForm(root),
       state.payload,
     );
+    syncStrategyPoolOperationForms(root, state.payload);
     syncVotingForms(root, state.payload);
     syncInteractiveTreeRevisionControls(
       interactiveTreeForm(root),
@@ -3356,6 +3956,22 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     let strategyRequest;
     try {
       strategyRequest = collectStrategyCandidateLabRequest(form);
+      if (!strategyPoolOperationRequestIsCurrent(
+        strategyRequest,
+        state.payload,
+      )) {
+        throw new Error(
+          "当前 Strategy Pool 类型或 Entry 集合已过期、不完整或不属于受认证投影，请刷新 Candidate Lab 后重选。",
+        );
+      }
+      if (!strategyPoolValidationRequestIsCurrent(
+        strategyRequest,
+        state.payload,
+      )) {
+        throw new Error(
+          "所选审批或拒绝 Pool 已过期、为空或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
+        );
+      }
       if (
         strategyRequest.workflow === "strategy_pool_apply"
         && !strategyPoolApplyOptions(state.payload).some(
@@ -3455,7 +4071,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       await dependencies.refreshAgentMessages?.(requestTaskId);
       await dependencies.settleCandidateLabSubmission?.(requestTaskId);
       if (selectedTaskId() !== requestTaskId) return result;
-      if (strategyRequest.workflow === "strategy_pool_apply") {
+      if (
+        strategyRequest.workflow === "strategy_pool_apply"
+        || STRATEGY_POOL_OPERATION_WORKFLOWS.includes(strategyRequest.workflow)
+      ) {
         await refresh(requestTaskId, { silent: true });
         if (selectedTaskId() !== requestTaskId) return result;
       }
@@ -3491,6 +4110,74 @@ export function createStrategyCandidateLabController(dependencies = {}) {
   }
 
   function handleClick(event) {
+    const reorderMove = event.target?.closest?.(
+      "[data-candidate-lab-pool-reorder-move]",
+    );
+    if (reorderMove) {
+      event.preventDefault?.();
+      const form = strategyPoolReorderForm(panel());
+      const reason = blockedReason(state, dependencies);
+      if (reason) {
+        const message = BLOCKED_REASON_COPY[reason]
+          || "当前 Candidate Lab 暂不可调整 Pool 顺序。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+        return true;
+      }
+      try {
+        const request = collectStrategyCandidateLabRequest(form);
+        const strategyType = request.workflow_inputs.strategy_type;
+        const orderedIds = request.workflow_inputs.ordered_ids;
+        const pool = strategyPoolOperationPools(state.payload).find(
+          (item) => item.strategyType === strategyType,
+        );
+        if (!strategyPoolOrderMatches(pool, orderedIds)) {
+          throw new Error(
+            "当前 Pool Entry 集合已过期，请刷新 Candidate Lab 后重试。",
+          );
+        }
+        const orderSelect = formField(form, "pool_reorder_ordered_ids");
+        const selected = Array.from(orderSelect?.selectedOptions || [])[0];
+        const selectedEntryId = nonEmptyText(selected?.value);
+        if (
+          !selected
+          || selected.dataset?.candidateLabProjection !== "1"
+          || nonEmptyText(selected.dataset?.strategyType) !== strategyType
+          || nonEmptyText(selected.dataset?.entryId) !== selectedEntryId
+        ) {
+          throw new Error("请先选择一个当前受认证 Pool Entry 再调整顺序。");
+        }
+        const direction = nonEmptyText(
+          reorderMove.dataset?.candidateLabPoolReorderMove,
+        );
+        if (!["up", "down"].includes(direction)) {
+          throw new Error("Pool Entry 调整方向无效。");
+        }
+        const selectedIndex = orderedIds.indexOf(selectedEntryId);
+        const targetIndex = direction === "up"
+          ? selectedIndex - 1
+          : selectedIndex + 1;
+        if (targetIndex >= 0 && targetIndex < orderedIds.length) {
+          [orderedIds[selectedIndex], orderedIds[targetIndex]] = [
+            orderedIds[targetIndex],
+            orderedIds[selectedIndex],
+          ];
+          renderStrategyPoolReorderOrder(
+            form,
+            pool,
+            orderedIds,
+            selectedEntryId,
+          );
+        }
+        setFormError(form, "");
+        renderAvailability();
+      } catch (error) {
+        const message = error?.message || "无法调整当前 Pool Entry 顺序。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+      }
+      return true;
+    }
     const materialize = event.target?.closest?.(
       "[data-candidate-lab-interactive-tree-frontier-materialize]",
     );
@@ -3645,6 +4332,52 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       syncCandidateStabilityControls(
         candidateStability,
         state.payload,
+      );
+      renderAvailability();
+      return true;
+    }
+    const poolRemove = field.closest?.(
+      '[data-candidate-lab-workflow="strategy_pool_remove_entry"]',
+    );
+    if (poolRemove && fieldName === "pool_remove_strategy_type") {
+      syncStrategyPoolRemoveEntryControls(
+        poolRemove,
+        strategyPoolOperationPools(state.payload),
+        { preserveEntry: false },
+      );
+      renderAvailability();
+      return true;
+    }
+    const poolAction = field.closest?.(
+      '[data-candidate-lab-workflow="strategy_pool_set_action"]',
+    );
+    if (poolAction && fieldName === "pool_action_strategy_type") {
+      syncStrategyPoolSetActionControls(
+        poolAction,
+        strategyPoolOperationPools(state.payload),
+        { preserveEntry: false, preserveAction: false },
+      );
+      renderAvailability();
+      return true;
+    }
+    if (poolAction && fieldName === "pool_action_type") {
+      setStrategyPoolActionValuePanelVisible(
+        poolAction,
+        ["limit", "pricing", "segment"].includes(formValue(
+          poolAction,
+          "pool_action_type",
+        )),
+      );
+      renderAvailability();
+      return true;
+    }
+    const poolReorder = field.closest?.(
+      '[data-candidate-lab-workflow="strategy_pool_reorder"]',
+    );
+    if (poolReorder && fieldName === "pool_reorder_strategy_type") {
+      syncStrategyPoolReorderControls(
+        poolReorder,
+        strategyPoolOperationPools(state.payload),
       );
       renderAvailability();
       return true;

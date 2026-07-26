@@ -73,8 +73,13 @@ def test_pool_validation_form_collects_only_type_and_partition() -> None:
           assert.ok(!formHtml.includes(forbidden), forbidden);
         }
 
+        const type = new FakeSelect("pool_validation_strategy_type");
+        installSelectedOption(type, "approval", {
+          candidateLabProjection: "1",
+          strategyType: "approval",
+        });
         const fields = new Map([
-          ["pool_validation_strategy_type", { value: "approval" }],
+          ["pool_validation_strategy_type", type],
           ["pool_validation_partition", { value: "validation" }],
         ]);
         const form = {
@@ -98,12 +103,18 @@ def test_pool_validation_form_collects_only_type_and_partition() -> None:
             },
           },
         );
-        fields.get("pool_validation_strategy_type").value = "limit";
+        installSelectedOption(type, "limit", {
+          candidateLabProjection: "1",
+          strategyType: "limit",
+        });
         assert.throws(
           () => collectStrategyCandidateLabRequest(form),
           /approval|reject/,
         );
-        fields.get("pool_validation_strategy_type").value = "reject";
+        installSelectedOption(type, "reject", {
+          candidateLabProjection: "1",
+          strategyType: "reject",
+        });
         fields.get("pool_validation_partition").value = "development";
         assert.throws(
           () => collectStrategyCandidateLabRequest(form),
@@ -116,11 +127,40 @@ def test_pool_validation_form_collects_only_type_and_partition() -> None:
 def test_pool_validation_form_reuses_blocking_and_single_flight_submission() -> None:
     run_node(
         r"""
+        function validationPayload() {
+          const payload = payloadFor("strategy-a", { empty: true });
+          const pool = {
+            kind: "candidate_pool",
+            strategy_type: "reject",
+            revision: 2,
+            entries: [{
+              entry_id: `pool-entry-${"a".repeat(32)}`,
+              position: 0,
+              action: { type: "reject" },
+            }],
+            total: 1,
+            truncated: false,
+          };
+          payload.pools = {
+            latest: pool,
+            all: [pool],
+            total: 1,
+            truncated: false,
+          };
+          return payload;
+        }
+
         function installValidationForm(harness) {
-          const type = { value: "reject", disabled: false, closest() { return null; } };
-          const partition = { value: "oot", disabled: false, closest() { return null; } };
+          const type = new FakeSelect("pool_validation_strategy_type");
+          const partition = new FakeSelect("pool_validation_partition");
+          partition.innerHTML = [
+            '<option value="validation">Validation</option>',
+            '<option value="oot">OOT</option>',
+          ].join("");
+          partition.value = "oot";
           const submit = { disabled: false, closest() { return null; } };
           const error = { textContent: "" };
+          const help = { textContent: "" };
           const fields = new Map([
             ["pool_validation_strategy_type", type],
             ["pool_validation_partition", partition],
@@ -129,13 +169,24 @@ def test_pool_validation_form_reuses_blocking_and_single_flight_submission() -> 
             dataset: { candidateLabWorkflow: "strategy_pool_validation" },
             querySelector(selector) {
               if (selector === "[data-candidate-lab-form-error]") return error;
+              if (
+                selector === "[data-candidate-lab-pool-validation-help]"
+              ) {
+                return help;
+              }
               const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
               return match ? fields.get(match[1]) || null : null;
             },
             querySelectorAll() { return [type, partition, submit]; },
-            reset() {},
+            reset() {
+              type.value = "";
+              partition.value = "oot";
+              error.textContent = "";
+            },
             closest() { return null; },
           };
+          type.form = form;
+          partition.form = form;
           const originalOne = harness.panel.querySelector.bind(harness.panel);
           const originalAll = harness.panel.querySelectorAll.bind(harness.panel);
           harness.panel.querySelector = (selector) => (
@@ -155,6 +206,7 @@ def test_pool_validation_form_reuses_blocking_and_single_flight_submission() -> 
         let release;
         const pending = new Promise((resolve) => { release = resolve; });
         const harness = makeHarness({
+          payloads: new Map([["strategy-a", validationPayload()]]),
           submitStrategyCandidateLabRequest: async () => {
             await pending;
             return { status: "accepted", messages: [] };
@@ -180,7 +232,10 @@ def test_pool_validation_form_reuses_blocking_and_single_flight_submission() -> 
           },
         );
 
-        const blocked = makeHarness({ getBlockedReason: () => "active_plan" });
+        const blocked = makeHarness({
+          getBlockedReason: () => "active_plan",
+          payloads: new Map([["strategy-a", validationPayload()]]),
+        });
         const blockedValidation = installValidationForm(blocked);
         await blocked.controller.selectTask(
           { id: "strategy-a", task_type: "strategy" },
