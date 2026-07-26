@@ -79,6 +79,15 @@ from marvis.packs.strategy.candidate_fragment import (
     univariate_asset_to_verified_fragment,
     verified_fragment_pool_parts,
 )
+from marvis.packs.strategy.interactive_tree_revision import (
+    interactive_tree_topology_evidence,
+)
+from marvis.packs.strategy.interactive_tree_tools import (
+    INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+    INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
+    VerifiedInteractiveTreeRevision,
+    load_verified_interactive_tree_revisions,
+)
 from marvis.packs.strategy.cross_matrix_cell_selection import (
     CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND,
     CROSS_MATRIX_CELL_SELECTION_ORIGIN_TOOL,
@@ -156,7 +165,7 @@ from marvis.repositories.strategy_pool import (
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 
 
-SCHEMA_VERSION = "strategy.candidate-lab-projection.v2"
+SCHEMA_VERSION = "strategy.candidate-lab-projection.v3"
 
 UNIVARIATE_ARTIFACT_KIND = "strategy_candidate_json"
 UNIVARIATE_ORIGIN_TOOL = "strategy.analyze_univariate_candidates"
@@ -198,6 +207,7 @@ _MODEL_SCORE_VIRTUAL_FIELD_RE = re.compile(
 _MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 _MAX_PROJECTION_BYTES = 64 * 1024 * 1024
 _MAX_CANDIDATES_PER_KIND = 20
+_MAX_INTERACTIVE_TREE_REVISIONS = 20
 _MAX_SCORECARD_CANDIDATES_PER_KIND = 3
 _MAX_VOTING_SEARCHES = 20
 _MAX_VOTING_SEARCH_COMBINATIONS = 20
@@ -360,6 +370,24 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         directory_name="strategy_automatic_trees",
         filename_pattern=re.compile(r"^candidate-asset-[0-9a-f]{32}\.json$"),
     )
+    interactive_tree_records, interactive_tree_total = (
+        artifact_repository.list_recent_for_task_kind_with_count(
+            task_id,
+            INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+            limit=_MAX_INTERACTIVE_TREE_REVISIONS,
+        )
+    )
+    interactive_tree_records = _candidate_record_window(
+        settings,
+        task_id,
+        interactive_tree_records,
+        kind=INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+        origin_tool=INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
+        directory_name="strategy_interactive_tree_revisions",
+        filename_pattern=re.compile(
+            r"^interactive-tree-revision-[0-9a-f]{32}\.json$"
+        ),
+    )
     scorecard_band_records, scorecard_band_total = (
         artifact_repository.list_recent_for_task_kind_with_count(
             task_id,
@@ -429,6 +457,10 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         _project_automatic_tree(context, record)
         for record in automatic_tree_records
     ]
+    interactive_tree_revision = _project_interactive_tree_revisions(
+        context,
+        interactive_tree_records,
+    )
     scorecard_band = [
         _project_scorecard_band(context, record)
         for record in scorecard_band_records
@@ -453,7 +485,7 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
     else:
         blocked_reason = None
 
-    return {
+    projection = {
         "schema_version": SCHEMA_VERSION,
         "task_id": context.task_id,
         "can_start": blocked_reason is None,
@@ -476,6 +508,11 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
                 _MAX_CANDIDATES_PER_KIND,
                 total=automatic_tree_total,
             ),
+            "interactive_tree_revision": _collection(
+                interactive_tree_revision,
+                _MAX_INTERACTIVE_TREE_REVISIONS,
+                total=interactive_tree_total,
+            ),
             "scorecard_band": _collection(
                 scorecard_band,
                 _MAX_SCORECARD_CANDIDATES_PER_KIND,
@@ -494,6 +531,8 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         },
         "pools": _collection(pools, len(STRATEGY_TYPES)),
     }
+    _require_projection_payload_budget(projection)
+    return projection
 
 
 def _project_univariate(
@@ -945,6 +984,7 @@ def _project_automatic_tree(
     ]
     tree_info = tree["tree"]
     diagnostics = asset["diagnostics"]
+    topology = interactive_tree_topology_evidence(asset)
     return {
         "kind": "automatic_tree",
         "artifact": _artifact_projection(record, context.task_id),
@@ -953,6 +993,7 @@ def _project_automatic_tree(
         "detail": {
             "asset_id": asset["asset_id"],
             "tree_id": tree_info["tree_id"],
+            "source_tree_id": asset["asset_id"],
             "summary": {
                 "node_count": tree_info["node_count"],
                 "leaf_count": tree_info["leaf_count"],
@@ -964,9 +1005,199 @@ def _project_automatic_tree(
             "red_flags": list(diagnostics["red_flags"])[:_MAX_RISKS],
             "report_info_gaps": [],
         },
-        "pointers": {"leaves": projected_leaves},
+        "pointers": {
+            "leaves": projected_leaves,
+            **_interactive_tree_topology_pointers(
+                source_tree_id=asset["asset_id"],
+                topology=topology,
+            ),
+        },
         "total": len(fragments),
         "truncated": len(fragments) > len(projected_leaves),
+    }
+
+
+def _project_interactive_tree_revisions(
+    context: _ProjectionContext,
+    records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if not records:
+        return []
+    revision_ids = tuple(
+        _text(
+            _mapping(record.get("provenance"), "interactive-tree provenance").get(
+                "revision_id"
+            ),
+            "interactive-tree revision_id",
+        )
+        for record in records
+    )
+    runtime = SimpleNamespace(
+        settings=context.settings,
+        task_artifacts=context.artifact_repository,
+    )
+    try:
+        verified = load_verified_interactive_tree_revisions(
+            runtime,
+            task_id=context.task_id,
+            revision_ids=revision_ids,
+            reserve_bytes=context.budget.reserve,
+        )
+    except StrategyError as exc:
+        raise CandidateLabProjectionError(
+            "interactive-tree revision verification failed"
+        ) from exc
+    projected = []
+    for record, revision_id in zip(records, revision_ids, strict=True):
+        binding = verified[revision_id]
+        if (
+            binding.artifact_id != record["id"]
+            or binding.path != Path(record["path"])
+            or not hmac.compare_digest(
+                binding.content_hash,
+                _sha256(
+                    record.get("content_hash"),
+                    "interactive-tree content hash",
+                ),
+            )
+            or binding.provenance
+            != _mapping(
+                record.get("provenance"),
+                "interactive-tree provenance",
+            )
+        ):
+            raise CandidateLabProjectionError(
+                "interactive-tree registry binding drifted"
+            )
+        projected.append(
+            _project_interactive_tree_revision(
+                context,
+                record,
+                binding=binding,
+            )
+        )
+    return projected
+
+
+def _project_interactive_tree_revision(
+    context: _ProjectionContext,
+    record: Mapping[str, Any],
+    *,
+    binding: VerifiedInteractiveTreeRevision,
+) -> dict[str, Any]:
+    revision = binding.revision
+    ancestry = binding.ancestor_revisions
+    topology = interactive_tree_topology_evidence(
+        binding.automatic_source.asset,
+        revision_payload=revision,
+        parent_revision=ancestry[0] if ancestry else None,
+        ancestor_revisions=ancestry[1:],
+    )
+    parent_ref = revision["parent_revision"]
+    source_tree_id = revision["revision_id"]
+    projected_frontier = [
+        {
+            key: fragment[key]
+            for key in (
+                "source_node_id",
+                "leaf_id",
+                "fragment_id",
+                "rule_id",
+                "effect_id",
+                "condition",
+                "metrics",
+            )
+        }
+        for fragment in revision["fragments"]
+    ]
+    history = [
+        {
+            "revision_id": item["revision_id"],
+            "semantic_tree_id": item["semantic_tree_id"],
+            "parent_revision_id": (
+                None
+                if item["parent_revision"] is None
+                else item["parent_revision"]["revision_id"]
+            ),
+            "edit": item["edit"],
+        }
+        for item in (revision, *ancestry)
+    ]
+    return {
+        "kind": "interactive_tree_revision",
+        "artifact": _artifact_projection(record, context.task_id),
+        "candidate_id": revision["candidate_evidence"]["candidate_id"],
+        "lifecycle": revision["lifecycle"],
+        "detail": {
+            "revision_id": revision["revision_id"],
+            "semantic_tree_id": revision["semantic_tree_id"],
+            "source_tree_id": source_tree_id,
+            "derived_from_source_tree_id": binding.provenance["source_tree_id"],
+            "base_asset_id": revision["base_tree"]["asset_id"],
+            "parent_revision_id": (
+                None if parent_ref is None else parent_ref["revision_id"]
+            ),
+            "edit": revision["edit"],
+            "summary": {
+                "node_count": len(topology["nodes"]),
+                "visible_node_count": len(topology["visible_node_ids"]),
+                "frontier_node_count": len(topology["frontier_node_ids"]),
+            },
+        },
+        "risks": {
+            "red_flags": [],
+            "report_info_gaps": [],
+        },
+        "history": history,
+        "pointers": {
+            "frontier": projected_frontier,
+            **_interactive_tree_topology_pointers(
+                source_tree_id=source_tree_id,
+                topology=topology,
+            ),
+        },
+        "total": len(topology["nodes"]),
+        "truncated": False,
+    }
+
+
+def _interactive_tree_topology_pointers(
+    *,
+    source_tree_id: str,
+    topology: Mapping[str, Any],
+) -> dict[str, Any]:
+    nodes = [
+        dict(node)
+        for node in _sequence(topology.get("nodes"), "interactive-tree nodes")
+    ]
+    eligible_prunes = [
+        {
+            "source_tree_id": source_tree_id,
+            "node_id": node["node_id"],
+            "operation": "prune_subtree",
+        }
+        for node in nodes
+        if node.get("can_prune") is True
+    ]
+    return {
+        "root_node_id": _text(
+            topology.get("root_node_id"),
+            "interactive-tree root_node_id",
+        ),
+        "nodes": nodes,
+        "visible_node_ids": list(
+            _text_sequence(
+                topology.get("visible_node_ids"),
+                "interactive-tree visible_node_ids",
+            )
+        ),
+        "frontier_node_ids": list(
+            _text_sequence(
+                topology.get("frontier_node_ids"),
+                "interactive-tree frontier_node_ids",
+            )
+        ),
+        "eligible_prunes": eligible_prunes,
     }
 
 
@@ -2583,6 +2814,27 @@ def _collection(
     }
 
 
+def _require_projection_payload_budget(payload: Mapping[str, Any]) -> None:
+    try:
+        byte_count = len(
+            json.dumps(
+                dict(payload),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise CandidateLabProjectionError(
+            "strategy candidate lab projection is not canonical JSON"
+        ) from exc
+    if byte_count > _MAX_PROJECTION_BYTES:
+        raise CandidateLabProjectionError(
+            "strategy candidate lab response byte budget exceeded"
+        )
+
+
 def _active_plan_projection(settings, task_id: str) -> dict[str, Any] | None:
     return PlanRepository(settings.db_path).latest_nonterminal_summary_for_task(task_id)
 
@@ -2678,6 +2930,15 @@ def _sequence(value: object, name: str) -> Sequence[Mapping[str, Any]]:
     if any(not isinstance(item, Mapping) for item in value):
         raise CandidateLabProjectionError(f"{name} entries must be objects")
     return value
+
+
+def _text_sequence(value: object, name: str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(
+        value,
+        Sequence,
+    ):
+        raise CandidateLabProjectionError(f"{name} must be an array")
+    return tuple(_text(item, f"{name} item") for item in value)
 
 
 def _mapping(value: object, name: str) -> Mapping[str, Any]:

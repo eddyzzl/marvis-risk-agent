@@ -9,7 +9,7 @@ development population, and publishes one canonical immutable JSON artifact.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -153,6 +153,19 @@ class _ReplayBinding:
     data_binding: Any
     sample_design: StrategySampleDesignExecutionBinding
     evidence: dict[str, Any]
+
+
+@dataclass
+class _RevisionReadBudget:
+    limit: int
+    used: int = 0
+
+    def reserve(self, byte_count: int) -> None:
+        if byte_count < 0 or self.used + byte_count > self.limit:
+            raise StrategyError(
+                "interactive-tree revision chain exceeds the aggregate byte budget"
+            )
+        self.used += byte_count
 
 
 def run_revise_interactive_tree(inputs: object, ctx, runtime) -> dict[str, Any]:
@@ -306,15 +319,65 @@ def load_verified_interactive_tree_revision(
 ) -> VerifiedInteractiveTreeRevision:
     """Load one exact revision and recursively authenticate its ancestry."""
 
+    return load_verified_interactive_tree_revisions(
+        runtime,
+        task_id=task_id,
+        revision_ids=(revision_id,),
+    )[_required_text(revision_id, "revision_id")]
+
+
+def load_verified_interactive_tree_revisions(
+    runtime,
+    *,
+    task_id: str,
+    revision_ids: Sequence[str],
+    max_total_bytes: int | None = None,
+    reserve_bytes: Callable[[int], None] | None = None,
+) -> dict[str, VerifiedInteractiveTreeRevision]:
+    """Batch-load exact revisions with one shared ancestry cache and budget."""
+
+    if isinstance(revision_ids, (str, bytes, bytearray)) or not isinstance(
+        revision_ids,
+        Sequence,
+    ):
+        raise StrategyError("revision_ids must be a sequence")
+    normalized_ids = tuple(
+        _required_text(revision_id, "revision_id")
+        for revision_id in revision_ids
+    )
+    if len(normalized_ids) != len(set(normalized_ids)):
+        raise StrategyError("revision_ids must be unique")
+    if max_total_bytes is not None and (
+        isinstance(max_total_bytes, bool)
+        or not isinstance(max_total_bytes, int)
+        or max_total_bytes < 1
+    ):
+        raise StrategyError("max_total_bytes must be a positive integer")
+    if reserve_bytes is not None and not callable(reserve_bytes):
+        raise StrategyError("reserve_bytes must be callable")
+    cache: dict[str, VerifiedInteractiveTreeRevision] = {}
+    budget = (
+        None
+        if max_total_bytes is None
+        else _RevisionReadBudget(max_total_bytes)
+    )
     with runtime.task_artifacts.transaction() as conn:
-        return _load_verified_interactive_tree_revision_on_connection(
-            conn,
-            runtime=runtime,
-            task_id=task_id,
-            revision_id=revision_id,
-            visited=set(),
-            depth=0,
-        )
+        for revision_id in normalized_ids:
+            _load_verified_interactive_tree_revision_on_connection(
+                conn,
+                runtime=runtime,
+                task_id=task_id,
+                revision_id=revision_id,
+                visited=set(),
+                depth=0,
+                cache=cache,
+                budget=budget,
+                reserve_bytes=reserve_bytes,
+            )
+    return {
+        revision_id: cache[revision_id]
+        for revision_id in normalized_ids
+    }
 
 
 def _resolve_revision_source_on_connection(
@@ -413,6 +476,9 @@ def _load_verified_interactive_tree_revision_on_connection(
     revision_id: str,
     visited: set[str],
     depth: int,
+    cache: dict[str, VerifiedInteractiveTreeRevision] | None = None,
+    budget: _RevisionReadBudget | None = None,
+    reserve_bytes: Callable[[int], None] | None = None,
 ) -> VerifiedInteractiveTreeRevision:
     normalized_revision = _required_text(revision_id, "revision_id")
     if _REVISION_ID_RE.fullmatch(normalized_revision) is None:
@@ -421,6 +487,8 @@ def _load_verified_interactive_tree_revision_on_connection(
         raise StrategyError("interactive-tree revision chain exceeds the depth budget")
     if normalized_revision in visited:
         raise StrategyError("interactive-tree revision chain contains a cycle")
+    if cache is not None and normalized_revision in cache:
+        return cache[normalized_revision]
     visited.add(normalized_revision)
     try:
         path = canonical_interactive_tree_revision_path(
@@ -466,6 +534,9 @@ def _load_verified_interactive_tree_revision_on_connection(
                 revision_id=parent_id,
                 visited=visited,
                 depth=depth + 1,
+                cache=cache,
+                budget=budget,
+                reserve_bytes=reserve_bytes,
             )
         )
         if (
@@ -486,6 +557,10 @@ def _load_verified_interactive_tree_revision_on_connection(
             expected_hash=registered_hash,
             max_bytes=MAX_INTERACTIVE_TREE_REVISION_BYTES,
         )
+        if budget is not None:
+            budget.reserve(len(canonical_bytes))
+        if reserve_bytes is not None:
+            reserve_bytes(len(canonical_bytes))
         payload = _strict_json_object_from_bytes(
             canonical_bytes,
             "interactive-tree revision artifact",
@@ -544,7 +619,7 @@ def _load_verified_interactive_tree_revision_on_connection(
             )
         if revision["revision_id"] != normalized_revision:
             raise StrategyError("interactive-tree revision identity changed")
-        return VerifiedInteractiveTreeRevision(
+        verified = VerifiedInteractiveTreeRevision(
             artifact_id=_required_text(row["id"], "revision artifact id"),
             task_id=task_id,
             path=path,
@@ -562,6 +637,9 @@ def _load_verified_interactive_tree_revision_on_connection(
             ),
             automatic_source=source,
         )
+        if cache is not None:
+            cache[normalized_revision] = verified
+        return verified
     finally:
         visited.remove(normalized_revision)
 

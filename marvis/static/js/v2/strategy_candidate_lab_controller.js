@@ -14,6 +14,7 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "candidate_monthly_stability",
   "voting_candidate_search",
   "voting_candidate_build_from_search",
+  "interactive_tree_revision",
 ]);
 
 const WORKFLOW_LABELS = Object.freeze({
@@ -26,6 +27,7 @@ const WORKFLOW_LABELS = Object.freeze({
   candidate_monthly_stability: "测算候选逐月稳定性",
   voting_candidate_search: "搜索 Voting 组合",
   voting_candidate_build_from_search: "从搜索结果构建 Voting 候选",
+  interactive_tree_revision: "创建不可变交互式树修订",
 });
 
 const COLLECTION_DEFINITIONS = Object.freeze([
@@ -44,8 +46,14 @@ const COLLECTION_DEFINITIONS = Object.freeze([
   {
     key: "automatic_tree",
     title: "自动规则树",
-    description: "完整树结果、叶节点规则与现成效果证据",
+    description: "完整拟合拓扑、可见节点、当前 frontier 与现成效果证据",
     pointerKey: "leaves",
+  },
+  {
+    key: "interactive_tree_revision",
+    title: "交互式树修订",
+    description: "每条不可变分支各自保留完整拓扑、frontier、历史与回放证据",
+    pointerKey: "frontier",
   },
   {
     key: "scorecard_band",
@@ -92,6 +100,8 @@ const VOTING_SEARCH_METRICS = Object.freeze([
 const VOTING_RULE_ID_RE = /^candidate-rule-[0-9a-f]{32}$/;
 const VOTING_SEARCH_ID_RE = /^voting-search-[0-9a-f]{32}$/;
 const VOTING_COMBO_ID_RE = /^voting-combo-[0-9a-f]{32}$/;
+const INTERACTIVE_TREE_SOURCE_ID_RE = /^(?:candidate-asset-[0-9a-f]{32}|interactive-tree-revision-[0-9a-f]{32})$/;
+const INTERACTIVE_TREE_NODE_ID_RE = /^node-[0-9a-f]{20}$/;
 
 const FIELD_LABELS = Object.freeze({
   action: "动作",
@@ -135,6 +145,7 @@ const FIELD_LABELS = Object.freeze({
   lower_inclusive: "包含下界",
   lower_risk: "低风险侧",
   monotonic_direction: "单调方向",
+  node_id: "节点 ID",
   lift: "Lift",
   method: "分箱方法",
   observation_stage: "观测阶段",
@@ -152,6 +163,7 @@ const FIELD_LABELS = Object.freeze({
   snapshot_hash: "Snapshot Hash",
   status: "状态",
   strategy_type: "策略类型",
+  source_tree_id: "操作来源树",
   total: "总数",
   upper_bound: "上界",
   upper_inclusive: "包含上界",
@@ -356,7 +368,7 @@ function pointerTableHtml(item, pointerKey) {
     : "";
   return [
     '<section class="candidate-lab-subsection">',
-    `<h5>${pointerKey === "bins" ? "候选分箱" : pointerKey === "cells" ? "矩阵单元格" : "叶节点"}</h5>`,
+    `<h5>${pointerKey === "bins" ? "候选分箱" : pointerKey === "cells" ? "矩阵单元格" : pointerKey === "frontier" ? "Frontier 规则" : "叶节点"}</h5>`,
     '<div class="candidate-lab-table-scroll">',
     `<table class="candidate-lab-table"><thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table>`,
     "</div>",
@@ -683,7 +695,162 @@ function votingSearchDetailHtml(item) {
   ].join("");
 }
 
+function interactiveTreeEligiblePointers(item) {
+  const sourceTreeId = nonEmptyText(item?.detail?.source_tree_id);
+  const nodes = new Map(
+    (Array.isArray(item?.pointers?.nodes) ? item.pointers.nodes : [])
+      .filter(isRecord)
+      .map((node) => [nonEmptyText(node.node_id), node]),
+  );
+  const pointers = Array.isArray(item?.pointers?.eligible_prunes)
+    ? item.pointers.eligible_prunes.filter(isRecord)
+    : [];
+  const seen = new Set();
+  return pointers.filter((pointer) => {
+    const pointerSource = nonEmptyText(pointer.source_tree_id);
+    const nodeId = nonEmptyText(pointer.node_id);
+    const node = nodes.get(nodeId);
+    const key = `${pointerSource}\u001f${nodeId}`;
+    if (
+      pointerSource !== sourceTreeId
+      || !INTERACTIVE_TREE_SOURCE_ID_RE.test(pointerSource)
+      || !INTERACTIVE_TREE_NODE_ID_RE.test(nodeId)
+      || pointer.operation !== "prune_subtree"
+      || node?.kind !== "split"
+      || node?.is_visible !== true
+      || node?.is_frontier === true
+      || node?.can_prune !== true
+      || seen.has(key)
+    ) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function interactiveTreeNodesHtml(item) {
+  const nodes = Array.isArray(item?.pointers?.nodes)
+    ? item.pointers.nodes.filter(isRecord)
+    : [];
+  if (!nodes.length) {
+    return '<p class="candidate-lab-empty">当前受认证树没有可见拓扑节点。</p>';
+  }
+  const eligible = new Set(
+    interactiveTreeEligiblePointers(item).map(
+      (pointer) => `${pointer.source_tree_id}\u001f${pointer.node_id}`,
+    ),
+  );
+  const sourceTreeId = nonEmptyText(item?.detail?.source_tree_id);
+  return [
+    '<div class="candidate-lab-table-scroll candidate-lab-tree-scroll">',
+    '<table class="candidate-lab-table candidate-lab-tree-table"><thead><tr>',
+    "<th>深度</th><th>节点</th><th>分裂 / 条件</th><th>样本效果</th><th>状态</th><th>操作</th>",
+    "</tr></thead><tbody>",
+    ...nodes.map((node) => {
+      const nodeId = nonEmptyText(node.node_id);
+      const key = `${sourceTreeId}\u001f${nodeId}`;
+      const split = node.kind === "split"
+        ? `${stablePrimitiveText(node.feature)} ≤ ${stablePrimitiveText(node.threshold)}；缺失→${stablePrimitiveText(node.missing_child)}`
+        : readableValue(node.condition);
+      const state = [
+        node.is_visible === true ? "可见" : "已隐藏",
+        node.is_frontier === true ? "frontier" : "",
+      ].filter(Boolean).join(" · ");
+      const action = node.can_prune === true && eligible.has(key)
+        ? [
+          '<button type="button" class="button compact secondary candidate-lab-tree-prune"',
+          ' data-candidate-lab-interactive-tree-prune="1"',
+          ` data-source-tree-id="${escapeHtml(sourceTreeId)}"`,
+          ` data-node-id="${escapeHtml(nodeId)}">剪枝到此节点</button>`,
+        ].join("")
+        : "—";
+      return [
+        "<tr>",
+        `<td>${escapeHtml(stablePrimitiveText(node.depth))}</td>`,
+        `<td><code>${escapeHtml(nodeId)}</code><small>${escapeHtml(stablePrimitiveText(node.kind))}</small></td>`,
+        `<td>${escapeHtml(split)}</td>`,
+        `<td>${escapeHtml(readableValue(node.metrics))}</td>`,
+        `<td>${escapeHtml(state || "—")}</td>`,
+        `<td>${action}</td>`,
+        "</tr>",
+      ].join("");
+    }),
+    "</tbody></table>",
+    "</div>",
+  ].join("");
+}
+
+function interactiveTreeDetailHtml(item) {
+  const detail = isRecord(item?.detail) ? item.detail : {};
+  const isRevision = item?.kind === "interactive_tree_revision";
+  const identity = isRevision
+    ? nonEmptyText(detail.revision_id)
+    : nonEmptyText(detail.asset_id);
+  const title = identity || (isRevision ? "交互式树修订" : "自动规则树");
+  const history = Array.isArray(item?.history)
+    ? item.history.filter(isRecord)
+    : [];
+  return [
+    '<details class="candidate-lab-evidence-card candidate-lab-tree-card">',
+    "<summary>",
+    '<span class="candidate-lab-card-title">',
+    `<strong>${escapeHtml(title)}</strong>`,
+    `<small>${isRevision ? "immutable revision branch" : "verified automatic topology"}</small>`,
+    "</span>",
+    '<span class="candidate-lab-card-state">查看完整拓扑</span>',
+    "</summary>",
+    '<div class="candidate-lab-card-body">',
+    evidenceIdentityHtml(item),
+    lifecycleHtml(item.lifecycle),
+    '<div class="candidate-lab-boundary-note" data-tone="info">',
+    "<strong>不可变分支</strong>",
+    "<p>每次剪枝都会创建新 revision；原树和已有分支不被覆盖，页面不会替你挑选节点、入池或部署。</p>",
+    "</div>",
+    '<section class="candidate-lab-subsection"><h5>树与修订身份</h5>',
+    factsTableHtml({
+      source_tree_id: detail.source_tree_id,
+      derived_from_source_tree_id: detail.derived_from_source_tree_id,
+      parent_revision_id: detail.parent_revision_id,
+      base_asset_id: detail.base_asset_id || detail.asset_id,
+      asset_hash: detail.asset_hash,
+      tree_id: detail.tree_id,
+      tree_result_hash: detail.tree_result_hash,
+      semantic_tree_id: detail.semantic_tree_id,
+      tree_hash: detail.tree_hash,
+      edit: detail.edit,
+      summary: detail.summary,
+    }),
+    "</section>",
+    isRevision
+      ? [
+        '<section class="candidate-lab-subsection"><h5>当前分支历史（近到远）</h5>',
+        scorecardRowsTableHtml(
+          history,
+          ["revision_id", "parent_revision_id", "edit", "semantic_tree_id"],
+          "当前 revision 没有可见历史。",
+        ),
+        "</section>",
+      ].join("")
+      : "",
+    pointerTableHtml(item, isRevision ? "frontier" : "leaves"),
+    '<section class="candidate-lab-subsection"><h5>完整节点拓扑</h5>',
+    interactiveTreeNodesHtml(item),
+    "</section>",
+    '<p class="candidate-lab-field-help">操作按钮仅来自服务端重新验真的 eligible_prunes；提交后 Tool 会再次按任务、父链和样本回放校验。</p>',
+    riskHtml(item.risks),
+    "</div>",
+    "</details>",
+  ].join("");
+}
+
 function candidateItemHtml(item, definition) {
+  if (
+    definition.key === "automatic_tree"
+    || definition.key === "interactive_tree_revision"
+  ) {
+    return interactiveTreeDetailHtml(item);
+  }
   if (definition.key === "scorecard_band") {
     return scorecardBandDetailHtml(item);
   }
@@ -1499,6 +1666,36 @@ function collectVotingCandidateBuildFromSearchInputs(form) {
   return inputs;
 }
 
+function collectInteractiveTreeRevisionInputs(form) {
+  const source = selectedProjectionOption(
+    form,
+    "interactive_tree_source_id",
+    "树或 revision",
+  );
+  const node = selectedProjectionOption(
+    form,
+    "interactive_tree_node_id",
+    "可剪枝节点",
+  );
+  const sourceTreeId = nonEmptyText(source.value);
+  const nodeId = nonEmptyText(node.value);
+  if (
+    !INTERACTIVE_TREE_SOURCE_ID_RE.test(sourceTreeId)
+    || !INTERACTIVE_TREE_NODE_ID_RE.test(nodeId)
+    || nonEmptyText(node.dataset?.sourceTreeId) !== sourceTreeId
+    || node.dataset?.operation !== "prune_subtree"
+  ) {
+    throw new Error("交互式树节点必须来自当前选择分支的受认证可剪枝投影。");
+  }
+  const inputs = {
+    source_tree_id: sourceTreeId,
+    node_id: nodeId,
+    operation: "prune_subtree",
+  };
+  optionalText(inputs, "reason", formValue(form, "interactive_tree_reason"));
+  return inputs;
+}
+
 export function collectStrategyCandidateLabRequest(form) {
   const workflow = nonEmptyText(form?.dataset?.candidateLabWorkflow);
   if (!STRATEGY_CANDIDATE_LAB_WORKFLOWS.includes(workflow)) {
@@ -1515,6 +1712,7 @@ export function collectStrategyCandidateLabRequest(form) {
     voting_candidate_search: collectVotingCandidateSearchInputs,
     voting_candidate_build_from_search:
       collectVotingCandidateBuildFromSearchInputs,
+    interactive_tree_revision: collectInteractiveTreeRevisionInputs,
   }[workflow](form);
   return {
     request_kind: "standard_workflow",
@@ -1599,6 +1797,127 @@ function univariateProjectionCandidates(payload) {
     seen.add(candidateId);
     return true;
   });
+}
+
+function interactiveTreeForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="interactive_tree_revision"]',
+  ) || null;
+}
+
+function interactiveTreeProjectionSources(payload) {
+  const candidates = isRecord(payload?.candidates) ? payload.candidates : {};
+  const collections = [
+    candidates.automatic_tree,
+    candidates.interactive_tree_revision,
+  ];
+  const seen = new Set();
+  return collections.flatMap((collection) => collectionItems(collection))
+    .filter((item) => {
+      const sourceTreeId = nonEmptyText(item?.detail?.source_tree_id);
+      if (
+        !INTERACTIVE_TREE_SOURCE_ID_RE.test(sourceTreeId)
+        || seen.has(sourceTreeId)
+      ) {
+        return false;
+      }
+      seen.add(sourceTreeId);
+      return true;
+    });
+}
+
+function interactiveTreePointer(payload, sourceTreeId, nodeId) {
+  const source = interactiveTreeProjectionSources(payload).find(
+    (item) => item?.detail?.source_tree_id === sourceTreeId,
+  );
+  if (!source) return null;
+  return interactiveTreeEligiblePointers(source).find(
+    (pointer) => pointer.node_id === nodeId,
+  ) || null;
+}
+
+function syncInteractiveTreeRevisionControls(
+  form,
+  payload,
+  {
+    requestedSourceTreeId = "",
+    requestedNodeId = "",
+    preserveNode = true,
+  } = {},
+) {
+  if (!form) return;
+  const sourceSelect = formField(form, "interactive_tree_source_id");
+  const nodeSelect = formField(form, "interactive_tree_node_id");
+  if (!sourceSelect || !nodeSelect) return;
+  const sources = interactiveTreeProjectionSources(payload);
+  const previousSource = nonEmptyText(sourceSelect.value);
+  sourceSelect.innerHTML = [
+    '<option value="">请选择自动树或不可变 revision</option>',
+    ...sources.map((item) => {
+      const sourceTreeId = nonEmptyText(item?.detail?.source_tree_id);
+      const eligibleCount = interactiveTreeEligiblePointers(item).length;
+      const type = item?.kind === "interactive_tree_revision"
+        ? "revision"
+        : "automatic";
+      return projectionOptionHtml(
+        sourceTreeId,
+        `${sourceTreeId} · ${type} · ${eligibleCount} 个可剪枝节点`,
+        {
+          "candidate-lab-projection": "1",
+          "source-tree-id": sourceTreeId,
+        },
+      );
+    }),
+  ].join("");
+  const preferredSource = nonEmptyText(requestedSourceTreeId) || previousSource;
+  if (selectContainsValue(sourceSelect, preferredSource)) {
+    sourceSelect.value = preferredSource;
+  } else if (sources.length) {
+    sourceSelect.value = nonEmptyText(sources[0]?.detail?.source_tree_id);
+  }
+
+  const selectedSourceId = nonEmptyText(sourceSelect.value);
+  const selectedSource = sources.find(
+    (item) => item?.detail?.source_tree_id === selectedSourceId,
+  );
+  const pointers = selectedSource
+    ? interactiveTreeEligiblePointers(selectedSource)
+    : [];
+  const previousNode = preserveNode ? nonEmptyText(nodeSelect.value) : "";
+  nodeSelect.innerHTML = [
+    '<option value="">请选择当前分支可见 split 节点</option>',
+    ...pointers.map((pointer) => {
+      const node = selectedSource?.pointers?.nodes?.find?.(
+        (item) => item?.node_id === pointer.node_id,
+      );
+      const label = node?.feature
+        ? `${pointer.node_id} · ${node.feature} ≤ ${stablePrimitiveText(node.threshold)}`
+        : pointer.node_id;
+      return projectionOptionHtml(
+        pointer.node_id,
+        label,
+        {
+          "candidate-lab-projection": "1",
+          "source-tree-id": pointer.source_tree_id,
+          operation: "prune_subtree",
+        },
+      );
+    }),
+  ].join("");
+  const preferredNode = nonEmptyText(requestedNodeId) || previousNode;
+  if (selectContainsValue(nodeSelect, preferredNode)) {
+    nodeSelect.value = preferredNode;
+  } else if (pointers.length) {
+    nodeSelect.value = pointers[0].node_id;
+  }
+  const help = form.querySelector?.("[data-candidate-lab-tree-help]");
+  if (help) {
+    help.textContent = sources.length
+      ? pointers.length
+        ? "选择后会创建新 revision；不会覆盖来源树，也不会自动入池。"
+        : "该分支当前没有可继续剪枝的可见 split 节点。"
+      : "当前任务尚无受认证自动树，请先构建自动规则树。";
+  }
 }
 
 function univariateCandidatePairs(candidate) {
@@ -2260,7 +2579,8 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       "[data-candidate-lab-form] input, "
       + "[data-candidate-lab-form] select, "
       + "[data-candidate-lab-form] textarea, "
-      + "[data-candidate-lab-form] button",
+      + "[data-candidate-lab-form] button, "
+      + "[data-candidate-lab-interactive-tree-prune]",
     ) || [];
     for (const control of controls) {
       const refinementPanel = control.closest?.(
@@ -2324,6 +2644,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       state.payload,
     );
     syncVotingForms(root, state.payload);
+    syncInteractiveTreeRevisionControls(
+      interactiveTreeForm(root),
+      state.payload,
+    );
     renderAvailability();
   }
 
@@ -2341,6 +2665,11 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       state.payload,
     );
     syncVotingForms(root, state.payload);
+    syncInteractiveTreeRevisionControls(
+      interactiveTreeForm(root),
+      state.payload,
+      { preserveNode: false },
+    );
   }
 
   function clear() {
@@ -2471,6 +2800,18 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     let strategyRequest;
     try {
       strategyRequest = collectStrategyCandidateLabRequest(form);
+      if (
+        strategyRequest.workflow === "interactive_tree_revision"
+        && !interactiveTreePointer(
+          state.payload,
+          strategyRequest.workflow_inputs.source_tree_id,
+          strategyRequest.workflow_inputs.node_id,
+        )
+      ) {
+        throw new Error(
+          "交互式树剪枝指针已过期或不属于当前任务的受认证投影，请刷新 Candidate Lab 后重选。",
+        );
+      }
     } catch (error) {
       const message = error?.message || "Candidate Lab 表单输入无效。";
       setFormError(form, message);
@@ -2518,8 +2859,9 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         );
       }
       await dependencies.refreshAgentMessages?.(requestTaskId);
+      await dependencies.settleCandidateLabSubmission?.(requestTaskId);
+      if (selectedTaskId() !== requestTaskId) return result;
       state.submitting = false;
-      await refresh(requestTaskId);
       dependencies.setActionStatus?.(`${content}已提交。`, "success");
       return result;
     } catch (error) {
@@ -2551,6 +2893,52 @@ export function createStrategyCandidateLabController(dependencies = {}) {
   }
 
   function handleClick(event) {
+    const prune = event.target?.closest?.(
+      "[data-candidate-lab-interactive-tree-prune]",
+    );
+    if (prune) {
+      event.preventDefault?.();
+      const reason = blockedReason(state, dependencies);
+      const form = interactiveTreeForm(panel());
+      if (reason) {
+        const message = BLOCKED_REASON_COPY[reason]
+          || "当前 Candidate Lab 暂不可启动新分析。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+        return true;
+      }
+      const sourceTreeId = nonEmptyText(prune.dataset?.sourceTreeId);
+      const nodeId = nonEmptyText(prune.dataset?.nodeId);
+      const pointer = interactiveTreePointer(
+        state.payload,
+        sourceTreeId,
+        nodeId,
+      );
+      if (!pointer || !form) {
+        const message = "该剪枝指针不属于当前任务的受认证 Candidate Lab 投影。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+        return true;
+      }
+      syncInteractiveTreeRevisionControls(
+        form,
+        state.payload,
+        {
+          requestedSourceTreeId: sourceTreeId,
+          requestedNodeId: nodeId,
+          preserveNode: false,
+        },
+      );
+      setFormError(form, "");
+      const launcher = form.closest?.(".candidate-lab-launcher");
+      if (launcher) launcher.open = true;
+      dependencies.setActionStatus?.(
+        "已带入受认证分支和节点；填写可选理由后确认创建不可变 revision。",
+        "info",
+      );
+      renderAvailability();
+      return true;
+    }
     const retry = event.target?.closest?.("[data-candidate-lab-retry]");
     if (!retry) return false;
     event.preventDefault?.();
@@ -2633,6 +3021,21 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         votingBuild,
         state.payload,
         { preserveCombo: false },
+      );
+      renderAvailability();
+      return true;
+    }
+    const interactiveTree = field.closest?.(
+      '[data-candidate-lab-workflow="interactive_tree_revision"]',
+    );
+    if (
+      interactiveTree
+      && fieldName === "interactive_tree_source_id"
+    ) {
+      syncInteractiveTreeRevisionControls(
+        interactiveTree,
+        state.payload,
+        { preserveNode: false },
       );
       renderAvailability();
       return true;

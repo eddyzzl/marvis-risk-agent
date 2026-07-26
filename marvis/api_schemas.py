@@ -217,6 +217,8 @@ ManualStrategyWorkflow = Literal[
     "scorecard_band_build",
     "scorecard_cutoff_selection",
     "candidate_monthly_stability",
+    "voting_candidate_search",
+    "voting_candidate_build_from_search",
     "interactive_tree_revision",
 ]
 
@@ -267,6 +269,64 @@ ManualInteractiveTreeSourceId = Annotated[
 ManualInteractiveTreeNodeId = Annotated[
     StrictStr,
     StringConstraints(pattern=r"^node-[0-9a-f]{20}$"),
+]
+ManualVotingRuleId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^candidate-rule-[0-9a-f]{32}$"),
+]
+ManualVotingSearchId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^voting-search-[0-9a-f]{32}$"),
+]
+ManualVotingComboId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^voting-combo-[0-9a-f]{32}$"),
+]
+ManualVotingMetric = Literal[
+    "hit_count",
+    "hit_share",
+    "good_count",
+    "bad_count",
+    "bad_rate",
+    "lift",
+    "bad_capture_rate",
+    "weighted_hit_total",
+    "weighted_hit_share",
+    "weighted_good_total",
+    "weighted_bad_total",
+    "weighted_bad_rate",
+    "weighted_bad_capture_rate",
+    "hit_amount",
+    "hit_amount_share",
+    "good_amount",
+    "bad_amount",
+    "bad_amount_rate",
+    "bad_amount_capture_rate",
+]
+_MANUAL_VOTING_RATE_METRICS = frozenset(
+    {
+        "hit_share",
+        "bad_rate",
+        "bad_capture_rate",
+        "weighted_hit_share",
+        "weighted_bad_rate",
+        "weighted_bad_capture_rate",
+        "hit_amount_share",
+        "bad_amount_rate",
+        "bad_amount_capture_rate",
+    }
+)
+_MANUAL_VOTING_REQUIRED_MINIMUM_SHARE = {
+    "bad_rate": "hit_share",
+    "weighted_bad_rate": "weighted_hit_share",
+    "bad_amount_rate": "hit_amount_share",
+}
+ManualStrategyType = Literal[
+    "approval",
+    "reject",
+    "limit",
+    "pricing",
+    "segmentation",
 ]
 ManualSelectionReason = Annotated[
     StrictStr,
@@ -424,6 +484,103 @@ class ManualInteractiveTreeRevisionInputs(BaseModel):
         return self
 
 
+class ManualVotingObjective(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    metric: ManualVotingMetric
+    direction: Literal["maximize", "minimize"]
+
+
+class ManualVotingConstraint(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    metric: ManualVotingMetric
+    operator: Literal["gte", "lte"]
+    value: Annotated[StrictInt | StrictFloat, Field(ge=0.0)]
+
+
+class ManualVotingCandidateSearchInputs(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: ManualStrategyType
+    member_count: StrictInt = Field(ge=2, le=50)
+    n: StrictInt = Field(ge=1, le=50)
+    objective: ManualVotingObjective
+    constraints: Annotated[
+        list[ManualVotingConstraint],
+        Field(max_length=32),
+    ] = Field(default_factory=list)
+    include_rule_ids: Annotated[
+        list[ManualVotingRuleId],
+        Field(max_length=50),
+        AfterValidator(_unique_strings),
+    ] = Field(default_factory=list)
+    exclude_rule_ids: Annotated[
+        list[ManualVotingRuleId],
+        Field(max_length=50),
+        AfterValidator(_unique_strings),
+    ] = Field(default_factory=list)
+    max_combinations: StrictInt = Field(default=10_000, ge=1, le=10_000)
+
+    @model_validator(mode="after")
+    def validate_relational_controls(self) -> Self:
+        if self.n > self.member_count:
+            raise ValueError("n cannot exceed member_count")
+        if len(self.include_rule_ids) > self.member_count:
+            raise ValueError("include_rule_ids cannot exceed member_count")
+        if set(self.include_rule_ids) & set(self.exclude_rule_ids):
+            raise ValueError("include_rule_ids and exclude_rule_ids cannot overlap")
+        identities = [
+            (constraint.metric, constraint.operator)
+            for constraint in self.constraints
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("constraints cannot repeat metric/operator")
+        for constraint in self.constraints:
+            try:
+                number = float(constraint.value)
+            except OverflowError as exc:
+                raise ValueError("constraint values must be finite") from exc
+            if not math.isfinite(number):
+                raise ValueError("constraint values must be finite")
+            if (
+                constraint.metric in _MANUAL_VOTING_RATE_METRICS
+                and number > 1.0
+            ):
+                raise ValueError("rate constraint values cannot exceed 1")
+        required_share = _MANUAL_VOTING_REQUIRED_MINIMUM_SHARE.get(
+            self.objective.metric
+        )
+        if self.objective.direction == "minimize" and required_share is not None:
+            has_positive_share = any(
+                constraint.metric == required_share
+                and constraint.operator == "gte"
+                and float(constraint.value) > 0.0
+                for constraint in self.constraints
+            )
+            if not has_positive_share:
+                raise ValueError(
+                    "minimizing a rate requires its positive share constraint"
+                )
+        return self
+
+
+class ManualVotingCandidateBuildFromSearchInputs(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    search_id: ManualVotingSearchId
+    combo_id: ManualVotingComboId
+    strategy_type: ManualStrategyType | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_null_strategy_type(self) -> Self:
+        if "strategy_type" in self.model_fields_set and self.strategy_type is None:
+            raise ValueError(
+                "optional fields must be omitted instead of null: strategy_type"
+            )
+        return self
+
+
 class ManualRiskThresholdSelectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -544,6 +701,12 @@ _MANUAL_CANDIDATE_STABILITY_INPUTS = TypeAdapter(
 _MANUAL_INTERACTIVE_TREE_REVISION_INPUTS = TypeAdapter(
     ManualInteractiveTreeRevisionInputs
 )
+_MANUAL_VOTING_CANDIDATE_SEARCH_INPUTS = TypeAdapter(
+    ManualVotingCandidateSearchInputs
+)
+_MANUAL_VOTING_CANDIDATE_BUILD_FROM_SEARCH_INPUTS = TypeAdapter(
+    ManualVotingCandidateBuildFromSearchInputs
+)
 
 _MANUAL_STRATEGY_PLATFORM_FIELDS = frozenset(
     {
@@ -619,11 +782,29 @@ class ManualStrategyRequest(BaseModel):
                 self.workflow_inputs,
                 strict=True,
             )
+        elif self.workflow == "voting_candidate_search":
+            _MANUAL_VOTING_CANDIDATE_SEARCH_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "voting_candidate_build_from_search":
+            _MANUAL_VOTING_CANDIDATE_BUILD_FROM_SEARCH_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
         user_owned_identity_fields = {
             "univariate_candidate_refinement": {"source_candidate_id"},
             "scorecard_cutoff_selection": {"asset_id", "cutoff_id"},
             "candidate_monthly_stability": {"asset_id", "entry_id"},
             "interactive_tree_revision": {"source_tree_id", "node_id"},
+            "voting_candidate_search": {
+                "include_rule_ids",
+                "exclude_rule_ids",
+            },
+            "voting_candidate_build_from_search": {
+                "search_id",
+                "combo_id",
+            },
         }.get(self.workflow, set())
         forbidden = sorted(
             key

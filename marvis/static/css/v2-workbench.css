@@ -2928,6 +2928,31 @@ body[data-theme="dark"] .plan-driver-action-card {
   font-weight: 600;
 }
 
+.candidate-lab-tree-scroll {
+  max-height: 520px;
+  overflow: auto;
+}
+
+.candidate-lab-tree-table {
+  min-width: 1120px;
+}
+
+.candidate-lab-tree-table code,
+.candidate-lab-tree-table small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.candidate-lab-tree-table small {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 9.5px;
+}
+
+.candidate-lab-tree-prune {
+  white-space: nowrap;
+}
+
 .candidate-lab-facts {
   min-width: 0;
 }

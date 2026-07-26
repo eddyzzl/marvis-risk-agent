@@ -303,6 +303,11 @@ const strategyCandidateLabController = createStrategyCandidateLabController({
   },
   renderAgentConversation,
   pollAgentMessagesUntilSettled,
+  settleCandidateLabSubmission: (taskId) => pollValidationProgress(
+    terminalTaskStatuses,
+    taskId,
+    { settleWhenServerIdle: true },
+  ),
   refreshAgentMessages: loadAgentMessages,
   resetPlanFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
   renderWorkflowStepper,

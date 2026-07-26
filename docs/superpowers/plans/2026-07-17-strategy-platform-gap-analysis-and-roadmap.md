@@ -538,6 +538,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **Candidate Lab Manual/Agent parity 首纵切（已完成，2026-07-23）**：策略任务宽桌面工作区新增 Candidate Lab，展示 task-owned、重新验真的单变量、Cross Matrix、自动树及当前 Strategy Pool；可直接启动单变量、单变量 fresh/existing refinement、Cross Matrix 和自动树。Manual 表单提交与自然语言共用 `strategy_request`、严格 compiler、PlanValidator、模板和 Tool，不维护第二套指标内核；existing refinement 的 candidate、feature/method 和 bin 只能从服务端投影选择，artifact/hash 不进入用户输入。当前活动 DataWorkspace 改变或不可用时，已有不可变 candidate 的 refinement 仍从父 artifact 恢复数据/sample lineage，并在创建计划前深验 canonical bytes、provenance、feature/method/bin；错配、损坏或跨任务引用只返回 clarification，不创建计划。投影使用 task/kind 的 `COUNT + DESC LIMIT`、总字节预算、来源 canonical/provenance 重验、重复 source cache、最新非终态 plan/assistant message 的单行查询；前端同任务 single-flight，任务切换取消旧请求，不进入轮询 tick。该纵切只覆盖已经存在的四个启动器和证据摘要，不提前宣称 Pool 全操作、交互树、评分卡、自动搜索、稳定性、代码/列写回或完整 evidence drawer 已完成。
 
+**交互式树不可变剪枝纵切（已完成，2026-07-25）**：Agent 和 Candidate Lab Manual 入口现在可从同一受认证自动树或任一历史 revision 的完整拓扑中精确选择一个仍可见、非 frontier 的 split 节点，执行 `prune_subtree` 并创建新的不可变分支；原树、父 revision 和 sibling 分支均不覆盖，也不存在平台暗选“当前最佳分支”。Tool 递归认证完整父链、task-owned registry/path/hash/provenance、样本设计与活动 DataWorkspace，在同一 development 样本上重放全部 frontier 条件并对件数、好坏、风险和金额观测做 exactly-once 守恒，再原子登记 canonical revision artifact。Candidate Lab 只投影 UI 所需的节点、frontier、历史 ID 和精确 eligible pointer，不暴露服务端 hash/binding；点击节点只预填二次确认表单，最终提交会再次按最新投影校验，计划完成后由统一 settle 轮询只刷新一次。Voting 搜索和从搜索结果构建候选的既有 Manual 表单也已补齐严格 HTTP schema，和 Agent compiler 共用相同约束。该纵切仍不等于“完整交互树”：手工改分裂、全特征最佳分裂、自动续建、frontier 入池、树代码生成/叶 ID 写回及独立验证继续留在 V2 Phase 3-5。
+
 交付：
 
 1. **单规则**：tree/quantile/equal-width/chi 四类分箱、类别等值箱、3-20 箱、最小样本、KS/IV/AUC/WOE/LIFT、件数+金额、批量排序、人工选箱/合并入池和 Excel；

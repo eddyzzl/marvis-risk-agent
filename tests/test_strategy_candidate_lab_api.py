@@ -1341,7 +1341,7 @@ def test_candidate_lab_replays_scorecard_pool_and_projects_safe_evidence(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v2"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v3"
     band = body["candidates"]["scorecard_band"]["latest"]
     assert band["detail"]["asset_id"] == asset["asset_id"]
     assert band["detail"]["performance"] == {"auc": 1.0, "ks": 1.0}
@@ -1922,7 +1922,7 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
 
     assert response.status_code == 200, response.text
     assert response.json() == {
-        "schema_version": "strategy.candidate-lab-projection.v2",
+        "schema_version": "strategy.candidate-lab-projection.v3",
         "task_id": task_id,
         "can_start": True,
         "blocked_reason": None,
@@ -1934,6 +1934,7 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
                 "univariate",
                 "cross_matrix",
                 "automatic_tree",
+                "interactive_tree_revision",
                 "scorecard_band",
                 "scorecard_cutoff_selection",
                 "voting_search",

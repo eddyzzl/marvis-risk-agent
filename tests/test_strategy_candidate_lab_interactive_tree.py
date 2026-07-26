@@ -1,0 +1,348 @@
+"""Candidate Lab projections for governed interactive-tree topology."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+import json
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+import pytest
+
+from marvis.app import create_app
+from marvis.db_schema import connect
+from marvis.packs.strategy import tools as strategy_tools
+from marvis.packs.strategy.interactive_tree_tools import (
+    INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+    INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
+)
+
+
+pytest_plugins = ("tests.test_strategy_interactive_tree_tool",)
+
+
+NODE_FIELDS = {
+    "node_id",
+    "kind",
+    "depth",
+    "condition",
+    "metrics",
+    "is_visible",
+    "is_frontier",
+    "can_prune",
+}
+PRUNE_FIELDS = {"source_tree_id", "node_id", "operation"}
+
+
+def _revise(
+    scenario,
+    *,
+    source_tree_id: str,
+    node_id: str,
+    reason: str,
+) -> dict:
+    return strategy_tools.tool_revise_interactive_tree(
+        {
+            "source_tree_id": source_tree_id,
+            "node_id": node_id,
+            "operation": "prune_subtree",
+            "reason": reason,
+        },
+        scenario.ctx,
+    )
+
+
+def _revision_record_and_payload(scenario, result: Mapping) -> tuple[dict, dict]:
+    artifact_id = result["artifacts"][0]["artifact_id"]
+    record = scenario.repository.get_for_task(scenario.task.id, artifact_id)
+    assert record is not None
+    payload = json.loads(Path(record["path"]).read_text(encoding="utf-8"))
+    return record, payload
+
+
+def _automatic_item(projection: Mapping, asset_id: str) -> Mapping:
+    collection = projection["candidates"]["automatic_tree"]
+    return next(
+        item
+        for item in collection["all"]
+        if item["detail"]["asset_id"] == asset_id
+    )
+
+
+def _assert_operable_topology(
+    item: Mapping,
+    *,
+    source_tree_id: str,
+    source_asset: Mapping,
+    visible_node_ids: list[str],
+    frontier_node_ids: list[str],
+) -> None:
+    assert item["detail"]["source_tree_id"] == source_tree_id
+    expected_nodes = source_asset["tree_result"]["tree"]["nodes"]
+    nodes = item["pointers"]["nodes"]
+    assert len(nodes) == len(expected_nodes)
+    assert len(nodes) <= 511
+    assert [node["node_id"] for node in nodes] == [
+        node["node_id"] for node in expected_nodes
+    ]
+
+    visible = set(visible_node_ids)
+    frontier = set(frontier_node_ids)
+    for actual, expected in zip(nodes, expected_nodes, strict=True):
+        assert NODE_FIELDS <= set(actual)
+        assert actual["node_id"] == expected["node_id"]
+        assert actual["kind"] == expected["kind"]
+        assert actual["depth"] == expected["depth"]
+        assert isinstance(actual["condition"], Mapping)
+        assert actual["metrics"] == expected["metrics"]
+        assert actual["is_visible"] is (expected["node_id"] in visible)
+        assert actual["is_frontier"] is (expected["node_id"] in frontier)
+        assert actual["can_prune"] is (
+            expected["kind"] == "split"
+            and expected["node_id"] in visible
+            and expected["node_id"] not in frontier
+        )
+
+    eligible_prunes = item["pointers"]["eligible_prunes"]
+    assert all(set(pointer) == PRUNE_FIELDS for pointer in eligible_prunes)
+    assert eligible_prunes == [
+        {
+            "source_tree_id": source_tree_id,
+            "node_id": node["node_id"],
+            "operation": "prune_subtree",
+        }
+        for node in nodes
+        if node["can_prune"]
+    ]
+
+
+def _current_keys(value: object) -> set[str]:
+    if isinstance(value, Mapping):
+        return {
+            str(key)
+            for key in value
+            if str(key).startswith("current_")
+        } | set().union(
+            *(_current_keys(child) for child in value.values()),
+            set(),
+        )
+    if isinstance(value, list):
+        return set().union(*(_current_keys(child) for child in value), set())
+    return set()
+
+
+def _hash_keys(value: object) -> set[str]:
+    if isinstance(value, Mapping):
+        return {
+            str(key)
+            for key in value
+            if str(key).endswith("_hash")
+        } | set().union(
+            *(_hash_keys(child) for child in value.values()),
+            set(),
+        )
+    if isinstance(value, list):
+        return set().union(*(_hash_keys(child) for child in value), set())
+    return set()
+
+
+def test_candidate_lab_projects_each_tree_source_without_inventing_one_current_branch(
+    scenario,
+) -> None:
+    client = TestClient(create_app(scenario.settings))
+    asset = scenario.source_asset
+    asset_id = asset["asset_id"]
+    tree = asset["tree_result"]["tree"]
+    base_visible = [node["node_id"] for node in tree["nodes"]]
+    base_frontier = list(tree["leaf_ids"])
+
+    before = client.get(
+        f"/api/tasks/{scenario.task.id}/strategy-candidate-lab"
+    )
+
+    assert before.status_code == 200, before.text
+    before_projection = before.json()
+    base_before = _automatic_item(before_projection, asset_id)
+    _assert_operable_topology(
+        base_before,
+        source_tree_id=asset_id,
+        source_asset=asset,
+        visible_node_ids=base_visible,
+        frontier_node_ids=base_frontier,
+    )
+    assert before_projection["candidates"]["interactive_tree_revision"] == {
+        "latest": None,
+        "all": [],
+        "total": 0,
+        "truncated": False,
+    }
+
+    split_ids = [
+        node["node_id"] for node in tree["nodes"] if node["kind"] == "split"
+    ]
+    first = _revise(
+        scenario,
+        source_tree_id=asset_id,
+        node_id=split_ids[-1],
+        reason="Prune the deepest unstable branch.",
+    )
+    second = _revise(
+        scenario,
+        source_tree_id=first["revision_id"],
+        node_id=split_ids[-2],
+        reason="Broaden the first branch.",
+    )
+    sibling = _revise(
+        scenario,
+        source_tree_id=asset_id,
+        node_id=tree["root_node_id"],
+        reason="Independent root-level branch.",
+    )
+    expected = {}
+    for result in (first, second, sibling):
+        record, payload = _revision_record_and_payload(scenario, result)
+        expected[result["revision_id"]] = (result, record, payload)
+
+    response = client.get(
+        f"/api/tasks/{scenario.task.id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 200, response.text
+    projection = response.json()
+    base_after = _automatic_item(projection, asset_id)
+    _assert_operable_topology(
+        base_after,
+        source_tree_id=asset_id,
+        source_asset=asset,
+        visible_node_ids=base_visible,
+        frontier_node_ids=base_frontier,
+    )
+
+    revisions = projection["candidates"]["interactive_tree_revision"]
+    assert revisions["total"] == 3
+    assert revisions["truncated"] is False
+    assert 0 < len(revisions["all"]) <= 20
+    assert revisions["latest"] in revisions["all"]
+    by_id = {
+        item["detail"]["revision_id"]: item
+        for item in revisions["all"]
+    }
+    assert set(by_id) == set(expected)
+
+    for revision_id, (result, record, payload) in expected.items():
+        item = by_id[revision_id]
+        parent = payload["parent_revision"]
+        assert item["kind"] == "interactive_tree_revision"
+        assert item["candidate_id"] == payload["candidate_evidence"]["candidate_id"]
+        assert item["artifact"]["artifact_id"] == record["id"]
+        assert item["detail"]["revision_id"] == revision_id
+        assert item["detail"]["source_tree_id"] == revision_id
+        assert item["detail"]["derived_from_source_tree_id"] == result[
+            "source_tree_id"
+        ]
+        assert item["detail"]["parent_revision_id"] == (
+            None if parent is None else parent["revision_id"]
+        )
+        assert item["detail"]["base_asset_id"] == asset_id
+        assert item["detail"]["edit"] == payload["edit"]
+        assert item["pointers"]["frontier_node_ids"] == payload["tree"][
+            "frontier_node_ids"
+        ]
+        assert item["pointers"]["visible_node_ids"] == payload["tree"][
+            "visible_node_ids"
+        ]
+        _assert_operable_topology(
+            item,
+            source_tree_id=revision_id,
+            source_asset=asset,
+            visible_node_ids=payload["tree"]["visible_node_ids"],
+            frontier_node_ids=payload["tree"]["frontier_node_ids"],
+        )
+
+    assert by_id[first["revision_id"]]["detail"]["parent_revision_id"] is None
+    assert (
+        by_id[second["revision_id"]]["detail"]["parent_revision_id"]
+        == first["revision_id"]
+    )
+    assert by_id[sibling["revision_id"]]["detail"]["parent_revision_id"] is None
+    assert (
+        by_id[second["revision_id"]]["pointers"]["visible_node_ids"]
+        != by_id[sibling["revision_id"]]["pointers"]["visible_node_ids"]
+    )
+    assert _current_keys(base_after) == set()
+    assert _current_keys(revisions) == set()
+    assert _hash_keys(base_after) == set()
+    assert _hash_keys(revisions) == set()
+
+
+@pytest.mark.parametrize("tamper", ["bytes", "provenance"])
+def test_candidate_lab_interactive_revision_tampering_fails_closed(
+    scenario,
+    tamper: str,
+) -> None:
+    result = _revise(
+        scenario,
+        source_tree_id=scenario.source_asset["asset_id"],
+        node_id=scenario.source_asset["tree_result"]["tree"]["root_node_id"],
+        reason="Create evidence for fail-closed projection.",
+    )
+    record, _payload = _revision_record_and_payload(scenario, result)
+    if tamper == "bytes":
+        Path(record["path"]).write_text('{"forged":true}', encoding="utf-8")
+    else:
+        provenance = dict(record["provenance"])
+        provenance["source_tree_id"] = "candidate-asset-" + "f" * 32
+        with connect(scenario.settings.db_path) as conn:
+            conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+            conn.execute(
+                "UPDATE task_artifacts SET provenance_json = ? WHERE id = ?",
+                (
+                    json.dumps(
+                        provenance,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    record["id"],
+                ),
+            )
+    client = TestClient(create_app(scenario.settings))
+
+    response = client.get(
+        f"/api/tasks/{scenario.task.id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "strategy candidate lab evidence verification failed"
+    )
+
+
+def test_candidate_lab_rejects_foreign_registered_interactive_revision(
+    scenario,
+) -> None:
+    result = _revise(
+        scenario,
+        source_tree_id=scenario.source_asset["asset_id"],
+        node_id=scenario.source_asset["tree_result"]["tree"]["root_node_id"],
+        reason="Task-owned revision.",
+    )
+    record, _payload = _revision_record_and_payload(scenario, result)
+    scenario.repository.register(
+        task_id=scenario.foreign_task.id,
+        kind=INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+        path=record["path"],
+        content_hash=record["content_hash"],
+        origin_tool=INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
+        provenance=record["provenance"],
+    )
+    client = TestClient(create_app(scenario.settings))
+
+    response = client.get(
+        f"/api/tasks/{scenario.foreign_task.id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "strategy candidate lab evidence verification failed"
+    )

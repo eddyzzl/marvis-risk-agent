@@ -1668,6 +1668,44 @@
 
                     <details class="candidate-lab-launcher">
                       <summary>
+                        <span><strong>交互式树修订</strong><small>从受认证可见节点创建不可变剪枝分支</small></span>
+                      </summary>
+                      <form
+                        data-candidate-lab-form
+                        data-candidate-lab-workflow="interactive_tree_revision"
+                        data-candidate-lab-interactive-tree-operation
+                      >
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>来源树 / Revision <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="interactive_tree_source_id">
+                            <option value="">请选择自动树或不可变 revision</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>可剪枝节点 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="interactive_tree_node_id">
+                            <option value="">请选择当前分支可见 split 节点</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>修订理由</span>
+                          <textarea
+                            rows="2"
+                            maxlength="500"
+                            data-candidate-lab-field="interactive_tree_reason"
+                            placeholder="可选；用于审计说明，不改变树的语义身份"
+                          ></textarea>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-tree-help>
+                          当前任务尚无受认证自动树，请先构建自动规则树。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">确认创建不可变 Revision</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
                         <span><strong>评分卡分档</strong><small>从受治理模型分生成完整分档与 Cutoff 观测</small></span>
                       </summary>
                       <form data-candidate-lab-form data-candidate-lab-workflow="scorecard_band_build">

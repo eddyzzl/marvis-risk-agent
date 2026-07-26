@@ -175,6 +175,39 @@ def test_candidate_stability_manual_pointer_reaches_governed_preflight_without_l
     )
 
 
+def test_voting_search_selection_manual_pointer_reaches_preflight_without_llm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(create_app(tmp_path))
+    task_id = _task(client, tmp_path)
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("typed Voting request must not resolve an LLM")
+        ),
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_request(
+            "voting_candidate_build_from_search",
+            {
+                "search_id": "voting-search-" + "c" * 32,
+                "combo_id": "voting-combo-" + "d" * 32,
+                "strategy_type": "approval",
+            },
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "clarification_required"
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert (
+        client.get(f"/api/tasks/{task_id}/task-artifacts").json()["artifacts"] == []
+    )
+
+
 @pytest.mark.parametrize(
     ("workflow", "workflow_inputs"),
     [

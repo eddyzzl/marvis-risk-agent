@@ -428,6 +428,82 @@ def interactive_tree_revision_to_candidate_fragments(
     ]
 
 
+def interactive_tree_topology_evidence(
+    automatic_tree_asset: Mapping[str, Any],
+    *,
+    revision_payload: Mapping[str, Any] | None = None,
+    parent_revision: Mapping[str, Any] | None = None,
+    ancestor_revisions: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Project one verified base/revision frontier over the full fitted topology."""
+
+    source = validate_automatic_tree_asset(automatic_tree_asset)
+    source_index = _source_index(source)
+    ancestors = _ancestor_chain(ancestor_revisions)
+    if revision_payload is None:
+        if parent_revision is not None or ancestors:
+            raise InteractiveTreeRevisionError(
+                "interactive-tree topology ancestor evidence requires a revision"
+            )
+        frontier = tuple(source_index["leaf_ids"])
+    else:
+        revision = validate_interactive_tree_revision(
+            revision_payload,
+            source,
+            parent_revision=parent_revision,
+            ancestor_revisions=ancestors,
+        )
+        frontier = tuple(revision["tree"]["frontier_node_ids"])
+    _require_frontier_cover(source_index, frontier=frontier)
+    visible = _visible_node_ids(source_index, frontier=frontier)
+    visible_set = set(visible)
+    frontier_set = set(frontier)
+    conditions = _path_conditions(source_index)
+    projected_nodes: list[dict[str, Any]] = []
+    for source_node in source_index["nodes"]:
+        node_id = source_node["node_id"]
+        projected = {
+            "node_id": node_id,
+            "kind": source_node["kind"],
+            "depth": source_node["depth"],
+            "path": list(source_node["path"]),
+            "condition": deepcopy(conditions[node_id]),
+            "metrics": deepcopy(source_node["metrics"]),
+            "is_visible": node_id in visible_set,
+            "is_frontier": node_id in frontier_set,
+            "can_prune": (
+                source_node["kind"] == "split"
+                and node_id in visible_set
+                and node_id not in frontier_set
+            ),
+        }
+        if source_node["kind"] == "leaf":
+            projected["rule_id"] = source_node["rule_id"]
+        else:
+            projected.update(
+                {
+                    field: deepcopy(source_node[field])
+                    for field in (
+                        "feature",
+                        "threshold",
+                        "sklearn_threshold",
+                        "threshold_adjustment",
+                        "missing_child",
+                        "left_child_id",
+                        "right_child_id",
+                        "direction_diagnostic",
+                    )
+                }
+            )
+        projected_nodes.append(projected)
+    return {
+        "root_node_id": source_index["root_id"],
+        "visible_node_ids": list(visible),
+        "frontier_node_ids": list(frontier),
+        "nodes": projected_nodes,
+    }
+
+
 def _assemble_revision(
     source: Mapping[str, Any],
     *,
