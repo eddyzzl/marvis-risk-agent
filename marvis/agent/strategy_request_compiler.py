@@ -85,6 +85,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_pool_set_action",
     "strategy_pool_reorder",
     "strategy_pool_compile",
+    "strategy_pool_apply",
     "strategy_pool_impact",
     "strategy_impact_cube",
     "strategy_dsl_delivery",
@@ -1735,6 +1736,7 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
     }
 )
 _STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
+_STRATEGY_POOL_APPLY_WORKFLOWS = frozenset({"strategy_pool_apply"})
 _POOL_MUTATION_WORKFLOWS = _STRATEGY_POOL_WORKFLOWS - {"strategy_pool_compile"}
 _POOL_ACTION_TYPES = {
     "approval": frozenset({"approval", "reject", "review"}),
@@ -1806,6 +1808,62 @@ _POOL_STRATEGY_TYPE_VALUE_GROUNDING = {
         r"(?<![A-Za-z0-9_])segmentation(?![A-Za-z0-9_])|(?:分群|分层)"
     ),
 }
+_POOL_APPLY_TARGET_RE = re.compile(
+    r"(?=.*(?:策略池|规则池|strategy(?:\s|-|_)*pool|\bpool\b))"
+    r"(?=.*(?:当前样本|当前数据|current\s+(?:sample|dataset)))"
+    r"(?=.*(?:应用|写回|回写|回填|打标|"
+    r"(?<![A-Za-z0-9_])(?:apply|write[-\s]*back|assign)(?![A-Za-z0-9_])))",
+    re.IGNORECASE,
+)
+_POOL_APPLY_POSITIVE_INTENT_RE = re.compile(
+    r"(?:应用|写回|回写|回填|打标)"
+    r"[^；;。.!?？\n]{0,180}(?:策略池|规则池|当前样本|当前数据)|"
+    r"(?:策略池|规则池)[^；;。.!?？\n]{0,180}"
+    r"(?:应用|写回|回写|回填|打标)|"
+    r"(?<![A-Za-z0-9_])(?:apply|write[-\s]*back|assign)"
+    r"[^;.!?\n]{0,180}(?:pool|current\s+(?:sample|dataset))"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_APPLY_NONCURRENT_RE = re.compile(
+    r"[?？]|(?:不要|不用|无需|先别|先不|暂不|取消|停止|禁止|"
+    r"能否|可否|是否|可以吗|能不能|如何|怎么|怎样|假设|假如|如果|"
+    r"以后|未来|将来|稍后|之前|此前|过去|上次)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cancel|can\s+you|"
+    r"could\s+you|how\s+to|what\s+if|later|previously|"
+    r"in\s+the\s+future)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_APPLY_SECOND_OPERATION_RE = re.compile(
+    r"(?:采纳|采用|部署|上线|投产|生效|激活|切换|导出|下载|"
+    r"加入|添加|入池|删除|移除|改动作|修改动作|重排|排序|编译|"
+    r"修改策略池|改(?:一下)?(?:策略池|规则池)|生成报告|形成报告|出报告)|"
+    r"(?<![A-Za-z0-9_])(?:adopt|deploy|promote|activate|switch|export|"
+    r"download|add|insert|remove|delete|reorder|compile|modify|"
+    r"generate\s+(?:a\s+)?report)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_APPLY_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:expected_pool_revision|"
+    r"expected_pool_snapshot_hash|pool_(?:id|artifact_id)|"
+    r"artifact_(?:id|hash)|dataset_(?:id|content_hash)|sample_design_ref|"
+    r"requirements(?:_hash)?|strategy_spec|design_hash|action_counts|"
+    r"activated|adopted|deployed)(?![A-Za-z0-9_])|"
+    r"(?:Pool|策略池|数据集|dataset|artifact|工件|产物)\s*(?:hash|哈希|revision|版本)",
+    re.IGNORECASE,
+)
+_POOL_APPLY_OUTPUT_PREFIX_LABEL_RE = re.compile(
+    r"(?:(?:输出|字段|列名)\s*前缀|output_prefix|output\s+prefix|prefix)"
+    r"\s*(?:为|是|设为|设置为|=|:|：)?",
+    re.IGNORECASE,
+)
+_POOL_APPLY_OUTPUT_PREFIX_RE = re.compile(
+    _POOL_APPLY_OUTPUT_PREFIX_LABEL_RE.pattern
+    + r"\s*(?P<prefix>[A-Za-z_][A-Za-z0-9_]{0,47})"
+    r"(?![A-Za-z0-9_./-])",
+    re.IGNORECASE,
+)
+_POOL_APPLY_SAFE_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,47}$")
 _POOL_IMPACT_TARGET_RE = re.compile(
     r"(?=.*(?:策略池|规则池|strategy(?:\s|-|_)*pool|\bpool\b))"
     r"(?=.*(?:影响|效果|瀑布|逐月|通过率|坏账率|风险率|测算|评估|回测|"
@@ -3550,6 +3608,8 @@ def _validate_standard_workflow_payload(
                 raw_inputs,
                 whitelist,
             )
+        elif workflow in _STRATEGY_POOL_APPLY_WORKFLOWS:
+            normalized = _validate_strategy_pool_apply_inputs(raw_inputs)
         elif workflow in _STRATEGY_POOL_WORKFLOWS:
             normalized = _validate_strategy_pool_workflow_inputs(
                 workflow,
@@ -6379,6 +6439,42 @@ def _validate_strategy_pool_workflow_inputs(
     return normalized
 
 
+def _validate_strategy_pool_apply_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the only two user-owned controls for Pool writeback."""
+
+    workflow = "strategy_pool_apply"
+    _reject_workflow_fields(
+        inputs,
+        {"strategy_type", "output_prefix"},
+        workflow=workflow,
+    )
+    if "strategy_type" not in inputs:
+        raise _DraftValidationError(f"{workflow} 缺少 strategy_type。")
+    strategy_type = _required_text(
+        inputs["strategy_type"],
+        name=f"{workflow} strategy_type",
+    )
+    if strategy_type not in STRATEGY_TYPES:
+        raise _DraftValidationError(
+            f"{workflow} strategy_type 只能是：" + "、".join(STRATEGY_TYPES) + "。"
+        )
+    normalized: dict[str, Any] = {"strategy_type": strategy_type}
+    if "output_prefix" in inputs:
+        output_prefix = _required_text(
+            inputs["output_prefix"],
+            name=f"{workflow} output_prefix",
+        )
+        if _POOL_APPLY_SAFE_PREFIX_RE.fullmatch(output_prefix) is None:
+            raise _DraftValidationError(
+                f"{workflow} output_prefix 必须是最长 48 字符的 ASCII identifier "
+                "prefix，且不能以数字开头。"
+            )
+        normalized["output_prefix"] = output_prefix
+    return normalized
+
+
 def _validate_strategy_pool_impact_inputs(
     inputs: Mapping[str, Any],
     whitelist: tuple[str, ...],
@@ -7981,6 +8077,21 @@ def _ground_refinement_request(
             code="automatic_tree_apply_workflow_required",
             fields=("workflow",),
         )
+    if _utterance_targets_strategy_pool_apply(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and (
+            draft.workflow == "strategy_pool_apply"
+            or draft.workflow == "automatic_tree_apply"
+            or draft.workflow in _POOL_MUTATION_WORKFLOWS
+        )
+    ):
+        return _clarification(
+            "原话明确要求把当前 Strategy Pool 应用或写回当前样本，只能编译为 "
+            "strategy_pool_apply；不能改路由到 Pool 编译预览、通用已有策略应用、"
+            "影响测算、采纳、部署或其他 Workflow。",
+            code="strategy_pool_apply_workflow_required",
+            fields=("workflow",),
+        )
     if utterance_targets_strategy_impact_cube(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_impact_cube"
@@ -8094,6 +8205,8 @@ def _ground_refinement_request(
             result,
             whitelist=whitelist,
         )
+    if draft.workflow in _STRATEGY_POOL_APPLY_WORKFLOWS:
+        return _ground_strategy_pool_apply_request(utterance, result)
     if draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS:
         return _ground_strategy_pool_impact_request(
             utterance,
@@ -10399,6 +10512,12 @@ def utterance_targets_strategy_impact_cube(utterance: str) -> bool:
     return bool(mentioned_types & {"limit", "pricing", "segmentation"})
 
 
+def _utterance_targets_strategy_pool_apply(utterance: str) -> bool:
+    """Reserve any explicit current-Pool-to-current-sample application clause."""
+
+    return _POOL_APPLY_TARGET_RE.search(utterance) is not None
+
+
 def _utterance_targets_strategy_pool_impact(utterance: str) -> bool:
     if _POOL_IMPACT_TARGET_RE.search(utterance) is None:
         return False
@@ -10442,6 +10561,81 @@ def _utterance_targets_strategy_pool_impact(utterance: str) -> bool:
         )
         for signal in signals
     )
+
+
+def _ground_strategy_pool_apply_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Prove the one Pool type and optional output prefix came from this command."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if (
+        _POOL_APPLY_NONCURRENT_RE.search(utterance) is not None
+        or _POOL_APPLY_POSITIVE_INTENT_RE.search(utterance) is None
+        or _POOL_APPLY_TARGET_RE.search(utterance) is None
+    ):
+        return _clarification(
+            "请用当前轮、肯定式的单一命令明确要求把一个指定类型的当前 "
+            "Strategy Pool 应用或写回当前样本；否定、问句、历史/未来或假设"
+            "描述不会创建派生数据集。",
+            code="strategy_pool_apply_positive_command_required",
+            fields=("apply_intent",),
+        )
+    if _POOL_APPLY_PLATFORM_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "Pool revision/hash、artifact、数据集、SampleDesign、requirements、"
+            "StrategySpec 和生命周期状态只能由平台恢复；请求中只能提供 Pool "
+            "类型与可选 output_prefix。",
+            code="strategy_pool_apply_platform_binding_forbidden",
+            fields=("platform_binding",),
+        )
+    if _POOL_APPLY_SECOND_OPERATION_RE.search(utterance) is not None:
+        return _clarification(
+            "Strategy Pool 应用必须是当前轮唯一操作；Pool 修改、采纳、激活、"
+            "部署、上线、导出或报告必须拆成后续请求。派生数据集默认不激活。",
+            code="strategy_pool_apply_single_operation_required",
+            fields=("workflow",),
+        )
+
+    missing_controls: list[str] = []
+    strategy_type = str(inputs.get("strategy_type") or "")
+    mentioned_types = {
+        item[0] for item in _voting_strategy_type_mentions(utterance)
+    }
+    pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    if (
+        pattern is None
+        or pattern.search(utterance) is None
+        or mentioned_types != {strategy_type}
+    ):
+        missing_controls.append(f"strategy_type {strategy_type or 'unknown'}")
+
+    prefix_labels = tuple(_POOL_APPLY_OUTPUT_PREFIX_LABEL_RE.finditer(utterance))
+    prefix_matches = tuple(_POOL_APPLY_OUTPUT_PREFIX_RE.finditer(utterance))
+    prefix_mentions = tuple(match.group("prefix") for match in prefix_matches)
+    output_prefix = inputs.get("output_prefix")
+    if len(prefix_labels) != len(prefix_matches):
+        missing_controls.append("output_prefix")
+    elif output_prefix is None:
+        if prefix_mentions:
+            missing_controls.append("output_prefix")
+    elif prefix_mentions != (output_prefix,):
+        missing_controls.append(f"output_prefix {output_prefix}")
+
+    if missing_controls:
+        missing_controls = list(dict.fromkeys(missing_controls))
+        return _clarification(
+            "Strategy Pool 应用只能采用原话中唯一明确的 Pool 类型与可选 ASCII "
+            "输出前缀；当前无法核对："
+            + "、".join(missing_controls)
+            + "。平台不会替用户猜测 Pool、前缀或任何数据/证据绑定。",
+            code="strategy_pool_apply_controls_not_grounded",
+            fields=tuple(missing_controls),
+        )
+    return result
 
 
 def _ground_strategy_pool_impact_request(
@@ -14669,6 +14863,23 @@ def _standard_workflow_confirmation_text(
             "平台只读编译当前 task Pool 为 canonical StrategySpec 并计算 design hash",
             "结果只是草案预览，不会创建已采纳策略，也不会采纳或部署",
         ]
+    elif draft.workflow == "strategy_pool_apply":
+        details = [
+            "已识别为〔Strategy Pool 应用写回 Workflow〕",
+            f"策略类型：{inputs['strategy_type']}",
+            "平台将在执行时认证当前 task 内指定类型的唯一非空 Pool、CAS revision/hash、"
+            "来源样本与 requirements，再确定性逐行应用",
+            "本步骤只创建保留原始行的不可变派生数据集；不激活或替换当前 workspace，"
+            "不采纳、不部署，也不改变 Pool",
+        ]
+        details.append(
+            "输出前缀："
+            + (
+                str(inputs["output_prefix"])
+                if "output_prefix" in inputs
+                else "由受控 Tool 使用默认前缀"
+            )
+        )
     elif draft.workflow == "strategy_impact_cube":
         details = [
             "已识别为〔统一 Strategy ImpactCube Workflow〕",
@@ -15362,6 +15573,15 @@ def _user_prompt(
         "metrics、conditions 或 strategy_spec。用户未指定月份/金额列时必须省略，平台只会"
         "使用唯一确认的语义角色；没有角色则 unavailable，多个角色则澄清，Agent 不得猜列。"
         "limit/pricing/segmentation、否定/问句/历史/仅报告或同轮修改/采纳/部署必须澄清。"
+        "对于 strategy_pool_apply，只能抄录用户当前肯定命令中唯一明确的五类 "
+        "strategy_type，以及用户以“输出前缀/output_prefix/output prefix/prefix”"
+        "显式标注的可选 ASCII identifier output_prefix；未提供时必须省略并由 Tool"
+        " 使用默认值。expected Pool revision/snapshot hash、Pool/artifact、dataset、"
+        "SampleDesign、requirements、StrategySpec、指标和生命周期状态全部禁止填写，"
+        "由平台在计划创建与执行时恢复。请求必须明确把当前 Pool 应用或写回当前样本，"
+        "且必须是当前、肯定、单步骤命令；否定、问句、历史/未来/假设、模糊或多 Pool，"
+        "或同轮串联 Pool 修改、采纳、激活、部署、上线、导出或报告必须 clarification。"
+        "结果只创建不可变派生数据集，不激活当前 workspace，不采纳、不部署。"
     )
 
 

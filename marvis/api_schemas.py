@@ -221,6 +221,7 @@ ManualStrategyWorkflow = Literal[
     "voting_candidate_build_from_search",
     "interactive_tree_revision",
     "interactive_tree_frontier_materialization",
+    "strategy_pool_apply",
 ]
 
 ManualUnivariateRefinementMethod = Literal[
@@ -611,6 +612,29 @@ class ManualVotingCandidateBuildFromSearchInputs(BaseModel):
         return self
 
 
+class ManualStrategyPoolApplyInputs(BaseModel):
+    """Only the Pool type and optional safe column prefix are user-owned."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: ManualStrategyType
+    output_prefix: Annotated[
+        StrictStr,
+        StringConstraints(
+            pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,47}$",
+            max_length=48,
+        ),
+    ] | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_null_output_prefix(self) -> Self:
+        if "output_prefix" in self.model_fields_set and self.output_prefix is None:
+            raise ValueError(
+                "optional fields must be omitted instead of null: output_prefix"
+            )
+        return self
+
+
 class ManualRiskThresholdSelectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -740,6 +764,9 @@ _MANUAL_VOTING_CANDIDATE_SEARCH_INPUTS = TypeAdapter(
 _MANUAL_VOTING_CANDIDATE_BUILD_FROM_SEARCH_INPUTS = TypeAdapter(
     ManualVotingCandidateBuildFromSearchInputs
 )
+_MANUAL_STRATEGY_POOL_APPLY_INPUTS = TypeAdapter(
+    ManualStrategyPoolApplyInputs
+)
 
 _MANUAL_STRATEGY_PLATFORM_FIELDS = frozenset(
     {
@@ -827,6 +854,11 @@ class ManualStrategyRequest(BaseModel):
             )
         elif self.workflow == "voting_candidate_build_from_search":
             _MANUAL_VOTING_CANDIDATE_BUILD_FROM_SEARCH_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "strategy_pool_apply":
+            _MANUAL_STRATEGY_POOL_APPLY_INPUTS.validate_python(
                 self.workflow_inputs,
                 strict=True,
             )

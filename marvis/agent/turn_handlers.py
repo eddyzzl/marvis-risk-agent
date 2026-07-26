@@ -1698,7 +1698,7 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
 )
 _STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
-    r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|冻结|探索|整理|梳理|汇总|归集|收集|刷新|更新|复盘|盘点|记录|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|打标|"
+    r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|冻结|探索|整理|梳理|汇总|归集|收集|刷新|更新|复盘|盘点|记录|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|写回|回写|回填|打标|"
     r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
     r"添加|加入|入池|删除|移除|排序|重排|改为|编译|预览|"
     r"develop|design|create|build|train|materialize|aggregate|collect|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
@@ -1869,6 +1869,7 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "voting_candidate_build_from_search",
         "interactive_tree_revision",
         "interactive_tree_frontier_materialization",
+        "strategy_pool_apply",
     }
 )
 
@@ -2962,6 +2963,19 @@ def _run_validated_strategy_request(
 
     if (
         isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_pool_apply"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_pool_apply",
+            slots=_strategy_pool_apply_plan_slots(runtime, task, draft),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow in _STRATEGY_POOL_WORKFLOWS
     ):
         template_id = {
@@ -3898,6 +3912,11 @@ def _standard_workflow_request_preflight(
         # Bind exact refs only once, immediately before plan creation. A
         # separate preflight read would open a second selection window where
         # current source/report heads could silently rebind.
+        return None
+    if draft.workflow == "strategy_pool_apply":
+        # Select and authenticate the exact current nonempty Pool only once,
+        # immediately before plan creation. The Tool revalidates the CAS under
+        # its writer lock before deriving any dataset.
         return None
     if draft.workflow == "strategy_dsl_delivery":
         # Strategy and dataset refs are selected and authenticated together
@@ -5119,6 +5138,60 @@ def _strategy_pool_impact_pool_binding(
             "当前 Strategy Pool revision/hash 绑定不完整，不能执行影响测算。"
         ) from exc
     return pool, binding
+
+
+def _strategy_pool_apply_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Bind one specified current nonempty Pool without exposing its identity."""
+
+    if draft.workflow != "strategy_pool_apply":
+        raise StrategySetupError(
+            "Strategy Pool 应用 slots 收到了错误的 Workflow。"
+        )
+    inputs = draft.to_dict()["workflow_inputs"]
+    strategy_type = str(inputs["strategy_type"])
+    try:
+        pool = StrategyCandidatePoolRepository(
+            runtime.settings.db_path
+        ).get_current(task.id, strategy_type)
+    except Exception as exc:
+        raise StrategySetupError(
+            "当前 Strategy Pool 状态无法通过完整性校验，不能执行应用写回。"
+        ) from exc
+    if pool is None:
+        raise StrategySetupError(
+            f"当前任务没有 {strategy_type} Strategy Pool，无法应用到当前样本。"
+        )
+    if not _strategy_pool_entries(pool):
+        raise StrategySetupError(
+            f"当前 {strategy_type} Strategy Pool 为空；请先加入候选规则再执行应用。"
+        )
+    try:
+        revision = pool["revision"]
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise ValueError("invalid Pool revision")
+        snapshot_hash = strategy_pool_snapshot_hash(pool)
+        if (
+            not isinstance(snapshot_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", snapshot_hash) is None
+        ):
+            raise ValueError("invalid Pool snapshot hash")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "当前 Strategy Pool revision/hash 绑定不完整，不能执行应用写回。"
+        ) from exc
+
+    slots: dict[str, object] = {
+        "strategy_type": strategy_type,
+        "expected_pool_revision": revision,
+        "expected_pool_snapshot_hash": snapshot_hash,
+    }
+    if "output_prefix" in inputs:
+        slots["output_prefix"] = inputs["output_prefix"]
+    return slots
 
 
 def _strategy_impact_cube_plan_slots(
@@ -9809,6 +9882,7 @@ def _strategy_request_requires_dataset(
             "strategy_model_evidence_v2",
             "strategy_report_bundle_v2",
             "strategy_impact_cube",
+            "strategy_pool_apply",
             "candidate_monthly_stability",
             "scorecard_band_build",
             "scorecard_cutoff_selection",

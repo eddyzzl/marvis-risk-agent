@@ -2137,6 +2137,63 @@ STRATEGY_POOL_COMPILE = WorkflowTemplate(
 )
 
 
+STRATEGY_POOL_APPLY = WorkflowTemplate(
+    id="strategy_pool_apply",
+    title="应用当前 Strategy Pool",
+    goal_patterns=(
+        "把当前策略池应用到当前样本",
+        "将当前策略池写回派生数据集",
+        "apply current strategy pool",
+    ),
+    slots=(
+        SlotSpec("strategy_type", True, "user", "Explicit Strategy Pool type"),
+        SlotSpec(
+            "output_prefix",
+            False,
+            "user",
+            "Optional safe ASCII output-column prefix",
+        ),
+        SlotSpec(
+            "expected_pool_revision",
+            True,
+            "task_context",
+            "Current nonempty Pool CAS revision",
+        ),
+        SlotSpec(
+            "expected_pool_snapshot_hash",
+            True,
+            "task_context",
+            "Current nonempty Pool CAS snapshot hash",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="应用当前策略池并生成派生数据集",
+            tool_ref=ToolRef("strategy", "apply_strategy_pool"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "output_prefix": "{slot:output_prefix}",
+                "expected_pool_revision": "{slot:expected_pool_revision}",
+                "expected_pool_snapshot_hash": (
+                    "{slot:expected_pool_snapshot_hash}"
+                ),
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "schema_version"}),
+                PostCheck("nonempty", {"field": "run_id"}),
+                PostCheck("nonempty", {"field": "result.dataset_id"}),
+                PostCheck("range", {"field": "result.row_count", "min": 0}),
+                PostCheck("nonempty", {"field": "evidence.artifact_id"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_POOL_IMPACT = WorkflowTemplate(
     id="strategy_pool_impact",
     title="测算 Strategy Pool 影响",

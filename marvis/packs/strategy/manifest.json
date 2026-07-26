@@ -5945,6 +5945,259 @@
       "memory_limit_mb": 2048
     },
     {
+      "name": "apply_strategy_pool",
+      "summary": "Authenticate the exact current non-empty Strategy Pool and its governed source/sample/model-score lineage, apply deterministic first-match decisions to the full source row universe, and atomically register one non-active derived dataset plus immutable evidence without adopting or deploying a Strategy.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_type": {
+            "type": "string",
+            "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+          },
+          "expected_pool_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expected_pool_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "output_prefix": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 48,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "default": "strategy_pool_"
+          }
+        },
+        "required": [
+          "strategy_type",
+          "expected_pool_revision",
+          "expected_pool_snapshot_hash"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.apply-strategy-pool-tool.v1"
+          },
+          "run_id": {
+            "type": "string",
+            "pattern": "^strategy-pool-apply-[0-9a-f]{32}$"
+          },
+          "input_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "cached": {"type": "boolean"},
+          "activated": {"const": false},
+          "adopted": {"const": false},
+          "deployed": {"const": false},
+          "source": {
+            "type": "object",
+            "properties": {
+              "pool_id": {"type": "string", "minLength": 1},
+              "revision": {"type": "integer", "minimum": 1},
+              "revision_id": {"type": "string", "minLength": 1},
+              "snapshot_hash": {"$ref": "#/$defs/sha256"},
+              "pool_artifact_id": {"$ref": "#/$defs/sha256"},
+              "pool_artifact_content_hash": {"$ref": "#/$defs/sha256"},
+              "design_hash": {"$ref": "#/$defs/sha256"},
+              "strategy_spec_hash": {"$ref": "#/$defs/sha256"},
+              "dataset_id": {"$ref": "#/$defs/dataset_id"},
+              "dataset_content_hash": {"$ref": "#/$defs/sha256"},
+              "row_count": {"type": "integer", "minimum": 1},
+              "sample_design_ref": {"$ref": "#/$defs/sample_design_ref"}
+            },
+            "required": [
+              "pool_id",
+              "revision",
+              "revision_id",
+              "snapshot_hash",
+              "pool_artifact_id",
+              "pool_artifact_content_hash",
+              "design_hash",
+              "strategy_spec_hash",
+              "dataset_id",
+              "dataset_content_hash",
+              "row_count",
+              "sample_design_ref"
+            ],
+            "additionalProperties": false
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "dataset_id": {"$ref": "#/$defs/dataset_id"},
+              "dataset_content_hash": {"$ref": "#/$defs/sha256"},
+              "row_count": {"type": "integer", "minimum": 1},
+              "result_hash": {"$ref": "#/$defs/sha256"}
+            },
+            "required": [
+              "dataset_id",
+              "dataset_content_hash",
+              "row_count",
+              "result_hash"
+            ],
+            "additionalProperties": false
+          },
+          "columns": {
+            "type": "object",
+            "properties": {
+              "action": {"$ref": "#/$defs/output_column"},
+              "value": {"$ref": "#/$defs/output_column"},
+              "value_type": {"$ref": "#/$defs/output_column"},
+              "rule_id": {"$ref": "#/$defs/output_column"},
+              "entry_id": {"$ref": "#/$defs/output_column"},
+              "reason_code": {"$ref": "#/$defs/output_column"}
+            },
+            "required": [
+              "action",
+              "value",
+              "value_type",
+              "rule_id",
+              "entry_id",
+              "reason_code"
+            ],
+            "additionalProperties": false
+          },
+          "action_counts": {"$ref": "#/$defs/counts"},
+          "rule_counts": {"$ref": "#/$defs/counts"},
+          "entry_counts": {"$ref": "#/$defs/counts"},
+          "default_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "requirements": {
+            "type": "object",
+            "properties": {
+              "requirements_hash": {"$ref": "#/$defs/sha256"},
+              "virtual_fields": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1}
+              }
+            },
+            "required": ["requirements_hash", "virtual_fields"],
+            "additionalProperties": false
+          },
+          "workspace": {
+            "type": "object",
+            "properties": {
+              "source_revision": {"type": "integer", "minimum": 1},
+              "source_analysis_generation": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "source_semantic_mapping_hash": {"$ref": "#/$defs/sha256"},
+              "active_dataset_id": {"$ref": "#/$defs/dataset_id"},
+              "result_revision": {"type": "null"},
+              "result_analysis_generation": {"type": "null"}
+            },
+            "required": [
+              "source_revision",
+              "source_analysis_generation",
+              "source_semantic_mapping_hash",
+              "active_dataset_id",
+              "result_revision",
+              "result_analysis_generation"
+            ],
+            "additionalProperties": false
+          },
+          "evidence": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"$ref": "#/$defs/sha256"},
+              "content_hash": {"$ref": "#/$defs/sha256"},
+              "download_url": {"type": "string", "minLength": 1}
+            },
+            "required": ["artifact_id", "content_hash", "download_url"],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "schema_version",
+          "run_id",
+          "input_hash",
+          "cached",
+          "activated",
+          "adopted",
+          "deployed",
+          "source",
+          "result",
+          "columns",
+          "action_counts",
+          "rule_counts",
+          "entry_counts",
+          "default_count",
+          "requirements",
+          "workspace",
+          "evidence"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "dataset_id": {
+            "type": "string",
+            "pattern": "^ds_[0-9a-f]{32}$"
+          },
+          "output_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+          },
+          "counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"$ref": "#/$defs/sha256"},
+              "artifact_content_hash": {"$ref": "#/$defs/sha256"},
+              "sample_design_id": {"type": "string", "minLength": 1},
+              "sample_design_content_hash": {"$ref": "#/$defs/sha256"},
+              "partition": {"const": "development"}
+            },
+            "required": [
+              "artifact_id",
+              "artifact_content_hash",
+              "sample_design_id",
+              "sample_design_content_hash",
+              "partition"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_apply_strategy_pool",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": [
+        "read:task",
+        "read:dataset",
+        "read:artifacts",
+        "write:artifact",
+        "write:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
       "name": "materialize_project_context",
       "summary": "Discover and bind governed current-project, historical-strategy and missing-information evidence into an immutable task-owned revision.",
       "input_schema": {

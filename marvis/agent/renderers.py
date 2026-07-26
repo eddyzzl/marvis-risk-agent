@@ -3009,6 +3009,93 @@ def _render_compile_strategy_pool(o: dict):
     ]
 
 
+def _strategy_pool_apply_integrity_failure() -> tuple[str, list[dict]]:
+    return (
+        "**Strategy Pool 应用结果完整性校验失败**：计划缓存中的 Pool、"
+        "派生数据集、逐行分布、requirements、workspace 或 evidence 绑定"
+        "不一致，已停止展示结果。请基于当前 Pool 重新执行应用。",
+        [],
+    )
+
+
+def _render_apply_strategy_pool(o: dict):
+    """Render only the strictly validated, non-activating Pool application."""
+
+    from marvis.packs.strategy.pool_apply_tools import (
+        validate_apply_strategy_pool_tool_output,
+    )
+
+    try:
+        o = validate_apply_strategy_pool_tool_output(o)
+        source = o["source"]
+        result = o["result"]
+        columns = o["columns"]
+        evidence = o["evidence"]
+        action_counts = o["action_counts"]
+        rule_counts = o["rule_counts"]
+        entry_counts = o["entry_counts"]
+    except Exception:
+        return _strategy_pool_apply_integrity_failure()
+
+    cached_note = "（命中已认证缓存）" if o["cached"] else ""
+    text = (
+        f"**Strategy Pool 应用完成{cached_note}**：当前 `{source['pool_id']}` "
+        f"revision {source['revision']} 已确定性应用到源数据集 "
+        f"`{source['dataset_id']}`，生成不可变派生数据集 "
+        f"`{result['dataset_id']}`；保留 **{result['row_count']}** 行。\n"
+        f"当前 workspace 未切换，仍指向源数据集 "
+        f"`{o['workspace']['active_dataset_id']}`。结果**未激活、未采纳、"
+        "未部署**，不会修改当前 Strategy Pool，也不会替换当前样本。\n\n"
+        f"**应用证据**：[{evidence['artifact_id']}]"
+        f"({evidence['download_url']})"
+    )
+    identity_rows = [
+        ["Pool ID", str(source["pool_id"])],
+        ["Pool Revision", str(source["revision"])],
+        ["Pool Revision ID", str(source["revision_id"])],
+        ["Pool Snapshot Hash", str(source["snapshot_hash"])],
+        ["Source Dataset", str(source["dataset_id"])],
+        ["Result Dataset", str(result["dataset_id"])],
+        ["Rows", str(result["row_count"])],
+        ["Design Hash", str(source["design_hash"])],
+        ["StrategySpec Hash", str(source["strategy_spec_hash"])],
+        ["Requirements Hash", str(o["requirements"]["requirements_hash"])],
+        ["Evidence Artifact", str(evidence["artifact_id"])],
+    ]
+    distribution_rows = [
+        ["action", str(key), str(value)]
+        for key, value in action_counts.items()
+    ]
+    distribution_rows.extend(
+        ["rule", str(key), str(value)]
+        for key, value in rule_counts.items()
+    )
+    distribution_rows.extend(
+        ["entry", str(key), str(value)]
+        for key, value in entry_counts.items()
+    )
+    distribution_rows.append(
+        ["default", "unmatched", str(o["default_count"])]
+    )
+    return text, [
+        {
+            "title": "Strategy Pool 应用身份",
+            "columns": ["字段", "值"],
+            "rows": identity_rows,
+        },
+        {
+            "title": "派生数据集输出列",
+            "columns": ["语义", "列名"],
+            "rows": [[str(key), str(value)] for key, value in columns.items()],
+        },
+        {
+            "title": "Strategy Pool 应用分布",
+            "columns": ["类别", "标识", "行数"],
+            "rows": distribution_rows,
+        },
+    ]
+
+
 def _pool_impact_amount_delta_rows(
     amount_deltas: object,
     *,
@@ -7390,6 +7477,7 @@ _RENDERERS = {
     "set_pool_entry_action": _render_strategy_pool_mutation,
     "reorder_strategy_pool": _render_strategy_pool_mutation,
     "compile_strategy_pool": _render_compile_strategy_pool,
+    "apply_strategy_pool": _render_apply_strategy_pool,
     "measure_candidate_monthly_stability": (
         _render_measure_candidate_monthly_stability
     ),
@@ -7488,6 +7576,8 @@ def render_tool_output(
             return _project_context_integrity_failure()
         if tool == "apply_automatic_tree":
             return _automatic_tree_apply_integrity_failure()
+        if tool == "apply_strategy_pool":
+            return _strategy_pool_apply_integrity_failure()
         return _render_generic(output or {})
 
 

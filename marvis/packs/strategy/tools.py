@@ -90,6 +90,14 @@ from marvis.packs.strategy.pool_tools import (
     run_reorder_strategy_pool,
     run_set_pool_entry_action,
 )
+from marvis.packs.strategy.pool_apply_tools import run_apply_strategy_pool
+from marvis.packs.strategy.apply_projection import (
+    DEFAULT_STRATEGY_APPLY_PREFIX,
+    deterministic_rule_counts,
+    deterministic_string_counts,
+    resolve_apply_output_columns,
+    serialize_strategy_decisions,
+)
 from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
 from marvis.packs.strategy.candidate_stability_tools import (
     run_measure_candidate_monthly_stability,
@@ -957,6 +965,12 @@ def tool_compile_strategy_pool(inputs: dict, ctx) -> dict:
     return run_compile_strategy_pool(inputs, ctx, _runtime(ctx))
 
 
+def tool_apply_strategy_pool(inputs: dict, ctx) -> dict:
+    """Apply the exact current Pool to its governed full source population."""
+
+    return run_apply_strategy_pool(inputs, ctx, _runtime(ctx))
+
+
 def tool_measure_pool_impact(inputs: dict, ctx) -> dict:
     """Measure governed first-match and monthly impact for the current Pool."""
 
@@ -1244,14 +1258,6 @@ def _same_strategy_payload(left: Strategy, right: Strategy) -> bool:
 
 
 _APPLY_SCHEMA_VERSION = "strategy.apply.v1"
-_SAFE_OUTPUT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-_APPLY_OUTPUT_SUFFIXES = {
-    "action": "action",
-    "value": "value",
-    "value_type": "value_type",
-    "rule_id": "rule_id",
-    "reason_code": "reason_code",
-}
 
 
 def tool_apply_strategy(inputs: dict, ctx) -> dict:
@@ -1275,22 +1281,28 @@ def tool_apply_strategy(inputs: dict, ctx) -> dict:
         raise StrategyError(
             "source dataset changed while the strategy was being applied"
         )
-    output_columns = _strategy_apply_output_columns(inputs, frame)
+    output_columns = resolve_apply_output_columns(
+        frame.columns,
+        output_prefix=inputs.get("output_prefix"),
+        output_columns=inputs.get("output_columns"),
+        default_prefix=DEFAULT_STRATEGY_APPLY_PREFIX,
+        include_entry_id=False,
+    ).as_dict()
 
     evaluation = evaluate_strategy_frame(frame, spec)
-    action_values, action_value_types = _strategy_apply_values(
+    serialized = serialize_strategy_decisions(
         evaluation.decisions,
         strategy_type=spec.strategy_type,
     )
     derived = frame.copy()
     derived[output_columns["action"]] = evaluation.action_type
-    derived[output_columns["value"]] = action_values
-    derived[output_columns["value_type"]] = action_value_types
+    derived[output_columns["value"]] = serialized.values
+    derived[output_columns["value_type"]] = serialized.value_types
     derived[output_columns["rule_id"]] = evaluation.matched_rule_id
     derived[output_columns["reason_code"]] = evaluation.reason_code
 
-    action_counts = _string_counts(evaluation.action_type)
-    rule_counts = _rule_counts(evaluation.matched_rule_id)
+    action_counts = deterministic_string_counts(evaluation.action_type)
+    rule_counts = deterministic_rule_counts(evaluation.matched_rule_id)
     default_count = int(evaluation.matched_rule_id.isna().sum())
     strategy_hash = strategy_spec_hash(spec)
     uow = ArtifactUnitOfWork()
@@ -1355,147 +1367,6 @@ def tool_apply_strategy(inputs: dict, ctx) -> dict:
         "output_columns": output_columns,
         "evidence": evidence,
     }
-
-
-def _strategy_apply_output_columns(inputs: dict, frame: pd.DataFrame) -> dict[str, str]:
-    raw_prefix = inputs.get("output_prefix")
-    raw_columns = inputs.get("output_columns")
-    if raw_prefix is not None and raw_columns is not None:
-        raise StrategyError(
-            "apply_strategy accepts output_prefix or output_columns, not both"
-        )
-    if raw_columns is not None and not isinstance(raw_columns, dict):
-        raise StrategyError("output_columns must be an object")
-
-    if raw_columns is None:
-        if raw_prefix is not None and not isinstance(raw_prefix, str):
-            raise StrategyError("output_prefix must be a string")
-        prefix = "strategy_" if raw_prefix is None else raw_prefix
-        _require_safe_output_name(prefix, name="output_prefix", is_prefix=True)
-        columns = {
-            key: f"{prefix}{suffix}" for key, suffix in _APPLY_OUTPUT_SUFFIXES.items()
-        }
-    else:
-        unsupported = sorted(set(raw_columns) - set(_APPLY_OUTPUT_SUFFIXES))
-        if unsupported:
-            raise StrategyError(
-                "output_columns has unsupported fields: " + ", ".join(unsupported)
-            )
-        columns = {}
-        for key, suffix in _APPLY_OUTPUT_SUFFIXES.items():
-            value = raw_columns.get(key)
-            if value is None:
-                columns[key] = f"strategy_{suffix}"
-            elif not isinstance(value, str):
-                raise StrategyError(f"output_columns.{key} must be a string")
-            else:
-                columns[key] = value
-
-    for key, column in columns.items():
-        _require_safe_output_name(column, name=f"output_columns.{key}")
-    normalized_outputs = [column.casefold() for column in columns.values()]
-    if len(set(normalized_outputs)) != len(normalized_outputs):
-        raise StrategyError(
-            "strategy output column names must be case-insensitively unique"
-        )
-    source_columns = {str(column).casefold() for column in frame.columns}
-    collisions = sorted(
-        column for column in columns.values() if column.casefold() in source_columns
-    )
-    if collisions:
-        raise StrategyError(
-            "strategy output columns already exist (case-insensitive): "
-            + ", ".join(collisions)
-        )
-    return columns
-
-
-def _require_safe_output_name(
-    value: str,
-    *,
-    name: str,
-    is_prefix: bool = False,
-) -> None:
-    limit = 48 if is_prefix else 64
-    if not isinstance(value, str) or not value or len(value) > limit:
-        raise StrategyError(f"{name} must be a non-empty safe identifier")
-    if _SAFE_OUTPUT_NAME.fullmatch(value) is None:
-        raise StrategyError(
-            f"{name} must contain only ASCII letters, digits, and underscores "
-            "and cannot start with a digit"
-        )
-
-
-def _strategy_apply_values(
-    decisions: pd.Series,
-    *,
-    strategy_type: str,
-) -> tuple[pd.Series, pd.Series]:
-    decision_values = decisions.tolist()
-    value_types = [_strategy_value_type(value) for value in decision_values]
-    numeric_storage = strategy_type in {"limit", "pricing"} and all(
-        value_type in {"integer", "number"} for value_type in value_types
-    )
-    values: list[object] = []
-    for value, value_type in zip(decision_values, value_types, strict=True):
-        values.append(
-            _strategy_storage_value(
-                value,
-                value_type=value_type,
-                numeric_storage=numeric_storage,
-            )
-        )
-    return (
-        pd.Series(values, index=decisions.index, dtype="object"),
-        pd.Series(value_types, index=decisions.index, dtype="object"),
-    )
-
-
-def _strategy_storage_value(value, *, value_type: str, numeric_storage: bool):
-    # Segment ids and legacy approval/reject output aliases may legally mix JSON
-    # scalar types; parquet has no union column. Preserve their exact type in the
-    # adjacent value_type column and use deterministic text storage. Canonical
-    # limit/pricing decision values remain numeric for immediate downstream use.
-    if numeric_storage:
-        return value
-    if value_type == "string":
-        return value
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def _strategy_value_type(value) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, dict):
-        return "object"
-    if isinstance(value, list):
-        return "array"
-    if isinstance(value, str):
-        return "string"
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, int):
-        return "integer"
-    if isinstance(value, float):
-        return "number"
-    raise StrategyError("strategy decision value must be JSON serializable")
-
-
-def _string_counts(values: pd.Series) -> dict[str, int]:
-    counts = values.value_counts(dropna=False).to_dict()
-    return {
-        str(key): int(counts[key]) for key in sorted(counts, key=lambda item: str(item))
-    }
-
-
-def _rule_counts(values: pd.Series) -> dict[str, int]:
-    return _string_counts(values.loc[values.notna()].map(str))
 
 
 def tool_backtest_strategy(inputs: dict, ctx) -> dict:

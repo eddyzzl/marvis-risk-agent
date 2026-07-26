@@ -247,7 +247,7 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=40,
+    version=41,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
@@ -266,7 +266,8 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "cross_matrix_cell_selection/"
         "strategy_pool_add_candidate/strategy_pool_remove_entry/"
         "strategy_pool_set_action/strategy_pool_reorder/strategy_pool_compile/"
-        "strategy_pool_impact/strategy_impact_cube/strategy_dsl_delivery/"
+        "strategy_pool_apply/strategy_pool_impact/strategy_impact_cube/"
+        "strategy_dsl_delivery/"
         "strategy_report_bundle_v2。"
         "strategy_project_context 只整理当前项目现状、历史策略与缺失信息。只能抽取用户明确提供的 "
         "as_of（YYYY-MM-DD，必填）、可选 scope、business_context 字段路径到逐字文本或 null 的映射、"
@@ -378,6 +379,17 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "问句、否定、假设、历史或未来描述必须 clarification。同一句不得串联选叶、Strategy Pool、"
         "业务动作、报告、采纳或部署。该 Workflow 只创建 development / unvalidated 派生数据集，"
         "不激活或替换当前 workspace。"
+        "strategy_pool_apply 表示把当前任务中一个明确类型的当前非空 Strategy Pool "
+        "确定性应用或写回当前样本。workflow_inputs 只允许五类 strategy_type 和可选 "
+        "output_prefix；output_prefix 只有在用户以输出前缀/output_prefix/output prefix/"
+        "prefix 明确标注时才能逐字抄录，必须是最长 48 字符且不以数字开头的 ASCII "
+        "identifier prefix，未提供时省略并由 Tool 使用默认值。Pool revision/snapshot "
+        "hash、Pool/artifact、dataset、SampleDesign、requirements、StrategySpec、指标、"
+        "结果和 activated/adopted/deployed 全部由平台恢复或计算，禁止输出。请求必须是"
+        "当前、肯定、单步骤命令，并明确把一个唯一类型的当前 Pool 应用到当前样本；"
+        "否定、问句、历史/未来/假设、模糊或多 Pool，以及同轮修改 Pool、采纳、激活、"
+        "部署、上线、导出或报告必须 clarification。结果只创建不可变派生数据集，"
+        "不激活当前 workspace，不采纳、不部署，也不修改 Pool。"
         "automatic_tree_leaf_materialization 表示从已生成的完整自动树候选中，只物化一个用户明确点名的"
         "叶节点 pointer。workflow_inputs 只允许 tree_asset_id、leaf_id 和可选 selection_reason。"
         "tree_asset_id 必须逐字抄录用户原话中的完整 candidate-asset- 后接 32 位小写十六进制；"
