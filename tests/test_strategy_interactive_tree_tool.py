@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -20,6 +21,7 @@ from marvis.db import DatasetRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.feature.weighted_rule_tree import build_weighted_rule_tree
 from marvis.packs.strategy import automatic_tree_leaf_tools as leaf_tools
+from marvis.packs.strategy import interactive_tree_tools as revision_tools
 from marvis.packs.strategy import tools as strategy_tools
 from marvis.packs.strategy.automatic_tree_asset import (
     build_automatic_tree_asset,
@@ -388,8 +390,259 @@ def test_revise_interactive_tree_accepts_an_exact_parent_revision_source(
     ) == third
 
 
+def test_verified_revision_can_be_reloaded_under_a_callers_existing_lock(
+    scenario: _Scenario,
+) -> None:
+    result = _invoke(
+        {
+            "source_tree_id": scenario.source_asset["asset_id"],
+            "node_id": _split_node_ids(scenario.source_asset)[-1],
+            "operation": "prune_subtree",
+            "reason": "Prepare a Pool-safe frontier selection.",
+        },
+        scenario.ctx,
+    )
+
+    with scenario.repository.transaction() as conn:
+        binding = (
+            revision_tools.load_verified_interactive_tree_revision_on_connection(
+                conn,
+                runtime=SimpleNamespace(
+                    settings=scenario.settings,
+                    task_artifacts=scenario.repository,
+                ),
+                task_id=scenario.task.id,
+                revision_id=result["revision_id"],
+            )
+        )
+
+    assert binding.revision["revision_id"] == result["revision_id"]
+    assert binding.revision["revision_hash"] == result["revision_hash"]
+    assert binding.automatic_source.asset == scenario.source_asset
+    assert binding.builder_binding() == {
+        "artifact_id": binding.artifact_id,
+        "task_id": scenario.task.id,
+        "kind": INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+        "artifact_schema_version": binding.provenance["schema_version"],
+        "content_hash": binding.content_hash,
+        "origin_tool": INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
+        "path": str(binding.path),
+        "provenance": binding.provenance,
+        "canonical_bytes": binding.canonical_bytes,
+    }
+
+
+def test_verified_revision_rejects_registry_primary_key_alias(
+    scenario: _Scenario,
+) -> None:
+    result = _invoke(
+        {
+            "source_tree_id": scenario.source_asset["asset_id"],
+            "node_id": _split_node_ids(scenario.source_asset)[-1],
+            "operation": "prune_subtree",
+            "reason": "Prove the registry identity is canonical.",
+        },
+        scenario.ctx,
+    )
+    record = scenario.repository.get_for_task(
+        scenario.task.id,
+        result["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    alias = "a" * 64
+    with scenario.repository.transaction() as conn:
+        conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+        conn.execute(
+            "UPDATE task_artifacts SET id = ? WHERE id = ?",
+            (alias, record["id"]),
+        )
+        conn.commit()
+
+    with pytest.raises(StrategyError, match="stable identity"):
+        revision_tools.load_verified_interactive_tree_revision(
+            SimpleNamespace(
+                settings=scenario.settings,
+                task_artifacts=scenario.repository,
+            ),
+            task_id=scenario.task.id,
+            revision_id=result["revision_id"],
+        )
+
+
+def test_revise_idempotent_replay_rejects_registry_primary_key_alias(
+    scenario: _Scenario,
+) -> None:
+    inputs = {
+        "source_tree_id": scenario.source_asset["asset_id"],
+        "node_id": _split_node_ids(scenario.source_asset)[-1],
+        "operation": "prune_subtree",
+        "reason": "Prove idempotent replay keeps canonical identity.",
+    }
+    result = _invoke(inputs, scenario.ctx)
+    record = scenario.repository.get_for_task(
+        scenario.task.id,
+        result["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    alias = "b" * 64
+    with scenario.repository.transaction() as conn:
+        conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+        conn.execute(
+            "UPDATE task_artifacts SET id = ? WHERE id = ?",
+            (alias, record["id"]),
+        )
+        conn.commit()
+
+    with pytest.raises(StrategyError, match="stable identity"):
+        _invoke(inputs, scenario.ctx)
+
+
+def test_verified_revision_chain_reads_shared_automatic_source_once(
+    scenario: _Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    split_ids = _split_node_ids(scenario.source_asset)
+    parent = _invoke(
+        {
+            "source_tree_id": scenario.source_asset["asset_id"],
+            "node_id": split_ids[-1],
+            "operation": "prune_subtree",
+            "reason": "First branch.",
+        },
+        scenario.ctx,
+    )
+    child = _invoke(
+        {
+            "source_tree_id": parent["revision_id"],
+            "node_id": split_ids[-2],
+            "operation": "prune_subtree",
+            "reason": "Second branch.",
+        },
+        scenario.ctx,
+    )
+    original = (
+        revision_tools.load_verified_automatic_tree_source_artifact_on_connection
+    )
+    reads = 0
+
+    def count_source_read(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        revision_tools,
+        "load_verified_automatic_tree_source_artifact_on_connection",
+        count_source_read,
+    )
+
+    binding = revision_tools.load_verified_interactive_tree_revision(
+        SimpleNamespace(
+            settings=scenario.settings,
+            task_artifacts=scenario.repository,
+        ),
+        task_id=scenario.task.id,
+        revision_id=child["revision_id"],
+    )
+
+    assert binding.revision["revision_id"] == child["revision_id"]
+    assert len(binding.ancestor_revisions) == 1
+    assert reads == 1
+
+
+def test_revise_deep_ancestry_reads_automatic_source_once_per_phase(
+    scenario: _Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revision production keeps lock-free and locked lineage reads bounded."""
+
+    split_ids = _split_node_ids(scenario.source_asset)
+    parent = _invoke(
+        {
+            "source_tree_id": scenario.source_asset["asset_id"],
+            "node_id": split_ids[-1],
+            "operation": "prune_subtree",
+            "reason": "Create an ancestor for the producer cache check.",
+        },
+        scenario.ctx,
+    )
+    child = _invoke(
+        {
+            "source_tree_id": parent["revision_id"],
+            "node_id": split_ids[-2],
+            "operation": "prune_subtree",
+            "reason": "Create a second ancestor for the producer cache check.",
+        },
+        scenario.ctx,
+    )
+    original = (
+        revision_tools.load_verified_automatic_tree_source_artifact_on_connection
+    )
+    reads = 0
+
+    def count_source_read(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        revision_tools,
+        "load_verified_automatic_tree_source_artifact_on_connection",
+        count_source_read,
+    )
+
+    result = _invoke(
+        {
+            "source_tree_id": child["revision_id"],
+            "node_id": scenario.source_asset["tree_result"]["tree"]["root_node_id"],
+            "operation": "prune_subtree",
+            "reason": "Use the full authenticated ancestry exactly twice.",
+        },
+        scenario.ctx,
+    )
+
+    assert result["parent_revision_id"] == child["revision_id"]
+    assert reads == 2
+
+
+def test_revise_fails_closed_when_ancestry_exceeds_aggregate_byte_budget(
+    scenario: _Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = _invoke(
+        {
+            "source_tree_id": scenario.source_asset["asset_id"],
+            "node_id": _split_node_ids(scenario.source_asset)[-1],
+            "operation": "prune_subtree",
+            "reason": "Prepare an ancestry budget failure.",
+        },
+        scenario.ctx,
+    )
+    before = _revision_records(scenario)
+    monkeypatch.setattr(
+        revision_tools,
+        "MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES",
+        1,
+    )
+
+    with pytest.raises(StrategyError, match="aggregate byte budget"):
+        _invoke(
+            {
+                "source_tree_id": parent["revision_id"],
+                "node_id": scenario.source_asset["tree_result"]["tree"][
+                    "root_node_id"
+                ],
+                "operation": "prune_subtree",
+                "reason": "This must not stage or publish a revision.",
+            },
+            scenario.ctx,
+        )
+
+    assert _revision_records(scenario) == before
+
+
 @pytest.mark.parametrize(
-    "forbidden_field",
+"forbidden_field",
     [
         "source_artifact_id",
         "expected_artifact_content_hash",

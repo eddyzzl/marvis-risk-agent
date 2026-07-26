@@ -75,6 +75,7 @@ from marvis.agent.strategy_request_compiler import (
     StrategyRequestDraft,
     compile_strategy_request,
     utterance_targets_candidate_monthly_stability,
+    utterance_targets_interactive_tree_frontier_materialization,
     utterance_targets_scorecard_band_build,
     utterance_targets_scorecard_cutoff_selection,
     utterance_targets_strategy_dsl_delivery,
@@ -142,6 +143,14 @@ from marvis.packs.strategy.automatic_tree_leaf_fragment import (
 from marvis.packs.strategy.automatic_tree_leaf_tools import (
     load_verified_automatic_tree_leaf_selection_artifact_on_connection,
     load_verified_automatic_tree_source_artifact_on_connection,
+)
+from marvis.packs.strategy.interactive_tree_frontier_selection import (
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.interactive_tree_frontier_tools import (
+    load_verified_interactive_tree_frontier_selection_artifact_on_connection,
 )
 from marvis.packs.strategy.voting_candidate_fragment import (
     VOTING_CANDIDATE_ARTIFACT_KIND,
@@ -1529,6 +1538,7 @@ def dispatch_driver_turn(
     text = str(user_text or "")
     if task.task_type == TASK_TYPE_STRATEGY and (
         utterance_targets_candidate_monthly_stability(text)
+        or utterance_targets_interactive_tree_frontier_materialization(text)
         or utterance_targets_scorecard_band_build(text)
         or utterance_targets_scorecard_cutoff_selection(text)
         or utterance_targets_strategy_sample_design(text)
@@ -1858,6 +1868,7 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "voting_candidate_search",
         "voting_candidate_build_from_search",
         "interactive_tree_revision",
+        "interactive_tree_frontier_materialization",
     }
 )
 
@@ -2698,6 +2709,19 @@ def _run_validated_strategy_request(
             repo,
             task,
             template_id="strategy_interactive_tree_revision",
+            slots=dict(draft.to_dict()["workflow_inputs"]),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "interactive_tree_frontier_materialization"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_interactive_tree_frontier_materialization",
             slots=dict(draft.to_dict()["workflow_inputs"]),
             auto_start=auto_start,
         )
@@ -3924,6 +3948,10 @@ def _standard_workflow_request_preflight(
         # The Tool resolves and authenticates the exact task-local tree or
         # revision under the same writer lock used for replay and persistence.
         # A separate preflight lookup would create a second binding window.
+        return None
+    if draft.workflow == "interactive_tree_frontier_materialization":
+        # The Tool resolves the revision and recursively authenticates its
+        # ancestry under the same writer lock used to register the pointer.
         return None
     if draft.workflow == "cross_matrix_cell_selection":
         try:
@@ -8587,6 +8615,15 @@ def _candidate_selection_artifact_slots(
             selection_id=selection_id,
         )
     if re.fullmatch(
+        r"interactive-tree-frontier-selection-[0-9a-f]{32}",
+        selection_id,
+    ) is not None:
+        return _interactive_tree_frontier_selection_artifact_slots(
+            runtime,
+            task_id=task_id,
+            selection_id=selection_id,
+        )
+    if re.fullmatch(
         r"cross-matrix-cell-selection-[0-9a-f]{32}", selection_id
     ) is not None:
         return _cross_matrix_cell_selection_artifact_slots(
@@ -8603,8 +8640,154 @@ def _candidate_selection_artifact_slots(
             selection_id=selection_id,
         )
     raise StrategySetupError(
-        "selection ID 格式无效；只支持完整 automatic-tree leaf selection 或 "
-        "Cross Matrix cell selection、Scorecard cutoff selection ID。"
+        "selection ID 格式无效；只支持完整 automatic-tree leaf selection、"
+        "interactive-tree frontier selection、Cross Matrix cell selection "
+        "或 Scorecard cutoff selection ID。"
+    )
+
+
+def _interactive_tree_frontier_selection_artifact_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    selection_id: str,
+) -> tuple[dict[str, str], str]:
+    """Resolve one task-local frontier pointer to authenticated Pool slots."""
+
+    if re.fullmatch(
+        r"interactive-tree-frontier-selection-[0-9a-f]{32}",
+        selection_id,
+    ) is None:
+        raise StrategySetupError(
+            "interactive-tree frontier selection ID 格式无效；"
+            "请复制完整 selection ID。"
+        )
+    repository = TaskArtifactRepository(runtime.settings.db_path)
+    try:
+        with repository.transaction() as conn:
+            conn.execute("BEGIN")
+            rows = conn.execute(
+                """
+                SELECT id, content_hash, provenance_json
+                  FROM task_artifacts
+                 WHERE task_id = ? AND kind = ? AND origin_tool = ?
+                """,
+                (
+                    task_id,
+                    INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
+                    INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL,
+                ),
+            ).fetchall()
+            matches: list[tuple[object, Mapping]] = []
+            for row in rows:
+                provenance_json = row["provenance_json"]
+                if not isinstance(provenance_json, str):
+                    raise StrategySetupError(
+                        "当前任务的 interactive-tree frontier selection "
+                        "artifact provenance 无效。"
+                    )
+                try:
+                    provenance = json.loads(provenance_json)
+                except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                    raise StrategySetupError(
+                        "当前任务的 interactive-tree frontier selection "
+                        "artifact provenance 无效。"
+                    ) from exc
+                if not isinstance(provenance, Mapping):
+                    raise StrategySetupError(
+                        "当前任务的 interactive-tree frontier selection "
+                        "artifact provenance 无效。"
+                    )
+                if provenance.get("selection_id") == selection_id:
+                    matches.append((row, provenance))
+            if not matches:
+                raise StrategySetupError(
+                    "当前任务没有 interactive-tree frontier selection "
+                    f"{selection_id}。"
+                )
+            if len(matches) != 1:
+                raise StrategySetupError(
+                    f"interactive-tree frontier selection {selection_id} "
+                    "对应多个 frontier selection artifact，当前不能安全绑定来源。"
+                )
+            row, provenance = matches[0]
+            if (
+                provenance.get("schema_version")
+                != INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION
+            ):
+                raise StrategySetupError(
+                    "interactive-tree frontier selection artifact schema 无效。"
+                )
+            semantic_tree_id = provenance.get("semantic_tree_id")
+            tree_hash = provenance.get("tree_hash")
+            artifact_id = row["id"]
+            content_hash = row["content_hash"]
+            if (
+                not isinstance(artifact_id, str)
+                or not artifact_id
+                or not isinstance(content_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", content_hash) is None
+                or not isinstance(semantic_tree_id, str)
+                or not semantic_tree_id
+                or not isinstance(tree_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", tree_hash) is None
+            ):
+                raise StrategySetupError(
+                    "interactive-tree frontier selection artifact "
+                    "完整性绑定不完整。"
+                )
+            verified = (
+                load_verified_interactive_tree_frontier_selection_artifact_on_connection(
+                    conn,
+                    runtime=SimpleNamespace(
+                        settings=runtime.settings,
+                        task_artifacts=repository,
+                    ),
+                    task_id=task_id,
+                    artifact_id=artifact_id,
+                    expected_content_hash=content_hash,
+                    expected_asset_id=semantic_tree_id,
+                    expected_asset_hash=tree_hash,
+                )
+            )
+    except StrategySetupError:
+        raise
+    except Exception as exc:
+        raise StrategySetupError(
+            f"interactive-tree frontier selection {selection_id} 未通过 "
+            "selection、revision 父链与 artifact 完整性校验，不能加入 "
+            "Strategy Pool。"
+        ) from exc
+
+    selection = verified.selection
+    revision = selection.get("revision")
+    frontier = selection.get("frontier")
+    if not isinstance(revision, Mapping) or not isinstance(frontier, Mapping):
+        raise StrategySetupError(
+            "interactive-tree frontier selection 缺少完整 revision/fragment 绑定。"
+        )
+    asset_id = revision.get("semantic_tree_id")
+    asset_hash = revision.get("tree_hash")
+    fragment_id = frontier.get("fragment_id")
+    if (
+        selection.get("selection_id") != selection_id
+        or asset_id != semantic_tree_id
+        or asset_hash != tree_hash
+        or not isinstance(fragment_id, str)
+        or not fragment_id
+    ):
+        raise StrategySetupError(
+            "interactive-tree frontier selection 的 revision/fragment "
+            "绑定与认证 artifact 不一致。"
+        )
+    return (
+        {
+            "source_artifact_id": verified.artifact_id,
+            "expected_artifact_content_hash": verified.content_hash,
+            "expected_asset_id": asset_id,
+            "expected_asset_hash": asset_hash,
+        },
+        fragment_id,
     )
 
 
@@ -9631,6 +9814,7 @@ def _strategy_request_requires_dataset(
             "scorecard_cutoff_selection",
             "automatic_tree_leaf_materialization",
             "interactive_tree_revision",
+            "interactive_tree_frontier_materialization",
             "cross_matrix_cell_selection",
             "voting_candidate_search",
             "voting_candidate_build_from_search",

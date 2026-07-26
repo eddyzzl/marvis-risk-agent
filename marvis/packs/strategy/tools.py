@@ -63,6 +63,9 @@ from marvis.packs.strategy.automatic_tree_leaf_tools import (
 from marvis.packs.strategy.interactive_tree_tools import (
     run_revise_interactive_tree,
 )
+from marvis.packs.strategy.interactive_tree_frontier_tools import (
+    run_materialize_interactive_tree_frontier_selection,
+)
 from marvis.packs.strategy.voting_candidate_tools import (
     run_build_voting_candidate,
 )
@@ -859,6 +862,19 @@ def tool_revise_interactive_tree(inputs: dict, ctx) -> dict:
     """Publish one governed immutable prune revision over an automatic tree."""
 
     return run_revise_interactive_tree(inputs, ctx, _runtime(ctx))
+
+
+def tool_materialize_interactive_tree_frontier_selection(
+    inputs: dict,
+    ctx,
+) -> dict:
+    """Persist one explicit pointer to an authenticated revision frontier."""
+
+    return run_materialize_interactive_tree_frontier_selection(
+        inputs,
+        ctx,
+        _runtime(ctx),
+    )
 
 
 def tool_build_voting_candidate(inputs: dict, ctx) -> dict:

@@ -1476,6 +1476,67 @@ def _render_materialize_automatic_tree_leaf_fragment(o: dict):
     ]
 
 
+def _render_materialize_interactive_tree_frontier_selection(o: dict):
+    """Render one pointer-only frontier selection without implying admission."""
+
+    artifacts = [
+        item for item in (o.get("artifacts") or []) if isinstance(item, dict)
+    ]
+    artifact = next(
+        (
+            item
+            for item in artifacts
+            if item.get("kind")
+            == "strategy_interactive_tree_frontier_selection_json"
+            and item.get("format") == "json"
+            and item.get("download_url")
+        ),
+        None,
+    )
+    text = (
+        "**交互式决策树精确前沿节点引用已物化。**"
+        "该 `pointer-only` 产物绑定精确修订版本与其中一个前沿节点，"
+        "没有复制条件、指标或动作；"
+        "未入池、未配置动作、未采纳、未部署。"
+    )
+    if artifact is not None:
+        label = str(
+            artifact.get("filename")
+            or artifact.get("kind")
+            or "interactive-tree-frontier-selection.json"
+        )
+        text += f"\n\n**前沿节点引用 JSON**：[{label}]({artifact['download_url']})"
+
+    reason = o.get("selection_reason")
+    artifact_id = str(artifact.get("artifact_id") or "") if artifact else ""
+    artifact_content_hash = (
+        str(artifact.get("content_hash") or "") if artifact else ""
+    )
+    rows = [
+        ["Selection ID", str(o.get("selection_id") or "")],
+        ["Selection Hash", str(o.get("selection_hash") or "")],
+        ["Revision ID", str(o.get("revision_id") or "")],
+        ["Semantic Tree ID", str(o.get("semantic_tree_id") or "")],
+        ["Tree Hash", str(o.get("tree_hash") or "")],
+        ["Source Node ID", str(o.get("source_node_id") or "")],
+        ["Leaf ID", str(o.get("leaf_id") or "")],
+        ["Fragment ID", str(o.get("fragment_id") or "")],
+        ["Fragment Hash", str(o.get("fragment_hash") or "")],
+        ["Rule ID", str(o.get("rule_id") or "")],
+        ["Effect ID", str(o.get("effect_id") or "")],
+        ["Artifact ID", artifact_id],
+        ["Artifact Content Hash", artifact_content_hash],
+        ["Selection Reason", str(reason) if reason is not None else "未提供"],
+    ]
+    return text, [
+        {
+            "title": "交互式决策树前沿节点引用",
+            "columns": ["字段", "值"],
+            "rows": rows,
+        }
+    ]
+
+
 def _automatic_tree_apply_integrity_failure() -> tuple[str, list[dict]]:
     return (
         "**自动树全量写回结果完整性校验失败**：计划缓存中的 source tree、"
@@ -7306,6 +7367,9 @@ _RENDERERS = {
     "apply_automatic_tree": _render_apply_automatic_tree,
     "materialize_automatic_tree_leaf_fragment": (
         _render_materialize_automatic_tree_leaf_fragment
+    ),
+    "materialize_interactive_tree_frontier_selection": (
+        _render_materialize_interactive_tree_frontier_selection
     ),
     "search_voting_candidates": _render_search_voting_candidates,
     "build_voting_candidate_from_search": (

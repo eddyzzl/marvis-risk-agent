@@ -70,7 +70,7 @@ class FakeSelect {
     if (selector === "[data-candidate-lab-field]") return this;
     if (
       selector
-      === '[data-candidate-lab-workflow="interactive_tree_revision"]'
+      === `[data-candidate-lab-workflow="${this.form?.dataset?.candidateLabWorkflow}"]`
     ) {
       return this.form;
     }
@@ -86,7 +86,7 @@ const rootA = `node-${"1".repeat(20)}`;
 const otherA = `node-${"2".repeat(20)}`;
 const leafA = `node-${"3".repeat(20)}`;
 const rootB = `node-${"4".repeat(20)}`;
-const leafB = `node-${"5".repeat(20)}`;
+const leafB = `leaf-${"5".repeat(20)}`;
 const orphanNode = `node-${"e".repeat(20)}`;
 const foreignNode = `node-${"f".repeat(20)}`;
 const unsafeNodeId = 'node-"><img src=x onerror=alert(1)>';
@@ -319,6 +319,21 @@ function pruneButton(sourceTreeId, nodeId) {
   };
 }
 
+function frontierButton(revisionId, sourceNodeId) {
+  return {
+    disabled: false,
+    dataset: { revisionId, sourceNodeId },
+    closest(selector) {
+      return (
+        selector
+        === "[data-candidate-lab-interactive-tree-frontier-materialize]"
+      )
+        ? this
+        : null;
+    },
+  };
+}
+
 function forgedOption(value, dataset) {
   return { value, selected: true, dataset };
 }
@@ -332,6 +347,12 @@ function makeHarness(options = {}) {
   let selectedTask = { id: "strategy-a", task_type: "strategy" };
   const sourceSelect = new FakeSelect("interactive_tree_source_id");
   const nodeSelect = new FakeSelect("interactive_tree_node_id");
+  const frontierRevisionSelect = new FakeSelect(
+    "interactive_tree_frontier_revision_id",
+  );
+  const frontierNodeSelect = new FakeSelect(
+    "interactive_tree_frontier_source_node_id",
+  );
   const reasonField = {
     value: "",
     disabled: false,
@@ -345,9 +366,25 @@ function makeHarness(options = {}) {
       return null;
     },
   };
+  const frontierReasonField = {
+    value: "",
+    disabled: false,
+    closest() {
+      return null;
+    },
+  };
+  const frontierSubmitButton = {
+    disabled: false,
+    closest() {
+      return null;
+    },
+  };
   const errorTarget = { textContent: "" };
   const help = { textContent: "" };
   const launcher = { open: false };
+  const frontierErrorTarget = { textContent: "" };
+  const frontierHelp = { textContent: "" };
+  const frontierLauncher = { open: false };
   const fields = new Map([
     ["interactive_tree_source_id", sourceSelect],
     ["interactive_tree_node_id", nodeSelect],
@@ -376,6 +413,44 @@ function makeHarness(options = {}) {
   };
   sourceSelect.form = form;
   nodeSelect.form = form;
+  const frontierFields = new Map([
+    ["interactive_tree_frontier_revision_id", frontierRevisionSelect],
+    ["interactive_tree_frontier_source_node_id", frontierNodeSelect],
+    ["interactive_tree_frontier_selection_reason", frontierReasonField],
+  ]);
+  const frontierForm = {
+    dataset: {
+      candidateLabWorkflow: "interactive_tree_frontier_materialization",
+    },
+    querySelector(selector) {
+      if (selector === "[data-candidate-lab-form-error]") {
+        return frontierErrorTarget;
+      }
+      if (
+        selector === "[data-candidate-lab-interactive-tree-frontier-help]"
+      ) {
+        return frontierHelp;
+      }
+      const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+      return match ? frontierFields.get(match[1]) || null : null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    reset() {
+      frontierRevisionSelect.value = "";
+      frontierNodeSelect.value = "";
+      frontierReasonField.value = "";
+      frontierErrorTarget.textContent = "";
+    },
+    closest(selector) {
+      return selector === ".candidate-lab-launcher"
+        ? frontierLauncher
+        : null;
+    },
+  };
+  frontierRevisionSelect.form = frontierForm;
+  frontierNodeSelect.form = frontierForm;
 
   const actionButtons = [];
   const panel = {
@@ -389,16 +464,28 @@ function makeHarness(options = {}) {
       ) {
         return form;
       }
+      if (
+        selector
+        === '[data-candidate-lab-workflow="interactive_tree_frontier_materialization"]'
+      ) {
+        return frontierForm;
+      }
       return null;
     },
     querySelectorAll(selector) {
-      if (selector === "[data-candidate-lab-form]") return [form];
+      if (selector === "[data-candidate-lab-form]") {
+        return [form, frontierForm];
+      }
       if (selector === "[data-candidate-lab-retry]") return [];
       return [
         sourceSelect,
         nodeSelect,
         reasonField,
         submitButton,
+        frontierRevisionSelect,
+        frontierNodeSelect,
+        frontierReasonField,
+        frontierSubmitButton,
         ...actionButtons,
       ];
     },
@@ -449,6 +536,14 @@ function makeHarness(options = {}) {
     errorTarget,
     fetchCalls,
     form,
+    frontierErrorTarget,
+    frontierForm,
+    frontierHelp,
+    frontierLauncher,
+    frontierNodeSelect,
+    frontierReasonField,
+    frontierRevisionSelect,
+    frontierSubmitButton,
     help,
     launcher,
     nodeSelect,
@@ -511,10 +606,15 @@ def test_interactive_tree_renders_full_topology_history_and_only_exact_prunes():
         );
         for (const marker of [
           'data-candidate-lab-workflow="interactive_tree_revision"',
+          'data-candidate-lab-workflow="interactive_tree_frontier_materialization"',
           "data-candidate-lab-interactive-tree-operation",
+          "data-candidate-lab-interactive-tree-frontier-operation",
           'data-candidate-lab-field="interactive_tree_source_id"',
           'data-candidate-lab-field="interactive_tree_node_id"',
           'data-candidate-lab-field="interactive_tree_reason"',
+          'data-candidate-lab-field="interactive_tree_frontier_revision_id"',
+          'data-candidate-lab-field="interactive_tree_frontier_source_node_id"',
+          'data-candidate-lab-field="interactive_tree_frontier_selection_reason"',
         ]) {
           assert.ok(indexHtml.includes(marker), marker);
         }
@@ -545,6 +645,15 @@ def test_interactive_tree_renders_full_topology_history_and_only_exact_prunes():
             || []).length === 2,
           "only the two eligible nodes present in topology get buttons",
         );
+        assert.equal(
+          (
+            html.match(
+              /data-candidate-lab-interactive-tree-frontier-materialize="1"/g,
+            ) || []
+          ).length,
+          1,
+          "only the exact frontier of an immutable revision is materializable",
+        );
         assert.ok(
           html.includes(`data-source-tree-id="${sourceA}"`)
           && html.includes(`data-node-id="${rootA}"`),
@@ -556,6 +665,10 @@ def test_interactive_tree_renders_full_topology_history_and_only_exact_prunes():
         assert.equal(html.includes(`data-node-id="${otherA}"`), false);
         assert.equal(html.includes(`data-node-id="${leafA}"`), false);
         assert.equal(html.includes(`data-node-id="${orphanNode}"`), false);
+        assert.ok(
+          html.includes(`data-revision-id="${sourceB}"`)
+          && html.includes(`data-source-node-id="${leafB}"`),
+        );
 
         assert.ok(
           html.includes("income&lt;script&gt;alert(&quot;condition&quot;)&lt;/script&gt;"),
@@ -629,6 +742,83 @@ def test_tree_row_click_only_selects_then_submit_emits_exact_typed_envelope():
             },
           },
         );
+        """
+    )
+
+
+def test_frontier_click_only_selects_then_submit_emits_exact_typed_envelope():
+    run_node(
+        r"""
+        const harness = makeHarness();
+        const button = harness.registerButton(frontierButton(sourceB, leafB));
+        await harness.selectTask({ id: "strategy-a", task_type: "strategy" });
+        harness.frontierRevisionSelect.value = "";
+        harness.frontierNodeSelect.value = "";
+
+        assert.equal(
+          harness.controller.handleClick({
+            target: button,
+            preventDefault() {},
+          }),
+          true,
+        );
+        assert.equal(harness.submitCalls.length, 0);
+        assert.equal(harness.frontierLauncher.open, true);
+        assert.equal(harness.frontierRevisionSelect.value, sourceB);
+        assert.equal(harness.frontierNodeSelect.value, leafB);
+
+        harness.frontierReasonField.value = "  Policy owner selected it.  ";
+        await harness.controller.submit(harness.frontierForm);
+        assert.equal(harness.submitCalls.length, 1);
+        assert.deepEqual(harness.submitCalls[0], [
+          "strategy-a",
+          {
+            request_kind: "standard_workflow",
+            workflow: "interactive_tree_frontier_materialization",
+            workflow_inputs: {
+              revision_id: sourceB,
+              source_node_id: leafB,
+              selection_reason: "Policy owner selected it.",
+            },
+          },
+          "物化交互树前沿节点",
+        ]);
+
+        harness.frontierReasonField.value = "   ";
+        assert.deepEqual(
+          collectStrategyCandidateLabRequest(harness.frontierForm),
+          {
+            request_kind: "standard_workflow",
+            workflow: "interactive_tree_frontier_materialization",
+            workflow_inputs: {
+              revision_id: sourceB,
+              source_node_id: leafB,
+            },
+          },
+        );
+
+        const forged = makeHarness();
+        await forged.selectTask({ id: "strategy-a", task_type: "strategy" });
+        installSelectedOption(
+          forged.frontierRevisionSelect,
+          sourceB,
+          { candidateLabProjection: "1", revisionId: sourceB },
+        );
+        installSelectedOption(
+          forged.frontierNodeSelect,
+          orphanNode,
+          {
+            candidateLabProjection: "1",
+            revisionId: sourceB,
+            sourceNodeId: orphanNode,
+          },
+        );
+        assert.equal(
+          await forged.controller.submit(forged.frontierForm),
+          null,
+        );
+        assert.equal(forged.submitCalls.length, 0);
+        assert.ok(forged.frontierErrorTarget.textContent.includes("受认证"));
         """
     )
 
@@ -737,6 +927,9 @@ def test_tree_actions_disable_while_blocked_or_submitting_and_switch_clears_pend
           ]]);
           const harness = makeHarness({ payloads });
           const button = harness.registerButton(pruneButton(sourceA, rootA));
+          const frontier = harness.registerButton(
+            frontierButton(sourceB, leafB),
+          );
           await harness.selectTask({
             id: "strategy-a",
             task_type: "strategy",
@@ -746,6 +939,27 @@ def test_tree_actions_disable_while_blocked_or_submitting_and_switch_clears_pend
           assert.equal(harness.nodeSelect.disabled, true, blockedReason);
           assert.equal(harness.reasonField.disabled, true, blockedReason);
           assert.equal(harness.submitButton.disabled, true, blockedReason);
+          assert.equal(frontier.disabled, true, blockedReason);
+          assert.equal(
+            harness.frontierRevisionSelect.disabled,
+            true,
+            blockedReason,
+          );
+          assert.equal(
+            harness.frontierNodeSelect.disabled,
+            true,
+            blockedReason,
+          );
+          assert.equal(
+            harness.frontierReasonField.disabled,
+            true,
+            blockedReason,
+          );
+          assert.equal(
+            harness.frontierSubmitButton.disabled,
+            true,
+            blockedReason,
+          );
 
           harness.sourceSelect.value = "";
           harness.nodeSelect.value = "";
@@ -755,6 +969,15 @@ def test_tree_actions_disable_while_blocked_or_submitting_and_switch_clears_pend
           });
           assert.equal(harness.sourceSelect.value, "");
           assert.equal(harness.nodeSelect.value, "");
+          assert.equal(harness.submitCalls.length, 0);
+          harness.frontierRevisionSelect.value = "";
+          harness.frontierNodeSelect.value = "";
+          harness.controller.handleClick({
+            target: frontier,
+            preventDefault() {},
+          });
+          assert.equal(harness.frontierRevisionSelect.value, "");
+          assert.equal(harness.frontierNodeSelect.value, "");
           assert.equal(harness.submitCalls.length, 0);
         }
 
@@ -766,6 +989,9 @@ def test_tree_actions_disable_while_blocked_or_submitting_and_switch_clears_pend
           submitStrategyCandidateLabRequest: () => pendingSubmission,
         });
         const button = harness.registerButton(pruneButton(sourceA, rootA));
+        const frontier = harness.registerButton(
+          frontierButton(sourceB, leafB),
+        );
         await harness.selectTask({
           id: "strategy-a",
           task_type: "strategy",
@@ -785,6 +1011,11 @@ def test_tree_actions_disable_while_blocked_or_submitting_and_switch_clears_pend
           harness.nodeSelect,
           harness.reasonField,
           harness.submitButton,
+          frontier,
+          harness.frontierRevisionSelect,
+          harness.frontierNodeSelect,
+          harness.frontierReasonField,
+          harness.frontierSubmitButton,
         ]) {
           assert.equal(control.disabled, true);
         }
@@ -798,6 +1029,9 @@ def test_tree_actions_disable_while_blocked_or_submitting_and_switch_clears_pend
         assert.equal(harness.sourceSelect.value, "");
         assert.equal(harness.nodeSelect.value, "");
         assert.equal(harness.reasonField.value, "");
+        assert.equal(harness.frontierRevisionSelect.value, "");
+        assert.equal(harness.frontierNodeSelect.value, "");
+        assert.equal(harness.frontierReasonField.value, "");
 
         resolveSubmission({ status: "accepted", messages: [] });
         await submitPromise;

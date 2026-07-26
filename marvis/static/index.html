@@ -1413,6 +1413,47 @@
 
                     <details class="candidate-lab-launcher">
                       <summary>
+                        <span><strong>物化交互树前沿节点</strong><small>把一个明确 frontier 节点固化为后续入池指针</small></span>
+                      </summary>
+                      <form
+                        data-candidate-lab-form
+                        data-candidate-lab-workflow="interactive_tree_frontier_materialization"
+                        data-candidate-lab-interactive-tree-frontier-operation
+                      >
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>不可变 Revision <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="interactive_tree_frontier_revision_id">
+                            <option value="">请选择不可变 revision</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Frontier 节点 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="interactive_tree_frontier_source_node_id">
+                            <option value="">请选择当前 revision 的 frontier 节点</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>选择理由</span>
+                          <textarea
+                            rows="2"
+                            maxlength="500"
+                            data-candidate-lab-field="interactive_tree_frontier_selection_reason"
+                            placeholder="可选；只影响审计选择身份，不改变树或节点语义"
+                          ></textarea>
+                        </label>
+                        <p
+                          class="candidate-lab-field-help"
+                          data-candidate-lab-interactive-tree-frontier-help
+                        >
+                          当前任务尚无不可变交互树 revision，请先完成一次明确剪枝。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">确认物化前沿节点</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
                         <span><strong>单变量细化</strong><small>重新分析，或细化已核验 Candidate</small></span>
                       </summary>
                       <form data-candidate-lab-form data-candidate-lab-workflow="univariate_candidate_refinement">

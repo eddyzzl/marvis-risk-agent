@@ -453,6 +453,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "apply_automatic_tree",
         "materialize_automatic_tree_leaf_fragment",
         "revise_interactive_tree",
+        "materialize_interactive_tree_frontier_selection",
         "build_voting_candidate",
         "search_voting_candidates",
         "build_voting_candidate_from_search",

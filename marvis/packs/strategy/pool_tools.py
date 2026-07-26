@@ -92,6 +92,23 @@ from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
     load_verified_cross_matrix_source_artifact,
     load_verified_cross_matrix_source_artifact_on_connection,
 )
+from marvis.packs.strategy.interactive_tree_frontier_selection import (
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL,
+    interactive_tree_frontier_selection_to_verified_candidate_fragment,
+)
+from marvis.packs.strategy.interactive_tree_frontier_tools import (
+    VerifiedInteractiveTreeFrontierSelection,
+    load_verified_interactive_tree_frontier_selection_artifact,
+    load_verified_interactive_tree_frontier_selection_artifact_on_connection,
+)
+from marvis.packs.strategy.interactive_tree_tools import (
+    INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+    INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION,
+    INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
+    VerifiedInteractiveTreeRevision,
+)
 from marvis.packs.strategy.scorecard_candidate import (
     SCORECARD_BAND_ASSET_ARTIFACT_KIND,
     SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
@@ -290,6 +307,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_VOTING_ANCESTRY_DEPTH = 16
 _MAX_VOTING_ANCESTRY_NODES = 256
 _MAX_POOL_ARTIFACT_BYTES = 64 * 1024 * 1024
+_MAX_INTERACTIVE_TREE_LINEAGE_BYTES = 64 * 1024 * 1024
 _BOUNDARY_ERRORS = (
     StrategyCandidatePoolConflictError,
     StrategyCandidatePoolDataError,
@@ -324,9 +342,27 @@ class _AutomaticTreeDatasetBinding:
 
 
 @dataclass(frozen=True)
+class _InteractiveTreeVerificationSettings:
+    tasks_dir: Path
+
+
+@dataclass(frozen=True)
+class _InteractiveTreeVerificationRuntime:
+    settings: _InteractiveTreeVerificationSettings
+
+
+@dataclass(frozen=True)
 class _AutomaticTreeCandidateLineage:
     selection: VerifiedAutomaticTreeLeafSelection
     tree: VerifiedAutomaticTreeSource
+    dataset: _AutomaticTreeDatasetBinding
+    verified_fragment: dict[str, Any]
+    source_binding: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _InteractiveTreeCandidateLineage:
+    selection: VerifiedInteractiveTreeFrontierSelection
     dataset: _AutomaticTreeDatasetBinding
     verified_fragment: dict[str, Any]
     source_binding: dict[str, Any]
@@ -377,6 +413,7 @@ class _VotingCandidateLineage:
 _CandidateLineage = (
     _UnivariateCandidateLineage
     | _AutomaticTreeCandidateLineage
+    | _InteractiveTreeCandidateLineage
     | _CrossMatrixCandidateLineage
     | _ScorecardCandidateLineage
     | _VotingCandidateLineage
@@ -1201,6 +1238,12 @@ class _LineageCache:
     voting: dict[tuple[str, str], _VotingCandidateLineage]
     voting_in_progress: set[tuple[str, str]]
     voting_verified: set[tuple[str, str]]
+    interactive_tree_bytes_used: int
+    interactive_revisions: dict[str, VerifiedInteractiveTreeRevision]
+    interactive_sources_by_asset: dict[
+        tuple[str, str],
+        VerifiedAutomaticTreeSource,
+    ]
 
     @classmethod
     def empty(cls) -> _LineageCache:
@@ -1213,7 +1256,23 @@ class _LineageCache:
             voting={},
             voting_in_progress=set(),
             voting_verified=set(),
+            interactive_tree_bytes_used=0,
+            interactive_revisions={},
+            interactive_sources_by_asset={},
         )
+
+    def reserve_interactive_tree_bytes(self, byte_count: int) -> None:
+        if (
+            isinstance(byte_count, bool)
+            or not isinstance(byte_count, int)
+            or byte_count < 0
+            or self.interactive_tree_bytes_used + byte_count
+            > _MAX_INTERACTIVE_TREE_LINEAGE_BYTES
+        ):
+            raise StrategyError(
+                "interactive-tree Pool lineage byte budget exceeded"
+            )
+        self.interactive_tree_bytes_used += byte_count
 
 
 def _require_snapshot_voting_marginals(
@@ -2090,8 +2149,16 @@ def _pool_lineage_development_facts(
             evidence_identity=verified_identity,
             target_col=target_col,
         ))
-    if isinstance(lineage, _AutomaticTreeCandidateLineage):
-        asset = lineage.tree.asset
+    if isinstance(
+        lineage,
+        (_AutomaticTreeCandidateLineage, _InteractiveTreeCandidateLineage),
+    ):
+        tree = (
+            lineage.tree
+            if isinstance(lineage, _AutomaticTreeCandidateLineage)
+            else lineage.selection.revision.automatic_source
+        )
+        asset = tree.asset
         training = asset["tree_result"]["training"]
         asset_identity = asset["identity"]
         verified_identity = _verified_lineage_evidence_identity(lineage)
@@ -2103,7 +2170,7 @@ def _pool_lineage_development_facts(
             asset["source_refs"]
         )
         if StrategySampleDesignRef.from_value(
-            lineage.tree.provenance.get("sample_design_ref")
+            tree.provenance.get("sample_design_ref")
         ).to_ref_dict() != sample_ref:
             raise StrategyError(
                 "automatic-tree sample-design asset and provenance disagree"
@@ -2840,6 +2907,16 @@ def _load_candidate_lineage(
         AUTOMATIC_TREE_LEAF_FRAGMENT_ORIGIN_TOOL,
         AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_SCHEMA_VERSION,
     )
+    interactive_frontier_triple = (
+        INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
+        INTERACTIVE_TREE_FRONTIER_SELECTION_ORIGIN_TOOL,
+        INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    )
+    interactive_revision_triple = (
+        INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+        INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
+        INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION,
+    )
     voting_triple = (
         VOTING_CANDIDATE_ARTIFACT_KIND,
         VOTING_CANDIDATE_ORIGIN_TOOL,
@@ -2894,6 +2971,21 @@ def _load_candidate_lineage(
             expected_asset_id=expected_asset_id,
             expected_asset_hash=expected_asset_hash,
             cache=cache if cache is not None else _LineageCache.empty(),
+        )
+    if triple == interactive_frontier_triple:
+        return _load_interactive_tree_candidate_lineage(
+            runtime,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            expected_content_hash=expected_content_hash,
+            expected_asset_id=expected_asset_id,
+            expected_asset_hash=expected_asset_hash,
+            cache=cache if cache is not None else _LineageCache.empty(),
+        )
+    if triple == interactive_revision_triple:
+        raise StrategyError(
+            "complete interactive-tree revision artifacts cannot be admitted "
+            "directly; materialize one frontier selection first"
         )
     if triple == cross_matrix_selection_triple:
         return _load_cross_matrix_candidate_lineage(
@@ -3240,6 +3332,74 @@ def _replay_automatic_tree_lineage(
         tree.asset,
         selection_artifact_binding=selection.replay_binding(),
         tree_artifact_binding=tree.builder_binding(),
+    )
+    source_binding, _rule_id, _execution = verified_fragment_pool_parts(
+        verified_fragment
+    )
+    return verified_fragment, source_binding
+
+
+def _load_interactive_tree_candidate_lineage(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+    expected_asset_id: str,
+    expected_asset_hash: str,
+    cache: _LineageCache,
+) -> _InteractiveTreeCandidateLineage:
+    selection = load_verified_interactive_tree_frontier_selection_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_content_hash=expected_content_hash,
+        expected_asset_id=expected_asset_id,
+        expected_asset_hash=expected_asset_hash,
+        reserve_bytes=cache.reserve_interactive_tree_bytes,
+        revision_cache=cache.interactive_revisions,
+        automatic_source_cache=cache.interactive_sources_by_asset,
+    )
+    revision = selection.revision
+    tree = revision.automatic_source
+    tree_key = (tree.artifact_id, tree.content_hash)
+    cached_tree = cache.trees.get(tree_key)
+    if cached_tree is None:
+        cache.trees[tree_key] = tree
+    elif cached_tree != tree:
+        raise StrategyError("cached interactive-tree base binding changed")
+    dataset = _load_automatic_tree_dataset(
+        runtime,
+        task_id=task_id,
+        tree=tree,
+        cache=cache,
+    )
+    verified_fragment, source_binding = _replay_interactive_tree_lineage(
+        selection
+    )
+    return _InteractiveTreeCandidateLineage(
+        selection=selection,
+        dataset=dataset,
+        verified_fragment=verified_fragment,
+        source_binding=source_binding,
+    )
+
+
+def _replay_interactive_tree_lineage(
+    selection: VerifiedInteractiveTreeFrontierSelection,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    revision = selection.revision
+    ancestry = revision.ancestor_revisions
+    verified_fragment = (
+        interactive_tree_frontier_selection_to_verified_candidate_fragment(
+            selection.selection,
+            revision.revision,
+            revision.automatic_source.asset,
+            selection_artifact_binding=selection.artifact_binding(),
+            revision_artifact_binding=revision.builder_binding(),
+            parent_revision=ancestry[0] if ancestry else None,
+            ancestor_revisions=ancestry[1:],
+        )
     )
     source_binding, _rule_id, _execution = verified_fragment_pool_parts(
         verified_fragment
@@ -3784,6 +3944,14 @@ def _require_lineage_on_connection(
             cache=cache if cache is not None else _LineageCache.empty(),
         )
         return
+    if isinstance(lineage, _InteractiveTreeCandidateLineage):
+        _require_interactive_tree_lineage_on_connection(
+            conn,
+            lineage,
+            tasks_root=tasks_root,
+            cache=cache if cache is not None else _LineageCache.empty(),
+        )
+        return
     if isinstance(lineage, _CrossMatrixCandidateLineage):
         _require_cross_matrix_lineage_on_connection(
             conn,
@@ -3961,6 +4129,69 @@ def _require_automatic_tree_lineage_on_connection(
     ):
         raise StrategyError(
             "automatic-tree candidate lineage changed before pool persistence"
+        )
+
+
+def _require_interactive_tree_lineage_on_connection(
+    conn,
+    lineage: _InteractiveTreeCandidateLineage,
+    *,
+    tasks_root: Path,
+    cache: _LineageCache,
+) -> None:
+    revision = lineage.selection.revision.revision
+    selection = (
+        load_verified_interactive_tree_frontier_selection_artifact_on_connection(
+            conn,
+            runtime=_InteractiveTreeVerificationRuntime(
+                settings=_InteractiveTreeVerificationSettings(
+                    tasks_dir=tasks_root,
+                )
+            ),
+            task_id=lineage.selection.task_id,
+            artifact_id=lineage.selection.artifact_id,
+            expected_content_hash=lineage.selection.content_hash,
+            expected_asset_id=revision["semantic_tree_id"],
+            expected_asset_hash=revision["tree"]["tree_hash"],
+            reserve_bytes=cache.reserve_interactive_tree_bytes,
+            revision_cache=cache.interactive_revisions,
+            automatic_source_cache=cache.interactive_sources_by_asset,
+        )
+    )
+    tree = selection.revision.automatic_source
+    tree_key = (tree.artifact_id, tree.content_hash)
+    cached_tree = cache.trees.get(tree_key)
+    if cached_tree is None:
+        cache.trees[tree_key] = tree
+    elif cached_tree != tree:
+        raise StrategyError(
+            "interactive-tree base changed before Pool persistence"
+        )
+    dataset_key = (lineage.dataset.dataset_id, lineage.dataset.content_hash)
+    dataset = cache.datasets.get(dataset_key)
+    if dataset is None:
+        if dataset_key not in cache.datasets_verified_on_connection:
+            _require_dataset_on_connection(conn, lineage.dataset)
+            _require_file_content_hash(
+                lineage.dataset.path,
+                lineage.dataset.content_hash,
+                "interactive-tree source dataset content hash drifted",
+            )
+            cache.datasets_verified_on_connection.add(dataset_key)
+        dataset = lineage.dataset
+        cache.datasets[dataset_key] = dataset
+    verified_fragment, source_binding = _replay_interactive_tree_lineage(
+        selection
+    )
+    if (
+        selection != lineage.selection
+        or tree != lineage.selection.revision.automatic_source
+        or dataset != lineage.dataset
+        or verified_fragment != lineage.verified_fragment
+        or source_binding != lineage.source_binding
+    ):
+        raise StrategyError(
+            "interactive-tree frontier lineage changed before Pool persistence"
         )
 
 

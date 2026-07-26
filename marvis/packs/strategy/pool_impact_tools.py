@@ -42,17 +42,12 @@ from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignExecutionBinding,
     StrategySampleDesignRef,
     bind_strategy_development_frame,
-    load_historical_strategy_sample_design_execution_binding,
     load_strategy_sample_design_execution_binding,
-    require_historical_strategy_sample_design_execution_binding_on_connection,
-    require_strategy_sample_design_execution_binding_on_connection,
     revalidate_strategy_sample_design_execution_binding,
 )
 from marvis.packs.strategy.sample_design_tools import (
     SAMPLE_DESIGN_ARTIFACT_KIND,
     SAMPLE_DESIGN_ORIGIN_TOOL,
-    load_historical_strategy_sample_design_artifact,
-    load_strategy_sample_design_artifact,
 )
 from marvis.packs.strategy.voting_candidate import (
     VOTING_CANDIDATE_ASSET_SCHEMA_VERSION,
@@ -81,6 +76,7 @@ from marvis.repositories.task_artifacts import (
 if TYPE_CHECKING:
     from marvis.packs.strategy.pool_tools import (
         StrategyCandidatePoolArtifactBinding,
+        StrategyPoolDevelopmentExecutionBinding,
     )
 
 
@@ -266,6 +262,7 @@ class StrategyPoolImpactArtifactBinding:
     validation_status: str
     tasks_root: Path
     db_path: Path
+    development: StrategyPoolDevelopmentExecutionBinding | None = None
 
 
 def run_measure_pool_impact(inputs, ctx, runtime) -> dict[str, Any]:
@@ -275,63 +272,63 @@ def run_measure_pool_impact(inputs, ctx, runtime) -> dict[str, Any]:
         request = _validate_inputs(inputs)
         task_id = _text(ctx.task_id, "task_id")
         repository = StrategyCandidatePoolRepository(runtime.settings.db_path)
-        pool = repository.get_current(task_id, request["strategy_type"])
-        if pool is None:
-            raise StrategyError("strategy candidate pool not found")
-        pool = validate_strategy_pool(pool)
-        _require_pool_cas(pool, request)
-        if not pool["entries"]:
-            raise StrategyError("cannot measure an empty Strategy Pool")
-
-        # Reuse the Pool's single candidate-adapter seam.  This verifies every
-        # concrete artifact, parent artifact, dataset, and nested Voting lineage.
         from marvis.packs.strategy import pool_tools
 
-        cache = pool_tools._LineageCache.empty()
-        lineages = pool_tools._load_pool_lineages(
+        pool_binding = pool_tools.load_current_strategy_candidate_pool_artifact(
             runtime,
             task_id=task_id,
-            pool=pool,
-            cache=cache,
+            strategy_type=request["strategy_type"],
+            expected_pool_revision=request["expected_pool_revision"],
+            expected_pool_snapshot_hash=request["expected_pool_snapshot_hash"],
         )
-        pool_artifact = pool_tools._normalize_source_record(
-            pool_tools._load_pool_artifact(runtime, task_id=task_id, snapshot=pool)
+        development = pool_tools.bind_strategy_pool_development_execution(
+            runtime,
+            pool_binding,
         )
-        selected = compile_strategy_pool(pool)
+        pool = pool_binding.pool
+        if not pool["entries"]:
+            raise StrategyError("cannot measure an empty Strategy Pool")
+        selected = pool_binding.compiled_design
         if selected["requirements"]:
             raise StrategyError(
                 "Pool impact cannot execute unresolved candidate requirements"
             )
-        sample = _pool_sample_binding(pool, task_id=task_id)
+        sample = _pool_development_sample_binding(development)
         dataset = _load_dataset_binding(
             runtime,
             request=request,
             task_id=task_id,
             sample=sample,
         )
-        sample_design = load_strategy_sample_design_execution_binding(
-            runtime,
-            task_id=task_id,
-            sample_design_ref=request["sample_design_ref"],
-            dataset_id=dataset.dataset_id,
-            dataset_content_hash=dataset.content_hash,
-            workspace_revision=dataset.workspace_revision,
-            workspace_generation=dataset.workspace_generation,
-            semantic_mapping_hash=dataset.semantic_mapping_hash,
-            target_col=dataset.target_col,
-            drop_nan_labels=request["drop_nan_labels"],
-            month_col=request.get("month_col"),
-            loan_amount_col=request.get("loan_amount_col"),
-            overdue_amount_col=request.get("overdue_amount_col"),
+        sample_design = development.sample_design
+        requested_sample_ref = StrategySampleDesignRef.from_value(
+            request["sample_design_ref"]
         )
+        if requested_sample_ref != sample_design.reference:
+            load_strategy_sample_design_execution_binding(
+                runtime,
+                task_id=task_id,
+                sample_design_ref=request["sample_design_ref"],
+                dataset_id=dataset.dataset_id,
+                dataset_content_hash=dataset.content_hash,
+                workspace_revision=dataset.workspace_revision,
+                workspace_generation=dataset.workspace_generation,
+                semantic_mapping_hash=dataset.semantic_mapping_hash,
+                target_col=dataset.target_col,
+                drop_nan_labels=request["drop_nan_labels"],
+                month_col=request.get("month_col"),
+                loan_amount_col=request.get("loan_amount_col"),
+                overdue_amount_col=request.get("overdue_amount_col"),
+            )
+            raise StrategyError(
+                "Strategy Pool candidate sample-design reference does not match "
+                "the requested development sample"
+            )
         request = _resolve_sample_design_optional_bindings(request, sample_design)
-        _require_pool_sample_design_ref(
-            lineages,
-            expected=sample_design.reference,
-        )
-        _require_pool_measurement_target(
-            lineages,
-            expected_target_col=dataset.target_col,
+        _require_pool_development_request(
+            development,
+            request=request,
+            task_id=task_id,
         )
         baseline = _load_baseline(
             runtime,
@@ -395,8 +392,7 @@ def run_measure_pool_impact(inputs, ctx, runtime) -> dict[str, Any]:
             request=request,
             task_id=task_id,
             pool=pool,
-            pool_artifact=pool_artifact,
-            lineages=lineages,
+            development=development,
             dataset=dataset,
             sample_design=sample_design,
             baseline=baseline,
@@ -632,6 +628,10 @@ def _load_strategy_pool_impact_artifact(
                 expected_pool_revision=identity["revision"],
                 expected_pool_snapshot_hash=identity["snapshot_hash"],
             )
+            development = pool_tools.bind_strategy_pool_development_execution(
+                runtime,
+                pool,
+            )
         else:
             pool = _load_historical_impact_pool(
                 runtime,
@@ -639,33 +639,24 @@ def _load_strategy_pool_impact_artifact(
                 identity=identity,
                 provenance=provenance,
             )
-        sample_ref = StrategySampleDesignRef.from_value(
-            provenance["sample_design_ref"]
-        )
-        sample_artifact_loader = (
-            load_strategy_sample_design_artifact
-            if require_current_sources
-            else load_historical_strategy_sample_design_artifact
-        )
-        sample_artifact = sample_artifact_loader(
-            runtime,
-            task_id=normalized_task,
-            artifact_id=sample_ref.artifact_id,
-            expected_artifact_content_hash=sample_ref.artifact_content_hash,
-            expected_sample_design_id=sample_ref.sample_design_id,
-            expected_sample_design_content_hash=sample_ref.sample_design_content_hash,
-        )
-        designed_drop_nan = sample_artifact.bundle["sample_design"][
-            "target_definition"
-        ]["drop_nan_labels"]
-        if not isinstance(designed_drop_nan, bool):
-            raise StrategyError("Pool impact sample-design label policy is invalid")
+            development = (
+                pool_tools.bind_strategy_pool_revision_development_execution(
+                    runtime,
+                    pool,
+                )
+            )
+        designed_drop_nan = development.sample_design.drop_nan_labels
         request = _impact_request_from_provenance(
             provenance,
             strategy_type=identity["strategy_type"],
             drop_nan_labels=designed_drop_nan,
         )
-        sample = _pool_sample_binding(pool.pool, task_id=normalized_task)
+        _require_pool_development_request(
+            development,
+            request=request,
+            task_id=normalized_task,
+        )
+        sample = _pool_development_sample_binding(development)
         dataset = _load_dataset_binding(
             runtime,
             request=request,
@@ -673,27 +664,13 @@ def _load_strategy_pool_impact_artifact(
             sample=sample,
             require_current_workspace=require_current_sources,
         )
-        sample_execution_loader = (
-            load_strategy_sample_design_execution_binding
-            if require_current_sources
-            else load_historical_strategy_sample_design_execution_binding
-        )
-        sample_design = sample_execution_loader(
-            runtime,
-            task_id=normalized_task,
-            sample_design_ref=request["sample_design_ref"],
-            dataset_id=dataset.dataset_id,
-            dataset_content_hash=dataset.content_hash,
-            workspace_revision=dataset.workspace_revision,
-            workspace_generation=dataset.workspace_generation,
-            semantic_mapping_hash=dataset.semantic_mapping_hash,
-            target_col=dataset.target_col,
-            drop_nan_labels=request["drop_nan_labels"],
-            month_col=request.get("month_col"),
-            loan_amount_col=request.get("loan_amount_col"),
-            overdue_amount_col=request.get("overdue_amount_col"),
-        )
+        sample_design = development.sample_design
         request = _resolve_sample_design_optional_bindings(request, sample_design)
+        _require_pool_development_request(
+            development,
+            request=request,
+            task_id=normalized_task,
+        )
         baseline = _load_baseline(
             runtime,
             request=request,
@@ -716,6 +693,7 @@ def _load_strategy_pool_impact_artifact(
             validation_status="unvalidated",
             tasks_root=tasks_root,
             db_path=db_path,
+            development=development,
         )
         _require_impact_binding_relationships(binding)
         with runtime.task_artifacts.transaction() as conn:
@@ -777,23 +755,17 @@ def _require_strategy_pool_impact_artifact_binding_on_connection(
     if binding.tasks_root != binding.tasks_root.absolute():
         raise StrategyError("Pool impact task root changed")
     _require_impact_binding_relationships(binding)
+    if binding.development is None:
+        raise StrategyError("Pool impact development binding is missing")
     if require_current_sources:
-        pool_tools.require_strategy_candidate_pool_artifact_binding_on_connection(
+        pool_tools.require_strategy_pool_development_execution_binding_on_connection(
             conn,
-            binding.pool,
-        )
-        require_strategy_sample_design_execution_binding_on_connection(
-            conn,
-            binding.sample_design,
+            binding.development,
         )
     else:
-        pool_tools.require_strategy_candidate_pool_revision_artifact_binding_on_connection(
+        pool_tools.require_strategy_pool_revision_development_execution_binding_on_connection(
             conn,
-            binding.pool,
-        )
-        require_historical_strategy_sample_design_execution_binding_on_connection(
-            conn,
-            binding.sample_design,
+            binding.development,
         )
     _require_dataset_and_workspace_on_connection(
         conn,
@@ -1027,6 +999,12 @@ def _require_impact_binding_relationships(
         pool_tools.StrategyCandidatePoolArtifactBinding,
     ):
         raise StrategyError("Pool impact Pool binding is invalid")
+    development = binding.development
+    if not isinstance(
+        development,
+        pool_tools.StrategyPoolDevelopmentExecutionBinding,
+    ):
+        raise StrategyError("Pool impact development binding is invalid")
     if not isinstance(binding.dataset, _DatasetBinding) or not isinstance(
         binding.sample_design,
         StrategySampleDesignExecutionBinding,
@@ -1052,6 +1030,9 @@ def _require_impact_binding_relationships(
     registered_dataset = binding.dataset.dataset
     if (
         binding.pool.task_id != task_id
+        or development.task_id != task_id
+        or development.pool != binding.pool
+        or development.sample_design != binding.sample_design
         or binding.sample_design.task_id != task_id
         or getattr(registered_dataset, "task_id", None) != task_id
     ):
@@ -1119,6 +1100,7 @@ def _require_impact_binding_relationships(
         raise StrategyError("Pool impact Pool identity changed")
 
     dataset = binding.dataset
+    public_dataset = development.dataset
     if (
         getattr(registered_dataset, "id", None) != dataset.dataset_id
         or getattr(registered_dataset, "source_path", None) != dataset.source_path
@@ -1129,6 +1111,15 @@ def _require_impact_binding_relationships(
             for column in getattr(registered_dataset, "columns", ())
         )
         != dataset.columns
+        or public_dataset.task_id != task_id
+        or public_dataset.dataset_id != dataset.dataset_id
+        or public_dataset.source_path != dataset.source_path
+        or public_dataset.path != dataset.path
+        or public_dataset.content_hash != dataset.content_hash
+        or public_dataset.registry_metadata_hash != dataset.registry_metadata_hash
+        or public_dataset.row_count != dataset.row_count
+        or public_dataset.columns != dataset.columns
+        or development.target_col != dataset.target_col
     ):
         raise StrategyError("Pool impact dataset binding changed")
     dataset_expected = {
@@ -1142,7 +1133,19 @@ def _require_impact_binding_relationships(
     }
     if any(provenance[field] != value for field, value in dataset_expected.items()):
         raise StrategyError("Pool impact dataset/workspace provenance changed")
-    sample_binding = _pool_sample_binding(pool, task_id=task_id)
+    development_identity = development.evidence_identity
+    if (
+        development_identity.get("dataset_id") != dataset.dataset_id
+        or development_identity.get("dataset_content_hash") != dataset.content_hash
+        or development_identity.get("workspace_revision")
+        != dataset.workspace_revision
+        or development_identity.get("workspace_generation")
+        != dataset.workspace_generation
+        or development_identity.get("semantic_mapping_hash")
+        != dataset.semantic_mapping_hash
+    ):
+        raise StrategyError("Pool impact development evidence identity changed")
+    sample_binding = _pool_development_sample_binding(development)
     assessment_bindings = assessment["bindings"]
     if (
         assessment_bindings["sample"] != sample_binding
@@ -1181,13 +1184,10 @@ def _require_impact_binding_relationships(
         or provenance["normalized_target_bad_value"] != 1
     ):
         raise StrategyError("Pool impact artifact provenance source binding changed")
-    _require_pool_sample_design_ref(
-        binding.pool.lineages,
-        expected=binding.sample_design.reference,
-    )
-    _require_pool_measurement_target(
-        binding.pool.lineages,
-        expected_target_col=dataset.target_col,
+    _require_pool_development_request(
+        development,
+        request=binding.request,
+        task_id=task_id,
     )
     _require_waterfall_pool_binding(assessment, pool=pool, compiled=compiled)
     _require_assessment_baseline_binding(
@@ -1406,6 +1406,88 @@ def _require_pool_cas(pool: Mapping[str, Any], request: Mapping[str, Any]) -> No
         pool["snapshot_hash"], request["expected_pool_snapshot_hash"]
     ):
         raise StrategyError("stale strategy candidate pool revision or snapshot hash")
+
+
+def _require_pool_development_request(
+    development,
+    *,
+    request: Mapping[str, Any],
+    task_id: str,
+) -> None:
+    """Match caller assertions to the Pool boundary's public evidence projection."""
+
+    from marvis.packs.strategy import pool_tools
+
+    if not isinstance(
+        development,
+        pool_tools.StrategyPoolDevelopmentExecutionBinding,
+    ):
+        raise StrategyError("Strategy Pool development binding is invalid")
+    sample = development.sample_design
+    identity = development.evidence_identity
+    expected_identity = {
+        "dataset_id": request["dataset_id"],
+        "dataset_content_hash": request["expected_dataset_content_hash"],
+        "workspace_revision": request["workspace_revision"],
+        "workspace_generation": request["workspace_generation"],
+        "semantic_mapping_hash": request["semantic_mapping_hash"],
+    }
+    if (
+        development.task_id != task_id
+        or development.pool.task_id != task_id
+        or development.pool.strategy_type != request["strategy_type"]
+    ):
+        raise StrategyError("Pool development task or strategy binding changed")
+    for field, expected in expected_identity.items():
+        if identity.get(field) != expected:
+            raise StrategyError(f"Pool sample {field} does not match the request")
+    if (
+        development.dataset.dataset_id != request["dataset_id"]
+        or not hmac.compare_digest(
+            development.dataset.content_hash,
+            request["expected_dataset_content_hash"],
+        )
+    ):
+        raise StrategyError("Pool development dataset binding changed")
+    if development.target_col != request["target_col"]:
+        raise StrategyError(
+            "strategy sample-design target_col does not match Pool impact binding"
+        )
+    if sample.reference != StrategySampleDesignRef.from_value(
+        request["sample_design_ref"]
+    ):
+        raise StrategyError(
+            "Strategy Pool candidate sample-design reference does not match "
+            "the requested development sample"
+        )
+    if sample.drop_nan_labels is not request["drop_nan_labels"]:
+        raise StrategyError(
+            "strategy sample-design drop_nan_labels does not match Pool impact binding"
+        )
+    optional_columns = {
+        "month_col": sample.month_col,
+        "loan_amount_col": sample.loan_amount_col,
+        "overdue_amount_col": sample.overdue_amount_col,
+    }
+    for field, expected in optional_columns.items():
+        if field in request and request[field] != expected:
+            raise StrategyError(
+                f"strategy sample-design {field} does not match Pool impact binding"
+            )
+
+
+def _pool_development_sample_binding(development) -> dict[str, Any]:
+    from marvis.packs.strategy import pool_tools
+
+    if not isinstance(
+        development,
+        pool_tools.StrategyPoolDevelopmentExecutionBinding,
+    ):
+        raise StrategyError("Strategy Pool development binding is invalid")
+    return {
+        "task_id": development.task_id,
+        **dict(development.evidence_identity),
+    }
 
 
 def _pool_sample_binding(
@@ -1768,8 +1850,7 @@ def _persist_assessment(
     request: Mapping[str, Any],
     task_id: str,
     pool: Mapping[str, Any],
-    pool_artifact,
-    lineages,
+    development,
     dataset: _DatasetBinding,
     sample_design: StrategySampleDesignExecutionBinding,
     baseline: _BaselineBinding | None,
@@ -1841,24 +1922,9 @@ def _persist_assessment(
                 _require_pool_cas(locked, request)
                 if locked != pool:
                     raise StrategyError("Strategy Pool changed before impact registration")
-                pool_tools._require_parent_pool_artifact_on_connection(
+                pool_tools.require_strategy_pool_development_execution_binding_on_connection(
                     conn,
-                    pool_artifact,
-                    snapshot=pool,
-                    tasks_root=Path(runtime.settings.tasks_dir),
-                )
-                cache = pool_tools._LineageCache.empty()
-                for lineage in lineages:
-                    pool_tools._require_lineage_on_connection(
-                        conn,
-                        lineage,
-                        tasks_root=Path(runtime.settings.tasks_dir),
-                        cache=cache,
-                    )
-                _require_sample_design_on_connection(
-                    conn,
-                    task_id=task_id,
-                    binding=sample_design,
+                    development,
                 )
                 _require_dataset_and_workspace_on_connection(
                     conn,

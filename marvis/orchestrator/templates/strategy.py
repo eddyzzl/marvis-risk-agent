@@ -1489,6 +1489,74 @@ STRATEGY_INTERACTIVE_TREE_REVISION = WorkflowTemplate(
 )
 
 
+STRATEGY_INTERACTIVE_TREE_FRONTIER_MATERIALIZATION = WorkflowTemplate(
+    id="strategy_interactive_tree_frontier_materialization",
+    title="交互式决策树前沿节点物化",
+    goal_patterns=(
+        "物化交互式决策树前沿节点",
+        "选择交互式树前沿节点",
+        "将交互式树节点准备为入池候选",
+        "materialize an interactive tree frontier selection",
+        "select one exact interactive tree frontier node",
+    ),
+    slots=(
+        SlotSpec(
+            "revision_id",
+            True,
+            "user",
+            "Exact immutable interactive-tree revision id",
+        ),
+        SlotSpec(
+            "source_node_id",
+            True,
+            "user",
+            "Exact source node id from the revision frontier",
+        ),
+        SlotSpec(
+            "selection_reason",
+            False,
+            "user",
+            "Optional user-owned frontier selection rationale",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="物化交互式树精确前沿节点",
+            tool_ref=ToolRef(
+                "strategy",
+                "materialize_interactive_tree_frontier_selection",
+            ),
+            inputs_template={
+                "revision_id": "{slot:revision_id}",
+                "source_node_id": "{slot:source_node_id}",
+                "selection_reason": "{slot:selection_reason}",
+            },
+            depends_on_titles=(),
+            post_checks=tuple(
+                PostCheck("nonempty", {"field": field})
+                for field in (
+                    "selection_id",
+                    "selection_hash",
+                    "revision_id",
+                    "semantic_tree_id",
+                    "tree_hash",
+                    "source_node_id",
+                    "leaf_id",
+                    "fragment_id",
+                    "fragment_hash",
+                    "rule_id",
+                    "effect_id",
+                    "artifacts",
+                )
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_UNIVARIATE_CANDIDATE_REFINEMENT = WorkflowTemplate(
     id="strategy_univariate_candidate_refinement",
     title="单变量候选选择与合并",

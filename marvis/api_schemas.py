@@ -220,6 +220,7 @@ ManualStrategyWorkflow = Literal[
     "voting_candidate_search",
     "voting_candidate_build_from_search",
     "interactive_tree_revision",
+    "interactive_tree_frontier_materialization",
 ]
 
 ManualUnivariateRefinementMethod = Literal[
@@ -269,6 +270,14 @@ ManualInteractiveTreeSourceId = Annotated[
 ManualInteractiveTreeNodeId = Annotated[
     StrictStr,
     StringConstraints(pattern=r"^node-[0-9a-f]{20}$"),
+]
+ManualInteractiveTreeRevisionId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^interactive-tree-revision-[0-9a-f]{32}$"),
+]
+ManualInteractiveTreeFrontierNodeId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^(?:node|leaf)-[0-9a-f]{20}$"),
 ]
 ManualVotingRuleId = Annotated[
     StrictStr,
@@ -481,6 +490,27 @@ class ManualInteractiveTreeRevisionInputs(BaseModel):
     def reject_explicit_null_reason(self) -> Self:
         if "reason" in self.model_fields_set and self.reason is None:
             raise ValueError("optional fields must be omitted instead of null: reason")
+        return self
+
+
+class ManualInteractiveTreeFrontierMaterializationInputs(BaseModel):
+    """One visible revision/frontier pointer for immutable materialization."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    revision_id: ManualInteractiveTreeRevisionId
+    source_node_id: ManualInteractiveTreeFrontierNodeId
+    selection_reason: ManualSelectionReason | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_null_reason(self) -> Self:
+        if (
+            "selection_reason" in self.model_fields_set
+            and self.selection_reason is None
+        ):
+            raise ValueError(
+                "optional fields must be omitted instead of null: selection_reason"
+            )
         return self
 
 
@@ -701,6 +731,9 @@ _MANUAL_CANDIDATE_STABILITY_INPUTS = TypeAdapter(
 _MANUAL_INTERACTIVE_TREE_REVISION_INPUTS = TypeAdapter(
     ManualInteractiveTreeRevisionInputs
 )
+_MANUAL_INTERACTIVE_TREE_FRONTIER_MATERIALIZATION_INPUTS = TypeAdapter(
+    ManualInteractiveTreeFrontierMaterializationInputs
+)
 _MANUAL_VOTING_CANDIDATE_SEARCH_INPUTS = TypeAdapter(
     ManualVotingCandidateSearchInputs
 )
@@ -782,6 +815,11 @@ class ManualStrategyRequest(BaseModel):
                 self.workflow_inputs,
                 strict=True,
             )
+        elif self.workflow == "interactive_tree_frontier_materialization":
+            _MANUAL_INTERACTIVE_TREE_FRONTIER_MATERIALIZATION_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
         elif self.workflow == "voting_candidate_search":
             _MANUAL_VOTING_CANDIDATE_SEARCH_INPUTS.validate_python(
                 self.workflow_inputs,
@@ -797,6 +835,10 @@ class ManualStrategyRequest(BaseModel):
             "scorecard_cutoff_selection": {"asset_id", "cutoff_id"},
             "candidate_monthly_stability": {"asset_id", "entry_id"},
             "interactive_tree_revision": {"source_tree_id", "node_id"},
+            "interactive_tree_frontier_materialization": {
+                "revision_id",
+                "source_node_id",
+            },
             "voting_candidate_search": {
                 "include_rule_ids",
                 "exclude_rule_ids",

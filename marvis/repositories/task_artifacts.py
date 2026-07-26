@@ -103,7 +103,7 @@ class TaskArtifactRepository:
             if created_at is not None
             else _now()
         )
-        artifact_id = _stable_artifact_id(
+        artifact_id = stable_task_artifact_id(
             task_id=normalized_task_id,
             kind=normalized_kind,
             path=normalized_path,
@@ -359,15 +359,26 @@ def _canonical_provenance(
     return normalized, payload
 
 
-def _stable_artifact_id(*, task_id: str, kind: str, path: str) -> str:
+def stable_task_artifact_id(*, task_id: str, kind: str, path: str) -> str:
+    """Return the canonical registry id for one logical artifact identity."""
+
+    normalized_task_id = _required_text(task_id, field="task_id")
+    normalized_kind = _required_text(kind, field="kind")
+    normalized_path = _required_text(path, field="path")
     identity_json = json.dumps(
-        [task_id, kind, path],
+        [normalized_task_id, normalized_kind, normalized_path],
         ensure_ascii=False,
         separators=(",", ":"),
     )
     return hashlib.sha256(
         f"{_IDENTITY_NAMESPACE}:{identity_json}".encode("utf-8")
     ).hexdigest()
+
+
+def _stable_artifact_id(*, task_id: str, kind: str, path: str) -> str:
+    """Backward-compatible internal alias for existing artifact consumers."""
+
+    return stable_task_artifact_id(task_id=task_id, kind=kind, path=path)
 
 
 def _select_identity_row(

@@ -68,6 +68,7 @@ from marvis.packs.strategy.sample_design_binding import (
 from marvis.packs.strategy.sample_design_tools import (
     load_strategy_sample_design_artifact,
 )
+from marvis.repositories.task_artifacts import stable_task_artifact_id
 
 
 TOOL_SCHEMA_VERSION = "strategy.revise-interactive-tree-tool.v1"
@@ -80,6 +81,7 @@ INTERACTIVE_TREE_REVISION_ARTIFACT_SCHEMA_VERSION = (
 INTERACTIVE_TREE_REVISION_ORIGIN_TOOL = "strategy.revise_interactive_tree"
 MAX_INTERACTIVE_TREE_REVISION_BYTES = 4 * 1024 * 1024
 MAX_INTERACTIVE_TREE_REVISION_CHAIN = 511
+MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES = 64 * 1024 * 1024
 
 _INPUT_FIELDS = frozenset(
     {"source_tree_id", "node_id", "operation", "reason"}
@@ -139,6 +141,21 @@ class VerifiedInteractiveTreeRevision:
     ancestor_revisions: tuple[dict[str, Any], ...]
     automatic_source: VerifiedAutomaticTreeSource
 
+    def builder_binding(self) -> dict[str, Any]:
+        """Project the exact live artifact facts accepted by pure adapters."""
+
+        return {
+            "artifact_id": self.artifact_id,
+            "task_id": self.task_id,
+            "kind": INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+            "artifact_schema_version": self.provenance["schema_version"],
+            "content_hash": self.content_hash,
+            "origin_tool": INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
+            "path": str(self.path),
+            "provenance": self.provenance,
+            "canonical_bytes": self.canonical_bytes,
+        }
+
 
 @dataclass(frozen=True)
 class _ResolvedRevisionSource:
@@ -173,12 +190,23 @@ def run_revise_interactive_tree(inputs: object, ctx, runtime) -> dict[str, Any]:
 
     request = _validate_inputs(inputs)
     task_id = _required_text(ctx.task_id, "task_id")
+    read_budget = _RevisionReadBudget(
+        MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES
+    )
+    revision_cache: dict[str, VerifiedInteractiveTreeRevision] = {}
+    automatic_source_cache: dict[
+        tuple[str, str],
+        VerifiedAutomaticTreeSource,
+    ] = {}
     with runtime.task_artifacts.transaction() as conn:
         source = _resolve_revision_source_on_connection(
             conn,
             runtime=runtime,
             task_id=task_id,
             source_tree_id=request["source_tree_id"],
+            revision_cache=revision_cache,
+            automatic_source_cache=automatic_source_cache,
+            budget=read_budget,
         )
     revision = _build_revision(source, request=request)
     canonical = canonical_interactive_tree_revision_json(
@@ -316,6 +344,8 @@ def load_verified_interactive_tree_revision(
     *,
     task_id: str,
     revision_id: str,
+    max_total_bytes: int | None = None,
+    reserve_bytes: Callable[[int], None] | None = None,
 ) -> VerifiedInteractiveTreeRevision:
     """Load one exact revision and recursively authenticate its ancestry."""
 
@@ -323,6 +353,8 @@ def load_verified_interactive_tree_revision(
         runtime,
         task_id=task_id,
         revision_ids=(revision_id,),
+        max_total_bytes=max_total_bytes,
+        reserve_bytes=reserve_bytes,
     )[_required_text(revision_id, "revision_id")]
 
 
@@ -356,6 +388,10 @@ def load_verified_interactive_tree_revisions(
     if reserve_bytes is not None and not callable(reserve_bytes):
         raise StrategyError("reserve_bytes must be callable")
     cache: dict[str, VerifiedInteractiveTreeRevision] = {}
+    source_cache: dict[
+        tuple[str, str],
+        VerifiedAutomaticTreeSource,
+    ] = {}
     budget = (
         None
         if max_total_bytes is None
@@ -371,6 +407,7 @@ def load_verified_interactive_tree_revisions(
                 visited=set(),
                 depth=0,
                 cache=cache,
+                source_cache=source_cache,
                 budget=budget,
                 reserve_bytes=reserve_bytes,
             )
@@ -380,12 +417,61 @@ def load_verified_interactive_tree_revisions(
     }
 
 
+def load_verified_interactive_tree_revision_on_connection(
+    conn,
+    *,
+    runtime,
+    task_id: str,
+    revision_id: str,
+    max_total_bytes: int | None = None,
+    reserve_bytes: Callable[[int], None] | None = None,
+    revision_cache: dict[str, VerifiedInteractiveTreeRevision] | None = None,
+    automatic_source_cache: (
+        dict[tuple[str, str], VerifiedAutomaticTreeSource] | None
+    ) = None,
+) -> VerifiedInteractiveTreeRevision:
+    """Authenticate one revision while reusing the caller's transaction."""
+
+    if max_total_bytes is not None and (
+        isinstance(max_total_bytes, bool)
+        or not isinstance(max_total_bytes, int)
+        or max_total_bytes < 1
+    ):
+        raise StrategyError("max_total_bytes must be a positive integer")
+    if reserve_bytes is not None and not callable(reserve_bytes):
+        raise StrategyError("reserve_bytes must be callable")
+    budget = (
+        None
+        if max_total_bytes is None
+        else _RevisionReadBudget(max_total_bytes)
+    )
+    return _load_verified_interactive_tree_revision_on_connection(
+        conn,
+        runtime=runtime,
+        task_id=task_id,
+        revision_id=revision_id,
+        visited=set(),
+        depth=0,
+        cache={} if revision_cache is None else revision_cache,
+        source_cache=(
+            {} if automatic_source_cache is None else automatic_source_cache
+        ),
+        budget=budget,
+        reserve_bytes=reserve_bytes,
+    )
+
+
 def _resolve_revision_source_on_connection(
     conn,
     *,
     runtime,
     task_id: str,
     source_tree_id: str,
+    revision_cache: dict[str, VerifiedInteractiveTreeRevision] | None = None,
+    automatic_source_cache: (
+        dict[tuple[str, str], VerifiedAutomaticTreeSource] | None
+    ) = None,
+    budget: _RevisionReadBudget | None = None,
 ) -> _ResolvedRevisionSource:
     if _ASSET_ID_RE.fullmatch(source_tree_id):
         source = _load_automatic_source_by_asset_on_connection(
@@ -393,6 +479,8 @@ def _resolve_revision_source_on_connection(
             runtime=runtime,
             task_id=task_id,
             asset_id=source_tree_id,
+            source_cache=automatic_source_cache,
+            budget=budget,
         )
         return _ResolvedRevisionSource(
             automatic_source=source,
@@ -408,6 +496,9 @@ def _resolve_revision_source_on_connection(
             revision_id=source_tree_id,
             visited=set(),
             depth=0,
+            cache=revision_cache,
+            source_cache=automatic_source_cache,
+            budget=budget,
         )
         return _ResolvedRevisionSource(
             automatic_source=parent.automatic_source,
@@ -426,7 +517,15 @@ def _load_automatic_source_by_asset_on_connection(
     runtime,
     task_id: str,
     asset_id: str,
+    source_cache: (
+        dict[tuple[str, str], VerifiedAutomaticTreeSource] | None
+    ) = None,
+    budget: _RevisionReadBudget | None = None,
+    reserve_bytes: Callable[[int], None] | None = None,
 ) -> VerifiedAutomaticTreeSource:
+    cache_key = (task_id, asset_id)
+    if source_cache is not None and cache_key in source_cache:
+        return source_cache[cache_key]
     path = canonical_automatic_tree_source_path(
         runtime.settings.tasks_dir,
         task_id=task_id,
@@ -438,17 +537,26 @@ def _load_automatic_source_by_asset_on_connection(
         kind=AUTOMATIC_TREE_SOURCE_ARTIFACT_KIND,
         path=path,
     )
+    expected_artifact_id = stable_task_artifact_id(
+        task_id=task_id,
+        kind=AUTOMATIC_TREE_SOURCE_ARTIFACT_KIND,
+        path=str(path),
+    )
+    if row["id"] != expected_artifact_id:
+        raise StrategyError(
+            "automatic-tree source artifact stable identity changed"
+        )
     provenance = _strict_provenance(row, "automatic-tree source")
     for field in ("asset_id", "asset_hash", "tree_result_hash"):
         if field not in provenance:
             raise StrategyError(
                 f"automatic-tree source provenance is missing {field}"
             )
-    return load_verified_automatic_tree_source_artifact_on_connection(
+    source = load_verified_automatic_tree_source_artifact_on_connection(
         conn,
         tasks_dir=runtime.settings.tasks_dir,
         task_id=task_id,
-        artifact_id=_required_text(row["id"], "automatic-tree artifact id"),
+        artifact_id=expected_artifact_id,
         expected_content_hash=_required_hash(
             row["content_hash"],
             "automatic-tree artifact content_hash",
@@ -466,6 +574,13 @@ def _load_automatic_source_by_asset_on_connection(
             "automatic-tree provenance tree_result_hash",
         ),
     )
+    if budget is not None:
+        budget.reserve(len(source.canonical_bytes))
+    if reserve_bytes is not None:
+        reserve_bytes(len(source.canonical_bytes))
+    if source_cache is not None:
+        source_cache[cache_key] = source
+    return source
 
 
 def _load_verified_interactive_tree_revision_on_connection(
@@ -477,6 +592,9 @@ def _load_verified_interactive_tree_revision_on_connection(
     visited: set[str],
     depth: int,
     cache: dict[str, VerifiedInteractiveTreeRevision] | None = None,
+    source_cache: (
+        dict[tuple[str, str], VerifiedAutomaticTreeSource] | None
+    ) = None,
     budget: _RevisionReadBudget | None = None,
     reserve_bytes: Callable[[int], None] | None = None,
 ) -> VerifiedInteractiveTreeRevision:
@@ -502,6 +620,15 @@ def _load_verified_interactive_tree_revision_on_connection(
             kind=INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
             path=path,
         )
+        expected_artifact_id = stable_task_artifact_id(
+            task_id=task_id,
+            kind=INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+            path=str(path),
+        )
+        if row["id"] != expected_artifact_id:
+            raise StrategyError(
+                "interactive-tree revision artifact stable identity changed"
+            )
         if row["origin_tool"] != INTERACTIVE_TREE_REVISION_ORIGIN_TOOL:
             raise StrategyError(
                 "interactive-tree revision artifact origin_tool is invalid"
@@ -522,6 +649,9 @@ def _load_verified_interactive_tree_revision_on_connection(
             runtime=runtime,
             task_id=task_id,
             asset_id=provenance["base_asset_id"],
+            source_cache=source_cache,
+            budget=budget,
+            reserve_bytes=reserve_bytes,
         )
         parent_id = provenance["parent_revision_id"]
         parent_binding = (
@@ -535,6 +665,7 @@ def _load_verified_interactive_tree_revision_on_connection(
                 visited=visited,
                 depth=depth + 1,
                 cache=cache,
+                source_cache=source_cache,
                 budget=budget,
                 reserve_bytes=reserve_bytes,
             )
@@ -620,7 +751,7 @@ def _load_verified_interactive_tree_revision_on_connection(
         if revision["revision_id"] != normalized_revision:
             raise StrategyError("interactive-tree revision identity changed")
         verified = VerifiedInteractiveTreeRevision(
-            artifact_id=_required_text(row["id"], "revision artifact id"),
+            artifact_id=expected_artifact_id,
             task_id=task_id,
             path=path,
             content_hash=registered_hash,
@@ -893,11 +1024,25 @@ def _persist_revision(
         with runtime.task_artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
+                locked_read_budget = _RevisionReadBudget(
+                    MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES
+                )
+                locked_revision_cache: dict[
+                    str,
+                    VerifiedInteractiveTreeRevision,
+                ] = {}
+                locked_automatic_source_cache: dict[
+                    tuple[str, str],
+                    VerifiedAutomaticTreeSource,
+                ] = {}
                 locked_source = _resolve_revision_source_on_connection(
                     conn,
                     runtime=runtime,
                     task_id=task_id,
                     source_tree_id=request["source_tree_id"],
+                    revision_cache=locked_revision_cache,
+                    automatic_source_cache=locked_automatic_source_cache,
+                    budget=locked_read_budget,
                 )
                 locked_revision = _build_revision(
                     locked_source,
@@ -1130,6 +1275,17 @@ def _verify_registered_revision(
     canonical: bytes,
     registry_record: bool = False,
 ) -> None:
+    expected_artifact_id = stable_task_artifact_id(
+        task_id=task_id,
+        kind=INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
+        path=str(final_path),
+    )
+    actual_artifact_id = record.get("id")
+    if not isinstance(actual_artifact_id, str) or not hmac.compare_digest(
+        actual_artifact_id,
+        expected_artifact_id,
+    ):
+        raise StrategyError("interactive-tree revision stable identity changed")
     expected = {
         "task_id": task_id,
         "kind": INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
@@ -1478,10 +1634,12 @@ __all__ = [
     "INTERACTIVE_TREE_REVISION_ORIGIN_TOOL",
     "MAX_INTERACTIVE_TREE_REVISION_BYTES",
     "MAX_INTERACTIVE_TREE_REVISION_CHAIN",
+    "MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES",
     "TOOL_SCHEMA_VERSION",
     "VerifiedInteractiveTreeRevision",
     "canonical_interactive_tree_revision_path",
     "interactive_tree_revision_provenance",
     "load_verified_interactive_tree_revision",
+    "load_verified_interactive_tree_revision_on_connection",
     "run_revise_interactive_tree",
 ]

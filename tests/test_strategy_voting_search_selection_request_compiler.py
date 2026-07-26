@@ -111,7 +111,7 @@ def test_voting_search_selection_compiles_exact_current_turn_pointers() -> None:
 
     assert result.draft is not None
     assert result.draft.to_dict() == _payload(strategy_type="approval")
-    assert llm.calls[0]["prompt_version"] == 38
+    assert llm.calls[0]["prompt_version"] == 40
     assert "voting_candidate_build_from_search" in llm.calls[0]["system_prompt"]
 
 

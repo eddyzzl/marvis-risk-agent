@@ -15,6 +15,7 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "voting_candidate_search",
   "voting_candidate_build_from_search",
   "interactive_tree_revision",
+  "interactive_tree_frontier_materialization",
 ]);
 
 const WORKFLOW_LABELS = Object.freeze({
@@ -28,6 +29,7 @@ const WORKFLOW_LABELS = Object.freeze({
   voting_candidate_search: "搜索 Voting 组合",
   voting_candidate_build_from_search: "从搜索结果构建 Voting 候选",
   interactive_tree_revision: "创建不可变交互式树修订",
+  interactive_tree_frontier_materialization: "物化交互树前沿节点",
 });
 
 const COLLECTION_DEFINITIONS = Object.freeze([
@@ -102,6 +104,8 @@ const VOTING_SEARCH_ID_RE = /^voting-search-[0-9a-f]{32}$/;
 const VOTING_COMBO_ID_RE = /^voting-combo-[0-9a-f]{32}$/;
 const INTERACTIVE_TREE_SOURCE_ID_RE = /^(?:candidate-asset-[0-9a-f]{32}|interactive-tree-revision-[0-9a-f]{32})$/;
 const INTERACTIVE_TREE_NODE_ID_RE = /^node-[0-9a-f]{20}$/;
+const INTERACTIVE_TREE_REVISION_ID_RE = /^interactive-tree-revision-[0-9a-f]{32}$/;
+const INTERACTIVE_TREE_FRONTIER_SOURCE_NODE_ID_RE = /^(?:node|leaf)-[0-9a-f]{20}$/;
 
 const FIELD_LABELS = Object.freeze({
   action: "动作",
@@ -729,6 +733,45 @@ function interactiveTreeEligiblePointers(item) {
   });
 }
 
+function interactiveTreeFrontierEligiblePointers(item) {
+  if (item?.kind !== "interactive_tree_revision") return [];
+  const revisionId = nonEmptyText(item?.detail?.revision_id);
+  if (!INTERACTIVE_TREE_REVISION_ID_RE.test(revisionId)) return [];
+  const nodes = new Map(
+    (Array.isArray(item?.pointers?.nodes) ? item.pointers.nodes : [])
+      .filter(isRecord)
+      .map((node) => [nonEmptyText(node.node_id), node]),
+  );
+  const frontierIds = new Set(
+    (Array.isArray(item?.pointers?.frontier_node_ids)
+      ? item.pointers.frontier_node_ids
+      : [])
+      .map(nonEmptyText)
+      .filter((nodeId) => (
+        INTERACTIVE_TREE_FRONTIER_SOURCE_NODE_ID_RE.test(nodeId)
+      )),
+  );
+  const pointers = Array.isArray(item?.pointers?.frontier)
+    ? item.pointers.frontier.filter(isRecord)
+    : [];
+  const seen = new Set();
+  return pointers.filter((pointer) => {
+    const sourceNodeId = nonEmptyText(pointer.source_node_id);
+    const node = nodes.get(sourceNodeId);
+    if (
+      !INTERACTIVE_TREE_FRONTIER_SOURCE_NODE_ID_RE.test(sourceNodeId)
+      || !frontierIds.has(sourceNodeId)
+      || node?.is_visible !== true
+      || node?.is_frontier !== true
+      || seen.has(sourceNodeId)
+    ) {
+      return false;
+    }
+    seen.add(sourceNodeId);
+    return true;
+  });
+}
+
 function interactiveTreeNodesHtml(item) {
   const nodes = Array.isArray(item?.pointers?.nodes)
     ? item.pointers.nodes.filter(isRecord)
@@ -742,6 +785,14 @@ function interactiveTreeNodesHtml(item) {
     ),
   );
   const sourceTreeId = nonEmptyText(item?.detail?.source_tree_id);
+  const revisionId = item?.kind === "interactive_tree_revision"
+    ? nonEmptyText(item?.detail?.revision_id)
+    : "";
+  const materializable = new Set(
+    interactiveTreeFrontierEligiblePointers(item).map(
+      (pointer) => pointer.source_node_id,
+    ),
+  );
   return [
     '<div class="candidate-lab-table-scroll candidate-lab-tree-scroll">',
     '<table class="candidate-lab-table candidate-lab-tree-table"><thead><tr>',
@@ -757,14 +808,27 @@ function interactiveTreeNodesHtml(item) {
         node.is_visible === true ? "可见" : "已隐藏",
         node.is_frontier === true ? "frontier" : "",
       ].filter(Boolean).join(" · ");
-      const action = node.can_prune === true && eligible.has(key)
-        ? [
+      const actions = [];
+      if (node.can_prune === true && eligible.has(key)) {
+        actions.push([
           '<button type="button" class="button compact secondary candidate-lab-tree-prune"',
           ' data-candidate-lab-interactive-tree-prune="1"',
           ` data-source-tree-id="${escapeHtml(sourceTreeId)}"`,
           ` data-node-id="${escapeHtml(nodeId)}">剪枝到此节点</button>`,
-        ].join("")
-        : "—";
+        ].join(""));
+      }
+      if (
+        INTERACTIVE_TREE_REVISION_ID_RE.test(revisionId)
+        && materializable.has(nodeId)
+      ) {
+        actions.push([
+          '<button type="button" class="button compact secondary candidate-lab-tree-frontier-materialize"',
+          ' data-candidate-lab-interactive-tree-frontier-materialize="1"',
+          ` data-revision-id="${escapeHtml(revisionId)}"`,
+          ` data-source-node-id="${escapeHtml(nodeId)}">物化前沿节点</button>`,
+        ].join(""));
+      }
+      const action = actions.join(" ") || "—";
       return [
         "<tr>",
         `<td>${escapeHtml(stablePrimitiveText(node.depth))}</td>`,
@@ -1696,6 +1760,42 @@ function collectInteractiveTreeRevisionInputs(form) {
   return inputs;
 }
 
+function collectInteractiveTreeFrontierMaterializationInputs(form) {
+  const revision = selectedProjectionOption(
+    form,
+    "interactive_tree_frontier_revision_id",
+    "交互树 revision",
+  );
+  const frontier = selectedProjectionOption(
+    form,
+    "interactive_tree_frontier_source_node_id",
+    "前沿节点",
+  );
+  const revisionId = nonEmptyText(revision.value);
+  const sourceNodeId = nonEmptyText(frontier.value);
+  if (
+    !INTERACTIVE_TREE_REVISION_ID_RE.test(revisionId)
+    || !INTERACTIVE_TREE_FRONTIER_SOURCE_NODE_ID_RE.test(sourceNodeId)
+    || nonEmptyText(revision.dataset?.revisionId) !== revisionId
+    || nonEmptyText(frontier.dataset?.revisionId) !== revisionId
+    || nonEmptyText(frontier.dataset?.sourceNodeId) !== sourceNodeId
+  ) {
+    throw new Error(
+      "交互树前沿节点必须来自当前 revision 的受认证 frontier 投影。",
+    );
+  }
+  const inputs = {
+    revision_id: revisionId,
+    source_node_id: sourceNodeId,
+  };
+  optionalText(
+    inputs,
+    "selection_reason",
+    formValue(form, "interactive_tree_frontier_selection_reason"),
+  );
+  return inputs;
+}
+
 export function collectStrategyCandidateLabRequest(form) {
   const workflow = nonEmptyText(form?.dataset?.candidateLabWorkflow);
   if (!STRATEGY_CANDIDATE_LAB_WORKFLOWS.includes(workflow)) {
@@ -1713,6 +1813,8 @@ export function collectStrategyCandidateLabRequest(form) {
     voting_candidate_build_from_search:
       collectVotingCandidateBuildFromSearchInputs,
     interactive_tree_revision: collectInteractiveTreeRevisionInputs,
+    interactive_tree_frontier_materialization:
+      collectInteractiveTreeFrontierMaterializationInputs,
   }[workflow](form);
   return {
     request_kind: "standard_workflow",
@@ -1917,6 +2019,131 @@ function syncInteractiveTreeRevisionControls(
         ? "选择后会创建新 revision；不会覆盖来源树，也不会自动入池。"
         : "该分支当前没有可继续剪枝的可见 split 节点。"
       : "当前任务尚无受认证自动树，请先构建自动规则树。";
+  }
+}
+
+function interactiveTreeFrontierMaterializationForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="interactive_tree_frontier_materialization"]',
+  ) || null;
+}
+
+function interactiveTreeFrontierProjectionSources(payload) {
+  const collection = payload?.candidates?.interactive_tree_revision;
+  const seen = new Set();
+  return collectionItems(collection).filter((item) => {
+    const revisionId = nonEmptyText(item?.detail?.revision_id);
+    if (
+      item?.kind !== "interactive_tree_revision"
+      || !INTERACTIVE_TREE_REVISION_ID_RE.test(revisionId)
+      || seen.has(revisionId)
+    ) {
+      return false;
+    }
+    seen.add(revisionId);
+    return true;
+  });
+}
+
+function interactiveTreeFrontierPointer(payload, revisionId, sourceNodeId) {
+  const source = interactiveTreeFrontierProjectionSources(payload).find(
+    (item) => item?.detail?.revision_id === revisionId,
+  );
+  if (!source) return null;
+  return interactiveTreeFrontierEligiblePointers(source).find(
+    (pointer) => pointer.source_node_id === sourceNodeId,
+  ) || null;
+}
+
+function syncInteractiveTreeFrontierMaterializationControls(
+  form,
+  payload,
+  {
+    requestedRevisionId = "",
+    requestedSourceNodeId = "",
+    preserveNode = true,
+  } = {},
+) {
+  if (!form) return;
+  const revisionSelect = formField(
+    form,
+    "interactive_tree_frontier_revision_id",
+  );
+  const nodeSelect = formField(
+    form,
+    "interactive_tree_frontier_source_node_id",
+  );
+  if (!revisionSelect || !nodeSelect) return;
+  const revisions = interactiveTreeFrontierProjectionSources(payload);
+  const previousRevision = nonEmptyText(revisionSelect.value);
+  revisionSelect.innerHTML = [
+    '<option value="">请选择不可变 revision</option>',
+    ...revisions.map((item) => {
+      const revisionId = nonEmptyText(item?.detail?.revision_id);
+      const frontierCount = interactiveTreeFrontierEligiblePointers(item).length;
+      return projectionOptionHtml(
+        revisionId,
+        `${revisionId} · ${frontierCount} 个可物化前沿节点`,
+        {
+          "candidate-lab-projection": "1",
+          "revision-id": revisionId,
+        },
+      );
+    }),
+  ].join("");
+  const preferredRevision = (
+    nonEmptyText(requestedRevisionId) || previousRevision
+  );
+  if (selectContainsValue(revisionSelect, preferredRevision)) {
+    revisionSelect.value = preferredRevision;
+  } else if (revisions.length) {
+    revisionSelect.value = nonEmptyText(revisions[0]?.detail?.revision_id);
+  }
+
+  const revisionId = nonEmptyText(revisionSelect.value);
+  const selectedRevision = revisions.find(
+    (item) => item?.detail?.revision_id === revisionId,
+  );
+  const pointers = selectedRevision
+    ? interactiveTreeFrontierEligiblePointers(selectedRevision)
+    : [];
+  const previousNode = preserveNode ? nonEmptyText(nodeSelect.value) : "";
+  nodeSelect.innerHTML = [
+    '<option value="">请选择当前 revision 的 frontier 节点</option>',
+    ...pointers.map((pointer) => {
+      const sourceNodeId = nonEmptyText(pointer.source_node_id);
+      const node = selectedRevision?.pointers?.nodes?.find?.(
+        (item) => item?.node_id === sourceNodeId,
+      );
+      const label = node?.condition
+        ? `${sourceNodeId} · ${readableValue(node.condition)}`
+        : sourceNodeId;
+      return projectionOptionHtml(
+        sourceNodeId,
+        label,
+        {
+          "candidate-lab-projection": "1",
+          "revision-id": revisionId,
+          "source-node-id": sourceNodeId,
+        },
+      );
+    }),
+  ].join("");
+  const preferredNode = nonEmptyText(requestedSourceNodeId) || previousNode;
+  if (selectContainsValue(nodeSelect, preferredNode)) {
+    nodeSelect.value = preferredNode;
+  } else if (pointers.length) {
+    nodeSelect.value = nonEmptyText(pointers[0]?.source_node_id);
+  }
+  const help = form.querySelector?.(
+    "[data-candidate-lab-interactive-tree-frontier-help]",
+  );
+  if (help) {
+    help.textContent = revisions.length
+      ? pointers.length
+        ? "每次只物化一个明确前沿节点；入池必须在后续单独请求中完成。"
+        : "该 revision 当前没有可物化的受认证 frontier 节点。"
+      : "当前任务尚无不可变交互树 revision，请先完成一次明确剪枝。";
   }
 }
 
@@ -2580,7 +2807,8 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       + "[data-candidate-lab-form] select, "
       + "[data-candidate-lab-form] textarea, "
       + "[data-candidate-lab-form] button, "
-      + "[data-candidate-lab-interactive-tree-prune]",
+      + "[data-candidate-lab-interactive-tree-prune], "
+      + "[data-candidate-lab-interactive-tree-frontier-materialize]",
     ) || [];
     for (const control of controls) {
       const refinementPanel = control.closest?.(
@@ -2648,6 +2876,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       interactiveTreeForm(root),
       state.payload,
     );
+    syncInteractiveTreeFrontierMaterializationControls(
+      interactiveTreeFrontierMaterializationForm(root),
+      state.payload,
+    );
     renderAvailability();
   }
 
@@ -2667,6 +2899,11 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     syncVotingForms(root, state.payload);
     syncInteractiveTreeRevisionControls(
       interactiveTreeForm(root),
+      state.payload,
+      { preserveNode: false },
+    );
+    syncInteractiveTreeFrontierMaterializationControls(
+      interactiveTreeFrontierMaterializationForm(root),
       state.payload,
       { preserveNode: false },
     );
@@ -2812,6 +3049,19 @@ export function createStrategyCandidateLabController(dependencies = {}) {
           "交互式树剪枝指针已过期或不属于当前任务的受认证投影，请刷新 Candidate Lab 后重选。",
         );
       }
+      if (
+        strategyRequest.workflow
+          === "interactive_tree_frontier_materialization"
+        && !interactiveTreeFrontierPointer(
+          state.payload,
+          strategyRequest.workflow_inputs.revision_id,
+          strategyRequest.workflow_inputs.source_node_id,
+        )
+      ) {
+        throw new Error(
+          "交互树前沿指针已过期或不属于当前任务的受认证投影，请刷新 Candidate Lab 后重选。",
+        );
+      }
     } catch (error) {
       const message = error?.message || "Candidate Lab 表单输入无效。";
       setFormError(form, message);
@@ -2893,6 +3143,52 @@ export function createStrategyCandidateLabController(dependencies = {}) {
   }
 
   function handleClick(event) {
+    const materialize = event.target?.closest?.(
+      "[data-candidate-lab-interactive-tree-frontier-materialize]",
+    );
+    if (materialize) {
+      event.preventDefault?.();
+      const reason = blockedReason(state, dependencies);
+      const form = interactiveTreeFrontierMaterializationForm(panel());
+      if (reason) {
+        const message = BLOCKED_REASON_COPY[reason]
+          || "当前 Candidate Lab 暂不可启动新分析。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+        return true;
+      }
+      const revisionId = nonEmptyText(materialize.dataset?.revisionId);
+      const sourceNodeId = nonEmptyText(materialize.dataset?.sourceNodeId);
+      const pointer = interactiveTreeFrontierPointer(
+        state.payload,
+        revisionId,
+        sourceNodeId,
+      );
+      if (!pointer || !form) {
+        const message = "该前沿指针不属于当前任务的受认证 Candidate Lab 投影。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+        return true;
+      }
+      syncInteractiveTreeFrontierMaterializationControls(
+        form,
+        state.payload,
+        {
+          requestedRevisionId: revisionId,
+          requestedSourceNodeId: sourceNodeId,
+          preserveNode: false,
+        },
+      );
+      setFormError(form, "");
+      const launcher = form.closest?.(".candidate-lab-launcher");
+      if (launcher) launcher.open = true;
+      dependencies.setActionStatus?.(
+        "已带入受认证 revision 与前沿节点；确认后只物化该节点，不会自动入池。",
+        "info",
+      );
+      renderAvailability();
+      return true;
+    }
     const prune = event.target?.closest?.(
       "[data-candidate-lab-interactive-tree-prune]",
     );
@@ -3034,6 +3330,21 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     ) {
       syncInteractiveTreeRevisionControls(
         interactiveTree,
+        state.payload,
+        { preserveNode: false },
+      );
+      renderAvailability();
+      return true;
+    }
+    const interactiveTreeFrontier = field.closest?.(
+      '[data-candidate-lab-workflow="interactive_tree_frontier_materialization"]',
+    );
+    if (
+      interactiveTreeFrontier
+      && fieldName === "interactive_tree_frontier_revision_id"
+    ) {
+      syncInteractiveTreeFrontierMaterializationControls(
+        interactiveTreeFrontier,
         state.payload,
         { preserveNode: false },
       );

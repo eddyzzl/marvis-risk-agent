@@ -16,6 +16,10 @@ from marvis.packs.strategy.interactive_tree_tools import (
     INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
     INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
 )
+from tests.test_strategy_pool_interactive_tree_frontier import (
+    _add_inputs as _interactive_pool_add_inputs,
+    _materialize_frontier,
+)
 
 
 pytest_plugins = ("tests.test_strategy_interactive_tree_tool",)
@@ -273,6 +277,72 @@ def test_candidate_lab_projects_each_tree_source_without_inventing_one_current_b
     assert _current_keys(revisions) == set()
     assert _hash_keys(base_after) == set()
     assert _hash_keys(revisions) == set()
+
+
+def test_candidate_lab_replays_interactive_frontier_pool_sources(
+    scenario,
+) -> None:
+    selection, revision = _materialize_frontier(scenario)
+    added = strategy_tools.tool_add_candidate_to_pool(
+        _interactive_pool_add_inputs(selection),
+        scenario.ctx,
+    )
+    client = TestClient(create_app(scenario.settings))
+
+    response = client.get(
+        f"/api/tasks/{scenario.task.id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 200, response.text
+    projection = response.json()
+    assert projection["pools"]["total"] == 1
+    pool = projection["pools"]["latest"]
+    assert pool["revision"] == added["revision"]
+    [entry] = pool["entries"]
+    fragment = next(
+        item
+        for item in revision["fragments"]
+        if item["source_node_id"] == selection["source_node_id"]
+    )
+    assert entry["source"] == {
+        "asset_id": revision["semantic_tree_id"],
+        "asset_type": revision["asset_type"],
+        "fragment_id": fragment["fragment_id"],
+        "fragment_type": "strategy_rule",
+        "effect_id": fragment["effect_id"],
+        "evidence_id": revision["candidate_evidence"]["candidate_id"],
+        "candidate_stage": "development",
+        "observation_stage": "backtested",
+        "validation_status": "unvalidated",
+    }
+    assert entry["execution"]["condition"] == fragment["condition"]
+    assert _hash_keys(projection) == set()
+
+
+def test_candidate_lab_frontier_pool_source_tampering_fails_closed(
+    scenario,
+) -> None:
+    selection, _revision = _materialize_frontier(scenario)
+    strategy_tools.tool_add_candidate_to_pool(
+        _interactive_pool_add_inputs(selection),
+        scenario.ctx,
+    )
+    record = scenario.repository.get_for_task(
+        scenario.task.id,
+        selection["artifacts"][0]["artifact_id"],
+    )
+    assert record is not None
+    Path(record["path"]).write_text('{"forged":true}', encoding="utf-8")
+    client = TestClient(create_app(scenario.settings))
+
+    response = client.get(
+        f"/api/tasks/{scenario.task.id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "strategy candidate lab evidence verification failed"
+    )
 
 
 @pytest.mark.parametrize("tamper", ["bytes", "provenance"])
