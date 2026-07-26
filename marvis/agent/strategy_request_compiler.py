@@ -74,6 +74,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "automatic_tree_apply",
     "automatic_tree_leaf_materialization",
     "voting_candidate_search",
+    "voting_candidate_build_from_search",
     "voting_candidate_build",
     "cross_matrix_analysis",
     "cross_matrix_cell_selection",
@@ -1195,6 +1196,99 @@ _POOL_ITEM_ID_RE = re.compile(r"^(?:candidate-rule|pool-entry)-[0-9a-f]{32}$")
 _VOTING_RULE_ID_RE = re.compile(r"^candidate-rule-[0-9a-f]{32}$")
 _VOTING_RULE_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])candidate-rule-[0-9a-f]{32}(?![A-Za-z0-9_-])"
+)
+_VOTING_SEARCH_ID_RE = re.compile(r"^voting-search-[0-9a-f]{32}$")
+_VOTING_SEARCH_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])voting-search-[0-9a-f]{32}(?![A-Za-z0-9_-])"
+)
+_VOTING_COMBO_ID_RE = re.compile(r"^voting-combo-[0-9a-f]{32}$")
+_VOTING_COMBO_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])voting-combo-[0-9a-f]{32}(?![A-Za-z0-9_-])"
+)
+_VOTING_SEARCH_SELECTION_INTENT_RE = re.compile(
+    r"(?:构建|物化|生成|创建)[^；;。\n]{0,80}"
+    r"(?:Voting|投票|n[-_ ]?of[-_ ]?k|候选)|"
+    r"(?:Voting|投票|n[-_ ]?of[-_ ]?k|搜索(?:结果|证据)|组合)"
+    r"[^；;。\n]{0,80}(?:构建|物化|生成|创建)|"
+    r"(?<![A-Za-z0-9_])(?:build|materialize|create|generate)"
+    r"[^;.!?\n]{0,80}(?:voting|n[-_ ]?of[-_ ]?k|candidate)|"
+    r"(?<![A-Za-z0-9_])(?:voting|n[-_ ]?of[-_ ]?k|search\s+(?:result|evidence))"
+    r"[^;.!?\n]{0,80}(?:build|materialize|create|generate)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_VOTING_SEARCH_SELECTION_HEURISTIC_RE = re.compile(
+    r"(?:第[一二三四五六七八九十百\d]+名|第一(?:个|名)|最好(?:的)?|最优|"
+    r"最佳|冠军|Top\s*[-#]?\s*\d+|排名|名次|刚才(?:那个|这个|的)?|"
+    r"上述|这个组合|那个组合)|"
+    r"(?<![A-Za-z0-9_])(?:winner|champion|first|best|top\s*[-#]?\s*\d+|"
+    r"rank(?:ing)?|previous|that\s+one|this\s+one)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_VOTING_SEARCH_SELECTION_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:artifact_id|artifact_hash|artifact_content_hash|"
+    r"expected_artifact_content_hash|search_content_hash|"
+    r"expected_search_content_hash|expected_content_hash|content_hash|"
+    r"(?:expected_)?pool_(?:revision|snapshot_hash|id)|"
+    r"(?:expected_)?revision_id|pool_ref|dataset_id|dataset_binding|"
+    r"(?:expected_)?dataset_content_hash|target_(?:col|polarity|semantics)|"
+    r"target_binding|polarity|"
+    r"sample_design_(?:ref|id|(?:content_)?hash|partition)|partition|"
+    r"workspace_(?:revision|generation)|semantic_mapping(?:_hash)?|"
+    r"requirement_bindings?|observation_bindings|provenance|rule_ids|"
+    r"member_rule_ids|member_ids|entry_ids|selected_entry_ids|n|rank)"
+    r"\s*(?:=|:|：)|"
+    r"(?<![A-Za-z0-9_])(?:pool\s+(?:revision|snapshot\s+hash|id)|"
+    r"revision\s+id|dataset\s+(?:id|content\s+hash)|content\s+hash|"
+    r"target\s+(?:column|col|polarity|semantics)|polarity|"
+    r"sample\s+design\s+(?:reference|ref|id|hash|partition)|"
+    r"workspace\s+(?:revision|generation)|semantic\s+mapping(?:\s+hash)?|"
+    r"requirement\s+bindings?)\s*(?:=|:|：)|"
+    r"(?<![A-Za-z0-9_-])(?:candidate-rule|pool-entry)-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])|"
+    r"(?:artifact|工件)\s*(?:id|hash|哈希|引用)|"
+    r"(?:(?:(?:策略|规则)?池|(?:Strategy\s+)?Pool)\s*"
+    r"(?:版本|修订|快照(?:哈希|hash)|ID|id)|"
+    r"(?:版本|修订)ID|(?:数据集|数据)(?:ID|id|内容(?:哈希|hash))|"
+    r"(?:目标|标签|坏标签)(?:列|字段|极性|语义|方向|取值)|"
+    r"样本设计(?:引用|ID|id|(?:内容)?(?:哈希|hash)|分区)|"
+    r"工作区(?:版本|修订|代次|revision|generation)|"
+    r"语义映射(?:(?:哈希|hash))?|(?:规则)?需求绑定)\s*(?:=|:|：|为)",
+    re.IGNORECASE,
+)
+_VOTING_SEARCH_SELECTION_FOLLOW_UP_RE = re.compile(
+    r"(?:加入|放入|写入|纳入|添加|加到)"
+    r"[^，,；;。\n]{0,24}(?:策略池|规则池|Pool)|"
+    r"(?:修改|调整|变更|编辑)[^，,；;。\n]{0,20}"
+    r"(?:策略池|规则池|Pool)|"
+    r"(?:设置|设为|改为)[^，,；;。\n]{0,20}(?:拒绝|审批|复核|动作)|"
+    r"(?:入池|设置动作|应用|套用|执行|采纳|部署|上线|投产|写回|回写)|"
+    r"(?<![A-Za-z0-9_])(?:add\s+to\s+(?:the\s+)?(?:strategy\s+)?pool|"
+    r"modify\s+(?:the\s+)?(?:strategy\s+)?pool|set\s+action|apply|adopt|"
+    r"deploy|publish|write[- ]?back)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_VOTING_SEARCH_SELECTION_RESEARCH_RE = re.compile(
+    r"(?:重新|再次|再)?(?:搜索|查找|寻找|检索|枚举|优化|筛选)"
+    r"[^，,；;。\n]{0,48}(?:投票|Voting|n[-_ ]?of[-_ ]?k)(?:组合|候选)?|"
+    r"(?:搜索|查找|寻找|找|检索|枚举|优化|筛选)"
+    r"[^，,；;。\n]{0,16}(?:一遍|一次|更好(?:的)?(?:组合|候选))|"
+    r"(?<![A-Za-z0-9_])(?:re-?search|search|find|enumerate|optimi[sz]e)"
+    r"[^,;.!?\n]{0,48}(?:voting|n[-_ ]?of[-_ ]?k)(?:\s+combinations?)?"
+    r"(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])(?:re-?search|search(?:ing)?|find|enumerate|optimi[sz]e)"
+    r"[^,;.!?\n]{0,32}(?:again|better\s+(?:combination|candidate))"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_VOTING_SEARCH_SELECTION_NEGATED_RESEARCH_RE = re.compile(
+    r"(?:不|不要|不用|无需|不需要|先不|暂不|别|禁止)"
+    r"[^，,；;。\n]{0,20}(?:重新|再次|再)?"
+    r"(?:搜索|查找|寻找|找|检索|枚举|优化|筛选)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|never|without)"
+    r"[^,;.!?\n]{0,24}(?:re-?search|search(?:ing)?|find|enumerate|optimi[sz]e)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
 )
 _VOTING_SUBJECT_RE = re.compile(
     r"(?:投票|(?<![A-Za-z0-9_])(?:Voting|n[-_ ]?of[-_ ]?k)"
@@ -3319,6 +3413,10 @@ def _validate_standard_workflow_payload(
             )
         elif workflow == "voting_candidate_search":
             normalized = _validate_voting_candidate_search_inputs(raw_inputs)
+        elif workflow == "voting_candidate_build_from_search":
+            normalized = _validate_voting_candidate_build_from_search_inputs(
+                raw_inputs
+            )
         elif workflow == "voting_candidate_build":
             normalized = _validate_voting_candidate_build_inputs(raw_inputs)
         elif workflow == "cross_matrix_analysis":
@@ -5203,6 +5301,47 @@ def _validate_voting_candidate_build_inputs(
     return {"strategy_type": strategy_type, "rule_ids": rule_ids, "n": n}
 
 
+def _validate_voting_candidate_build_from_search_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the two exact search pointers and optional Pool type only."""
+
+    workflow = "voting_candidate_build_from_search"
+    allowed = {"search_id", "combo_id", "strategy_type"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted({"search_id", "combo_id"} - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+
+    search_id = _required_text(inputs["search_id"], name=f"{workflow} search_id")
+    if _VOTING_SEARCH_ID_RE.fullmatch(search_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} search_id 必须是完整的 voting-search ID。"
+        )
+    combo_id = _required_text(inputs["combo_id"], name=f"{workflow} combo_id")
+    if _VOTING_COMBO_ID_RE.fullmatch(combo_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} combo_id 必须是完整的 voting-combo ID。"
+        )
+
+    normalized = {"search_id": search_id, "combo_id": combo_id}
+    if "strategy_type" in inputs:
+        strategy_type = _required_text(
+            inputs["strategy_type"],
+            name=f"{workflow} strategy_type",
+        )
+        if strategy_type not in STRATEGY_TYPES:
+            raise _DraftValidationError(
+                f"{workflow} strategy_type 只能是："
+                + "、".join(STRATEGY_TYPES)
+                + "。"
+            )
+        normalized["strategy_type"] = strategy_type
+    return normalized
+
+
 def _validate_voting_candidate_search_inputs(
     inputs: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -6247,8 +6386,19 @@ def _utterance_targets_voting_candidate_search(utterance: str) -> bool:
     """Reserve explicit Voting combination search before exact-member build."""
 
     return (
-        _VOTING_SUBJECT_RE.search(utterance) is not None
+        not _utterance_targets_voting_search_selection(utterance)
+        and _VOTING_SUBJECT_RE.search(utterance) is not None
         and _VOTING_SEARCH_INTENT_RE.search(utterance) is not None
+    )
+
+
+def _utterance_targets_voting_search_selection(utterance: str) -> bool:
+    """Reserve an exact search-result materialization before search/build."""
+
+    return (
+        _VOTING_SEARCH_ID_TOKEN_RE.search(utterance) is not None
+        and _VOTING_COMBO_ID_TOKEN_RE.search(utterance) is not None
+        and _VOTING_SEARCH_SELECTION_INTENT_RE.search(utterance) is not None
     )
 
 
@@ -6304,6 +6454,81 @@ def _voting_search_text_has_positive_follow_up(text: str) -> bool:
         if _VOTING_SEARCH_NEGATED_FOLLOW_UP_RE.search(fragment) is None:
             return True
         previous_end = match.end()
+    return False
+
+
+def _voting_search_selection_has_positive_follow_up(text: str) -> bool:
+    """Reject lifecycle chaining while allowing explicit negative disclaimers."""
+
+    previous_end = 0
+    for match in _VOTING_SEARCH_SELECTION_FOLLOW_UP_RE.finditer(text):
+        clause_start = max(
+            text.rfind(separator, 0, match.start()) + 1
+            for separator in ("；", ";", "。", ".", "!", "！", "?", "？")
+        )
+        clause_prefix = text[clause_start : match.start()]
+        english_negation = tuple(
+            re.finditer(
+                r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|never|without)"
+                r"(?![A-Za-z0-9_])",
+                clause_prefix,
+                re.IGNORECASE,
+            )
+        )
+        if english_negation:
+            after_negation = clause_prefix[english_negation[-1].end() :]
+            if re.search(
+                r"(?<![A-Za-z0-9_])(?:but|however|then)(?![A-Za-z0-9_])",
+                after_negation,
+                re.IGNORECASE,
+            ) is None:
+                previous_end = match.end()
+                continue
+        local_start = max(
+            previous_end,
+            *(
+                text.rfind(separator, previous_end, match.start()) + 1
+                for separator in (
+                    "，",
+                    ",",
+                    "；",
+                    ";",
+                    "。",
+                    ".",
+                    "!",
+                    "！",
+                    "?",
+                    "？",
+                )
+            ),
+        )
+        fragment = text[local_start : match.end()]
+        if _VOTING_SEARCH_NEGATED_FOLLOW_UP_RE.search(fragment) is None:
+            return True
+        previous_end = match.end()
+    return False
+
+
+def _voting_search_selection_has_positive_research(text: str) -> bool:
+    """Detect a second search command, excluding an explicitly negated one."""
+
+    scrubbed = _VOTING_SEARCH_ID_TOKEN_RE.sub(
+        lambda match: " " * len(match.group(0)),
+        text,
+    )
+    scrubbed = _VOTING_COMBO_ID_TOKEN_RE.sub(
+        lambda match: " " * len(match.group(0)),
+        scrubbed,
+    )
+    for match in _VOTING_SEARCH_SELECTION_RESEARCH_RE.finditer(scrubbed):
+        local_start = max(
+            scrubbed.rfind(separator, 0, match.start()) + 1
+            for separator in ("，", ",", "；", ";", "。", ".", "!", "！", "?", "？")
+        )
+        if _VOTING_SEARCH_SELECTION_NEGATED_RESEARCH_RE.search(
+            scrubbed[local_start : match.end()]
+        ) is None:
+            return True
     return False
 
 
@@ -7373,6 +7598,19 @@ def _ground_refinement_request(
     whitelist: tuple[str, ...],
 ) -> StrategyRequestCompilation:
     draft = result.draft
+    if _utterance_targets_voting_search_selection(utterance):
+        if not (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow == "voting_candidate_build_from_search"
+        ):
+            return _clarification(
+                "原话明确要求从一个 Voting 搜索结果的完整 search_id 与 combo_id "
+                "构建候选，只能编译为 voting_candidate_build_from_search；不能改路由为"
+                "重新搜索、自由 rule ID 构建、通用策略生命周期或其他 Workflow。",
+                code="voting_search_selection_workflow_required",
+                fields=("workflow",),
+            )
+        return _ground_voting_candidate_build_from_search(utterance, result)
     if utterance_targets_strategy_dsl_delivery(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_dsl_delivery"
@@ -7614,6 +7852,8 @@ def _ground_refinement_request(
         return _ground_automatic_tree_leaf_materialization(utterance, result)
     if draft.workflow == "voting_candidate_search":
         return _ground_voting_candidate_search(utterance, result)
+    if draft.workflow == "voting_candidate_build_from_search":
+        return _ground_voting_candidate_build_from_search(utterance, result)
     if draft.workflow == "voting_candidate_build":
         return _ground_voting_candidate_build(utterance, result)
     if draft.workflow == "cross_matrix_cell_selection":
@@ -9637,6 +9877,88 @@ def _voting_search_rule_controls(
             else:
                 exclude.add(rule_id)
     return include, exclude, labeled
+
+
+def _ground_voting_candidate_build_from_search(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Ground one exact search/combo pointer pair in the current command."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if not _utterance_targets_voting_search_selection(utterance):
+        return _clarification(
+            "请明确要求从一个完整 Voting search_id 和一个完整 combo_id "
+            "构建或物化候选。",
+            code="voting_search_selection_intent_required",
+            fields=("build_intent", "search_id", "combo_id"),
+        )
+    if (
+        _VOTING_NEGATED_BUILD_RE.search(utterance) is not None
+        or _VOTING_NONCOMMAND_RE.search(utterance) is not None
+        or _VOTING_POSTPOSED_CANCELLATION_RE.search(utterance) is not None
+    ):
+        return _clarification(
+            "Voting 搜索结果构建必须是当前轮立即执行的肯定式单步命令；问句、"
+            "否定、假设、历史/未来描述或句尾撤销不会构建候选。",
+            code="voting_search_selection_positive_command_required",
+            fields=("build_intent",),
+        )
+    if (
+        _voting_search_selection_has_positive_research(utterance)
+        or _voting_search_selection_has_positive_follow_up(utterance)
+    ):
+        return _clarification(
+            "本轮只从精确 search_id/combo_id 构建 Voting 候选；加入或修改 "
+            "Strategy Pool、设置动作、应用、采纳、部署和写回必须另发请求。",
+            code="voting_search_selection_single_step_required",
+            fields=("next_action",),
+        )
+    if _VOTING_SEARCH_SELECTION_PLATFORM_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "Voting 搜索结果构建只接受 search_id、combo_id 与可选 strategy_type；"
+            "artifact/hash、rule/entry/member IDs、n 和 rank 均由平台重新恢复，"
+            "不能由自然语言注入。",
+            code="voting_search_selection_platform_binding_forbidden",
+            fields=("platform_binding",),
+        )
+    if _VOTING_SEARCH_SELECTION_HEURISTIC_RE.search(utterance) is not None:
+        return _clarification(
+            "请逐字点名完整 search_id 与 combo_id；即使同时提供 pointer，平台也"
+            "不会消费第一名、最好、冠军、Top N、排名或‘刚才那个’等启发式选择。",
+            code="voting_search_selection_explicit_ids_required",
+            fields=("search_id", "combo_id"),
+        )
+    search_ids = tuple(
+        match.group(0) for match in _VOTING_SEARCH_ID_TOKEN_RE.finditer(utterance)
+    )
+    combo_ids = tuple(
+        match.group(0) for match in _VOTING_COMBO_ID_TOKEN_RE.finditer(utterance)
+    )
+    if search_ids != (inputs["search_id"],) or combo_ids != (inputs["combo_id"],):
+        return _clarification(
+            "Voting 搜索结果构建必须逐字提供且只提供一个完整 search_id 与一个"
+            "完整 combo_id；平台不会补全、替换、按排名选择或消费代词。",
+            code="voting_search_selection_controls_not_grounded",
+            fields=("search_id", "combo_id"),
+        )
+    observed_types = {
+        value for value, _start, _end in _voting_strategy_type_mentions(utterance)
+    }
+    expected_type = inputs.get("strategy_type")
+    if (
+        expected_type is not None
+        and observed_types != {expected_type}
+    ) or (expected_type is None and observed_types):
+        return _clarification(
+            "可选 strategy_type 只能逐字采用当前请求中唯一明确的 Strategy Pool "
+            "类型；未明确时模型必须省略并由平台唯一解析。",
+            code="voting_search_selection_strategy_type_not_grounded",
+            fields=("strategy_type",),
+        )
+    return result
 
 
 def _ground_voting_candidate_build(
@@ -13732,6 +14054,22 @@ def _standard_workflow_confirmation_text(
                 "不会修改 Pool、入池、应用、采纳或部署",
             ]
         )
+    elif draft.workflow == "voting_candidate_build_from_search":
+        details = [
+            "已识别为〔Voting 搜索结果精确构建 Workflow〕",
+            f"搜索证据 pointer：{inputs['search_id']}",
+            f"组合 pointer：{inputs['combo_id']}",
+        ]
+        if "strategy_type" in inputs:
+            details.append(f"来源 Strategy Pool 类型：{inputs['strategy_type']}")
+        details.extend(
+            [
+                "平台将在计划开始前重新校验搜索证据、组合与当前 Pool；"
+                "不会采用排名、最好或冠军等启发式选择",
+                "本步骤只构建 development/backtested/unvalidated Voting 候选；"
+                "不会加入或修改 Pool，不会设置动作、应用、采纳或部署",
+            ]
+        )
     elif draft.workflow == "voting_candidate_build":
         details = [
             "已识别为〔Voting / n-of-k 候选构建 Workflow〕",
@@ -14409,6 +14747,13 @@ def _user_prompt(
         "amounts、artifact、result 或已计算排名。该步骤只搜索，不构建、不选择、不修改"
         "或加入 Pool、不应用、不采纳、不部署；搜索/查找/优化 Voting 组合的原话必须优先"
         "路由到本 Workflow 或 clarification。"
+        "对于 voting_candidate_build_from_search，只能逐字抄录用户当前请求中唯一完整"
+        "的 search_id、唯一完整的 combo_id 和可选的唯一 strategy_type；strategy_type"
+        " 未明确时必须省略。不得输出 artifact/hash、rule/entry/member IDs、n、rank、"
+        "winner/champion、指标、结果或 Pool 身份，也不得按第一名、最好、Top N、"
+        "刚才那个等表述选择组合。该步骤只构建候选；同轮串联入池、修改 Pool、设置"
+        "动作、应用、采纳、部署或写回时必须 clarification。它必须优先于重新搜索和"
+        "自由 rule ID Voting 构建路由。"
         "对于 voting_candidate_build，只能逐字抄录用户明确标注的 strategy_type、"
         "2 到 50 个完整 candidate-rule ID 和整数 n；不得输出 entry_id、Pool revision/hash、"
         "condition、指标、动作、推荐或平台数据绑定。规则集合必须全部来自同一条正向"

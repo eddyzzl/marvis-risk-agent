@@ -151,6 +151,7 @@ from marvis.packs.strategy.voting_candidate_tools import (
     load_verified_voting_candidate_artifact_on_connection,
 )
 from marvis.packs.strategy.voting_candidate_search_tools import (
+    resolve_voting_candidate_search_selection,
     resolve_voting_candidate_search_inputs,
 )
 from marvis.packs.strategy.cross_matrix_candidate_tools import (
@@ -2713,6 +2714,23 @@ def _run_validated_strategy_request(
 
     if (
         isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "voting_candidate_build_from_search"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_voting_candidate_build_from_search",
+            slots=_strategy_voting_candidate_build_from_search_plan_slots(
+                runtime,
+                task,
+                draft,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "voting_candidate_build"
     ):
         return _start_confirmed_strategy_plan(
@@ -3894,6 +3912,16 @@ def _standard_workflow_request_preflight(
         except StrategySetupError as exc:
             return ("strategy_voting_search_pool_binding_required", str(exc))
         return None
+    if draft.workflow == "voting_candidate_build_from_search":
+        try:
+            _strategy_voting_candidate_build_from_search_plan_slots(
+                runtime,
+                task,
+                draft,
+            )
+        except StrategySetupError as exc:
+            return ("strategy_voting_search_selection_binding_required", str(exc))
+        return None
     if draft.workflow == "voting_candidate_build":
         try:
             _strategy_voting_candidate_plan_slots(runtime, task, draft)
@@ -4895,6 +4923,32 @@ def _strategy_voting_candidate_search_plan_slots(
         )
     except StrategyError as exc:
         raise StrategySetupError(str(exc)) from exc
+
+
+def _strategy_voting_candidate_build_from_search_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Preflight exact pointers without copying recovered state into the plan."""
+
+    if draft.workflow != "voting_candidate_build_from_search":
+        raise StrategySetupError(
+            "Voting 搜索结果构建 slots 收到了错误的 Workflow。"
+        )
+    inputs = draft.to_dict()["workflow_inputs"]
+    try:
+        read_runtime = _strategy_report_read_runtime(runtime)
+        resolve_voting_candidate_search_selection(
+            read_runtime,
+            task_id=task.id,
+            search_id=inputs["search_id"],
+            combo_id=inputs["combo_id"],
+            strategy_type=inputs.get("strategy_type"),
+        )
+    except StrategyError as exc:
+        raise StrategySetupError(str(exc)) from exc
+    return dict(inputs)
 
 
 def _strategy_voting_candidate_plan_slots(
@@ -9238,6 +9292,7 @@ def _strategy_request_requires_dataset(
             "automatic_tree_leaf_materialization",
             "cross_matrix_cell_selection",
             "voting_candidate_search",
+            "voting_candidate_build_from_search",
             "voting_candidate_build",
         }:
             return False

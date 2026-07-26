@@ -322,6 +322,11 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     voting_search_tool = next(
         tool for tool in manifest.tools if tool.name == "search_voting_candidates"
     )
+    voting_search_selection_tool = next(
+        tool
+        for tool in manifest.tools
+        if tool.name == "build_voting_candidate_from_search"
+    )
     cross_matrix_tool = next(
         tool for tool in manifest.tools if tool.name == "build_cross_matrix_candidate"
     )
@@ -405,6 +410,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "materialize_automatic_tree_leaf_fragment",
         "build_voting_candidate",
         "search_voting_candidates",
+        "build_voting_candidate_from_search",
         "build_cross_matrix_candidate",
         "materialize_cross_matrix_cell_selection",
         "build_scorecard_band_asset",
@@ -769,6 +775,75 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         assert voting_search_tool.output_schema["properties"][field] == {
             "const": True
         }
+    assert voting_search_selection_tool.determinism == "deterministic"
+    assert voting_search_selection_tool.policy.human_decision_gate == "none"
+    assert voting_search_selection_tool.policy.effect_authorization == "none"
+    assert set(voting_search_selection_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+    }
+    assert voting_search_selection_tool.input_schema["required"] == [
+        "search_id",
+        "combo_id",
+    ]
+    assert set(voting_search_selection_tool.input_schema["properties"]) == {
+        "search_id",
+        "combo_id",
+        "strategy_type",
+    }
+    assert (
+        voting_search_selection_tool.input_schema["additionalProperties"] is False
+    )
+    assert (
+        voting_search_selection_tool.output_schema["additionalProperties"] is False
+    )
+    assert voting_search_selection_tool.output_schema["properties"][
+        "schema_version"
+    ] == {"const": "strategy.build-voting-candidate-from-search-tool.v1"}
+    assert voting_search_selection_tool.output_schema["properties"][
+        "not_mutated_pool"
+    ] == {"const": True}
+    assert voting_search_selection_tool.output_schema["properties"][
+        "voting_candidate"
+    ] == {"$ref": "#/$defs/voting_candidate"}
+    delegated_schema = dict(voting_tool.output_schema)
+    delegated_defs = delegated_schema.pop("$defs")
+    assert voting_search_selection_tool.output_schema["$defs"][
+        "voting_candidate"
+    ] == delegated_schema
+    for name, schema in delegated_defs.items():
+        assert voting_search_selection_tool.output_schema["$defs"][name] == schema
+
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {
+                "schema_version": (
+                    "strategy.build-voting-candidate-from-search-tool.v1"
+                ),
+                "source_search_selection": {
+                    "search_id": "voting-search-" + "a" * 32,
+                    "combo_id": "voting-combo-" + "b" * 32,
+                    "strategy_type": "approval",
+                    "rank": 1,
+                    "member_rule_ids": [
+                        "candidate-rule-" + "c" * 32,
+                        "candidate-rule-" + "d" * 32,
+                    ],
+                    "n": 1,
+                    "eligible": True,
+                    "constraint_failures": [],
+                },
+                "voting_candidate": {"asset_id": "candidate-asset-" + "e" * 32},
+                "not_mutated_pool": True,
+                "not_admitted": True,
+                "not_applied": True,
+                "not_adopted": True,
+                "not_deployed": True,
+            },
+            voting_search_selection_tool.output_schema,
+            label="Voting search selection nested output",
+        )
     assert cross_matrix_tool.determinism == "deterministic"
     assert cross_matrix_tool.policy.human_decision_gate == "none"
     assert cross_matrix_tool.policy.effect_authorization == "none"

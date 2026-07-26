@@ -135,7 +135,7 @@ def test_voting_candidate_compiles_exact_rule_set_and_n() -> None:
         RULE_C,
     }
     assert result.draft.to_dict()["workflow_inputs"]["n"] == 2
-    assert llm.calls[0]["prompt_version"] == 37
+    assert llm.calls[0]["prompt_version"] == 38
     assert "voting_candidate_build" in llm.calls[0]["system_prompt"]
 
 

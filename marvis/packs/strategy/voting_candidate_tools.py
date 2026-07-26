@@ -9,7 +9,7 @@ or deployment state.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -235,6 +235,40 @@ class _SampleBinding:
 def run_build_voting_candidate(inputs: object, ctx, runtime) -> dict[str, Any]:
     """Build and publish one candidate without changing the Pool or strategy."""
 
+    return _run_build_voting_candidate(
+        inputs,
+        ctx,
+        runtime,
+        registration_guard=None,
+    )
+
+
+def _run_build_voting_candidate_with_registration_guard(
+    inputs: object,
+    ctx,
+    runtime,
+    *,
+    registration_guard: Callable[[Any], None],
+) -> dict[str, Any]:
+    """Delegate candidate publication with one caller-owned commit guard."""
+
+    if not callable(registration_guard):
+        raise StrategyError("Voting candidate registration guard is invalid")
+    return _run_build_voting_candidate(
+        inputs,
+        ctx,
+        runtime,
+        registration_guard=registration_guard,
+    )
+
+
+def _run_build_voting_candidate(
+    inputs: object,
+    ctx,
+    runtime,
+    *,
+    registration_guard: Callable[[Any], None] | None,
+) -> dict[str, Any]:
     try:
         request = _validate_inputs(inputs)
         task_id = _required_text(ctx.task_id, "task_id")
@@ -335,6 +369,7 @@ def run_build_voting_candidate(inputs: object, ctx, runtime) -> dict[str, Any]:
             sample=sample,
             resolved_requirements=resolved_requirements,
             document=document,
+            registration_guard=registration_guard,
         )
     except StrategyError:
         raise
@@ -1485,6 +1520,7 @@ def _persist_voting_candidate(
     sample: _SampleBinding,
     resolved_requirements: ResolvedPoolRequirements | None,
     document: Mapping[str, Any],
+    registration_guard: Callable[[Any], None] | None,
 ) -> dict[str, Any]:
     from marvis.packs.strategy import pool_tools
 
@@ -1573,6 +1609,8 @@ def _persist_voting_candidate(
                     content_hash=content_hash,
                     provenance=provenance,
                 )
+                if registration_guard is not None:
+                    registration_guard(conn)
                 uow.promote_all()
                 _verify_artifact_file(
                     final_path,
@@ -1601,6 +1639,8 @@ def _persist_voting_candidate(
                         conn,
                         resolved_requirements,
                     )
+                if registration_guard is not None:
+                    registration_guard(conn)
                 conn.commit()
                 db_committed = True
             except Exception:

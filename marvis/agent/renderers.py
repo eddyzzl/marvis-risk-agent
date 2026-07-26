@@ -1913,6 +1913,364 @@ def _render_build_voting_candidate(o: dict):
     return text, tables
 
 
+def _render_build_voting_candidate_from_search(
+    o: dict,
+    *,
+    trusted_inputs: Mapping[str, Any] | None,
+):
+    """Project an exact search pointer without implying automatic selection."""
+
+    validated = _validated_build_voting_candidate_from_search_output(
+        o,
+        trusted_inputs=trusted_inputs,
+    )
+    if validated is None:
+        return (
+            "**Voting 搜索结果候选完整性校验失败**：平台不会展示未经严格"
+            " pointer、候选结构和生命周期一致性校验的搜索来源、约束或候选"
+            "事实；请重新执行该构建步骤。",
+            [],
+        )
+    source, candidate = validated
+
+    search_id = source["search_id"]
+    combo_id = source["combo_id"]
+    eligibility = source.get("eligible")
+    prefix = (
+        f"**Voting 搜索组合精确构建来源**：用户精确点名 search "
+        f"`{search_id}` 中的 combo `{combo_id}`。"
+    )
+    if eligibility is True:
+        prefix += (
+            " 该组合满足搜索时的资格约束；这只是对用户 pointer 的证据说明，"
+            "不代表平台自动选择或推荐。"
+        )
+    elif eligibility is False:
+        failures = [
+            item
+            for item in (source.get("constraint_failures") or [])
+            if isinstance(item, dict)
+        ]
+        rendered_failures = "；".join(
+            f"{item.get('metric', '-')}"
+            f" {item.get('operator', '-')} {_num(item.get('threshold'))}"
+            f"（actual {_num(item.get('actual'))}）"
+            for item in failures
+        )
+        prefix += (
+            " **警告：该组合未满足搜索时的资格约束。**"
+            + (f" 失败约束：{rendered_failures}。" if rendered_failures else "")
+            + " 仍继续构建是因为用户精确点名了该 combo，不代表平台推荐。"
+        )
+    else:
+        prefix += (
+            " 搜索时的资格状态不可用；平台不会据此声称该组合满足约束或受到推荐。"
+        )
+
+    candidate_text, tables = _render_build_voting_candidate(candidate)
+    return f"{prefix}\n\n{candidate_text}", tables
+
+
+def _validated_build_voting_candidate_from_search_output(
+    output: object,
+    *,
+    trusted_inputs: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Validate the wrapper before projecting any search-selection claim."""
+
+    top_fields = {
+        "schema_version",
+        "source_search_selection",
+        "voting_candidate",
+        "not_mutated_pool",
+        "not_admitted",
+        "not_applied",
+        "not_adopted",
+        "not_deployed",
+    }
+    source_fields = {
+        "search_id",
+        "combo_id",
+        "strategy_type",
+        "rank",
+        "member_rule_ids",
+        "n",
+        "eligible",
+        "constraint_failures",
+    }
+    candidate_fields = {
+        "schema_version",
+        "asset_id",
+        "asset_hash",
+        "candidate_id",
+        "evidence_hash",
+        "rule_id",
+        "rule_hash",
+        "fragment_id",
+        "fragment_hash",
+        "effect_id",
+        "effect_hash",
+        "pool_id",
+        "revision",
+        "snapshot_hash",
+        "selected_entries",
+        "n",
+        "k",
+        "dataset_id",
+        "target_col",
+        "sample_design_ref",
+        "drop_nan_labels",
+        "nan_labels_dropped",
+        "population_count",
+        "labeled_count",
+        "candidate_stage",
+        "observation_stage",
+        "validation_status",
+        "effect",
+        "metrics",
+        "hit_distribution",
+        "metric_observations",
+        "not_admitted",
+        "not_applied",
+        "not_adopted",
+        "not_deployed",
+        "artifacts",
+    }
+    hash_fields = {
+        "asset_hash",
+        "evidence_hash",
+        "rule_hash",
+        "fragment_hash",
+        "effect_hash",
+        "snapshot_hash",
+    }
+    id_patterns = {
+        "asset_id": r"candidate-asset-[0-9a-f]{32}",
+        "candidate_id": r"candidate-[0-9a-f]{32}",
+        "rule_id": r"candidate-rule-[0-9a-f]{32}",
+        "fragment_id": r"candidate-fragment-[0-9a-f]{32}",
+        "effect_id": r"candidate-effect-[0-9a-f]{32}",
+    }
+    try:
+        if not isinstance(output, dict) or set(output) != top_fields:
+            return None
+        if output["schema_version"] != (
+            "strategy.build-voting-candidate-from-search-tool.v1"
+        ):
+            return None
+        if any(
+            output[field] is not True
+            for field in (
+                "not_mutated_pool",
+                "not_admitted",
+                "not_applied",
+                "not_adopted",
+                "not_deployed",
+            )
+        ):
+            return None
+        source = output["source_search_selection"]
+        candidate = output["voting_candidate"]
+        if (
+            not isinstance(trusted_inputs, Mapping)
+            or set(trusted_inputs)
+            not in (
+                {"search_id", "combo_id"},
+                {"search_id", "combo_id", "strategy_type"},
+            )
+            or not isinstance(source, dict)
+            or set(source) != source_fields
+            or not isinstance(candidate, dict)
+            or set(candidate) != candidate_fields
+        ):
+            return None
+        if (
+            trusted_inputs["search_id"] != source["search_id"]
+            or trusted_inputs["combo_id"] != source["combo_id"]
+            or (
+                "strategy_type" in trusted_inputs
+                and trusted_inputs["strategy_type"] != source["strategy_type"]
+            )
+        ):
+            return None
+        if (
+            re.fullmatch(
+                r"voting-search-[0-9a-f]{32}",
+                str(source["search_id"]),
+            )
+            is None
+            or re.fullmatch(
+                r"voting-combo-[0-9a-f]{32}",
+                str(source["combo_id"]),
+            )
+            is None
+            or source["strategy_type"]
+            not in {"approval", "reject", "limit", "pricing", "segmentation"}
+            or isinstance(source["rank"], bool)
+            or not isinstance(source["rank"], int)
+            or not 1 <= source["rank"] <= 10_000
+        ):
+            return None
+        members = source["member_rule_ids"]
+        if (
+            not isinstance(members, list)
+            or not 2 <= len(members) <= 50
+            or len(set(members)) != len(members)
+            or any(
+                not isinstance(rule_id, str)
+                or re.fullmatch(r"candidate-rule-[0-9a-f]{32}", rule_id)
+                is None
+                for rule_id in members
+            )
+        ):
+            return None
+        source_n = source["n"]
+        failures = source["constraint_failures"]
+        if (
+            isinstance(source_n, bool)
+            or not isinstance(source_n, int)
+            or not 1 <= source_n <= len(members)
+            or not isinstance(source["eligible"], bool)
+            or not isinstance(failures, list)
+            or len(failures) > 32
+            or source["eligible"] is not (len(failures) == 0)
+        ):
+            return None
+        for failure in failures:
+            if (
+                not isinstance(failure, dict)
+                or set(failure)
+                != {"metric", "operator", "threshold", "actual"}
+                or not isinstance(failure["metric"], str)
+                or not failure["metric"]
+                or failure["operator"] not in {"gte", "lte"}
+                or isinstance(failure["threshold"], bool)
+                or not isinstance(failure["threshold"], (int, float))
+                or isinstance(failure["actual"], bool)
+                or not isinstance(failure["actual"], (int, float))
+            ):
+                return None
+        if candidate["schema_version"] != "strategy.build-voting-candidate-tool.v2":
+            return None
+        if any(
+            re.fullmatch(pattern, str(candidate[field])) is None
+            for field, pattern in id_patterns.items()
+        ) or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(candidate[field])) is None
+            for field in hash_fields
+        ):
+            return None
+        candidate_n = candidate["n"]
+        candidate_k = candidate["k"]
+        selected_entries = candidate["selected_entries"]
+        if (
+            not isinstance(candidate["pool_id"], str)
+            or not candidate["pool_id"]
+            or isinstance(candidate["revision"], bool)
+            or not isinstance(candidate["revision"], int)
+            or candidate["revision"] < 1
+            or isinstance(candidate_n, bool)
+            or not isinstance(candidate_n, int)
+            or isinstance(candidate_k, bool)
+            or not isinstance(candidate_k, int)
+            or not 2 <= candidate_k <= 50
+            or not 1 <= candidate_n <= candidate_k
+            or candidate_n != source_n
+            or not isinstance(selected_entries, list)
+            or len(selected_entries) != candidate_k
+        ):
+            return None
+        selected_rule_ids: list[str] = []
+        for entry in selected_entries:
+            if (
+                not isinstance(entry, dict)
+                or set(entry) != {"pool_position", "entry_id", "rule_id"}
+                or isinstance(entry["pool_position"], bool)
+                or not isinstance(entry["pool_position"], int)
+                or entry["pool_position"] < 0
+                or not isinstance(entry["entry_id"], str)
+                or not entry["entry_id"]
+                or not isinstance(entry["rule_id"], str)
+                or not entry["rule_id"]
+            ):
+                return None
+            selected_rule_ids.append(entry["rule_id"])
+        if selected_rule_ids != members:
+            return None
+        if (
+            candidate["candidate_stage"] != "development"
+            or candidate["observation_stage"] != "backtested"
+            or candidate["validation_status"] != "unvalidated"
+            or any(
+                candidate[field] is not True
+                or candidate[field] is not output[field]
+                for field in (
+                    "not_admitted",
+                    "not_applied",
+                    "not_adopted",
+                    "not_deployed",
+                )
+            )
+            or not isinstance(candidate["dataset_id"], str)
+            or not candidate["dataset_id"]
+            or not isinstance(candidate["target_col"], str)
+            or not candidate["target_col"]
+            or not isinstance(candidate["effect"], dict)
+            or not isinstance(candidate["metrics"], dict)
+            or not isinstance(candidate["hit_distribution"], list)
+            or not isinstance(candidate["metric_observations"], list)
+        ):
+            return None
+        sample_ref = candidate["sample_design_ref"]
+        if (
+            not isinstance(sample_ref, dict)
+            or set(sample_ref)
+            != {
+                "artifact_id",
+                "artifact_content_hash",
+                "sample_design_id",
+                "sample_design_content_hash",
+                "partition",
+            }
+            or sample_ref["partition"] != "development"
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", str(sample_ref[field])) is None
+                for field in (
+                    "artifact_id",
+                    "artifact_content_hash",
+                    "sample_design_content_hash",
+                )
+            )
+        ):
+            return None
+        artifacts = candidate["artifacts"]
+        if (
+            not isinstance(artifacts, list)
+            or len(artifacts) != 1
+            or not isinstance(artifacts[0], dict)
+            or set(artifacts[0])
+            != {
+                "artifact_id",
+                "kind",
+                "format",
+                "filename",
+                "content_hash",
+                "download_url",
+            }
+            or artifacts[0]["kind"] != "strategy_voting_candidate_json"
+            or artifacts[0]["format"] != "json"
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(artifacts[0]["content_hash"]),
+            )
+            is None
+        ):
+            return None
+    except Exception:
+        return None
+    return source, candidate
+
+
 def _render_search_voting_candidates(o: dict):
     """Render a bounded aggregate projection without implying a selection."""
 
@@ -6950,6 +7308,9 @@ _RENDERERS = {
         _render_materialize_automatic_tree_leaf_fragment
     ),
     "search_voting_candidates": _render_search_voting_candidates,
+    "build_voting_candidate_from_search": (
+        _render_build_voting_candidate_from_search
+    ),
     "build_voting_candidate": _render_build_voting_candidate,
     "build_cross_matrix_candidate": _render_build_cross_matrix_candidate,
     "materialize_cross_matrix_cell_selection": (
@@ -7028,6 +7389,11 @@ def render_tool_output(
     """Render a tool's raw output to (text, tables); falls back to generic."""
     renderer = _RENDERERS.get(tool, _render_generic)
     try:
+        if tool == "build_voting_candidate_from_search":
+            return renderer(
+                output or {},
+                trusted_inputs=trusted_inputs,
+            )
         if tool in {
             "export_strategy_delivery",
             "measure_candidate_monthly_stability",

@@ -1200,6 +1200,60 @@ STRATEGY_VOTING_CANDIDATE_BUILD = WorkflowTemplate(
 )
 
 
+STRATEGY_VOTING_CANDIDATE_BUILD_FROM_SEARCH = WorkflowTemplate(
+    id="strategy_voting_candidate_build_from_search",
+    title="Voting 搜索组合精确候选构建",
+    goal_patterns=(
+        "从 Voting 搜索结果构建候选",
+        "物化指定 Voting 搜索组合",
+        "build voting candidate from search result",
+        "materialize exact voting search combination",
+    ),
+    slots=(
+        SlotSpec("search_id", True, "user", "Exact authenticated Voting search id"),
+        SlotSpec("combo_id", True, "user", "Exact evaluated Voting combination id"),
+        SlotSpec(
+            "strategy_type",
+            False,
+            "user",
+            "Optional explicit Strategy Pool type",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="从搜索组合构建 Voting 候选",
+            tool_ref=ToolRef("strategy", "build_voting_candidate_from_search"),
+            inputs_template={
+                "search_id": "{slot:search_id}",
+                "combo_id": "{slot:combo_id}",
+                "strategy_type": "{slot:strategy_type}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "voting_candidate.asset_id"}),
+                PostCheck("nonempty", {"field": "voting_candidate.asset_hash"}),
+                PostCheck("nonempty", {"field": "voting_candidate.candidate_id"}),
+                PostCheck("nonempty", {"field": "voting_candidate.evidence_hash"}),
+                PostCheck("nonempty", {"field": "voting_candidate.fragment_id"}),
+                PostCheck("nonempty", {"field": "voting_candidate.effect_id"}),
+                PostCheck(
+                    "nonempty",
+                    {"field": "source_search_selection.search_id"},
+                ),
+                PostCheck(
+                    "nonempty",
+                    {"field": "source_search_selection.combo_id"},
+                ),
+                PostCheck("nonempty", {"field": "voting_candidate.artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_VOTING_CANDIDATE_SEARCH = WorkflowTemplate(
     id="strategy_voting_candidate_search",
     title="Voting n-of-k 组合搜索",

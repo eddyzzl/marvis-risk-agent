@@ -74,10 +74,19 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
 )
+from marvis.repositories.strategy_pool import (
+    StrategyCandidatePoolConflictError,
+    StrategyCandidatePoolDataError,
+    StrategyCandidatePoolNotFoundError,
+    StrategyCandidatePoolRepository,
+)
 
 
 VOTING_CANDIDATE_SEARCH_TOOL_SCHEMA_VERSION = (
     "strategy.search-voting-candidates-tool.v1"
+)
+VOTING_CANDIDATE_SEARCH_SELECTION_TOOL_SCHEMA_VERSION = (
+    "strategy.build-voting-candidate-from-search-tool.v1"
 )
 VOTING_CANDIDATE_SEARCH_ARTIFACT_KIND = "strategy_voting_candidate_search_json"
 VOTING_CANDIDATE_SEARCH_ARTIFACT_SCHEMA_VERSION = (
@@ -110,6 +119,8 @@ _RUN_INPUT_FIELDS = frozenset(
         "max_combinations",
     }
 )
+_SELECTION_INPUT_FIELDS = frozenset({"search_id", "combo_id", "strategy_type"})
+_SELECTION_REQUIRED_INPUT_FIELDS = frozenset({"search_id", "combo_id"})
 _POOL_REF_FIELDS = frozenset(
     {
         "artifact_id",
@@ -209,8 +220,12 @@ _OUTPUT_FIELDS = frozenset(
 )
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _SEARCH_ID_RE = re.compile(r"^voting-search-[0-9a-f]{32}$")
+_COMBO_ID_RE = re.compile(r"^voting-combo-[0-9a-f]{32}$")
 _SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 _BOUNDARY_ERRORS = (
+    StrategyCandidatePoolConflictError,
+    StrategyCandidatePoolDataError,
+    StrategyCandidatePoolNotFoundError,
     TaskArtifactConflictError,
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
@@ -232,6 +247,26 @@ class VotingCandidateSearchArtifactBinding:
     resolved_requirements: ResolvedPoolRequirements | None
     tasks_root: Path
     db_path: Path
+
+
+@dataclass(frozen=True)
+class VotingCandidateSearchSelectionBinding:
+    """One exact evaluated search combination mapped to its live Pool entries."""
+
+    task_id: str
+    search_id: str
+    combo_id: str
+    strategy_type: str
+    artifact_binding: VotingCandidateSearchArtifactBinding
+    pool_id: str
+    pool_revision: int
+    pool_snapshot_hash: str
+    member_rule_ids: tuple[str, ...]
+    selected_entry_ids: tuple[str, ...]
+    n: int
+    eligible: bool
+    constraint_failures: tuple[dict[str, Any], ...]
+    rank: int
 
 
 def resolve_voting_candidate_search_inputs(
@@ -264,6 +299,183 @@ def resolve_voting_candidate_search_inputs(
             "expected_revision_id": pool.pool["revision_id"],
             "expected_snapshot_hash": pool.pool["snapshot_hash"],
         },
+    }
+
+
+def resolve_voting_candidate_search_selection(
+    runtime,
+    *,
+    task_id: str,
+    search_id: str,
+    combo_id: str,
+    strategy_type: str | None = None,
+) -> VotingCandidateSearchSelectionBinding:
+    """Authenticate one evaluated combo against its exact current Pool."""
+
+    try:
+        task = _text(task_id, "task_id")
+        search = _search_id(search_id, "search_id")
+        combo = _combo_id(combo_id, "combo_id")
+        requested_type = (
+            None
+            if strategy_type is None
+            else _strategy_type(strategy_type, "strategy_type")
+        )
+        pool_repository = StrategyCandidatePoolRepository(runtime.settings.db_path)
+        matches: list[
+            tuple[str, VotingCandidateSearchArtifactBinding]
+        ] = []
+        for candidate_type in (
+            [requested_type] if requested_type is not None else sorted(STRATEGY_TYPES)
+        ):
+            if pool_repository.get_current(task, candidate_type) is None:
+                continue
+            pool = load_current_strategy_candidate_pool_artifact(
+                runtime,
+                task_id=task,
+                strategy_type=candidate_type,
+            )
+            path = _expected_search_path(
+                runtime.settings.tasks_dir,
+                task_id=task,
+                search_id=search,
+                pool_snapshot_hash=pool.pool["snapshot_hash"],
+            )
+            record = runtime.task_artifacts.get_for_task_kind_path(
+                task,
+                VOTING_CANDIDATE_SEARCH_ARTIFACT_KIND,
+                str(path),
+            )
+            if record is None:
+                continue
+            provenance = _validate_provenance(record.get("provenance"))
+            artifact = load_voting_candidate_search_artifact(
+                runtime,
+                task_id=task,
+                artifact_id=record["id"],
+                expected_artifact_content_hash=record["content_hash"],
+                expected_search_id=search,
+                expected_search_content_hash=provenance["search_content_hash"],
+            )
+            matches.append((candidate_type, artifact))
+        if not matches:
+            raise StrategyError(
+                "Voting search does not match any current Strategy Pool; "
+                "run the search again"
+            )
+        if len(matches) != 1:
+            raise StrategyError(
+                "Voting search matches multiple current Strategy Pool types; "
+                "strategy_type is required"
+            )
+        resolved_type, artifact = matches[0]
+        pool = artifact.pool_development.pool
+        selected = next(
+            (
+                item
+                for item in artifact.result["combinations"]
+                if hmac.compare_digest(item["combo_id"], combo)
+            ),
+            None,
+        )
+        if selected is None:
+            raise StrategyError(
+                "combo_id is not an authenticated evaluated Voting search "
+                "combination; choose an evaluated combo or run the search again"
+            )
+        entries, _excluded = _searchable_entries(pool)
+        entries_by_rule = {entry["rule_id"]: entry for entry in entries}
+        if len(entries_by_rule) != len(entries):
+            raise StrategyError("current Voting search Pool rule ids are not unique")
+        member_rule_ids = tuple(selected["member_ids"])
+        if any(rule_id not in entries_by_rule for rule_id in member_rule_ids):
+            raise StrategyError("Voting search combination members changed from Pool")
+        return VotingCandidateSearchSelectionBinding(
+            task_id=task,
+            search_id=search,
+            combo_id=combo,
+            strategy_type=resolved_type,
+            artifact_binding=artifact,
+            pool_id=pool.pool["pool_id"],
+            pool_revision=pool.pool["revision"],
+            pool_snapshot_hash=pool.pool["snapshot_hash"],
+            member_rule_ids=member_rule_ids,
+            selected_entry_ids=tuple(
+                entries_by_rule[rule_id]["entry_id"] for rule_id in member_rule_ids
+            ),
+            n=selected["n"],
+            eligible=selected["eligible"],
+            constraint_failures=tuple(
+                dict(item) for item in selected["constraint_failures"]
+            ),
+            rank=selected["rank"],
+        )
+    except StrategyError:
+        raise
+    except _BOUNDARY_ERRORS as exc:
+        raise StrategyError(str(exc)) from exc
+
+
+def run_build_voting_candidate_from_search(
+    inputs,
+    ctx,
+    runtime,
+) -> dict[str, Any]:
+    """Build one immutable Voting candidate from an authenticated search pointer."""
+
+    request = _validate_selection_inputs(inputs)
+    task_id = _text(ctx.task_id, "task_id")
+    selection = resolve_voting_candidate_search_selection(
+        runtime,
+        task_id=task_id,
+        search_id=request["search_id"],
+        combo_id=request["combo_id"],
+        strategy_type=request["strategy_type"],
+    )
+    # Local import prevents a module cycle: the explicit builder already owns
+    # Pool/source replay and its compare-and-swap boundary.
+    from marvis.packs.strategy.voting_candidate_tools import (
+        _run_build_voting_candidate_with_registration_guard,
+    )
+
+    def require_search_binding_on_connection(conn) -> None:
+        require_voting_candidate_search_artifact_binding_on_connection(
+            conn,
+            selection.artifact_binding,
+        )
+
+    output = _run_build_voting_candidate_with_registration_guard(
+        {
+            "strategy_type": selection.strategy_type,
+            "expected_pool_revision": selection.pool_revision,
+            "expected_pool_snapshot_hash": selection.pool_snapshot_hash,
+            "selected_entry_ids": list(selection.selected_entry_ids),
+            "n": selection.n,
+        },
+        ctx,
+        runtime,
+        registration_guard=require_search_binding_on_connection,
+    )
+    return {
+        "schema_version": VOTING_CANDIDATE_SEARCH_SELECTION_TOOL_SCHEMA_VERSION,
+        "source_search_selection": {
+            "search_id": selection.search_id,
+            "combo_id": selection.combo_id,
+            "strategy_type": selection.strategy_type,
+            "rank": selection.rank,
+            "member_rule_ids": list(selection.member_rule_ids),
+            "n": selection.n,
+            "eligible": selection.eligible,
+            "constraint_failures": [
+                dict(item) for item in selection.constraint_failures
+            ],
+        },
+        "voting_candidate": output,
+        "not_mutated_pool": True,
+        "not_admitted": output["not_admitted"],
+        "not_applied": output["not_applied"],
+        "not_adopted": output["not_adopted"],
+        "not_deployed": output["not_deployed"],
     }
 
 
@@ -510,6 +722,32 @@ def _validate_run_inputs(value: object) -> dict[str, Any]:
     return {
         **_normalize_controls(obj),
         "pool_ref": _normalize_pool_ref(obj["pool_ref"]),
+    }
+
+
+def _validate_selection_inputs(value: object) -> dict[str, Any]:
+    obj = _json_object(value, "build_voting_candidate_from_search inputs")
+    missing = sorted(_SELECTION_REQUIRED_INPUT_FIELDS - set(obj))
+    unsupported = sorted(set(obj) - _SELECTION_INPUT_FIELDS)
+    if missing or unsupported:
+        detail: list[str] = []
+        if missing:
+            detail.append("missing: " + ", ".join(missing))
+        if unsupported:
+            detail.append("unsupported: " + ", ".join(unsupported))
+        raise StrategyError(
+            "invalid build_voting_candidate_from_search inputs ("
+            + "; ".join(detail)
+            + ")"
+        )
+    return {
+        "search_id": _search_id(obj["search_id"], "search_id"),
+        "combo_id": _combo_id(obj["combo_id"], "combo_id"),
+        "strategy_type": (
+            None
+            if "strategy_type" not in obj
+            else _strategy_type(obj["strategy_type"], "strategy_type")
+        ),
     }
 
 
@@ -1659,6 +1897,20 @@ def _search_id(value: object, name: str) -> str:
     return text
 
 
+def _combo_id(value: object, name: str) -> str:
+    text = _text(value, name)
+    if _COMBO_ID_RE.fullmatch(text) is None:
+        raise StrategyError(f"{name} is invalid")
+    return text
+
+
+def _strategy_type(value: object, name: str) -> str:
+    text = _text(value, name)
+    if text not in STRATEGY_TYPES:
+        raise StrategyError(f"{name} is invalid")
+    return text
+
+
 def _safe_component(value: object, name: str) -> str:
     text = _text(value, name)
     if _SAFE_COMPONENT_RE.fullmatch(text) is None or text in {".", ".."}:
@@ -1714,10 +1966,14 @@ __all__ = [
     "VOTING_CANDIDATE_SEARCH_ARTIFACT_KIND",
     "VOTING_CANDIDATE_SEARCH_ARTIFACT_SCHEMA_VERSION",
     "VOTING_CANDIDATE_SEARCH_ORIGIN_TOOL",
+    "VOTING_CANDIDATE_SEARCH_SELECTION_TOOL_SCHEMA_VERSION",
     "VOTING_CANDIDATE_SEARCH_TOOL_SCHEMA_VERSION",
     "VotingCandidateSearchArtifactBinding",
+    "VotingCandidateSearchSelectionBinding",
     "load_voting_candidate_search_artifact",
     "require_voting_candidate_search_artifact_binding_on_connection",
+    "run_build_voting_candidate_from_search",
     "resolve_voting_candidate_search_inputs",
+    "resolve_voting_candidate_search_selection",
     "run_search_voting_candidates",
 ]
