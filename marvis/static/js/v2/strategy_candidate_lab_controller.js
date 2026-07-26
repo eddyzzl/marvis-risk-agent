@@ -12,6 +12,7 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "scorecard_band_build",
   "scorecard_cutoff_selection",
   "candidate_monthly_stability",
+  "strategy_pool_apply",
   "strategy_pool_validation",
   "voting_candidate_search",
   "voting_candidate_build_from_search",
@@ -28,6 +29,7 @@ const WORKFLOW_LABELS = Object.freeze({
   scorecard_band_build: "生成评分卡分档证据",
   scorecard_cutoff_selection: "记录评分卡 Cutoff 选择",
   candidate_monthly_stability: "测算候选逐月稳定性",
+  strategy_pool_apply: "应用当前 Strategy Pool",
   strategy_pool_validation: "执行 Strategy Pool 独立样本回放验证",
   voting_candidate_search: "搜索 Voting 组合",
   voting_candidate_build_from_search: "从搜索结果构建 Voting 候选",
@@ -110,6 +112,14 @@ const INTERACTIVE_TREE_SOURCE_ID_RE = /^(?:candidate-asset-[0-9a-f]{32}|interact
 const INTERACTIVE_TREE_NODE_ID_RE = /^node-[0-9a-f]{20}$/;
 const INTERACTIVE_TREE_REVISION_ID_RE = /^interactive-tree-revision-[0-9a-f]{32}$/;
 const INTERACTIVE_TREE_FRONTIER_SOURCE_NODE_ID_RE = /^(?:node|leaf)-[0-9a-f]{20}$/;
+const STRATEGY_POOL_TYPES = Object.freeze([
+  "approval",
+  "reject",
+  "limit",
+  "pricing",
+  "segmentation",
+]);
+const STRATEGY_POOL_APPLY_PREFIX_RE = /^[A-Za-z_][A-Za-z0-9_]{0,47}$/;
 
 const FIELD_LABELS = Object.freeze({
   action: "动作",
@@ -1576,6 +1586,34 @@ function collectStrategyPoolValidationInputs(form) {
   };
 }
 
+function collectStrategyPoolApplyInputs(form) {
+  const selected = selectedProjectionOption(
+    form,
+    "pool_apply_strategy_type",
+    "当前非空 Strategy Pool",
+  );
+  const strategyType = nonEmptyText(selected.value);
+  if (
+    !STRATEGY_POOL_TYPES.includes(strategyType)
+    || nonEmptyText(selected.dataset?.strategyType) !== strategyType
+  ) {
+    throw new Error(
+      "Strategy Pool 必须来自当前任务受认证的非空 Pool 投影。",
+    );
+  }
+  const inputs = { strategy_type: strategyType };
+  const outputPrefix = formValue(form, "pool_apply_output_prefix");
+  if (outputPrefix) {
+    if (!STRATEGY_POOL_APPLY_PREFIX_RE.test(outputPrefix)) {
+      throw new Error(
+        "输出列前缀必须是最长 48 字符的安全 ASCII identifier prefix，且不能以数字开头。",
+      );
+    }
+    inputs.output_prefix = outputPrefix;
+  }
+  return inputs;
+}
+
 function parseVotingConstraints(value) {
   const text = String(value || "").trim();
   if (!text) return [];
@@ -1880,6 +1918,7 @@ export function collectStrategyCandidateLabRequest(form) {
     scorecard_band_build: collectScorecardBandInputs,
     scorecard_cutoff_selection: collectScorecardCutoffSelectionInputs,
     candidate_monthly_stability: collectCandidateMonthlyStabilityInputs,
+    strategy_pool_apply: collectStrategyPoolApplyInputs,
     strategy_pool_validation: collectStrategyPoolValidationInputs,
     voting_candidate_search: collectVotingCandidateSearchInputs,
     voting_candidate_build_from_search:
@@ -2729,6 +2768,79 @@ function syncCandidateStabilityControls(form, payload) {
   }
 }
 
+function strategyPoolApplyForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_pool_apply"]',
+  ) || null;
+}
+
+function strategyPoolApplyOptions(payload) {
+  const pools = collectionItems(isRecord(payload?.pools) ? payload.pools : {});
+  const byType = new Map();
+  const duplicates = new Set();
+  for (const pool of pools) {
+    const strategyType = nonEmptyText(pool?.strategy_type);
+    const entries = Array.isArray(pool?.entries)
+      ? pool.entries.filter(isRecord)
+      : [];
+    if (
+      pool?.kind !== "candidate_pool"
+      || !STRATEGY_POOL_TYPES.includes(strategyType)
+      || entries.length < 1
+      || !Number.isInteger(pool?.total)
+      || pool.total < entries.length
+    ) {
+      continue;
+    }
+    if (byType.has(strategyType)) {
+      duplicates.add(strategyType);
+      continue;
+    }
+    byType.set(strategyType, {
+      strategyType,
+      entryCount: entries.length,
+    });
+  }
+  for (const strategyType of duplicates) byType.delete(strategyType);
+  return STRATEGY_POOL_TYPES
+    .filter((strategyType) => byType.has(strategyType))
+    .map((strategyType) => byType.get(strategyType));
+}
+
+function syncStrategyPoolApplyControls(form, payload) {
+  if (!form) return;
+  const strategySelect = formField(form, "pool_apply_strategy_type");
+  if (!strategySelect) return;
+  const pools = strategyPoolApplyOptions(payload);
+  const previousType = nonEmptyText(strategySelect.value);
+  strategySelect.innerHTML = [
+    '<option value="">请选择当前非空 Strategy Pool</option>',
+    ...pools.map((pool) => projectionOptionHtml(
+      pool.strategyType,
+      `${pool.strategyType} · ${pool.entryCount} 条当前规则`,
+      {
+        "candidate-lab-projection": "1",
+        "strategy-type": pool.strategyType,
+      },
+    )),
+  ].join("");
+  if (previousType && selectContainsValue(strategySelect, previousType)) {
+    strategySelect.value = previousType;
+  } else if (pools.length === 1) {
+    strategySelect.value = pools[0].strategyType;
+  } else {
+    strategySelect.value = "";
+  }
+  const help = form.querySelector?.("[data-candidate-lab-pool-apply-empty]");
+  if (help) {
+    help.textContent = pools.length === 0
+      ? "当前任务尚无可应用的受认证非空 Strategy Pool。"
+      : pools.length === 1
+        ? "已选择当前唯一的受认证非空 Strategy Pool；可直接应用或填写输出列前缀。"
+        : "当前存在多个受认证非空 Strategy Pool，请明确选择要应用的策略类型。";
+  }
+}
+
 function votingSearchForm(root) {
   return root?.querySelector?.(
     '[data-candidate-lab-workflow="voting_candidate_search"]',
@@ -3061,6 +3173,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       candidateStabilityForm(root),
       state.payload,
     );
+    syncStrategyPoolApplyControls(
+      strategyPoolApplyForm(root),
+      state.payload,
+    );
     syncVotingForms(root, state.payload);
     syncInteractiveTreeRevisionControls(
       interactiveTreeForm(root),
@@ -3088,6 +3204,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     syncScorecardForms(root, state.payload);
     syncCandidateStabilityControls(
       candidateStabilityForm(root),
+      state.payload,
+    );
+    syncStrategyPoolApplyControls(
+      strategyPoolApplyForm(root),
       state.payload,
     );
     syncVotingForms(root, state.payload);
@@ -3237,6 +3357,18 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     try {
       strategyRequest = collectStrategyCandidateLabRequest(form);
       if (
+        strategyRequest.workflow === "strategy_pool_apply"
+        && !strategyPoolApplyOptions(state.payload).some(
+          (pool) => (
+            pool.strategyType === strategyRequest.workflow_inputs.strategy_type
+          ),
+        )
+      ) {
+        throw new Error(
+          "所选 Strategy Pool 已过期、为空或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
+        );
+      }
+      if (
         strategyRequest.workflow === "interactive_tree_revision"
         && !interactiveTreePointer(
           state.payload,
@@ -3323,6 +3455,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       await dependencies.refreshAgentMessages?.(requestTaskId);
       await dependencies.settleCandidateLabSubmission?.(requestTaskId);
       if (selectedTaskId() !== requestTaskId) return result;
+      if (strategyRequest.workflow === "strategy_pool_apply") {
+        await refresh(requestTaskId, { silent: true });
+        if (selectedTaskId() !== requestTaskId) return result;
+      }
       state.submitting = false;
       dependencies.setActionStatus?.(`${content}已提交。`, "success");
       return result;

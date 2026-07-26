@@ -1954,6 +1954,37 @@
 
                     <details class="candidate-lab-launcher">
                       <summary>
+                        <span><strong>应用当前 Strategy Pool</strong><small>把当前完整 Pool 写入非 active 的派生数据集</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_pool_apply">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Strategy Pool <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_apply_strategy_type">
+                            <option value="">等待当前非空 Pool 受认证投影</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>输出列前缀</span>
+                          <input
+                            autocomplete="off"
+                            maxlength="48"
+                            data-candidate-lab-field="pool_apply_output_prefix"
+                            placeholder="可选；例如 risk_run_01"
+                          >
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-pool-apply-empty>
+                          当前任务尚无可应用的非空 Strategy Pool。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          应用只生成非 active 的 task-owned 派生数据集；不会修改 Pool，不切换工作区数据集，不采纳、发布或部署策略。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">应用当前 Strategy Pool</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
                         <span><strong>Voting 组合搜索</strong><small>在当前 Pool 规则中确定性枚举 n-of-k 组合</small></span>
                       </summary>
                       <form data-candidate-lab-form data-candidate-lab-workflow="voting_candidate_search">
