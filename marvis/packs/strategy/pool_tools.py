@@ -92,6 +92,7 @@ from marvis.packs.strategy.scorecard_candidate import (
     SCORECARD_BAND_ASSET_ARTIFACT_KIND,
     SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
     SCORECARD_BAND_ASSET_ORIGIN_TOOL,
+    SCORECARD_BAND_ASSET_TYPE,
     SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
     SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION,
     SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
@@ -116,9 +117,11 @@ from marvis.packs.strategy.voting_candidate_fragment import (
 )
 from marvis.packs.strategy.voting_candidate_tools import (
     VerifiedVotingCandidateArtifact,
+    canonical_voting_candidate_artifact_json,
     load_verified_voting_candidate_artifact,
     load_verified_voting_candidate_artifact_on_connection,
     require_voting_snapshot_marginal_reachability,
+    validate_voting_candidate_artifact_document,
 )
 from marvis.packs.strategy.errors import (
     StrategyError,
@@ -130,6 +133,7 @@ from marvis.packs.strategy.pool import (
     POOL_PRODUCER_VERSION,
     REPLACE_SELECTED_MEMBERS_PLACEMENT,
     add_verified_candidate_fragment,
+    canonical_strategy_pool_json,
     compile_strategy_pool,
     remove_pool_entry,
     reorder_strategy_pool,
@@ -157,6 +161,19 @@ from marvis.repositories.task_artifacts import (
 POOL_ARTIFACT_SCHEMA_VERSION = "strategy.candidate-pool-artifact.v2"
 POOL_MUTATION_TOOL_SCHEMA_VERSION = "strategy.candidate-pool-mutation-tool.v2"
 POOL_COMPILE_TOOL_SCHEMA_VERSION = "strategy.compile-candidate-pool-tool.v2"
+SCORECARD_REPORT_PROJECTION_SCHEMA_VERSION = (
+    "strategy.scorecard-report-projection.v1"
+)
+MAX_SCORECARD_REPORT_MODELS = 256
+MAX_SCORECARD_REPORT_USAGES = 4_096
+MAX_SCORECARD_REPORT_DETAIL_ROWS = 120_000
+# The final V2 report has global 100k-field / 20k-ref / 16 MiB caps and
+# contains six other sections.  These scorecard-only reservations make the
+# public projection fail before an adapter can construct an undeliverable
+# report; they never trim or sample evidence.
+MAX_SCORECARD_REPORT_TABLE_FIELDS = 50_000
+MAX_SCORECARD_REPORT_TABLE_REFS = 10_000
+MAX_SCORECARD_REPORT_PROJECTION_JSON_BYTES = 4 * 1024 * 1024
 _LEGACY_ARCHIVE_WARNING = (
     "A draft Strategy Pool v1 ledger was archived unchanged; this v2 Pool is "
     "a separate rebuild and does not claim v1 revision continuity."
@@ -368,6 +385,692 @@ class StrategyCandidatePoolArtifactBinding:
     tasks_root: Path
     datasets_root: Path
     db_path: Path
+
+
+def project_scorecard_report_evidence(
+    binding: StrategyCandidatePoolArtifactBinding,
+) -> dict[str, Any]:
+    """Project governed scorecard detail without exposing executable vectors.
+
+    The projection follows the current Pool order and recursively follows only
+    the parent entries frozen by Voting candidates.  Every scorecard selection
+    and Voting wrapper is replayed against its authenticated parent before any
+    aggregate value is copied.  Full-band assets and selections are
+    de-duplicated by their canonical domain identities; their authenticated
+    TaskArtifact refs and every distinct Pool/Voting usage path remain visible
+    for audit.  Resource limits fail closed and never slice the evidence.
+    """
+
+    if not isinstance(binding, StrategyCandidatePoolArtifactBinding):
+        raise StrategyError(
+            "scorecard report projection requires an authenticated "
+            "StrategyCandidatePoolArtifactBinding"
+        )
+    pool = validate_strategy_pool(binding.pool)
+    if (
+        pool != binding.pool
+        or pool["task_id"] != binding.task_id
+        or pool["strategy_type"] != binding.strategy_type
+        or compile_strategy_pool(pool) != binding.compiled_design
+    ):
+        raise StrategyError("scorecard report Pool binding changed")
+    canonical_pool = canonical_strategy_pool_json(pool).encode("utf-8")
+    if not hmac.compare_digest(
+        hashlib.sha256(canonical_pool).hexdigest(),
+        _required_hash(
+            binding.artifact_content_hash,
+            "scorecard report Pool artifact content hash",
+        ),
+    ):
+        raise StrategyError("scorecard report Pool canonical evidence changed")
+
+    entries = pool["entries"]
+    relevant_types = {SCORECARD_BAND_ASSET_TYPE, VOTING_CANDIDATE_ASSET_TYPE}
+    if not any(
+        entry["source"]["asset_type"] in relevant_types for entry in entries
+    ):
+        return {
+            "schema_version": SCORECARD_REPORT_PROJECTION_SCHEMA_VERSION,
+            "models": [],
+            "usages": [],
+            "artifact_refs": [],
+        }
+    if len(binding.lineages) != len(entries):
+        raise StrategyError(
+            "scorecard report Pool lineage order is incomplete"
+        )
+
+    models_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    model_order: list[tuple[str, str]] = []
+    usages_by_identity: dict[
+        tuple[str, str, str, str],
+        dict[str, Any],
+    ] = {}
+    usage_order: list[tuple[str, str, str, str]] = []
+    artifact_refs: dict[tuple[str, str], dict[str, str]] = {}
+    active_voting: set[tuple[str, str]] = set()
+    traversal_nodes = 0
+    detail_rows = 0
+    usage_path_count = 0
+
+    def add_artifact_ref(
+        *,
+        kind: str,
+        ref_id: str,
+        content_hash: str,
+    ) -> dict[str, str]:
+        ref = {
+            "kind": _required_text(kind, "scorecard report artifact kind"),
+            "ref_id": _required_text(ref_id, "scorecard report artifact id"),
+            "content_hash": _required_hash(
+                content_hash,
+                "scorecard report artifact content hash",
+            ),
+        }
+        identity = (ref["kind"], ref["ref_id"])
+        existing = artifact_refs.get(identity)
+        if existing is not None and not hmac.compare_digest(
+            existing["content_hash"],
+            ref["content_hash"],
+        ):
+            raise StrategyError(
+                "scorecard report artifact reference identity drifted"
+            )
+        artifact_refs[identity] = ref
+        return ref
+
+    def dedupe_artifact_refs(
+        refs: Sequence[Mapping[str, str]],
+    ) -> list[dict[str, str]]:
+        by_identity: dict[tuple[str, str], dict[str, str]] = {}
+        for ref in refs:
+            normalized = add_artifact_ref(
+                kind=ref["kind"],
+                ref_id=ref["ref_id"],
+                content_hash=ref["content_hash"],
+            )
+            by_identity[
+                (normalized["kind"], normalized["ref_id"])
+            ] = normalized
+        return [
+            by_identity[key] for key in sorted(by_identity)
+        ]
+
+    def walk(
+        entry: Mapping[str, Any],
+        lineage: _CandidateLineage,
+        *,
+        path: list[dict[str, Any]],
+        lineage_refs: list[dict[str, str]],
+        depth: int,
+    ) -> None:
+        nonlocal detail_rows, traversal_nodes, usage_path_count
+        traversal_nodes += 1
+        if traversal_nodes > _MAX_VOTING_ANCESTRY_NODES:
+            raise StrategyError(
+                "scorecard report lineage exceeds node budget"
+            )
+        if depth > _MAX_VOTING_ANCESTRY_DEPTH:
+            raise StrategyError(
+                "scorecard report lineage exceeds depth budget"
+            )
+        if lineage.source_binding != entry["source"]:
+            raise StrategyError(
+                "scorecard report lineage changed from Pool entry"
+            )
+        source_asset_type = entry["source"]["asset_type"]
+        if (
+            source_asset_type == SCORECARD_BAND_ASSET_TYPE
+            and not isinstance(lineage, _ScorecardCandidateLineage)
+        ) or (
+            source_asset_type == VOTING_CANDIDATE_ASSET_TYPE
+            and not isinstance(lineage, _VotingCandidateLineage)
+        ):
+            raise StrategyError(
+                "scorecard report relevant lineage type changed"
+            )
+
+        if isinstance(lineage, _ScorecardCandidateLineage):
+            replayed = scorecard_cutoff_selection_to_verified_candidate_fragment(
+                lineage.selection.selection,
+                lineage.asset.asset,
+                selection_artifact_binding=lineage.selection.to_domain_binding(),
+                source_artifact_binding=lineage.asset.to_domain_binding(),
+            )
+            if (
+                replayed != lineage.verified_fragment
+                or replayed["artifact"]["artifact_id"]
+                != entry["source"]["artifact_id"]
+                or replayed["asset"]["asset_id"]
+                != entry["source"]["asset_id"]
+            ):
+                raise StrategyError(
+                    "scorecard report cutoff selection replay changed"
+                )
+            asset_ref = add_artifact_ref(
+                kind="strategy_scorecard_band_asset",
+                ref_id=lineage.asset.artifact_id,
+                content_hash=lineage.asset.content_hash,
+            )
+            selection_ref = add_artifact_ref(
+                kind="strategy_scorecard_cutoff_selection",
+                ref_id=lineage.selection.artifact_id,
+                content_hash=lineage.selection.content_hash,
+            )
+            model_key = (
+                lineage.asset.asset["asset_id"],
+                lineage.asset.asset["asset_hash"],
+            )
+            model = _scorecard_report_model(
+                lineage.asset.asset,
+                artifact_ref=asset_ref,
+            )
+            existing = models_by_identity.get(model_key)
+            if existing is None:
+                if len(model_order) >= MAX_SCORECARD_REPORT_MODELS:
+                    raise StrategyError(
+                        "scorecard report models exceed budget"
+                    )
+                model_order.append(model_key)
+                models_by_identity[model_key] = model
+                detail_rows += (
+                    len(model["scorecard_points"])
+                    + len(model["bands"])
+                    + len(model["cutoffs"])
+                )
+                if detail_rows > MAX_SCORECARD_REPORT_DETAIL_ROWS:
+                    raise StrategyError(
+                        "scorecard report detail rows exceed budget"
+                    )
+            elif existing != model:
+                raise StrategyError(
+                    "scorecard report band artifact projection drifted"
+                )
+            usage_path_count += 1
+            if usage_path_count > MAX_SCORECARD_REPORT_USAGES:
+                raise StrategyError(
+                    "scorecard report usage paths exceed budget"
+                )
+            selection_value = lineage.selection.selection
+            usage_key = (
+                *model_key,
+                selection_value["selection_id"],
+                selection_value["selection_hash"],
+            )
+            usage = {
+                "model_ref": model_key,
+                "band_artifact_ref": dict(asset_ref),
+                "selection_artifact_ref": dict(selection_ref),
+                "usage_artifact_refs": dedupe_artifact_refs(
+                    [*lineage_refs, asset_ref, selection_ref]
+                ),
+                "cutoff_id": _required_text(
+                    selection_value["cutoff_id"],
+                    "scorecard report cutoff_id",
+                ),
+                "selection_reason": selection_value["selection_reason"],
+            }
+            usage_path = {
+                "path": [dict(node) for node in path],
+                "artifact_refs": [
+                    dict(ref) for ref in usage["usage_artifact_refs"]
+                ],
+            }
+            existing_usage = usages_by_identity.get(usage_key)
+            if existing_usage is None:
+                usage_order.append(usage_key)
+                usages_by_identity[usage_key] = {
+                    **usage,
+                    "usage_paths": [usage_path],
+                }
+            else:
+                if {
+                    key: value
+                    for key, value in existing_usage.items()
+                    if key not in {"usage_paths", "usage_artifact_refs"}
+                } != {
+                    key: value
+                    for key, value in usage.items()
+                    if key != "usage_artifact_refs"
+                }:
+                    raise StrategyError(
+                        "scorecard report selection projection drifted"
+                    )
+                existing_usage["usage_artifact_refs"] = (
+                    dedupe_artifact_refs(
+                        [
+                            *existing_usage["usage_artifact_refs"],
+                            *usage["usage_artifact_refs"],
+                        ]
+                    )
+                )
+                if any(
+                    usage_path["path"] == item["path"]
+                    for item in existing_usage["usage_paths"]
+                ):
+                    raise StrategyError(
+                        "scorecard report contains a duplicate usage path"
+                    )
+                existing_usage["usage_paths"].append(usage_path)
+            return
+
+        if not isinstance(lineage, _VotingCandidateLineage):
+            return
+        candidate = lineage.candidate
+        voting_key = (candidate.artifact_id, candidate.content_hash)
+        if voting_key in active_voting:
+            raise StrategyError(
+                "scorecard report Voting ancestry contains a cycle"
+            )
+        if len(active_voting) >= _MAX_VOTING_ANCESTRY_DEPTH:
+            raise StrategyError(
+                "scorecard report Voting ancestry exceeds depth budget"
+            )
+        active_voting.add(voting_key)
+        try:
+            document = validate_voting_candidate_artifact_document(
+                candidate.document
+            )
+            canonical = canonical_voting_candidate_artifact_json(
+                document
+            ).encode("utf-8")
+            if (
+                document != candidate.document
+                or document["asset"] != candidate.asset
+                or canonical != candidate.canonical_bytes
+                or not hmac.compare_digest(
+                    hashlib.sha256(canonical).hexdigest(),
+                    _required_hash(
+                        candidate.content_hash,
+                        "scorecard report Voting artifact content hash",
+                    ),
+                )
+            ):
+                raise StrategyError(
+                    "scorecard report Voting artifact canonical evidence changed"
+                )
+            parent = validate_strategy_pool(lineage.parent_pool)
+            verify_voting_candidate_asset_against_pool(candidate.asset, parent)
+            voting_ref = add_artifact_ref(
+                kind="strategy_voting_candidate",
+                ref_id=candidate.artifact_id,
+                content_hash=candidate.content_hash,
+            )
+            parent_artifact = lineage.parent_pool_artifact
+            expected_parent_hash = strategy_pool_artifact_content_hash(parent)
+            expected_parent_origin = _ORIGIN_BY_OPERATION[
+                parent["operation"]["kind"]
+            ]
+            if (
+                getattr(parent_artifact, "task_id", None) != binding.task_id
+                or getattr(parent_artifact, "kind", None) != POOL_ARTIFACT_KIND
+                or getattr(parent_artifact, "origin_tool", None)
+                != expected_parent_origin
+                or not hmac.compare_digest(
+                    _required_hash(
+                        getattr(parent_artifact, "content_hash", None),
+                        "scorecard report parent Pool artifact content hash",
+                    ),
+                    expected_parent_hash,
+                )
+                or candidate.provenance.get("pool_artifact_id")
+                != getattr(parent_artifact, "artifact_id", None)
+                or not hmac.compare_digest(
+                    _required_hash(
+                        candidate.provenance.get(
+                            "pool_artifact_content_hash"
+                        ),
+                        "scorecard report Voting parent Pool content hash",
+                    ),
+                    expected_parent_hash,
+                )
+            ):
+                raise StrategyError(
+                    "scorecard report Voting parent Pool artifact changed"
+                )
+            parent_pool_ref = add_artifact_ref(
+                kind="strategy_candidate_pool",
+                ref_id=_required_text(
+                    parent_artifact.artifact_id,
+                    "scorecard report parent Pool artifact id",
+                ),
+                content_hash=expected_parent_hash,
+            )
+            child_lineage_refs = dedupe_artifact_refs(
+                [*lineage_refs, voting_ref, parent_pool_ref]
+            )
+            replayed = voting_candidate_to_verified_fragment(
+                candidate.asset,
+                artifact_binding=candidate.artifact_binding(),
+            )
+            if (
+                replayed != lineage.verified_fragment
+                or replayed["artifact"]["artifact_id"]
+                != entry["source"]["artifact_id"]
+                or replayed["asset"]["asset_id"]
+                != entry["source"]["asset_id"]
+            ):
+                raise StrategyError(
+                    "scorecard report Voting fragment replay changed"
+                )
+            selected = candidate.asset["selected_entries"]
+            if len(selected) != len(lineage.parent_lineages):
+                raise StrategyError(
+                    "scorecard report Voting parent lineage order changed"
+                )
+            parent_by_id = {
+                parent_entry["entry_id"]: parent_entry
+                for parent_entry in parent["entries"]
+            }
+            for selected_entry, parent_lineage in zip(
+                selected,
+                lineage.parent_lineages,
+                strict=True,
+            ):
+                parent_entry = parent_by_id.get(selected_entry["entry_id"])
+                if (
+                    parent_entry is None
+                    or parent_entry["position"]
+                    != selected_entry["pool_position"]
+                    or parent_entry["rule_id"] != selected_entry["rule_id"]
+                    or parent_lineage.source_binding != parent_entry["source"]
+                ):
+                    raise StrategyError(
+                        "scorecard report Voting parent entry changed"
+                    )
+                walk(
+                    parent_entry,
+                    parent_lineage,
+                    path=[
+                        *path,
+                        _scorecard_report_path_node(
+                            parent_entry,
+                            scope="voting_parent_entry",
+                            lineage=parent_lineage,
+                        ),
+                    ],
+                    lineage_refs=child_lineage_refs,
+                    depth=depth + 1,
+                )
+        finally:
+            active_voting.discard(voting_key)
+
+    for entry, lineage in zip(entries, binding.lineages, strict=True):
+        walk(
+            entry,
+            lineage,
+            path=[
+                _scorecard_report_path_node(
+                    entry,
+                    scope="current_pool_entry",
+                    lineage=lineage,
+                )
+            ],
+            lineage_refs=[],
+            depth=0,
+        )
+
+    model_index = {
+        key: index for index, key in enumerate(model_order, start=1)
+    }
+    reported_artifact_ref_keys = {
+        (ref["kind"], ref["ref_id"])
+        for usage in (
+            usages_by_identity[key] for key in usage_order
+        )
+        for ref in usage["usage_artifact_refs"]
+    }
+    projection = {
+        "schema_version": SCORECARD_REPORT_PROJECTION_SCHEMA_VERSION,
+        "models": [
+            {
+                **models_by_identity[key],
+                "model_index": model_index[key],
+            }
+            for key in model_order
+        ],
+        "usages": [
+            {
+                **{
+                    key: value
+                    for key, value in usage.items()
+                    if key != "model_ref"
+                },
+                "model_index": model_index[usage["model_ref"]],
+            }
+            for usage in (
+                usages_by_identity[key] for key in usage_order
+            )
+        ],
+        "artifact_refs": [
+            artifact_refs[key]
+            for key in sorted(reported_artifact_ref_keys)
+        ],
+    }
+    _enforce_scorecard_projection_report_budget(projection)
+    return projection
+
+
+def _enforce_scorecard_projection_report_budget(
+    projection: Mapping[str, Any],
+) -> None:
+    """Reserve enough of the final report budget for the other six sections."""
+
+    models = projection["models"]
+    usages = projection["usages"]
+    usages_by_model: dict[int, list[Mapping[str, Any]]] = {
+        int(model["model_index"]): [] for model in models
+    }
+    for usage in usages:
+        usages_by_model[int(usage["model_index"])].append(usage)
+
+    field_footprint = 0
+    # Each governed artifact appears in the top-level inventory, candidate
+    # section and four scorecard table inventories.  The current Pool adds one
+    # more identity.  Each model's frozen/result role refs and repeated
+    # development dataset binding are budgeted separately.
+    artifact_ref_count = len(projection["artifact_refs"]) + 1
+    ref_footprint = (
+        artifact_ref_count * 6
+        + len(models) * 11
+        + (2 if models else 0)
+    )
+    for model in models:
+        model_index = int(model["model_index"])
+        model_ref_identities = {
+            ("strategy_candidate_pool", "current_pool"),
+            (
+                model["band_artifact_ref"]["kind"],
+                model["band_artifact_ref"]["ref_id"],
+            ),
+            ("backtest", model["band_artifact_ref"]["ref_id"]),
+            *(
+                (ref["kind"], ref["ref_id"])
+                for usage in usages_by_model[model_index]
+                for ref in usage["usage_artifact_refs"]
+            ),
+        }
+        model_ref_count = len(model_ref_identities)
+        point_count = len(model["scorecard_points"])
+        band_count = len(model["bands"])
+        cutoff_count = len(model["cutoffs"])
+        field_footprint += (
+            22
+            + point_count * 15
+            + band_count * 13
+            + cutoff_count * 16
+        )
+        # This is an upper bound for the current four-table adapter: optional
+        # cells can use fewer refs, while selected cutoff refs are subsets of
+        # the complete model lineage.
+        ref_footprint += (
+            19
+            + model_ref_count * 3
+            + point_count * (14 + model_ref_count)
+            + band_count * (12 + model_ref_count)
+            + cutoff_count * (12 + model_ref_count * 4)
+        )
+
+    if field_footprint > MAX_SCORECARD_REPORT_TABLE_FIELDS:
+        raise StrategyError(
+            "scorecard report field footprint exceeds budget"
+        )
+    if ref_footprint > MAX_SCORECARD_REPORT_TABLE_REFS:
+        raise StrategyError(
+            "scorecard report reference footprint exceeds budget"
+        )
+    if (
+        len(_canonical_json(projection).encode("utf-8"))
+        > MAX_SCORECARD_REPORT_PROJECTION_JSON_BYTES
+    ):
+        raise StrategyError(
+            "scorecard report JSON footprint exceeds budget"
+        )
+
+
+def _scorecard_report_path_node(
+    entry: Mapping[str, Any],
+    *,
+    scope: str,
+    lineage: _CandidateLineage,
+) -> dict[str, Any]:
+    voting = (
+        lineage.candidate.asset["voting"]
+        if isinstance(lineage, _VotingCandidateLineage)
+        else None
+    )
+    return {
+        "scope": scope,
+        "position": int(entry["position"]),
+        "entry_id": _required_text(
+            entry["entry_id"],
+            "scorecard report path entry_id",
+        ),
+        "rule_id": _required_text(
+            entry["rule_id"],
+            "scorecard report path rule_id",
+        ),
+        "asset_type": _required_text(
+            entry["source"]["asset_type"],
+            "scorecard report path asset_type",
+        ),
+        "voting_n": None if voting is None else int(voting["n"]),
+        "voting_k": None if voting is None else int(voting["k"]),
+    }
+
+
+def _scorecard_report_model(
+    asset: Mapping[str, Any],
+    *,
+    artifact_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    contract = asset["score_contract"]
+    vector = asset["score_vector"]
+    return {
+        "band_artifact_ref": dict(artifact_ref),
+        "score_product": contract["score_product"],
+        "score_direction": contract["score_direction"],
+        "points_direction": contract["points_direction"],
+        "scale": {
+            key: contract["scale"][key]
+            for key in (
+                "base_score",
+                "pdo",
+                "base_odds",
+                "factor",
+                "offset",
+            )
+        },
+        "sample_summary": {
+            key: vector[key]
+            for key in (
+                "row_count",
+                "development_count",
+                "labeled_count",
+                "bad_count",
+            )
+        },
+        "performance": {
+            key: asset["performance"][key] for key in ("auc", "ks")
+        },
+        "lifecycle": {
+            key: asset["lifecycle"][key]
+            for key in (
+                "candidate_stage",
+                "observation_stage",
+                "validation_status",
+            )
+        },
+        "scorecard_points": [
+            {
+                key: row[key]
+                for key in (
+                    "feature",
+                    "bin_index",
+                    "bin_label",
+                    "lower",
+                    "upper",
+                    "count",
+                    "bad_count",
+                    "good_count",
+                    "bad_rate",
+                    "woe",
+                    "iv_contribution",
+                    "coefficient",
+                    "monotonic_direction",
+                    "points",
+                )
+            }
+            for row in contract["scorecard_table"]
+        ],
+        "bands": [
+            {
+                key: band[key]
+                for key in (
+                    "ordinal",
+                    "bin_id",
+                    "lower_bound",
+                    "upper_bound",
+                    "lower_inclusive",
+                    "upper_inclusive",
+                    "count",
+                    "share",
+                    "labeled_count",
+                    "bad_count",
+                    "bad_rate",
+                    "average_pd",
+                )
+            }
+            for band in asset["bands"]
+        ],
+        "cutoffs": [
+            {
+                "ordinal": cutoff["ordinal"],
+                "cutoff_id": cutoff["cutoff_id"],
+                "execution_pd": cutoff["execution_pd"],
+                "display_points": cutoff["display_points"],
+                "lower_risk": {
+                    key: cutoff["lower_risk"][key]
+                    for key in (
+                        "count",
+                        "labeled_count",
+                        "bad_count",
+                        "bad_rate",
+                    )
+                },
+                "higher_risk": {
+                    key: cutoff["higher_risk"][key]
+                    for key in (
+                        "count",
+                        "labeled_count",
+                        "bad_count",
+                        "bad_rate",
+                    )
+                },
+            }
+            for cutoff in asset["cutoffs"]
+        ],
+    }
 
 
 @dataclass(frozen=True)
@@ -3038,10 +3741,12 @@ def _read_verified_pool_file(
 __all__ = [
     "POOL_ARTIFACT_KIND",
     "POOL_ARTIFACT_SCHEMA_VERSION",
+    "SCORECARD_REPORT_PROJECTION_SCHEMA_VERSION",
     "StrategyCandidatePoolArtifactBinding",
     "VerifiedUnivariateCandidateLineageBinding",
     "load_current_strategy_candidate_pool_artifact",
     "load_verified_univariate_candidate_lineage",
+    "project_scorecard_report_evidence",
     "require_strategy_candidate_pool_artifact_binding_on_connection",
     "require_verified_univariate_candidate_lineage_on_connection",
     "run_add_candidate_to_pool",

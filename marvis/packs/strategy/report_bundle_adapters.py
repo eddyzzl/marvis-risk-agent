@@ -75,6 +75,7 @@ from marvis.packs.strategy.pool_impact_tools import (
 )
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
+    project_scorecard_report_evidence,
 )
 from marvis.packs.strategy.pool_requirement_resolver import (
     validate_pool_requirement_bindings_provenance,
@@ -103,6 +104,11 @@ from marvis.packs.strategy.sample_design_v2 import (
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
 )
+
+
+_MAX_SCORECARD_REPORT_TABLE_FIELDS = 50_000
+_MAX_SCORECARD_REPORT_TABLE_REFS = 10_000
+_MAX_SCORECARD_REPORT_TABLE_JSON_BYTES = 8 * 1024 * 1024
 
 
 _SECTION_TITLES = {
@@ -280,6 +286,12 @@ def build_strategy_report_bundle_source_inputs(
     )
     sample = _authenticated_sample_design(sample_design)
     pool, design = _authenticated_candidate_pool(candidate_pool)
+    try:
+        scorecard_report = project_scorecard_report_evidence(candidate_pool)
+    except StrategyError as exc:
+        raise StrategyReportBundleError(
+            "candidate-pool scorecard lineage is invalid"
+        ) from exc
     stability = (
         None
         if candidate_stability is None
@@ -436,6 +448,8 @@ def build_strategy_report_bundle_source_inputs(
         ),
         stability_source=stability_source_ref,
     )
+    scorecard_backtest_refs = _scorecard_backtest_refs(scorecard_report)
+    scorecard_frozen_refs = _scorecard_frozen_refs(scorecard_report)
     state = project["state"]
     pre_impact_sections = {
         "current_project": _current_project_section(project, refs.project),
@@ -451,6 +465,9 @@ def build_strategy_report_bundle_source_inputs(
             pool=pool,
             compiled_design=design,
             pool_ref=refs.pool,
+            scorecard_report=scorecard_report,
+            scorecard_backtest_refs=scorecard_backtest_refs,
+            scorecard_frozen_refs=scorecard_frozen_refs,
             stability=stability,
             stability_ref=refs.stability,
             stability_source_ref=refs.stability_source,
@@ -542,6 +559,9 @@ def build_strategy_report_bundle_source_inputs(
             [
                 refs.pool,
                 refs.impact,
+                *scorecard_report["artifact_refs"],
+                *scorecard_backtest_refs,
+                *scorecard_frozen_refs,
                 *([] if refs.stability is None else [refs.stability]),
                 *(
                     []
@@ -2036,6 +2056,9 @@ def _candidate_section(
     pool: Mapping[str, Any],
     compiled_design: Mapping[str, Any],
     pool_ref: Mapping[str, str],
+    scorecard_report: Mapping[str, Any],
+    scorecard_backtest_refs: Sequence[Mapping[str, str]],
+    scorecard_frozen_refs: Sequence[Mapping[str, str]],
     stability: Mapping[str, Any] | None,
     stability_ref: Mapping[str, str] | None,
     stability_source_ref: Mapping[str, str] | None,
@@ -2144,9 +2167,44 @@ def _candidate_section(
         ),
     ]
     tables = [candidates, strategy]
-    stage_evidence: list[dict[str, Any]] = []
+    scorecard_tables = _scorecard_report_tables(
+        scorecard_report=scorecard_report,
+        pool_ref=pool_ref,
+        scorecard_backtest_refs=scorecard_backtest_refs,
+    )
+    tables.extend(scorecard_tables)
+    if len(scorecard_backtest_refs) != len(scorecard_frozen_refs):
+        raise StrategyReportBundleError(
+            "scorecard stage role refs do not match"
+        )
+    stage_evidence: list[dict[str, Any]] = [
+        {
+            "effect_stage": "backtested",
+            "population": "risk",
+            "partition": "development",
+            "binding": {
+                "kind": "development_backtest",
+                "dataset_ref": dataset_ref,
+                "frozen_artifact_ref": frozen_ref,
+                "result_ref": backtest_ref,
+            },
+        }
+        for frozen_ref, backtest_ref in zip(
+            scorecard_frozen_refs,
+            scorecard_backtest_refs,
+            strict=True,
+        )
+    ]
     red_flags: list[dict[str, Any]] = []
-    section_refs = [pool_ref]
+    section_refs = _dedupe_refs(
+        [
+            pool_ref,
+            *scorecard_report["artifact_refs"],
+            *scorecard_backtest_refs,
+            *scorecard_frozen_refs,
+            *([] if not scorecard_backtest_refs else [dataset_ref]),
+        ]
+    )
     if stability is not None:
         if stability_ref is None or stability_source_ref is None:
             raise StrategyReportBundleError(
@@ -2246,7 +2304,15 @@ def _candidate_section(
             for item in stability["red_flags"]
         )
         section_refs = _dedupe_refs(
-            [pool_ref, dataset_ref, stability_source_ref, stability_ref]
+            [
+                pool_ref,
+                *scorecard_report["artifact_refs"],
+                *scorecard_backtest_refs,
+                *scorecard_frozen_refs,
+                dataset_ref,
+                stability_source_ref,
+                stability_ref,
+            ]
         )
     return build_strategy_report_section(
         key="candidate_combinations",
@@ -2258,6 +2324,599 @@ def _candidate_section(
         red_flags=red_flags,
         source_refs=section_refs,
     )
+
+
+def _scorecard_report_tables(
+    *,
+    scorecard_report: Mapping[str, Any],
+    pool_ref: Mapping[str, str],
+    scorecard_backtest_refs: Sequence[Mapping[str, str]],
+) -> list[dict[str, Any]]:
+    models = scorecard_report["models"]
+    usages = scorecard_report["usages"]
+    if not models:
+        if usages or scorecard_report["artifact_refs"]:
+            raise StrategyReportBundleError(
+                "empty scorecard report projection contains orphan evidence"
+            )
+        return []
+    if len(scorecard_backtest_refs) != len(models):
+        raise StrategyReportBundleError(
+            "scorecard backtest refs do not match projected models"
+        )
+
+    usages_by_model: dict[int, list[Mapping[str, Any]]] = {
+        int(model["model_index"]): [] for model in models
+    }
+    for usage in usages:
+        model_index = int(usage["model_index"])
+        if model_index not in usages_by_model:
+            raise StrategyReportBundleError(
+                "scorecard usage references an unknown model"
+            )
+        usages_by_model[model_index].append(usage)
+
+    summary_rows: list[dict[str, Any]] = []
+    point_rows: list[dict[str, Any]] = []
+    band_rows: list[dict[str, Any]] = []
+    cutoff_rows: list[dict[str, Any]] = []
+    all_refs: list[Mapping[str, str]] = [
+        pool_ref,
+        *scorecard_report["artifact_refs"],
+        *scorecard_backtest_refs,
+    ]
+
+    for model, backtest_ref in zip(
+        models,
+        scorecard_backtest_refs,
+        strict=True,
+    ):
+        model_index = int(model["model_index"])
+        band_ref = _scorecard_artifact_ref(model["band_artifact_ref"])
+        model_usages = usages_by_model[model_index]
+        usage_refs = _dedupe_refs(
+            [
+                _scorecard_artifact_ref(ref)
+                for usage in model_usages
+                for ref in usage["usage_artifact_refs"]
+            ]
+        )
+        model_refs = _dedupe_refs(
+            [band_ref, pool_ref, backtest_ref, *usage_refs]
+        )
+        all_refs.extend(model_refs)
+        path_values = [
+            _scorecard_usage_path_value(path)
+            for usage in model_usages
+            for path in usage["usage_paths"]
+        ]
+        vector = model["sample_summary"]
+        performance = model["performance"]
+        lifecycle = model["lifecycle"]
+        scale = model["scale"]
+        summary_rows.append(
+            {
+                "row_id": f"scorecard-model-{model_index:03d}",
+                "cells": {
+                    "model_index": _present_field_many(
+                        model_index,
+                        model_refs,
+                    ),
+                    "score_product": _present_field(
+                        model["score_product"], band_ref
+                    ),
+                    "score_direction": _present_field(
+                        model["score_direction"], band_ref
+                    ),
+                    "points_direction": _present_field(
+                        model["points_direction"], band_ref
+                    ),
+                    "row_count": _present_field(vector["row_count"], band_ref),
+                    "development_count": _present_field(
+                        vector["development_count"], band_ref
+                    ),
+                    "labeled_count": _present_field(
+                        vector["labeled_count"], band_ref
+                    ),
+                    "bad_count": _present_field(vector["bad_count"], band_ref),
+                    "auc": _present_field(performance["auc"], band_ref),
+                    "ks": _present_field(performance["ks"], band_ref),
+                    "base_score": _present_field(
+                        scale["base_score"], band_ref
+                    ),
+                    "pdo": _present_field(scale["pdo"], band_ref),
+                    "base_odds": _present_field(
+                        scale["base_odds"], band_ref
+                    ),
+                    "factor": _present_field(scale["factor"], band_ref),
+                    "offset": _present_field(scale["offset"], band_ref),
+                    "band_count": _present_field(
+                        len(model["bands"]), band_ref
+                    ),
+                    "cutoff_count": _present_field(
+                        len(model["cutoffs"]), band_ref
+                    ),
+                    "candidate_stage": _present_field(
+                        lifecycle["candidate_stage"], band_ref
+                    ),
+                    "observation_stage": _present_field(
+                        lifecycle["observation_stage"], band_ref
+                    ),
+                    "validation_status": _present_field(
+                        lifecycle["validation_status"], band_ref
+                    ),
+                    "usage_count": _present_field_many(
+                        len(path_values), model_refs
+                    ),
+                    "usage_paths": _present_field_many(
+                        path_values, model_refs
+                    ),
+                },
+            }
+        )
+
+        for row_index, row in enumerate(model["scorecard_points"]):
+            point_rows.append(
+                {
+                    "row_id": (
+                        f"scorecard-points-{model_index:03d}-"
+                        f"{row_index:06d}"
+                    ),
+                    "cells": {
+                        "model_index": _present_field_many(
+                            model_index,
+                            model_refs,
+                        ),
+                        **{
+                            key: _scorecard_optional_field(
+                                row[key],
+                                band_ref,
+                                note=f"scorecard_{key}_not_applicable",
+                            )
+                            for key in (
+                                "feature",
+                                "bin_index",
+                                "bin_label",
+                                "lower",
+                                "upper",
+                                "count",
+                                "bad_count",
+                                "good_count",
+                                "bad_rate",
+                                "woe",
+                                "iv_contribution",
+                                "coefficient",
+                                "monotonic_direction",
+                                "points",
+                            )
+                        },
+                    },
+                }
+            )
+
+        for band in model["bands"]:
+            band_rows.append(
+                {
+                    "row_id": (
+                        f"scorecard-band-{model_index:03d}-"
+                        f"{int(band['ordinal']):03d}"
+                    ),
+                    "cells": {
+                        "model_index": _present_field_many(
+                            model_index,
+                            model_refs,
+                        ),
+                        "ordinal": _present_field(
+                            band["ordinal"], band_ref
+                        ),
+                        "bin_id": _present_field(band["bin_id"], band_ref),
+                        "lower_bound": _scorecard_boundary_field(
+                            band["lower_bound"],
+                            unbounded="−∞",
+                            source_ref=band_ref,
+                        ),
+                        "upper_bound": _scorecard_boundary_field(
+                            band["upper_bound"],
+                            unbounded="+∞",
+                            source_ref=band_ref,
+                        ),
+                        "lower_inclusive": _present_field(
+                            band["lower_inclusive"], band_ref
+                        ),
+                        "upper_inclusive": _present_field(
+                            band["upper_inclusive"], band_ref
+                        ),
+                        "count": _present_field(band["count"], band_ref),
+                        "share": _present_field(band["share"], band_ref),
+                        "labeled_count": _present_field(
+                            band["labeled_count"], band_ref
+                        ),
+                        "bad_count": _present_field(
+                            band["bad_count"], band_ref
+                        ),
+                        "bad_rate": _scorecard_optional_field(
+                            band["bad_rate"],
+                            band_ref,
+                            note="scorecard_band_bad_rate_undefined",
+                        ),
+                        "average_pd": _present_field(
+                            band["average_pd"], band_ref
+                        ),
+                    },
+                }
+            )
+
+        for cutoff in model["cutoffs"]:
+            selected_usages = [
+                usage
+                for usage in model_usages
+                if usage["cutoff_id"] == cutoff["cutoff_id"]
+            ]
+            selected_refs = _dedupe_refs(
+                (
+                    [
+                        band_ref,
+                        pool_ref,
+                        backtest_ref,
+                        *[
+                            _scorecard_artifact_ref(ref)
+                            for usage in selected_usages
+                            for ref in usage["usage_artifact_refs"]
+                        ],
+                    ]
+                    if selected_usages
+                    else model_refs
+                )
+            )
+            selection_reasons = [
+                usage["selection_reason"]
+                for usage in selected_usages
+                if usage["selection_reason"] is not None
+            ]
+            selected_paths = [
+                _scorecard_usage_path_value(path)
+                for usage in selected_usages
+                for path in usage["usage_paths"]
+            ]
+            lower = cutoff["lower_risk"]
+            higher = cutoff["higher_risk"]
+            cutoff_rows.append(
+                {
+                    "row_id": (
+                        f"scorecard-cutoff-{model_index:03d}-"
+                        f"{int(cutoff['ordinal']):03d}"
+                    ),
+                    "cells": {
+                        "model_index": _present_field_many(
+                            model_index,
+                            model_refs,
+                        ),
+                        "ordinal": _present_field(
+                            cutoff["ordinal"], band_ref
+                        ),
+                        "cutoff_id": _present_field(
+                            cutoff["cutoff_id"], band_ref
+                        ),
+                        "execution_pd": _present_field(
+                            cutoff["execution_pd"], band_ref
+                        ),
+                        "display_points": _present_field(
+                            cutoff["display_points"], band_ref
+                        ),
+                        "selected": _present_field_many(
+                            bool(selected_usages), selected_refs
+                        ),
+                        "selection_reason": (
+                            _present_field_many(
+                                selection_reasons, selected_refs
+                            )
+                            if selection_reasons
+                            else _absent_field(
+                                "not_applicable",
+                                note=(
+                                    "scorecard_cutoff_not_selected"
+                                    if not selected_usages
+                                    else "selection_reason_not_provided"
+                                ),
+                            )
+                        ),
+                        "usage_paths": _present_field_many(
+                            selected_paths, selected_refs
+                        ),
+                        "lower_risk_count": _present_field(
+                            lower["count"], band_ref
+                        ),
+                        "lower_risk_labeled_count": _present_field(
+                            lower["labeled_count"], band_ref
+                        ),
+                        "lower_risk_bad_count": _present_field(
+                            lower["bad_count"], band_ref
+                        ),
+                        "lower_risk_bad_rate": _scorecard_optional_field(
+                            lower["bad_rate"],
+                            band_ref,
+                            note="scorecard_lower_risk_bad_rate_undefined",
+                        ),
+                        "higher_risk_count": _present_field(
+                            higher["count"], band_ref
+                        ),
+                        "higher_risk_labeled_count": _present_field(
+                            higher["labeled_count"], band_ref
+                        ),
+                        "higher_risk_bad_count": _present_field(
+                            higher["bad_count"], band_ref
+                        ),
+                        "higher_risk_bad_rate": _scorecard_optional_field(
+                            higher["bad_rate"],
+                            band_ref,
+                            note="scorecard_higher_risk_bad_rate_undefined",
+                        ),
+                    },
+                }
+            )
+
+    refs = _dedupe_refs(all_refs)
+    tables = [
+        build_strategy_report_table(
+            table_id="scorecard_model_summary",
+            title=(
+                "评分卡模型汇总（原始PD越高风险越高，"
+                "评分卡分数越高风险越低）"
+            ),
+            sheet_key="05_candidates",
+            granularity="aggregate",
+            content_class="metric_summary",
+            effect_stage="backtested",
+            columns=[
+                _column("model_index", "模型序号"),
+                _column("score_product", "分值产品"),
+                _column("score_direction", "原始PD方向"),
+                _column("points_direction", "评分卡分数方向"),
+                _column("row_count", "全量行数"),
+                _column("development_count", "开发样本数"),
+                _column("labeled_count", "有标签样本数"),
+                _column("bad_count", "坏样本数"),
+                _column("auc", "AUC", precision=6),
+                _column("ks", "KS", precision=6),
+                _column("base_score", "基础分", precision=6),
+                _column("pdo", "PDO", precision=6),
+                _column("base_odds", "基础好坏比", precision=6),
+                _column("factor", "Factor", precision=6),
+                _column("offset", "Offset", precision=6),
+                _column("band_count", "风险分带数"),
+                _column("cutoff_count", "候选阈值数"),
+                _column("candidate_stage", "候选阶段"),
+                _column("observation_stage", "观察阶段"),
+                _column("validation_status", "验证状态"),
+                _column("usage_count", "Pool使用次数"),
+                _column("usage_paths", "Pool/Voting使用路径"),
+            ],
+            rows=summary_rows,
+            source_refs=refs,
+        ),
+        build_strategy_report_table(
+            table_id="scorecard_points",
+            title="评分卡分值明细（分数越高风险越低）",
+            sheet_key="appendix_scorecard",
+            granularity="aggregate",
+            content_class="bin_summary",
+            effect_stage="backtested",
+            columns=[
+                _column("model_index", "模型序号"),
+                _column("feature", "变量"),
+                _column("bin_index", "分箱序号"),
+                _column("bin_label", "分箱标签"),
+                _column("lower", "下界"),
+                _column("upper", "上界"),
+                _column("count", "样本数"),
+                _column("bad_count", "坏样本数"),
+                _column("good_count", "好样本数"),
+                _column("bad_rate", "坏样本率", unit="%", precision=6),
+                _column("woe", "WOE", precision=6),
+                _column("iv_contribution", "IV贡献", precision=6),
+                _column("coefficient", "系数", precision=6),
+                _column("monotonic_direction", "单调方向"),
+                _column("points", "评分卡分值", precision=6),
+            ],
+            rows=point_rows,
+            source_refs=refs,
+        ),
+        build_strategy_report_table(
+            table_id="scorecard_bands",
+            title="评分卡风险分带（原始PD越高风险越高）",
+            sheet_key="appendix_scorecard",
+            granularity="aggregate",
+            content_class="bin_summary",
+            effect_stage="backtested",
+            columns=[
+                _column("model_index", "模型序号"),
+                _column("ordinal", "分带序号"),
+                _column("bin_id", "分带ID"),
+                _column("lower_bound", "原始PD下界"),
+                _column("upper_bound", "原始PD上界"),
+                _column("lower_inclusive", "包含下界"),
+                _column("upper_inclusive", "包含上界"),
+                _column("count", "样本数"),
+                _column("share", "样本占比", unit="%", precision=6),
+                _column("labeled_count", "有标签样本数"),
+                _column("bad_count", "坏样本数"),
+                _column("bad_rate", "坏样本率", unit="%", precision=6),
+                _column("average_pd", "平均原始PD", precision=6),
+            ],
+            rows=band_rows,
+            source_refs=refs,
+        ),
+        build_strategy_report_table(
+            table_id="scorecard_cutoff_evaluations",
+            title=(
+                "评分卡全阈值评估（原始PD越高风险越高，"
+                "分数越高风险越低）"
+            ),
+            sheet_key="appendix_scorecard",
+            granularity="aggregate",
+            content_class="metric_summary",
+            effect_stage="backtested",
+            columns=[
+                _column("model_index", "模型序号"),
+                _column("ordinal", "阈值序号"),
+                _column("cutoff_id", "阈值ID"),
+                _column("execution_pd", "原始坏概率阈值", precision=8),
+                _column("display_points", "对应展示分", precision=6),
+                _column("selected", "已选择"),
+                _column("selection_reason", "选择理由"),
+                _column("usage_paths", "Pool/Voting使用路径"),
+                _column("lower_risk_count", "低风险侧样本数"),
+                _column("lower_risk_labeled_count", "低风险侧有标签数"),
+                _column("lower_risk_bad_count", "低风险侧坏样本数"),
+                _column(
+                    "lower_risk_bad_rate",
+                    "低风险侧坏样本率",
+                    unit="%",
+                    precision=6,
+                ),
+                _column("higher_risk_count", "高风险侧样本数"),
+                _column("higher_risk_labeled_count", "高风险侧有标签数"),
+                _column("higher_risk_bad_count", "高风险侧坏样本数"),
+                _column(
+                    "higher_risk_bad_rate",
+                    "高风险侧坏样本率",
+                    unit="%",
+                    precision=6,
+                ),
+            ],
+            rows=cutoff_rows,
+            source_refs=refs,
+        ),
+    ]
+    _enforce_scorecard_report_table_budget(tables)
+    return tables
+
+
+def _enforce_scorecard_report_table_budget(
+    tables: Sequence[Mapping[str, Any]],
+) -> None:
+    field_count = sum(
+        len(row["cells"])
+        for table in tables
+        for row in table["rows"]
+    )
+    ref_count = sum(
+        len(table["source_refs"])
+        + sum(
+            len(field["source_refs"])
+            for row in table["rows"]
+            for field in row["cells"].values()
+        )
+        for table in tables
+    )
+    if field_count > _MAX_SCORECARD_REPORT_TABLE_FIELDS:
+        raise StrategyReportBundleError(
+            "scorecard report table fields exceed reserved budget"
+        )
+    if ref_count > _MAX_SCORECARD_REPORT_TABLE_REFS:
+        raise StrategyReportBundleError(
+            "scorecard report table references exceed reserved budget"
+        )
+    encoded = json.dumps(
+        tables,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    if len(encoded) > _MAX_SCORECARD_REPORT_TABLE_JSON_BYTES:
+        raise StrategyReportBundleError(
+            "scorecard report table JSON exceeds reserved budget"
+        )
+
+
+def _scorecard_backtest_refs(
+    scorecard_report: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    # SourceRef.kind is the report-contract role, not the TaskArtifact kind.
+    # The governed band artifact is a combined frozen scorecard contract and
+    # development aggregate result; retain its exact id/hash for both roles.
+    return [
+        _artifact_ref(
+            "backtest",
+            str(model["band_artifact_ref"]["ref_id"]),
+            str(model["band_artifact_ref"]["content_hash"]),
+        )
+        for model in scorecard_report["models"]
+    ]
+
+
+def _scorecard_frozen_refs(
+    scorecard_report: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    return [
+        _artifact_ref(
+            "strategy_candidate_asset",
+            str(model["band_artifact_ref"]["ref_id"]),
+            str(model["band_artifact_ref"]["content_hash"]),
+        )
+        for model in scorecard_report["models"]
+    ]
+
+
+def _scorecard_artifact_ref(value: Mapping[str, Any]) -> dict[str, str]:
+    return _artifact_ref(
+        str(value["kind"]),
+        str(value["ref_id"]),
+        str(value["content_hash"]),
+    )
+
+
+def _scorecard_usage_path_value(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "label": _scorecard_usage_path_label(value["path"]),
+        "artifact_refs": [
+            _scorecard_artifact_ref(ref)
+            for ref in value["artifact_refs"]
+        ],
+    }
+
+
+def _scorecard_usage_path_label(
+    path: Sequence[Mapping[str, Any]],
+) -> str:
+    parts: list[str] = []
+    for node in path:
+        prefix = (
+            "Pool"
+            if node["scope"] == "current_pool_entry"
+            else "Voting"
+        )
+        label = (
+            f"{prefix}[{int(node['position']) + 1}]"
+            f":{node['rule_id']}"
+        )
+        if node["voting_n"] is not None:
+            label += f"(n={node['voting_n']},k={node['voting_k']})"
+        parts.append(label)
+    return " > ".join(parts)
+
+
+def _scorecard_optional_field(
+    value: Any,
+    source_ref: Mapping[str, str],
+    *,
+    note: str,
+) -> dict[str, Any]:
+    if value is None:
+        return _absent_field("not_applicable", note=note)
+    return _present_field(value, source_ref)
+
+
+def _scorecard_boundary_field(
+    value: Any,
+    *,
+    unbounded: str,
+    source_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    return _present_field(unbounded if value is None else value, source_ref)
 
 
 def _candidate_stability_table(

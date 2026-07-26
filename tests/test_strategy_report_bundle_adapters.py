@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from marvis.artifacts.model_score_vector import write_model_score_vector
+from marvis.output.strategy_report_bundle import render_strategy_report_bundle
 from marvis.packs.modeling.evidence import (
     canonical_modeling_training_evidence_json,
 )
@@ -29,6 +30,7 @@ from marvis.packs.modeling.score_evidence_tools import (
 from marvis.packs.strategy.candidate_fragment import (
     build_verified_candidate_fragment,
 )
+from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.candidate_stability import (
     CANDIDATE_STABILITY_PRODUCER_VERSION,
     build_candidate_stability_artifact,
@@ -69,8 +71,10 @@ from marvis.packs.strategy.pool_impact import (
 from marvis.packs.strategy.pool_impact_tools import (
     StrategyPoolImpactArtifactBinding,
 )
+from marvis.packs.strategy import pool_tools as strategy_pool_tools
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
+    project_scorecard_report_evidence,
 )
 from marvis.packs.strategy.project_context import (
     build_context_field,
@@ -102,6 +106,32 @@ from marvis.packs.strategy.sample_design_v2 import (
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
 )
+from marvis.packs.strategy.scorecard_candidate import (
+    build_scorecard_cutoff_selection,
+    canonical_scorecard_band_asset_json,
+    canonical_scorecard_cutoff_selection_json,
+    scorecard_cutoff_selection_to_verified_candidate_fragment,
+)
+from marvis.packs.strategy.scorecard_candidate_tools import (
+    ScorecardBandAssetArtifactBinding,
+    ScorecardCutoffSelectionArtifactBinding,
+)
+from marvis.packs.strategy.voting_candidate import (
+    build_voting_candidate_asset,
+)
+from marvis.packs.strategy.voting_candidate_fragment import (
+    VOTING_CANDIDATE_ARTIFACT_KIND,
+    VOTING_CANDIDATE_ORIGIN_TOOL,
+    voting_candidate_to_verified_fragment,
+)
+from marvis.packs.strategy import (
+    voting_candidate_tools as strategy_voting_tools,
+)
+from marvis.packs.strategy.voting_candidate_tools import (
+    VerifiedVotingCandidateArtifact,
+    build_voting_candidate_artifact_document,
+    canonical_voting_candidate_artifact_json,
+)
 from tests.test_modeling_evidence_contract import (
     _artifact as _model_artifact,
     _evidence as _training_evidence,
@@ -120,6 +150,13 @@ from tests.test_strategy_sample_design_v2 import (
     _metric_observations as _sample_metric_observations,
     _policy as _sample_policy,
     _source_ref as _sample_source_ref,
+)
+from tests.test_strategy_scorecard_candidate import (
+    _build as _build_scorecard_band_asset,
+)
+from tests.test_strategy_voting_candidate import (
+    SAMPLE_DESIGN_REF as _PLAIN_VOTING_SAMPLE_REF,
+    _pool as _plain_voting_parent_pool,
 )
 
 
@@ -458,6 +495,565 @@ def _pool_and_impact_bindings(
         db_path=tmp_path / "marvis.sqlite",
     )
     return pool_binding, impact_binding
+
+
+def _scorecard_report_pool_binding(
+    tmp_path: Path,
+    sample: StrategySampleDesignV2ArtifactBinding,
+    *,
+    selection_ordinal: int = 0,
+    selection_reason: str | None = "风险上限方案",
+) -> tuple[
+    StrategyCandidatePoolArtifactBinding,
+    ScorecardCutoffSelectionArtifactBinding,
+]:
+    design = sample.bundle["sample_design"]
+    dataset = design["identity"]["dataset_ref"]
+    workspace = design["identity"]["workspace_ref"]
+    identity = {
+        "task_id": sample.task_id,
+        "dataset_id": dataset["dataset_id"],
+        "dataset_content_hash": dataset["content_hash"],
+        "workspace_revision": workspace["revision"],
+        "workspace_generation": workspace["generation"],
+        "semantic_mapping_hash": workspace["semantic_mapping_hash"],
+        "sample_context_hash": _hash("scorecard-report-sample-context"),
+    }
+    sample_ref = {
+        "membership_artifact_id": sample.membership_artifact_id,
+        "expected_membership_artifact_content_hash": (
+            sample.membership_artifact_content_hash
+        ),
+        "bundle_artifact_id": sample.bundle_artifact_id,
+        "expected_bundle_artifact_content_hash": (
+            sample.bundle_artifact_content_hash
+        ),
+        "expected_bundle_id": sample.bundle["bundle_id"],
+        "expected_sample_design_id": design["sample_design_id"],
+        "expected_sample_design_content_hash": design["content_hash"],
+    }
+    asset = _build_scorecard_band_asset(
+        identity=identity,
+        sample_design_ref=sample_ref,
+    )
+    asset_canonical = canonical_scorecard_band_asset_json(asset).encode("utf-8")
+    band_binding = ScorecardBandAssetArtifactBinding(
+        task_id=sample.task_id,
+        artifact_id=_hash("scorecard-report-band-artifact"),
+        path=tmp_path / "scorecard-band.json",
+        content_hash=hashlib.sha256(asset_canonical).hexdigest(),
+        provenance={},
+        canonical_bytes=asset_canonical,
+        asset=asset,
+        score_evidence=None,  # type: ignore[arg-type]
+        sample_design=sample,
+    )
+    cutoff = asset["cutoffs"][selection_ordinal]
+    selection = build_scorecard_cutoff_selection(
+        asset,
+        source_artifact_binding=band_binding.to_domain_binding(),
+        cutoff_id=cutoff["cutoff_id"],
+        selection_reason=selection_reason,
+    )
+    selection_canonical = canonical_scorecard_cutoff_selection_json(
+        selection
+    ).encode("utf-8")
+    selection_binding = ScorecardCutoffSelectionArtifactBinding(
+        task_id=sample.task_id,
+        artifact_id=_hash(
+            f"scorecard-report-selection-{selection_ordinal}-artifact"
+        ),
+        path=tmp_path / f"scorecard-selection-{selection_ordinal}.json",
+        content_hash=hashlib.sha256(selection_canonical).hexdigest(),
+        provenance={},
+        canonical_bytes=selection_canonical,
+        selection=selection,
+        source_asset_binding=band_binding,
+    )
+    fragment = scorecard_cutoff_selection_to_verified_candidate_fragment(
+        selection,
+        asset,
+        selection_artifact_binding=selection_binding.to_domain_binding(),
+        source_artifact_binding=band_binding.to_domain_binding(),
+    )
+    pool = add_verified_candidate_fragment(
+        None,
+        task_id=sample.task_id,
+        strategy_type="approval",
+        default_action=_action("approval"),
+        verified_candidate_fragment=fragment,
+        action=_action("reject"),
+    )
+    compiled = compile_strategy_pool(pool)
+    lineage = strategy_pool_tools._ScorecardCandidateLineage(
+        selection=selection_binding,
+        asset=band_binding,
+        dataset=SimpleNamespace(),
+        verified_fragment=fragment,
+        source_binding=pool["entries"][0]["source"],
+    )
+    canonical = canonical_strategy_pool_json(pool)
+    return (
+        StrategyCandidatePoolArtifactBinding(
+            task_id=sample.task_id,
+            strategy_type="approval",
+            pool=pool,
+            compiled_design=compiled,
+            artifact_id=_hash("scorecard-report-pool-artifact"),
+            artifact_path=tmp_path / "scorecard-report-pool.json",
+            artifact_content_hash=_file_hash(canonical),
+            artifact_origin_tool="strategy.add_candidate_to_pool",
+            artifact_provenance={},
+            artifact_provenance_json="{}",
+            lineages=(lineage,),
+            tasks_root=tmp_path,
+            datasets_root=tmp_path,
+            db_path=tmp_path / "marvis.sqlite",
+        ),
+        selection_binding,
+    )
+
+
+def _scorecard_voting_report_pool_binding(
+    tmp_path: Path,
+    sample: StrategySampleDesignV2ArtifactBinding,
+) -> StrategyCandidatePoolArtifactBinding:
+    direct, first_selection = _scorecard_report_pool_binding(
+        tmp_path,
+        sample,
+        selection_ordinal=0,
+        selection_reason="低风险方案",
+    )
+    first_lineage = direct.lineages[0]
+    band_binding = first_selection.source_asset_binding
+    asset = band_binding.asset
+    second_selection_value = build_scorecard_cutoff_selection(
+        asset,
+        source_artifact_binding=band_binding.to_domain_binding(),
+        cutoff_id=asset["cutoffs"][1]["cutoff_id"],
+        selection_reason="高风险方案",
+    )
+    second_canonical = canonical_scorecard_cutoff_selection_json(
+        second_selection_value
+    ).encode("utf-8")
+    second_selection = ScorecardCutoffSelectionArtifactBinding(
+        task_id=sample.task_id,
+        artifact_id=_hash("scorecard-report-selection-1-artifact"),
+        path=tmp_path / "scorecard-selection-1.json",
+        content_hash=hashlib.sha256(second_canonical).hexdigest(),
+        provenance={},
+        canonical_bytes=second_canonical,
+        selection=second_selection_value,
+        source_asset_binding=band_binding,
+    )
+    second_fragment = scorecard_cutoff_selection_to_verified_candidate_fragment(
+        second_selection_value,
+        asset,
+        selection_artifact_binding=second_selection.to_domain_binding(),
+        source_artifact_binding=band_binding.to_domain_binding(),
+    )
+    parent_pool = add_verified_candidate_fragment(
+        direct.pool,
+        task_id=sample.task_id,
+        strategy_type="approval",
+        default_action=_action("approval"),
+        verified_candidate_fragment=second_fragment,
+        action=_action("reject"),
+    )
+    second_lineage = strategy_pool_tools._ScorecardCandidateLineage(
+        selection=second_selection,
+        asset=band_binding,
+        dataset=SimpleNamespace(),
+        verified_fragment=second_fragment,
+        source_binding=parent_pool["entries"][1]["source"],
+    )
+
+    target = np.asarray([0, 0, 1, 1, 1, 0], dtype=np.int64)
+    hit_count = np.asarray([0, 1, 2, 2, 1, 0], dtype=np.int64)
+    voting_mask = hit_count >= 1
+    effect = strategy_voting_tools._effect_from_mask(
+        voting_mask,
+        target=target,
+        population_count=len(target),
+    )
+    voting_asset = build_voting_candidate_asset(
+        parent_pool,
+        selected_entry_ids=[
+            entry["entry_id"] for entry in parent_pool["entries"]
+        ],
+        n=1,
+        target_col="target",
+        sample_design_ref=sample.bundle["sample_design"]["compatibility"][
+            "legacy_development_ref"
+        ],
+        effect=effect,
+    )
+    document = build_voting_candidate_artifact_document(
+        voting_asset,
+        target_col="target",
+        drop_nan_labels=False,
+        nan_labels_dropped=0,
+        population_count=len(target),
+        labeled_count=len(target),
+        hit_distribution=strategy_voting_tools._hit_distribution(
+            hit_count,
+            target=target,
+            k=2,
+        ),
+        metric_observations=strategy_voting_tools._metric_observations(
+            voting_mask,
+            hit_count=hit_count,
+            target=target,
+            amount_values={
+                "loan_amount": None,
+                "overdue_amount": None,
+            },
+            k=2,
+        ),
+    )
+    voting_canonical = canonical_voting_candidate_artifact_json(
+        document
+    ).encode("utf-8")
+    parent_pool_artifact_id = _hash(
+        "scorecard-report-voting-parent-pool-artifact"
+    )
+    parent_pool_artifact_hash = _file_hash(
+        canonical_strategy_pool_json(parent_pool)
+    )
+    candidate = VerifiedVotingCandidateArtifact(
+        artifact_id=_hash("scorecard-report-voting-artifact"),
+        task_id=sample.task_id,
+        kind=VOTING_CANDIDATE_ARTIFACT_KIND,
+        path=tmp_path / "scorecard-voting.json",
+        content_hash=hashlib.sha256(voting_canonical).hexdigest(),
+        origin_tool=VOTING_CANDIDATE_ORIGIN_TOOL,
+        provenance={
+            "schema_version": document["schema_version"],
+            "pool_artifact_id": parent_pool_artifact_id,
+            "pool_artifact_content_hash": parent_pool_artifact_hash,
+        },
+        canonical_bytes=voting_canonical,
+        document=document,
+        asset=voting_asset,
+    )
+    voting_fragment = voting_candidate_to_verified_fragment(
+        voting_asset,
+        artifact_binding=candidate.artifact_binding(),
+    )
+    current_pool = add_verified_candidate_fragment(
+        parent_pool,
+        task_id=sample.task_id,
+        strategy_type="approval",
+        default_action=_action("approval"),
+        verified_candidate_fragment=voting_fragment,
+        action=_action("reject"),
+        placement_mode="replace_selected_members",
+        selected_entry_ids=[
+            entry["entry_id"] for entry in parent_pool["entries"]
+        ],
+    )
+    lineage = strategy_pool_tools._VotingCandidateLineage(
+        candidate=candidate,
+        parent_pool=parent_pool,
+        parent_pool_artifact=SimpleNamespace(
+            artifact_id=parent_pool_artifact_id,
+            task_id=sample.task_id,
+            kind=strategy_pool_tools.POOL_ARTIFACT_KIND,
+            path=tmp_path / "scorecard-report-voting-parent-pool.json",
+            content_hash=parent_pool_artifact_hash,
+            origin_tool="strategy.add_candidate_to_pool",
+            provenance={},
+            provenance_json="{}",
+        ),
+        parent_lineages=(first_lineage, second_lineage),
+        verified_fragment=voting_fragment,
+        source_binding=current_pool["entries"][0]["source"],
+    )
+    canonical = canonical_strategy_pool_json(current_pool)
+    return StrategyCandidatePoolArtifactBinding(
+        task_id=sample.task_id,
+        strategy_type="approval",
+        pool=current_pool,
+        compiled_design=compile_strategy_pool(current_pool),
+        artifact_id=_hash("scorecard-report-voting-pool-artifact"),
+        artifact_path=tmp_path / "scorecard-report-voting-pool.json",
+        artifact_content_hash=_file_hash(canonical),
+        artifact_origin_tool="strategy.add_candidate_to_pool",
+        artifact_provenance={},
+        artifact_provenance_json="{}",
+        lineages=(lineage,),
+        tasks_root=tmp_path,
+        datasets_root=tmp_path,
+        db_path=tmp_path / "marvis.sqlite",
+    )
+
+
+def _non_scorecard_voting_report_pool_binding(
+    tmp_path: Path,
+) -> StrategyCandidatePoolArtifactBinding:
+    parent_pool = _plain_voting_parent_pool()
+    selected_entry_ids = [
+        entry["entry_id"] for entry in parent_pool["entries"]
+    ]
+    target = np.asarray([0, 0, 1, 1, 1, 0], dtype=np.int64)
+    hit_count = np.asarray([0, 1, 2, 3, 2, 1], dtype=np.int64)
+    voting_mask = hit_count >= 2
+    effect = strategy_voting_tools._effect_from_mask(
+        voting_mask,
+        target=target,
+        population_count=len(target),
+    )
+    voting_asset = build_voting_candidate_asset(
+        parent_pool,
+        selected_entry_ids=selected_entry_ids,
+        n=2,
+        target_col="bad",
+        sample_design_ref=_PLAIN_VOTING_SAMPLE_REF,
+        effect=effect,
+    )
+    document = build_voting_candidate_artifact_document(
+        voting_asset,
+        target_col="bad",
+        drop_nan_labels=False,
+        nan_labels_dropped=0,
+        population_count=len(target),
+        labeled_count=len(target),
+        hit_distribution=strategy_voting_tools._hit_distribution(
+            hit_count,
+            target=target,
+            k=3,
+        ),
+        metric_observations=strategy_voting_tools._metric_observations(
+            voting_mask,
+            hit_count=hit_count,
+            target=target,
+            amount_values={
+                "loan_amount": None,
+                "overdue_amount": None,
+            },
+            k=3,
+        ),
+    )
+    voting_canonical = canonical_voting_candidate_artifact_json(
+        document
+    ).encode("utf-8")
+    parent_pool_artifact_id = _hash(
+        "non-scorecard-voting-parent-pool-artifact"
+    )
+    parent_pool_artifact_hash = _file_hash(
+        canonical_strategy_pool_json(parent_pool)
+    )
+    candidate = VerifiedVotingCandidateArtifact(
+        artifact_id=_hash("non-scorecard-voting-artifact"),
+        task_id=parent_pool["task_id"],
+        kind=VOTING_CANDIDATE_ARTIFACT_KIND,
+        path=tmp_path / "non-scorecard-voting.json",
+        content_hash=hashlib.sha256(voting_canonical).hexdigest(),
+        origin_tool=VOTING_CANDIDATE_ORIGIN_TOOL,
+        provenance={
+            "schema_version": document["schema_version"],
+            "pool_artifact_id": parent_pool_artifact_id,
+            "pool_artifact_content_hash": parent_pool_artifact_hash,
+        },
+        canonical_bytes=voting_canonical,
+        document=document,
+        asset=voting_asset,
+    )
+    voting_fragment = voting_candidate_to_verified_fragment(
+        voting_asset,
+        artifact_binding=candidate.artifact_binding(),
+    )
+    current_pool = add_verified_candidate_fragment(
+        parent_pool,
+        task_id=parent_pool["task_id"],
+        strategy_type=parent_pool["strategy_type"],
+        default_action=_action("approval"),
+        verified_candidate_fragment=voting_fragment,
+        action=_action("reject"),
+        placement_mode="replace_selected_members",
+        selected_entry_ids=selected_entry_ids,
+    )
+    parent_lineages = tuple(
+        strategy_pool_tools._UnivariateCandidateLineage(
+            asset_record=None,
+            asset={},
+            parent_record=None,
+            evidence={},
+            dataset=SimpleNamespace(),
+            verified_fragment={},
+            source_binding=entry["source"],
+        )
+        for entry in parent_pool["entries"]
+    )
+    lineage = strategy_pool_tools._VotingCandidateLineage(
+        candidate=candidate,
+        parent_pool=parent_pool,
+        parent_pool_artifact=SimpleNamespace(
+            artifact_id=parent_pool_artifact_id,
+            task_id=parent_pool["task_id"],
+            kind=strategy_pool_tools.POOL_ARTIFACT_KIND,
+            path=tmp_path / "non-scorecard-voting-parent-pool.json",
+            content_hash=parent_pool_artifact_hash,
+            origin_tool="strategy.add_candidate_to_pool",
+            provenance={},
+            provenance_json="{}",
+        ),
+        parent_lineages=parent_lineages,
+        verified_fragment=voting_fragment,
+        source_binding=current_pool["entries"][0]["source"],
+    )
+    canonical = canonical_strategy_pool_json(current_pool)
+    return StrategyCandidatePoolArtifactBinding(
+        task_id=parent_pool["task_id"],
+        strategy_type=parent_pool["strategy_type"],
+        pool=current_pool,
+        compiled_design=compile_strategy_pool(current_pool),
+        artifact_id=_hash("non-scorecard-voting-pool-artifact"),
+        artifact_path=tmp_path / "non-scorecard-voting-pool.json",
+        artifact_content_hash=_file_hash(canonical),
+        artifact_origin_tool="strategy.add_candidate_to_pool",
+        artifact_provenance={},
+        artifact_provenance_json="{}",
+        lineages=(lineage,),
+        tasks_root=tmp_path,
+        datasets_root=tmp_path,
+        db_path=tmp_path / "marvis.sqlite",
+    )
+
+
+def _scorecard_reused_selection_voting_report_pool_binding(
+    tmp_path: Path,
+    sample: StrategySampleDesignV2ArtifactBinding,
+) -> StrategyCandidatePoolArtifactBinding:
+    one_of_two = _scorecard_voting_report_pool_binding(tmp_path, sample)
+    one_of_two_lineage = one_of_two.lineages[0]
+    assert isinstance(
+        one_of_two_lineage,
+        strategy_pool_tools._VotingCandidateLineage,
+    )
+    parent_pool = one_of_two_lineage.parent_pool
+    target = np.asarray([0, 0, 1, 1, 1, 0], dtype=np.int64)
+    hit_count = np.asarray([0, 1, 2, 2, 1, 0], dtype=np.int64)
+    voting_mask = hit_count >= 2
+    effect = strategy_voting_tools._effect_from_mask(
+        voting_mask,
+        target=target,
+        population_count=len(target),
+    )
+    voting_asset = build_voting_candidate_asset(
+        parent_pool,
+        selected_entry_ids=[
+            entry["entry_id"] for entry in parent_pool["entries"]
+        ],
+        n=2,
+        target_col="target",
+        sample_design_ref=sample.bundle["sample_design"]["compatibility"][
+            "legacy_development_ref"
+        ],
+        effect=effect,
+    )
+    document = build_voting_candidate_artifact_document(
+        voting_asset,
+        target_col="target",
+        drop_nan_labels=False,
+        nan_labels_dropped=0,
+        population_count=len(target),
+        labeled_count=len(target),
+        hit_distribution=strategy_voting_tools._hit_distribution(
+            hit_count,
+            target=target,
+            k=2,
+        ),
+        metric_observations=strategy_voting_tools._metric_observations(
+            voting_mask,
+            hit_count=hit_count,
+            target=target,
+            amount_values={
+                "loan_amount": None,
+                "overdue_amount": None,
+            },
+            k=2,
+        ),
+    )
+    canonical = canonical_voting_candidate_artifact_json(document).encode(
+        "utf-8"
+    )
+    candidate = VerifiedVotingCandidateArtifact(
+        artifact_id=_hash("scorecard-report-voting-n2-artifact"),
+        task_id=sample.task_id,
+        kind=VOTING_CANDIDATE_ARTIFACT_KIND,
+        path=tmp_path / "scorecard-voting-n2.json",
+        content_hash=hashlib.sha256(canonical).hexdigest(),
+        origin_tool=VOTING_CANDIDATE_ORIGIN_TOOL,
+        provenance={
+            "schema_version": document["schema_version"],
+            "pool_artifact_id": (
+                one_of_two_lineage.parent_pool_artifact.artifact_id
+            ),
+            "pool_artifact_content_hash": (
+                one_of_two_lineage.parent_pool_artifact.content_hash
+            ),
+        },
+        canonical_bytes=canonical,
+        document=document,
+        asset=voting_asset,
+    )
+    two_of_two_fragment = voting_candidate_to_verified_fragment(
+        voting_asset,
+        artifact_binding=candidate.artifact_binding(),
+    )
+    selected_entry_ids = [
+        entry["entry_id"] for entry in parent_pool["entries"]
+    ]
+    current_pool = add_verified_candidate_fragment(
+        parent_pool,
+        task_id=sample.task_id,
+        strategy_type="approval",
+        default_action=_action("approval"),
+        verified_candidate_fragment=two_of_two_fragment,
+        action=_action("reject"),
+        placement_mode="before_selected_members",
+        selected_entry_ids=selected_entry_ids,
+    )
+    current_pool = add_verified_candidate_fragment(
+        current_pool,
+        task_id=sample.task_id,
+        strategy_type="approval",
+        default_action=_action("approval"),
+        verified_candidate_fragment=one_of_two_lineage.verified_fragment,
+        action=_action("reject"),
+        placement_mode="replace_selected_members",
+        selected_entry_ids=selected_entry_ids,
+    )
+    two_of_two_lineage = strategy_pool_tools._VotingCandidateLineage(
+        candidate=candidate,
+        parent_pool=parent_pool,
+        parent_pool_artifact=one_of_two_lineage.parent_pool_artifact,
+        parent_lineages=one_of_two_lineage.parent_lineages,
+        verified_fragment=two_of_two_fragment,
+        source_binding=current_pool["entries"][0]["source"],
+    )
+    one_of_two_lineage = replace(
+        one_of_two_lineage,
+        source_binding=current_pool["entries"][1]["source"],
+    )
+    pool_canonical = canonical_strategy_pool_json(current_pool)
+    return StrategyCandidatePoolArtifactBinding(
+        task_id=sample.task_id,
+        strategy_type="approval",
+        pool=current_pool,
+        compiled_design=compile_strategy_pool(current_pool),
+        artifact_id=_hash("scorecard-report-reused-selection-pool-artifact"),
+        artifact_path=tmp_path / "scorecard-reused-selection-pool.json",
+        artifact_content_hash=_file_hash(pool_canonical),
+        artifact_origin_tool="strategy.add_candidate_to_pool",
+        artifact_provenance={},
+        artifact_provenance_json="{}",
+        lineages=(two_of_two_lineage, one_of_two_lineage),
+        tasks_root=tmp_path,
+        datasets_root=tmp_path,
+        db_path=tmp_path / "marvis.sqlite",
+    )
 
 
 def _candidate_stability_binding(
@@ -992,10 +1588,12 @@ def _impact_cube_binding(
                 ).encode("utf-8")
             ).hexdigest(),
             "requirements": requirements,
-            "virtual_fields": [
-                item["requirement"]["virtual_field"]
-                for item in requirements
-            ],
+            "virtual_fields": list(
+                dict.fromkeys(
+                    item["requirement"]["virtual_field"]
+                    for item in requirements
+                )
+            ),
         }
     return StrategyImpactCubeArtifactBinding(
         task_id=sample.task_id,
@@ -2188,7 +2786,7 @@ def test_adapter_projects_candidate_stability_summary_table_and_sources(
         **result,
     )
     assert bundle["schema_version"] == "strategy.report-bundle.v2"
-    assert bundle["effect_stages"] == ["backtested"]
+    assert "backtested" in bundle["effect_stages"]
 
 
 def test_adapter_binds_standalone_stability_to_exact_candidate_asset(
@@ -2273,3 +2871,529 @@ def test_adapter_projects_low_sample_stability_flags_as_amber(
     assert red_flags[0]["level"] == "amber"
     assert "202601" in red_flags[0]["message"]
     assert "低样本" in red_flags[0]["message"]
+
+
+def test_adapter_projects_complete_scorecard_tables_from_pool_lineage(
+    tmp_path: Path,
+) -> None:
+    project, sample, _pool, _legacy_impact = _bindings(tmp_path)
+    pool, selection = _scorecard_report_pool_binding(tmp_path, sample)
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        impact_cube=impact_cube,
+    )
+
+    section = result["sections"][4]
+    tables = {table["table_id"]: table for table in section["tables"]}
+    assert {
+        "scorecard_model_summary",
+        "scorecard_points",
+        "scorecard_bands",
+        "scorecard_cutoff_evaluations",
+    } <= set(tables)
+    assert tables["scorecard_points"]["sheet_key"] == "appendix_scorecard"
+    scorecard_tables = [
+        tables[table_id]
+        for table_id in (
+            "scorecard_model_summary",
+            "scorecard_points",
+            "scorecard_bands",
+            "scorecard_cutoff_evaluations",
+        )
+    ]
+    assert {
+        table["effect_stage"] for table in scorecard_tables
+    } == {"backtested"}
+    backtest_stages = [
+        stage
+        for stage in section["stage_evidence"]
+        if stage["effect_stage"] == "backtested"
+    ]
+    assert len(backtest_stages) == 1
+    assert backtest_stages[0]["binding"]["result_ref"] == {
+        "kind": "backtest",
+        "ref_id": selection.source_asset_binding.artifact_id,
+        "content_hash": selection.source_asset_binding.content_hash,
+    }
+    assert backtest_stages[0]["binding"]["frozen_artifact_ref"] == {
+        "kind": "strategy_candidate_asset",
+        "ref_id": selection.source_asset_binding.artifact_id,
+        "content_hash": selection.source_asset_binding.content_hash,
+    }
+    assert {
+        (
+            ref["kind"],
+            ref["ref_id"],
+            ref["content_hash"],
+        )
+        for ref in result["strategy_artifact_refs"]
+    } >= {
+        (
+            "strategy_scorecard_band_asset",
+            selection.source_asset_binding.artifact_id,
+            selection.source_asset_binding.content_hash,
+        ),
+        (
+            "strategy_candidate_asset",
+            selection.source_asset_binding.artifact_id,
+            selection.source_asset_binding.content_hash,
+        ),
+        (
+            "backtest",
+            selection.source_asset_binding.artifact_id,
+            selection.source_asset_binding.content_hash,
+        ),
+    }
+    summary = tables["scorecard_model_summary"]["rows"][0]["cells"]
+    assert summary["score_direction"]["value"] == "higher_is_riskier"
+    assert summary["points_direction"]["value"] == "higher_is_better"
+    assert summary["auc"]["value"] == 1.0
+    assert summary["ks"]["value"] == 1.0
+    pool_ref = {
+        "kind": "strategy_candidate_pool",
+        "ref_id": pool.artifact_id,
+        "content_hash": pool.artifact_content_hash,
+    }
+    assert pool_ref in summary["model_index"]["source_refs"]
+    assert {
+        ref["kind"] for ref in summary["model_index"]["source_refs"]
+    } >= {
+        "strategy_candidate_pool",
+        "strategy_scorecard_band_asset",
+        "strategy_scorecard_cutoff_selection",
+    }
+    for table in scorecard_tables[1:]:
+        assert pool_ref in table["rows"][0]["cells"]["model_index"][
+            "source_refs"
+        ]
+
+    asset = selection.source_asset_binding.asset
+    assert len(tables["scorecard_points"]["rows"]) == len(
+        asset["score_contract"]["scorecard_table"]
+    )
+    assert len(tables["scorecard_bands"]["rows"]) == len(asset["bands"])
+    cutoff_rows = tables["scorecard_cutoff_evaluations"]["rows"]
+    assert len(cutoff_rows) == len(asset["cutoffs"])
+    selected = next(
+        row for row in cutoff_rows if row["cells"]["selected"]["value"] is True
+    )
+    unselected = next(
+        row
+        for row in cutoff_rows
+        if row["cells"]["selected"]["value"] is False
+    )
+    assert {
+        ref["kind"]
+        for ref in unselected["cells"]["selected"]["source_refs"]
+    } >= {
+        "strategy_candidate_pool",
+        "strategy_scorecard_band_asset",
+        "strategy_scorecard_cutoff_selection",
+    }
+    assert selected["cells"]["cutoff_id"]["value"] == selection.selection[
+        "cutoff_id"
+    ]
+    assert selected["cells"]["selection_reason"]["value"] == ["风险上限方案"]
+    assert selected["cells"]["lower_risk_count"]["value"] == 2
+    assert selected["cells"]["lower_risk_bad_count"]["value"] == 0
+    assert selected["cells"]["lower_risk_bad_rate"]["value"] == 0.0
+    assert selected["cells"]["higher_risk_count"]["value"] == 4
+    assert selected["cells"]["higher_risk_bad_count"]["value"] == 2
+    assert selected["cells"]["higher_risk_bad_rate"]["value"] == pytest.approx(
+        2.0 / 3.0
+    )
+
+    bundle = build_strategy_report_bundle(
+        task_id=project.task_id,
+        report_revision=1,
+        strategy_id=None,
+        strategy_version=None,
+        strategy_type="approval",
+        title=_present("评分卡策略报告", result["strategy_artifact_refs"][0]),
+        status="partial",
+        generated_at="2026-07-25T12:00:00+08:00",
+        **result,
+    )
+    assert bundle["schema_version"] == "strategy.report-bundle.v2"
+    assert "backtested" in bundle["effect_stages"]
+    rendered = render_strategy_report_bundle(bundle)
+    assert set(rendered) == {"json", "markdown", "xlsx", "docx"}
+    assert b"scorecard_model_summary" in rendered["json"]
+    assert "评分卡模型汇总" in rendered["markdown"].decode("utf-8")
+    assert rendered["xlsx"].startswith(b"PK")
+    assert rendered["docx"].startswith(b"PK")
+
+
+def test_scorecard_report_projection_recurses_voting_dedupes_and_redacts(
+    tmp_path: Path,
+) -> None:
+    _project, sample, _pool, _impact = _bindings(tmp_path)
+    pool = _scorecard_voting_report_pool_binding(tmp_path, sample)
+
+    projection = project_scorecard_report_evidence(pool)
+
+    assert len(projection["models"]) == 1
+    assert len(projection["usages"]) == 2
+    assert [
+        [
+            node["scope"]
+            for node in usage["usage_paths"][0]["path"]
+        ]
+        for usage in projection["usages"]
+    ] == [
+        ["current_pool_entry", "voting_parent_entry"],
+        ["current_pool_entry", "voting_parent_entry"],
+    ]
+    assert [
+        usage["selection_reason"] for usage in projection["usages"]
+    ] == ["低风险方案", "高风险方案"]
+    assert len(projection["artifact_refs"]) == 5
+    assert {
+        ref["kind"] for ref in projection["artifact_refs"]
+    } == {
+        "strategy_candidate_pool",
+        "strategy_scorecard_band_asset",
+        "strategy_scorecard_cutoff_selection",
+        "strategy_voting_candidate",
+    }
+    for usage in projection["usages"]:
+        assert {
+            ref["kind"] for ref in usage["usage_artifact_refs"]
+        } == {
+            "strategy_candidate_pool",
+            "strategy_scorecard_band_asset",
+            "strategy_scorecard_cutoff_selection",
+            "strategy_voting_candidate",
+        }
+        assert (
+            usage["usage_paths"][0]["artifact_refs"]
+            == usage["usage_artifact_refs"]
+        )
+    serialized = json.dumps(
+        projection,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    for forbidden in (
+        "asset_hash",
+        "selection_hash",
+        "raw_pd_content_hash",
+        "canonical_bytes",
+        "score_vector",
+        "dataset_content_hash",
+    ):
+        assert forbidden not in serialized
+
+
+def test_non_scorecard_voting_pool_keeps_scorecard_projection_empty(
+    tmp_path: Path,
+) -> None:
+    pool = _non_scorecard_voting_report_pool_binding(tmp_path)
+
+    projection = project_scorecard_report_evidence(pool)
+
+    assert projection == {
+        "schema_version": "strategy.scorecard-report-projection.v1",
+        "models": [],
+        "usages": [],
+        "artifact_refs": [],
+    }
+
+
+def test_scorecard_projection_keeps_each_reused_usage_path_audit_chain(
+    tmp_path: Path,
+) -> None:
+    _project, sample, _pool, _impact = _bindings(tmp_path)
+    pool = _scorecard_reused_selection_voting_report_pool_binding(
+        tmp_path,
+        sample,
+    )
+
+    projection = project_scorecard_report_evidence(pool)
+
+    assert len(projection["models"]) == 1
+    assert len(projection["usages"]) == 2
+    for usage in projection["usages"]:
+        assert len(usage["usage_paths"]) == 2
+        path_voting_refs = [
+            [
+                ref["ref_id"]
+                for ref in path["artifact_refs"]
+                if ref["kind"] == "strategy_voting_candidate"
+            ]
+            for path in usage["usage_paths"]
+        ]
+        assert all(len(refs) == 1 for refs in path_voting_refs)
+        assert len({refs[0] for refs in path_voting_refs}) == 2
+        assert {
+            ref["ref_id"]
+            for ref in usage["usage_artifact_refs"]
+            if ref["kind"] == "strategy_voting_candidate"
+        } == {refs[0] for refs in path_voting_refs}
+
+
+def test_scorecard_report_projection_rejects_tampered_selection_and_voting_order(
+    tmp_path: Path,
+) -> None:
+    _project, sample, _pool, _impact = _bindings(tmp_path)
+    direct, _selection = _scorecard_report_pool_binding(tmp_path, sample)
+    direct_lineage = direct.lineages[0]
+    tampered_selection = replace(
+        direct_lineage.selection,
+        selection={
+            **direct_lineage.selection.selection,
+            "selection_reason": "伪造理由",
+        },
+    )
+    tampered_direct = replace(
+        direct,
+        lineages=(
+            replace(direct_lineage, selection=tampered_selection),
+        ),
+    )
+
+    with pytest.raises(StrategyError):
+        project_scorecard_report_evidence(tampered_direct)
+
+    voting = _scorecard_voting_report_pool_binding(tmp_path, sample)
+    voting_lineage = voting.lineages[0]
+    tampered_voting = replace(
+        voting,
+        lineages=(
+            replace(
+                voting_lineage,
+                parent_lineages=tuple(
+                    reversed(voting_lineage.parent_lineages)
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(StrategyError, match="parent entry"):
+        project_scorecard_report_evidence(tampered_voting)
+
+    parent_artifact = voting_lineage.parent_pool_artifact
+    forged_parent_artifact = SimpleNamespace(**vars(parent_artifact))
+    forged_parent_artifact.content_hash = "f" * 64
+    tampered_parent_ref = replace(
+        voting,
+        lineages=(
+            replace(
+                voting_lineage,
+                parent_pool_artifact=forged_parent_artifact,
+            ),
+        ),
+    )
+    with pytest.raises(StrategyError, match="parent Pool artifact"):
+        project_scorecard_report_evidence(tampered_parent_ref)
+
+
+def test_scorecard_report_projection_rejects_relevant_lineage_type_drift(
+    tmp_path: Path,
+) -> None:
+    _project, sample, _pool, _impact = _bindings(tmp_path)
+    direct, _selection = _scorecard_report_pool_binding(tmp_path, sample)
+    source = direct.pool["entries"][0]["source"]
+    wrong_lineage = strategy_pool_tools._UnivariateCandidateLineage(
+        asset_record=None,
+        asset={},
+        parent_record=None,
+        evidence={},
+        dataset=SimpleNamespace(),
+        verified_fragment={},
+        source_binding=source,
+    )
+
+    with pytest.raises(StrategyError, match="lineage type"):
+        project_scorecard_report_evidence(
+            replace(direct, lineages=(wrong_lineage,))
+        )
+
+    voting = _scorecard_voting_report_pool_binding(tmp_path, sample)
+    voting_source = voting.pool["entries"][0]["source"]
+    with pytest.raises(StrategyError, match="lineage type"):
+        project_scorecard_report_evidence(
+            replace(
+                voting,
+                lineages=(
+                    replace(wrong_lineage, source_binding=voting_source),
+                ),
+            )
+        )
+
+
+def test_adapter_preserves_scorecard_voting_usage_paths_and_all_cutoffs(
+    tmp_path: Path,
+) -> None:
+    project, sample, _pool, _impact = _bindings(tmp_path)
+    pool = _scorecard_voting_report_pool_binding(tmp_path, sample)
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        impact_cube=impact_cube,
+    )
+
+    tables = {
+        table["table_id"]: table
+        for table in result["sections"][4]["tables"]
+    }
+    summary = tables["scorecard_model_summary"]["rows"][0]["cells"]
+    assert summary["usage_count"]["value"] == 2
+    assert {
+        ref["kind"] for ref in summary["usage_paths"]["source_refs"]
+    } >= {
+        "strategy_candidate_pool",
+        "strategy_scorecard_band_asset",
+        "strategy_scorecard_cutoff_selection",
+        "strategy_voting_candidate",
+    }
+    assert all(
+        "Pool[1]" in path["label"] and "Voting[" in path["label"]
+        for path in summary["usage_paths"]["value"]
+    )
+    assert all(
+        {
+            ref["kind"] for ref in path["artifact_refs"]
+        } == {
+            "strategy_candidate_pool",
+            "strategy_scorecard_band_asset",
+            "strategy_scorecard_cutoff_selection",
+            "strategy_voting_candidate",
+        }
+        for path in summary["usage_paths"]["value"]
+    )
+    cutoff_rows = tables["scorecard_cutoff_evaluations"]["rows"]
+    assert len(cutoff_rows) == 2
+    assert [
+        row["cells"]["selected"]["value"] for row in cutoff_rows
+    ] == [True, True]
+    assert [
+        row["cells"]["selection_reason"]["value"] for row in cutoff_rows
+    ] == [["低风险方案"], ["高风险方案"]]
+    assert {
+        ref["kind"] for ref in result["strategy_artifact_refs"]
+    } >= {
+        "strategy_candidate_pool",
+        "strategy_scorecard_band_asset",
+        "strategy_scorecard_cutoff_selection",
+        "strategy_voting_candidate",
+    }
+
+
+def test_adapter_keeps_each_reused_scorecard_path_audit_chain(
+    tmp_path: Path,
+) -> None:
+    project, sample, _pool, _impact = _bindings(tmp_path)
+    pool = _scorecard_reused_selection_voting_report_pool_binding(
+        tmp_path,
+        sample,
+    )
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        impact_cube=impact_cube,
+    )
+
+    summary = next(
+        table
+        for table in result["sections"][4]["tables"]
+        if table["table_id"] == "scorecard_model_summary"
+    )["rows"][0]["cells"]
+    paths = summary["usage_paths"]["value"]
+    assert len(paths) == 4
+    voting_ref_ids = [
+        [
+            ref["ref_id"]
+            for ref in path["artifact_refs"]
+            if ref["kind"] == "strategy_voting_candidate"
+        ]
+        for path in paths
+    ]
+    assert all(len(refs) == 1 for refs in voting_ref_ids)
+    assert len({refs[0] for refs in voting_ref_ids}) == 2
+    assert all(
+        {
+            (ref["kind"], ref["ref_id"], ref["content_hash"])
+            for ref in path["artifact_refs"]
+        }
+        <= {
+            (ref["kind"], ref["ref_id"], ref["content_hash"])
+            for ref in summary["usage_paths"]["source_refs"]
+        }
+        for path in paths
+    )
+
+
+def test_scorecard_report_limits_fail_closed_without_trimming(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _project, sample, _pool, _impact = _bindings(tmp_path)
+    direct, _selection = _scorecard_report_pool_binding(tmp_path, sample)
+    monkeypatch.setattr(
+        strategy_pool_tools,
+        "MAX_SCORECARD_REPORT_DETAIL_ROWS",
+        1,
+    )
+    with pytest.raises(StrategyError, match="detail rows exceed budget"):
+        project_scorecard_report_evidence(direct)
+
+    voting = _scorecard_voting_report_pool_binding(tmp_path, sample)
+    monkeypatch.setattr(
+        strategy_pool_tools,
+        "MAX_SCORECARD_REPORT_DETAIL_ROWS",
+        512,
+    )
+    monkeypatch.setattr(
+        strategy_pool_tools,
+        "MAX_SCORECARD_REPORT_USAGES",
+        1,
+    )
+    with pytest.raises(StrategyError, match="usage paths exceed budget"):
+        project_scorecard_report_evidence(voting)
+
+    monkeypatch.setattr(
+        strategy_pool_tools,
+        "MAX_SCORECARD_REPORT_TABLE_REFS",
+        1,
+        raising=False,
+    )
+    with pytest.raises(
+        StrategyError,
+        match="report reference footprint exceeds budget",
+    ):
+        project_scorecard_report_evidence(direct)
+
+
+def test_scorecard_report_adapter_fails_before_global_report_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, sample, _pool, _impact = _bindings(tmp_path)
+    pool, _selection = _scorecard_report_pool_binding(tmp_path, sample)
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+    monkeypatch.setattr(
+        "marvis.packs.strategy.report_bundle_adapters."
+        "_MAX_SCORECARD_REPORT_TABLE_REFS",
+        1,
+    )
+
+    with pytest.raises(
+        StrategyReportBundleError,
+        match="scorecard report table references exceed reserved budget",
+    ):
+        build_strategy_report_bundle_source_inputs(
+            project_context=project,
+            sample_design=sample,
+            candidate_pool=pool,
+            impact_cube=impact_cube,
+        )
