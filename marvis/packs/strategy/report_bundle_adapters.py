@@ -11,10 +11,8 @@ development evidence to an independent-validation or production claim.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
 import hashlib
 import json
-from pathlib import Path
 from typing import Any
 
 from marvis.packs.modeling.evidence import (
@@ -50,16 +48,14 @@ from marvis.packs.strategy.model_evidence_tools import (
 )
 from marvis.packs.strategy.dsl import strategy_spec_hash
 from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.impact_cube import (
-    STRATEGY_IMPACT_CUBE_PRODUCER_VERSION,
-    canonical_strategy_impact_cube_json,
-    validate_strategy_impact_cube,
+from marvis.packs.strategy.impact_cube_binding import (
+    StrategyImpactCubeArtifactBinding,
+    validate_strategy_impact_cube_artifact_binding as _validate_impact_cube_binding,
 )
 from marvis.packs.strategy.impact_cube_tools import (
     IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION,
     IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION,
     impact_cube_producer_run_ref,
-    validate_impact_cube_producer_run,
 )
 from marvis.packs.strategy.pool import (
     canonical_strategy_pool_json,
@@ -193,29 +189,6 @@ _MODEL_STATUS_TO_AVAILABILITY = {
     "not_matured": "not_matured",
     "not_applicable": "not_applicable",
 }
-_IMPACT_CUBE_PROVENANCE_FIELDS = frozenset(
-    {
-        "schema_version",
-        "producer_version",
-        "task_id",
-        "cube_id",
-        "cube_content_hash",
-        "pool_ref",
-        "sample_design_ref",
-        "dataset_binding",
-        "target_binding",
-        "dimension_bindings",
-        "current_strategy_ref",
-        "economics_inputs",
-        "partitions",
-        "populations",
-        "lifecycle",
-        "producer_run",
-    }
-)
-_IMPACT_CUBE_REQUIREMENTS_PROVENANCE_FIELDS = (
-    _IMPACT_CUBE_PROVENANCE_FIELDS | {"requirement_bindings"}
-)
 _CANDIDATE_STABILITY_PROVENANCE_FIELDS = frozenset(
     {
         "schema_version",
@@ -273,21 +246,6 @@ _CANDIDATE_STABILITY_LIFECYCLE = {
     "not_adopted": True,
     "not_deployed": True,
 }
-
-
-@dataclass(frozen=True)
-class StrategyImpactCubeArtifactBinding:
-    """Authenticated immutable ImpactCube source for report projection."""
-
-    task_id: str
-    artifact_id: str
-    artifact_path: Path
-    artifact_content_hash: str
-    artifact_provenance: dict[str, Any]
-    artifact_provenance_json: str
-    cube: dict[str, Any]
-    tasks_root: Path
-    db_path: Path
 
 
 def validate_strategy_impact_cube_artifact_binding(
@@ -1831,218 +1789,10 @@ def _authenticated_pool_impact(
 def _authenticated_impact_cube(
     binding: StrategyImpactCubeArtifactBinding,
 ) -> dict[str, Any]:
-    _require_binding_type(
-        binding,
-        StrategyImpactCubeArtifactBinding,
-        "ImpactCube",
-    )
-    cube = validate_strategy_impact_cube(binding.cube)
-    if cube != binding.cube or cube["identity"]["task_id"] != binding.task_id:
-        raise StrategyReportBundleError(
-            "ImpactCube binding identity changed"
-        )
-    _require_canonical_artifact_hash(
-        binding.artifact_content_hash,
-        canonical_strategy_impact_cube_json(cube),
-        "ImpactCube",
-    )
-    _require_impact_cube_provenance(binding, cube)
-    return cube
-
-
-def _require_impact_cube_provenance(
-    binding: StrategyImpactCubeArtifactBinding,
-    cube: Mapping[str, Any],
-) -> None:
     try:
-        canonical = json.dumps(
-            binding.artifact_provenance,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        provenance = json.loads(canonical)
-    except (TypeError, ValueError, RecursionError) as exc:
-        raise StrategyReportBundleError(
-            "ImpactCube artifact provenance is invalid"
-        ) from exc
-    schema_version = (
-        provenance.get("schema_version")
-        if isinstance(provenance, dict)
-        else None
-    )
-    expected_fields = (
-        _IMPACT_CUBE_PROVENANCE_FIELDS
-        if schema_version == IMPACT_CUBE_ARTIFACT_SCHEMA_VERSION
-        else _IMPACT_CUBE_REQUIREMENTS_PROVENANCE_FIELDS
-        if schema_version == IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION
-        else None
-    )
-    if (
-        expected_fields is None
-        or set(provenance) != expected_fields
-        or binding.artifact_provenance_json != canonical
-    ):
-        raise StrategyReportBundleError(
-            "ImpactCube artifact provenance fields changed"
-        )
-    if schema_version == IMPACT_CUBE_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION:
-        try:
-            requirement_bindings = (
-                validate_pool_requirement_bindings_provenance(
-                    provenance["requirement_bindings"]
-                )
-            )
-        except StrategyError as exc:
-            raise StrategyReportBundleError(
-                "ImpactCube requirement bindings are invalid"
-            ) from exc
-        if not requirement_bindings["requirements"]:
-            raise StrategyReportBundleError(
-                "ImpactCube requirements provenance must not be empty"
-            )
-    if (
-        provenance["producer_version"]
-        != STRATEGY_IMPACT_CUBE_PRODUCER_VERSION
-        or provenance["task_id"] != binding.task_id
-        or provenance["cube_id"] != cube["cube_id"]
-        or provenance["cube_content_hash"] != cube["content_hash"]
-        or provenance["populations"] != ["approval", "risk"]
-        or provenance["lifecycle"] != cube["lifecycle"]
-    ):
-        raise StrategyReportBundleError(
-            "ImpactCube artifact provenance identity changed"
-        )
-    sources = cube["source_bindings"]
-    if (
-        provenance["dataset_binding"] != sources["dataset"]
-        or provenance["target_binding"] != sources["target"]
-        or provenance["dimension_bindings"]
-        != {
-            key: sources["fields"][key]
-            for key in ("month_col", "group_col", "segment_col")
-        }
-    ):
-        raise StrategyReportBundleError(
-            "ImpactCube artifact provenance source binding changed"
-        )
-    current = sources["current_strategy"]
-    expected_current = (
-        current["value"]
-        if current["availability"] == "present"
-        else None
-    )
-    if provenance["current_strategy_ref"] != expected_current:
-        raise StrategyReportBundleError(
-            "ImpactCube artifact provenance current strategy changed"
-        )
-    economics = sources["economics"]
-    expected_economics = provenance["economics_inputs"]
-    if expected_economics is None:
-        expected_absence = (
-            ("not_applicable", "segmentation_has_no_economic_contract")
-            if cube["identity"]["strategy_type"] == "segmentation"
-            else ("unavailable", "economics_inputs_not_provided")
-        )
-        if (
-            (
-                economics["availability"],
-                economics["reason"],
-            )
-            != expected_absence
-            or economics["bindings"] != {}
-        ):
-            raise StrategyReportBundleError(
-                "ImpactCube artifact provenance economics changed"
-            )
-    elif expected_economics != economics["bindings"]:
-        raise StrategyReportBundleError(
-            "ImpactCube artifact provenance economics changed"
-        )
-    expected_partitions = [
-        item["name"]
-        for item in cube["partitions"]
-        if item["role"] == "risk"
-    ]
-    if provenance["partitions"] != expected_partitions:
-        raise StrategyReportBundleError(
-            "ImpactCube artifact provenance partitions changed"
-        )
-    identity = cube["identity"]
-    pool_artifact = sources["pool_artifact"]
-    expected_pool_ref = {
-        "artifact_id": pool_artifact["artifact_id"],
-        "expected_artifact_content_hash": pool_artifact[
-            "artifact_content_hash"
-        ],
-        "expected_pool_id": identity["pool_id"],
-        "expected_revision": identity["revision"],
-        "expected_revision_id": identity["revision_id"],
-        "expected_snapshot_hash": identity["snapshot_hash"],
-    }
-    if provenance["pool_ref"] != expected_pool_ref:
-        raise StrategyReportBundleError(
-            "ImpactCube artifact provenance Pool binding changed"
-        )
-    sample = sources["sample_design_v2"]
-    expected_sample_ref = {
-        "membership_artifact_id": sample["membership_artifact_id"],
-        "expected_membership_artifact_content_hash": sample[
-            "membership_artifact_content_hash"
-        ],
-        "bundle_artifact_id": sample["bundle_artifact_id"],
-        "expected_bundle_artifact_content_hash": sample[
-            "bundle_artifact_content_hash"
-        ],
-        "expected_bundle_id": sample["bundle_id"],
-        "expected_sample_design_id": sample["sample_design_id"],
-        "expected_sample_design_content_hash": sample[
-            "sample_design_content_hash"
-        ],
-    }
-    if provenance["sample_design_ref"] != expected_sample_ref:
-        raise StrategyReportBundleError(
-            "ImpactCube artifact provenance sample-design binding changed"
-        )
-    request = {
-        "strategy_type": cube["identity"]["strategy_type"],
-        "pool_ref": provenance["pool_ref"],
-        "sample_design_ref": provenance["sample_design_ref"],
-        "partitions": provenance["partitions"],
-        "population": "risk",
-        "dimension_bindings": provenance["dimension_bindings"],
-        "current_strategy_ref": (
-            None
-            if provenance["current_strategy_ref"] is None
-            else {
-                "strategy_id": provenance["current_strategy_ref"][
-                    "strategy_id"
-                ],
-                "expected_strategy_spec_hash": provenance[
-                    "current_strategy_ref"
-                ]["strategy_spec_hash"],
-            }
-        ),
-        "economics_inputs": provenance["economics_inputs"],
-    }
-    try:
-        validate_impact_cube_producer_run(
-            provenance["producer_run"],
-            expected_task_id=binding.task_id,
-            expected_request=request,
-            expected_cube_id=cube["cube_id"],
-            expected_cube_content_hash=cube["content_hash"],
-            expected_artifact_id=binding.artifact_id,
-            expected_artifact_filename=binding.artifact_path.name,
-            expected_artifact_content_hash=(
-                binding.artifact_content_hash
-            ),
-        )
+        return _validate_impact_cube_binding(binding)
     except StrategyError as exc:
-        raise StrategyReportBundleError(
-            f"ImpactCube producer_run is invalid: {exc}"
-        ) from exc
+        raise StrategyReportBundleError(str(exc)) from exc
 
 
 def _authenticated_model_evidence(

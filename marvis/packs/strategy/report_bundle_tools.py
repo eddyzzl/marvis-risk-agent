@@ -46,15 +46,10 @@ from marvis.packs.strategy.candidate_stability_tools import (
     require_candidate_stability_artifact_binding_on_connection,
 )
 from marvis.packs.strategy.errors import StrategyError
-from marvis.packs.strategy.impact_cube import (
-    MAX_IMPACT_CUBE_JSON_BYTES,
-    canonical_strategy_impact_cube_json,
-    validate_strategy_impact_cube,
-)
-from marvis.packs.strategy.impact_cube_tools import (
-    IMPACT_CUBE_ARTIFACT_KIND,
-    IMPACT_CUBE_ORIGIN_TOOL,
-    require_impact_cube_measurement_audit_on_connection,
+from marvis.packs.strategy.impact_cube_binding import (
+    StrategyImpactCubeArtifactBinding,
+    load_strategy_impact_cube_artifact,
+    require_strategy_impact_cube_artifact_binding_on_connection,
 )
 from marvis.packs.strategy.model_evidence_tools import (
     StrategyModelEvidenceV2ArtifactBinding,
@@ -89,9 +84,7 @@ from marvis.packs.strategy.report_bundle import (
     validate_strategy_report_bundle,
 )
 from marvis.packs.strategy.report_bundle_adapters import (
-    StrategyImpactCubeArtifactBinding,
     build_strategy_report_bundle_source_inputs,
-    validate_strategy_impact_cube_artifact_binding,
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
@@ -295,18 +288,6 @@ _IMPACT_CUBE_ID_RE = re.compile(
 )
 _STRATEGY_TYPES = frozenset(
     {"approval", "reject", "limit", "pricing", "segmentation"}
-)
-_TASK_ARTIFACT_RECORD_FIELDS = frozenset(
-    {
-        "id",
-        "task_id",
-        "kind",
-        "path",
-        "content_hash",
-        "origin_tool",
-        "provenance",
-        "created_at",
-    }
 )
 _MAX_INPUT_BYTES = 1024 * 1024
 
@@ -566,10 +547,10 @@ def _load_sources(
     impact_cube = (
         None
         if request["impact_cube_ref"] is None
-        else _load_strategy_impact_cube_artifact(
+        else load_strategy_impact_cube_artifact(
             runtime,
             task_id=task_id,
-            ref=request["impact_cube_ref"],
+            **request["impact_cube_ref"],
         )
     )
     pool_impact = (
@@ -641,303 +622,6 @@ def _load_sources(
         training_evidence=training_evidence,
         score_evidence=score_evidence,
     )
-
-
-def _load_strategy_impact_cube_artifact(
-    runtime,
-    *,
-    task_id: str,
-    ref: Mapping[str, Any],
-) -> StrategyImpactCubeArtifactBinding:
-    artifact_id = _hash(ref["artifact_id"], "impact_cube_ref.artifact_id")
-    artifact_hash = _hash(
-        ref["expected_artifact_content_hash"],
-        "impact_cube_ref.expected_artifact_content_hash",
-    )
-    record = runtime.task_artifacts.get_for_task(task_id, artifact_id)
-    if (
-        not isinstance(record, Mapping)
-        or set(record) != _TASK_ARTIFACT_RECORD_FIELDS
-    ):
-        raise StrategyError("ImpactCube artifact registry row is invalid")
-    if (
-        record["id"] != artifact_id
-        or record["task_id"] != task_id
-        or record["kind"] != IMPACT_CUBE_ARTIFACT_KIND
-        or record["origin_tool"] != IMPACT_CUBE_ORIGIN_TOOL
-        or not hmac.compare_digest(
-            str(record["content_hash"]),
-            artifact_hash,
-        )
-    ):
-        raise StrategyError("ImpactCube artifact registry binding changed")
-    tasks_root = Path(runtime.settings.tasks_dir).absolute()
-    db_path = Path(runtime.settings.db_path).absolute()
-    path = Path(str(record["path"]))
-    raw = _read_impact_cube_source_file(
-        path,
-        root=tasks_root,
-        expected_hash=artifact_hash,
-    )
-    try:
-        cube = validate_strategy_impact_cube(
-            json.loads(
-                raw.decode("utf-8"),
-                object_pairs_hook=_object_without_duplicate_keys,
-                parse_constant=_reject_json_constant,
-            )
-        )
-    except (
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        TypeError,
-        ValueError,
-        RecursionError,
-    ) as exc:
-        raise StrategyError("ImpactCube artifact JSON is invalid") from exc
-    canonical = canonical_strategy_impact_cube_json(cube).encode("utf-8")
-    if raw != canonical:
-        raise StrategyError("ImpactCube artifact bytes are not canonical")
-    if cube["cube_id"] != ref["expected_cube_id"]:
-        raise StrategyError("ImpactCube cube_id changed")
-    if not hmac.compare_digest(
-        cube["content_hash"],
-        ref["expected_cube_content_hash"],
-    ):
-        raise StrategyError("ImpactCube content_hash changed")
-    expected_path = (
-        tasks_root
-        / task_id
-        / "strategy_impact_cubes"
-        / f"{cube['cube_id']}.json"
-    )
-    if path != expected_path:
-        raise StrategyError("ImpactCube artifact path is not canonical")
-    provenance = _canonical_object(
-        record["provenance"],
-        "ImpactCube artifact provenance",
-    )
-    binding = StrategyImpactCubeArtifactBinding(
-        task_id=task_id,
-        artifact_id=artifact_id,
-        artifact_path=path,
-        artifact_content_hash=artifact_hash,
-        artifact_provenance=provenance,
-        artifact_provenance_json=_canonical_json(provenance),
-        cube=cube,
-        tasks_root=tasks_root,
-        db_path=db_path,
-    )
-    validate_strategy_impact_cube_artifact_binding(binding)
-    with runtime.task_artifacts.transaction() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        _require_strategy_impact_cube_artifact_binding_on_connection(
-            conn,
-            binding,
-        )
-        conn.commit()
-    return binding
-
-
-def load_strategy_impact_cube_artifact(
-    runtime,
-    *,
-    task_id: str,
-    artifact_id: str,
-    expected_artifact_content_hash: str,
-    expected_cube_id: str,
-    expected_cube_content_hash: str,
-) -> StrategyImpactCubeArtifactBinding:
-    """Load one exact authenticated ImpactCube for public workflow wiring."""
-
-    return _load_strategy_impact_cube_artifact(
-        runtime,
-        task_id=task_id,
-        ref={
-            "artifact_id": artifact_id,
-            "expected_artifact_content_hash": (
-                expected_artifact_content_hash
-            ),
-            "expected_cube_id": expected_cube_id,
-            "expected_cube_content_hash": expected_cube_content_hash,
-        },
-    )
-
-
-def _require_strategy_impact_cube_artifact_binding_on_connection(
-    conn,
-    binding: StrategyImpactCubeArtifactBinding,
-) -> None:
-    if not isinstance(binding, StrategyImpactCubeArtifactBinding):
-        raise StrategyError("ImpactCube artifact binding is invalid")
-    if not conn.in_transaction:
-        raise StrategyError(
-            "ImpactCube binding requires a caller-owned transaction"
-        )
-    database = conn.execute(
-        "SELECT file FROM pragma_database_list WHERE name = 'main'"
-    ).fetchone()
-    if (
-        database is None
-        or not str(database["file"])
-        or Path(str(database["file"])).absolute() != binding.db_path
-    ):
-        raise StrategyError("ImpactCube binding database changed")
-    cube = validate_strategy_impact_cube_artifact_binding(binding)
-    if (
-        binding.tasks_root != binding.tasks_root.absolute()
-        or binding.artifact_path
-        != binding.tasks_root
-        / binding.task_id
-        / "strategy_impact_cubes"
-        / f"{cube['cube_id']}.json"
-    ):
-        raise StrategyError("ImpactCube artifact path changed")
-    row = conn.execute(
-        """
-        SELECT id, task_id, kind, path, content_hash, origin_tool,
-               provenance_json
-          FROM task_artifacts
-         WHERE task_id = ? AND id = ?
-        """,
-        (binding.task_id, binding.artifact_id),
-    ).fetchone()
-    if (
-        row is None
-        or str(row["id"]) != binding.artifact_id
-        or str(row["task_id"]) != binding.task_id
-        or str(row["kind"]) != IMPACT_CUBE_ARTIFACT_KIND
-        or str(row["path"]) != str(binding.artifact_path)
-        or not hmac.compare_digest(
-            str(row["content_hash"]),
-            binding.artifact_content_hash,
-        )
-        or str(row["origin_tool"]) != IMPACT_CUBE_ORIGIN_TOOL
-        or str(row["provenance_json"])
-        != binding.artifact_provenance_json
-    ):
-        raise StrategyError("ImpactCube artifact registry binding changed")
-    raw = _read_impact_cube_source_file(
-        binding.artifact_path,
-        root=binding.tasks_root,
-        expected_hash=binding.artifact_content_hash,
-    )
-    if raw != canonical_strategy_impact_cube_json(cube).encode("utf-8"):
-        raise StrategyError("ImpactCube artifact bytes changed")
-    require_impact_cube_measurement_audit_on_connection(
-        conn,
-        binding.artifact_provenance["producer_run"],
-    )
-
-
-def _read_impact_cube_source_file(
-    path: Path,
-    *,
-    root: Path,
-    expected_hash: str,
-) -> bytes:
-    if not path.is_absolute() or path.is_symlink():
-        raise StrategyError("ImpactCube artifact must be a regular file")
-    current = path.parent
-    while current != root:
-        if current.is_symlink():
-            raise StrategyError(
-                "ImpactCube artifact path traverses a symlink"
-            )
-        if current == current.parent:
-            break
-        current = current.parent
-    try:
-        path.resolve(strict=True).relative_to(root.resolve(strict=True))
-    except (OSError, ValueError) as exc:
-        raise StrategyError(
-            "ImpactCube artifact escaped task storage"
-        ) from exc
-    descriptor = -1
-    chunks: list[bytes] = []
-    digest = hashlib.sha256()
-    total = 0
-    before = None
-    try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-        )
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode):
-            raise StrategyError(
-                "ImpactCube artifact must be a regular file"
-            )
-        if (
-            before.st_size < 0
-            or before.st_size > MAX_IMPACT_CUBE_JSON_BYTES
-        ):
-            raise StrategyError("ImpactCube artifact exceeds byte budget")
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > MAX_IMPACT_CUBE_JSON_BYTES:
-                raise StrategyError(
-                    "ImpactCube artifact exceeds byte budget"
-                )
-            digest.update(chunk)
-            chunks.append(chunk)
-        after = os.fstat(descriptor)
-        live = os.stat(path, follow_symlinks=False)
-        if (
-            (
-                before.st_dev,
-                before.st_ino,
-                before.st_size,
-                before.st_mtime_ns,
-            )
-            != (
-                after.st_dev,
-                after.st_ino,
-                after.st_size,
-                after.st_mtime_ns,
-            )
-            or not stat.S_ISREG(live.st_mode)
-            or (live.st_dev, live.st_ino)
-            != (after.st_dev, after.st_ino)
-        ):
-            raise StrategyError(
-                "ImpactCube artifact changed while being read"
-            )
-    except StrategyError:
-        raise
-    except OSError as exc:
-        raise StrategyError("ImpactCube artifact is unavailable") from exc
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-    assert before is not None
-    raw = b"".join(chunks)
-    if (
-        len(raw) != before.st_size
-        or not hmac.compare_digest(digest.hexdigest(), expected_hash)
-    ):
-        raise StrategyError("ImpactCube artifact bytes or hash changed")
-    return raw
-
-
-def _object_without_duplicate_keys(
-    pairs: list[tuple[str, Any]],
-) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise StrategyError(f"JSON contains duplicate key: {key}")
-        result[key] = value
-    return result
-
-
-def _reject_json_constant(value: str) -> Any:
-    raise StrategyError(f"JSON contains non-finite constant: {value}")
 
 
 def _modeling_runtime(runtime):
@@ -1183,7 +867,7 @@ def _revalidate_sources(conn, sources: _ReportSources) -> None:
             sources.voting_candidate_search,
         )
     if sources.impact_cube is not None:
-        _require_strategy_impact_cube_artifact_binding_on_connection(
+        require_strategy_impact_cube_artifact_binding_on_connection(
             conn,
             sources.impact_cube,
         )
