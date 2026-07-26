@@ -7,8 +7,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from marvis.agent import turn_handlers
+from marvis.api_schemas import ManualStrategyRequest
 from marvis.app import create_app
 from marvis.db import TaskRepository
 from marvis.orchestrator.contracts import Plan, PlanStatus
@@ -78,6 +80,166 @@ def _request(workflow: str, workflow_inputs: dict) -> dict:
             "workflow_inputs": workflow_inputs,
         },
     }
+
+
+@pytest.mark.parametrize(
+    ("workflow", "workflow_inputs"),
+    [
+        ("scorecard_band_build", {}),
+        ("scorecard_band_build", {"bin_count": 10}),
+        (
+            "scorecard_band_build",
+            {"raw_pd_band_edges": [0, 0.25, 0.7, 1]},
+        ),
+        (
+            "scorecard_cutoff_selection",
+            {
+                "asset_id": "scorecard-band-asset-" + "a" * 32,
+                "cutoff_id": "scorecard-cutoff-" + "b" * 32,
+                "reason": "选择经业务评审的观测切点",
+            },
+        ),
+    ],
+)
+def test_scorecard_manual_request_schema_accepts_only_user_owned_controls(
+    workflow: str,
+    workflow_inputs: dict,
+) -> None:
+    request = ManualStrategyRequest.model_validate(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": workflow,
+            "workflow_inputs": workflow_inputs,
+        },
+        strict=True,
+    )
+
+    assert request.workflow == workflow
+    assert request.workflow_inputs == workflow_inputs
+
+
+@pytest.mark.parametrize(
+    ("workflow", "workflow_inputs"),
+    [
+        (
+            "scorecard_band_build",
+            {"bin_count": 10, "raw_pd_band_edges": [0, 0.5, 1]},
+        ),
+        ("scorecard_band_build", {"bin_count": True}),
+        ("scorecard_band_build", {"bin_count": 1}),
+        ("scorecard_band_build", {"raw_pd_band_edges": [0, 0.5, 0.5, 1]}),
+        ("scorecard_band_build", {"raw_pd_band_edges": [0.1, 0.5, 1]}),
+        ("scorecard_band_build", {"raw_pd_band_edges": [0, 0.5, 0.9]}),
+        ("scorecard_band_build", {"artifact_id": "forged"}),
+        ("scorecard_band_build", {"unknown_control": True}),
+        (
+            "scorecard_cutoff_selection",
+            {
+                "asset_id": "scorecard-band-asset-" + "a" * 32,
+                "cutoff_id": "scorecard-cutoff-" + "b" * 32,
+                "artifact_id": "forged",
+            },
+        ),
+        (
+            "scorecard_cutoff_selection",
+            {
+                "asset_id": "scorecard-band-asset-" + "a" * 32,
+                "cutoff_id": "scorecard-cutoff-" + "b" * 32,
+                "asset_hash": "f" * 64,
+            },
+        ),
+        (
+            "scorecard_cutoff_selection",
+            {
+                "asset_id": "not-a-scorecard-asset",
+                "cutoff_id": "scorecard-cutoff-" + "b" * 32,
+            },
+        ),
+        (
+            "scorecard_cutoff_selection",
+            {
+                "asset_id": "scorecard-band-asset-" + "a" * 32,
+                "cutoff_id": "not-a-scorecard-cutoff",
+            },
+        ),
+        (
+            "scorecard_cutoff_selection",
+            {
+                "asset_id": "scorecard-band-asset-" + "a" * 32,
+                "cutoff_id": "scorecard-cutoff-" + "b" * 32,
+                "reason": None,
+            },
+        ),
+    ],
+)
+def test_scorecard_manual_request_schema_rejects_forged_or_unknown_inputs(
+    workflow: str,
+    workflow_inputs: dict,
+) -> None:
+    with pytest.raises(ValidationError):
+        ManualStrategyRequest.model_validate(
+            {
+                "request_kind": "standard_workflow",
+                "workflow": workflow,
+                "workflow_inputs": workflow_inputs,
+            },
+            strict=True,
+        )
+
+
+def test_scorecard_forged_bindings_fail_at_http_schema_before_execution(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(tmp_path))
+    task_id = _task(client, tmp_path)
+    forged_requests = [
+        ("scorecard_band_build", {"artifact_id": "forged"}),
+        ("scorecard_band_build", {"unknown_control": True}),
+        (
+            "scorecard_cutoff_selection",
+            {
+                "asset_id": "scorecard-band-asset-" + "a" * 32,
+                "cutoff_id": "scorecard-cutoff-" + "b" * 32,
+                "source_artifact_id": "f" * 64,
+            },
+        ),
+        (
+            "scorecard_cutoff_selection",
+            {
+                "asset_id": "scorecard-band-asset-" + "a" * 32,
+                "cutoff_id": "scorecard-cutoff-" + "b" * 32,
+                "expected_asset_hash": "f" * 64,
+            },
+        ),
+        (
+            "scorecard_cutoff_selection",
+            {
+                "asset_id": "scorecard-band-asset-" + "a" * 32,
+                "cutoff_id": "scorecard-cutoff-" + "b" * 32,
+                "source_ref": {"artifact_id": "forged"},
+            },
+        ),
+        (
+            "scorecard_cutoff_selection",
+            {
+                "asset_id": "scorecard-band-asset-" + "a" * 32,
+                "cutoff_id": "scorecard-cutoff-" + "b" * 32,
+                "unknown_control": True,
+            },
+        ),
+    ]
+
+    for workflow, workflow_inputs in forged_requests:
+        response = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json=_request(workflow, workflow_inputs),
+        )
+        assert response.status_code == 422, response.text
+
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert (
+        client.get(f"/api/tasks/{task_id}/task-artifacts").json()["artifacts"] == []
+    )
 
 
 @pytest.mark.slow

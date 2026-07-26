@@ -9,6 +9,8 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "univariate_candidate_refinement",
   "cross_matrix_analysis",
   "automatic_tree_candidate_build",
+  "scorecard_band_build",
+  "scorecard_cutoff_selection",
 ]);
 
 const WORKFLOW_LABELS = Object.freeze({
@@ -16,6 +18,8 @@ const WORKFLOW_LABELS = Object.freeze({
   univariate_candidate_refinement: "启动单变量候选细化",
   cross_matrix_analysis: "启动二维 Cross Matrix",
   automatic_tree_candidate_build: "启动自动规则树",
+  scorecard_band_build: "生成评分卡分档证据",
+  scorecard_cutoff_selection: "记录评分卡 Cutoff 选择",
 });
 
 const COLLECTION_DEFINITIONS = Object.freeze([
@@ -37,6 +41,18 @@ const COLLECTION_DEFINITIONS = Object.freeze([
     description: "完整树结果、叶节点规则与现成效果证据",
     pointerKey: "leaves",
   },
+  {
+    key: "scorecard_band",
+    title: "评分卡分档",
+    description: "原始 PD 分档、评分卡分数与 Cutoff 两侧观测效果",
+    pointerKey: "bands",
+  },
+  {
+    key: "scorecard_cutoff_selection",
+    title: "Cutoff 选择记录",
+    description: "人工选择的 Cutoff 指针及其受认证来源证据",
+    pointerKey: "",
+  },
 ]);
 
 const FIELD_LABELS = Object.freeze({
@@ -47,7 +63,13 @@ const FIELD_LABELS = Object.freeze({
   asset_id: "Asset ID",
   bad: "坏样本",
   bad_rate: "坏率",
+  bad_count: "坏样本",
+  base_odds: "基准赔率",
+  base_points: "基础分值",
+  base_score: "基准分",
+  average_pd: "平均原始 PD",
   bin_id: "Bin ID",
+  bin_label: "分箱标签",
   candidate_id: "Candidate ID",
   candidate_stage: "候选阶段",
   cell_id: "Cell ID",
@@ -55,22 +77,34 @@ const FIELD_LABELS = Object.freeze({
   condition: "命中条件",
   count: "样本数",
   created_at: "创建时间",
+  cutoff_id: "Cutoff ID",
   default_action: "默认动作",
   effect: "效果",
   effect_id: "Effect ID",
+  execution_pd: "执行原始 PD",
   enabled: "启用",
   evidence_hash: "Evidence Hash",
+  factor: "Factor",
   feature: "字段",
   fragment_id: "Fragment ID",
   good: "好样本",
+  good_count: "好样本",
   iv: "IV",
+  iv_contribution: "IV 贡献",
   ks: "KS",
   lifecycle: "生命周期",
+  lower_bound: "下界",
+  lower_inclusive: "包含下界",
+  lower_risk: "低风险侧",
+  monotonic_direction: "单调方向",
   lift: "Lift",
   method: "分箱方法",
   observation_stage: "观测阶段",
   pool_id: "Pool ID",
   position: "顺序",
+  points: "分值",
+  pdo: "PDO",
+  display_points: "评分卡分数",
   revision: "Revision",
   revision_id: "Revision ID",
   risk: "风险",
@@ -81,6 +115,11 @@ const FIELD_LABELS = Object.freeze({
   status: "状态",
   strategy_type: "策略类型",
   total: "总数",
+  upper_bound: "上界",
+  upper_inclusive: "包含上界",
+  higher_risk: "高风险侧",
+  coefficient: "系数",
+  offset: "Offset",
   tree_id: "Tree ID",
   tree_result_hash: "Tree Result Hash",
   validation_status: "验证状态",
@@ -320,6 +359,249 @@ function candidateDetailHtml(item, pointerKey) {
   ].join("");
 }
 
+function scorecardDirectionNoteHtml() {
+  return [
+    '<div class="candidate-lab-boundary-note" data-tone="info">',
+    "<strong>方向口径</strong>",
+    "<p>原始 PD 越高表示风险越高；评分卡分数越高表示更安全。</p>",
+    "<p>Cutoff 只记录观测边界，不等于通过或拒绝动作；平台不会推荐或自动选择某个 Cutoff，也不会自动进入 Strategy Pool。</p>",
+    "</div>",
+  ].join("");
+}
+
+function scorecardRowsTableHtml(rows, columns, emptyText) {
+  const visible = Array.isArray(rows) ? rows.filter(isRecord) : [];
+  if (!visible.length) {
+    return `<p class="candidate-lab-empty">${escapeHtml(emptyText)}</p>`;
+  }
+  return [
+    '<div class="candidate-lab-table-scroll">',
+    '<table class="candidate-lab-table"><thead><tr>',
+    ...columns.map((key) => `<th>${escapeHtml(fieldLabel(key))}</th>`),
+    "</tr></thead><tbody>",
+    ...visible.map((row) => [
+      "<tr>",
+      ...columns.map((key) => `<td>${escapeHtml(readableValue(row[key]))}</td>`),
+      "</tr>",
+    ].join("")),
+    "</tbody></table>",
+    "</div>",
+  ].join("");
+}
+
+function scorecardPointIntervalText(row) {
+  const lowerMissing = row.lower === null || row.lower === undefined || row.lower === "";
+  const upperMissing = row.upper === null || row.upper === undefined || row.upper === "";
+  if (lowerMissing && upperMissing) return "-";
+  const lower = lowerMissing ? "-∞" : stablePrimitiveText(row.lower);
+  const upper = upperMissing ? "+∞" : stablePrimitiveText(row.upper);
+  return `${lower} ～ ${upper}`;
+}
+
+function scorecardPointValue(row, key) {
+  if (key === "feature" && row.feature === "__base__") {
+    return "基础分（Base Points）";
+  }
+  if (key === "interval") return scorecardPointIntervalText(row);
+  return stablePrimitiveText(row[key]);
+}
+
+function scorecardScaleHtml(rows) {
+  const base = rows.find((row) => row.feature === "__base__");
+  if (!base) return "";
+  const scale = factsTableHtml({
+    base_points: base.points,
+    base_score: base.base_score,
+    pdo: base.pdo,
+    base_odds: base.base_odds,
+    factor: base.factor,
+    offset: base.offset,
+  });
+  return scale
+    ? `<section class="candidate-lab-subsection"><h6>基础分与刻度</h6>${scale}</section>`
+    : "";
+}
+
+function scorecardPointsDetailHtml(item, rows) {
+  const visible = Array.isArray(rows) ? rows.filter(isRecord) : [];
+  const columns = [
+    ["feature", "字段"],
+    ["bin_label", "分箱标签"],
+    ["interval", "区间"],
+    ["count", "样本数"],
+    ["good_count", "好样本"],
+    ["bad_count", "坏样本"],
+    ["bad_rate", "坏率"],
+    ["woe", "WOE"],
+    ["iv_contribution", "IV 贡献"],
+    ["coefficient", "系数"],
+    ["monotonic_direction", "单调方向"],
+    ["points", "分值"],
+  ];
+  const table = visible.length
+    ? [
+      '<div class="candidate-lab-table-scroll">',
+      '<table class="candidate-lab-table"><thead><tr>',
+      ...columns.map(([, label]) => `<th>${escapeHtml(label)}</th>`),
+      "</tr></thead><tbody>",
+      ...visible.map((row) => [
+        "<tr>",
+        ...columns.map(([key]) => (
+          `<td>${escapeHtml(scorecardPointValue(row, key))}</td>`
+        )),
+        "</tr>",
+      ].join("")),
+      "</tbody></table>",
+      "</div>",
+    ].join("")
+    : '<p class="candidate-lab-empty">当前受认证投影没有可见评分卡分值明细。</p>';
+  const truncation = item?.truncated
+    ? `<p class="candidate-lab-truncated">评分卡分值明细已截断：当前仅显示前 ${escapeHtml(visible.length)} 行。</p>`
+    : "";
+  return [
+    '<details class="candidate-lab-evidence-card candidate-lab-scorecard-points" data-candidate-lab-scorecard-points>',
+    "<summary>",
+    '<span class="candidate-lab-card-title">',
+    "<strong>评分卡分值明细</strong>",
+    `<small>${escapeHtml(visible.length)} 行受认证明细</small>`,
+    "</span>",
+    '<span class="candidate-lab-card-state">展开分值表</span>',
+    "</summary>",
+    '<div class="candidate-lab-card-body">',
+    '<div class="candidate-lab-boundary-note" data-tone="info">',
+    "<strong>分值方向</strong>",
+    "<p>评分卡分值越高，代表风险越低（越安全）。</p>",
+    "</div>",
+    scorecardScaleHtml(visible),
+    table,
+    truncation,
+    "</div>",
+    "</details>",
+  ].join("");
+}
+
+function scorecardBandDetailHtml(item) {
+  const detail = isRecord(item?.detail) ? item.detail : {};
+  const pointers = isRecord(item?.pointers) ? item.pointers : {};
+  const title = nonEmptyText(detail.asset_id)
+    || nonEmptyText(item?.candidate_id)
+    || "评分卡分档";
+  return [
+    '<details class="candidate-lab-evidence-card candidate-lab-scorecard-card">',
+    '<summary>',
+    '<span class="candidate-lab-card-title">',
+    `<strong>${escapeHtml(title)}</strong>`,
+    "<small>受认证评分卡分档证据</small>",
+    "</span>",
+    '<span class="candidate-lab-card-state">查看分档与 Cutoff</span>',
+    "</summary>",
+    '<div class="candidate-lab-card-body">',
+    evidenceIdentityHtml(item),
+    lifecycleHtml(item.lifecycle),
+    scorecardDirectionNoteHtml(),
+    '<section class="candidate-lab-subsection"><h5>样本与性能</h5>',
+    factsTableHtml({
+      asset_id: detail.asset_id,
+      sample: detail.sample,
+      performance: detail.performance,
+    }),
+    "</section>",
+    '<section class="candidate-lab-subsection"><h5>分档证据</h5>',
+    scorecardRowsTableHtml(
+      pointers.bands,
+      [
+        "ordinal",
+        "bin_id",
+        "lower_bound",
+        "upper_bound",
+        "count",
+        "share",
+        "labeled_count",
+        "bad_count",
+        "bad_rate",
+        "average_pd",
+      ],
+      "当前受认证投影没有可见分档。",
+    ),
+    "</section>",
+    '<section class="candidate-lab-subsection"><h5>Cutoff 观测</h5>',
+    scorecardRowsTableHtml(
+      pointers.cutoffs,
+      [
+        "ordinal",
+        "cutoff_id",
+        "execution_pd",
+        "display_points",
+        "lower_risk",
+        "higher_risk",
+      ],
+      "当前受认证投影没有可见 Cutoff。",
+    ),
+    "</section>",
+    scorecardPointsDetailHtml(item, pointers.scorecard_points),
+    riskHtml(item.risks),
+    "</div>",
+    "</details>",
+  ].join("");
+}
+
+function scorecardSelectionDetailHtml(item) {
+  const detail = isRecord(item?.detail) ? item.detail : {};
+  const effect = isRecord(detail.effect) ? [detail.effect] : [];
+  const title = nonEmptyText(detail.selection_id)
+    || nonEmptyText(item?.candidate_id)
+    || "Cutoff 选择记录";
+  return [
+    '<details class="candidate-lab-evidence-card candidate-lab-scorecard-card">',
+    '<summary>',
+    '<span class="candidate-lab-card-title">',
+    `<strong>${escapeHtml(title)}</strong>`,
+    "<small>人工 Cutoff 指针</small>",
+    "</span>",
+    '<span class="candidate-lab-card-state">查看选择证据</span>',
+    "</summary>",
+    '<div class="candidate-lab-card-body">',
+    evidenceIdentityHtml(item),
+    lifecycleHtml(item.lifecycle),
+    scorecardDirectionNoteHtml(),
+    '<section class="candidate-lab-subsection"><h5>选择记录</h5>',
+    factsTableHtml({
+      selection_id: detail.selection_id,
+      asset_id: detail.asset_id,
+      cutoff_id: detail.cutoff_id,
+      reason: detail.reason,
+    }),
+    "</section>",
+    '<section class="candidate-lab-subsection"><h5>Cutoff 观测</h5>',
+    scorecardRowsTableHtml(
+      effect,
+      [
+        "ordinal",
+        "cutoff_id",
+        "execution_pd",
+        "display_points",
+        "lower_risk",
+        "higher_risk",
+      ],
+      "该选择记录没有可见的 Cutoff 观测。",
+    ),
+    "</section>",
+    riskHtml(item.risks),
+    "</div>",
+    "</details>",
+  ].join("");
+}
+
+function candidateItemHtml(item, definition) {
+  if (definition.key === "scorecard_band") {
+    return scorecardBandDetailHtml(item);
+  }
+  if (definition.key === "scorecard_cutoff_selection") {
+    return scorecardSelectionDetailHtml(item);
+  }
+  return candidateDetailHtml(item, definition.pointerKey);
+}
+
 function candidateCollectionHtml(candidates, definition) {
   const collection = isRecord(candidates?.[definition.key])
     ? candidates[definition.key]
@@ -328,7 +610,7 @@ function candidateCollectionHtml(candidates, definition) {
   const total = collectionTotal(collection);
   const countText = total === null ? "" : `${total} 个`;
   const list = items.length
-    ? items.map((item) => candidateDetailHtml(item, definition.pointerKey)).join("")
+    ? items.map((item) => candidateItemHtml(item, definition)).join("")
     : '<p class="candidate-lab-empty">暂无受认证结果。先从左侧启动对应分析，完成后会在这里出现。</p>';
   return [
     '<section class="candidate-lab-result-group">',
@@ -831,6 +1113,80 @@ function collectTreeInputs(form) {
   return inputs;
 }
 
+function parseRawPdBandEdges(value) {
+  const edges = splitValues(value).map((item) => Number(item));
+  if (
+    edges.length < 3
+    || edges.length > 21
+    || edges.some((item) => !Number.isFinite(item))
+  ) {
+    throw new Error("原始 PD 边界必须包含 3 到 21 个有限数字。");
+  }
+  if (edges[0] !== 0 || edges.at(-1) !== 1) {
+    throw new Error("原始 PD 边界必须从 0 开始并以 1 结束。");
+  }
+  if (edges.some((item, index) => (
+    item < 0
+    || item > 1
+    || (index > 0 && item <= edges[index - 1])
+  ))) {
+    throw new Error("原始 PD 边界必须位于 0 到 1 且严格递增。");
+  }
+  return edges;
+}
+
+function collectScorecardBandInputs(form) {
+  const mode = formValue(form, "scorecard_banding_mode");
+  if (mode === "equal_frequency") {
+    const binCount = optionalNumber(
+      form,
+      "scorecard_bin_count",
+      { integer: true },
+    );
+    if (binCount === undefined) return {};
+    if (binCount < 2 || binCount > 20) {
+      throw new Error("评分卡分档数必须是 2 到 20 的整数。");
+    }
+    return { bin_count: binCount };
+  }
+  if (mode === "raw_pd_edges") {
+    return {
+      raw_pd_band_edges: parseRawPdBandEdges(
+        formValue(form, "raw_pd_band_edges"),
+      ),
+    };
+  }
+  throw new Error("请选择等频分档或自定义原始 PD 边界。");
+}
+
+function collectScorecardCutoffSelectionInputs(form) {
+  const asset = selectedProjectionOption(
+    form,
+    "scorecard_asset_id",
+    "评分卡分档资产",
+  );
+  const cutoff = selectedProjectionOption(
+    form,
+    "scorecard_cutoff_id",
+    "Cutoff",
+  );
+  const assetId = nonEmptyText(asset.value);
+  const cutoffId = nonEmptyText(cutoff.value);
+  if (cutoff.dataset?.sourceAssetId !== assetId) {
+    throw new Error("Cutoff 必须属于当前选择的评分卡分档资产。");
+  }
+  const inputs = {
+    asset_id: assetId,
+    cutoff_id: cutoffId,
+  };
+  optionalText(
+    inputs,
+    "reason",
+    formValue(form, "scorecard_selection_reason"),
+  );
+  return inputs;
+}
+
 export function collectStrategyCandidateLabRequest(form) {
   const workflow = nonEmptyText(form?.dataset?.candidateLabWorkflow);
   if (!STRATEGY_CANDIDATE_LAB_WORKFLOWS.includes(workflow)) {
@@ -841,6 +1197,8 @@ export function collectStrategyCandidateLabRequest(form) {
     univariate_candidate_refinement: collectRefinementInputs,
     cross_matrix_analysis: collectCrossInputs,
     automatic_tree_candidate_build: collectTreeInputs,
+    scorecard_band_build: collectScorecardBandInputs,
+    scorecard_cutoff_selection: collectScorecardCutoffSelectionInputs,
   }[workflow](form);
   return {
     request_kind: "standard_workflow",
@@ -1055,6 +1413,161 @@ function syncRefinementForm(root, payload, options = {}) {
   syncRefinementCandidateControls(form, payload, options);
 }
 
+function scorecardBandBuildForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="scorecard_band_build"]',
+  ) || null;
+}
+
+function scorecardCutoffSelectionForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="scorecard_cutoff_selection"]',
+  ) || null;
+}
+
+function setScorecardBandingPanelVisible(panel, visible) {
+  if (!panel) return;
+  panel.classList?.toggle?.("hidden", !visible);
+  panel.setAttribute?.("aria-hidden", visible ? "false" : "true");
+  const controls = panel.querySelectorAll?.("input, select, textarea, button") || [];
+  for (const control of controls) control.disabled = !visible;
+}
+
+function syncScorecardBandingMode(form) {
+  if (!form) return;
+  const mode = formValue(form, "scorecard_banding_mode") || "equal_frequency";
+  const panels = form.querySelectorAll?.(
+    "[data-candidate-lab-scorecard-banding-panel]",
+  ) || [];
+  for (const modePanel of panels) {
+    setScorecardBandingPanelVisible(
+      modePanel,
+      modePanel.dataset?.candidateLabScorecardBandingPanel === mode,
+    );
+  }
+}
+
+function scorecardBandProjectionCandidates(payload) {
+  const collection = isRecord(payload?.candidates?.scorecard_band)
+    ? payload.candidates.scorecard_band
+    : {};
+  const seen = new Set();
+  return collectionItems(collection).filter((item) => {
+    const assetId = nonEmptyText(item?.detail?.asset_id);
+    if (
+      !/^scorecard-band-asset-[0-9a-f]{32}$/.test(assetId)
+      || seen.has(assetId)
+    ) {
+      return false;
+    }
+    seen.add(assetId);
+    return true;
+  });
+}
+
+function scorecardProjectionCutoffs(candidate) {
+  const rows = Array.isArray(candidate?.pointers?.cutoffs)
+    ? candidate.pointers.cutoffs.filter(isRecord)
+    : [];
+  const seen = new Set();
+  return rows.filter((row) => {
+    const cutoffId = nonEmptyText(row.cutoff_id);
+    if (
+      !/^scorecard-cutoff-[0-9a-f]{32}$/.test(cutoffId)
+      || seen.has(cutoffId)
+    ) {
+      return false;
+    }
+    seen.add(cutoffId);
+    return true;
+  });
+}
+
+function syncScorecardCutoffControls(
+  form,
+  payload,
+  { preserveCutoff = true } = {},
+) {
+  if (!form) return;
+  const candidates = scorecardBandProjectionCandidates(payload);
+  const assetSelect = formField(form, "scorecard_asset_id");
+  const cutoffSelect = formField(form, "scorecard_cutoff_id");
+  if (!assetSelect || !cutoffSelect) return;
+
+  const previousAssetId = nonEmptyText(assetSelect.value);
+  assetSelect.innerHTML = [
+    '<option value="">请选择当前任务的评分卡分档</option>',
+    ...candidates.map((candidate) => {
+      const assetId = nonEmptyText(candidate?.detail?.asset_id);
+      const cutoffCount = scorecardProjectionCutoffs(candidate).length;
+      return projectionOptionHtml(
+        assetId,
+        `${assetId} · ${cutoffCount} 个可见 Cutoff`,
+        { "candidate-lab-projection": "1" },
+      );
+    }),
+  ].join("");
+  if (selectContainsValue(assetSelect, previousAssetId)) {
+    assetSelect.value = previousAssetId;
+  } else {
+    assetSelect.value = "";
+  }
+
+  const assetId = nonEmptyText(assetSelect.value);
+  const candidate = candidates.find(
+    (item) => nonEmptyText(item?.detail?.asset_id) === assetId,
+  );
+  const cutoffs = scorecardProjectionCutoffs(candidate);
+  const previousCutoffId = nonEmptyText(cutoffSelect.value);
+  const previousCutoffSource = nonEmptyText(
+    Array.from(cutoffSelect.selectedOptions || [])[0]?.dataset?.sourceAssetId,
+  );
+  cutoffSelect.innerHTML = [
+    '<option value="">请选择该分档中的可见 Cutoff</option>',
+    ...cutoffs.map((cutoff) => {
+      const cutoffId = nonEmptyText(cutoff.cutoff_id);
+      const pd = stablePrimitiveText(cutoff.execution_pd);
+      const points = stablePrimitiveText(cutoff.display_points);
+      return projectionOptionHtml(
+        cutoffId,
+        `${cutoffId} · PD ${pd} · ${points} 分`,
+        {
+          "candidate-lab-projection": "1",
+          "source-asset-id": assetId,
+        },
+      );
+    }),
+  ].join("");
+  if (
+    preserveCutoff
+    && previousCutoffSource === assetId
+    && selectContainsValue(cutoffSelect, previousCutoffId)
+  ) {
+    cutoffSelect.value = previousCutoffId;
+  } else {
+    cutoffSelect.value = "";
+  }
+
+  const empty = form.querySelector?.("[data-candidate-lab-scorecard-empty]");
+  if (empty) {
+    empty.textContent = candidates.length
+      ? assetId
+        ? cutoffs.length
+          ? "请明确选择一个 Cutoff；下拉仅包含当前任务受认证投影中的可见项。"
+          : "该评分卡分档没有可选择的可见 Cutoff。"
+        : "请先明确选择一个当前任务的评分卡分档资产。"
+      : "当前任务尚无评分卡分档证据，请先生成分档。";
+  }
+}
+
+function syncScorecardForms(root, payload) {
+  syncScorecardBandingMode(scorecardBandBuildForm(root));
+  syncScorecardCutoffControls(
+    scorecardCutoffSelectionForm(root),
+    payload,
+  );
+}
+
 function submissionClarificationText(result) {
   const direct = nonEmptyText(result?.message);
   if (direct) return direct;
@@ -1111,8 +1624,16 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       + "[data-candidate-lab-form] button",
     ) || [];
     for (const control of controls) {
-      const modePanel = control.closest?.("[data-candidate-lab-refinement-panel]");
-      const hiddenByMode = Boolean(modePanel?.classList?.contains?.("hidden"));
+      const refinementPanel = control.closest?.(
+        "[data-candidate-lab-refinement-panel]",
+      );
+      const scorecardPanel = control.closest?.(
+        "[data-candidate-lab-scorecard-banding-panel]",
+      );
+      const hiddenByMode = Boolean(
+        refinementPanel?.classList?.contains?.("hidden")
+        || scorecardPanel?.classList?.contains?.("hidden"),
+      );
       control.disabled = Boolean(reason) || hiddenByMode;
     }
     const status = $("strategyCandidateLabStatus");
@@ -1154,6 +1675,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       }
     }
     syncRefinementForm(root, state.payload);
+    syncScorecardForms(root, state.payload);
     renderAvailability();
   }
 
@@ -1165,6 +1687,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       setFormError(form, "");
     }
     syncRefinementForm(root, state.payload, { preserveBins: false });
+    syncScorecardForms(root, state.payload);
   }
 
   function clear() {
@@ -1384,23 +1907,50 @@ export function createStrategyCandidateLabController(dependencies = {}) {
 
   function handleChange(event) {
     const field = event.target?.closest?.("[data-candidate-lab-field]");
-    const form = field?.closest?.(
+    if (!field) return false;
+    const fieldName = field.dataset?.candidateLabField;
+    const refinement = field.closest?.(
       '[data-candidate-lab-workflow="univariate_candidate_refinement"]',
     );
-    if (!field || !form) return false;
-    const fieldName = field.dataset?.candidateLabField;
-    if (fieldName === "refinement_mode") {
-      syncRefinementMode(form);
-    } else if (
-      fieldName === "source_candidate_id"
-      || fieldName === "source_feature_method"
-    ) {
-      syncRefinementCandidateControls(form, state.payload, { preserveBins: false });
-    } else {
-      return false;
+    if (refinement) {
+      if (fieldName === "refinement_mode") {
+        syncRefinementMode(refinement);
+      } else if (
+        fieldName === "source_candidate_id"
+        || fieldName === "source_feature_method"
+      ) {
+        syncRefinementCandidateControls(
+          refinement,
+          state.payload,
+          { preserveBins: false },
+        );
+      } else {
+        return false;
+      }
+      renderAvailability();
+      return true;
     }
-    renderAvailability();
-    return true;
+    const scorecardBand = field.closest?.(
+      '[data-candidate-lab-workflow="scorecard_band_build"]',
+    );
+    if (scorecardBand && fieldName === "scorecard_banding_mode") {
+      syncScorecardBandingMode(scorecardBand);
+      renderAvailability();
+      return true;
+    }
+    const scorecardSelection = field.closest?.(
+      '[data-candidate-lab-workflow="scorecard_cutoff_selection"]',
+    );
+    if (scorecardSelection && fieldName === "scorecard_asset_id") {
+      syncScorecardCutoffControls(
+        scorecardSelection,
+        state.payload,
+        { preserveCutoff: false },
+      );
+      renderAvailability();
+      return true;
+    }
+    return false;
   }
 
   function bind(root = document) {

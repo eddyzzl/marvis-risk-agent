@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -13,7 +17,25 @@ from marvis.domain import TaskCreate
 from marvis.feature.univariate import analyze_univariate
 from marvis.output.strategy_candidate_report import render_strategy_candidate_bundle
 from marvis.orchestrator.contracts import Plan, PlanStatus
-from marvis.packs.strategy import candidate_lab_projection
+from marvis.packs.strategy import (
+    candidate_lab_projection,
+    voting_candidate_tools,
+)
+from marvis.packs.modeling.evidence import (
+    MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
+)
+from marvis.packs.modeling.evidence_tools import (
+    TRAINING_EVIDENCE_ARTIFACT_SCHEMA_VERSION,
+    TRAIN_MODEL_WITH_EVIDENCE_V2_ORIGIN_TOOL,
+)
+from marvis.packs.modeling.score_evidence import (
+    MODEL_SCORE_EVIDENCE_ARTIFACT_KIND,
+    MODEL_SCORE_VECTOR_ARTIFACT_KIND,
+)
+from marvis.packs.modeling.score_evidence_tools import (
+    MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL,
+    MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_TOOL_SCHEMA_VERSION,
+)
 from marvis.packs.strategy.candidate_asset import (
     canonical_candidate_asset_json,
     refine_univariate_candidate,
@@ -29,7 +51,40 @@ from marvis.packs.strategy.cross_matrix_candidate import (
     canonical_cross_matrix_candidate_asset_json,
 )
 from marvis.packs.strategy.evaluator import evaluate_expression_frame
+from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.pool import add_verified_candidate_fragment
+from marvis.packs.strategy.scorecard_candidate import (
+    SCORECARD_BAND_ASSET_ARTIFACT_KIND,
+    SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
+    SCORECARD_BAND_ASSET_ORIGIN_TOOL,
+    SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+    SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
+    build_scorecard_band_asset,
+    build_scorecard_cutoff_selection,
+    canonical_scorecard_band_asset_json,
+    canonical_scorecard_cutoff_selection_json,
+    scorecard_cutoff_selection_to_verified_candidate_fragment,
+)
+from marvis.packs.strategy.voting_candidate import build_voting_candidate_asset
+from marvis.packs.strategy.voting_candidate_fragment import (
+    VOTING_CANDIDATE_ARTIFACT_KIND,
+    VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+    VOTING_CANDIDATE_ORIGIN_TOOL,
+    voting_candidate_to_verified_fragment,
+)
+from marvis.packs.strategy.voting_candidate_tools import (
+    build_voting_candidate_artifact_document,
+    canonical_voting_candidate_artifact_json,
+    canonical_voting_candidate_path,
+    voting_candidate_artifact_provenance,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION,
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+)
 from marvis.repositories.strategy_pool import (
     ABSENT_POOL_REVISION,
     ABSENT_POOL_SNAPSHOT_HASH,
@@ -45,6 +100,36 @@ from marvis.repositories.task_artifacts import TaskArtifactRepository
 HASH_A = "a" * 64
 HASH_B = "b" * 64
 HASH_C = "c" * 64
+
+
+@pytest.fixture(autouse=True)
+def _fast_scorecard_live_revalidation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep Candidate Lab tests fast; authoritative loader has its own suite."""
+
+    def load(runtime, **request):
+        record = runtime.task_artifacts.get_for_task(
+            request["task_id"],
+            request["artifact_id"],
+        )
+        assert record is not None
+        raw = Path(record["path"]).read_bytes()
+        asset = candidate_lab_projection.validate_scorecard_band_asset(
+            json.loads(raw)
+        )
+        assert record["content_hash"] == request[
+            "expected_artifact_content_hash"
+        ]
+        assert asset["asset_id"] == request["expected_asset_id"]
+        assert asset["asset_hash"] == request["expected_asset_hash"]
+        return SimpleNamespace(asset=asset, canonical_bytes=raw)
+
+    monkeypatch.setattr(
+        candidate_lab_projection,
+        "load_scorecard_band_asset_artifact",
+        load,
+    )
 
 
 def _strategy_task(app) -> str:
@@ -541,6 +626,24 @@ def _persist_initial_pool(
         },
         reason="candidate lab test",
     )
+    _persist_pool_snapshot(
+        app,
+        task_id,
+        snapshot=snapshot,
+        expected_revision=ABSENT_POOL_REVISION,
+        expected_snapshot_hash=ABSENT_POOL_SNAPSHOT_HASH,
+    )
+    return snapshot
+
+
+def _persist_pool_snapshot(
+    app,
+    task_id: str,
+    *,
+    snapshot: dict,
+    expected_revision: int,
+    expected_snapshot_hash: str,
+) -> dict:
     content = canonical_strategy_pool_snapshot_json(snapshot).encode("utf-8")
     content_hash = strategy_pool_artifact_content_hash(snapshot)
     path = (
@@ -579,8 +682,8 @@ def _persist_initial_pool(
     )
     StrategyCandidatePoolRepository(app.state.settings.db_path).apply_snapshot(
         snapshot=snapshot,
-        expected_revision=ABSENT_POOL_REVISION,
-        expected_snapshot_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        expected_revision=expected_revision,
+        expected_snapshot_hash=expected_snapshot_hash,
         artifact_id=record["id"],
         artifact_content_hash=record["content_hash"],
         audit={
@@ -591,7 +694,1152 @@ def _persist_initial_pool(
             "detail": {"entry_count": len(entries)},
         },
     )
-    return snapshot
+    return record
+
+
+def _scorecard_hash(label: str) -> str:
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def _scorecard_scale() -> dict[str, float | int]:
+    factor = 50.0 / math.log(2.0)
+    return {
+        "base_score": 600,
+        "pdo": 50,
+        "base_odds": 50.0,
+        "factor": factor,
+        "offset": 600.0 - factor * math.log(50.0),
+    }
+
+
+def _scorecard_table() -> list[dict[str, object]]:
+    scale = _scorecard_scale()
+    return [
+        {
+            "feature": "__base__",
+            "bin_index": -999,
+            "bin_label": "base_points",
+            "lower": None,
+            "upper": None,
+            "count": None,
+            "bad_count": None,
+            "good_count": None,
+            "bad_rate": None,
+            "woe": None,
+            "iv_contribution": None,
+            "coefficient": None,
+            "monotonic_direction": None,
+            "points": 320.0,
+            **scale,
+        },
+        {
+            "feature": "income",
+            "bin_index": 0,
+            "bin_label": "[-inf, 10)",
+            "lower": None,
+            "upper": 10.0,
+            "count": 3,
+            "bad_count": 2,
+            "good_count": 1,
+            "bad_rate": 2.0 / 3.0,
+            "woe": 0.4,
+            "iv_contribution": 0.08,
+            "coefficient": 0.5,
+            "monotonic_direction": "increasing",
+            "points": -14.0,
+        },
+        {
+            "feature": "income",
+            "bin_index": 1,
+            "bin_label": "[10, inf)",
+            "lower": 10.0,
+            "upper": None,
+            "count": 3,
+            "bad_count": 0,
+            "good_count": 3,
+            "bad_rate": 0.0,
+            "woe": -0.4,
+            "iv_contribution": 0.08,
+            "coefficient": 0.5,
+            "monotonic_direction": "increasing",
+            "points": 14.0,
+        },
+    ]
+
+
+def _large_scorecard_table(row_count: int) -> list[dict[str, object]]:
+    base = _scorecard_table()[0]
+    return [
+        base,
+        *[
+            {
+                "feature": f"feature_{index:05d}",
+                "bin_index": 0,
+                "bin_label": "all",
+                "lower": None,
+                "upper": None,
+                "count": 6,
+                "bad_count": 2,
+                "good_count": 4,
+                "bad_rate": 1.0 / 3.0,
+                "woe": 0.0,
+                "iv_contribution": 0.0,
+                "coefficient": 0.0,
+                "monotonic_direction": None,
+                "points": float(index % 100),
+            }
+            for index in range(row_count - 1)
+        ],
+    ]
+
+
+def _scorecard_band_provenance(asset: dict) -> dict:
+    identity = asset["identity"]
+    refs = asset["source_refs"]
+    return {
+        "schema_version": SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
+        "asset_schema_version": asset["schema_version"],
+        "producer_version": asset["producer_version"],
+        "task_id": identity["task_id"],
+        "asset_type": asset["asset_type"],
+        "asset_id": asset["asset_id"],
+        "asset_hash": asset["asset_hash"],
+        "dataset_id": identity["dataset_id"],
+        "dataset_content_hash": identity["dataset_content_hash"],
+        "workspace_revision": identity["workspace_revision"],
+        "workspace_generation": identity["workspace_generation"],
+        "semantic_mapping_hash": identity["semantic_mapping_hash"],
+        "sample_context_hash": identity["sample_context_hash"],
+        "sample_design_ref": asset["sample_design_ref"],
+        "training_evidence_ref": refs["training_evidence"],
+        "score_evidence_ref": refs["score_evidence"],
+        "score_vector_ref": refs["score_vector"],
+        "score_product": asset["score_contract"]["score_product"],
+        "scorecard_table_hash": asset["score_contract"]["scorecard_table_hash"],
+        "raw_pd_internal_edges": [
+            band["upper_bound"] for band in asset["bands"][:-1]
+        ],
+        "band_count": len(asset["bands"]),
+        "cutoff_count": len(asset["cutoffs"]),
+    }
+
+
+def _scorecard_selection_provenance(selection: dict) -> dict:
+    source = selection["source_asset_ref"]
+    return {
+        "schema_version": SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION,
+        "selection_schema_version": selection["schema_version"],
+        "producer_version": selection["producer_version"],
+        "task_id": source["task_id"],
+        "selection_id": selection["selection_id"],
+        "selection_hash": selection["selection_hash"],
+        "cutoff_id": selection["cutoff_id"],
+        "selection_reason": selection["selection_reason"],
+        "source_artifact_id": source["artifact_id"],
+        "source_artifact_content_hash": source["artifact_content_hash"],
+        "source_asset_id": source["asset_id"],
+        "source_asset_hash": source["asset_hash"],
+    }
+
+
+def _register_scorecard_candidate(
+    app,
+    task_id: str,
+    *,
+    variant: int = 0,
+    created_at: str | None = None,
+    band_directory_name: str = "strategy_scorecard_candidates",
+    drift_band_provenance: bool = False,
+    scorecard_rows: list[dict[str, object]] | None = None,
+) -> tuple[dict, Path, dict, dict, Path, dict, dict]:
+    artifacts = TaskArtifactRepository(app.state.settings.db_path)
+    task_root = app.state.settings.tasks_dir / task_id
+    identity = {
+        "task_id": task_id,
+        "dataset_id": f"dataset-scorecard-{variant}",
+        "dataset_content_hash": _scorecard_hash(f"dataset-{variant}"),
+        "workspace_revision": variant + 1,
+        "workspace_generation": 1,
+        "semantic_mapping_hash": _scorecard_hash(f"semantics-{variant}"),
+        "sample_context_hash": _scorecard_hash(f"sample-context-{variant}"),
+    }
+    membership_id = f"sample-membership-{variant}"
+    membership_content_hash = _scorecard_hash(
+        f"membership-logical-content-{variant}"
+    )
+    membership_path = (
+        task_root / "strategy_sample_designs_v2" / f"{membership_id}.bin"
+    )
+    membership_bytes = f"membership-source-{variant}".encode()
+    membership_path.parent.mkdir(parents=True, exist_ok=True)
+    membership_path.write_bytes(membership_bytes)
+    membership_record = artifacts.register(
+        task_id=task_id,
+        kind=SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
+        path=str(membership_path),
+        content_hash=hashlib.sha256(membership_bytes).hexdigest(),
+        origin_tool=SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+        provenance={
+            "schema_version": SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION,
+            "task_id": task_id,
+            "dataset_id": identity["dataset_id"],
+            "dataset_content_hash": identity["dataset_content_hash"],
+            "workspace_revision": identity["workspace_revision"],
+            "workspace_generation": identity["workspace_generation"],
+            "semantic_mapping_hash": identity["semantic_mapping_hash"],
+            "format": "binary",
+            "artifact_role": "membership",
+            "membership_id": membership_id,
+            "membership_content_hash": membership_content_hash,
+            "membership_artifact_content_hash": hashlib.sha256(
+                membership_bytes
+            ).hexdigest(),
+        },
+    )
+    bundle_id = f"strategy-sample-design-bundle-{variant}"
+    sample_design_id = f"strategy-sample-design-{variant}"
+    sample_design_content_hash = _scorecard_hash(f"sample-design-{variant}")
+    bundle_path = (
+        task_root / "strategy_sample_designs_v2" / f"{bundle_id}.json"
+    )
+    bundle_bytes = f'{{"bundle_fixture":{variant}}}'.encode()
+    bundle_path.write_bytes(bundle_bytes)
+    bundle_record = artifacts.register(
+        task_id=task_id,
+        kind=SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+        path=str(bundle_path),
+        content_hash=hashlib.sha256(bundle_bytes).hexdigest(),
+        origin_tool=SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+        provenance={
+            "schema_version": SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION,
+            "task_id": task_id,
+            "dataset_id": identity["dataset_id"],
+            "dataset_content_hash": identity["dataset_content_hash"],
+            "workspace_revision": identity["workspace_revision"],
+            "workspace_generation": identity["workspace_generation"],
+            "semantic_mapping_hash": identity["semantic_mapping_hash"],
+            "format": "json",
+            "artifact_role": "bundle",
+            "membership_id": membership_id,
+            "membership_content_hash": membership_content_hash,
+            "membership_artifact_id": membership_record["id"],
+            "membership_artifact_content_hash": membership_record[
+                "content_hash"
+            ],
+            "bundle_id": bundle_id,
+            "bundle_artifact_content_hash": hashlib.sha256(
+                bundle_bytes
+            ).hexdigest(),
+            "sample_design_id": sample_design_id,
+            "sample_design_content_hash": sample_design_content_hash,
+        },
+    )
+    sample_design_ref = {
+        "membership_artifact_id": membership_record["id"],
+        "expected_membership_artifact_content_hash": membership_record[
+            "content_hash"
+        ],
+        "bundle_artifact_id": bundle_record["id"],
+        "expected_bundle_artifact_content_hash": bundle_record["content_hash"],
+        "expected_bundle_id": bundle_id,
+        "expected_sample_design_id": sample_design_id,
+        "expected_sample_design_content_hash": sample_design_content_hash,
+    }
+    training_evidence_id = f"training-evidence-{variant}"
+    training_evidence_content_hash = _scorecard_hash(
+        f"training-evidence-logical-{variant}"
+    )
+    training_path = (
+        task_root
+        / "modeling_artifacts"
+        / f"{training_evidence_id}.training_evidence.json"
+    )
+    training_bytes = f'{{"training_fixture":{variant}}}'.encode()
+    training_path.parent.mkdir(parents=True, exist_ok=True)
+    training_path.write_bytes(training_bytes)
+    training_record = artifacts.register(
+        task_id=task_id,
+        kind=MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
+        path=str(training_path),
+        content_hash=hashlib.sha256(training_bytes).hexdigest(),
+        origin_tool=TRAIN_MODEL_WITH_EVIDENCE_V2_ORIGIN_TOOL,
+        provenance={
+            "schema_version": TRAINING_EVIDENCE_ARTIFACT_SCHEMA_VERSION,
+            "format": "json",
+            "artifact_role": "training_evidence",
+            "task_id": task_id,
+            "evidence_id": training_evidence_id,
+            "evidence_content_hash": training_evidence_content_hash,
+            "evidence_artifact_content_hash": hashlib.sha256(
+                training_bytes
+            ).hexdigest(),
+            "dataset_id": identity["dataset_id"],
+            "dataset_content_hash": identity["dataset_content_hash"],
+            "workspace_revision": identity["workspace_revision"],
+            "workspace_generation": identity["workspace_generation"],
+            "semantic_mapping_hash": identity["semantic_mapping_hash"],
+            "sample_design_id": sample_design_id,
+            "sample_design_content_hash": sample_design_content_hash,
+            "sample_membership_id": membership_id,
+            "sample_membership_content_hash": membership_content_hash,
+            "sample_membership_artifact_id": membership_record["id"],
+            "sample_membership_artifact_content_hash": membership_record[
+                "content_hash"
+            ],
+            "sample_bundle_artifact_id": bundle_record["id"],
+            "sample_bundle_artifact_content_hash": bundle_record[
+                "content_hash"
+            ],
+        },
+    )
+    training_evidence_ref = {
+        "artifact_id": training_record["id"],
+        "artifact_content_hash": training_record["content_hash"],
+        "evidence_id": training_evidence_id,
+        "evidence_content_hash": training_evidence_content_hash,
+    }
+    score_request_hash = _scorecard_hash(f"score-request-{variant}")
+    score_dir = task_root / "model_score_evidence"
+    score_dir.mkdir(parents=True, exist_ok=True)
+    vector_path = score_dir / f"{score_request_hash}.scores.parquet"
+    vector_bytes = f"score-vector-fixture-{variant}".encode()
+    vector_path.write_bytes(vector_bytes)
+    score_lineage = {
+        "schema_version": (
+            MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_TOOL_SCHEMA_VERSION
+        ),
+        "task_id": task_id,
+        "request_hash": score_request_hash,
+        "training_evidence_id": training_evidence_id,
+        "training_evidence_content_hash": training_evidence_content_hash,
+        "training_evidence_artifact_id": training_record["id"],
+        "training_evidence_artifact_content_hash": training_record[
+            "content_hash"
+        ],
+        "sample_design_id": sample_design_id,
+        "sample_design_content_hash": sample_design_content_hash,
+        "sample_membership_id": membership_id,
+        "sample_membership_content_hash": membership_content_hash,
+        "dataset_id": identity["dataset_id"],
+        "dataset_content_hash": identity["dataset_content_hash"],
+        "workspace_revision": identity["workspace_revision"],
+        "workspace_generation": identity["workspace_generation"],
+        "score_product": "raw_native_uncalibrated_bad_probability",
+    }
+    vector_record = artifacts.register(
+        task_id=task_id,
+        kind=MODEL_SCORE_VECTOR_ARTIFACT_KIND,
+        path=str(vector_path),
+        content_hash=hashlib.sha256(vector_bytes).hexdigest(),
+        origin_tool=MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL,
+        provenance={
+            **score_lineage,
+            "format": "parquet",
+            "artifact_role": "model_score_vector",
+            "row_count": 6,
+        },
+    )
+    score_evidence_id = f"score-evidence-{variant}"
+    score_evidence_content_hash = _scorecard_hash(
+        f"score-evidence-logical-{variant}"
+    )
+    score_path = (
+        score_dir / f"{score_request_hash}.model_score_evidence.json"
+    )
+    score_bytes = f'{{"score_fixture":{variant}}}'.encode()
+    score_path.write_bytes(score_bytes)
+    score_record = artifacts.register(
+        task_id=task_id,
+        kind=MODEL_SCORE_EVIDENCE_ARTIFACT_KIND,
+        path=str(score_path),
+        content_hash=hashlib.sha256(score_bytes).hexdigest(),
+        origin_tool=MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL,
+        provenance={
+            **score_lineage,
+            "format": "json",
+            "artifact_role": "model_score_evidence",
+            "score_vector_artifact_id": vector_record["id"],
+            "score_vector_artifact_content_hash": vector_record[
+                "content_hash"
+            ],
+            "score_evidence_id": score_evidence_id,
+            "score_evidence_content_hash": score_evidence_content_hash,
+            "score_evidence_artifact_content_hash": hashlib.sha256(
+                score_bytes
+            ).hexdigest(),
+        },
+    )
+    score_evidence_ref = {
+        "artifact_id": score_record["id"],
+        "artifact_content_hash": score_record["content_hash"],
+        "evidence_id": score_evidence_id,
+        "evidence_content_hash": score_evidence_content_hash,
+    }
+    score_vector_ref = {
+        "artifact_id": vector_record["id"],
+        "artifact_content_hash": vector_record["content_hash"],
+    }
+    asset = build_scorecard_band_asset(
+        identity=identity,
+        sample_design_ref=sample_design_ref,
+        training_evidence_ref=training_evidence_ref,
+        score_evidence_ref=score_evidence_ref,
+        score_vector_ref=score_vector_ref,
+        score_product="raw_native_uncalibrated_bad_probability",
+        score_direction="higher_is_riskier",
+        points_direction="higher_is_better",
+        scorecard_scale=_scorecard_scale(),
+        scorecard_table=(
+            _scorecard_table()
+            if scorecard_rows is None
+            else scorecard_rows
+        ),
+        raw_pd=np.asarray([0.1, 0.2, 0.4, 0.6, 0.8, 0.9]),
+        risk_development_mask=np.ones(6, dtype=np.bool_),
+        labels=np.asarray([0.0, 0.0, 0.0, 1.0, 1.0, np.nan]),
+        score_bins=[
+            {
+                "ordinal": 0,
+                "bin_id": "score-bin-00",
+                "lower_bound": None,
+                "upper_bound": 0.3,
+                "lower_inclusive": False,
+                "upper_inclusive": False,
+            },
+            {
+                "ordinal": 1,
+                "bin_id": "score-bin-01",
+                "lower_bound": 0.3,
+                "upper_bound": 0.7,
+                "lower_inclusive": True,
+                "upper_inclusive": False,
+            },
+            {
+                "ordinal": 2,
+                "bin_id": "score-bin-02",
+                "lower_bound": 0.7,
+                "upper_bound": None,
+                "lower_inclusive": True,
+                "upper_inclusive": False,
+            },
+        ],
+    )
+    band_bytes = canonical_scorecard_band_asset_json(asset).encode("utf-8")
+    band_path = (
+        app.state.settings.tasks_dir
+        / task_id
+        / band_directory_name
+        / f"{asset['asset_id']}.json"
+    )
+    band_path.parent.mkdir(parents=True, exist_ok=True)
+    band_path.write_bytes(band_bytes)
+    band_provenance = _scorecard_band_provenance(asset)
+    if drift_band_provenance:
+        band_provenance["score_vector_ref"] = {
+            **band_provenance["score_vector_ref"],
+            "artifact_content_hash": "f" * 64,
+        }
+    band_record = artifacts.register(
+        task_id=task_id,
+        kind=SCORECARD_BAND_ASSET_ARTIFACT_KIND,
+        path=str(band_path),
+        content_hash=hashlib.sha256(band_bytes).hexdigest(),
+        origin_tool=SCORECARD_BAND_ASSET_ORIGIN_TOOL,
+        provenance=band_provenance,
+        created_at=created_at,
+    )
+    selection_record, selection_path, fragment = (
+        _register_scorecard_selection(
+            app,
+            task_id,
+            asset=asset,
+            band_record=band_record,
+            cutoff_ordinal=0,
+            selection_reason="候选实验室明确选择",
+            created_at=created_at,
+        )
+    )
+    return (
+        band_record,
+        band_path,
+        asset,
+        selection_record,
+        selection_path,
+        fragment,
+        {
+            "membership": (membership_record, membership_path),
+            "bundle": (bundle_record, bundle_path),
+            "training": (training_record, training_path),
+            "score": (score_record, score_path),
+            "vector": (vector_record, vector_path),
+        },
+    )
+
+
+def _register_scorecard_selection(
+    app,
+    task_id: str,
+    *,
+    asset: dict,
+    band_record: dict,
+    cutoff_ordinal: int,
+    selection_reason: str,
+    created_at: str | None = None,
+) -> tuple[dict, Path, dict]:
+    band_bytes = canonical_scorecard_band_asset_json(asset).encode("utf-8")
+    band_binding = {
+        "artifact_id": band_record["id"],
+        "task_id": task_id,
+        "kind": SCORECARD_BAND_ASSET_ARTIFACT_KIND,
+        "artifact_schema_version": SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
+        "content_hash": band_record["content_hash"],
+        "origin_tool": SCORECARD_BAND_ASSET_ORIGIN_TOOL,
+        "canonical_bytes": band_bytes,
+    }
+    selection = build_scorecard_cutoff_selection(
+        asset,
+        source_artifact_binding=band_binding,
+        cutoff_id=asset["cutoffs"][cutoff_ordinal]["cutoff_id"],
+        selection_reason=selection_reason,
+    )
+    selection_bytes = canonical_scorecard_cutoff_selection_json(selection).encode(
+        "utf-8"
+    )
+    selection_path = (
+        app.state.settings.tasks_dir
+        / task_id
+        / "strategy_scorecard_candidates"
+        / f"{selection['selection_id']}.json"
+    )
+    selection_path.parent.mkdir(parents=True, exist_ok=True)
+    selection_path.write_bytes(selection_bytes)
+    selection_record = TaskArtifactRepository(
+        app.state.settings.db_path
+    ).register(
+        task_id=task_id,
+        kind=SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+        path=str(selection_path),
+        content_hash=hashlib.sha256(selection_bytes).hexdigest(),
+        origin_tool=SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
+        provenance=_scorecard_selection_provenance(selection),
+        created_at=created_at,
+    )
+    selection_binding = {
+        "artifact_id": selection_record["id"],
+        "task_id": task_id,
+        "kind": SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+        "artifact_schema_version": (
+            SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION
+        ),
+        "content_hash": selection_record["content_hash"],
+        "origin_tool": SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
+        "canonical_bytes": selection_bytes,
+    }
+    fragment = scorecard_cutoff_selection_to_verified_candidate_fragment(
+        selection,
+        asset,
+        selection_artifact_binding=selection_binding,
+        source_artifact_binding=band_binding,
+    )
+    return selection_record, selection_path, fragment
+
+
+def test_candidate_lab_replays_scorecard_pool_and_projects_safe_evidence(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _strategy_task(app)
+    (
+        _band_record,
+        _band_path,
+        asset,
+        _selection_record,
+        _selection_path,
+        fragment,
+        _sources,
+    ) = _register_scorecard_candidate(app, task_id)
+    _persist_initial_pool(
+        app,
+        task_id,
+        strategy_type="approval",
+        fragment=fragment,
+    )
+
+    response = client.get(f"/api/tasks/{task_id}/strategy-candidate-lab")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v2"
+    band = body["candidates"]["scorecard_band"]["latest"]
+    assert band["detail"]["asset_id"] == asset["asset_id"]
+    assert band["detail"]["performance"] == {"auc": 1.0, "ks": 1.0}
+    assert band["detail"]["directions"] == {
+        "raw_pd": {
+            "direction": "higher_is_riskier",
+            "meaning": "higher_raw_pd_means_higher_risk",
+        },
+        "scorecard_points": {
+            "direction": "higher_is_better",
+            "meaning": "higher_points_mean_safer",
+        },
+    }
+    assert len(band["pointers"]["bands"]) == 3
+    assert len(band["pointers"]["cutoffs"]) == 2
+    assert band["pointers"]["scorecard_points"] == _scorecard_table()
+    selection = body["candidates"]["scorecard_cutoff_selection"]["latest"]
+    assert selection["detail"] == {
+        "selection_id": selection["candidate_id"],
+        "asset_id": asset["asset_id"],
+        "cutoff_id": asset["cutoffs"][0]["cutoff_id"],
+        "reason": "候选实验室明确选择",
+        "directions": band["detail"]["directions"],
+        "effect": band["pointers"]["cutoffs"][0],
+    }
+    assert body["pools"]["total"] == 1
+    assert body["pools"]["latest"]["entries"][0]["source"]["asset_type"] == (
+        "scorecard_band"
+    )
+
+
+def test_candidate_lab_bounds_scorecard_point_rows(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _strategy_task(app)
+    cap = candidate_lab_projection._MAX_SCORECARD_POINT_POINTERS
+    scorecard_rows = _large_scorecard_table(cap + 1)
+    (
+        _band_record,
+        _band_path,
+        asset,
+        _selection_record,
+        _selection_path,
+        _fragment,
+        _sources,
+    ) = _register_scorecard_candidate(
+        app,
+        task_id,
+        scorecard_rows=scorecard_rows,
+    )
+
+    response = client.get(f"/api/tasks/{task_id}/strategy-candidate-lab")
+
+    assert response.status_code == 200, response.text
+    projected = response.json()["candidates"]["scorecard_band"]["latest"]
+    points = projected["pointers"]["scorecard_points"]
+    assert len(points) == cap
+    assert projected["total"] == (
+        len(asset["bands"]) + len(asset["cutoffs"]) + len(scorecard_rows)
+    )
+    assert projected["truncated"] is True
+    assert points[0]["feature"] == "__base__"
+    assert points[-1]["feature"] == f"feature_{cap - 2:05d}"
+    assert {
+        "feature",
+        "bin_index",
+        "bin_label",
+        "woe",
+        "coefficient",
+        "points",
+    } <= set(points[-1])
+    assert not any("hash" in key or "ref" in key for key in points[-1])
+
+
+def test_candidate_lab_replays_voting_with_nested_scorecard_requirements(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _strategy_task(app)
+    (
+        band_record,
+        _band_path,
+        asset,
+        _first_selection_record,
+        first_selection_path,
+        first_fragment,
+        sources,
+    ) = _register_scorecard_candidate(app, task_id)
+    _second_selection, _second_path, second_fragment = (
+        _register_scorecard_selection(
+            app,
+            task_id,
+            asset=asset,
+            band_record=band_record,
+            cutoff_ordinal=1,
+            selection_reason="Voting 第二个阈值",
+        )
+    )
+    first_pool = _persist_initial_pool(
+        app,
+        task_id,
+        strategy_type="approval",
+        fragment=first_fragment,
+    )
+    parent_pool = add_verified_candidate_fragment(
+        first_pool,
+        task_id=task_id,
+        strategy_type="approval",
+        default_action={
+            "type": "approval",
+            "value": "approve",
+            "reason_code": None,
+            "stop": True,
+        },
+        verified_candidate_fragment=second_fragment,
+        action={
+            "type": "reject",
+            "value": "reject",
+            "reason_code": "TEST",
+            "stop": True,
+        },
+        reason="candidate lab voting parent",
+    )
+    parent_record = _persist_pool_snapshot(
+        app,
+        task_id,
+        snapshot=parent_pool,
+        expected_revision=first_pool["revision"],
+        expected_snapshot_hash=first_pool["snapshot_hash"],
+    )
+    bundle_record, _bundle_path = sources["bundle"]
+    sample_ref = {
+        "artifact_id": bundle_record["id"],
+        "artifact_content_hash": bundle_record["content_hash"],
+        "sample_design_id": asset["sample_design_ref"][
+            "expected_sample_design_id"
+        ],
+        "sample_design_content_hash": asset["sample_design_ref"][
+            "expected_sample_design_content_hash"
+        ],
+        "partition": "development",
+    }
+    hit_count = np.asarray([0, 0, 1, 2, 2], dtype=np.int64)
+    target = np.asarray([0, 0, 0, 1, 1], dtype=np.int64)
+    voting_mask = hit_count >= 2
+    effect = voting_candidate_tools._effect_from_mask(
+        voting_mask,
+        target=target,
+        population_count=6,
+    )
+    distribution = voting_candidate_tools._hit_distribution(
+        hit_count,
+        target=target,
+        k=2,
+    )
+    observations = voting_candidate_tools._metric_observations(
+        voting_mask,
+        hit_count=hit_count,
+        target=target,
+        amount_values={"loan_amount": None, "overdue_amount": None},
+        k=2,
+    )
+    voting_asset = build_voting_candidate_asset(
+        parent_pool,
+        selected_entry_ids=[
+            entry["entry_id"] for entry in parent_pool["entries"]
+        ],
+        n=2,
+        target_col="bad",
+        sample_design_ref=sample_ref,
+        effect=effect,
+    )
+    voting_document = build_voting_candidate_artifact_document(
+        voting_asset,
+        target_col="bad",
+        drop_nan_labels=True,
+        nan_labels_dropped=1,
+        population_count=6,
+        labeled_count=5,
+        hit_distribution=distribution,
+        metric_observations=observations,
+    )
+    voting_bytes = canonical_voting_candidate_artifact_json(
+        voting_document
+    ).encode("utf-8")
+    voting_path = canonical_voting_candidate_path(
+        app.state.settings.tasks_dir,
+        task_id=task_id,
+        asset_id=voting_asset["asset_id"],
+    )
+    voting_path.parent.mkdir(parents=True, exist_ok=True)
+    voting_path.write_bytes(voting_bytes)
+    voting_record = TaskArtifactRepository(
+        app.state.settings.db_path
+    ).register(
+        task_id=task_id,
+        kind=VOTING_CANDIDATE_ARTIFACT_KIND,
+        path=str(voting_path),
+        content_hash=hashlib.sha256(voting_bytes).hexdigest(),
+        origin_tool=VOTING_CANDIDATE_ORIGIN_TOOL,
+        provenance=voting_candidate_artifact_provenance(
+            voting_document,
+            task_id=task_id,
+            pool_artifact={
+                "id": parent_record["id"],
+                "content_hash": parent_record["content_hash"],
+            },
+        ),
+    )
+    voting_fragment = voting_candidate_to_verified_fragment(
+        voting_asset,
+        artifact_binding={
+            "artifact_id": voting_record["id"],
+            "task_id": task_id,
+            "kind": VOTING_CANDIDATE_ARTIFACT_KIND,
+            "content_hash": voting_record["content_hash"],
+            "origin_tool": VOTING_CANDIDATE_ORIGIN_TOOL,
+            "artifact_schema_version": (
+                VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION
+            ),
+            "asset_id": voting_asset["asset_id"],
+            "asset_hash": voting_asset["asset_hash"],
+        },
+    )
+    current_pool = add_verified_candidate_fragment(
+        parent_pool,
+        task_id=task_id,
+        strategy_type="approval",
+        default_action={
+            "type": "approval",
+            "value": "approve",
+            "reason_code": None,
+            "stop": True,
+        },
+        verified_candidate_fragment=voting_fragment,
+        action={
+            "type": "reject",
+            "value": "reject",
+            "reason_code": "TEST",
+            "stop": True,
+        },
+        placement_mode="replace_selected_members",
+        selected_entry_ids=[
+            entry["entry_id"] for entry in parent_pool["entries"]
+        ],
+        reason="candidate lab voting replacement",
+    )
+    _persist_pool_snapshot(
+        app,
+        task_id,
+        snapshot=current_pool,
+        expected_revision=parent_pool["revision"],
+        expected_snapshot_hash=parent_pool["snapshot_hash"],
+    )
+
+    response = client.get(f"/api/tasks/{task_id}/strategy-candidate-lab")
+
+    assert response.status_code == 200, response.text
+    voting_pool = next(
+        pool
+        for pool in response.json()["pools"]["all"]
+        if pool["strategy_type"] == "approval"
+    )
+    execution = voting_pool["entries"][0]["execution"]
+    assert execution["requirement_types"] == [
+        "model_score_vector.v1",
+        "model_score_vector.v1",
+    ]
+    assert execution["condition"]["op"] == "n_of_k"
+    assert {
+        condition["field"] for condition in execution["condition"]["args"]
+    } == {"scorecard_raw_pd"}
+
+    for index in range(3):
+        _register_scorecard_selection(
+            app,
+            task_id,
+            asset=asset,
+            band_record=band_record,
+            cutoff_ordinal=0,
+            selection_reason=f"Voting 历史窗口占位 {index}",
+        )
+    first_selection_path.write_bytes(b"nested-scorecard-selection-drift")
+
+    drifted = client.get(f"/api/tasks/{task_id}/strategy-candidate-lab")
+
+    assert drifted.status_code == 409
+    assert drifted.json()["detail"] == (
+        "strategy candidate lab evidence verification failed"
+    )
+
+
+def test_candidate_lab_scorecard_projection_omits_private_bindings_and_hashes(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _strategy_task(app)
+    (
+        _band_record,
+        _band_path,
+        asset,
+        _selection_record,
+        _selection_path,
+        fragment,
+        _sources,
+    ) = _register_scorecard_candidate(app, task_id)
+    _persist_initial_pool(
+        app,
+        task_id,
+        strategy_type="approval",
+        fragment=fragment,
+    )
+
+    response = client.get(f"/api/tasks/{task_id}/strategy-candidate-lab")
+
+    assert response.status_code == 200, response.text
+
+    def all_keys(value: object) -> set[str]:
+        if isinstance(value, dict):
+            return set(value) | {
+                key
+                for nested in value.values()
+                for key in all_keys(nested)
+            }
+        if isinstance(value, list):
+            return {
+                key
+                for nested in value
+                for key in all_keys(nested)
+            }
+        return set()
+
+    keys = all_keys(response.json())
+    forbidden = {
+        "dataset_id",
+        "dataset_content_hash",
+        "workspace_revision",
+        "workspace_generation",
+        "semantic_mapping_hash",
+        "sample_context_hash",
+        "source_refs",
+        "sample_design_ref",
+        "asset_hash",
+        "selection_hash",
+        "content_hash",
+        "artifact_content_hash",
+        "raw_pd_content_hash",
+        "scorecard_table_hash",
+        "score_evidence_artifact_content_hash",
+        "score_vector_artifact_content_hash",
+    }
+    assert forbidden & keys == set()
+    private_virtual_field = (
+        "__marvis_model_pd_"
+        + asset["source_refs"]["score_vector"]["artifact_id"][:16]
+    )
+    assert private_virtual_field not in str(response.json())
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("bytes", "path", "provenance", "missing_source"),
+)
+def test_candidate_lab_scorecard_lineage_tampering_fails_closed(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _strategy_task(app)
+    (
+        band_record,
+        band_path,
+        _asset,
+        _selection_record,
+        _selection_path,
+        fragment,
+        _sources,
+    ) = _register_scorecard_candidate(
+        app,
+        task_id,
+        band_directory_name=(
+            "strategy_scorecard_candidates_shadow"
+            if mutation == "path"
+            else "strategy_scorecard_candidates"
+        ),
+        drift_band_provenance=mutation == "provenance",
+    )
+    _persist_initial_pool(
+        app,
+        task_id,
+        strategy_type="approval",
+        fragment=fragment,
+    )
+    if mutation == "bytes":
+        band_path.write_bytes(b"{}")
+    elif mutation == "missing_source":
+        with TaskArtifactRepository(
+            app.state.settings.db_path
+        ).transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "DELETE FROM task_artifacts WHERE id = ?",
+                (band_record["id"],),
+            )
+            conn.commit()
+
+    response = client.get(f"/api/tasks/{task_id}/strategy-candidate-lab")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "strategy candidate lab evidence verification failed"
+    )
+
+
+@pytest.mark.parametrize(
+    "source_name",
+    ("training", "score", "vector", "membership", "bundle"),
+)
+def test_candidate_lab_scorecard_upstream_source_drift_fails_closed(
+    tmp_path: Path,
+    source_name: str,
+) -> None:
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _strategy_task(app)
+    (
+        _band_record,
+        _band_path,
+        _asset,
+        _selection_record,
+        _selection_path,
+        _fragment,
+        sources,
+    ) = _register_scorecard_candidate(app, task_id)
+    _record, source_path = sources[source_name]
+    source_path.write_bytes(b"upstream-source-drift")
+
+    response = client.get(f"/api/tasks/{task_id}/strategy-candidate-lab")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "strategy candidate lab evidence verification failed"
+    )
+
+
+def test_candidate_lab_authoritative_scorecard_replay_failure_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _strategy_task(app)
+    _register_scorecard_candidate(app, task_id)
+
+    def reject_live_sources(*_args, **_kwargs):
+        raise StrategyError("live scorecard evidence replay failed")
+
+    monkeypatch.setattr(
+        candidate_lab_projection,
+        "load_scorecard_band_asset_artifact",
+        reject_live_sources,
+    )
+
+    response = client.get(f"/api/tasks/{task_id}/strategy-candidate-lab")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "strategy candidate lab evidence verification failed"
+    )
+
+
+def test_candidate_lab_bounds_scorecard_history_before_deep_replay(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _strategy_task(app)
+    (
+        oldest_band,
+        oldest_band_path,
+        _asset,
+        oldest_selection,
+        oldest_selection_path,
+        _fragment,
+        _sources,
+    ) = _register_scorecard_candidate(
+        app,
+        task_id,
+        created_at="2026-07-24T00:00:00+00:00",
+    )
+    oldest_band_path.write_bytes(b"not-read-old-band")
+    oldest_selection_path.write_bytes(b"not-read-old-selection")
+    for variant in range(1, 4):
+        _register_scorecard_candidate(
+            app,
+            task_id,
+            variant=variant,
+            created_at=f"2026-07-24T00:00:{variant:02d}+00:00",
+        )
+
+    response = client.get(f"/api/tasks/{task_id}/strategy-candidate-lab")
+
+    assert response.status_code == 200, response.text
+    candidates = response.json()["candidates"]
+    for kind, oldest in (
+        ("scorecard_band", oldest_band),
+        ("scorecard_cutoff_selection", oldest_selection),
+    ):
+        collection = candidates[kind]
+        assert collection["total"] == 4
+        assert collection["truncated"] is True
+        assert len(collection["all"]) == 3
+        assert oldest["id"] not in {
+            item["artifact"]["artifact_id"] for item in collection["all"]
+        }
+
+
+def test_candidate_lab_reuses_scorecard_verification_across_history_and_pools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _strategy_task(app)
+    (
+        _band_record,
+        band_path,
+        _asset,
+        _selection_record,
+        selection_path,
+        fragment,
+        _sources,
+    ) = _register_scorecard_candidate(app, task_id)
+    _persist_initial_pool(
+        app,
+        task_id,
+        strategy_type="approval",
+        fragment=fragment,
+    )
+    _persist_initial_pool(
+        app,
+        task_id,
+        strategy_type="reject",
+        fragment=fragment,
+    )
+    original = candidate_lab_projection._read_regular_file
+    reads = {band_path: 0, selection_path: 0}
+
+    def counting_read(path, **kwargs):
+        if path in reads:
+            reads[path] += 1
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(
+        candidate_lab_projection,
+        "_read_regular_file",
+        counting_read,
+    )
+
+    response = client.get(f"/api/tasks/{task_id}/strategy-candidate-lab")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["pools"]["total"] == 2
+    assert reads == {band_path: 1, selection_path: 1}
 
 
 def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Path) -> None:
@@ -603,7 +1851,7 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
 
     assert response.status_code == 200, response.text
     assert response.json() == {
-        "schema_version": "strategy.candidate-lab-projection.v1",
+        "schema_version": "strategy.candidate-lab-projection.v2",
         "task_id": task_id,
         "can_start": True,
         "blocked_reason": None,
@@ -611,7 +1859,13 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
         "open_gate": None,
         "candidates": {
             kind: {"latest": None, "all": [], "total": 0, "truncated": False}
-            for kind in ("univariate", "cross_matrix", "automatic_tree")
+            for kind in (
+                "univariate",
+                "cross_matrix",
+                "automatic_tree",
+                "scorecard_band",
+                "scorecard_cutoff_selection",
+            )
         },
         "pools": {"latest": None, "all": [], "total": 0, "truncated": False},
     }

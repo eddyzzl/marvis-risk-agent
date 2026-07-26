@@ -1665,6 +1665,93 @@
                         <button type="submit" class="button compact primary">启动自动规则树</button>
                       </form>
                     </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>评分卡分档</strong><small>从受治理模型分生成完整分档与 Cutoff 观测</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="scorecard_band_build">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>分档方式</span>
+                          <select data-candidate-lab-field="scorecard_banding_mode">
+                            <option value="equal_frequency" selected>等频分档</option>
+                            <option value="raw_pd_edges">自定义原始 PD 边界</option>
+                          </select>
+                        </label>
+                        <div data-candidate-lab-scorecard-banding-panel="equal_frequency">
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>分档数</span>
+                            <input
+                              type="number"
+                              min="2"
+                              max="20"
+                              step="1"
+                              value="10"
+                              data-candidate-lab-field="scorecard_bin_count"
+                            >
+                          </label>
+                        </div>
+                        <div
+                          class="hidden"
+                          data-candidate-lab-scorecard-banding-panel="raw_pd_edges"
+                          aria-hidden="true"
+                        >
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>原始 PD 边界</span>
+                            <textarea
+                              rows="2"
+                              data-candidate-lab-field="raw_pd_band_edges"
+                              placeholder="必须从 0 到 1 严格递增，例如：0, 0.1, 0.3, 0.6, 1"
+                            ></textarea>
+                          </label>
+                        </div>
+                        <p class="candidate-lab-boundary-note">
+                          原始 PD 越高表示风险越高；评分卡分数越高表示更安全。这里只生成完整观测证据，不选择 Cutoff，也不进入 Strategy Pool。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">生成评分卡分档证据</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>选择评分卡 Cutoff</strong><small>从当前受认证分档中记录一个明确指针</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="scorecard_cutoff_selection">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>评分卡分档资产 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="scorecard_asset_id">
+                            <option value="">请选择当前任务的评分卡分档</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Cutoff <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="scorecard_cutoff_id">
+                            <option value="">请选择该分档中的可见 Cutoff</option>
+                          </select>
+                        </label>
+                        <p
+                          class="candidate-lab-field-help"
+                          data-candidate-lab-scorecard-empty
+                        >
+                          当前任务尚无评分卡分档证据，请先生成分档。
+                        </p>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>选择理由</span>
+                          <textarea
+                            rows="2"
+                            maxlength="500"
+                            data-candidate-lab-field="scorecard_selection_reason"
+                            placeholder="可选；记录业务评审理由"
+                          ></textarea>
+                        </label>
+                        <p class="candidate-lab-boundary-note">
+                          Cutoff 仅是观测与候选指针，不等于通过或拒绝动作；平台不会推荐或自动选择某个 Cutoff，也不会自动进入 Strategy Pool。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">记录 Cutoff 选择</button>
+                      </form>
+                    </details>
                   </div>
                   <section class="candidate-lab-evidence" aria-label="受认证候选结果">
                     <header>

@@ -195,6 +195,584 @@ def test_primary_launchers_emit_only_user_owned_inputs_and_omit_empty_methods():
     )
 
 
+def test_scorecard_launchers_submit_only_visible_projection_ids_and_user_controls():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          collectStrategyCandidateLabRequest,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        function makeForm(workflow, values = {}, fields = {}) {
+          return {
+            dataset: { candidateLabWorkflow: workflow },
+            querySelector(selector) {
+              const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+              if (!match) return null;
+              return fields[match[1]] || { value: values[match[1]] || "" };
+            },
+            querySelectorAll() { return []; },
+          };
+        }
+
+        const equalFrequency = collectStrategyCandidateLabRequest(makeForm(
+          "scorecard_band_build",
+          {
+            scorecard_banding_mode: "equal_frequency",
+            scorecard_bin_count: "10",
+            raw_pd_band_edges: "",
+          },
+        ));
+        assert.deepEqual(equalFrequency, {
+          request_kind: "standard_workflow",
+          workflow: "scorecard_band_build",
+          workflow_inputs: { bin_count: 10 },
+        });
+
+        const manualEdges = collectStrategyCandidateLabRequest(makeForm(
+          "scorecard_band_build",
+          {
+            scorecard_banding_mode: "raw_pd_edges",
+            scorecard_bin_count: "10",
+            raw_pd_band_edges: "0, 0.2, 0.75, 1",
+          },
+        ));
+        assert.deepEqual(manualEdges.workflow_inputs, {
+          raw_pd_band_edges: [0, 0.2, 0.75, 1],
+        });
+        for (const forbidden of [
+          "artifact_id",
+          "asset_hash",
+          "content_hash",
+          "score_evidence_ref",
+          "sample_design_ref",
+        ]) {
+          assert.equal(forbidden in manualEdges.workflow_inputs, false);
+        }
+
+        const assetId = `scorecard-band-asset-${"a".repeat(32)}`;
+        const cutoffId = `scorecard-cutoff-${"b".repeat(32)}`;
+        const assetOption = {
+          value: assetId,
+          dataset: { candidateLabProjection: "1" },
+        };
+        const cutoffOption = {
+          value: cutoffId,
+          dataset: {
+            candidateLabProjection: "1",
+            sourceAssetId: assetId,
+          },
+        };
+        const selection = collectStrategyCandidateLabRequest(makeForm(
+          "scorecard_cutoff_selection",
+          { scorecard_selection_reason: "业务评审选择该观测切点" },
+          {
+            scorecard_asset_id: {
+              value: assetId,
+              selectedOptions: [assetOption],
+              options: [assetOption],
+            },
+            scorecard_cutoff_id: {
+              value: cutoffId,
+              selectedOptions: [cutoffOption],
+              options: [cutoffOption],
+            },
+          },
+        ));
+        assert.deepEqual(selection, {
+          request_kind: "standard_workflow",
+          workflow: "scorecard_cutoff_selection",
+          workflow_inputs: {
+            asset_id: assetId,
+            cutoff_id: cutoffId,
+            reason: "业务评审选择该观测切点",
+          },
+        });
+        assert.deepEqual(Object.keys(selection.workflow_inputs).sort(), [
+          "asset_id",
+          "cutoff_id",
+          "reason",
+        ]);
+
+        const forgedAsset = {
+          scorecard_asset_id: {
+            value: assetId,
+            selectedOptions: [{ value: assetId, dataset: {} }],
+            options: [],
+          },
+          scorecard_cutoff_id: {
+            value: cutoffId,
+            selectedOptions: [cutoffOption],
+            options: [cutoffOption],
+          },
+        };
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(makeForm(
+            "scorecard_cutoff_selection",
+            {},
+            forgedAsset,
+          )),
+          /受认证投影/,
+        );
+        """
+    )
+
+
+def test_scorecard_projection_has_dedicated_band_and_cutoff_evidence_tables():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          strategyCandidateLabResultsHtml,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const artifact = {
+          artifact_id: "task-artifact-band",
+          content_hash: "a".repeat(64),
+          created_at: "2026-07-25T10:00:00Z",
+          download_url: "/api/tasks/task-1/task-artifacts/band/download",
+          path: "/private/workspace/never-render.json",
+        };
+        const assetId = `scorecard-band-asset-${"a".repeat(32)}`;
+        const cutoffId = `scorecard-cutoff-${"b".repeat(32)}`;
+        const band = {
+          kind: "scorecard_band",
+          artifact,
+          candidate_id: assetId,
+          lifecycle: { candidate_stage: "development" },
+          detail: {
+            asset_id: assetId,
+            performance: { auc: 0.73, ks: 0.34 },
+            sample: {
+              row_count: 120,
+              development_count: 100,
+              labeled_count: 96,
+              bad_count: 12,
+            },
+            directions: {
+              raw_pd: {
+                direction: "higher_is_riskier",
+                meaning: "higher_raw_pd_means_higher_risk",
+              },
+              scorecard_points: {
+                direction: "higher_is_better",
+                meaning: "higher_points_mean_safer",
+              },
+            },
+          },
+          risks: { red_flags: [], report_info_gaps: [] },
+          pointers: {
+            bands: [{
+              ordinal: 0,
+              bin_id: "scorecard-band-0",
+              lower_bound: 0,
+              upper_bound: 0.2,
+              count: 40,
+              share: 0.3333,
+              labeled_count: 38,
+              bad_count: 1,
+              bad_rate: 0.0263,
+              average_pd: 0.11,
+            }],
+            cutoffs: [{
+              ordinal: 0,
+              cutoff_id: cutoffId,
+              execution_pd: 0.2,
+              display_points: 612.3,
+              lower_risk: { count: 40, bad_rate: 0.0263 },
+              higher_risk: { count: 80, bad_rate: 0.1375 },
+            }],
+          },
+          total: 2,
+          truncated: false,
+        };
+        const selection = {
+          kind: "scorecard_cutoff_selection",
+          artifact: { ...artifact, artifact_id: "task-artifact-selection" },
+          candidate_id: `scorecard-cutoff-selection-${"c".repeat(32)}`,
+          lifecycle: { candidate_stage: "selected" },
+          detail: {
+            selection_id: `scorecard-cutoff-selection-${"c".repeat(32)}`,
+            asset_id: assetId,
+            cutoff_id: cutoffId,
+            reason: "业务评审选择",
+            directions: band.detail.directions,
+            effect: band.pointers.cutoffs[0],
+          },
+          risks: { red_flags: [], report_info_gaps: [] },
+          pointers: {},
+          total: 1,
+          truncated: false,
+        };
+        const collection = (item) => ({
+          latest: item,
+          all: [item],
+          total: 1,
+          truncated: false,
+        });
+        const html = strategyCandidateLabResultsHtml({
+          candidates: {
+            scorecard_band: collection(band),
+            scorecard_cutoff_selection: collection(selection),
+          },
+          pools: {},
+        });
+
+        for (const expected of [
+          "评分卡分档",
+          "Cutoff 选择记录",
+          "分档证据",
+          "Cutoff 观测",
+          cutoffId,
+          "612.3",
+          "原始 PD 越高表示风险越高",
+          "评分卡分数越高表示更安全",
+          "不等于通过或拒绝动作",
+          "不会自动进入 Strategy Pool",
+        ]) {
+          assert.ok(html.includes(expected), expected);
+        }
+        assert.equal(html.includes("最佳 Cutoff"), false);
+        assert.equal(html.includes("/private/workspace"), false);
+        assert.equal(html.includes('{"'), false);
+        """
+    )
+
+
+def test_scorecard_band_exposes_collapsible_points_table_without_private_fields():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          strategyCandidateLabResultsHtml,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const band = {
+          kind: "scorecard_band",
+          artifact: {
+            artifact_id: "task-artifact-band",
+            download_url: "/api/tasks/task-1/task-artifacts/band/download",
+          },
+          candidate_id: `scorecard-band-asset-${"a".repeat(32)}`,
+          lifecycle: { candidate_stage: "development" },
+          detail: {
+            asset_id: `scorecard-band-asset-${"a".repeat(32)}`,
+            performance: { auc: 0.73, ks: 0.34 },
+            sample: { row_count: 120, labeled_count: 96, bad_count: 12 },
+          },
+          risks: { red_flags: [], report_info_gaps: [] },
+          pointers: {
+            bands: [],
+            cutoffs: [],
+            scorecard_points: [
+              {
+                feature: "__base__",
+                bin_index: -999,
+                bin_label: "base_points",
+                lower: null,
+                upper: null,
+                count: null,
+                bad_count: null,
+                good_count: null,
+                bad_rate: null,
+                woe: null,
+                iv_contribution: null,
+                coefficient: null,
+                monotonic_direction: null,
+                points: 320,
+                base_score: 600,
+                pdo: 50,
+                base_odds: 50,
+                factor: 72.1348,
+                offset: 317.8072,
+                asset_hash: "NEVER_RENDER_HASH",
+                source_ref: "NEVER_RENDER_REF",
+                private_note: "NEVER_RENDER_PRIVATE",
+              },
+              {
+                feature: "income",
+                bin_index: 0,
+                bin_label: "[-inf, 10)",
+                lower: null,
+                upper: 10,
+                count: 3,
+                bad_count: 2,
+                good_count: 1,
+                bad_rate: 0.6667,
+                woe: 0.4,
+                iv_contribution: 0.08,
+                coefficient: 0.5,
+                monotonic_direction: "increasing",
+                points: -14,
+              },
+              {
+                feature: "empty_feature",
+                bin_index: 1,
+                bin_label: "MISSING_VALUE_ROW",
+                lower: null,
+                upper: null,
+                count: null,
+                bad_count: null,
+                good_count: null,
+                bad_rate: null,
+                woe: null,
+                iv_contribution: null,
+                coefficient: null,
+                monotonic_direction: null,
+                points: null,
+              },
+            ],
+          },
+          total: 999,
+          truncated: true,
+        };
+        const html = strategyCandidateLabResultsHtml({
+          candidates: {
+            scorecard_band: {
+              latest: band,
+              all: [band],
+              total: 1,
+              truncated: false,
+            },
+          },
+          pools: {},
+        });
+
+        assert.match(
+          html,
+          /<details[^>]*data-candidate-lab-scorecard-points[^>]*>[\\s\\S]*?<summary>[\\s\\S]*?评分卡分值明细/,
+        );
+        for (const expected of [
+          "评分卡分值越高，代表风险越低",
+          "字段",
+          "分箱标签",
+          "区间",
+          "样本数",
+          "好样本",
+          "坏样本",
+          "坏率",
+          "WOE",
+          "IV 贡献",
+          "系数",
+          "单调方向",
+          "分值",
+          "基础分与刻度",
+          "基准分",
+          "PDO",
+          "基准赔率",
+          "Factor",
+          "Offset",
+          "320",
+          "600",
+          "-∞ ～ 10",
+          "当前仅显示前 3 行",
+        ]) {
+          assert.ok(html.includes(expected), expected);
+        }
+
+        const missingRow = html.match(
+          /<tr[^>]*>(?:(?!<\\/tr>)[\\s\\S])*MISSING_VALUE_ROW(?:(?!<\\/tr>)[\\s\\S])*<\\/tr>/,
+        )?.[0];
+        assert.ok(missingRow, "missing-value scorecard row");
+        assert.equal(missingRow.includes(">0<"), false);
+        assert.ok((missingRow.match(/>-<\\/td>/g) || []).length >= 8);
+        for (const forbidden of [
+          "NEVER_RENDER_HASH",
+          "NEVER_RENDER_REF",
+          "NEVER_RENDER_PRIVATE",
+          ">null<",
+          ">undefined<",
+        ]) {
+          assert.equal(html.includes(forbidden), false, forbidden);
+        }
+        """
+    )
+
+
+def test_controller_populates_scorecard_cutoff_selects_from_current_projection():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          collectStrategyCandidateLabRequest,
+          createStrategyCandidateLabController,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        class FakeSelect {
+          constructor(fieldName) {
+            this.options = [];
+            this._value = "";
+            this.disabled = false;
+            this.dataset = { candidateLabField: fieldName };
+            this.form = null;
+          }
+          set innerHTML(html) {
+            this.options = Array.from(
+              html.matchAll(/<option value="([^"]*)"([^>]*)>(.*?)<\\/option>/g),
+            ).map((match) => {
+              const attrs = match[2];
+              const projection = attrs.match(/data-candidate-lab-projection="([^"]*)"/);
+              const source = attrs.match(/data-source-asset-id="([^"]*)"/);
+              return {
+                value: match[1],
+                selected: false,
+                dataset: {
+                  ...(projection ? { candidateLabProjection: projection[1] } : {}),
+                  ...(source ? { sourceAssetId: source[1] } : {}),
+                },
+              };
+            });
+            this.value = this.options[0]?.value || "";
+          }
+          get innerHTML() { return ""; }
+          set value(value) {
+            this._value = value;
+            for (const option of this.options) option.selected = option.value === value;
+          }
+          get value() { return this._value; }
+          get selectedOptions() {
+            return this.options.filter((option) => option.selected);
+          }
+          closest(selector) {
+            if (selector === "[data-candidate-lab-field]") return this;
+            if (
+              selector
+              === '[data-candidate-lab-workflow="scorecard_cutoff_selection"]'
+            ) return this.form;
+            return null;
+          }
+        }
+
+        const assetId = `scorecard-band-asset-${"a".repeat(32)}`;
+        const cutoffId = `scorecard-cutoff-${"b".repeat(32)}`;
+        const otherAssetId = `scorecard-band-asset-${"c".repeat(32)}`;
+        const otherCutoffId = `scorecard-cutoff-${"d".repeat(32)}`;
+        const assetSelect = new FakeSelect("scorecard_asset_id");
+        const cutoffSelect = new FakeSelect("scorecard_cutoff_id");
+        const reason = { value: "", disabled: false, closest() { return null; } };
+        const empty = { textContent: "" };
+        const fields = new Map([
+          ["scorecard_asset_id", assetSelect],
+          ["scorecard_cutoff_id", cutoffSelect],
+          ["scorecard_selection_reason", reason],
+        ]);
+        const selectionForm = {
+          dataset: { candidateLabWorkflow: "scorecard_cutoff_selection" },
+          querySelector(selector) {
+            if (selector === "[data-candidate-lab-scorecard-empty]") return empty;
+            const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+            return match ? fields.get(match[1]) || null : null;
+          },
+          querySelectorAll() { return []; },
+          reset() {},
+        };
+        assetSelect.form = selectionForm;
+        cutoffSelect.form = selectionForm;
+        const panel = {
+          classList: { toggle() {} },
+          dataset: {},
+          setAttribute() {},
+          querySelector(selector) {
+            if (
+              selector
+              === '[data-candidate-lab-workflow="scorecard_cutoff_selection"]'
+            ) return selectionForm;
+            return null;
+          },
+          querySelectorAll(selector) {
+            if (selector === "[data-candidate-lab-form]") return [selectionForm];
+            if (selector === "[data-candidate-lab-retry]") return [];
+            return [assetSelect, cutoffSelect, reason];
+          },
+        };
+        const ids = {
+          strategyCandidateLabPanel: panel,
+          strategyCandidateLabResults: { innerHTML: "" },
+          strategyCandidateLabStatus: { textContent: "", dataset: {} },
+        };
+        const controller = createStrategyCandidateLabController({
+          $: (id) => ids[id] || null,
+          getSelectedTask: () => ({ id: "strategy-1", task_type: "strategy" }),
+          getSelectedTaskId: () => "strategy-1",
+          getBlockedReason: () => "",
+          getStrategyCandidateLab: async () => {
+            const band = (asset, cutoff, pd, points) => ({
+              detail: { asset_id: asset },
+              pointers: {
+                cutoffs: [{
+                  cutoff_id: cutoff,
+                  execution_pd: pd,
+                  display_points: points,
+                }],
+              },
+            });
+            const first = band(assetId, cutoffId, 0.42, 608.5);
+            const second = band(otherAssetId, otherCutoffId, 0.61, 571.2);
+            return {
+              task_id: "strategy-1",
+              can_start: true,
+              blocked_reason: null,
+              candidates: {
+                scorecard_band: {
+                  latest: first,
+                  all: [first, second],
+                  total: 2,
+                  truncated: false,
+                },
+              },
+              pools: {},
+            };
+          },
+        });
+
+        await controller.selectTask({ id: "strategy-1", task_type: "strategy" });
+        assert.equal(assetSelect.value, "");
+        assert.equal(cutoffSelect.value, "");
+        assert.ok(assetSelect.options.some((option) => option.value === assetId));
+        assert.ok(assetSelect.options.some((option) => option.value === otherAssetId));
+        assert.ok(empty.textContent.includes("先明确选择"));
+
+        assetSelect.value = assetId;
+        assert.equal(controller.handleChange({ target: assetSelect }), true);
+        assert.equal(
+          assetSelect.selectedOptions[0].dataset.candidateLabProjection,
+          "1",
+        );
+        assert.equal(cutoffSelect.value, "");
+        assert.ok(cutoffSelect.options.some((option) => option.value === cutoffId));
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(selectionForm),
+          /受认证投影/,
+        );
+
+        cutoffSelect.value = cutoffId;
+        assert.equal(
+          cutoffSelect.selectedOptions[0].dataset.sourceAssetId,
+          assetId,
+        );
+        assert.deepEqual(
+          collectStrategyCandidateLabRequest(selectionForm).workflow_inputs,
+          { asset_id: assetId, cutoff_id: cutoffId },
+        );
+
+        assetSelect.value = otherAssetId;
+        assert.equal(controller.handleChange({ target: assetSelect }), true);
+        assert.equal(cutoffSelect.value, "");
+        assert.ok(
+          cutoffSelect.options.some((option) => option.value === otherCutoffId),
+        );
+        assert.equal(
+          cutoffSelect.options.some((option) => option.value === cutoffId),
+          false,
+        );
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(selectionForm),
+          /受认证投影/,
+        );
+        """
+    )
+
+
 def test_sentinel_types_are_explicit_and_preserve_textual_leading_zeroes():
     run_node(
         """
@@ -890,6 +1468,8 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
         "univariate_candidate_refinement",
         "cross_matrix_analysis",
         "automatic_tree_candidate_build",
+        "scorecard_band_build",
+        "scorecard_cutoff_selection",
     ):
         assert f'data-candidate-lab-workflow="{workflow}"' in index_html
     refinement_start = index_html.index(
@@ -901,6 +1481,32 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
     assert '<select data-candidate-lab-field="source_candidate_id">' in refinement_html
     for forbidden in ("artifact_id", "content_hash", "evidence_hash"):
         assert forbidden not in refinement_html
+    scorecard_selection_start = index_html.index(
+        'data-candidate-lab-workflow="scorecard_cutoff_selection"'
+    )
+    scorecard_selection_end = index_html.index("</form>", scorecard_selection_start)
+    scorecard_selection_html = index_html[
+        scorecard_selection_start:scorecard_selection_end
+    ]
+    assert 'data-candidate-lab-field="scorecard_asset_id"' in (
+        scorecard_selection_html
+    )
+    assert 'data-candidate-lab-field="scorecard_cutoff_id"' in (
+        scorecard_selection_html
+    )
+    for forbidden in (
+        "artifact_id",
+        "asset_hash",
+        "content_hash",
+        "score_evidence_ref",
+        "sample_design_ref",
+    ):
+        assert forbidden not in scorecard_selection_html
+    assert "原始 PD 越高表示风险越高" in index_html
+    assert "评分卡分数越高表示更安全" in index_html
+    assert "不等于通过或拒绝动作" in index_html
+    assert "不会自动进入 Strategy Pool" in index_html
+    assert "最佳 Cutoff" not in index_html
     assert "text:001" in index_html
     assert "number:-9999" in index_html
     assert ".candidate-lab-layout" in workbench_css

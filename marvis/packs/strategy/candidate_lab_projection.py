@@ -17,14 +17,33 @@ import os
 from pathlib import Path
 import re
 import stat
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 
-from marvis.db import TaskRepository
+from marvis.data.backend import DataBackend
+from marvis.data.registry import DatasetRegistry
+from marvis.db import ModelingRepository, TaskRepository
 from marvis.domain import STRATEGY_TYPES
 from marvis.output.strategy_candidate_report import (
     canonical_strategy_candidate_report_json,
     strategy_candidate_report_from_json,
+)
+from marvis.packs.modeling.evidence import (
+    MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
+)
+from marvis.packs.modeling.evidence_tools import (
+    TRAINING_EVIDENCE_ARTIFACT_SCHEMA_VERSION,
+    TRAIN_MODEL_WITH_EVIDENCE_V2_ORIGIN_TOOL,
+)
+from marvis.packs.modeling.experiment import ExperimentStore
+from marvis.packs.modeling.score_evidence import (
+    MODEL_SCORE_EVIDENCE_ARTIFACT_KIND,
+    MODEL_SCORE_VECTOR_ARTIFACT_KIND,
+)
+from marvis.packs.modeling.score_evidence_tools import (
+    MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL,
+    MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_TOOL_SCHEMA_VERSION,
 )
 from marvis.packs.strategy.automatic_tree_asset import (
     canonical_automatic_tree_asset_json,
@@ -82,10 +101,38 @@ from marvis.packs.strategy.pool import (
     POOL_PRODUCER_VERSION,
     validate_strategy_pool,
 )
+from marvis.packs.strategy.scorecard_candidate import (
+    MAX_SCORECARD_BANDS,
+    MAX_SCORECARD_TABLE_ROWS,
+    SCORECARD_BAND_ASSET_ARTIFACT_KIND,
+    SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
+    SCORECARD_BAND_ASSET_ORIGIN_TOOL,
+    SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+    SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION,
+    SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
+    canonical_scorecard_band_asset_json,
+    canonical_scorecard_cutoff_selection_json,
+    scorecard_cutoff_selection_to_verified_candidate_fragment,
+    validate_scorecard_band_asset,
+    validate_scorecard_cutoff_selection,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION,
+    SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
+    SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+)
+from marvis.packs.strategy.scorecard_candidate_tools import (
+    load_scorecard_band_asset_artifact,
+)
+from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.voting_candidate_fragment import (
     VOTING_CANDIDATE_ARTIFACT_KIND,
     VOTING_CANDIDATE_ORIGIN_TOOL,
     voting_candidate_to_verified_fragment,
+)
+from marvis.packs.strategy.voting_candidate import (
+    verify_voting_candidate_asset_against_pool,
 )
 from marvis.packs.strategy.voting_candidate_tools import (
     canonical_voting_candidate_artifact_json,
@@ -94,6 +141,7 @@ from marvis.packs.strategy.voting_candidate_tools import (
     voting_candidate_artifact_provenance,
 )
 from marvis.repositories.plans import PlanRepository
+from marvis.repositories.datasets import DatasetRepository
 from marvis.repositories.strategy_pool import (
     POOL_ARTIFACT_KIND,
     StrategyCandidatePoolRepository,
@@ -103,7 +151,7 @@ from marvis.repositories.strategy_pool import (
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 
 
-SCHEMA_VERSION = "strategy.candidate-lab-projection.v1"
+SCHEMA_VERSION = "strategy.candidate-lab-projection.v2"
 
 UNIVARIATE_ARTIFACT_KIND = "strategy_candidate_json"
 UNIVARIATE_ORIGIN_TOOL = "strategy.analyze_univariate_candidates"
@@ -139,14 +187,21 @@ _POOL_ORIGIN_BY_OPERATION = {
 }
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MODEL_SCORE_VIRTUAL_FIELD_RE = re.compile(
+    r"^__marvis_model_pd_[0-9a-f]{16}$"
+)
 _MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 _MAX_PROJECTION_BYTES = 64 * 1024 * 1024
 _MAX_CANDIDATES_PER_KIND = 20
+_MAX_SCORECARD_CANDIDATES_PER_KIND = 3
 _MAX_RANKINGS = 50
 _MAX_METRICS = 100
 _MAX_BIN_POINTERS = 200
 _MAX_CELL_POINTERS = 400
 _MAX_LEAF_POINTERS = 256
+_MAX_SCORECARD_BAND_POINTERS = MAX_SCORECARD_BANDS
+_MAX_SCORECARD_CUTOFF_POINTERS = MAX_SCORECARD_BANDS - 1
+_MAX_SCORECARD_POINT_POINTERS = min(MAX_SCORECARD_TABLE_ROWS, 2_000)
 _MAX_POOL_ENTRIES = 200
 _MAX_RISKS = 50
 _UNIVARIATE_PARAMETER_FIELDS = (
@@ -165,6 +220,27 @@ _UNIVARIATE_PARAMETER_FIELDS = (
     "budget_unit",
     "drop_nan_labels",
     "nan_labels_dropped",
+)
+_SCORECARD_POINT_FIELDS = (
+    "feature",
+    "bin_index",
+    "bin_label",
+    "lower",
+    "upper",
+    "count",
+    "bad_count",
+    "good_count",
+    "bad_rate",
+    "woe",
+    "iv_contribution",
+    "coefficient",
+    "monotonic_direction",
+    "points",
+    "base_score",
+    "pdo",
+    "base_odds",
+    "factor",
+    "offset",
 )
 
 
@@ -193,6 +269,14 @@ class _ProjectionContext:
     budget: _ProjectionBudget
     raw_cache: dict[tuple[str, str], bytes] = field(default_factory=dict)
     verified_cache: dict[tuple[str, str], Any] = field(default_factory=dict)
+    scorecard_source_cache: set[str] = field(default_factory=set)
+    scorecard_runtime: Any | None = None
+    verified_pool_entry_replays: set[tuple[str, str]] = field(
+        default_factory=set
+    )
+    pool_entry_replays_in_progress: set[tuple[str, str]] = field(
+        default_factory=set
+    )
 
 
 def build_strategy_candidate_lab_projection(settings, task_id: str) -> dict[str, Any]:
@@ -269,6 +353,42 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         directory_name="strategy_automatic_trees",
         filename_pattern=re.compile(r"^candidate-asset-[0-9a-f]{32}\.json$"),
     )
+    scorecard_band_records, scorecard_band_total = (
+        artifact_repository.list_recent_for_task_kind_with_count(
+            task_id,
+            SCORECARD_BAND_ASSET_ARTIFACT_KIND,
+            limit=_MAX_SCORECARD_CANDIDATES_PER_KIND,
+        )
+    )
+    scorecard_band_records = _candidate_record_window(
+        settings,
+        task_id,
+        scorecard_band_records,
+        kind=SCORECARD_BAND_ASSET_ARTIFACT_KIND,
+        origin_tool=SCORECARD_BAND_ASSET_ORIGIN_TOOL,
+        directory_name="strategy_scorecard_candidates",
+        filename_pattern=re.compile(
+            r"^scorecard-band-asset-[0-9a-f]{32}\.json$"
+        ),
+    )
+    scorecard_selection_records, scorecard_selection_total = (
+        artifact_repository.list_recent_for_task_kind_with_count(
+            task_id,
+            SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+            limit=_MAX_SCORECARD_CANDIDATES_PER_KIND,
+        )
+    )
+    scorecard_selection_records = _candidate_record_window(
+        settings,
+        task_id,
+        scorecard_selection_records,
+        kind=SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+        origin_tool=SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
+        directory_name="strategy_scorecard_candidates",
+        filename_pattern=re.compile(
+            r"^scorecard-cutoff-selection-[0-9a-f]{32}\.json$"
+        ),
+    )
     univariate = [
         _project_univariate(context, record)
         for record in univariate_records
@@ -283,6 +403,14 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
     automatic_tree = [
         _project_automatic_tree(context, record)
         for record in automatic_tree_records
+    ]
+    scorecard_band = [
+        _project_scorecard_band(context, record)
+        for record in scorecard_band_records
+    ]
+    scorecard_cutoff_selection = [
+        _project_scorecard_cutoff_selection(context, record)
+        for record in scorecard_selection_records
     ]
     pools = _project_current_pools(
         context,
@@ -318,6 +446,16 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
                 automatic_tree,
                 _MAX_CANDIDATES_PER_KIND,
                 total=automatic_tree_total,
+            ),
+            "scorecard_band": _collection(
+                scorecard_band,
+                _MAX_SCORECARD_CANDIDATES_PER_KIND,
+                total=scorecard_band_total,
+            ),
+            "scorecard_cutoff_selection": _collection(
+                scorecard_cutoff_selection,
+                _MAX_SCORECARD_CANDIDATES_PER_KIND,
+                total=scorecard_selection_total,
             ),
         },
         "pools": _collection(pools, len(STRATEGY_TYPES)),
@@ -790,6 +928,680 @@ def _verified_automatic_tree_source(
     return verified
 
 
+def _scorecard_directions_projection() -> dict[str, dict[str, str]]:
+    return {
+        "raw_pd": {
+            "direction": "higher_is_riskier",
+            "meaning": "higher_raw_pd_means_higher_risk",
+        },
+        "scorecard_points": {
+            "direction": "higher_is_better",
+            "meaning": "higher_points_mean_safer",
+        },
+    }
+
+
+def _scorecard_cutoff_projection(
+    cutoff: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        key: cutoff[key]
+        for key in (
+            "ordinal",
+            "cutoff_id",
+            "execution_pd",
+            "display_points",
+            "lower_risk",
+            "higher_risk",
+        )
+    }
+
+
+def _project_scorecard_band(
+    context: _ProjectionContext,
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    verified = _verified_scorecard_band_source(context, record)
+    asset = verified["asset"]
+    bands = [
+        {
+            key: band[key]
+            for key in (
+                "ordinal",
+                "bin_id",
+                "lower_bound",
+                "upper_bound",
+                "lower_inclusive",
+                "upper_inclusive",
+                "count",
+                "share",
+                "labeled_count",
+                "bad_count",
+                "bad_rate",
+                "average_pd",
+            )
+        }
+        for band in asset["bands"][:_MAX_SCORECARD_BAND_POINTERS]
+    ]
+    cutoffs = [
+        _scorecard_cutoff_projection(cutoff)
+        for cutoff in asset["cutoffs"][:_MAX_SCORECARD_CUTOFF_POINTERS]
+    ]
+    scorecard_table = asset["score_contract"]["scorecard_table"]
+    scorecard_points = [
+        {
+            key: row[key]
+            for key in _SCORECARD_POINT_FIELDS
+            if key in row
+        }
+        for row in scorecard_table[:_MAX_SCORECARD_POINT_POINTERS]
+    ]
+    score_vector = asset["score_vector"]
+    total = (
+        len(asset["bands"])
+        + len(asset["cutoffs"])
+        + len(scorecard_table)
+    )
+    projected_total = len(bands) + len(cutoffs) + len(scorecard_points)
+    return {
+        "kind": "scorecard_band",
+        "artifact": _artifact_projection(record, context.task_id),
+        "candidate_id": asset["asset_id"],
+        "lifecycle": asset["lifecycle"],
+        "detail": {
+            "asset_id": asset["asset_id"],
+            "performance": asset["performance"],
+            "sample": {
+                key: score_vector[key]
+                for key in (
+                    "row_count",
+                    "development_count",
+                    "labeled_count",
+                    "bad_count",
+                )
+            },
+            "directions": _scorecard_directions_projection(),
+        },
+        "risks": {"red_flags": [], "report_info_gaps": []},
+        "pointers": {
+            "bands": bands,
+            "cutoffs": cutoffs,
+            "scorecard_points": scorecard_points,
+        },
+        "total": total,
+        "truncated": total > projected_total,
+    }
+
+
+def _project_scorecard_cutoff_selection(
+    context: _ProjectionContext,
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    verified = _verified_scorecard_cutoff_selection(context, record)
+    selection = verified["selection"]
+    asset = verified["asset"]
+    cutoff = verified["cutoff"]
+    return {
+        "kind": "scorecard_cutoff_selection",
+        "artifact": _artifact_projection(record, context.task_id),
+        "candidate_id": selection["selection_id"],
+        "lifecycle": asset["lifecycle"],
+        "detail": {
+            "selection_id": selection["selection_id"],
+            "asset_id": asset["asset_id"],
+            "cutoff_id": cutoff["cutoff_id"],
+            "reason": selection["selection_reason"],
+            "directions": _scorecard_directions_projection(),
+            "effect": _scorecard_cutoff_projection(cutoff),
+        },
+        "risks": {"red_flags": [], "report_info_gaps": []},
+        "pointers": {},
+        "total": 1,
+        "truncated": False,
+    }
+
+
+def _verified_scorecard_band_source(
+    context: _ProjectionContext,
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    cache_key = _record_cache_key(record)
+    cached = context.verified_cache.get(cache_key)
+    if cached is not None:
+        if not isinstance(cached, dict) or cached.get("kind") != "scorecard_band":
+            raise CandidateLabProjectionError("artifact verification cache drifted")
+        return cached
+    raw = _read_candidate_record(
+        context,
+        record,
+        kind=SCORECARD_BAND_ASSET_ARTIFACT_KIND,
+        origin_tool=SCORECARD_BAND_ASSET_ORIGIN_TOOL,
+        directory_name="strategy_scorecard_candidates",
+    )
+    asset = validate_scorecard_band_asset(
+        _json_object(raw, "scorecard band asset")
+    )
+    _require_bytes_equal(
+        canonical_scorecard_band_asset_json(asset).encode("utf-8"),
+        raw,
+    )
+    expected_path = (
+        Path(context.settings.tasks_dir)
+        / context.task_id
+        / "strategy_scorecard_candidates"
+        / f"{asset['asset_id']}.json"
+    )
+    _require_exact_path(record, expected_path)
+    provenance = _mapping(record["provenance"], "scorecard band provenance")
+    if (
+        asset["identity"]["task_id"] != context.task_id
+        or provenance != _scorecard_band_provenance(asset)
+    ):
+        raise CandidateLabProjectionError("scorecard band provenance drifted")
+    _verify_scorecard_direct_sources(context, asset)
+    try:
+        live = load_scorecard_band_asset_artifact(
+            _scorecard_live_runtime(context),
+            task_id=context.task_id,
+            artifact_id=record["id"],
+            expected_artifact_content_hash=record["content_hash"],
+            expected_asset_id=asset["asset_id"],
+            expected_asset_hash=asset["asset_hash"],
+        )
+    except StrategyError as exc:
+        raise CandidateLabProjectionError(
+            "scorecard band failed authoritative source replay"
+        ) from exc
+    if live.asset != asset or live.canonical_bytes != raw:
+        raise CandidateLabProjectionError(
+            "scorecard authoritative replay disagrees with projected asset"
+        )
+    verified = {
+        "kind": "scorecard_band",
+        "asset": asset,
+        "provenance": dict(provenance),
+        "raw": raw,
+    }
+    context.verified_cache[cache_key] = verified
+    return verified
+
+
+def _scorecard_live_runtime(context: _ProjectionContext) -> Any:
+    cached = context.scorecard_runtime
+    if cached is not None:
+        return cached
+    settings = context.settings
+    datasets_root = getattr(
+        settings,
+        "datasets_dir",
+        settings.workspace / "datasets",
+    )
+    backend = DataBackend(datasets_root)
+    runtime = SimpleNamespace(
+        settings=settings,
+        backend=backend,
+        registry=DatasetRegistry(
+            DatasetRepository(settings.db_path),
+            backend,
+            datasets_root,
+        ),
+        task_artifacts=context.artifact_repository,
+        experiments=ExperimentStore(settings.db_path),
+        modeling_repo=ModelingRepository(settings.db_path),
+    )
+    context.scorecard_runtime = runtime
+    return runtime
+
+
+def _verified_scorecard_cutoff_selection(
+    context: _ProjectionContext,
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    cache_key = _record_cache_key(record)
+    cached = context.verified_cache.get(cache_key)
+    if cached is not None:
+        if (
+            not isinstance(cached, dict)
+            or cached.get("kind") != "scorecard_cutoff_selection"
+        ):
+            raise CandidateLabProjectionError("artifact verification cache drifted")
+        return cached
+    raw = _read_candidate_record(
+        context,
+        record,
+        kind=SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+        origin_tool=SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
+        directory_name="strategy_scorecard_candidates",
+    )
+    selection = validate_scorecard_cutoff_selection(
+        _json_object(raw, "scorecard cutoff selection")
+    )
+    _require_bytes_equal(
+        canonical_scorecard_cutoff_selection_json(selection).encode("utf-8"),
+        raw,
+    )
+    expected_path = (
+        Path(context.settings.tasks_dir)
+        / context.task_id
+        / "strategy_scorecard_candidates"
+        / f"{selection['selection_id']}.json"
+    )
+    _require_exact_path(record, expected_path)
+    provenance = _mapping(
+        record["provenance"],
+        "scorecard cutoff selection provenance",
+    )
+    if provenance != _scorecard_selection_provenance(selection):
+        raise CandidateLabProjectionError(
+            "scorecard cutoff selection provenance drifted"
+        )
+    source_pointer = selection["source_asset_ref"]
+    source_record = _require_source_artifact(
+        context,
+        artifact_id=source_pointer["artifact_id"],
+        content_hash=source_pointer["artifact_content_hash"],
+        kind=source_pointer["kind"],
+        origin_tool=source_pointer["origin_tool"],
+    )
+    source = _verified_scorecard_band_source(context, source_record)
+    selection_binding = _scorecard_artifact_binding(
+        record,
+        artifact_schema_version=(
+            SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION
+        ),
+        canonical_bytes=raw,
+    )
+    source_binding = _scorecard_artifact_binding(
+        source_record,
+        artifact_schema_version=SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
+        canonical_bytes=source["raw"],
+    )
+    fragment = scorecard_cutoff_selection_to_verified_candidate_fragment(
+        selection,
+        source["asset"],
+        selection_artifact_binding=selection_binding,
+        source_artifact_binding=source_binding,
+    )
+    cutoff = next(
+        (
+            cutoff
+            for cutoff in source["asset"]["cutoffs"]
+            if cutoff["cutoff_id"] == selection["cutoff_id"]
+        ),
+        None,
+    )
+    if cutoff is None:
+        raise CandidateLabProjectionError(
+            "scorecard cutoff selection source no longer contains cutoff"
+        )
+    verified = {
+        "kind": "scorecard_cutoff_selection",
+        "selection": selection,
+        "asset": source["asset"],
+        "cutoff": cutoff,
+        "fragment": fragment,
+    }
+    context.verified_cache[cache_key] = verified
+    return verified
+
+
+def _scorecard_artifact_binding(
+    record: Mapping[str, Any],
+    *,
+    artifact_schema_version: str,
+    canonical_bytes: bytes,
+) -> dict[str, Any]:
+    return {
+        "artifact_id": record["id"],
+        "task_id": record["task_id"],
+        "kind": record["kind"],
+        "artifact_schema_version": artifact_schema_version,
+        "content_hash": record["content_hash"],
+        "origin_tool": record["origin_tool"],
+        "canonical_bytes": canonical_bytes,
+    }
+
+
+def _scorecard_band_provenance(asset: Mapping[str, Any]) -> dict[str, Any]:
+    identity = asset["identity"]
+    refs = asset["source_refs"]
+    return {
+        "schema_version": SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
+        "asset_schema_version": asset["schema_version"],
+        "producer_version": asset["producer_version"],
+        "task_id": identity["task_id"],
+        "asset_type": asset["asset_type"],
+        "asset_id": asset["asset_id"],
+        "asset_hash": asset["asset_hash"],
+        "dataset_id": identity["dataset_id"],
+        "dataset_content_hash": identity["dataset_content_hash"],
+        "workspace_revision": identity["workspace_revision"],
+        "workspace_generation": identity["workspace_generation"],
+        "semantic_mapping_hash": identity["semantic_mapping_hash"],
+        "sample_context_hash": identity["sample_context_hash"],
+        "sample_design_ref": asset["sample_design_ref"],
+        "training_evidence_ref": refs["training_evidence"],
+        "score_evidence_ref": refs["score_evidence"],
+        "score_vector_ref": refs["score_vector"],
+        "score_product": asset["score_contract"]["score_product"],
+        "scorecard_table_hash": asset["score_contract"]["scorecard_table_hash"],
+        "raw_pd_internal_edges": [
+            band["upper_bound"] for band in asset["bands"][:-1]
+        ],
+        "band_count": len(asset["bands"]),
+        "cutoff_count": len(asset["cutoffs"]),
+    }
+
+
+def _scorecard_selection_provenance(
+    selection: Mapping[str, Any],
+) -> dict[str, Any]:
+    source = selection["source_asset_ref"]
+    return {
+        "schema_version": SCORECARD_CUTOFF_SELECTION_ARTIFACT_SCHEMA_VERSION,
+        "selection_schema_version": selection["schema_version"],
+        "producer_version": selection["producer_version"],
+        "task_id": source["task_id"],
+        "selection_id": selection["selection_id"],
+        "selection_hash": selection["selection_hash"],
+        "cutoff_id": selection["cutoff_id"],
+        "selection_reason": selection["selection_reason"],
+        "source_artifact_id": source["artifact_id"],
+        "source_artifact_content_hash": source["artifact_content_hash"],
+        "source_asset_id": source["asset_id"],
+        "source_asset_hash": source["asset_hash"],
+    }
+
+
+def _verify_scorecard_direct_sources(
+    context: _ProjectionContext,
+    asset: Mapping[str, Any],
+) -> None:
+    cache_payload = {
+        "identity": asset["identity"],
+        "sample_design_ref": asset["sample_design_ref"],
+        "source_refs": asset["source_refs"],
+    }
+    cache_key = _canonical_mapping_hash(cache_payload)
+    if cache_key in context.scorecard_source_cache:
+        return
+
+    task_root = Path(context.settings.tasks_dir) / context.task_id
+    identity = asset["identity"]
+    sample_ref = asset["sample_design_ref"]
+    refs = asset["source_refs"]
+
+    membership_record = _require_source_artifact(
+        context,
+        artifact_id=sample_ref["membership_artifact_id"],
+        content_hash=sample_ref[
+            "expected_membership_artifact_content_hash"
+        ],
+        kind=SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
+        origin_tool=SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+    )
+    membership_provenance = _mapping(
+        membership_record["provenance"],
+        "scorecard membership provenance",
+    )
+    membership_id = _source_path_component(
+        membership_provenance.get("membership_id"),
+        "scorecard membership id",
+    )
+    _require_exact_path(
+        membership_record,
+        task_root
+        / "strategy_sample_designs_v2"
+        / f"{membership_id}.bin",
+    )
+    _require_provenance_subset(
+        membership_provenance,
+        {
+            "schema_version": SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION,
+            "task_id": context.task_id,
+            "dataset_id": identity["dataset_id"],
+            "dataset_content_hash": identity["dataset_content_hash"],
+            "workspace_revision": identity["workspace_revision"],
+            "workspace_generation": identity["workspace_generation"],
+            "semantic_mapping_hash": identity["semantic_mapping_hash"],
+            "format": "binary",
+            "artifact_role": "membership",
+            "membership_artifact_content_hash": membership_record[
+                "content_hash"
+            ],
+        },
+        "scorecard membership",
+    )
+    membership_content_hash = _sha256(
+        membership_provenance.get("membership_content_hash"),
+        "scorecard membership content hash",
+    )
+
+    bundle_record = _require_source_artifact(
+        context,
+        artifact_id=sample_ref["bundle_artifact_id"],
+        content_hash=sample_ref["expected_bundle_artifact_content_hash"],
+        kind=SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+        origin_tool=SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+    )
+    bundle_id = _source_path_component(
+        sample_ref["expected_bundle_id"],
+        "scorecard bundle id",
+    )
+    _require_exact_path(
+        bundle_record,
+        task_root / "strategy_sample_designs_v2" / f"{bundle_id}.json",
+    )
+    bundle_provenance = _mapping(
+        bundle_record["provenance"],
+        "scorecard sample bundle provenance",
+    )
+    _require_provenance_subset(
+        bundle_provenance,
+        {
+            "schema_version": SAMPLE_DESIGN_V2_ARTIFACT_SCHEMA_VERSION,
+            "task_id": context.task_id,
+            "dataset_id": identity["dataset_id"],
+            "dataset_content_hash": identity["dataset_content_hash"],
+            "workspace_revision": identity["workspace_revision"],
+            "workspace_generation": identity["workspace_generation"],
+            "semantic_mapping_hash": identity["semantic_mapping_hash"],
+            "format": "json",
+            "artifact_role": "bundle",
+            "membership_id": membership_id,
+            "membership_content_hash": membership_content_hash,
+            "membership_artifact_id": membership_record["id"],
+            "membership_artifact_content_hash": membership_record[
+                "content_hash"
+            ],
+            "bundle_id": bundle_id,
+            "bundle_artifact_content_hash": bundle_record["content_hash"],
+            "sample_design_id": sample_ref["expected_sample_design_id"],
+            "sample_design_content_hash": sample_ref[
+                "expected_sample_design_content_hash"
+            ],
+        },
+        "scorecard sample bundle",
+    )
+
+    training_ref = refs["training_evidence"]
+    training_record = _require_source_artifact(
+        context,
+        artifact_id=training_ref["artifact_id"],
+        content_hash=training_ref["artifact_content_hash"],
+        kind=MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
+        origin_tool=TRAIN_MODEL_WITH_EVIDENCE_V2_ORIGIN_TOOL,
+    )
+    training_evidence_id = _source_path_component(
+        training_ref["evidence_id"],
+        "scorecard training evidence id",
+    )
+    _require_exact_path(
+        training_record,
+        task_root
+        / "modeling_artifacts"
+        / f"{training_evidence_id}.training_evidence.json",
+    )
+    training_provenance = _mapping(
+        training_record["provenance"],
+        "scorecard training evidence provenance",
+    )
+    _require_provenance_subset(
+        training_provenance,
+        {
+            "schema_version": TRAINING_EVIDENCE_ARTIFACT_SCHEMA_VERSION,
+            "format": "json",
+            "artifact_role": "training_evidence",
+            "task_id": context.task_id,
+            "evidence_id": training_evidence_id,
+            "evidence_content_hash": training_ref[
+                "evidence_content_hash"
+            ],
+            "evidence_artifact_content_hash": training_record[
+                "content_hash"
+            ],
+            "dataset_id": identity["dataset_id"],
+            "dataset_content_hash": identity["dataset_content_hash"],
+            "workspace_revision": identity["workspace_revision"],
+            "workspace_generation": identity["workspace_generation"],
+            "semantic_mapping_hash": identity["semantic_mapping_hash"],
+            "sample_design_id": sample_ref["expected_sample_design_id"],
+            "sample_design_content_hash": sample_ref[
+                "expected_sample_design_content_hash"
+            ],
+            "sample_membership_id": membership_id,
+            "sample_membership_content_hash": membership_content_hash,
+            "sample_membership_artifact_id": membership_record["id"],
+            "sample_membership_artifact_content_hash": membership_record[
+                "content_hash"
+            ],
+            "sample_bundle_artifact_id": bundle_record["id"],
+            "sample_bundle_artifact_content_hash": bundle_record[
+                "content_hash"
+            ],
+        },
+        "scorecard training evidence",
+    )
+
+    score_ref = refs["score_evidence"]
+    score_record = _require_source_artifact(
+        context,
+        artifact_id=score_ref["artifact_id"],
+        content_hash=score_ref["artifact_content_hash"],
+        kind=MODEL_SCORE_EVIDENCE_ARTIFACT_KIND,
+        origin_tool=MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL,
+    )
+    vector_ref = refs["score_vector"]
+    vector_record = _require_source_artifact(
+        context,
+        artifact_id=vector_ref["artifact_id"],
+        content_hash=vector_ref["artifact_content_hash"],
+        kind=MODEL_SCORE_VECTOR_ARTIFACT_KIND,
+        origin_tool=MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_ORIGIN_TOOL,
+    )
+    score_provenance = _mapping(
+        score_record["provenance"],
+        "scorecard score evidence provenance",
+    )
+    vector_provenance = _mapping(
+        vector_record["provenance"],
+        "scorecard score vector provenance",
+    )
+    request_hash = _sha256(
+        score_provenance.get("request_hash"),
+        "scorecard score request hash",
+    )
+    if vector_provenance.get("request_hash") != request_hash:
+        raise CandidateLabProjectionError(
+            "scorecard score evidence and vector request drifted"
+        )
+    _require_exact_path(
+        score_record,
+        task_root
+        / "model_score_evidence"
+        / f"{request_hash}.model_score_evidence.json",
+    )
+    _require_exact_path(
+        vector_record,
+        task_root
+        / "model_score_evidence"
+        / f"{request_hash}.scores.parquet",
+    )
+    score_lineage = {
+        "schema_version": (
+            MATERIALIZE_MODEL_SCORE_EVIDENCE_V2_TOOL_SCHEMA_VERSION
+        ),
+        "task_id": context.task_id,
+        "request_hash": request_hash,
+        "training_evidence_id": training_evidence_id,
+        "training_evidence_content_hash": training_ref[
+            "evidence_content_hash"
+        ],
+        "training_evidence_artifact_id": training_record["id"],
+        "training_evidence_artifact_content_hash": training_record[
+            "content_hash"
+        ],
+        "sample_design_id": sample_ref["expected_sample_design_id"],
+        "sample_design_content_hash": sample_ref[
+            "expected_sample_design_content_hash"
+        ],
+        "sample_membership_id": membership_id,
+        "sample_membership_content_hash": membership_content_hash,
+        "dataset_id": identity["dataset_id"],
+        "dataset_content_hash": identity["dataset_content_hash"],
+        "workspace_revision": identity["workspace_revision"],
+        "workspace_generation": identity["workspace_generation"],
+        "score_product": asset["score_contract"]["score_product"],
+    }
+    _require_provenance_subset(
+        vector_provenance,
+        {
+            **score_lineage,
+            "format": "parquet",
+            "artifact_role": "model_score_vector",
+            "row_count": asset["score_vector"]["row_count"],
+        },
+        "scorecard score vector",
+    )
+    _require_provenance_subset(
+        score_provenance,
+        {
+            **score_lineage,
+            "format": "json",
+            "artifact_role": "model_score_evidence",
+            "score_vector_artifact_id": vector_record["id"],
+            "score_vector_artifact_content_hash": vector_record[
+                "content_hash"
+            ],
+            "score_evidence_id": score_ref["evidence_id"],
+            "score_evidence_content_hash": score_ref[
+                "evidence_content_hash"
+            ],
+            "score_evidence_artifact_content_hash": score_record[
+                "content_hash"
+            ],
+        },
+        "scorecard score evidence",
+    )
+    context.scorecard_source_cache.add(cache_key)
+
+
+def _require_provenance_subset(
+    provenance: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    name: str,
+) -> None:
+    if any(provenance.get(key) != value for key, value in expected.items()):
+        raise CandidateLabProjectionError(f"{name} provenance drifted")
+
+
+def _source_path_component(value: object, name: str) -> str:
+    text = _text(value, name)
+    if Path(text).name != text:
+        raise CandidateLabProjectionError(f"{name} is not path-safe")
+    return text
+
+
 def _project_current_pools(
     context: _ProjectionContext,
 ) -> list[dict[str, Any]]:
@@ -836,20 +1648,7 @@ def _project_current_pools(
         entries = pool["entries"]
         if len(entries) > _MAX_POOL_ENTRIES:
             raise CandidateLabProjectionError("current pool entry cap exceeded")
-        for entry in entries:
-            source = entry["source"]
-            fragment = _verified_pool_source_fragment(context, source)
-            replayed_source, replayed_rule_id, replayed_execution = (
-                verified_fragment_pool_parts(fragment)
-            )
-            if (
-                source != replayed_source
-                or entry["rule_id"] != replayed_rule_id
-                or entry["execution"] != replayed_execution
-            ):
-                raise CandidateLabProjectionError(
-                    "pool entry does not match replayed source fragment"
-                )
+        _verify_pool_entries_against_sources(context, pool)
         evidence_identity = (
             entries[0]["source"]["evidence_identity"] if entries else None
         )
@@ -876,7 +1675,7 @@ def _project_current_pools(
                 "rule_id": entry["rule_id"],
                 "position": entry["position"],
                 "source": _pool_source_projection(entry["source"]),
-                "execution": entry["execution"],
+                "execution": _pool_execution_projection(entry["execution"]),
                 "action": entry["action"],
                 "enabled": entry["enabled"],
             }
@@ -905,6 +1704,42 @@ def _project_current_pools(
     return projected
 
 
+def _verify_pool_entries_against_sources(
+    context: _ProjectionContext,
+    pool: Mapping[str, Any],
+) -> None:
+    replay_key = (
+        _text(pool.get("revision_id"), "pool revision_id"),
+        _sha256(pool.get("snapshot_hash"), "pool snapshot_hash"),
+    )
+    if replay_key in context.verified_pool_entry_replays:
+        return
+    if replay_key in context.pool_entry_replays_in_progress:
+        raise CandidateLabProjectionError("voting parent pool cycle detected")
+    context.pool_entry_replays_in_progress.add(replay_key)
+    try:
+        entries = _sequence(pool.get("entries"), "pool entries")
+        if len(entries) > _MAX_POOL_ENTRIES:
+            raise CandidateLabProjectionError("pool artifact entry cap exceeded")
+        for entry in entries:
+            source = _mapping(entry.get("source"), "pool entry source")
+            fragment = _verified_pool_source_fragment(context, source)
+            replayed_source, replayed_rule_id, replayed_execution = (
+                verified_fragment_pool_parts(fragment)
+            )
+            if (
+                source != replayed_source
+                or entry.get("rule_id") != replayed_rule_id
+                or entry.get("execution") != replayed_execution
+            ):
+                raise CandidateLabProjectionError(
+                    "pool entry does not match replayed source fragment"
+                )
+    finally:
+        context.pool_entry_replays_in_progress.discard(replay_key)
+    context.verified_pool_entry_replays.add(replay_key)
+
+
 def _pool_source_projection(source: Mapping[str, Any]) -> dict[str, Any]:
     visible_fields = (
         "asset_id",
@@ -918,6 +1753,41 @@ def _pool_source_projection(source: Mapping[str, Any]) -> dict[str, Any]:
         "validation_status",
     )
     return {key: source[key] for key in visible_fields if key in source}
+
+
+def _pool_execution_projection(
+    execution: Mapping[str, Any],
+) -> dict[str, Any]:
+    requirements = _sequence(
+        execution.get("requirements", []),
+        "pool execution requirements",
+    )
+    return {
+        "condition": _ui_safe_pool_condition(execution["condition"]),
+        "requirement_types": [
+            _text(requirement.get("type"), "pool requirement type")
+            for requirement in requirements
+        ],
+    }
+
+
+def _ui_safe_pool_condition(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _ui_safe_pool_condition(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return [_ui_safe_pool_condition(item) for item in value]
+    if (
+        isinstance(value, str)
+        and _MODEL_SCORE_VIRTUAL_FIELD_RE.fullmatch(value) is not None
+    ):
+        return "scorecard_raw_pd"
+    return value
 
 
 def _verified_pool_source_fragment(
@@ -949,6 +1819,13 @@ def _verified_pool_source_fragment(
         VOTING_CANDIDATE_ORIGIN_TOOL,
     ):
         return _verified_voting_candidate_fragment(context, record)
+    if dispatch == (
+        SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+        SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
+    ):
+        return _verified_scorecard_cutoff_selection(context, record)[
+            "fragment"
+        ]
     raise CandidateLabProjectionError("pool source artifact contract is unsupported")
 
 
@@ -1213,6 +2090,7 @@ def _verified_voting_candidate_fragment(
         origin_tool=_pool_artifact_origin(context, provenance),
     )
     parent_pool = _verified_pool_snapshot_record(context, parent_record)
+    _verify_pool_entries_against_sources(context, parent_pool)
     pool_ref = asset["pool_ref"]
     for key, expected in (
         ("pool_id", parent_pool["pool_id"]),
@@ -1225,6 +2103,12 @@ def _verified_voting_candidate_fragment(
             raise CandidateLabProjectionError(
                 "voting candidate parent pool binding drifted"
             )
+    try:
+        verify_voting_candidate_asset_against_pool(asset, parent_pool)
+    except StrategyError as exc:
+        raise CandidateLabProjectionError(
+            "voting candidate no longer replays against its parent pool"
+        ) from exc
     expected_provenance = voting_candidate_artifact_provenance(
         document,
         task_id=context.task_id,

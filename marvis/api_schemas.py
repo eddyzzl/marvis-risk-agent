@@ -214,6 +214,8 @@ ManualStrategyWorkflow = Literal[
     "cross_matrix_analysis",
     "automatic_tree_candidate_build",
     "univariate_candidate_refinement",
+    "scorecard_band_build",
+    "scorecard_cutoff_selection",
 ]
 
 ManualUnivariateRefinementMethod = Literal[
@@ -234,6 +236,14 @@ ManualUnivariateAnalysisMethod = Literal[
 ManualCandidateId = Annotated[
     StrictStr,
     StringConstraints(pattern=r"^candidate-[0-9a-f]{32}$"),
+]
+ManualScorecardAssetId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^scorecard-band-asset-[0-9a-f]{32}$"),
+]
+ManualScorecardCutoffId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^scorecard-cutoff-[0-9a-f]{32}$"),
 ]
 ManualSelectionReason = Annotated[
     StrictStr,
@@ -264,10 +274,24 @@ def _unique_strings(values: list[str]) -> list[str]:
     return values
 
 
+def _raw_pd_band_edges(
+    values: list[int | float],
+) -> list[int | float]:
+    normalized = _finite_strictly_increasing_numbers(values)
+    if float(normalized[0]) != 0.0 or float(normalized[-1]) != 1.0:
+        raise ValueError("raw_pd_band_edges must start at 0 and end at 1")
+    return normalized
+
+
 ManualBreakpointList = Annotated[
     list[StrictInt | StrictFloat],
     Field(min_length=1, max_length=19),
     AfterValidator(_finite_strictly_increasing_numbers),
+]
+ManualRawPdBandEdges = Annotated[
+    list[StrictInt | StrictFloat],
+    Field(min_length=3, max_length=21),
+    AfterValidator(_raw_pd_band_edges),
 ]
 ManualBinId = Annotated[
     StrictStr,
@@ -286,6 +310,49 @@ class ManualRiskThresholdRequest(BaseModel):
 
     operator: Literal[">=", ">", "<=", "<"]
     value: StrictRatio
+
+
+class ManualScorecardBandBuildInputs(BaseModel):
+    """Only user-owned scorecard band controls cross the manual API."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    bin_count: StrictInt | None = Field(default=None, ge=2, le=20)
+    raw_pd_band_edges: ManualRawPdBandEdges | None = None
+
+    @model_validator(mode="after")
+    def validate_optional_and_mutually_exclusive_controls(self) -> Self:
+        explicit_nulls = sorted(
+            field
+            for field in self.model_fields_set
+            if getattr(self, field) is None
+        )
+        if explicit_nulls:
+            raise ValueError(
+                "optional fields must be omitted instead of null: "
+                + ", ".join(explicit_nulls)
+            )
+        if self.bin_count is not None and self.raw_pd_band_edges is not None:
+            raise ValueError(
+                "bin_count and raw_pd_band_edges are mutually exclusive"
+            )
+        return self
+
+
+class ManualScorecardCutoffSelectionInputs(BaseModel):
+    """One visible asset/cutoff pointer plus an optional operator reason."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    asset_id: ManualScorecardAssetId
+    cutoff_id: ManualScorecardCutoffId
+    reason: ManualSelectionReason | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_null_reason(self) -> Self:
+        if "reason" in self.model_fields_set and self.reason is None:
+            raise ValueError("optional fields must be omitted instead of null: reason")
+        return self
 
 
 class ManualRiskThresholdSelectionRequest(BaseModel):
@@ -396,6 +463,12 @@ ManualUnivariateRefinementInputs = (
 _MANUAL_UNIVARIATE_REFINEMENT_INPUTS = TypeAdapter(
     ManualUnivariateRefinementInputs
 )
+_MANUAL_SCORECARD_BAND_BUILD_INPUTS = TypeAdapter(
+    ManualScorecardBandBuildInputs
+)
+_MANUAL_SCORECARD_CUTOFF_SELECTION_INPUTS = TypeAdapter(
+    ManualScorecardCutoffSelectionInputs
+)
 
 _MANUAL_STRATEGY_PLATFORM_FIELDS = frozenset(
     {
@@ -451,11 +524,20 @@ class ManualStrategyRequest(BaseModel):
                 self.workflow_inputs,
                 strict=True,
             )
-        user_owned_identity_fields = (
-            {"source_candidate_id"}
-            if self.workflow == "univariate_candidate_refinement"
-            else set()
-        )
+        elif self.workflow == "scorecard_band_build":
+            _MANUAL_SCORECARD_BAND_BUILD_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "scorecard_cutoff_selection":
+            _MANUAL_SCORECARD_CUTOFF_SELECTION_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        user_owned_identity_fields = {
+            "univariate_candidate_refinement": {"source_candidate_id"},
+            "scorecard_cutoff_selection": {"asset_id", "cutoff_id"},
+        }.get(self.workflow, set())
         forbidden = sorted(
             key
             for key in self.workflow_inputs
