@@ -1913,6 +1913,282 @@ def _render_build_voting_candidate(o: dict):
     return text, tables
 
 
+def _render_search_voting_candidates(o: dict):
+    """Render a bounded aggregate projection without implying a selection."""
+
+    validated = _validated_voting_search_tool_output(o)
+    if validated is None:
+        return (
+            "**Voting 搜索结果完整性校验失败**：平台不会展示未经 canonical "
+            "hash、计数守恒和 artifact hash 认证的搜索计数、排名或指标；"
+            "请重新执行 Voting 组合搜索。",
+            [],
+        )
+    result, artifact_hash = validated
+    search_id = result["search_id"]
+    raw_combinations = result.get("combinations")
+    combinations = (
+        [
+            item
+            for item in raw_combinations
+            if isinstance(item, dict)
+            and item.get("eligible") is True
+            and re.fullmatch(
+                r"voting-combo-[0-9a-f]{32}",
+                str(item.get("combo_id") or ""),
+            )
+            is not None
+            and isinstance(item.get("member_ids"), list)
+            and all(
+                re.fullmatch(
+                    r"candidate-rule-[0-9a-f]{32}",
+                    str(rule_id),
+                )
+                is not None
+                for rule_id in item["member_ids"]
+            )
+        ][:10]
+        if isinstance(raw_combinations, list)
+        else []
+    )
+    configuration = result.get("configuration")
+    objective = (
+        configuration.get("objective")
+        if isinstance(configuration, dict)
+        and isinstance(configuration.get("objective"), dict)
+        else {}
+    )
+    objective_metric = str(objective.get("metric") or "")
+    metric_order = [
+        objective_metric,
+        "hit_share",
+        "bad_rate",
+        "bad_capture_rate",
+        "lift",
+        "weighted_hit_share",
+        "weighted_bad_rate",
+        "weighted_bad_capture_rate",
+        "hit_amount_share",
+        "bad_amount_rate",
+        "bad_amount_capture_rate",
+    ]
+    displayed_metrics: list[str] = []
+    for metric in metric_order:
+        if (
+            metric
+            and metric not in displayed_metrics
+            and any(
+                isinstance(item.get("metrics"), dict)
+                and item["metrics"].get(metric) is not None
+                for item in combinations
+            )
+        ):
+            displayed_metrics.append(metric)
+
+    text = (
+        f"**Voting 组合只读搜索完成**：search ID `{search_id}`；"
+        f"search_space {_voting_search_count_text(result['search_space'])}，"
+        f"evaluated {_voting_search_count_text(result['evaluated'])}，"
+        f"eligible {_voting_search_count_text(result['eligible'])}。"
+    )
+    if result["truncated"] is True:
+        text += (
+            "\n\n**搜索预算已截断**：按 canonical 组合顺序评估预算前缀，"
+            "以下只是已评估范围内 Top-N；不得外推为未评估范围的结论。"
+        )
+    else:
+        text += "\n\n已完整评估当前搜索空间。"
+    text += (
+        "\n\n**边界**：本步骤未修改 Pool、未选择任何组合、未构建候选、"
+        "未入池、未应用、未采纳、未部署。后续如需构建，必须另行引用明确的"
+        "组合成员并发起受治理请求。"
+    )
+    text += (
+        "\n\n**完整聚合结果 artifact**：内容 SHA-256 "
+        f"`{artifact_hash}`；请从当前任务的统一产物栏下载。"
+        "Pool 身份、排除明细和下载路由不从未认证的 Tool 外层字段投影。"
+    )
+
+    rows = []
+    for item in combinations:
+        metrics = item.get("metrics")
+        assert isinstance(metrics, dict)
+        rows.append(
+            [
+                str(item.get("rank") or ""),
+                str(item["combo_id"]),
+                "、".join(str(rule_id) for rule_id in item["member_ids"]),
+                str(item.get("n") or ""),
+                *[
+                    _voting_search_metric_text(metric, metrics.get(metric))
+                    for metric in displayed_metrics
+                ],
+            ]
+        )
+    return text, [
+        {
+            "title": "Voting 搜索已评估范围内符合约束的 Top-10",
+            "columns": [
+                "Rank",
+                "Combo ID",
+                "成员 Rule IDs",
+                "n",
+                *displayed_metrics,
+            ],
+            "rows": rows,
+        }
+    ]
+
+
+def _validated_voting_search_tool_output(
+    output: object,
+) -> tuple[dict[str, Any], str] | None:
+    """Authenticate every renderer-owned Voting-search fact before projection."""
+
+    from marvis.packs.strategy.voting_candidate_search import (
+        canonical_voting_candidate_search_result_json,
+        validate_voting_candidate_search_result,
+    )
+
+    expected_fields = {
+        "schema_version",
+        "search_id",
+        "request_hash",
+        "content_hash",
+        "pool_id",
+        "pool_revision",
+        "pool_snapshot_hash",
+        "search_space",
+        "evaluated",
+        "truncated",
+        "eligible",
+        "excluded_unsupported_rule_ids",
+        "search_result",
+        "artifacts",
+        "not_mutated_pool",
+        "not_selected",
+        "not_admitted",
+        "not_applied",
+        "not_adopted",
+        "not_deployed",
+    }
+    try:
+        if not isinstance(output, dict) or set(output) != expected_fields:
+            return None
+        if output["schema_version"] != "strategy.search-voting-candidates-tool.v1":
+            return None
+        result = validate_voting_candidate_search_result(output["search_result"])
+        for field in (
+            "search_id",
+            "request_hash",
+            "content_hash",
+            "search_space",
+            "evaluated",
+            "truncated",
+            "eligible",
+        ):
+            if output[field] != result[field]:
+                return None
+        if (
+            not isinstance(output["pool_id"], str)
+            or not output["pool_id"]
+            or isinstance(output["pool_revision"], bool)
+            or not isinstance(output["pool_revision"], int)
+            or output["pool_revision"] < 1
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(output["pool_snapshot_hash"]),
+            )
+            is None
+        ):
+            return None
+        if any(
+            output[field] is not True
+            for field in (
+                "not_mutated_pool",
+                "not_selected",
+                "not_admitted",
+                "not_applied",
+                "not_adopted",
+                "not_deployed",
+            )
+        ):
+            return None
+        excluded = output["excluded_unsupported_rule_ids"]
+        if (
+            not isinstance(excluded, list)
+            or excluded != sorted(set(excluded))
+            or any(
+                not isinstance(rule_id, str)
+                or re.fullmatch(r"candidate-rule-[0-9a-f]{32}", rule_id)
+                is None
+                for rule_id in excluded
+            )
+        ):
+            return None
+        artifacts = output["artifacts"]
+        if (
+            not isinstance(artifacts, list)
+            or len(artifacts) != 1
+            or not isinstance(artifacts[0], dict)
+            or set(artifacts[0])
+            != {
+                "artifact_id",
+                "kind",
+                "format",
+                "filename",
+                "content_hash",
+                "download_url",
+            }
+        ):
+            return None
+        artifact = artifacts[0]
+        canonical = canonical_voting_candidate_search_result_json(result).encode(
+            "utf-8"
+        )
+        artifact_hash = hashlib.sha256(canonical).hexdigest()
+        if (
+            re.fullmatch(r"[0-9a-f]{64}", str(artifact["artifact_id"])) is None
+            or artifact["kind"] != "strategy_voting_candidate_search_json"
+            or artifact["format"] != "json"
+            or not isinstance(artifact["filename"], str)
+            or not artifact["filename"].endswith(".json")
+            or artifact["content_hash"] != artifact_hash
+            or not isinstance(artifact["download_url"], str)
+            or not artifact["download_url"].startswith("/api/tasks/")
+            or f"expected_content_hash={artifact_hash}"
+            not in artifact["download_url"]
+        ):
+            return None
+    except Exception:
+        return None
+    return result, artifact_hash
+
+
+def _voting_search_metric_text(metric: str, value: object) -> str:
+    if value is None:
+        return "n/a"
+    if metric in {
+        "hit_share",
+        "bad_rate",
+        "bad_capture_rate",
+        "weighted_hit_share",
+        "weighted_bad_rate",
+        "weighted_bad_capture_rate",
+        "hit_amount_share",
+        "bad_amount_rate",
+        "bad_amount_capture_rate",
+    }:
+        return _pct(value)
+    return _fmt(value)
+
+
+def _voting_search_count_text(value: object) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"{value:,}"
+    return _fmt(value)
+
+
 def _cross_matrix_cell_metric(cell: dict, name: str):
     effect = cell.get("effect") if isinstance(cell.get("effect"), dict) else {}
     return effect.get(name, cell.get(name))
@@ -6673,6 +6949,7 @@ _RENDERERS = {
     "materialize_automatic_tree_leaf_fragment": (
         _render_materialize_automatic_tree_leaf_fragment
     ),
+    "search_voting_candidates": _render_search_voting_candidates,
     "build_voting_candidate": _render_build_voting_candidate,
     "build_cross_matrix_candidate": _render_build_cross_matrix_candidate,
     "materialize_cross_matrix_cell_selection": (

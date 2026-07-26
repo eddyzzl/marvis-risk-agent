@@ -150,6 +150,9 @@ from marvis.packs.strategy.voting_candidate_fragment import (
 from marvis.packs.strategy.voting_candidate_tools import (
     load_verified_voting_candidate_artifact_on_connection,
 )
+from marvis.packs.strategy.voting_candidate_search_tools import (
+    resolve_voting_candidate_search_inputs,
+)
 from marvis.packs.strategy.cross_matrix_candidate_tools import (
     ASSET_ARTIFACT_KIND as CROSS_MATRIX_SOURCE_ARTIFACT_KIND,
     ASSET_ARTIFACT_SCHEMA_VERSION as CROSS_MATRIX_SOURCE_ARTIFACT_SCHEMA_VERSION,
@@ -2693,6 +2696,23 @@ def _run_validated_strategy_request(
 
     if (
         isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "voting_candidate_search"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_voting_candidate_search",
+            slots=_strategy_voting_candidate_search_plan_slots(
+                runtime,
+                task,
+                draft,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "voting_candidate_build"
     ):
         return _start_confirmed_strategy_plan(
@@ -3868,6 +3888,12 @@ def _standard_workflow_request_preflight(
         except StrategySetupError as exc:
             return ("cross_matrix_cell_source_required", str(exc))
         return None
+    if draft.workflow == "voting_candidate_search":
+        try:
+            _strategy_voting_candidate_search_plan_slots(runtime, task, draft)
+        except StrategySetupError as exc:
+            return ("strategy_voting_search_pool_binding_required", str(exc))
+        return None
     if draft.workflow == "voting_candidate_build":
         try:
             _strategy_voting_candidate_plan_slots(runtime, task, draft)
@@ -4849,6 +4875,26 @@ def _cross_matrix_cell_selection_slots(
     if "selection_reason" in inputs:
         slots["selection_reason"] = inputs["selection_reason"]
     return slots
+
+
+def _strategy_voting_candidate_search_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Bind user controls to the exact current Pool through the Tool resolver."""
+
+    if draft.workflow != "voting_candidate_search":
+        raise StrategySetupError("Voting 组合搜索 slots 收到了错误的 Workflow。")
+    try:
+        read_runtime = _strategy_report_read_runtime(runtime)
+        return resolve_voting_candidate_search_inputs(
+            read_runtime,
+            task_id=task.id,
+            user_controls=draft.to_dict()["workflow_inputs"],
+        )
+    except StrategyError as exc:
+        raise StrategySetupError(str(exc)) from exc
 
 
 def _strategy_voting_candidate_plan_slots(
@@ -9191,6 +9237,7 @@ def _strategy_request_requires_dataset(
             "scorecard_cutoff_selection",
             "automatic_tree_leaf_materialization",
             "cross_matrix_cell_selection",
+            "voting_candidate_search",
             "voting_candidate_build",
         }:
             return False

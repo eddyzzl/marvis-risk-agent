@@ -1200,6 +1200,91 @@ STRATEGY_VOTING_CANDIDATE_BUILD = WorkflowTemplate(
 )
 
 
+STRATEGY_VOTING_CANDIDATE_SEARCH = WorkflowTemplate(
+    id="strategy_voting_candidate_search",
+    title="Voting n-of-k 组合搜索",
+    goal_patterns=(
+        "搜索 Voting 策略组合",
+        "查找投票组合",
+        "优化 n-of-k 组合",
+        "search voting combinations",
+        "optimize n-of-k combinations",
+    ),
+    slots=(
+        SlotSpec("strategy_type", True, "user", "Explicit Strategy Pool type"),
+        SlotSpec(
+            "pool_ref",
+            True,
+            "task_context",
+            "Exact authenticated current Strategy Pool identity",
+        ),
+        SlotSpec(
+            "member_count",
+            True,
+            "user",
+            "Number of member rules in each searched combination",
+        ),
+        SlotSpec("n", True, "user", "Required member hits"),
+        SlotSpec(
+            "objective",
+            True,
+            "user",
+            "Explicit deterministic metric and ordering direction",
+        ),
+        SlotSpec(
+            "constraints",
+            True,
+            "user",
+            "Explicit deterministic eligibility constraints; [] is valid",
+        ),
+        SlotSpec(
+            "include_rule_ids",
+            True,
+            "user",
+            "Explicit mandatory current Pool rule ids; [] is valid",
+        ),
+        SlotSpec(
+            "exclude_rule_ids",
+            True,
+            "user",
+            "Explicit excluded current Pool rule ids; [] is valid",
+        ),
+        SlotSpec(
+            "max_combinations",
+            True,
+            "user",
+            "Hard deterministic combination evaluation budget",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="搜索 Voting n-of-k 组合",
+            tool_ref=ToolRef("strategy", "search_voting_candidates"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "pool_ref": "{slot:pool_ref}",
+                "member_count": "{slot:member_count}",
+                "n": "{slot:n}",
+                "objective": "{slot:objective}",
+                "constraints": "{slot:constraints}",
+                "include_rule_ids": "{slot:include_rule_ids}",
+                "exclude_rule_ids": "{slot:exclude_rule_ids}",
+                "max_combinations": "{slot:max_combinations}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "search_id"}),
+                PostCheck("nonempty", {"field": "content_hash"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_AUTOMATIC_TREE_LEAF_MATERIALIZATION = WorkflowTemplate(
     id="strategy_automatic_tree_leaf_materialization",
     title="自动树精确叶节点物化",
