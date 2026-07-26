@@ -222,6 +222,10 @@ ManualStrategyWorkflow = Literal[
     "interactive_tree_revision",
     "interactive_tree_frontier_group_materialization",
     "interactive_tree_frontier_materialization",
+    "strategy_pool_compile",
+    "strategy_pool_remove_entry",
+    "strategy_pool_set_action",
+    "strategy_pool_reorder",
     "strategy_pool_apply",
     "strategy_pool_validation",
 ]
@@ -640,6 +644,145 @@ class ManualVotingCandidateBuildFromSearchInputs(BaseModel):
         return self
 
 
+class ManualStrategyPoolDecisionAction(BaseModel):
+    """A fixed decision action; its canonical value is owned by StrategyAction."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    type: Literal["approval", "reject", "review"]
+
+
+class ManualStrategyPoolLimitAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    type: Literal["limit"]
+    value: StrictNonNegativeNumber
+
+    @model_validator(mode="after")
+    def reject_non_finite_value(self) -> Self:
+        if isinstance(self.value, float) and not math.isfinite(self.value):
+            raise ValueError("limit action value must be finite")
+        return self
+
+
+class ManualStrategyPoolPricingAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    type: Literal["pricing"]
+    value: StrictRatio
+
+    @model_validator(mode="after")
+    def reject_non_finite_value(self) -> Self:
+        if isinstance(self.value, float) and not math.isfinite(self.value):
+            raise ValueError("pricing action value must be finite")
+        return self
+
+
+class ManualStrategyPoolSegmentAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    type: Literal["segment"]
+    value: StrictStr | StrictInt | StrictFloat
+
+    @model_validator(mode="after")
+    def reject_empty_or_non_finite_value(self) -> Self:
+        if isinstance(self.value, str) and not self.value.strip():
+            raise ValueError("segment action value must be a non-empty scalar")
+        if isinstance(self.value, float) and not math.isfinite(self.value):
+            raise ValueError("segment action value must be finite")
+        return self
+
+
+ManualStrategyPoolAction = (
+    ManualStrategyPoolDecisionAction
+    | ManualStrategyPoolLimitAction
+    | ManualStrategyPoolPricingAction
+    | ManualStrategyPoolSegmentAction
+)
+
+_MANUAL_STRATEGY_POOL_ACTION_TYPES = {
+    "approval": frozenset({"approval", "reject", "review"}),
+    "reject": frozenset({"approval", "reject", "review"}),
+    "limit": frozenset({"limit"}),
+    "pricing": frozenset({"pricing"}),
+    "segmentation": frozenset({"segment"}),
+}
+
+
+def _reject_explicit_null_reason(
+    value: BaseModel,
+    *,
+    reason: str | None,
+) -> None:
+    if "reason" in value.model_fields_set and reason is None:
+        raise ValueError("optional fields must be omitted instead of null: reason")
+
+
+class ManualStrategyPoolCompileInputs(BaseModel):
+    """The Pool type is the only user-owned compile-preview control."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: ManualStrategyType
+
+
+class ManualStrategyPoolRemoveEntryInputs(BaseModel):
+    """Remove one currently visible Pool entry by its projection identity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: ManualStrategyType
+    entry_id: ManualPoolEntryId
+    reason: ManualSelectionReason | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_null_reason(self) -> Self:
+        _reject_explicit_null_reason(self, reason=self.reason)
+        return self
+
+
+class ManualStrategyPoolSetActionInputs(BaseModel):
+    """Set one current entry's minimal typed StrategyAction."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: ManualStrategyType
+    entry_id: ManualPoolEntryId
+    action: ManualStrategyPoolAction
+    reason: ManualSelectionReason | None = None
+
+    @model_validator(mode="after")
+    def validate_action_compatibility_and_optional_reason(self) -> Self:
+        _reject_explicit_null_reason(self, reason=self.reason)
+        if self.action.type not in _MANUAL_STRATEGY_POOL_ACTION_TYPES[
+            self.strategy_type
+        ]:
+            raise ValueError(
+                f"action {self.action.type} is not compatible with "
+                f"{self.strategy_type} Strategy Pool"
+            )
+        return self
+
+
+class ManualStrategyPoolReorderInputs(BaseModel):
+    """A complete explicit order of currently visible Pool entry identities."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: ManualStrategyType
+    ordered_ids: Annotated[
+        list[ManualPoolEntryId],
+        Field(min_length=1, max_length=200),
+        AfterValidator(_unique_strings),
+    ]
+    reason: ManualSelectionReason | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_null_reason(self) -> Self:
+        _reject_explicit_null_reason(self, reason=self.reason)
+        return self
+
+
 class ManualStrategyPoolApplyInputs(BaseModel):
     """Only the Pool type and optional safe column prefix are user-owned."""
 
@@ -804,6 +947,18 @@ _MANUAL_VOTING_CANDIDATE_SEARCH_INPUTS = TypeAdapter(
 _MANUAL_VOTING_CANDIDATE_BUILD_FROM_SEARCH_INPUTS = TypeAdapter(
     ManualVotingCandidateBuildFromSearchInputs
 )
+_MANUAL_STRATEGY_POOL_COMPILE_INPUTS = TypeAdapter(
+    ManualStrategyPoolCompileInputs
+)
+_MANUAL_STRATEGY_POOL_REMOVE_ENTRY_INPUTS = TypeAdapter(
+    ManualStrategyPoolRemoveEntryInputs
+)
+_MANUAL_STRATEGY_POOL_SET_ACTION_INPUTS = TypeAdapter(
+    ManualStrategyPoolSetActionInputs
+)
+_MANUAL_STRATEGY_POOL_REORDER_INPUTS = TypeAdapter(
+    ManualStrategyPoolReorderInputs
+)
 _MANUAL_STRATEGY_POOL_APPLY_INPUTS = TypeAdapter(
     ManualStrategyPoolApplyInputs
 )
@@ -908,6 +1063,26 @@ class ManualStrategyRequest(BaseModel):
                 self.workflow_inputs,
                 strict=True,
             )
+        elif self.workflow == "strategy_pool_compile":
+            _MANUAL_STRATEGY_POOL_COMPILE_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "strategy_pool_remove_entry":
+            _MANUAL_STRATEGY_POOL_REMOVE_ENTRY_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "strategy_pool_set_action":
+            _MANUAL_STRATEGY_POOL_SET_ACTION_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "strategy_pool_reorder":
+            _MANUAL_STRATEGY_POOL_REORDER_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
         elif self.workflow == "strategy_pool_apply":
             _MANUAL_STRATEGY_POOL_APPLY_INPUTS.validate_python(
                 self.workflow_inputs,
@@ -939,6 +1114,9 @@ class ManualStrategyRequest(BaseModel):
                 "search_id",
                 "combo_id",
             },
+            "strategy_pool_remove_entry": {"entry_id"},
+            "strategy_pool_set_action": {"entry_id"},
+            "strategy_pool_reorder": {"ordered_ids"},
         }.get(self.workflow, set())
         forbidden = sorted(
             key
