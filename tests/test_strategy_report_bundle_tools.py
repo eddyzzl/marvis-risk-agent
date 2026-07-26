@@ -3,11 +3,14 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
+from docx import Document
+from openpyxl import load_workbook
 import pytest
 
 from marvis.data.workspace import data_semantic_mapping_hash
@@ -25,6 +28,10 @@ from marvis.packs.strategy.impact_cube_tools import (
     run_measure_strategy_impact_cube,
 )
 from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
+from marvis.packs.strategy.pool_stability_tools import (
+    POOL_STABILITY_MEASUREMENT_AUDIT_KIND,
+    run_measure_strategy_pool_stability,
+)
 from marvis.packs.strategy.pool_validation_tools import (
     run_measure_strategy_pool_validation,
 )
@@ -507,6 +514,22 @@ def _attach_candidate_stability(fixture: dict) -> dict:
     return output
 
 
+def _attach_pool_stability(fixture: dict) -> dict:
+    output = run_measure_strategy_pool_stability(
+        fixture["request"]["impact_cube_ref"],
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    artifact = output["artifact"]
+    fixture["request"]["pool_stability_ref"] = {
+        "artifact_id": artifact["artifact_id"],
+        "expected_artifact_content_hash": artifact["content_hash"],
+        "expected_stability_id": output["stability_id"],
+        "expected_stability_content_hash": output["content_hash"],
+    }
+    return output
+
+
 def _run(fixture: dict) -> dict:
     return run_build_strategy_report_bundle_v2(
         fixture["request"],
@@ -746,11 +769,36 @@ def test_report_bundle_projects_platform_bound_pool_validation_refs_exactly(
     }
 
 
-def test_report_bundle_tool_schema_version_is_v5() -> None:
+def test_report_bundle_tool_schema_version_is_v6() -> None:
     assert (
         BUILD_STRATEGY_REPORT_BUNDLE_V2_TOOL_SCHEMA_VERSION
-        == "strategy.build-report-bundle-v2-tool.v5"
+        == "strategy.build-report-bundle-v2-tool.v6"
     )
+
+
+def test_legacy_report_plan_without_pool_stability_ref_replays_as_none(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+    legacy_request = deepcopy(fixture["request"])
+    explicit_request = {**deepcopy(legacy_request), "pool_stability_ref": None}
+
+    normalized_legacy = report_tools._validate_inputs(legacy_request)
+    normalized_explicit = report_tools._validate_inputs(explicit_request)
+    assert normalized_legacy == normalized_explicit
+    assert normalized_legacy["pool_stability_ref"] is None
+    assert report_tools._request_hash(
+        normalized_legacy
+    ) == report_tools._request_hash(normalized_explicit)
+
+    fixture["request"] = legacy_request
+    first = _run(fixture)
+    fixture["request"] = explicit_request
+    replay = _run(fixture)
+
+    assert replay == first
+    assert len(_report_rows(fixture)) == 4
+    assert len(_audit_rows(fixture)) == 1
 
 
 def test_legacy_report_plan_without_pool_validation_refs_replays_as_empty(
@@ -930,6 +978,290 @@ def test_report_bundle_projects_exact_candidate_stability_into_all_outputs(
     }
 
 
+def test_report_bundle_projects_exact_pool_stability_into_all_outputs_and_audit(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+    stability = _attach_pool_stability(fixture)
+
+    output = _run(fixture)
+
+    impact = next(
+        section
+        for section in output["bundle"]["sections"]
+        if section["key"] == "impact_assessment"
+    )
+    table = next(
+        item
+        for item in impact["tables"]
+        if item["table_id"] == "strategy_pool_stability_summary"
+    )
+    assert table["sheet_key"] == "10_validation"
+    assert table["effect_stage"] is None
+    assert 0 < len(table["rows"]) <= 8
+    assert all(
+        stage["binding"]["result_ref"]["kind"] != "pool_stability"
+        for stage in impact["stage_evidence"]
+    )
+    assert output["bundle"]["effect_stages"] == ["backtested"]
+    assert {
+        (stage["population"], stage["partition"])
+        for stage in impact["stage_evidence"]
+    } == {
+        ("approval", "development"),
+        ("risk", "development"),
+    }
+    assert "oot_claim_suppressed_by_validation_blocker" in {
+        flag["code"] for flag in impact["red_flags"]
+    }
+
+    published = {}
+    for artifact in output["artifacts"]:
+        record = fixture["runtime"].task_artifacts.get_for_task(
+            fixture["task"].id,
+            artifact["artifact_id"],
+        )
+        assert record is not None
+        published[artifact["format"]] = Path(record["path"]).read_bytes()
+    title = "策略池跨分区分布稳定性摘要（非效果验证）"
+    assert "strategy_pool_stability_summary" in published["json"].decode("utf-8")
+    assert title in published["markdown"].decode("utf-8")
+    workbook = load_workbook(BytesIO(published["xlsx"]), read_only=True)
+    assert title in {
+        cell.value
+        for row in workbook["10_validation"].iter_rows()
+        for cell in row
+    }
+    document = Document(BytesIO(published["docx"]))
+    visible_docx = "\n".join(
+        [
+            *(paragraph.text for paragraph in document.paragraphs),
+            *(
+                cell.text
+                for document_table in document.tables
+                for row in document_table.rows
+                for cell in row.cells
+            ),
+        ]
+    )
+    assert title in visible_docx
+
+    audit = json.loads(str(_audit_rows(fixture)[0]["detail_json"]))
+    assert audit["source_artifacts"]["pool_stability"] == {
+        "artifact_id": fixture["request"]["pool_stability_ref"]["artifact_id"],
+        "content_hash": fixture["request"]["pool_stability_ref"][
+            "expected_artifact_content_hash"
+        ],
+        "stability_id": stability["stability_id"],
+        "stability_content_hash": stability["content_hash"],
+        "producer_run_ref": stability["producer_run_ref"],
+    }
+
+
+def test_report_bundle_rejects_unknown_pool_stability_ref_fields(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+    fixture["request"]["pool_stability_ref"] = {
+        "artifact_id": "a" * 64,
+        "expected_artifact_content_hash": "b" * 64,
+        "expected_stability_id": "strategy-pool-stability-" + ("1" * 24),
+        "expected_stability_content_hash": "c" * 64,
+        "latest": True,
+    }
+
+    with pytest.raises(
+        StrategyError,
+        match="pool_stability_ref.*fields",
+    ):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "file_deleted",
+        "file_tampered",
+        "registry_deleted",
+        "registry_tampered",
+        "audit_deleted",
+        "audit_tampered",
+        "source_cube_tampered",
+    ],
+)
+def test_report_bundle_pool_stability_source_mutations_fail_closed(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+    stability = _attach_pool_stability(fixture)
+    task_id = fixture["task"].id
+    artifact_id = stability["artifact"]["artifact_id"]
+    record = fixture["runtime"].task_artifacts.get_for_task(
+        task_id,
+        artifact_id,
+    )
+    assert record is not None
+
+    if mutation == "file_deleted":
+        Path(record["path"]).unlink()
+    elif mutation == "file_tampered":
+        Path(record["path"]).write_bytes(b"{}")
+    elif mutation == "source_cube_tampered":
+        cube_record = fixture["runtime"].task_artifacts.get_for_task(
+            task_id,
+            fixture["impact_output"]["artifact"]["artifact_id"],
+        )
+        assert cube_record is not None
+        Path(cube_record["path"]).write_bytes(b"{}")
+    else:
+        with fixture["runtime"].task_artifacts.transaction() as conn:
+            if mutation == "registry_deleted":
+                conn.execute(
+                    "DELETE FROM task_artifacts WHERE id = ?",
+                    (artifact_id,),
+                )
+            elif mutation == "registry_tampered":
+                conn.execute(
+                    "DROP TRIGGER trg_task_artifacts_immutable_update"
+                )
+                conn.execute(
+                    "UPDATE task_artifacts SET content_hash = ? WHERE id = ?",
+                    ("f" * 64, artifact_id),
+                )
+            elif mutation == "audit_deleted":
+                conn.execute(
+                    "DELETE FROM audit WHERE kind = ? AND target_ref = ?",
+                    (
+                        POOL_STABILITY_MEASUREMENT_AUDIT_KIND,
+                        stability["producer_run_ref"]["ref_id"],
+                    ),
+                )
+            elif mutation == "audit_tampered":
+                conn.execute(
+                    """
+                    UPDATE audit
+                       SET detail_json = ?
+                     WHERE kind = ? AND target_ref = ?
+                    """,
+                    (
+                        "{}",
+                        POOL_STABILITY_MEASUREMENT_AUDIT_KIND,
+                        stability["producer_run_ref"]["ref_id"],
+                    ),
+                )
+            else:
+                raise AssertionError(f"unsupported mutation {mutation}")
+            conn.commit()
+
+    with pytest.raises(StrategyError):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
+def test_report_bundle_exact_pool_stability_is_idempotent_and_never_rebinds_latest(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+    planned = _attach_pool_stability(fixture)
+    planned_ref = deepcopy(fixture["request"]["pool_stability_ref"])
+
+    newer_cube = run_measure_strategy_impact_cube(
+        {
+            **deepcopy(fixture["impact_request"]),
+            "partitions": ["development", "validation", "oot"],
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    newer_stability = run_measure_strategy_pool_stability(
+        {
+            "artifact_id": newer_cube["artifact"]["artifact_id"],
+            "expected_artifact_content_hash": newer_cube["artifact"][
+                "content_hash"
+            ],
+            "expected_cube_id": newer_cube["cube_id"],
+            "expected_cube_content_hash": newer_cube["content_hash"],
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    assert newer_stability["artifact"]["artifact_id"] != planned["artifact"][
+        "artifact_id"
+    ]
+    assert fixture["request"]["pool_stability_ref"] == planned_ref
+
+    first = _run(fixture)
+    replay = _run(fixture)
+
+    assert replay == first
+    assert len(_report_rows(fixture)) == 4
+    assert len(_audit_rows(fixture)) == 1
+    audit = json.loads(str(_audit_rows(fixture)[0]["detail_json"]))
+    assert audit["source_artifacts"]["pool_stability"][
+        "artifact_id"
+    ] == planned["artifact"]["artifact_id"]
+    assert audit["source_artifacts"]["pool_stability"][
+        "producer_run_ref"
+    ] == planned["producer_run_ref"]
+
+
+def test_report_bundle_pool_stability_rejects_legacy_pool_impact_fallback(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+    _attach_pool_stability(fixture)
+    workspace = fixture["workspace"]
+    legacy_sample_ref = fixture["v2_output"]["bundle"]["sample_design"][
+        "compatibility"
+    ]["legacy_development_ref"]
+    legacy_impact = run_measure_pool_impact(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": fixture["pool"]["revision"],
+            "expected_pool_snapshot_hash": fixture["pool"]["snapshot_hash"],
+            "dataset_id": fixture["dataset"].id,
+            "expected_dataset_content_hash": fixture["dataset"].content_hash,
+            "workspace_revision": workspace.revision,
+            "workspace_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(
+                workspace.semantic_mapping
+            ),
+            "target_col": "bad",
+            "sample_design_ref": legacy_sample_ref,
+            "month_col": "apply_month",
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+            "comparison_mode": "absolute",
+            "drop_nan_labels": True,
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    legacy_artifact = legacy_impact["artifacts"][0]
+    fixture["request"].pop("impact_cube_ref")
+    fixture["request"]["pool_impact_ref"] = {
+        "artifact_id": legacy_artifact["artifact_id"],
+        "expected_artifact_content_hash": legacy_artifact["content_hash"],
+        "expected_assessment_id": legacy_impact["assessment_id"],
+        "expected_assessment_content_hash": legacy_impact["content_hash"],
+    }
+
+    with pytest.raises(
+        StrategyError,
+        match="Pool stability requires the report's exact ImpactCube",
+    ):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
 def test_report_bundle_passes_exact_voting_search_binding_and_audits_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -999,7 +1331,7 @@ def test_report_bundle_passes_exact_voting_search_binding_and_audits_it(
         "search_content_hash": search_hash,
     }
     assert output["schema_version"] == (
-        "strategy.build-report-bundle-v2-tool.v5"
+        "strategy.build-report-bundle-v2-tool.v6"
     )
 
 
@@ -1516,6 +1848,47 @@ def test_build_report_bundle_revalidates_candidate_stability_before_commit(
     with pytest.raises(
         StrategyError,
         match="stability|artifact|hash|bytes",
+    ):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
+@pytest.mark.parametrize("source_kind", ["pool_stability", "impact_cube"])
+def test_build_report_bundle_revalidates_pool_stability_and_exact_impact_cube_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_kind: str,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+    stability = _attach_pool_stability(fixture)
+    artifact_id = (
+        stability["artifact"]["artifact_id"]
+        if source_kind == "pool_stability"
+        else fixture["impact_output"]["artifact"]["artifact_id"]
+    )
+    record = fixture["runtime"].task_artifacts.get_for_task(
+        fixture["task"].id,
+        artifact_id,
+    )
+    assert record is not None
+    source_path = Path(record["path"])
+    original_render = report_tools.render_strategy_report_bundle
+
+    def tampering_render(bundle):
+        rendered = original_render(bundle)
+        source_path.write_bytes(b"{}")
+        return rendered
+
+    monkeypatch.setattr(
+        report_tools,
+        "render_strategy_report_bundle",
+        tampering_render,
+    )
+    with pytest.raises(
+        StrategyError,
+        match="stability|ImpactCube|artifact|hash|bytes",
     ):
         _run(fixture)
 

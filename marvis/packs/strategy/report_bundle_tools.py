@@ -61,6 +61,11 @@ from marvis.packs.strategy.pool_impact_tools import (
     load_strategy_pool_impact_artifact,
     require_strategy_pool_impact_artifact_binding_on_connection,
 )
+from marvis.packs.strategy.pool_stability_tools import (
+    StrategyPoolStabilityArtifactBinding,
+    load_strategy_pool_stability_artifact,
+    require_strategy_pool_stability_artifact_binding_on_connection,
+)
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
     load_current_strategy_candidate_pool_artifact,
@@ -113,7 +118,7 @@ from marvis.repositories.task_artifacts import (
 
 
 BUILD_STRATEGY_REPORT_BUNDLE_V2_TOOL_SCHEMA_VERSION = (
-    "strategy.build-report-bundle-v2-tool.v5"
+    "strategy.build-report-bundle-v2-tool.v6"
 )
 BUILD_STRATEGY_REPORT_BUNDLE_V2_AUDIT_KIND = (
     "strategy.report_bundle.published"
@@ -133,6 +138,7 @@ _INPUT_FIELDS = frozenset(
         "candidate_pool_ref",
         "pool_validation_refs",
         "candidate_stability_ref",
+        "pool_stability_ref",
         "voting_candidate_search_ref",
         "pool_impact_ref",
         "impact_cube_ref",
@@ -184,6 +190,14 @@ _POOL_REF_FIELDS = frozenset(
     }
 )
 _CANDIDATE_STABILITY_REF_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "expected_artifact_content_hash",
+        "expected_stability_id",
+        "expected_stability_content_hash",
+    }
+)
+_POOL_STABILITY_REF_FIELDS = frozenset(
     {
         "artifact_id",
         "expected_artifact_content_hash",
@@ -280,6 +294,9 @@ _REPORT_ID_RE = re.compile(r"^strategy-report-[0-9a-f]{24}$")
 _CANDIDATE_STABILITY_ID_RE = re.compile(
     r"^candidate-stability-[0-9a-f]{24}$"
 )
+_POOL_STABILITY_ID_RE = re.compile(
+    r"^strategy-pool-stability-[0-9a-f]{24}$"
+)
 _VOTING_CANDIDATE_SEARCH_ID_RE = re.compile(
     r"^voting-search-[0-9a-f]{32}$"
 )
@@ -310,6 +327,7 @@ class _ReportSources:
     candidate_pool: StrategyCandidatePoolArtifactBinding
     pool_validations: tuple[StrategyPoolValidationArtifactBinding, ...]
     candidate_stability: StrategyCandidateStabilityArtifactBinding | None
+    pool_stability: StrategyPoolStabilityArtifactBinding | None
     voting_candidate_search: VotingCandidateSearchArtifactBinding | None
     pool_impact: StrategyPoolImpactArtifactBinding | None
     impact_cube: StrategyImpactCubeArtifactBinding | None
@@ -336,6 +354,7 @@ def run_build_strategy_report_bundle_v2(inputs, ctx, runtime) -> dict[str, Any]:
             candidate_pool=sources.candidate_pool,
             pool_validations=sources.pool_validations,
             candidate_stability=sources.candidate_stability,
+            pool_stability=sources.pool_stability,
             voting_candidate_search=sources.voting_candidate_search,
             pool_impact=sources.pool_impact,
             impact_cube=sources.impact_cube,
@@ -553,6 +572,15 @@ def _load_sources(
             **request["impact_cube_ref"],
         )
     )
+    pool_stability = (
+        None
+        if request["pool_stability_ref"] is None
+        else load_strategy_pool_stability_artifact(
+            runtime,
+            task_id=task_id,
+            **request["pool_stability_ref"],
+        )
+    )
     pool_impact = (
         None
         if impact_cube is not None
@@ -615,6 +643,7 @@ def _load_sources(
         candidate_pool=candidate_pool,
         pool_validations=pool_validations,
         candidate_stability=candidate_stability,
+        pool_stability=pool_stability,
         voting_candidate_search=voting_candidate_search,
         pool_impact=pool_impact,
         impact_cube=impact_cube,
@@ -861,6 +890,11 @@ def _revalidate_sources(conn, sources: _ReportSources) -> None:
             conn,
             sources.candidate_stability,
         )
+    if sources.pool_stability is not None:
+        require_strategy_pool_stability_artifact_binding_on_connection(
+            conn,
+            sources.pool_stability,
+        )
     if sources.voting_candidate_search is not None:
         require_voting_candidate_search_artifact_binding_on_connection(
             conn,
@@ -1005,6 +1039,7 @@ def _audit_source_artifacts(sources: _ReportSources) -> dict[str, Any]:
             for binding in sources.pool_validations
         },
         "candidate_stability": None,
+        "pool_stability": None,
         "voting_candidate_search": None,
         "pool_impact": None,
         "impact_cube": None,
@@ -1043,6 +1078,23 @@ def _audit_source_artifacts(sources: _ReportSources) -> dict[str, Any]:
             "stability_content_hash": sources.candidate_stability.stability[
                 "content_hash"
             ],
+        }
+    if sources.pool_stability is not None:
+        producer_run = sources.pool_stability.artifact_provenance[
+            "producer_run"
+        ]
+        result["pool_stability"] = {
+            "artifact_id": sources.pool_stability.artifact_id,
+            "content_hash": sources.pool_stability.artifact_content_hash,
+            "stability_id": sources.pool_stability.stability["stability_id"],
+            "stability_content_hash": sources.pool_stability.stability[
+                "content_hash"
+            ],
+            "producer_run_ref": {
+                "kind": "tool_run",
+                "ref_id": producer_run["run_id"],
+                "content_hash": producer_run["content_hash"],
+            },
         }
     if sources.voting_candidate_search is not None:
         result["voting_candidate_search"] = {
@@ -1205,6 +1257,9 @@ def _validate_inputs(value: object) -> dict[str, Any]:
     )
     request["candidate_stability_ref"] = _optional_candidate_stability_ref(
         request["candidate_stability_ref"]
+    )
+    request["pool_stability_ref"] = _optional_pool_stability_ref(
+        request["pool_stability_ref"]
     )
     request["voting_candidate_search_ref"] = (
         _optional_voting_candidate_search_ref(
@@ -1388,6 +1443,41 @@ def _optional_candidate_stability_ref(
         "expected_stability_content_hash": _hash(
             obj["expected_stability_content_hash"],
             "candidate_stability_ref.expected_stability_content_hash",
+        ),
+    }
+
+
+def _optional_pool_stability_ref(
+    value: object,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    obj = _exact_object(
+        value,
+        _POOL_STABILITY_REF_FIELDS,
+        "pool_stability_ref",
+    )
+    stability_id = _text(
+        obj["expected_stability_id"],
+        "pool_stability_ref.expected_stability_id",
+    )
+    if _POOL_STABILITY_ID_RE.fullmatch(stability_id) is None:
+        raise StrategyError(
+            "pool_stability_ref.expected_stability_id is not canonical"
+        )
+    return {
+        "artifact_id": _hash(
+            obj["artifact_id"],
+            "pool_stability_ref.artifact_id",
+        ),
+        "expected_artifact_content_hash": _hash(
+            obj["expected_artifact_content_hash"],
+            "pool_stability_ref.expected_artifact_content_hash",
+        ),
+        "expected_stability_id": stability_id,
+        "expected_stability_content_hash": _hash(
+            obj["expected_stability_content_hash"],
+            "pool_stability_ref.expected_stability_content_hash",
         ),
     }
 

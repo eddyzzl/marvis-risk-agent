@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 from marvis.packs.modeling.evidence import (
@@ -68,6 +69,19 @@ from marvis.packs.strategy.pool_impact import (
 )
 from marvis.packs.strategy.pool_impact_tools import (
     StrategyPoolImpactArtifactBinding,
+)
+from marvis.packs.strategy.pool_stability import (
+    POOL_STABILITY_PRODUCER_VERSION,
+    canonical_strategy_pool_stability_json,
+    validate_strategy_pool_stability,
+)
+from marvis.packs.strategy.pool_stability_tools import (
+    POOL_STABILITY_ARTIFACT_KIND,
+    POOL_STABILITY_ARTIFACT_SCHEMA_VERSION,
+    POOL_STABILITY_ORIGIN_TOOL,
+    POOL_STABILITY_PRODUCER_RUN_SCHEMA_VERSION,
+    POOL_STABILITY_TOOL_SCHEMA_VERSION,
+    StrategyPoolStabilityArtifactBinding,
 )
 from marvis.packs.strategy.pool_validation import (
     canonical_strategy_pool_validation_json,
@@ -129,6 +143,7 @@ from marvis.packs.strategy.voting_candidate_search_tools import (
     VOTING_CANDIDATE_SEARCH_ARTIFACT_SCHEMA_VERSION,
     VotingCandidateSearchArtifactBinding,
 )
+from marvis.repositories.task_artifacts import stable_task_artifact_id
 
 
 _MAX_SCORECARD_REPORT_TABLE_FIELDS = 50_000
@@ -295,6 +310,7 @@ def build_strategy_report_bundle_source_inputs(
         StrategyPoolValidationArtifactBinding
     ] = (),
     candidate_stability: StrategyCandidateStabilityArtifactBinding | None = None,
+    pool_stability: StrategyPoolStabilityArtifactBinding | None = None,
     voting_candidate_search: VotingCandidateSearchArtifactBinding | None = None,
     pool_impact: StrategyPoolImpactArtifactBinding | None = None,
     impact_cube: StrategyImpactCubeArtifactBinding | None = None,
@@ -317,6 +333,7 @@ def build_strategy_report_bundle_source_inputs(
         sample_design=sample_design,
         candidate_pool=candidate_pool,
         candidate_stability=candidate_stability,
+        pool_stability=pool_stability,
         voting_candidate_search=voting_candidate_search,
         pool_impact=(
             None if impact_cube is not None else pool_impact
@@ -379,6 +396,11 @@ def build_strategy_report_bundle_source_inputs(
         if cube is not None or pool_impact is None
         else _authenticated_pool_impact(pool_impact)
     )
+    pool_stability_evidence = (
+        None
+        if pool_stability is None
+        else _authenticated_pool_stability(pool_stability)
+    )
     effective_training = _effective_training_binding(
         training_evidence=training_evidence,
         score_evidence=score_evidence,
@@ -425,7 +447,23 @@ def build_strategy_report_bundle_source_inputs(
             impact_binding=impact_cube,
             cube=cube,
         )
+        if pool_stability_evidence is not None:
+            assert pool_stability is not None
+            _require_pool_stability_identity(
+                stability=pool_stability_evidence,
+                stability_binding=pool_stability,
+                sample_binding=sample_design,
+                pool_binding=candidate_pool,
+                pool=pool,
+                compiled_design=design,
+                impact_binding=impact_cube,
+                cube=cube,
+            )
     else:
+        if pool_stability_evidence is not None:
+            raise StrategyReportBundleError(
+                "Pool stability requires the report's exact ImpactCube"
+            )
         assert pool_impact is not None and impact is not None
         _require_pool_impact_identity(
             sample=sample,
@@ -466,6 +504,15 @@ def build_strategy_report_bundle_source_inputs(
         )
         for binding, evidence in validations
     }
+    pool_stability_ref = (
+        None
+        if pool_stability is None
+        else _artifact_ref(
+            "pool_stability",
+            pool_stability.artifact_id,
+            pool_stability.artifact_content_hash,
+        )
+    )
     refs = _EvidenceRefs(
         project=_artifact_ref(
             "strategy_project_context",
@@ -582,6 +629,13 @@ def build_strategy_report_bundle_source_inputs(
         pool_ref=refs.pool,
         claim_oot_validated=allow_oot_validated,
     )
+    if pool_stability_evidence is not None:
+        assert pool_stability_ref is not None
+        impact_section = _with_pool_stability_evidence(
+            section=impact_section,
+            stability=pool_stability_evidence,
+            stability_ref=pool_stability_ref,
+        )
     base_final_document = (
         _impact_cube_final_document_section(
             pool=pool,
@@ -600,16 +654,24 @@ def build_strategy_report_bundle_source_inputs(
             impact_ref=refs.impact,
         )
     )
+    final_document = _with_pool_validation_final_document(
+        section=base_final_document,
+        impact_section=impact_section,
+        validations=validations,
+        validation_refs=validation_refs,
+        claim_oot_validated=allow_oot_validated,
+    )
+    if pool_stability_evidence is not None:
+        assert pool_stability_ref is not None
+        final_document = _with_pool_stability_final_document(
+            section=final_document,
+            stability=pool_stability_evidence,
+            stability_ref=pool_stability_ref,
+        )
     sections_by_key = {
         **pre_impact_sections,
         "impact_assessment": impact_section,
-        "final_document": _with_pool_validation_final_document(
-            section=base_final_document,
-            impact_section=impact_section,
-            validations=validations,
-            validation_refs=validation_refs,
-            claim_oot_validated=allow_oot_validated,
-        ),
+        "final_document": final_document,
     }
     snapshot = state["current_project_snapshot"]
     dataset_refs = _dedupe_refs(
@@ -620,6 +682,15 @@ def build_strategy_report_bundle_source_inputs(
                 []
                 if stability is None
                 else [_dataset_ref_from_candidate_stability(stability)]
+            ),
+            *(
+                []
+                if pool_stability_evidence is None
+                else [
+                    _dataset_ref_from_pool_stability(
+                        pool_stability_evidence
+                    )
+                ]
             ),
             (
                 _dataset_ref_from_impact_cube(cube)
@@ -646,6 +717,21 @@ def build_strategy_report_bundle_source_inputs(
                 else [
                     impact_cube_producer_run_ref(
                         impact_cube.artifact_provenance["producer_run"]
+                    )
+                ]
+            ),
+            *(
+                []
+                if pool_stability is None
+                else [
+                    _artifact_ref(
+                        "tool_run",
+                        pool_stability.artifact_provenance[
+                            "producer_run"
+                        ]["run_id"],
+                        pool_stability.artifact_provenance[
+                            "producer_run"
+                        ]["content_hash"],
                     )
                 ]
             ),
@@ -676,6 +762,11 @@ def build_strategy_report_bundle_source_inputs(
                     else [voting_search_ref]
                 ),
                 *validation_refs.values(),
+                *(
+                    []
+                    if pool_stability_ref is None
+                    else [pool_stability_ref]
+                ),
             ]
         ),
         "tool_run_refs": tool_run_refs,
@@ -799,6 +890,191 @@ def _authenticated_candidate_pool(
         "candidate-pool",
     )
     return pool, compiled
+
+
+def _authenticated_pool_stability(
+    binding: StrategyPoolStabilityArtifactBinding,
+) -> dict[str, Any]:
+    _require_binding_type(
+        binding,
+        StrategyPoolStabilityArtifactBinding,
+        "Pool stability",
+    )
+    if not isinstance(binding.stability, Mapping):
+        raise StrategyReportBundleError(
+            "Pool stability binding payload is invalid"
+        )
+    source_bindings = binding.stability.get("source_bindings")
+    if not isinstance(source_bindings, Mapping):
+        raise StrategyReportBundleError(
+            "Pool stability source bindings are invalid"
+        )
+    source_ref = source_bindings.get("impact_cube")
+    if not isinstance(source_ref, Mapping):
+        raise StrategyReportBundleError(
+            "Pool stability ImpactCube source binding is invalid"
+        )
+    source_cube = _authenticated_impact_cube(binding.impact_cube)
+    try:
+        stability = validate_strategy_pool_stability(
+            binding.stability,
+            impact_cube=source_cube,
+            impact_cube_ref=source_ref,
+        )
+    except StrategyError as exc:
+        raise StrategyReportBundleError(
+            "Pool stability evidence is invalid"
+        ) from exc
+    if (
+        stability != binding.stability
+        or binding.task_id != binding.impact_cube.task_id
+        or stability["identity"]["task_id"] != binding.task_id
+    ):
+        raise StrategyReportBundleError(
+            "Pool stability binding identity changed"
+        )
+    _require_canonical_artifact_hash(
+        binding.artifact_content_hash,
+        canonical_strategy_pool_stability_json(stability),
+        "Pool stability",
+    )
+    if not isinstance(binding.tasks_root, Path) or not (
+        binding.tasks_root.is_absolute()
+    ):
+        raise StrategyReportBundleError(
+            "Pool stability governed task root changed"
+        )
+    expected_path = (
+        binding.tasks_root
+        / binding.task_id
+        / "strategy_pool_stabilities"
+        / f"{stability['stability_id']}.json"
+    )
+    if (
+        not isinstance(binding.artifact_path, Path)
+        or binding.artifact_path != expected_path
+        or binding.artifact_id
+        != stable_task_artifact_id(
+            task_id=binding.task_id,
+            kind=POOL_STABILITY_ARTIFACT_KIND,
+            path=str(expected_path),
+        )
+    ):
+        raise StrategyReportBundleError(
+            "Pool stability governed artifact identity changed"
+        )
+    _require_pool_stability_provenance(binding, stability)
+    return stability
+
+
+def _require_pool_stability_provenance(
+    binding: StrategyPoolStabilityArtifactBinding,
+    stability: Mapping[str, Any],
+) -> None:
+    try:
+        canonical = json.dumps(
+            binding.artifact_provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        provenance = json.loads(canonical)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise StrategyReportBundleError(
+            "Pool stability artifact provenance is invalid"
+        ) from exc
+    if (
+        not isinstance(provenance, dict)
+        or binding.artifact_provenance_json != canonical
+    ):
+        raise StrategyReportBundleError(
+            "Pool stability artifact provenance fields changed"
+        )
+
+    source = stability["source_bindings"]
+    tool_ref = {
+        "plugin": "strategy",
+        "tool": "measure_strategy_pool_stability",
+        "origin_tool": POOL_STABILITY_ORIGIN_TOOL,
+        "tool_schema_version": POOL_STABILITY_TOOL_SCHEMA_VERSION,
+        "producer_version": POOL_STABILITY_PRODUCER_VERSION,
+    }
+    request = source["impact_cube"]
+    input_hash = hashlib.sha256(
+        _canonical_pool_stability_value(
+            {
+                "task_id": binding.task_id,
+                "request": request,
+                "producer": tool_ref,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    producer_body = {
+        "schema_version": POOL_STABILITY_PRODUCER_RUN_SCHEMA_VERSION,
+        "task_id": binding.task_id,
+        "input_hash": input_hash,
+        "request": request,
+        "tool_ref": tool_ref,
+        "stability_ref": {
+            "stability_id": stability["stability_id"],
+            "content_hash": stability["content_hash"],
+        },
+        "artifact_ref": {
+            "artifact_id": binding.artifact_id,
+            "kind": POOL_STABILITY_ARTIFACT_KIND,
+            "filename": binding.artifact_path.name,
+            "content_hash": binding.artifact_content_hash,
+            "origin_tool": POOL_STABILITY_ORIGIN_TOOL,
+        },
+    }
+    run_id = (
+        "strategy-pool-stability-run-"
+        + hashlib.sha256(
+            _canonical_pool_stability_value(producer_body).encode("utf-8")
+        ).hexdigest()[:24]
+    )
+    run_without_hash = {**producer_body, "run_id": run_id}
+    producer_run = {
+        **run_without_hash,
+        "content_hash": hashlib.sha256(
+            _canonical_pool_stability_value(run_without_hash).encode("utf-8")
+        ).hexdigest(),
+    }
+    expected = {
+        "schema_version": POOL_STABILITY_ARTIFACT_SCHEMA_VERSION,
+        "producer_version": POOL_STABILITY_PRODUCER_VERSION,
+        "task_id": binding.task_id,
+        "stability_id": stability["stability_id"],
+        "stability_content_hash": stability["content_hash"],
+        "impact_cube_ref": request,
+        "pool_identity": stability["identity"],
+        "sample_design_v2": source["sample_design_v2"],
+        "dataset_binding": source["dataset"],
+        "baseline_partition": stability["baseline_partition"],
+        "comparison_partitions": stability["comparison_partitions"],
+        "lifecycle": stability["lifecycle"],
+        "producer_run": producer_run,
+    }
+    if provenance != expected:
+        raise StrategyReportBundleError(
+            "Pool stability artifact provenance identity changed"
+        )
+
+
+def _canonical_pool_stability_value(value: object) -> str:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise StrategyReportBundleError(
+            "Pool stability binding must contain finite canonical JSON"
+        ) from exc
 
 
 def _authenticated_pool_validations(
@@ -2191,6 +2467,70 @@ def _require_impact_cube_identity(
     ):
         raise StrategyReportBundleError(
             "ImpactCube target or development lineage changed"
+        )
+
+
+def _require_pool_stability_identity(
+    *,
+    stability: Mapping[str, Any],
+    stability_binding: StrategyPoolStabilityArtifactBinding,
+    sample_binding: StrategySampleDesignV2ArtifactBinding,
+    pool_binding: StrategyCandidatePoolArtifactBinding,
+    pool: Mapping[str, Any],
+    compiled_design: Mapping[str, Any],
+    impact_binding: StrategyImpactCubeArtifactBinding,
+    cube: Mapping[str, Any],
+) -> None:
+    source = stability["source_bindings"]
+    expected_impact_ref = {
+        "artifact_id": impact_binding.artifact_id,
+        "expected_artifact_content_hash": (
+            impact_binding.artifact_content_hash
+        ),
+        "expected_cube_id": cube["cube_id"],
+        "expected_cube_content_hash": cube["content_hash"],
+    }
+    nested = stability_binding.impact_cube
+    if (
+        source["impact_cube"] != expected_impact_ref
+        or stability_binding.task_id != sample_binding.task_id
+        or nested.task_id != impact_binding.task_id
+        or nested.artifact_id != impact_binding.artifact_id
+        or nested.artifact_content_hash
+        != impact_binding.artifact_content_hash
+        or nested.cube != cube
+    ):
+        raise StrategyReportBundleError(
+            "Pool stability does not reference the report's exact ImpactCube"
+        )
+
+    expected_pool = {
+        "pool_id": pool["pool_id"],
+        "task_id": pool["task_id"],
+        "strategy_type": pool["strategy_type"],
+        "revision": pool["revision"],
+        "revision_id": pool["revision_id"],
+        "snapshot_hash": pool["snapshot_hash"],
+        "design_hash": compiled_design["design_hash"],
+        "strategy_spec_hash": strategy_spec_hash(
+            compiled_design["strategy_spec"]
+        ),
+    }
+    cube_source = cube["source_bindings"]
+    if (
+        stability["identity"] != expected_pool
+        or source["sample_design_v2"]
+        != cube_source["sample_design_v2"]
+        or source["dataset"] != cube_source["dataset"]
+        or cube_source["pool_artifact"]
+        != {
+            "artifact_id": pool_binding.artifact_id,
+            "artifact_content_hash": pool_binding.artifact_content_hash,
+        }
+    ):
+        raise StrategyReportBundleError(
+            "Pool stability evidence references another current Pool, "
+            "SampleDesign V2, or dataset"
         )
 
 
@@ -4011,6 +4351,170 @@ def _with_pool_validation_evidence(
     )
 
 
+def _with_pool_stability_evidence(
+    *,
+    section: Mapping[str, Any],
+    stability: Mapping[str, Any],
+    stability_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    table = _pool_stability_summary_table(stability, stability_ref)
+    tables = list(section["tables"])
+    insert_at = (
+        1
+        if tables and tables[0]["table_id"] == "impact_cube_partitions"
+        else 0
+    )
+    tables.insert(insert_at, table)
+    drift_flags = []
+    for population, comparison, distribution in (
+        _pool_stability_distributions(stability)
+    ):
+        severity = distribution["severity"]
+        if severity == "stable":
+            continue
+        population_role = population["population_role"]
+        partition = comparison["partition"]
+        basis = distribution["basis"]
+        drift_flags.append(
+            {
+                "code": (
+                    "pool_stability_distribution_drift_"
+                    f"{population_role}_{partition}_{basis}"
+                ),
+                "level": "amber" if severity == "warning" else "red",
+                "message": (
+                    f"Pool stability {population_role}/{partition}/{basis} "
+                    f"PSI={float(distribution['psi']):.6g}，"
+                    f"{severity} 仅表示跨分区分布漂移；不表示效果验证、"
+                    "OOT 已验证、策略采纳或策略晋级。"
+                ),
+                "source_refs": [stability_ref],
+            }
+        )
+    return build_strategy_report_section(
+        key=section["key"],
+        title=section["title"],
+        availability=section["availability"],
+        summary_fields=section["summary_fields"],
+        tables=tables,
+        stage_evidence=section["stage_evidence"],
+        red_flags=[*section["red_flags"], *drift_flags],
+        source_refs=_dedupe_refs(
+            [*section["source_refs"], stability_ref]
+        ),
+    )
+
+
+def _pool_stability_summary_table(
+    stability: Mapping[str, Any],
+    stability_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    rows = [
+        {
+            "row_id": (
+                "pool-stability-"
+                f"{population['population_role']}-"
+                f"{comparison['partition']}-"
+                f"{distribution['basis']}"
+            ),
+            "cells": {
+                "population": _present_field(
+                    population["population_role"],
+                    stability_ref,
+                ),
+                "baseline_partition": _present_field(
+                    stability["baseline_partition"],
+                    stability_ref,
+                ),
+                "comparison_partition": _present_field(
+                    comparison["partition"],
+                    stability_ref,
+                ),
+                "basis": _present_field(
+                    distribution["basis"],
+                    stability_ref,
+                ),
+                "development_sample_count": _present_field(
+                    distribution["development_sample_count"],
+                    stability_ref,
+                ),
+                "comparison_sample_count": _present_field(
+                    distribution["comparison_sample_count"],
+                    stability_ref,
+                ),
+                "psi": _present_field(
+                    distribution["psi"],
+                    stability_ref,
+                ),
+                "max_abs_share_delta": _present_field(
+                    distribution["max_abs_share_delta"],
+                    stability_ref,
+                ),
+                "severity": _present_field(
+                    distribution["severity"],
+                    stability_ref,
+                ),
+            },
+        }
+        for population, comparison, distribution in (
+            _pool_stability_distributions(stability)
+        )
+    ]
+    if len(rows) > 8:
+        raise StrategyReportBundleError(
+            "Pool stability report summary exceeds eight rows"
+        )
+    return build_strategy_report_table(
+        table_id="strategy_pool_stability_summary",
+        title="策略池跨分区分布稳定性摘要（非效果验证）",
+        sheet_key="10_validation",
+        granularity="aggregate",
+        content_class="metric_summary",
+        effect_stage=None,
+        columns=[
+            _column("population", "人群口径"),
+            _column("baseline_partition", "基准分区"),
+            _column("comparison_partition", "比较分区"),
+            _column("basis", "分布口径"),
+            _column(
+                "development_sample_count",
+                "基准样本数",
+                unit="count",
+                precision=0,
+            ),
+            _column(
+                "comparison_sample_count",
+                "比较样本数",
+                unit="count",
+                precision=0,
+            ),
+            _column("psi", "PSI", precision=6),
+            _column(
+                "max_abs_share_delta",
+                "最大占比差",
+                unit="%",
+                precision=6,
+            ),
+            _column("severity", "分布漂移等级"),
+        ],
+        rows=rows,
+        source_refs=[stability_ref],
+    )
+
+
+def _pool_stability_distributions(
+    stability: Mapping[str, Any],
+) -> list[
+    tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]
+]:
+    return [
+        (population, comparison, distribution)
+        for population in stability["populations"]
+        for comparison in population["comparisons"]
+        for distribution in comparison["distributions"]
+    ]
+
+
 def _with_pool_validation_final_document(
     *,
     section: Mapping[str, Any],
@@ -4108,6 +4612,50 @@ def _with_pool_validation_final_document(
         red_flags=section["red_flags"],
         source_refs=_dedupe_refs(
             [*section["source_refs"], *ref_values]
+        ),
+    )
+
+
+def _with_pool_stability_final_document(
+    *,
+    section: Mapping[str, Any],
+    stability: Mapping[str, Any],
+    stability_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    distributions = _pool_stability_distributions(stability)
+    severities = [
+        item["severity"]
+        for _population, _comparison, item in distributions
+    ]
+    summary = {
+        "baseline_partition": stability["baseline_partition"],
+        "comparison_partitions": stability["comparison_partitions"],
+        "max_psi": max(
+            float(item["psi"])
+            for _population, _comparison, item in distributions
+        ),
+        "stable_count": severities.count("stable"),
+        "warning_count": severities.count("warning"),
+        "material_count": severities.count("material"),
+        "scope": "distribution_drift_only",
+    }
+    return build_strategy_report_section(
+        key=section["key"],
+        title=section["title"],
+        availability=section["availability"],
+        summary_fields=[
+            *section["summary_fields"],
+            _named(
+                "pool_stability_distribution_drift_summary",
+                "策略池跨分区分布稳定性摘要",
+                _present_field(summary, stability_ref),
+            ),
+        ],
+        tables=section["tables"],
+        stage_evidence=section["stage_evidence"],
+        red_flags=section["red_flags"],
+        source_refs=_dedupe_refs(
+            [*section["source_refs"], stability_ref]
         ),
     )
 
@@ -6215,6 +6763,17 @@ def _dataset_ref_from_candidate_stability(
         "dataset",
         identity["dataset_id"],
         identity["dataset_content_hash"],
+    )
+
+
+def _dataset_ref_from_pool_stability(
+    stability: Mapping[str, Any],
+) -> dict[str, str]:
+    dataset = stability["source_bindings"]["dataset"]
+    return _artifact_ref(
+        "dataset",
+        dataset["dataset_id"],
+        dataset["dataset_content_hash"],
     )
 
 

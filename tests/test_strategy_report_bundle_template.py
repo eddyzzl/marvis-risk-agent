@@ -109,6 +109,7 @@ def test_report_bundle_exposes_only_title_and_status_as_user_slots() -> None:
         "candidate_pool_ref",
         "pool_impact_ref",
         "impact_cube_ref",
+        "pool_stability_ref",
         "candidate_stability_ref",
         "voting_candidate_search_ref",
         "pool_validation_refs",

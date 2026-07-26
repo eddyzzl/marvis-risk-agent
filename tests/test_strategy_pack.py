@@ -247,6 +247,51 @@ def test_report_bundle_manifest_accepts_only_exact_optional_candidate_stability_
         )
 
 
+def test_report_bundle_manifest_accepts_only_exact_optional_pool_stability_ref(
+    tmp_path,
+) -> None:
+    manifest = _real_builtin_registry(tmp_path).get("strategy")
+    tool = next(
+        item for item in manifest.tools if item.name == "build_report_bundle_v2"
+    )
+    schema = tool.input_schema
+    pool_stability_schema = {
+        **schema["$defs"]["pool_stability_ref"],
+        "$defs": {"sha256": schema["$defs"]["sha256"]},
+    }
+    pool_stability_ref = {
+        "artifact_id": "a" * 64,
+        "expected_artifact_content_hash": "b" * 64,
+        "expected_stability_id": "strategy-pool-stability-" + ("1" * 24),
+        "expected_stability_content_hash": "c" * 64,
+    }
+
+    assert schema["properties"]["pool_stability_ref"] == {
+        "$ref": "#/$defs/pool_stability_ref"
+    }
+    assert "pool_stability_ref" not in schema["required"]
+    assert set(pool_stability_schema["properties"]) == set(pool_stability_ref)
+    assert set(pool_stability_schema["required"]) == set(pool_stability_ref)
+    assert pool_stability_schema["additionalProperties"] is False
+    validate_against_schema(
+        pool_stability_ref,
+        pool_stability_schema,
+        label="pool_stability_ref",
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {**pool_stability_ref, "forged_metric": 0.99},
+            pool_stability_schema,
+            label="pool_stability_ref",
+        )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            None,
+            pool_stability_schema,
+            label="pool_stability_ref",
+        )
+
+
 def test_report_bundle_manifest_accepts_only_exact_optional_voting_search_ref(
     tmp_path,
 ) -> None:
@@ -515,7 +560,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert delivery_tool.output_schema["additionalProperties"] is False
     report_output_schema = report_bundle_tool.output_schema
     assert report_output_schema["properties"]["schema_version"] == {
-        "const": "strategy.build-report-bundle-v2-tool.v5"
+        "const": "strategy.build-report-bundle-v2-tool.v6"
     }
     report_artifacts = report_output_schema["properties"]["artifacts"]
     assert report_artifacts["minItems"] == 4

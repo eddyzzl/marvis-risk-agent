@@ -572,6 +572,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **候选逐月稳定性报告接入（已完成，2026-07-25）**：`strategy_report_bundle_v2` 新增平台注入的可选精确 stability ref，用户和 LLM 仍只提供 title/status。Agent 按 registry 稳定顺序从新到旧先认证 artifact，再选择与当前 Pool entry、SampleDesign V2 `risk/development`、dataset/workspace、target/month 和 evidence identity 完全一致的最新结果；有效但无关的历史证据可以跳过，无法认证的待判定证据失败关闭且不回退。适配层在“候选组合与策略设计”加入 development baseline 与最多 240 个月的命中/未命中、标签覆盖、命中坏率和 PSI 表，使用 `backtested` stage binding，低于 30 行的月份生成 amber 提醒；其中 standalone asset stability 的 frozen ref 必须指向精确候选 asset artifact，只有 `pool_entry_incremental_first_match` 才能指向当前 Pool revision，避免错误宣称独立 rule-hit 已验证 Pool waterfall。XLSX 放入 `appendix_candidate_stability`，其他三种格式复用同一表。发布前后在同一数据库事务内复核 stability registry、canonical path、文件 bytes、registry hash、领域 content hash 与 provenance；审计保存两层 hash。上方 2026-07-23 稳定性段落中“正式报告接入待续”的状态由本纵切覆盖；树/Voting/Cross/评分卡候选和独立 OOT 稳定性仍待后续。
 
+**当前 Pool 跨分区稳定性报告接入（已完成，2026-07-25）**：`strategy_report_bundle_v2` 在计划阶段先冻结当前 Pool、SampleDesign V2、dataset 与 requirement 完全一致的 exact ImpactCube，再 newest-first 完整认证最多 64 条 PoolStability artifact；只有嵌套 source ref 与该 ImpactCube 的 artifact/hash/cube/hash 四字段完全一致才会冻结为 `pool_stability_ref`，有效但无关的历史证据可以跳过，损坏证据或窗口耗尽则失败关闭且不回退。Tool schema v6 只接受该四字段 ref，执行和四格式原子发布事务前后都会复核 PoolStability、嵌套 ImpactCube、registry、唯一成功 audit、producer run、canonical path 与文件 bytes；审计保存 artifact/domain 双 hash 和 producer-run ref，旧 plan 缺字段按 `None` 等价重放。报告在影响测算和最终结论中增加 `distribution_drift_only` 摘要，并在 XLSX `10_validation`、JSON、Markdown、DOCX 展示最多 8 行 approval/risk × validation/OOT × waterfall/new-action 的 PSI 与最大占比差。该证据的 `effect_stage=None`，不会增加 stage evidence、放宽 OOT gating、修改 Pool、创建或晋级策略、采纳或部署。
+
 交付：
 
 1. 单规则、组合规则、n-of-k、稳定 rule id、增删、删除、完整 reorder、指标预览和单规则回测；

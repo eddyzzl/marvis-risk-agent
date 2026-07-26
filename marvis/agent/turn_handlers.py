@@ -240,6 +240,10 @@ from marvis.packs.strategy.pool_impact_tools import (
     POOL_IMPACT_ARTIFACT_KIND,
     load_historical_strategy_pool_impact_artifact,
 )
+from marvis.packs.strategy.pool_stability_tools import (
+    POOL_STABILITY_ARTIFACT_KIND,
+    load_strategy_pool_stability_artifact,
+)
 from marvis.packs.strategy.pool_tools import (
     bind_strategy_pool_development_execution,
     load_current_strategy_candidate_pool_artifact,
@@ -6947,6 +6951,9 @@ _STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT = 64
 _STRATEGY_REPORT_VOTING_SEARCH_REPLAY_LIMIT = (
     _STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT
 )
+_STRATEGY_REPORT_POOL_STABILITY_REPLAY_LIMIT = (
+    _STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT
+)
 
 
 def _strategy_report_bundle_v2_plan_slots(
@@ -7063,6 +7070,29 @@ def _strategy_report_bundle_v2_plan_slots(
             "expected_cube_content_hash": impact_cube.cube["content_hash"],
         }
     )
+    pool_stability = (
+        None
+        if impact_cube_ref is None
+        else _strategy_report_latest_pool_stability_binding(
+            read_runtime,
+            task_id=task.id,
+            impact_cube_ref=impact_cube_ref,
+        )
+    )
+    pool_stability_ref = (
+        None
+        if pool_stability is None
+        else {
+            "artifact_id": pool_stability.artifact_id,
+            "expected_artifact_content_hash": (
+                pool_stability.artifact_content_hash
+            ),
+            "expected_stability_id": pool_stability.stability["stability_id"],
+            "expected_stability_content_hash": (
+                pool_stability.stability["content_hash"]
+            ),
+        }
+    )
     impact = None
     pool_impact_ref = None
     if impact_cube is None:
@@ -7161,6 +7191,7 @@ def _strategy_report_bundle_v2_plan_slots(
             candidate_pool=pool,
             pool_validations=pool_validations,
             candidate_stability=candidate_stability,
+            pool_stability=pool_stability,
             voting_candidate_search=voting_candidate_search,
             pool_impact=impact,
             impact_cube=impact_cube,
@@ -7192,6 +7223,7 @@ def _strategy_report_bundle_v2_plan_slots(
         "candidate_pool_ref": candidate_pool_ref,
         "pool_validation_refs": list(pool_validation_refs),
         "candidate_stability_ref": candidate_stability_ref,
+        "pool_stability_ref": pool_stability_ref,
         "voting_candidate_search_ref": voting_candidate_search_ref,
         "pool_impact_ref": pool_impact_ref,
         "impact_cube_ref": impact_cube_ref,
@@ -7934,6 +7966,74 @@ def _strategy_report_latest_impact_cube_binding(
             f"{_STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT} 个 ImpactCube artifact，"
             "但 registry 仍有更早记录；平台无法证明窗口外不存在与当前 "
             "Pool/SampleDesign 完全一致的 ImpactCube，本次未创建报告计划。",
+        )
+    return None
+
+
+def _strategy_report_latest_pool_stability_binding(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    impact_cube_ref: Mapping[str, object],
+):
+    """Select the newest authenticated stability for the exact report cube."""
+
+    records, total = _strategy_report_artifact_window(
+        read_runtime,
+        task_id=task_id,
+        kind=POOL_STABILITY_ARTIFACT_KIND,
+        limit=_STRATEGY_REPORT_POOL_STABILITY_REPLAY_LIMIT,
+        unavailable_code=(
+            "strategy_report_bundle_v2_pool_stability_registry_unavailable"
+        ),
+        invalid_code="strategy_report_bundle_v2_pool_stability_invalid",
+        label="PoolStability",
+    )
+    for item in records:
+        provenance = item.get("provenance")
+        try:
+            binding = load_strategy_pool_stability_artifact(
+                read_runtime,
+                task_id=task_id,
+                artifact_id=item.get("id"),
+                expected_artifact_content_hash=item.get("content_hash"),
+                expected_stability_id=(
+                    provenance.get("stability_id")
+                    if isinstance(provenance, Mapping)
+                    else None
+                ),
+                expected_stability_content_hash=(
+                    provenance.get("stability_content_hash")
+                    if isinstance(provenance, Mapping)
+                    else None
+                ),
+            )
+            source_ref = binding.stability["source_bindings"]["impact_cube"]
+        except (
+            KeyError,
+            StrategyError,
+            TypeError,
+            ValueError,
+            *_STRATEGY_V2_ARTIFACT_ERRORS,
+        ) as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_report_bundle_v2_pool_stability_invalid",
+                "最新待判定的 PoolStability artifact 未通过文件、registry、"
+                "provenance、producer-run、唯一 audit 或 embedded "
+                "ImpactCube 复核；其真实来源无法确认，平台不会回退到旧"
+                "稳定性证据。",
+            ) from exc
+        if source_ref == dict(impact_cube_ref):
+            return binding
+    if total > _STRATEGY_REPORT_POOL_STABILITY_REPLAY_LIMIT:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_pool_stability_"
+            "selection_window_exhausted",
+            "已完整认证最新 "
+            f"{_STRATEGY_REPORT_POOL_STABILITY_REPLAY_LIMIT} 个 "
+            "PoolStability artifact，但 registry 仍有更早记录；平台无法"
+            "证明窗口外不存在与当前 exact ImpactCube 一致的稳定性证据，"
+            "本次未创建报告计划。",
         )
     return None
 
