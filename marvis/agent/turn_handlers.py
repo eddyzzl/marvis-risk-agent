@@ -1857,6 +1857,7 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "candidate_monthly_stability",
         "voting_candidate_search",
         "voting_candidate_build_from_search",
+        "interactive_tree_revision",
     }
 )
 
@@ -2685,6 +2686,19 @@ def _run_validated_strategy_request(
                 task_id=task.id,
                 draft=draft,
             ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "interactive_tree_revision"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_interactive_tree_revision",
+            slots=dict(draft.to_dict()["workflow_inputs"]),
             auto_start=auto_start,
         )
 
@@ -3905,6 +3919,11 @@ def _standard_workflow_request_preflight(
             )
         except StrategySetupError as exc:
             return ("automatic_tree_leaf_source_required", str(exc))
+        return None
+    if draft.workflow == "interactive_tree_revision":
+        # The Tool resolves and authenticates the exact task-local tree or
+        # revision under the same writer lock used for replay and persistence.
+        # A separate preflight lookup would create a second binding window.
         return None
     if draft.workflow == "cross_matrix_cell_selection":
         try:
@@ -9611,6 +9630,7 @@ def _strategy_request_requires_dataset(
             "scorecard_band_build",
             "scorecard_cutoff_selection",
             "automatic_tree_leaf_materialization",
+            "interactive_tree_revision",
             "cross_matrix_cell_selection",
             "voting_candidate_search",
             "voting_candidate_build_from_search",

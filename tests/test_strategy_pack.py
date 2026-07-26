@@ -355,6 +355,11 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         for tool in manifest.tools
         if tool.name == "materialize_automatic_tree_leaf_fragment"
     )
+    interactive_tree_revision_tool = next(
+        tool
+        for tool in manifest.tools
+        if tool.name == "revise_interactive_tree"
+    )
     voting_tool = next(
         tool for tool in manifest.tools if tool.name == "build_voting_candidate"
     )
@@ -447,6 +452,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "build_automatic_tree_candidate",
         "apply_automatic_tree",
         "materialize_automatic_tree_leaf_fragment",
+        "revise_interactive_tree",
         "build_voting_candidate",
         "search_voting_candidates",
         "build_voting_candidate_from_search",
@@ -730,6 +736,35 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert (
         automatic_tree_leaf_tool.output_schema["properties"]["artifacts"]["minItems"]
         == 1
+    )
+    assert interactive_tree_revision_tool.determinism == "deterministic"
+    assert interactive_tree_revision_tool.policy.human_decision_gate == "none"
+    assert interactive_tree_revision_tool.policy.effect_authorization == "none"
+    assert set(interactive_tree_revision_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+    }
+    assert (
+        interactive_tree_revision_tool.input_schema["additionalProperties"]
+        is False
+    )
+    assert set(interactive_tree_revision_tool.input_schema["required"]) == {
+        "source_tree_id",
+        "node_id",
+        "operation",
+    }
+    assert (
+        interactive_tree_revision_tool.output_schema["properties"][
+            "schema_version"
+        ]
+        == {"const": "strategy.revise-interactive-tree-tool.v1"}
+    )
+    assert (
+        interactive_tree_revision_tool.output_schema["properties"]["replay"][
+            "properties"
+        ]["exactly_once"]
+        == {"const": True}
     )
     assert voting_tool.determinism == "deterministic"
     assert voting_tool.policy.human_decision_gate == "none"

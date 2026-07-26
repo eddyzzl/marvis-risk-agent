@@ -217,6 +217,7 @@ ManualStrategyWorkflow = Literal[
     "scorecard_band_build",
     "scorecard_cutoff_selection",
     "candidate_monthly_stability",
+    "interactive_tree_revision",
 ]
 
 ManualUnivariateRefinementMethod = Literal[
@@ -253,6 +254,19 @@ ManualCandidateAssetId = Annotated[
 ManualPoolEntryId = Annotated[
     StrictStr,
     StringConstraints(pattern=r"^pool-entry-[0-9a-f]{32}$"),
+]
+ManualInteractiveTreeSourceId = Annotated[
+    StrictStr,
+    StringConstraints(
+        pattern=(
+            r"^(?:candidate-asset-[0-9a-f]{32}|"
+            r"interactive-tree-revision-[0-9a-f]{32})$"
+        )
+    ),
+]
+ManualInteractiveTreeNodeId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^node-[0-9a-f]{20}$"),
 ]
 ManualSelectionReason = Annotated[
     StrictStr,
@@ -393,6 +407,23 @@ ManualCandidateStabilityInputs = (
 )
 
 
+class ManualInteractiveTreeRevisionInputs(BaseModel):
+    """One visible tree/node pointer for an immutable prune revision."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    source_tree_id: ManualInteractiveTreeSourceId
+    node_id: ManualInteractiveTreeNodeId
+    operation: Literal["prune_subtree"]
+    reason: ManualSelectionReason | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_null_reason(self) -> Self:
+        if "reason" in self.model_fields_set and self.reason is None:
+            raise ValueError("optional fields must be omitted instead of null: reason")
+        return self
+
+
 class ManualRiskThresholdSelectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -510,6 +541,9 @@ _MANUAL_SCORECARD_CUTOFF_SELECTION_INPUTS = TypeAdapter(
 _MANUAL_CANDIDATE_STABILITY_INPUTS = TypeAdapter(
     ManualCandidateStabilityInputs
 )
+_MANUAL_INTERACTIVE_TREE_REVISION_INPUTS = TypeAdapter(
+    ManualInteractiveTreeRevisionInputs
+)
 
 _MANUAL_STRATEGY_PLATFORM_FIELDS = frozenset(
     {
@@ -580,10 +614,16 @@ class ManualStrategyRequest(BaseModel):
                 self.workflow_inputs,
                 strict=True,
             )
+        elif self.workflow == "interactive_tree_revision":
+            _MANUAL_INTERACTIVE_TREE_REVISION_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
         user_owned_identity_fields = {
             "univariate_candidate_refinement": {"source_candidate_id"},
             "scorecard_cutoff_selection": {"asset_id", "cutoff_id"},
             "candidate_monthly_stability": {"asset_id", "entry_id"},
+            "interactive_tree_revision": {"source_tree_id", "node_id"},
         }.get(self.workflow, set())
         forbidden = sorted(
             key

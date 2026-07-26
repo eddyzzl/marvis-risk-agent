@@ -1424,6 +1424,71 @@ STRATEGY_AUTOMATIC_TREE_LEAF_MATERIALIZATION = WorkflowTemplate(
 )
 
 
+STRATEGY_INTERACTIVE_TREE_REVISION = WorkflowTemplate(
+    id="strategy_interactive_tree_revision",
+    title="交互式决策树修剪修订",
+    goal_patterns=(
+        "修剪交互式决策树节点",
+        "删除决策树子树",
+        "基于自动树创建修剪版本",
+        "prune an interactive decision tree subtree",
+        "create an immutable interactive tree revision",
+    ),
+    slots=(
+        SlotSpec(
+            "source_tree_id",
+            True,
+            "user",
+            "Exact automatic-tree asset id or interactive-tree revision id",
+        ),
+        SlotSpec(
+            "node_id",
+            True,
+            "user",
+            "Exact currently visible split-node id",
+        ),
+        SlotSpec(
+            "reason",
+            False,
+            "user",
+            "Optional user-owned audit rationale for this prune",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="发布交互式决策树修剪版本",
+            tool_ref=ToolRef("strategy", "revise_interactive_tree"),
+            inputs_template={
+                "source_tree_id": "{slot:source_tree_id}",
+                "node_id": "{slot:node_id}",
+                "operation": "prune_subtree",
+                "reason": "{slot:reason}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "revision_id"}),
+                PostCheck("nonempty", {"field": "revision_hash"}),
+                PostCheck("nonempty", {"field": "semantic_tree_id"}),
+                PostCheck("nonempty", {"field": "tree_hash"}),
+                PostCheck(
+                    "one_of",
+                    {"field": "replay.exactly_once", "values": [True]},
+                ),
+                PostCheck(
+                    "one_of",
+                    {"field": "replay.metrics_matched", "values": [True]},
+                ),
+                PostCheck("nonempty", {"field": "replay.result_hash"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_UNIVARIATE_CANDIDATE_REFINEMENT = WorkflowTemplate(
     id="strategy_univariate_candidate_refinement",
     title="单变量候选选择与合并",

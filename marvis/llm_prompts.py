@@ -247,7 +247,7 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=38,
+    version=39,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
@@ -260,6 +260,7 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "scorecard_band_build/scorecard_cutoff_selection/"
         "automatic_tree_candidate_build/"
         "automatic_tree_apply/automatic_tree_leaf_materialization/"
+        "interactive_tree_revision/"
         "voting_candidate_search/voting_candidate_build_from_search/"
         "voting_candidate_build/cross_matrix_analysis/"
         "cross_matrix_cell_selection/"
@@ -393,6 +394,16 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "fragment/rule/effect id、condition、metrics、action、数据集字段和其他平台绑定字段全部禁止"
         "输出或猜测。不能在同一请求中串联 Strategy Pool、拒绝/审批/复核动作、采纳、部署或 leaf ID"
         "写回；遇到这些请求必须 clarification。"
+        "interactive_tree_revision 表示在一个已认证 automatic tree asset 或 prior "
+        "interactive revision 上执行一次不可变子树修剪。workflow_inputs 必须且只能包含"
+        "用户当前命令中唯一完整的 source_tree_id（candidate-asset- 或 "
+        "interactive-tree-revision- 后接 32 位小写十六进制）、唯一完整的 split node_id"
+        "（node- 后接 20 位小写十六进制）、固定 operation=prune_subtree，以及用户以"
+        "‘理由/原因/说明/reason’显式标注时逐字一致的可选 reason。artifact/hash、父链、"
+        "tree/frontier/condition/metrics、dataset/workspace/SampleDesign 与 replay 结果"
+        "全部由平台恢复和计算，禁止输出。不得按最好、风险最高、不稳定或代词替用户选择"
+        "节点；不得同轮串联入池、业务动作、自动继续、整树应用、报告、采纳、部署或写回。"
+        "问句、否定、假设/未来/历史描述必须 clarification。"
         "voting_candidate_search 表示在当前 Strategy Pool 的非 Voting 已启用规则中执行"
         "确定性、有预算的 n-of-k 组合搜索。workflow_inputs 必须包含用户明确提供的 "
         "strategy_type、member_count（K，2 到 50）、n、objective={metric,direction}；"

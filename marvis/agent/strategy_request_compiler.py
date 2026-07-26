@@ -73,6 +73,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "automatic_tree_candidate_build",
     "automatic_tree_apply",
     "automatic_tree_leaf_materialization",
+    "interactive_tree_revision",
     "voting_candidate_search",
     "voting_candidate_build_from_search",
     "voting_candidate_build",
@@ -853,6 +854,49 @@ _CROSS_MATRIX_CELL_ID_TOKEN_RE = re.compile(
 )
 _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])candidate-asset-[0-9a-f]{32}(?![A-Za-z0-9_-])"
+)
+_INTERACTIVE_TREE_SOURCE_ID_RE = re.compile(
+    r"^(?:candidate-asset|interactive-tree-revision)-[0-9a-f]{32}$"
+)
+_INTERACTIVE_TREE_SOURCE_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])"
+    r"(?:candidate-asset|interactive-tree-revision)-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])"
+)
+_INTERACTIVE_TREE_NODE_ID_RE = re.compile(r"^node-[0-9a-f]{20}$")
+_INTERACTIVE_TREE_NODE_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])node-[0-9a-f]{20}(?![A-Za-z0-9_-])"
+)
+_INTERACTIVE_TREE_PRUNE_ACTION_RE = re.compile(
+    r"(?:修剪|剪枝|删除(?:该|这个|指定)?(?:节点|子树)|合并(?:该|这个|指定)?子树)|"
+    r"(?<![A-Za-z0-9_])prune_subtree(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])(?:prune|remove|delete)\s+"
+    r"(?:the\s+)?(?:node|subtree)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TREE_AMBIGUOUS_NODE_RE = re.compile(
+    r"(?:最好|最优|最佳|最差|风险最高|坏率最高|自动(?:选择|挑选)|"
+    r"表现不好|不稳定)"
+    r"[^，,；;。\n]{0,20}(?:节点|子树)|"
+    r"(?<![A-Za-z0-9_])(?:best|worst|highest[- ]risk|unstable)"
+    r"\s+(?:node|subtree)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TREE_NEGATED_OR_NONCURRENT_RE = re.compile(
+    r"[?？]|(?:不要|不用|无需|先不|暂不|取消|撤销|禁止|"
+    r"能否|可否|是否|可以吗|能不能|如何|怎么|假设|假如|如果|"
+    r"以后|未来|将来|稍后|之前|此前|过去|上次)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cancel|can\s+you|"
+    r"could\s+you|how\s+to|what\s+if|later|previously|"
+    r"in\s+the\s+future)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TREE_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:source_artifact_id|expected_[A-Za-z0-9_]*hash|"
+    r"dataset_id|workspace_(?:revision|generation)|sample_design_ref|"
+    r"frontier_node_ids|visible_node_ids|metrics|condition|tree_json)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
 )
 _AUTOMATIC_TREE_APPLY_TARGET_RE = re.compile(
     r"(?:自动(?:决策)?树|决策树|完整树|"
@@ -3411,6 +3455,8 @@ def _validate_standard_workflow_payload(
             normalized = _validate_automatic_tree_leaf_materialization_inputs(
                 raw_inputs
             )
+        elif workflow == "interactive_tree_revision":
+            normalized = _validate_interactive_tree_revision_inputs(raw_inputs)
         elif workflow == "voting_candidate_search":
             normalized = _validate_voting_candidate_search_inputs(raw_inputs)
         elif workflow == "voting_candidate_build_from_search":
@@ -5144,6 +5190,79 @@ def _validate_automatic_tree_leaf_materialization_inputs(
             inputs["selection_reason"]
         )
     return normalized
+
+
+def _validate_interactive_tree_revision_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate only the explicit immutable prune command.
+
+    Artifact rows, hashes, topology, frontier, conditions, metrics, dataset and
+    SampleDesign bindings are platform-owned and cannot enter the draft.
+    """
+
+    workflow = "interactive_tree_revision"
+    allowed = {"source_tree_id", "node_id", "operation", "reason"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted({"source_tree_id", "node_id", "operation"} - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+    source_tree_id = _required_text(
+        inputs["source_tree_id"],
+        name=f"{workflow} source_tree_id",
+    )
+    if _INTERACTIVE_TREE_SOURCE_ID_RE.fullmatch(source_tree_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} source_tree_id 必须是完整 automatic-tree asset "
+            "或 interactive-tree revision ID。"
+        )
+    node_id = _required_text(
+        inputs["node_id"],
+        name=f"{workflow} node_id",
+    )
+    if _INTERACTIVE_TREE_NODE_ID_RE.fullmatch(node_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} node_id 必须是 node- 后接 20 位小写十六进制字符。"
+        )
+    operation = _required_text(
+        inputs["operation"],
+        name=f"{workflow} operation",
+    )
+    if operation != "prune_subtree":
+        raise _DraftValidationError(
+            f"{workflow} operation 只允许 prune_subtree。"
+        )
+    normalized: dict[str, Any] = {
+        "source_tree_id": source_tree_id,
+        "node_id": node_id,
+        "operation": operation,
+    }
+    if "reason" in inputs:
+        reason = inputs["reason"]
+        if reason is None:
+            normalized["reason"] = None
+        else:
+            normalized["reason"] = _interactive_tree_revision_reason(reason)
+    return normalized
+
+
+def _interactive_tree_revision_reason(value: object) -> str:
+    if not isinstance(value, str):
+        raise _DraftValidationError(
+            "interactive_tree_revision reason 必须是文本。"
+        )
+    if "\x00" in value:
+        raise _DraftValidationError(
+            "interactive_tree_revision reason 不能包含 NUL。"
+        )
+    canonical = " ".join(unicodedata.normalize("NFC", value).split())
+    if not canonical or len(canonical) > 500:
+        raise _DraftValidationError(
+            "interactive_tree_revision reason 必须是 1 到 500 字符的非空文本。"
+        )
+    return canonical
 
 
 def _validate_automatic_tree_apply_inputs(
@@ -7706,7 +7825,7 @@ def _ground_refinement_request(
         )
     if _utterance_targets_automatic_tree_apply(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
-        and draft.workflow == "automatic_tree_apply"
+        and draft.workflow in {"automatic_tree_apply", "interactive_tree_revision"}
     ):
         return _clarification(
             "原话明确要求把完整自动树写回当前样本，只能编译为 "
@@ -7850,6 +7969,8 @@ def _ground_refinement_request(
         )
     if draft.workflow == "automatic_tree_leaf_materialization":
         return _ground_automatic_tree_leaf_materialization(utterance, result)
+    if draft.workflow == "interactive_tree_revision":
+        return _ground_interactive_tree_revision(utterance, result)
     if draft.workflow == "voting_candidate_search":
         return _ground_voting_candidate_search(utterance, result)
     if draft.workflow == "voting_candidate_build_from_search":
@@ -11270,6 +11391,112 @@ def _ground_automatic_tree_leaf_materialization(
     return result
 
 
+def _ground_interactive_tree_revision(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Require one current, explicit, single-step prune over exact IDs."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if _INTERACTIVE_TREE_AMBIGUOUS_NODE_RE.search(utterance) is not None:
+        return _clarification(
+            "请从认证树拓扑中明确复制一个当前可见的完整 split node ID；平台不会"
+            "按“最好”“风险最高”“不稳定”或代词替你选择节点。",
+            code="interactive_tree_revision_node_selection_ambiguous",
+            fields=("node_id",),
+        )
+    if (
+        _INTERACTIVE_TREE_NEGATED_OR_NONCURRENT_RE.search(utterance) is not None
+        or _INTERACTIVE_TREE_PRUNE_ACTION_RE.search(utterance) is None
+    ):
+        return _clarification(
+            "原话必须是当前、肯定的一次修剪命令；问句、否定、假设、未来或"
+            "历史描述不会创建交互树修订。",
+            code="interactive_tree_revision_intent_negated",
+            fields=("prune_intent",),
+        )
+    if _INTERACTIVE_TREE_PLATFORM_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "树制品、hash、frontier、condition、metrics、数据集与样本绑定由"
+            "平台恢复，不能由本次自然语言请求覆盖。",
+            code="interactive_tree_revision_platform_controls_forbidden",
+            fields=("platform_bindings",),
+        )
+    if any(
+        pattern.search(utterance) is not None
+        for pattern in (
+            _AUTOMATIC_TREE_LEAF_POOL_CHAIN_RE,
+            _AUTOMATIC_TREE_LEAF_ACTION_CHAIN_RE,
+            _AUTOMATIC_TREE_LEAF_LIFECYCLE_CHAIN_RE,
+            _AUTOMATIC_TREE_LEAF_WRITEBACK_CHAIN_RE,
+        )
+    ) or re.search(
+        r"(?:生成报告|出报告|应用整棵树|继续自动分裂|自动继续|"
+        r"(?<![A-Za-z0-9_])(?:generate\s+(?:a\s+)?report|apply\s+tree|"
+        r"apply\s+(?:it|the\s+tree)\s+to\s+(?:the\s+)?dataset|"
+        r"auto[- ]?continue)(?![A-Za-z0-9_]))",
+        utterance,
+        re.IGNORECASE,
+    ):
+        return _clarification(
+            "本轮只允许一次 prune_subtree；入池、业务动作、整树应用、继续"
+            "分裂、报告、采纳、部署或写回必须拆成后续请求。",
+            code="interactive_tree_revision_single_step_required",
+            fields=("next_action",),
+        )
+
+    source_matches = tuple(
+        _INTERACTIVE_TREE_SOURCE_ID_TOKEN_RE.finditer(utterance)
+    )
+    node_matches = tuple(_INTERACTIVE_TREE_NODE_ID_TOKEN_RE.finditer(utterance))
+    source_ids = frozenset(match.group(0) for match in source_matches)
+    node_ids = frozenset(match.group(0) for match in node_matches)
+    missing_or_ambiguous: list[str] = []
+    if len(source_matches) != 1 or len(source_ids) != 1:
+        missing_or_ambiguous.append("source_tree_id")
+    if len(node_matches) != 1 or len(node_ids) != 1:
+        missing_or_ambiguous.append("node_id")
+    if missing_or_ambiguous:
+        return _clarification(
+            "请在同一条命令中逐字提供且只提供一个完整 automatic-tree asset "
+            "或 interactive-tree revision ID，以及一个完整 split node ID；"
+            "不能使用“刚才那棵树”“那个节点”等代词。",
+            code="interactive_tree_revision_explicit_ids_required",
+            fields=tuple(missing_or_ambiguous),
+        )
+    ungrounded: list[str] = []
+    if source_ids != {inputs["source_tree_id"]}:
+        ungrounded.append("source_tree_id")
+    if node_ids != {inputs["node_id"]}:
+        ungrounded.append("node_id")
+    if inputs["operation"] != "prune_subtree":
+        ungrounded.append("operation")
+    if ungrounded:
+        return _clarification(
+            "模型草案中的来源树、节点或操作与用户原话不一致；平台不会替换、"
+            "补全、猜测或改选节点。",
+            code="interactive_tree_revision_controls_not_grounded",
+            fields=tuple(ungrounded),
+        )
+
+    explicit_reasons = _automatic_tree_leaf_explicit_reasons(utterance)
+    supplied_reason = inputs.get("reason")
+    if bool(explicit_reasons or supplied_reason is not None) and (
+        len(explicit_reasons) != 1
+        or not isinstance(supplied_reason, str)
+        or supplied_reason != explicit_reasons[0]
+    ):
+        return _clarification(
+            "reason 只有在用户以“理由/原因/说明/reason”显式标注时才能逐字"
+            "抄录；未提供时模型必须省略，平台不会代写。",
+            code="interactive_tree_revision_reason_not_grounded",
+            fields=("reason",),
+        )
+    return result
+
+
 def _utterance_targets_automatic_tree_apply(utterance: str) -> bool:
     """Recognize full-tree dataset writeback without stealing build/leaf turns."""
 
@@ -14023,6 +14250,19 @@ def _standard_workflow_confirmation_text(
         ]
         if "selection_reason" in inputs:
             details.append(f"用户原话选择说明：{inputs['selection_reason']}")
+    elif draft.workflow == "interactive_tree_revision":
+        details = [
+            "已识别为〔交互式树修剪修订 Workflow〕",
+            f"来源树 pointer：{inputs['source_tree_id']}",
+            f"精确 split node pointer：{inputs['node_id']}",
+            "操作：prune_subtree",
+            "平台将恢复并认证完整自动树、父 revision、数据集、workspace 与"
+            "SampleDesign，并在 development 样本逐行重放新 frontier",
+            "每次修剪发布一个不可变 revision；不会修改原树，也不会加入 "
+            "Strategy Pool；不会采纳或部署，也不会设置业务动作或写回",
+        ]
+        if "reason" in inputs and inputs["reason"] is not None:
+            details.append(f"用户原话修剪说明：{inputs['reason']}")
     elif draft.workflow == "voting_candidate_search":
         objective = inputs["objective"]
         details = [
@@ -14735,6 +14975,14 @@ def _user_prompt(
         "Strategy Pool、业务动作、采纳、部署或 leaf ID 写回。selection_reason 中也"
         "不得藏入理由替换、后续动作、生命周期操作或极值/排名选叶语义；它只接受"
         "人工/业务/风险/合规/样本评审依据类短说明。"
+        "对于 interactive_tree_revision，只能逐字抄录用户当前肯定命令中唯一完整的"
+        " source_tree_id（candidate-asset- 或 interactive-tree-revision- 后接 32 位"
+        "小写十六进制）、唯一完整的 split node_id（node- 后接 20 位小写十六进制）、"
+        "固定 operation=prune_subtree，以及用户显式标注时逐字一致的 reason。不得输出"
+        "artifact/hash、父链、tree/frontier/condition/metrics、dataset/workspace/"
+        "SampleDesign 或重放结果，这些均由平台恢复。不得按最好、风险最高、不稳定或"
+        "代词替用户选节点，也不得同轮串联入池、业务动作、自动继续、整树应用、报告、"
+        "采纳、部署或写回。"
         "对于 voting_candidate_search，必须逐字抄录用户明确提供的 strategy_type、"
         "member_count/K、n 和 objective metric+direction；中文指标只能采用 system "
         "prompt 明列的别名并输出对应 canonical metric，禁止自行扩展近义词；"
