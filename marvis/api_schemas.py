@@ -223,6 +223,7 @@ ManualStrategyWorkflow = Literal[
     "interactive_tree_frontier_group_materialization",
     "interactive_tree_frontier_materialization",
     "strategy_pool_apply",
+    "strategy_pool_validation",
 ]
 
 ManualUnivariateRefinementMethod = Literal[
@@ -662,6 +663,15 @@ class ManualStrategyPoolApplyInputs(BaseModel):
         return self
 
 
+class ManualStrategyPoolValidationInputs(BaseModel):
+    """Only an approval/reject Pool type and independent partition are user-owned."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: Literal["approval", "reject"]
+    partition: Literal["validation", "oot"]
+
+
 class ManualRiskThresholdSelectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -797,6 +807,9 @@ _MANUAL_VOTING_CANDIDATE_BUILD_FROM_SEARCH_INPUTS = TypeAdapter(
 _MANUAL_STRATEGY_POOL_APPLY_INPUTS = TypeAdapter(
     ManualStrategyPoolApplyInputs
 )
+_MANUAL_STRATEGY_POOL_VALIDATION_INPUTS = TypeAdapter(
+    ManualStrategyPoolValidationInputs
+)
 
 _MANUAL_STRATEGY_PLATFORM_FIELDS = frozenset(
     {
@@ -897,6 +910,11 @@ class ManualStrategyRequest(BaseModel):
             )
         elif self.workflow == "strategy_pool_apply":
             _MANUAL_STRATEGY_POOL_APPLY_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "strategy_pool_validation":
+            _MANUAL_STRATEGY_POOL_VALIDATION_INPUTS.validate_python(
                 self.workflow_inputs,
                 strict=True,
             )

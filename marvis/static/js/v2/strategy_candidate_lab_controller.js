@@ -12,6 +12,7 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "scorecard_band_build",
   "scorecard_cutoff_selection",
   "candidate_monthly_stability",
+  "strategy_pool_validation",
   "voting_candidate_search",
   "voting_candidate_build_from_search",
   "interactive_tree_revision",
@@ -27,6 +28,7 @@ const WORKFLOW_LABELS = Object.freeze({
   scorecard_band_build: "生成评分卡分档证据",
   scorecard_cutoff_selection: "记录评分卡 Cutoff 选择",
   candidate_monthly_stability: "测算候选逐月稳定性",
+  strategy_pool_validation: "执行 Strategy Pool 独立样本回放验证",
   voting_candidate_search: "搜索 Voting 组合",
   voting_candidate_build_from_search: "从搜索结果构建 Voting 候选",
   interactive_tree_revision: "创建不可变交互式树修订",
@@ -1555,6 +1557,25 @@ function collectCandidateMonthlyStabilityInputs(form) {
   throw new Error("请选择当前 Pool 条目或单变量候选资产。");
 }
 
+function collectStrategyPoolValidationInputs(form) {
+  const strategyType = formValue(form, "pool_validation_strategy_type");
+  const partition = formValue(form, "pool_validation_partition");
+  if (!["approval", "reject"].includes(strategyType)) {
+    throw new Error(
+      "独立样本回放验证的 Strategy Pool 类型只能是 approval 或 reject。",
+    );
+  }
+  if (!["validation", "oot"].includes(partition)) {
+    throw new Error(
+      "独立样本回放验证分区只能是 validation 或 oot。",
+    );
+  }
+  return {
+    strategy_type: strategyType,
+    partition,
+  };
+}
+
 function parseVotingConstraints(value) {
   const text = String(value || "").trim();
   if (!text) return [];
@@ -1859,6 +1880,7 @@ export function collectStrategyCandidateLabRequest(form) {
     scorecard_band_build: collectScorecardBandInputs,
     scorecard_cutoff_selection: collectScorecardCutoffSelectionInputs,
     candidate_monthly_stability: collectCandidateMonthlyStabilityInputs,
+    strategy_pool_validation: collectStrategyPoolValidationInputs,
     voting_candidate_search: collectVotingCandidateSearchInputs,
     voting_candidate_build_from_search:
       collectVotingCandidateBuildFromSearchInputs,

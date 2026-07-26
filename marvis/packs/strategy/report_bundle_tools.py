@@ -71,6 +71,12 @@ from marvis.packs.strategy.pool_tools import (
     load_current_strategy_candidate_pool_artifact,
     require_strategy_candidate_pool_artifact_binding_on_connection,
 )
+from marvis.packs.strategy.pool_validation_tools import (
+    StrategyPoolValidationArtifactBinding,
+    load_strategy_pool_validation_artifacts,
+    require_strategy_pool_validation_artifact_binding_on_connection,
+    validate_strategy_pool_validation_artifact_refs,
+)
 from marvis.packs.strategy.project_context import build_report_field, build_source_ref
 from marvis.packs.strategy.project_context_tools import (
     StrategyProjectContextArtifactBinding,
@@ -114,7 +120,7 @@ from marvis.repositories.task_artifacts import (
 
 
 BUILD_STRATEGY_REPORT_BUNDLE_V2_TOOL_SCHEMA_VERSION = (
-    "strategy.build-report-bundle-v2-tool.v4"
+    "strategy.build-report-bundle-v2-tool.v5"
 )
 BUILD_STRATEGY_REPORT_BUNDLE_V2_AUDIT_KIND = (
     "strategy.report_bundle.published"
@@ -132,6 +138,7 @@ _INPUT_FIELDS = frozenset(
         "project_context_ref",
         "sample_design_ref",
         "candidate_pool_ref",
+        "pool_validation_refs",
         "candidate_stability_ref",
         "voting_candidate_search_ref",
         "pool_impact_ref",
@@ -320,6 +327,7 @@ class _ReportSources:
     project_context: StrategyProjectContextArtifactBinding
     sample_design: StrategySampleDesignV2ArtifactBinding
     candidate_pool: StrategyCandidatePoolArtifactBinding
+    pool_validations: tuple[StrategyPoolValidationArtifactBinding, ...]
     candidate_stability: StrategyCandidateStabilityArtifactBinding | None
     voting_candidate_search: VotingCandidateSearchArtifactBinding | None
     pool_impact: StrategyPoolImpactArtifactBinding | None
@@ -345,6 +353,7 @@ def run_build_strategy_report_bundle_v2(inputs, ctx, runtime) -> dict[str, Any]:
             project_context=sources.project_context,
             sample_design=sources.sample_design,
             candidate_pool=sources.candidate_pool,
+            pool_validations=sources.pool_validations,
             candidate_stability=sources.candidate_stability,
             voting_candidate_search=sources.voting_candidate_search,
             pool_impact=sources.pool_impact,
@@ -529,6 +538,13 @@ def _load_sources(
         task_id=task_id,
         **request["candidate_pool_ref"],
     )
+    pool_validations = load_strategy_pool_validation_artifacts(
+        runtime,
+        task_id=task_id,
+        refs=request["pool_validation_refs"],
+        candidate_pool=candidate_pool,
+        sample_design=sample_design,
+    )
     candidate_stability = (
         None
         if request["candidate_stability_ref"] is None
@@ -616,6 +632,7 @@ def _load_sources(
         project_context=project_context,
         sample_design=sample_design,
         candidate_pool=candidate_pool,
+        pool_validations=pool_validations,
         candidate_stability=candidate_stability,
         voting_candidate_search=voting_candidate_search,
         pool_impact=pool_impact,
@@ -1150,6 +1167,11 @@ def _revalidate_sources(conn, sources: _ReportSources) -> None:
         conn,
         sources.candidate_pool,
     )
+    for validation in sources.pool_validations:
+        require_strategy_pool_validation_artifact_binding_on_connection(
+            conn,
+            validation,
+        )
     if sources.candidate_stability is not None:
         require_candidate_stability_artifact_binding_on_connection(
             conn,
@@ -1283,6 +1305,20 @@ def _audit_source_artifacts(sources: _ReportSources) -> dict[str, Any]:
         "candidate_pool": {
             "artifact_id": sources.candidate_pool.artifact_id,
             "content_hash": sources.candidate_pool.artifact_content_hash,
+        },
+        "pool_validations": {
+            binding.evidence["partition"]: {
+                "artifact_id": binding.artifact_id,
+                "content_hash": binding.artifact_content_hash,
+                "evidence_id": binding.evidence["evidence_id"],
+                "evidence_content_hash": binding.evidence["content_hash"],
+                "validation_status": binding.evidence["lifecycle"][
+                    "validation_status"
+                ],
+                "not_adopted": True,
+                "not_deployed": True,
+            }
+            for binding in sources.pool_validations
         },
         "candidate_stability": None,
         "voting_candidate_search": None,
@@ -1438,7 +1474,10 @@ def _validate_inputs(value: object) -> dict[str, Any]:
         )
     candidate = dict(value)
     for field in _OPTIONAL_INPUT_FIELDS:
-        candidate.setdefault(field, None)
+        candidate.setdefault(
+            field,
+            [] if field == "pool_validation_refs" else None,
+        )
     request = _canonical_object(candidate, "build_report_bundle_v2 inputs")
     if len(_canonical_json(request).encode("utf-8")) > _MAX_INPUT_BYTES:
         raise StrategyError("build_report_bundle_v2 inputs exceed byte budget")
@@ -1475,6 +1514,11 @@ def _validate_inputs(value: object) -> dict[str, Any]:
     )
     request["sample_design_ref"] = _sample_ref(request["sample_design_ref"])
     request["candidate_pool_ref"] = _pool_ref(request["candidate_pool_ref"])
+    request["pool_validation_refs"] = list(
+        validate_strategy_pool_validation_artifact_refs(
+            request["pool_validation_refs"]
+        )
+    )
     request["candidate_stability_ref"] = _optional_candidate_stability_ref(
         request["candidate_stability_ref"]
     )

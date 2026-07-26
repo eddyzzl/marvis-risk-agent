@@ -3085,6 +3085,247 @@ def _strategy_pool_apply_integrity_failure() -> tuple[str, list[dict]]:
     )
 
 
+def _strategy_pool_validation_integrity_failure() -> tuple[str, list[dict]]:
+    return (
+        "**Strategy Pool 独立样本回放验证结果完整性校验失败**：计划缓存中的"
+        " Pool、StrategySampleDesign V2、独立分区、canonical evidence 或"
+        " artifact 摘要不一致，已停止展示动作、风险、金额和逐月结果。"
+        "请基于当前证据重新执行独立回放。",
+        [],
+    )
+
+
+def _validated_strategy_pool_validation_output(
+    value: object,
+    *,
+    trusted_task_id: str | None,
+    trusted_inputs: Mapping[str, Any] | None,
+    trusted_artifacts: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Authenticate canonical evidence and its exact terminal plan inputs."""
+
+    from marvis.packs.strategy.pool_validation_tools import (
+        authenticate_strategy_pool_validation_artifact_record,
+        validate_measure_strategy_pool_validation_tool_output,
+    )
+
+    if (
+        not isinstance(value, Mapping)
+        or not isinstance(trusted_task_id, str)
+        or not trusted_task_id
+        or not isinstance(trusted_inputs, Mapping)
+        or not isinstance(trusted_artifacts, Mapping)
+        or set(trusted_artifacts) != {"pool_validation"}
+    ):
+        raise ValueError("Pool validation trusted terminal context is unavailable")
+    trusted = trusted_artifacts["pool_validation"]
+    if (
+        not isinstance(trusted, Mapping)
+        or set(trusted) != {"record", "tasks_root"}
+        or not isinstance(trusted["record"], Mapping)
+        or not isinstance(trusted["tasks_root"], str)
+        or not trusted["tasks_root"]
+    ):
+        raise ValueError("Pool validation registry context is unavailable")
+    record = trusted["record"]
+    artifact_id = record.get("id")
+    if not isinstance(artifact_id, str) or not artifact_id:
+        raise ValueError("Pool validation registry artifact id is unavailable")
+    output = validate_measure_strategy_pool_validation_tool_output(
+        value,
+        expected_task_id=trusted_task_id,
+        expected_artifact_id=artifact_id,
+    )
+    authenticated = authenticate_strategy_pool_validation_artifact_record(
+        task_id=trusted_task_id,
+        record=record,
+        evidence=output["evidence"],
+        tasks_root=trusted["tasks_root"],
+    )
+    if authenticated != output["evidence"]:
+        raise ValueError("Pool validation registered evidence changed")
+    evidence = output["evidence"]
+    identity = evidence["identity"]
+    sources = evidence["source_bindings"]
+    sample = sources["sample_design_v2"]
+    expected_inputs = {
+        "strategy_type": identity["strategy_type"],
+        "partition": evidence["partition"],
+        "pool_ref": {
+            "artifact_id": sources["pool_artifact"]["artifact_id"],
+            "expected_artifact_content_hash": sources["pool_artifact"][
+                "artifact_content_hash"
+            ],
+            "expected_pool_id": identity["pool_id"],
+            "expected_revision": identity["revision"],
+            "expected_revision_id": identity["revision_id"],
+            "expected_snapshot_hash": identity["snapshot_hash"],
+        },
+        "sample_design_ref": {
+            "membership_artifact_id": sample["membership_artifact_id"],
+            "expected_membership_artifact_content_hash": sample[
+                "membership_artifact_content_hash"
+            ],
+            "bundle_artifact_id": sample["bundle_artifact_id"],
+            "expected_bundle_artifact_content_hash": sample[
+                "bundle_artifact_content_hash"
+            ],
+            "expected_bundle_id": sample["bundle_id"],
+            "expected_sample_design_id": sample["sample_design_id"],
+            "expected_sample_design_content_hash": sample[
+                "sample_design_content_hash"
+            ],
+        },
+        "population": "risk",
+        "comparison_mode": "absolute",
+    }
+    if dict(trusted_inputs) != expected_inputs:
+        raise ValueError("Pool validation terminal inputs changed")
+    return output
+
+
+def _replay_amount_text(effect: object, name: str, field: str) -> str:
+    if not isinstance(effect, Mapping):
+        return "n/a"
+    amounts = effect.get("amounts")
+    if not isinstance(amounts, Mapping):
+        return "n/a"
+    item = amounts.get(name)
+    if not isinstance(item, Mapping) or item.get("status") != "available":
+        return "n/a"
+    value = item.get(field)
+    return _pct(value) if field.endswith("rate") else _num(value)
+
+
+def _replay_summary_row(scope: str, effect: Mapping[str, Any]) -> list[str]:
+    return [
+        scope,
+        _num(effect.get("population_count")),
+        _num(effect.get("labelled_count")),
+        _pct(effect.get("bad_rate")),
+        _replay_amount_text(effect, "loan_amount", "sum"),
+        _replay_amount_text(effect, "overdue_amount", "sum"),
+        _replay_amount_text(effect, "paired", "overdue_rate"),
+    ]
+
+
+def _render_measure_strategy_pool_validation(
+    o: dict,
+    *,
+    trusted_task_id: str | None,
+    trusted_inputs: Mapping[str, Any] | None,
+    trusted_artifacts: Mapping[str, Any] | None = None,
+):
+    """Render independent replay evidence without inventing drift semantics."""
+
+    try:
+        o = _validated_strategy_pool_validation_output(
+            o,
+            trusted_task_id=trusted_task_id,
+            trusted_inputs=trusted_inputs,
+            trusted_artifacts=trusted_artifacts,
+        )
+    except Exception:
+        return _strategy_pool_validation_integrity_failure()
+
+    evidence = o["evidence"]
+    identity = evidence["identity"]
+    population = evidence["population_metrics"]
+    overall = evidence["overall"]
+    overall_effect = overall["effect"]
+    actions = overall["actions"]["breakdown"]
+    monthly = evidence["monthly"]
+    periods = monthly["periods"] if monthly["status"] == "available" else []
+    month_text = (
+        f"**{len(periods)}** 个月"
+        if monthly["status"] == "available"
+        else "月份维度不可用"
+    )
+    artifact = o["artifact"]
+    text = (
+        f"**Strategy Pool 独立样本回放验证完成**：已在 "
+        f"`{evidence['partition']}` 的 `risk` 独立分区回放当前 "
+        f"`{identity['strategy_type']}` Pool `{identity['pool_id']}` "
+        f"revision {identity['revision']}。\n"
+        f"- independent replay evidence 覆盖 **{population['population_count']}** "
+        f"行，其中 **{population['labelled_count']}** 行进入风险分母、"
+        f"**{population['unlabelled_count']}** 行保留但不进入风险分母；"
+        f"{month_text}。\n"
+        "- 这里只呈现该独立分区实际观察到的动作、风险、金额与逐月回放证据，"
+        "不外推为未计算的结论。\n"
+        "- 本步骤不会修改 Pool、不会创建策略，也不晋级、不采纳、不部署。\n\n"
+        f"**独立回放 evidence artifact**：[{artifact['artifact_id']}]"
+        f"({artifact['download_url']})"
+    )
+    if o["warnings"]:
+        text += "\n\n**证据提醒**：" + "；".join(o["warnings"])
+
+    action_rows = [
+        [
+            str(item["action"]),
+            _num(item["count"]),
+            _pct(item["rate"]),
+            _num(item["bad_count"]),
+            _pct(item["bad_rate"]),
+        ]
+        for item in actions
+    ]
+    monthly_rows = []
+    for item in periods:
+        effect = item["effect"]
+        metrics = item["actions"]["metrics"]
+        monthly_rows.append(
+            [
+                str(item["period"]),
+                _num(effect["population_count"]),
+                _num(effect["labelled_count"]),
+                _pct(metrics["approve_rate"]),
+                _pct(metrics["reject_rate"]),
+                _pct(metrics["review_rate"]),
+                _pct(effect["bad_rate"]),
+                _replay_amount_text(effect, "loan_amount", "sum"),
+                _replay_amount_text(effect, "overdue_amount", "sum"),
+                _replay_amount_text(effect, "paired", "overdue_rate"),
+            ]
+        )
+    return text, [
+        {
+            "title": "独立回放总体风险与金额",
+            "columns": [
+                "范围",
+                "样本数",
+                "有标签样本",
+                "总体坏率",
+                "放款金额",
+                "逾期金额",
+                "逾期金额率",
+            ],
+            "rows": [_replay_summary_row("overall", overall_effect)],
+        },
+        {
+            "title": "独立回放总体动作",
+            "columns": ["动作", "样本数", "占比", "坏样本数", "坏率"],
+            "rows": action_rows,
+        },
+        {
+            "title": "独立回放逐月证据",
+            "columns": [
+                "月份",
+                "样本数",
+                "有标签样本",
+                "通过占比",
+                "拒绝占比",
+                "复核占比",
+                "总体坏率",
+                "放款金额",
+                "逾期金额",
+                "逾期金额率",
+            ],
+            "rows": monthly_rows,
+        },
+    ]
+
+
 def _render_apply_strategy_pool(o: dict):
     """Render only the strictly validated, non-activating Pool application."""
 
@@ -7548,6 +7789,9 @@ _RENDERERS = {
     "reorder_strategy_pool": _render_strategy_pool_mutation,
     "compile_strategy_pool": _render_compile_strategy_pool,
     "apply_strategy_pool": _render_apply_strategy_pool,
+    "measure_strategy_pool_validation": (
+        _render_measure_strategy_pool_validation
+    ),
     "measure_candidate_monthly_stability": (
         _render_measure_candidate_monthly_stability
     ),
@@ -7619,6 +7863,7 @@ def render_tool_output(
         if tool in {
             "export_strategy_delivery",
             "measure_candidate_monthly_stability",
+            "measure_strategy_pool_validation",
         }:
             return renderer(
                 output or {},
@@ -7636,6 +7881,8 @@ def render_tool_output(
             return _pool_impact_integrity_failure()
         if tool == "measure_candidate_monthly_stability":
             return _candidate_stability_integrity_failure()
+        if tool == "measure_strategy_pool_validation":
+            return _strategy_pool_validation_integrity_failure()
         if tool == "materialize_sample_design":
             return _sample_design_integrity_failure()
         if tool == "materialize_sample_design_v2":

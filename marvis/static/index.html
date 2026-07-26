@@ -1925,6 +1925,35 @@
 
                     <details class="candidate-lab-launcher">
                       <summary>
+                        <span><strong>Strategy Pool 独立样本回放验证</strong><small>在 validation 或 OOT 实际样本上复核当前 Pool</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_pool_validation">
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>Strategy Pool 类型 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="pool_validation_strategy_type">
+                              <option value="approval" selected>审批 / 准入 Pool</option>
+                              <option value="reject">拒绝 Pool</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>独立样本分区 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="pool_validation_partition">
+                              <option value="validation" selected>Validation</option>
+                              <option value="oot">OOT</option>
+                            </select>
+                          </label>
+                        </div>
+                        <p class="candidate-lab-boundary-note">
+                          本操作只生成 independent replay evidence，展示所选独立分区的实际动作、风险、金额和逐月结果；不修改 Pool、不创建策略，也不晋级、采纳或部署。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">执行独立样本回放验证</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
                         <span><strong>Voting 组合搜索</strong><small>在当前 Pool 规则中确定性枚举 n-of-k 组合</small></span>
                       </summary>
                       <form data-candidate-lab-form data-candidate-lab-workflow="voting_candidate_search">

@@ -73,14 +73,24 @@ from marvis.packs.strategy.pool_impact import (
 from marvis.packs.strategy.pool_impact_tools import (
     StrategyPoolImpactArtifactBinding,
 )
+from marvis.packs.strategy.pool_validation import (
+    canonical_strategy_pool_validation_json,
+    validate_strategy_pool_validation_evidence,
+)
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
     StrategyPoolDevelopmentDatasetBinding,
     StrategyPoolDevelopmentExecutionBinding,
     project_scorecard_report_evidence,
 )
+from marvis.packs.strategy.pool_validation_tools import (
+    POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION,
+    POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION,
+    StrategyPoolValidationArtifactBinding,
+)
 from marvis.packs.strategy.pool_requirement_resolver import (
     ResolvedPoolRequirements,
+    normalize_pool_requirements,
     pool_requirement_bindings_provenance,
     validate_pool_requirement_bindings_provenance,
 )
@@ -236,6 +246,25 @@ _CANDIDATE_STABILITY_PROVENANCE_FIELDS = frozenset(
         "sample_partition",
     }
 )
+_POOL_VALIDATION_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "producer_version",
+        "task_id",
+        "evidence_id",
+        "evidence_content_hash",
+        "pool_ref",
+        "sample_design_ref",
+        "dataset_binding",
+        "target_binding",
+        "field_bindings",
+        "partition",
+        "population",
+        "comparison_mode",
+        "lifecycle_stage",
+        "validation_status",
+    }
+)
 _CANDIDATE_STABILITY_LIFECYCLE = {
     "candidate_stage": "development",
     "observation_stage": "backtested",
@@ -304,6 +333,9 @@ def build_strategy_report_bundle_source_inputs(
     project_context: StrategyProjectContextArtifactBinding,
     sample_design: StrategySampleDesignV2ArtifactBinding,
     candidate_pool: StrategyCandidatePoolArtifactBinding,
+    pool_validations: Sequence[
+        StrategyPoolValidationArtifactBinding
+    ] = (),
     candidate_stability: StrategyCandidateStabilityArtifactBinding | None = None,
     voting_candidate_search: VotingCandidateSearchArtifactBinding | None = None,
     pool_impact: StrategyPoolImpactArtifactBinding | None = None,
@@ -336,8 +368,18 @@ def build_strategy_report_bundle_source_inputs(
         training_evidence=training_evidence,
         score_evidence=score_evidence,
     )
+    for validation in pool_validations:
+        _require_same_task(task_id, pool_validation=validation)
     sample = _authenticated_sample_design(sample_design)
     pool, design = _authenticated_candidate_pool(candidate_pool)
+    validations = _authenticated_pool_validations(
+        pool_validations,
+        sample_binding=sample_design,
+        sample=sample,
+        pool_binding=candidate_pool,
+        pool=pool,
+        compiled_design=design,
+    )
     voting_search = (
         None
         if voting_candidate_search is None
@@ -458,6 +500,14 @@ def build_strategy_report_bundle_source_inputs(
             voting_candidate_search.artifact_content_hash,
         )
     )
+    validation_refs = {
+        evidence["partition"]: _artifact_ref(
+            "strategy_validation",
+            binding.artifact_id,
+            binding.artifact_content_hash,
+        )
+        for binding, evidence in validations
+    }
     refs = _EvidenceRefs(
         project=_artifact_ref(
             "strategy_project_context",
@@ -553,39 +603,54 @@ def build_strategy_report_bundle_source_inputs(
         sections=pre_impact_sections.values(),
         missing_information=state["missing_information_records"],
     )
+    base_impact_section = (
+        _impact_cube_section(
+            cube=cube,
+            pool_ref=refs.pool,
+            impact_ref=refs.impact,
+            allow_oot_validated=allow_oot_validated,
+        )
+        if cube is not None
+        else _impact_section(
+            impact=impact,
+            pool_ref=refs.pool,
+            impact_ref=refs.impact,
+        )
+    )
+    impact_section = _with_pool_validation_evidence(
+        section=base_impact_section,
+        validations=validations,
+        validation_refs=validation_refs,
+        pool_ref=refs.pool,
+        claim_oot_validated=allow_oot_validated,
+    )
+    base_final_document = (
+        _impact_cube_final_document_section(
+            pool=pool,
+            compiled_design=design,
+            cube=cube,
+            pool_ref=refs.pool,
+            impact_ref=refs.impact,
+            allow_oot_validated=allow_oot_validated,
+        )
+        if cube is not None
+        else _final_document_section(
+            pool=pool,
+            compiled_design=design,
+            impact=impact,
+            pool_ref=refs.pool,
+            impact_ref=refs.impact,
+        )
+    )
     sections_by_key = {
         **pre_impact_sections,
-        "impact_assessment": (
-            _impact_cube_section(
-                cube=cube,
-                pool_ref=refs.pool,
-                impact_ref=refs.impact,
-                allow_oot_validated=allow_oot_validated,
-            )
-            if cube is not None
-            else _impact_section(
-                impact=impact,
-                pool_ref=refs.pool,
-                impact_ref=refs.impact,
-            )
-        ),
-        "final_document": (
-            _impact_cube_final_document_section(
-                pool=pool,
-                compiled_design=design,
-                cube=cube,
-                pool_ref=refs.pool,
-                impact_ref=refs.impact,
-                allow_oot_validated=allow_oot_validated,
-            )
-            if cube is not None
-            else _final_document_section(
-                pool=pool,
-                compiled_design=design,
-                impact=impact,
-                pool_ref=refs.pool,
-                impact_ref=refs.impact,
-            )
+        "impact_assessment": impact_section,
+        "final_document": _with_pool_validation_final_document(
+            section=base_final_document,
+            impact_section=impact_section,
+            validations=validations,
+            validation_refs=validation_refs,
+            claim_oot_validated=allow_oot_validated,
         ),
     }
     snapshot = state["current_project_snapshot"]
@@ -602,6 +667,10 @@ def build_strategy_report_bundle_source_inputs(
                 _dataset_ref_from_impact_cube(cube)
                 if cube is not None
                 else _dataset_ref_from_impact(impact)
+            ),
+            *(
+                _dataset_ref_from_pool_validation(evidence)
+                for _binding, evidence in validations
             ),
         ]
     )
@@ -648,6 +717,7 @@ def build_strategy_report_bundle_source_inputs(
                     if voting_search_ref is None
                     else [voting_search_ref]
                 ),
+                *validation_refs.values(),
             ]
         ),
         "tool_run_refs": tool_run_refs,
@@ -771,6 +841,347 @@ def _authenticated_candidate_pool(
         "candidate-pool",
     )
     return pool, compiled
+
+
+def _authenticated_pool_validations(
+    bindings: Sequence[StrategyPoolValidationArtifactBinding],
+    *,
+    sample_binding: StrategySampleDesignV2ArtifactBinding,
+    sample: Mapping[str, Any],
+    pool_binding: StrategyCandidatePoolArtifactBinding,
+    pool: Mapping[str, Any],
+    compiled_design: Mapping[str, Any],
+) -> tuple[
+    tuple[StrategyPoolValidationArtifactBinding, dict[str, Any]],
+    ...,
+]:
+    if isinstance(bindings, str | bytes | bytearray) or not isinstance(
+        bindings,
+        Sequence,
+    ):
+        raise StrategyReportBundleError(
+            "Pool validation bindings must be a sequence"
+        )
+    if len(bindings) > 2:
+        raise StrategyReportBundleError(
+            "Pool validation bindings may contain at most validation and OOT"
+        )
+    by_partition: dict[
+        str,
+        tuple[StrategyPoolValidationArtifactBinding, dict[str, Any]],
+    ] = {}
+    for binding in bindings:
+        _require_binding_type(
+            binding,
+            StrategyPoolValidationArtifactBinding,
+            "Pool validation",
+        )
+        evidence = validate_strategy_pool_validation_evidence(
+            binding.evidence
+        )
+        if (
+            evidence != binding.evidence
+            or binding.task_id != sample_binding.task_id
+            or evidence["identity"]["task_id"] != binding.task_id
+        ):
+            raise StrategyReportBundleError(
+                "Pool validation binding identity changed"
+            )
+        _require_canonical_artifact_hash(
+            binding.artifact_content_hash,
+            canonical_strategy_pool_validation_json(evidence),
+            "Pool validation",
+        )
+        _require_pool_validation_provenance(binding, evidence)
+        _require_pool_validation_provenance_requirements(
+            binding,
+            compiled_design=compiled_design,
+        )
+        _require_pool_validation_identity(
+            evidence=evidence,
+            sample_binding=sample_binding,
+            sample=sample,
+            pool_binding=pool_binding,
+            pool=pool,
+            compiled_design=compiled_design,
+        )
+        partition = evidence["partition"]
+        if partition in by_partition:
+            raise StrategyReportBundleError(
+                f"Pool validation {partition} evidence is duplicated"
+            )
+        by_partition[partition] = (binding, evidence)
+    return tuple(
+        by_partition[partition]
+        for partition in ("validation", "oot")
+        if partition in by_partition
+    )
+
+
+def _require_pool_validation_provenance(
+    binding: StrategyPoolValidationArtifactBinding,
+    evidence: Mapping[str, Any],
+) -> None:
+    try:
+        provenance_json = json.dumps(
+            binding.artifact_provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        provenance = json.loads(provenance_json)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise StrategyReportBundleError(
+            "Pool validation provenance is invalid"
+        ) from exc
+    if (
+        not isinstance(provenance, dict)
+        or set(provenance) != _POOL_VALIDATION_PROVENANCE_FIELDS
+        or binding.artifact_provenance_json != provenance_json
+    ):
+        raise StrategyReportBundleError(
+            "Pool validation provenance fields changed"
+        )
+    schema_version = provenance["schema_version"]
+    fields = provenance["field_bindings"]
+    if (
+        schema_version == POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION
+        and isinstance(fields, dict)
+        and set(fields)
+        == {"month_col", "loan_amount_col", "overdue_amount_col"}
+    ):
+        pass
+    elif (
+        schema_version
+        == POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION
+        and isinstance(fields, dict)
+        and set(fields)
+        == {
+            "month_col",
+            "loan_amount_col",
+            "overdue_amount_col",
+            "requirements",
+        }
+    ):
+        try:
+            validate_pool_requirement_bindings_provenance(
+                fields["requirements"]
+            )
+        except StrategyError as exc:
+            raise StrategyReportBundleError(
+                "Pool validation requirement provenance is invalid"
+            ) from exc
+    else:
+        raise StrategyReportBundleError(
+            "Pool validation provenance schema changed"
+        )
+    identity = evidence["identity"]
+    sources = evidence["source_bindings"]
+    sample_source = sources["sample_design_v2"]
+    expected_pool_ref = {
+        "artifact_id": sources["pool_artifact"]["artifact_id"],
+        "expected_artifact_content_hash": sources["pool_artifact"][
+            "artifact_content_hash"
+        ],
+        "expected_pool_id": identity["pool_id"],
+        "expected_revision": identity["revision"],
+        "expected_revision_id": identity["revision_id"],
+        "expected_snapshot_hash": identity["snapshot_hash"],
+        "pool_id": identity["pool_id"],
+        "revision_id": identity["revision_id"],
+    }
+    expected_sample_ref = {
+        "membership_artifact_id": sample_source["membership_artifact_id"],
+        "expected_membership_artifact_content_hash": sample_source[
+            "membership_artifact_content_hash"
+        ],
+        "bundle_artifact_id": sample_source["bundle_artifact_id"],
+        "expected_bundle_artifact_content_hash": sample_source[
+            "bundle_artifact_content_hash"
+        ],
+        "expected_bundle_id": sample_source["bundle_id"],
+        "expected_sample_design_id": sample_source["sample_design_id"],
+        "expected_sample_design_content_hash": sample_source[
+            "sample_design_content_hash"
+        ],
+    }
+    physical_fields = {
+        key: fields[key]
+        for key in ("month_col", "loan_amount_col", "overdue_amount_col")
+    }
+    expected_scalars = {
+        "producer_version": evidence["producer_version"],
+        "task_id": identity["task_id"],
+        "evidence_id": evidence["evidence_id"],
+        "evidence_content_hash": evidence["content_hash"],
+        "partition": evidence["partition"],
+        "population": "risk",
+        "comparison_mode": "absolute",
+        "lifecycle_stage": evidence["partition"],
+        "validation_status": "independent_evidence",
+    }
+    if (
+        any(
+            provenance[key] != value
+            for key, value in expected_scalars.items()
+        )
+        or provenance["pool_ref"] != expected_pool_ref
+        or provenance["sample_design_ref"] != expected_sample_ref
+        or provenance["dataset_binding"] != sources["dataset"]
+        or provenance["target_binding"] != sources["target"]
+        or physical_fields != sources["fields"]
+    ):
+        raise StrategyReportBundleError(
+            "Pool validation provenance does not match embedded evidence"
+        )
+
+
+def _require_pool_validation_provenance_requirements(
+    binding: StrategyPoolValidationArtifactBinding,
+    *,
+    compiled_design: Mapping[str, Any],
+) -> None:
+    requirements = list(
+        normalize_pool_requirements(compiled_design["requirements"])
+    )
+    provenance = binding.artifact_provenance
+    fields = provenance["field_bindings"]
+    if requirements:
+        if (
+            provenance["schema_version"]
+            != POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION
+            or "requirements" not in fields
+        ):
+            raise StrategyReportBundleError(
+                "Pool validation requirements differ from the Candidate Pool"
+            )
+        try:
+            bindings = validate_pool_requirement_bindings_provenance(
+                fields["requirements"]
+            )
+        except StrategyError as exc:
+            raise StrategyReportBundleError(
+                "Pool validation requirement bindings are invalid"
+            ) from exc
+        if bindings["requirements"] != requirements:
+            raise StrategyReportBundleError(
+                "Pool validation requirements differ from the Candidate Pool"
+            )
+        return
+    if (
+        provenance["schema_version"] != POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION
+        or "requirements" in fields
+    ):
+        raise StrategyReportBundleError(
+            "Pool validation requirements differ from the Candidate Pool"
+        )
+
+
+def _require_pool_validation_identity(
+    *,
+    evidence: Mapping[str, Any],
+    sample_binding: StrategySampleDesignV2ArtifactBinding,
+    sample: Mapping[str, Any],
+    pool_binding: StrategyCandidatePoolArtifactBinding,
+    pool: Mapping[str, Any],
+    compiled_design: Mapping[str, Any],
+) -> None:
+    identity = evidence["identity"]
+    sources = evidence["source_bindings"]
+    partition = evidence["partition"]
+    expected_identity = {
+        "pool_id": pool["pool_id"],
+        "task_id": pool["task_id"],
+        "strategy_type": pool["strategy_type"],
+        "revision": pool["revision"],
+        "revision_id": pool["revision_id"],
+        "snapshot_hash": pool["snapshot_hash"],
+        "design_hash": compiled_design["design_hash"],
+        "strategy_spec_hash": strategy_spec_hash(
+            compiled_design["strategy_spec"]
+        ),
+    }
+    header = sample_binding.membership["header"]
+    design = sample["sample_design"]
+    expected_sample = {
+        "membership_artifact_id": sample_binding.membership_artifact_id,
+        "membership_artifact_content_hash": (
+            sample_binding.membership_artifact_content_hash
+        ),
+        "membership_id": header["membership_id"],
+        "membership_content_hash": header["content_hash"],
+        "bundle_artifact_id": sample_binding.bundle_artifact_id,
+        "bundle_artifact_content_hash": (
+            sample_binding.bundle_artifact_content_hash
+        ),
+        "bundle_id": sample["bundle_id"],
+        "bundle_content_hash": sample["content_hash"],
+        "sample_design_id": design["sample_design_id"],
+        "sample_design_content_hash": design["content_hash"],
+        "partition_key": f"risk/{partition}",
+        "partition_count": header["counts"]["risk"][partition],
+        "analysis_universe_row_count": header["row_count"],
+    }
+    source = sample_binding.source_binding
+    try:
+        expected_dataset = {
+            "task_id": source.task_id,
+            "dataset_id": source.dataset_id,
+            "dataset_content_hash": source.dataset_content_hash,
+            "dataset_source_path": source.dataset_source_path,
+            "dataset_registry_metadata_hash": (
+                source.dataset_registry_metadata_hash
+            ),
+            "workspace_revision": source.workspace_revision,
+            "workspace_generation": source.workspace_generation,
+            "semantic_mapping_hash": source.semantic_mapping_hash,
+        }
+    except AttributeError as exc:
+        raise StrategyReportBundleError(
+            "Pool validation sample dataset binding is incomplete"
+        ) from exc
+    target = design["target_selector"]
+    fields = design["sample_semantics"]["field_bindings"]
+    expected_development = {
+        "legacy_development_ref": design["compatibility"][
+            "legacy_development_ref"
+        ],
+        "sample_binding": {
+            "task_id": pool["task_id"],
+            **pool["entries"][0]["source"]["evidence_identity"],
+        },
+    }
+    if (
+        identity != expected_identity
+        or sources["pool_artifact"]
+        != {
+            "artifact_id": pool_binding.artifact_id,
+            "artifact_content_hash": pool_binding.artifact_content_hash,
+        }
+        or sources["sample_design_v2"] != expected_sample
+        or sources["dataset"] != expected_dataset
+        or sources["development_lineage"] != expected_development
+        or sources["target"]
+        != {
+            "column": target["column"],
+            "good_value": target["good_value"],
+            "bad_value": target["bad_value"],
+            "missing_policy": (
+                "retain_population_exclude_risk_denominator"
+            ),
+        }
+        or sources["fields"]
+        != {
+            "month_col": fields["month_field"],
+            "loan_amount_col": fields["loan_amount_field"],
+            "overdue_amount_col": fields["overdue_amount_field"],
+        }
+    ):
+        raise StrategyReportBundleError(
+            "Pool validation evidence references another current Pool, "
+            "SampleDesign V2, or dataset"
+        )
 
 
 def _authenticated_voting_candidate_search(
@@ -3714,6 +4125,699 @@ def _impact_cube_section(
     )
 
 
+def _with_pool_validation_evidence(
+    *,
+    section: Mapping[str, Any],
+    validations: Sequence[
+        tuple[StrategyPoolValidationArtifactBinding, Mapping[str, Any]]
+    ],
+    validation_refs: Mapping[str, Mapping[str, str]],
+    pool_ref: Mapping[str, str],
+    claim_oot_validated: bool,
+) -> dict[str, Any]:
+    if not validations:
+        return dict(section)
+    summary_fields = list(section["summary_fields"])
+    for _binding, evidence in validations:
+        partition = evidence["partition"]
+        source_ref = validation_refs[partition]
+        population = evidence["population_metrics"]
+        metrics = evidence["overall"]["actions"]["metrics"]
+        summary_fields.extend(
+            [
+                _named(
+                    f"pool_{partition}_validation_status",
+                    f"{partition} 独立重放状态",
+                    _present_field(
+                        evidence["lifecycle"]["validation_status"],
+                        source_ref,
+                    ),
+                ),
+                _named(
+                    f"pool_{partition}_population_count",
+                    f"{partition} 独立重放样本数",
+                    _present_field(
+                        population["population_count"],
+                        source_ref,
+                    ),
+                ),
+                _named(
+                    f"pool_{partition}_label_coverage",
+                    f"{partition} 标签覆盖率",
+                    _present_field(
+                        population["label_coverage"],
+                        source_ref,
+                    ),
+                ),
+                _named(
+                    f"pool_{partition}_overall_bad_rate",
+                    f"{partition} 整体坏样本率",
+                    _nullable_metric_field(
+                        metrics["overall_bad_rate"],
+                        source_ref,
+                    ),
+                ),
+            ]
+        )
+    tables = [
+        *section["tables"],
+        _pool_validation_summary_table(
+            validations,
+            validation_refs=validation_refs,
+            claim_oot_validated=claim_oot_validated,
+        ),
+        _pool_validation_action_table(
+            validations,
+            validation_refs=validation_refs,
+            claim_oot_validated=claim_oot_validated,
+        ),
+    ]
+    monthly = _pool_validation_monthly_table(
+        validations,
+        validation_refs=validation_refs,
+        claim_oot_validated=claim_oot_validated,
+    )
+    if monthly is not None:
+        tables.append(monthly)
+    red_flags = [
+        *section["red_flags"],
+        *(
+            {
+                "code": (
+                    f"pool_validation_{evidence['partition']}_"
+                    f"{item['code']}"
+                ),
+                "level": item["level"],
+                "message": (
+                    f"{evidence['partition']} 独立重放：{item['message']}"
+                ),
+                "source_refs": [validation_refs[evidence["partition"]]],
+            }
+            for _binding, evidence in validations
+            for item in evidence["red_flags"]
+        ),
+    ]
+    stage_evidence = list(section["stage_evidence"])
+    if claim_oot_validated:
+        stage_evidence.extend(
+            {
+                "effect_stage": "oot_validated",
+                "population": "risk",
+                "partition": evidence["partition"],
+                "binding": {
+                    "kind": "independent_validation",
+                    "dataset_ref": _dataset_ref_from_pool_validation(
+                        evidence
+                    ),
+                    "frozen_artifact_ref": pool_ref,
+                    "result_ref": validation_refs[evidence["partition"]],
+                },
+            }
+            for _binding, evidence in validations
+        )
+    else:
+        red_flags.append(
+            {
+                "code": "pool_validation_claim_suppressed_by_validation_blocker",
+                "level": "amber",
+                "message": (
+                    "独立 validation/OOT 重放证据已保留，但成熟度或其他验证"
+                    "阻塞项尚未解决，因此报告未声明 OOT 已验证。"
+                ),
+                "source_refs": list(validation_refs.values()),
+            }
+        )
+    return build_strategy_report_section(
+        key=section["key"],
+        title=section["title"],
+        availability=section["availability"],
+        summary_fields=summary_fields,
+        tables=tables,
+        stage_evidence=stage_evidence,
+        red_flags=red_flags,
+        source_refs=_dedupe_refs(
+            [*section["source_refs"], *validation_refs.values()]
+        ),
+    )
+
+
+def _with_pool_validation_final_document(
+    *,
+    section: Mapping[str, Any],
+    impact_section: Mapping[str, Any],
+    validations: Sequence[
+        tuple[StrategyPoolValidationArtifactBinding, Mapping[str, Any]]
+    ],
+    validation_refs: Mapping[str, Mapping[str, str]],
+    claim_oot_validated: bool,
+) -> dict[str, Any]:
+    if not validations:
+        return dict(section)
+    stage_order = ("estimated", "backtested", "oot_validated")
+    observed_stages = {
+        item["effect_stage"] for item in impact_section["stage_evidence"]
+    }
+    evidence_stages = [
+        stage for stage in stage_order if stage in observed_stages
+    ]
+    ref_values = list(validation_refs.values())
+    summary_fields: list[dict[str, Any]] = []
+    existing_statuses: list[str] = []
+    existing_status_refs: list[Mapping[str, str]] = []
+    for item in section["summary_fields"]:
+        field_id = item["field_id"]
+        if field_id in {"evidence_stage", "evidence_stages"}:
+            prior_refs = item["field"]["source_refs"]
+            summary_fields.append(
+                _named(
+                    "evidence_stages",
+                    "当前证据阶段",
+                    _present_field_many(
+                        evidence_stages,
+                        _dedupe_refs([*prior_refs, *ref_values]),
+                    ),
+                )
+            )
+            continue
+        if field_id == "validation_statuses":
+            value = item["field"]["value"]
+            if isinstance(value, list):
+                existing_statuses.extend(str(status) for status in value)
+            existing_status_refs.extend(item["field"]["source_refs"])
+            continue
+        summary_fields.append(item)
+    validation_statuses = list(
+        dict.fromkeys([*existing_statuses, "independent_evidence"])
+    )
+    conclusion = (
+        "independent_replay_evidence_only"
+        if claim_oot_validated
+        else (
+            "independent_replay_evidence_available_"
+            "claim_suppressed_by_validation_blocker"
+        )
+    )
+    replay_partitions = [
+        evidence["partition"] for _binding, evidence in validations
+    ]
+    summary_fields.extend(
+        [
+            _named(
+                "validation_statuses",
+                "验证状态",
+                _present_field_many(
+                    validation_statuses,
+                    _dedupe_refs([*existing_status_refs, *ref_values]),
+                ),
+            ),
+            _named(
+                "independent_replay_partitions",
+                "独立 validation/OOT 回放分区",
+                _present_field_many(
+                    replay_partitions,
+                    ref_values,
+                ),
+            ),
+            _named(
+                "validation_conclusion",
+                "独立 validation/OOT 回放结论",
+                _present_field_many(
+                    conclusion,
+                    ref_values,
+                ),
+            ),
+        ]
+    )
+    return build_strategy_report_section(
+        key=section["key"],
+        title=section["title"],
+        availability=section["availability"],
+        summary_fields=summary_fields,
+        tables=section["tables"],
+        stage_evidence=section["stage_evidence"],
+        red_flags=section["red_flags"],
+        source_refs=_dedupe_refs(
+            [*section["source_refs"], *ref_values]
+        ),
+    )
+
+
+def _pool_validation_summary_table(
+    validations: Sequence[
+        tuple[StrategyPoolValidationArtifactBinding, Mapping[str, Any]]
+    ],
+    *,
+    validation_refs: Mapping[str, Mapping[str, str]],
+    claim_oot_validated: bool,
+) -> dict[str, Any]:
+    rows = []
+    for _binding, evidence in validations:
+        partition = evidence["partition"]
+        source_ref = validation_refs[partition]
+        population = evidence["population_metrics"]
+        effect = evidence["overall"]["effect"]
+        metrics = evidence["overall"]["actions"]["metrics"]
+        amounts = effect["amounts"]
+        rows.append(
+            {
+                "row_id": f"pool-independent-{partition}",
+                "cells": {
+                    "partition": _present_field(partition, source_ref),
+                    "lifecycle_stage": _present_field(
+                        evidence["lifecycle"]["stage"],
+                        source_ref,
+                    ),
+                    "validation_status": _present_field(
+                        evidence["lifecycle"]["validation_status"],
+                        source_ref,
+                    ),
+                    "population_count": _present_field(
+                        population["population_count"],
+                        source_ref,
+                    ),
+                    "labelled_count": _present_field(
+                        population["labelled_count"],
+                        source_ref,
+                    ),
+                    "unlabelled_count": _present_field(
+                        population["unlabelled_count"],
+                        source_ref,
+                    ),
+                    "label_coverage": _present_field(
+                        population["label_coverage"],
+                        source_ref,
+                    ),
+                    "approve_rate": _present_field(
+                        metrics["approve_rate"],
+                        source_ref,
+                    ),
+                    "reject_rate": _present_field(
+                        metrics["reject_rate"],
+                        source_ref,
+                    ),
+                    "review_rate": _present_field(
+                        metrics["review_rate"],
+                        source_ref,
+                    ),
+                    "overall_bad_rate": _nullable_metric_field(
+                        metrics["overall_bad_rate"],
+                        source_ref,
+                    ),
+                    "overall_bad_count": _present_field(
+                        metrics["overall_bad_count"],
+                        source_ref,
+                    ),
+                    "bad_capture_rate": _nullable_metric_field(
+                        metrics["bad_capture_rate"],
+                        source_ref,
+                    ),
+                    "good_reject_rate": _nullable_metric_field(
+                        metrics["good_reject_rate"],
+                        source_ref,
+                    ),
+                    "monthly_status": _present_field(
+                        evidence["monthly"]["status"],
+                        source_ref,
+                    ),
+                    **_pool_validation_amount_cells(
+                        amounts,
+                        source_ref=source_ref,
+                    ),
+                },
+            }
+        )
+    return build_strategy_report_table(
+        table_id="strategy_pool_independent_validation_summary",
+        title="当前策略池独立 validation/OOT 重放汇总",
+        sheet_key="10_validation",
+        granularity="aggregate",
+        content_class="metric_summary",
+        effect_stage=(
+            "oot_validated" if claim_oot_validated else None
+        ),
+        columns=[
+            _column("partition", "样本分区"),
+            _column("lifecycle_stage", "证据分区"),
+            _column("validation_status", "验证状态"),
+            _column("population_count", "样本数", unit="count", precision=0),
+            _column("labelled_count", "有标签数", unit="count", precision=0),
+            _column("unlabelled_count", "无标签数", unit="count", precision=0),
+            _column("label_coverage", "标签覆盖率", unit="%", precision=4),
+            _column("approve_rate", "通过率", unit="%", precision=4),
+            _column("reject_rate", "拒绝率", unit="%", precision=4),
+            _column("review_rate", "复核率", unit="%", precision=4),
+            _column("overall_bad_rate", "整体坏样本率", unit="%", precision=4),
+            _column(
+                "overall_bad_count",
+                "整体坏样本数",
+                unit="count",
+                precision=0,
+            ),
+            _column("bad_capture_rate", "坏样本捕获率", unit="%", precision=4),
+            _column("good_reject_rate", "好样本误拒率", unit="%", precision=4),
+            _column("monthly_status", "逐月结果状态"),
+            *_pool_validation_amount_columns(),
+        ],
+        rows=rows,
+        source_refs=list(validation_refs.values()),
+    )
+
+
+def _pool_validation_action_table(
+    validations: Sequence[
+        tuple[StrategyPoolValidationArtifactBinding, Mapping[str, Any]]
+    ],
+    *,
+    validation_refs: Mapping[str, Mapping[str, str]],
+    claim_oot_validated: bool,
+) -> dict[str, Any]:
+    rows = []
+    for _binding, evidence in validations:
+        partition = evidence["partition"]
+        source_ref = validation_refs[partition]
+        for action in evidence["overall"]["actions"]["breakdown"]:
+            rows.append(
+                {
+                    "row_id": (
+                        f"pool-independent-{partition}-{action['action']}"
+                    ),
+                    "cells": {
+                        "partition": _present_field(partition, source_ref),
+                        "action": _present_field(
+                            action["action"],
+                            source_ref,
+                        ),
+                        "count": _present_field(action["count"], source_ref),
+                        "rate": _present_field(action["rate"], source_ref),
+                        "labelled_count": _present_field(
+                            action["labelled_count"],
+                            source_ref,
+                        ),
+                        "bad_count": _present_field(
+                            action["bad_count"],
+                            source_ref,
+                        ),
+                        "bad_rate": _nullable_metric_field(
+                            action["bad_rate"],
+                            source_ref,
+                        ),
+                    },
+                }
+            )
+    return build_strategy_report_table(
+        table_id="strategy_pool_independent_validation_actions",
+        title="当前策略池独立重放动作影响",
+        sheet_key="10_validation",
+        granularity="aggregate",
+        content_class="metric_summary",
+        effect_stage=(
+            "oot_validated" if claim_oot_validated else None
+        ),
+        columns=[
+            _column("partition", "样本分区"),
+            _column("action", "动作"),
+            _column("count", "样本数", unit="count", precision=0),
+            _column("rate", "样本占比", unit="%", precision=4),
+            _column("labelled_count", "有标签数", unit="count", precision=0),
+            _column("bad_count", "坏样本数", unit="count", precision=0),
+            _column("bad_rate", "坏样本率", unit="%", precision=4),
+        ],
+        rows=rows,
+        source_refs=list(validation_refs.values()),
+    )
+
+
+def _pool_validation_monthly_table(
+    validations: Sequence[
+        tuple[StrategyPoolValidationArtifactBinding, Mapping[str, Any]]
+    ],
+    *,
+    validation_refs: Mapping[str, Mapping[str, str]],
+    claim_oot_validated: bool,
+) -> dict[str, Any] | None:
+    rows = []
+    used_refs: list[Mapping[str, str]] = []
+    for _binding, evidence in validations:
+        monthly = evidence["monthly"]
+        if monthly["status"] != "available":
+            continue
+        partition = evidence["partition"]
+        source_ref = validation_refs[partition]
+        used_refs.append(source_ref)
+        for period in monthly["periods"]:
+            metrics = period["actions"]["metrics"]
+            effect = period["effect"]
+            rows.append(
+                {
+                    "row_id": (
+                        f"pool-independent-{partition}-{period['period']}"
+                    ),
+                    "cells": {
+                        "partition": _present_field(partition, source_ref),
+                        "period": _present_field(
+                            period["period"],
+                            source_ref,
+                        ),
+                        "population_count": _present_field(
+                            effect["population_count"],
+                            source_ref,
+                        ),
+                        "labelled_count": _present_field(
+                            effect["labelled_count"],
+                            source_ref,
+                        ),
+                        "label_coverage": _present_field(
+                            effect["label_coverage"],
+                            source_ref,
+                        ),
+                        "bad_count": _present_field(
+                            effect["bad_count"],
+                            source_ref,
+                        ),
+                        "approve_rate": _present_field(
+                            metrics["approve_rate"],
+                            source_ref,
+                        ),
+                        "reject_rate": _present_field(
+                            metrics["reject_rate"],
+                            source_ref,
+                        ),
+                        "review_rate": _present_field(
+                            metrics["review_rate"],
+                            source_ref,
+                        ),
+                        "overall_bad_rate": _nullable_metric_field(
+                            metrics["overall_bad_rate"],
+                            source_ref,
+                        ),
+                        "bad_capture_rate": _nullable_metric_field(
+                            metrics["bad_capture_rate"],
+                            source_ref,
+                        ),
+                        "good_reject_rate": _nullable_metric_field(
+                            metrics["good_reject_rate"],
+                            source_ref,
+                        ),
+                        **_pool_validation_amount_cells(
+                            effect["amounts"],
+                            source_ref=source_ref,
+                        ),
+                    },
+                }
+            )
+    if not rows:
+        return None
+    return build_strategy_report_table(
+        table_id="strategy_pool_independent_validation_monthly",
+        title="当前策略池独立重放逐月效果",
+        sheet_key="10_validation",
+        granularity="aggregate",
+        content_class="monthly_summary",
+        effect_stage=(
+            "oot_validated" if claim_oot_validated else None
+        ),
+        columns=[
+            _column("partition", "样本分区"),
+            _column("period", "月份"),
+            _column("population_count", "样本数", unit="count", precision=0),
+            _column("labelled_count", "有标签数", unit="count", precision=0),
+            _column("label_coverage", "标签覆盖率", unit="%", precision=4),
+            _column("bad_count", "坏样本数", unit="count", precision=0),
+            _column("approve_rate", "通过率", unit="%", precision=4),
+            _column("reject_rate", "拒绝率", unit="%", precision=4),
+            _column("review_rate", "复核率", unit="%", precision=4),
+            _column("overall_bad_rate", "整体坏样本率", unit="%", precision=4),
+            _column("bad_capture_rate", "坏样本捕获率", unit="%", precision=4),
+            _column("good_reject_rate", "好样本误拒率", unit="%", precision=4),
+            *_pool_validation_amount_columns(),
+        ],
+        rows=rows,
+        source_refs=_dedupe_refs(used_refs),
+    )
+
+
+def _pool_validation_amount_cells(
+    amounts: Mapping[str, Any],
+    *,
+    source_ref: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    return {
+        "loan_amount_status": _pool_validation_amount_field(
+            amounts,
+            amount_key="loan_amount",
+            field="status",
+            source_ref=source_ref,
+        ),
+        "loan_amount_coverage_count": _pool_validation_amount_field(
+            amounts,
+            amount_key="loan_amount",
+            field="coverage_count",
+            source_ref=source_ref,
+        ),
+        "loan_amount_coverage_rate": _pool_validation_amount_field(
+            amounts,
+            amount_key="loan_amount",
+            field="coverage_rate",
+            source_ref=source_ref,
+        ),
+        "loan_amount_sum": _pool_validation_amount_field(
+            amounts,
+            amount_key="loan_amount",
+            field="sum",
+            source_ref=source_ref,
+        ),
+        "overdue_amount_status": _pool_validation_amount_field(
+            amounts,
+            amount_key="overdue_amount",
+            field="status",
+            source_ref=source_ref,
+        ),
+        "overdue_amount_coverage_count": _pool_validation_amount_field(
+            amounts,
+            amount_key="overdue_amount",
+            field="coverage_count",
+            source_ref=source_ref,
+        ),
+        "overdue_amount_coverage_rate": _pool_validation_amount_field(
+            amounts,
+            amount_key="overdue_amount",
+            field="coverage_rate",
+            source_ref=source_ref,
+        ),
+        "overdue_amount_sum": _pool_validation_amount_field(
+            amounts,
+            amount_key="overdue_amount",
+            field="sum",
+            source_ref=source_ref,
+        ),
+        "paired_amount_status": _pool_validation_amount_field(
+            amounts,
+            amount_key="paired",
+            field="status",
+            source_ref=source_ref,
+        ),
+        "paired_coverage_count": _pool_validation_amount_field(
+            amounts,
+            amount_key="paired",
+            field="coverage_count",
+            source_ref=source_ref,
+        ),
+        "paired_coverage_rate": _pool_validation_amount_field(
+            amounts,
+            amount_key="paired",
+            field="coverage_rate",
+            source_ref=source_ref,
+        ),
+        "paired_loan_amount_sum": _pool_validation_amount_field(
+            amounts,
+            amount_key="paired",
+            field="loan_amount_sum",
+            source_ref=source_ref,
+        ),
+        "paired_overdue_amount_sum": _pool_validation_amount_field(
+            amounts,
+            amount_key="paired",
+            field="overdue_amount_sum",
+            source_ref=source_ref,
+        ),
+        "paired_overdue_rate": _pool_validation_amount_field(
+            amounts,
+            amount_key="paired",
+            field="overdue_rate",
+            source_ref=source_ref,
+        ),
+    }
+
+
+def _pool_validation_amount_field(
+    amounts: Mapping[str, Any],
+    *,
+    amount_key: str,
+    field: str,
+    source_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    item = amounts[amount_key]
+    if field == "status":
+        return _present_field(item["status"], source_ref)
+    if item["status"] != "available" or item[field] is None:
+        return _absent_field("unavailable")
+    return _present_field(item[field], source_ref)
+
+
+def _pool_validation_amount_columns() -> list[dict[str, Any]]:
+    return [
+        _column("loan_amount_status", "贷款金额状态"),
+        _column(
+            "loan_amount_coverage_count",
+            "贷款金额覆盖数",
+            unit="count",
+            precision=0,
+        ),
+        _column(
+            "loan_amount_coverage_rate",
+            "贷款金额覆盖率",
+            unit="%",
+            precision=4,
+        ),
+        _column("loan_amount_sum", "贷款金额合计"),
+        _column("overdue_amount_status", "逾期金额状态"),
+        _column(
+            "overdue_amount_coverage_count",
+            "逾期金额覆盖数",
+            unit="count",
+            precision=0,
+        ),
+        _column(
+            "overdue_amount_coverage_rate",
+            "逾期金额覆盖率",
+            unit="%",
+            precision=4,
+        ),
+        _column("overdue_amount_sum", "逾期金额合计"),
+        _column("paired_amount_status", "金额配对状态"),
+        _column(
+            "paired_coverage_count",
+            "金额配对覆盖数",
+            unit="count",
+            precision=0,
+        ),
+        _column(
+            "paired_coverage_rate",
+            "金额配对覆盖率",
+            unit="%",
+            precision=4,
+        ),
+        _column("paired_loan_amount_sum", "配对贷款金额合计"),
+        _column("paired_overdue_amount_sum", "配对逾期金额合计"),
+        _column(
+            "paired_overdue_rate",
+            "配对逾期金额率",
+            unit="%",
+            precision=4,
+        ),
+    ]
+
+
 def _has_validation_blocker(
     *,
     sections: Iterable[Mapping[str, Any]],
@@ -5379,6 +6483,17 @@ def _dataset_ref_from_impact_cube(
     cube: Mapping[str, Any],
 ) -> dict[str, str]:
     dataset = cube["source_bindings"]["dataset"]
+    return _artifact_ref(
+        "dataset",
+        dataset["dataset_id"],
+        dataset["dataset_content_hash"],
+    )
+
+
+def _dataset_ref_from_pool_validation(
+    evidence: Mapping[str, Any],
+) -> dict[str, str]:
+    dataset = evidence["source_bindings"]["dataset"]
     return _artifact_ref(
         "dataset",
         dataset["dataset_id"],

@@ -247,7 +247,7 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=42,
+    version=43,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
@@ -268,7 +268,8 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "cross_matrix_cell_selection/"
         "strategy_pool_add_candidate/strategy_pool_remove_entry/"
         "strategy_pool_set_action/strategy_pool_reorder/strategy_pool_compile/"
-        "strategy_pool_apply/strategy_pool_impact/strategy_impact_cube/"
+        "strategy_pool_apply/strategy_pool_validation/strategy_pool_impact/"
+        "strategy_impact_cube/"
         "strategy_dsl_delivery/"
         "strategy_report_bundle_v2。"
         "strategy_project_context 只整理当前项目现状、历史策略与缺失信息。只能抽取用户明确提供的 "
@@ -392,6 +393,19 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "否定、问句、历史/未来/假设、模糊或多 Pool，以及同轮修改 Pool、采纳、激活、"
         "部署、上线、导出或报告必须 clarification。结果只创建不可变派生数据集，"
         "不激活当前 workspace，不采纳、不部署，也不修改 Pool。"
+        "strategy_pool_validation 表示把当前任务中一个明确的 approval/reject "
+        "非空 Strategy Pool 在精确 StrategySampleDesign V2 的独立 risk/validation "
+        "或 risk/oot 成员上回放。workflow_inputs 必须且只能包含用户当前肯定命令"
+        "中唯一明确的 strategy_type 与 partition；strategy_type 只能是 approval/"
+        "reject，partition 只能是 validation/oot。Pool ref/revision/hash/artifact、"
+        "SampleDesign membership/bundle/ref、dataset/workspace/target/requirements、"
+        "population=risk、comparison_mode=absolute、指标、月份、状态和结果全部由平台"
+        "恢复或计算，禁止输出。请求必须明确说独立样本回放验证及一个分区；"
+        "development、limit/pricing/segmentation、问句、否定、历史/未来/假设、"
+        "模糊或多个类型/分区，以及同轮修改 Pool、应用、报告、晋级、采纳或部署"
+        "必须 clarification。它只发布 independent replay evidence 的实际动作、"
+        "风险、金额与逐月证据，不得声称 PSI、stability 或 drift；不会修改 Pool、"
+        "创建、晋级、采纳或部署策略。"
         "automatic_tree_leaf_materialization 表示从已生成的完整自动树候选中，只物化一个用户明确点名的"
         "叶节点 pointer。workflow_inputs 只允许 tree_asset_id、leaf_id 和可选 selection_reason。"
         "tree_asset_id 必须逐字抄录用户原话中的完整 candidate-asset- 后接 32 位小写十六进制；"

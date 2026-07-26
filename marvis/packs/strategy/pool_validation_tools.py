@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 import hashlib
 import hmac
 import json
@@ -20,6 +21,7 @@ import pandas as pd
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.artifacts.transactional import ArtifactTransactionError
 from marvis.files import sha256_file
+from marvis.packs.strategy.dsl import strategy_spec_hash
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
@@ -31,6 +33,7 @@ from marvis.packs.strategy.pool_tools import (
 from marvis.packs.strategy.pool_requirement_resolver import (
     ResolvedPoolRequirements,
     hydrate_requirement_fields,
+    normalize_pool_requirements,
     pool_requirement_bindings_provenance,
     project_pool_entry_requirements,
     require_resolved_pool_requirements_on_connection,
@@ -53,6 +56,7 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactConflictError,
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
+    stable_task_artifact_id,
 )
 
 
@@ -162,23 +166,718 @@ _PROVENANCE_FIELDS = frozenset(
 _PHYSICAL_FIELD_BINDING_FIELDS = frozenset(
     {"month_col", "loan_amount_col", "overdue_amount_col"}
 )
-_TASK_ARTIFACT_ROW_FIELDS = (
-    "id",
-    "task_id",
-    "kind",
-    "path",
-    "content_hash",
-    "origin_tool",
-    "provenance_json",
-    "created_at",
+_TASK_ARTIFACT_RECORD_FIELDS = frozenset(
+    {
+        "id",
+        "task_id",
+        "kind",
+        "path",
+        "content_hash",
+        "origin_tool",
+        "provenance",
+        "created_at",
+    }
+)
+_POOL_PROVENANCE_REF_FIELDS = _POOL_REF_FIELDS | {
+    "pool_id",
+    "revision_id",
+}
+_DATASET_BINDING_FIELDS = frozenset(
+    {
+        "task_id",
+        "dataset_id",
+        "dataset_content_hash",
+        "dataset_source_path",
+        "dataset_registry_metadata_hash",
+        "workspace_revision",
+        "workspace_generation",
+        "semantic_mapping_hash",
+    }
+)
+_TARGET_BINDING_FIELDS = frozenset(
+    {"column", "good_value", "bad_value", "missing_policy"}
+)
+_POOL_VALIDATION_REF_FIELDS = frozenset(
+    {
+        "partition",
+        "artifact_id",
+        "expected_artifact_content_hash",
+        "expected_evidence_id",
+        "expected_evidence_content_hash",
+    }
+)
+_POOL_VALIDATION_EVIDENCE_ID_RE = re.compile(
+    r"^strategy-pool-validation-[0-9a-f]{24}$"
 )
 _MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
+_MAX_PROVENANCE_BYTES = 1024 * 1024
+_MAX_REGISTRY_PATH_BYTES = 16 * 1024
+_MAX_DISCOVERABLE_ARTIFACTS = 64
 _BOUNDARY_ERRORS = (
     ArtifactTransactionError,
     TaskArtifactConflictError,
     TaskArtifactDataError,
     TaskArtifactNotFoundError,
 )
+
+
+@dataclass(frozen=True)
+class StrategyPoolValidationArtifactBinding:
+    """Authenticated independent Pool replay evidence for report writers."""
+
+    task_id: str
+    artifact_id: str
+    artifact_path: Path
+    artifact_content_hash: str
+    artifact_provenance: dict[str, Any]
+    artifact_provenance_json: str
+    evidence: dict[str, Any]
+    tasks_root: Path
+    db_path: Path
+
+
+def authenticate_strategy_pool_validation_artifact_record(
+    *,
+    task_id: str,
+    record: Mapping[str, Any],
+    evidence: object,
+    tasks_root: Path | str,
+) -> dict[str, Any]:
+    """Authenticate one trusted registry record without current-Pool state.
+
+    This boundary proves only that aggregate evidence is the canonical
+    registered output of this Tool.  It deliberately does not decide whether
+    the evidence is compatible with the task's current Candidate Pool.
+    """
+
+    normalized_task = _text(task_id, "task_id")
+    if (
+        not isinstance(record, Mapping)
+        or set(record) != _TASK_ARTIFACT_RECORD_FIELDS
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact record fields are invalid"
+        )
+    validated_evidence = validate_strategy_pool_validation_evidence(evidence)
+    if (
+        validated_evidence != evidence
+        or validated_evidence["identity"]["task_id"] != normalized_task
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact evidence identity changed"
+        )
+    root = Path(tasks_root).absolute()
+    artifact_path_text = _text(
+        record["path"],
+        "Pool validation artifact record.path",
+    )
+    if len(artifact_path_text.encode("utf-8")) > _MAX_REGISTRY_PATH_BYTES:
+        raise StrategyError(
+            "Strategy Pool validation artifact registry path exceeds byte budget"
+        )
+    artifact_path = Path(artifact_path_text)
+    expected_path = (
+        root
+        / normalized_task
+        / "strategy_pool_validations"
+        / f"{validated_evidence['evidence_id']}.json"
+    )
+    if artifact_path != expected_path:
+        raise StrategyError(
+            "Strategy Pool validation artifact record path is not canonical"
+        )
+    kind = _text(record["kind"], "Pool validation artifact record.kind")
+    origin = _text(
+        record["origin_tool"],
+        "Pool validation artifact record.origin_tool",
+    )
+    if (
+        record["task_id"] != normalized_task
+        or kind != POOL_VALIDATION_ARTIFACT_KIND
+        or origin != POOL_VALIDATION_ORIGIN_TOOL
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact record identity changed"
+        )
+    artifact_id = _hash(
+        record["id"],
+        "Pool validation artifact record.id",
+    )
+    if artifact_id != stable_task_artifact_id(
+        task_id=normalized_task,
+        kind=kind,
+        path=str(artifact_path),
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact record stable id changed"
+        )
+    artifact_hash = _hash(
+        record["content_hash"],
+        "Pool validation artifact record.content_hash",
+    )
+    canonical = canonical_strategy_pool_validation_json(
+        validated_evidence
+    ).encode("utf-8")
+    if not hmac.compare_digest(
+        hashlib.sha256(canonical).hexdigest(),
+        artifact_hash,
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact record content hash changed"
+        )
+    provenance = _validate_provenance(record["provenance"])
+    if provenance != record["provenance"]:
+        raise StrategyError(
+            "Strategy Pool validation artifact record provenance changed"
+        )
+    _require_provenance_matches_evidence(
+        provenance,
+        validated_evidence,
+    )
+    _text(
+        record["created_at"],
+        "Pool validation artifact record.created_at",
+    )
+    raw = _read_regular_nofollow(
+        artifact_path,
+        root=root,
+        expected_content_hash=artifact_hash,
+    )
+    if raw != canonical:
+        raise StrategyError(
+            "Strategy Pool validation artifact record canonical bytes changed"
+        )
+    return validated_evidence
+
+
+def load_latest_strategy_pool_validation_artifacts(
+    runtime,
+    *,
+    task_id: str,
+    candidate_pool: StrategyCandidatePoolArtifactBinding,
+    sample_design: StrategySampleDesignV2ArtifactBinding,
+) -> tuple[StrategyPoolValidationArtifactBinding, ...]:
+    """Select at most one latest compatible validation/OOT artifact.
+
+    Compatibility is platform-owned: callers provide the already authenticated
+    current Pool and exact SampleDesign V2 bindings, never artifact references.
+    Once a compatible newest row is selected, any registry, provenance, path,
+    byte, or embedded-evidence drift fails closed instead of falling back to an
+    older result.
+    """
+
+    normalized_task = _text(task_id, "task_id")
+    if (
+        not isinstance(candidate_pool, StrategyCandidatePoolArtifactBinding)
+        or not isinstance(
+            sample_design,
+            StrategySampleDesignV2ArtifactBinding,
+        )
+        or candidate_pool.task_id != normalized_task
+        or sample_design.task_id != normalized_task
+    ):
+        raise StrategyError(
+            "Pool validation discovery requires same-task authenticated "
+            "Pool and SampleDesign V2 bindings"
+        )
+    tasks_root = Path(runtime.settings.tasks_dir).absolute()
+    db_path = Path(runtime.settings.db_path).absolute()
+    selected: dict[str, StrategyPoolValidationArtifactBinding] = {}
+    try:
+        with runtime.task_artifacts.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_strategy_candidate_pool_artifact_binding_on_connection(
+                conn,
+                candidate_pool,
+            )
+            require_strategy_sample_design_v2_artifact_binding_on_connection(
+                conn,
+                sample_design,
+            )
+            count = conn.execute(
+                """
+                SELECT COUNT(*) AS total
+                  FROM task_artifacts
+                 WHERE task_id = ? AND kind = ? AND origin_tool = ?
+                """,
+                (
+                    normalized_task,
+                    POOL_VALIDATION_ARTIFACT_KIND,
+                    POOL_VALIDATION_ORIGIN_TOOL,
+                ),
+            ).fetchone()
+            if (
+                count is None
+                or int(count["total"]) > _MAX_DISCOVERABLE_ARTIFACTS
+            ):
+                raise StrategyError(
+                    "Strategy Pool validation artifact history exceeds "
+                    "discovery budget"
+                )
+            rows = conn.execute(
+                """
+                SELECT CASE
+                           WHEN length(CAST(id AS BLOB)) = 64 THEN id
+                           ELSE NULL
+                       END AS id,
+                       length(CAST(path AS BLOB)) AS path_bytes,
+                       length(CAST(content_hash AS BLOB)) AS hash_bytes,
+                       length(CAST(provenance_json AS BLOB))
+                           AS provenance_bytes
+                  FROM task_artifacts
+                 WHERE task_id = ? AND kind = ? AND origin_tool = ?
+                 ORDER BY created_at DESC, id DESC
+                """,
+                (
+                    normalized_task,
+                    POOL_VALIDATION_ARTIFACT_KIND,
+                    POOL_VALIDATION_ORIGIN_TOOL,
+                ),
+            ).fetchall()
+            for row in rows:
+                if len(selected) == 2:
+                    break
+                if row["id"] is None:
+                    raise StrategyError(
+                        "Strategy Pool validation artifact registry id changed"
+                    )
+                _require_bounded_registry_metadata(
+                    path_bytes=row["path_bytes"],
+                    hash_bytes=row["hash_bytes"],
+                )
+                provenance_json = _bounded_provenance_json_on_connection(
+                    conn,
+                    task_id=normalized_task,
+                    artifact_id=str(row["id"]),
+                    byte_length=row["provenance_bytes"],
+                )
+                provenance = _provenance_from_json(
+                    provenance_json
+                )
+                partition = provenance["partition"]
+                if partition in selected or partition not in {
+                    "validation",
+                    "oot",
+                }:
+                    continue
+                if not _provenance_matches_current_sources(
+                    provenance,
+                    pool=candidate_pool,
+                    sample=sample_design,
+                ):
+                    continue
+                _require_provenance_matches_pool_requirements(
+                    provenance,
+                    pool=candidate_pool,
+                )
+                artifact_row = _bounded_artifact_row_on_connection(
+                    conn,
+                    task_id=normalized_task,
+                    artifact_id=row["id"],
+                    path_bytes=row["path_bytes"],
+                    hash_bytes=row["hash_bytes"],
+                )
+                binding = _pool_validation_binding_from_row(
+                    artifact_row,
+                    provenance=provenance,
+                    provenance_json=provenance_json,
+                    tasks_root=tasks_root,
+                    db_path=db_path,
+                )
+                _require_pool_validation_compatibility(
+                    binding.evidence,
+                    pool=candidate_pool,
+                    sample=sample_design,
+                )
+                require_strategy_pool_validation_artifact_binding_on_connection(
+                    conn,
+                    binding,
+                )
+                selected[partition] = binding
+            require_strategy_candidate_pool_artifact_binding_on_connection(
+                conn,
+                candidate_pool,
+            )
+            require_strategy_sample_design_v2_artifact_binding_on_connection(
+                conn,
+                sample_design,
+            )
+            conn.commit()
+    except StrategyError:
+        raise
+    except _BOUNDARY_ERRORS as exc:
+        raise StrategyError(str(exc)) from exc
+    return tuple(
+        selected[partition]
+        for partition in ("validation", "oot")
+        if partition in selected
+    )
+
+
+def select_latest_strategy_pool_validation_refs(
+    runtime,
+    *,
+    task_id: str,
+    candidate_pool: StrategyCandidatePoolArtifactBinding,
+    sample_design: StrategySampleDesignV2ArtifactBinding,
+) -> tuple[dict[str, Any], ...]:
+    """Select immutable platform-owned refs for a report plan/turn."""
+
+    return tuple(
+        _pool_validation_artifact_ref(binding)
+        for binding in load_latest_strategy_pool_validation_artifacts(
+            runtime,
+            task_id=task_id,
+            candidate_pool=candidate_pool,
+            sample_design=sample_design,
+        )
+    )
+
+
+def load_strategy_pool_validation_artifacts(
+    runtime,
+    *,
+    task_id: str,
+    refs: object,
+    candidate_pool: StrategyCandidatePoolArtifactBinding,
+    sample_design: StrategySampleDesignV2ArtifactBinding,
+) -> tuple[StrategyPoolValidationArtifactBinding, ...]:
+    """Load only exact Pool validation refs frozen by the platform plan.
+
+    An empty ref list intentionally remains empty even if newer compatible
+    evidence appears later.  This preserves exact retry and prevents execution
+    from silently rebinding a plan to a different report source.
+    """
+
+    normalized_task = _text(task_id, "task_id")
+    normalized_refs = validate_strategy_pool_validation_artifact_refs(refs)
+    if (
+        not isinstance(candidate_pool, StrategyCandidatePoolArtifactBinding)
+        or not isinstance(
+            sample_design,
+            StrategySampleDesignV2ArtifactBinding,
+        )
+        or candidate_pool.task_id != normalized_task
+        or sample_design.task_id != normalized_task
+    ):
+        raise StrategyError(
+            "Pool validation loading requires same-task authenticated "
+            "Pool and SampleDesign V2 bindings"
+        )
+    tasks_root = Path(runtime.settings.tasks_dir).absolute()
+    db_path = Path(runtime.settings.db_path).absolute()
+    loaded: list[StrategyPoolValidationArtifactBinding] = []
+    try:
+        with runtime.task_artifacts.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_strategy_candidate_pool_artifact_binding_on_connection(
+                conn,
+                candidate_pool,
+            )
+            require_strategy_sample_design_v2_artifact_binding_on_connection(
+                conn,
+                sample_design,
+            )
+            for ref in normalized_refs:
+                row = conn.execute(
+                    """
+                    SELECT CASE
+                               WHEN length(CAST(id AS BLOB)) = 64 THEN id
+                               ELSE NULL
+                           END AS id,
+                           kind = ? AS kind_matches,
+                           origin_tool = ? AS origin_matches,
+                           length(CAST(path AS BLOB)) AS path_bytes,
+                           length(CAST(content_hash AS BLOB)) AS hash_bytes,
+                           length(CAST(provenance_json AS BLOB))
+                               AS provenance_bytes
+                      FROM task_artifacts
+                     WHERE task_id = ? AND id = ?
+                    """,
+                    (
+                        POOL_VALIDATION_ARTIFACT_KIND,
+                        POOL_VALIDATION_ORIGIN_TOOL,
+                        normalized_task,
+                        ref["artifact_id"],
+                    ),
+                ).fetchone()
+                if row is None:
+                    raise StrategyError(
+                        "Strategy Pool validation referenced artifact "
+                        "was not found"
+                    )
+                if (
+                    row["id"] is None
+                    or row["kind_matches"] != 1
+                    or row["origin_matches"] != 1
+                ):
+                    raise StrategyError(
+                        "Strategy Pool validation referenced artifact "
+                        "registry binding changed"
+                    )
+                _require_bounded_registry_metadata(
+                    path_bytes=row["path_bytes"],
+                    hash_bytes=row["hash_bytes"],
+                )
+                provenance_json = _bounded_provenance_json_on_connection(
+                    conn,
+                    task_id=normalized_task,
+                    artifact_id=str(row["id"]),
+                    byte_length=row["provenance_bytes"],
+                )
+                provenance = _provenance_from_json(provenance_json)
+                _require_provenance_matches_pool_requirements(
+                    provenance,
+                    pool=candidate_pool,
+                )
+                artifact_row = _bounded_artifact_row_on_connection(
+                    conn,
+                    task_id=normalized_task,
+                    artifact_id=row["id"],
+                    path_bytes=row["path_bytes"],
+                    hash_bytes=row["hash_bytes"],
+                )
+                binding = _pool_validation_binding_from_row(
+                    artifact_row,
+                    provenance=provenance,
+                    provenance_json=provenance_json,
+                    tasks_root=tasks_root,
+                    db_path=db_path,
+                )
+                _require_pool_validation_compatibility(
+                    binding.evidence,
+                    pool=candidate_pool,
+                    sample=sample_design,
+                )
+                expected = _pool_validation_artifact_ref(binding)
+                if expected != ref:
+                    raise StrategyError(
+                        "Strategy Pool validation referenced artifact "
+                        "binding changed"
+                    )
+                require_strategy_pool_validation_artifact_binding_on_connection(
+                    conn,
+                    binding,
+                )
+                loaded.append(binding)
+            require_strategy_candidate_pool_artifact_binding_on_connection(
+                conn,
+                candidate_pool,
+            )
+            require_strategy_sample_design_v2_artifact_binding_on_connection(
+                conn,
+                sample_design,
+            )
+            conn.commit()
+    except StrategyError:
+        raise
+    except _BOUNDARY_ERRORS as exc:
+        raise StrategyError(str(exc)) from exc
+    return tuple(loaded)
+
+
+def validate_strategy_pool_validation_artifact_refs(
+    value: object,
+) -> tuple[dict[str, Any], ...]:
+    """Validate and canonicalize zero to two platform-owned report refs."""
+
+    if (
+        isinstance(value, str | bytes | bytearray)
+        or not isinstance(value, list | tuple)
+        or len(value) > 2
+    ):
+        raise StrategyError(
+            "pool_validation_refs must contain at most validation and OOT"
+        )
+    by_partition: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(value):
+        obj = _json_object(raw, f"pool_validation_refs[{index}]")
+        _exact_fields(
+            obj,
+            _POOL_VALIDATION_REF_FIELDS,
+            f"pool_validation_refs[{index}]",
+        )
+        partition = _text(
+            obj["partition"],
+            f"pool_validation_refs[{index}].partition",
+        )
+        if partition not in {"validation", "oot"}:
+            raise StrategyError(
+                f"pool_validation_refs[{index}].partition is invalid"
+            )
+        if partition in by_partition:
+            raise StrategyError(
+                f"pool_validation_refs duplicates {partition}"
+            )
+        evidence_id = _text(
+            obj["expected_evidence_id"],
+            f"pool_validation_refs[{index}].expected_evidence_id",
+        )
+        if _POOL_VALIDATION_EVIDENCE_ID_RE.fullmatch(evidence_id) is None:
+            raise StrategyError(
+                "pool_validation_refs expected_evidence_id is not canonical"
+            )
+        by_partition[partition] = {
+            "partition": partition,
+            "artifact_id": _hash(
+                obj["artifact_id"],
+                f"pool_validation_refs[{index}].artifact_id",
+            ),
+            "expected_artifact_content_hash": _hash(
+                obj["expected_artifact_content_hash"],
+                "pool_validation_refs"
+                f"[{index}].expected_artifact_content_hash",
+            ),
+            "expected_evidence_id": evidence_id,
+            "expected_evidence_content_hash": _hash(
+                obj["expected_evidence_content_hash"],
+                "pool_validation_refs"
+                f"[{index}].expected_evidence_content_hash",
+            ),
+        }
+    return tuple(
+        by_partition[partition]
+        for partition in ("validation", "oot")
+        if partition in by_partition
+    )
+
+
+def require_strategy_pool_validation_artifact_binding_on_connection(
+    conn,
+    binding: StrategyPoolValidationArtifactBinding,
+) -> None:
+    """Re-authenticate one Pool validation artifact under a writer lock."""
+
+    if not isinstance(binding, StrategyPoolValidationArtifactBinding):
+        raise StrategyError("Strategy Pool validation artifact binding is invalid")
+    if not conn.in_transaction:
+        raise StrategyError(
+            "Strategy Pool validation binding requires a caller-owned transaction"
+        )
+    database = conn.execute(
+        "SELECT file FROM pragma_database_list WHERE name = 'main'"
+    ).fetchone()
+    if (
+        database is None
+        or not str(database["file"])
+        or Path(str(database["file"])).absolute() != binding.db_path
+    ):
+        raise StrategyError("Strategy Pool validation binding database changed")
+    task_id = _text(binding.task_id, "binding.task_id")
+    artifact_id = _hash(binding.artifact_id, "binding.artifact_id")
+    artifact_hash = _hash(
+        binding.artifact_content_hash,
+        "binding.artifact_content_hash",
+    )
+    evidence = validate_strategy_pool_validation_evidence(binding.evidence)
+    if evidence != binding.evidence or evidence["identity"]["task_id"] != task_id:
+        raise StrategyError("Strategy Pool validation binding payload changed")
+    canonical = canonical_strategy_pool_validation_json(evidence).encode("utf-8")
+    if not hmac.compare_digest(
+        hashlib.sha256(canonical).hexdigest(),
+        artifact_hash,
+    ):
+        raise StrategyError(
+            "Strategy Pool validation binding artifact hash changed"
+        )
+    expected_path = (
+        binding.tasks_root
+        / task_id
+        / "strategy_pool_validations"
+        / f"{evidence['evidence_id']}.json"
+    )
+    if (
+        binding.tasks_root != binding.tasks_root.absolute()
+        or binding.artifact_path != expected_path
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact governed path changed"
+        )
+    provenance = _validate_provenance(binding.artifact_provenance)
+    _require_provenance_matches_evidence(provenance, evidence)
+    provenance_json = _canonical_json(provenance)
+    if (
+        provenance != binding.artifact_provenance
+        or provenance_json != binding.artifact_provenance_json
+    ):
+        raise StrategyError(
+            "Strategy Pool validation binding provenance changed"
+        )
+    metadata = conn.execute(
+        """
+        SELECT CASE
+                   WHEN length(CAST(id AS BLOB)) = 64 THEN id
+                   ELSE NULL
+               END AS id,
+               kind = ? AS kind_matches,
+               origin_tool = ? AS origin_matches,
+               length(CAST(path AS BLOB)) AS path_bytes,
+               length(CAST(content_hash AS BLOB)) AS hash_bytes,
+               length(CAST(provenance_json AS BLOB)) AS provenance_bytes
+          FROM task_artifacts
+         WHERE task_id = ? AND id = ?
+        """,
+        (
+            POOL_VALIDATION_ARTIFACT_KIND,
+            POOL_VALIDATION_ORIGIN_TOOL,
+            task_id,
+            artifact_id,
+        ),
+    ).fetchone()
+    if metadata is None:
+        raise StrategyError(
+            "Strategy Pool validation artifact registry row disappeared"
+        )
+    if (
+        metadata["id"] is None
+        or metadata["kind_matches"] != 1
+        or metadata["origin_matches"] != 1
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact registry binding changed"
+        )
+    _require_bounded_registry_metadata(
+        path_bytes=metadata["path_bytes"],
+        hash_bytes=metadata["hash_bytes"],
+    )
+    persisted_provenance_json = _bounded_provenance_json_on_connection(
+        conn,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        byte_length=metadata["provenance_bytes"],
+    )
+    row = _bounded_artifact_row_on_connection(
+        conn,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        path_bytes=metadata["path_bytes"],
+        hash_bytes=metadata["hash_bytes"],
+    )
+    expected_row = {
+        "id": artifact_id,
+        "task_id": task_id,
+        "kind": POOL_VALIDATION_ARTIFACT_KIND,
+        "path": str(binding.artifact_path),
+        "content_hash": artifact_hash,
+        "origin_tool": POOL_VALIDATION_ORIGIN_TOOL,
+    }
+    if any(str(row[field]) != value for field, value in expected_row.items()):
+        raise StrategyError(
+            "Strategy Pool validation artifact registry binding changed"
+        )
+    if persisted_provenance_json != provenance_json:
+        raise StrategyError(
+            "Strategy Pool validation artifact registry provenance changed"
+        )
+    raw = _read_regular_nofollow(
+        binding.artifact_path,
+        root=binding.tasks_root,
+        expected_content_hash=artifact_hash,
+    )
+    if raw != canonical:
+        raise StrategyError(
+            "Strategy Pool validation artifact canonical bytes changed"
+        )
 
 
 def run_measure_strategy_pool_validation(inputs, ctx, runtime) -> dict[str, Any]:
@@ -378,6 +1077,440 @@ def validate_measure_strategy_pool_validation_tool_output(
         )
     obj["evidence"] = evidence
     return obj
+
+
+def _pool_validation_binding_from_row(
+    row,
+    *,
+    provenance: Mapping[str, Any],
+    provenance_json: str,
+    tasks_root: Path,
+    db_path: Path,
+) -> StrategyPoolValidationArtifactBinding:
+    artifact_id = _hash(row["id"], "Pool validation artifact_id")
+    task_id = _text(row["task_id"], "Pool validation task_id")
+    artifact_hash = _hash(
+        row["content_hash"],
+        "Pool validation artifact content_hash",
+    )
+    if (
+        str(row["kind"]) != POOL_VALIDATION_ARTIFACT_KIND
+        or str(row["origin_tool"]) != POOL_VALIDATION_ORIGIN_TOOL
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact registry binding changed"
+        )
+    artifact_path = Path(str(row["path"]))
+    raw = _read_regular_nofollow(
+        artifact_path,
+        root=tasks_root,
+        expected_content_hash=artifact_hash,
+    )
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_json_constant,
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+    ) as exc:
+        raise StrategyError(
+            "Strategy Pool validation artifact JSON is invalid"
+        ) from exc
+    evidence = validate_strategy_pool_validation_evidence(payload)
+    canonical = canonical_strategy_pool_validation_json(evidence).encode("utf-8")
+    if raw != canonical:
+        raise StrategyError(
+            "Strategy Pool validation artifact bytes are not canonical"
+        )
+    expected_path = (
+        tasks_root
+        / task_id
+        / "strategy_pool_validations"
+        / f"{evidence['evidence_id']}.json"
+    )
+    if artifact_path != expected_path:
+        raise StrategyError(
+            "Strategy Pool validation artifact path is not canonical"
+        )
+    normalized_provenance = _validate_provenance(provenance)
+    _require_provenance_matches_evidence(
+        normalized_provenance,
+        evidence,
+    )
+    canonical_provenance_json = _canonical_json(normalized_provenance)
+    if provenance_json != canonical_provenance_json:
+        raise StrategyError(
+            "Strategy Pool validation artifact provenance is not canonical"
+        )
+    return StrategyPoolValidationArtifactBinding(
+        task_id=task_id,
+        artifact_id=artifact_id,
+        artifact_path=artifact_path,
+        artifact_content_hash=artifact_hash,
+        artifact_provenance=normalized_provenance,
+        artifact_provenance_json=canonical_provenance_json,
+        evidence=evidence,
+        tasks_root=tasks_root,
+        db_path=db_path,
+    )
+
+
+def _pool_validation_artifact_ref(
+    binding: StrategyPoolValidationArtifactBinding,
+) -> dict[str, Any]:
+    evidence = binding.evidence
+    return {
+        "partition": evidence["partition"],
+        "artifact_id": binding.artifact_id,
+        "expected_artifact_content_hash": binding.artifact_content_hash,
+        "expected_evidence_id": evidence["evidence_id"],
+        "expected_evidence_content_hash": evidence["content_hash"],
+    }
+
+
+def _provenance_from_json(raw: str) -> dict[str, Any]:
+    if (
+        not isinstance(raw, str)
+        or len(raw.encode("utf-8")) > _MAX_PROVENANCE_BYTES
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact provenance exceeds byte budget"
+        )
+    try:
+        payload = json.loads(
+            raw,
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_json_constant,
+        )
+    except (
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+    ) as exc:
+        raise StrategyError(
+            "Strategy Pool validation artifact provenance is invalid"
+        ) from exc
+    provenance = _validate_provenance(payload)
+    if raw != _canonical_json(provenance):
+        raise StrategyError(
+            "Strategy Pool validation artifact provenance is not canonical"
+        )
+    return provenance
+
+
+def _require_provenance_byte_budget(value: Mapping[str, Any]) -> None:
+    if len(_canonical_json(value).encode("utf-8")) > _MAX_PROVENANCE_BYTES:
+        raise StrategyError(
+            "Strategy Pool validation artifact provenance exceeds byte budget"
+        )
+
+
+def _require_bounded_registry_metadata(
+    *,
+    path_bytes: object,
+    hash_bytes: object,
+) -> None:
+    if (
+        isinstance(path_bytes, bool)
+        or not isinstance(path_bytes, int)
+        or path_bytes < 1
+        or path_bytes > _MAX_REGISTRY_PATH_BYTES
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact registry path exceeds byte budget"
+        )
+    if (
+        isinstance(hash_bytes, bool)
+        or not isinstance(hash_bytes, int)
+        or hash_bytes != 64
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact registry content hash changed"
+        )
+
+
+def _bounded_artifact_row_on_connection(
+    conn,
+    *,
+    task_id: str,
+    artifact_id: str,
+    path_bytes: object,
+    hash_bytes: object,
+):
+    _require_bounded_registry_metadata(
+        path_bytes=path_bytes,
+        hash_bytes=hash_bytes,
+    )
+    row = conn.execute(
+        """
+        SELECT id, task_id, kind, path, content_hash, origin_tool
+          FROM task_artifacts
+         WHERE task_id = ? AND id = ?
+           AND kind = ? AND origin_tool = ?
+           AND length(CAST(id AS BLOB)) = 64
+           AND length(CAST(path AS BLOB)) = ?
+           AND length(CAST(content_hash AS BLOB)) = 64
+        """,
+        (
+            task_id,
+            artifact_id,
+            POOL_VALIDATION_ARTIFACT_KIND,
+            POOL_VALIDATION_ORIGIN_TOOL,
+            path_bytes,
+        ),
+    ).fetchone()
+    if row is None:
+        raise StrategyError(
+            "Strategy Pool validation artifact registry binding changed"
+        )
+    return row
+
+
+def _bounded_provenance_json_on_connection(
+    conn,
+    *,
+    task_id: str,
+    artifact_id: str,
+    byte_length: object,
+) -> str:
+    if (
+        isinstance(byte_length, bool)
+        or not isinstance(byte_length, int)
+        or byte_length < 0
+        or byte_length > _MAX_PROVENANCE_BYTES
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact provenance exceeds byte budget"
+        )
+    row = conn.execute(
+        """
+        SELECT provenance_json
+          FROM task_artifacts
+         WHERE task_id = ? AND id = ?
+           AND length(CAST(provenance_json AS BLOB)) = ?
+        """,
+        (task_id, artifact_id, byte_length),
+    ).fetchone()
+    if row is None or not isinstance(row["provenance_json"], str):
+        raise StrategyError(
+            "Strategy Pool validation artifact provenance changed"
+        )
+    raw = row["provenance_json"]
+    if len(raw.encode("utf-8")) != byte_length:
+        raise StrategyError(
+            "Strategy Pool validation artifact provenance changed"
+        )
+    return raw
+
+
+def _provenance_matches_current_sources(
+    provenance: Mapping[str, Any],
+    *,
+    pool: StrategyCandidatePoolArtifactBinding,
+    sample: StrategySampleDesignV2ArtifactBinding,
+) -> bool:
+    return (
+        provenance["pool_ref"] == _current_pool_provenance_ref(pool)
+        and provenance["sample_design_ref"]
+        == _current_sample_design_provenance_ref(sample)
+        and provenance["dataset_binding"] == _dataset_evidence_binding(sample)
+    )
+
+
+def _require_provenance_matches_pool_requirements(
+    provenance: Mapping[str, Any],
+    *,
+    pool: StrategyCandidatePoolArtifactBinding,
+) -> None:
+    compiled_requirements = list(
+        normalize_pool_requirements(
+            pool.compiled_design["requirements"]
+        )
+    )
+    fields = provenance["field_bindings"]
+    if compiled_requirements:
+        if (
+            provenance["schema_version"]
+            != POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION
+            or "requirements" not in fields
+        ):
+            raise StrategyError(
+                "Strategy Pool validation requirements differ from the "
+                "current Candidate Pool"
+            )
+        requirement_bindings = validate_pool_requirement_bindings_provenance(
+            fields["requirements"]
+        )
+        if requirement_bindings["requirements"] != compiled_requirements:
+            raise StrategyError(
+                "Strategy Pool validation requirements differ from the "
+                "current Candidate Pool"
+            )
+        return
+    if (
+        provenance["schema_version"] != POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION
+        or "requirements" in fields
+    ):
+        raise StrategyError(
+            "Strategy Pool validation requirements differ from the "
+            "current Candidate Pool"
+        )
+
+
+def _current_pool_provenance_ref(
+    pool: StrategyCandidatePoolArtifactBinding,
+) -> dict[str, Any]:
+    snapshot = pool.pool
+    return {
+        "artifact_id": pool.artifact_id,
+        "expected_artifact_content_hash": pool.artifact_content_hash,
+        "expected_pool_id": snapshot["pool_id"],
+        "expected_revision": snapshot["revision"],
+        "expected_revision_id": snapshot["revision_id"],
+        "expected_snapshot_hash": snapshot["snapshot_hash"],
+        "pool_id": snapshot["pool_id"],
+        "revision_id": snapshot["revision_id"],
+    }
+
+
+def _current_sample_design_provenance_ref(
+    sample: StrategySampleDesignV2ArtifactBinding,
+) -> dict[str, Any]:
+    design = sample.bundle["sample_design"]
+    return {
+        "membership_artifact_id": sample.membership_artifact_id,
+        "expected_membership_artifact_content_hash": (
+            sample.membership_artifact_content_hash
+        ),
+        "bundle_artifact_id": sample.bundle_artifact_id,
+        "expected_bundle_artifact_content_hash": (
+            sample.bundle_artifact_content_hash
+        ),
+        "expected_bundle_id": sample.bundle["bundle_id"],
+        "expected_sample_design_id": design["sample_design_id"],
+        "expected_sample_design_content_hash": design["content_hash"],
+    }
+
+
+def _require_pool_validation_compatibility(
+    evidence: Mapping[str, Any],
+    *,
+    pool: StrategyCandidatePoolArtifactBinding,
+    sample: StrategySampleDesignV2ArtifactBinding,
+) -> None:
+    identity = evidence["identity"]
+    compiled = pool.compiled_design
+    expected_identity = {
+        "pool_id": pool.pool["pool_id"],
+        "task_id": pool.task_id,
+        "strategy_type": pool.strategy_type,
+        "revision": pool.pool["revision"],
+        "revision_id": pool.pool["revision_id"],
+        "snapshot_hash": pool.pool["snapshot_hash"],
+        "design_hash": compiled["design_hash"],
+        "strategy_spec_hash": strategy_spec_hash(compiled["strategy_spec"]),
+    }
+    sources = evidence["source_bindings"]
+    partition = evidence["partition"]
+    design = sample.bundle["sample_design"]
+    fields = design["sample_semantics"]["field_bindings"]
+    expected_target = {
+        "column": design["target_selector"]["column"],
+        "good_value": design["target_selector"]["good_value"],
+        "bad_value": design["target_selector"]["bad_value"],
+        "missing_policy": "retain_population_exclude_risk_denominator",
+    }
+    expected_fields = {
+        "month_col": fields["month_field"],
+        "loan_amount_col": fields["loan_amount_field"],
+        "overdue_amount_col": fields["overdue_amount_field"],
+    }
+    if (
+        identity != expected_identity
+        or sources["pool_artifact"]
+        != {
+            "artifact_id": pool.artifact_id,
+            "artifact_content_hash": pool.artifact_content_hash,
+        }
+        or sources["sample_design_v2"]
+        != _sample_design_evidence_ref(sample, partition=partition)
+        or sources["dataset"] != _dataset_evidence_binding(sample)
+        or sources["target"] != expected_target
+        or sources["fields"] != expected_fields
+        or sources["development_lineage"]["legacy_development_ref"]
+        != design["compatibility"]["legacy_development_ref"]
+    ):
+        raise StrategyError(
+            "Strategy Pool validation evidence is not compatible with the "
+            "current Pool, exact SampleDesign V2, and dataset"
+        )
+
+
+def _require_provenance_matches_evidence(
+    provenance: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> None:
+    identity = evidence["identity"]
+    sources = evidence["source_bindings"]
+    pool_ref = provenance["pool_ref"]
+    sample_ref = provenance["sample_design_ref"]
+    sample_source = sources["sample_design_v2"]
+    expected_pool = {
+        "artifact_id": sources["pool_artifact"]["artifact_id"],
+        "expected_artifact_content_hash": sources["pool_artifact"][
+            "artifact_content_hash"
+        ],
+        "expected_pool_id": identity["pool_id"],
+        "expected_revision": identity["revision"],
+        "expected_revision_id": identity["revision_id"],
+        "expected_snapshot_hash": identity["snapshot_hash"],
+        "pool_id": identity["pool_id"],
+        "revision_id": identity["revision_id"],
+    }
+    expected_sample = {
+        "membership_artifact_id": sample_source["membership_artifact_id"],
+        "expected_membership_artifact_content_hash": sample_source[
+            "membership_artifact_content_hash"
+        ],
+        "bundle_artifact_id": sample_source["bundle_artifact_id"],
+        "expected_bundle_artifact_content_hash": sample_source[
+            "bundle_artifact_content_hash"
+        ],
+        "expected_bundle_id": sample_source["bundle_id"],
+        "expected_sample_design_id": sample_source["sample_design_id"],
+        "expected_sample_design_content_hash": sample_source[
+            "sample_design_content_hash"
+        ],
+    }
+    physical_fields = {
+        key: provenance["field_bindings"][key]
+        for key in _PHYSICAL_FIELD_BINDING_FIELDS
+    }
+    if (
+        provenance["task_id"] != identity["task_id"]
+        or provenance["evidence_id"] != evidence["evidence_id"]
+        or provenance["evidence_content_hash"] != evidence["content_hash"]
+        or pool_ref != expected_pool
+        or sample_ref != expected_sample
+        or provenance["dataset_binding"] != sources["dataset"]
+        or provenance["target_binding"] != sources["target"]
+        or physical_fields != sources["fields"]
+        or provenance["partition"] != evidence["partition"]
+        or provenance["lifecycle_stage"] != evidence["lifecycle"]["stage"]
+        or provenance["validation_status"]
+        != evidence["lifecycle"]["validation_status"]
+    ):
+        raise StrategyError(
+            "Strategy Pool validation artifact provenance does not match "
+            "embedded evidence"
+        )
 
 
 def _validate_inputs(value: object) -> dict[str, Any]:
@@ -966,11 +2099,6 @@ def _persist_evidence(
         "utf-8"
     )
     artifact_hash = hashlib.sha256(canonical).hexdigest()
-    out_dir = _prepare_output_directory(
-        runtime.settings.tasks_dir,
-        task_id=task_id,
-    )
-    final_path = out_dir / f"{evidence['evidence_id']}.json"
     sources = evidence["source_bindings"]
     provenance = {
         "schema_version": (
@@ -1001,6 +2129,12 @@ def _persist_evidence(
         "validation_status": "independent_evidence",
     }
     _validate_provenance(provenance)
+    _require_provenance_byte_budget(provenance)
+    out_dir = _prepare_output_directory(
+        runtime.settings.tasks_dir,
+        task_id=task_id,
+    )
+    final_path = out_dir / f"{evidence['evidence_id']}.json"
     uow = ArtifactUnitOfWork()
     staged = uow.stage_file(out_dir, final_path.name)
     try:
@@ -1024,12 +2158,39 @@ def _persist_evidence(
                     sample=sample,
                     resolved_requirements=resolved_requirements,
                 )
-                row = _select_artifact_row(
+                metadata = _select_artifact_row(
                     conn,
                     task_id=task_id,
                     path=final_path,
                 )
-                if row is not None:
+                if metadata is not None:
+                    if (
+                        metadata["id"] is None
+                        or metadata["origin_matches"] != 1
+                    ):
+                        raise StrategyError(
+                            "existing Strategy Pool validation artifact "
+                            "registry row changed"
+                        )
+                    _require_bounded_registry_metadata(
+                        path_bytes=metadata["path_bytes"],
+                        hash_bytes=metadata["hash_bytes"],
+                    )
+                    persisted_provenance_json = (
+                        _bounded_provenance_json_on_connection(
+                            conn,
+                            task_id=task_id,
+                            artifact_id=metadata["id"],
+                            byte_length=metadata["provenance_bytes"],
+                        )
+                    )
+                    row = _bounded_artifact_row_on_connection(
+                        conn,
+                        task_id=task_id,
+                        artifact_id=metadata["id"],
+                        path_bytes=metadata["path_bytes"],
+                        hash_bytes=metadata["hash_bytes"],
+                    )
                     _require_existing_artifact(
                         row,
                         task_id=task_id,
@@ -1037,6 +2198,9 @@ def _persist_evidence(
                         canonical=canonical,
                         content_hash=artifact_hash,
                         provenance=provenance,
+                        persisted_provenance_json=(
+                            persisted_provenance_json
+                        ),
                     )
                     uow.rollback()
                     reused = True
@@ -1190,6 +2354,10 @@ def _validate_provenance(value: object) -> dict[str, Any]:
         )
     for field in ("task_id", "evidence_id", "partition"):
         _text(obj[field], f"validation provenance.{field}")
+    if obj["partition"] not in {"validation", "oot"}:
+        raise StrategyError(
+            "Strategy Pool validation provenance partition is invalid"
+        )
     _hash(
         obj["evidence_content_hash"],
         "validation provenance.evidence_content_hash",
@@ -1204,6 +2372,86 @@ def _validate_provenance(value: object) -> dict[str, Any]:
     ):
         raise StrategyError(
             "Strategy Pool validation provenance lifecycle changed"
+        )
+    pool_ref = _json_object(
+        obj["pool_ref"],
+        "Strategy Pool validation provenance.pool_ref",
+    )
+    _exact_fields(
+        pool_ref,
+        _POOL_PROVENANCE_REF_FIELDS,
+        "Strategy Pool validation provenance.pool_ref",
+    )
+    for field in (
+        "artifact_id",
+        "expected_artifact_content_hash",
+        "expected_snapshot_hash",
+    ):
+        _hash(pool_ref[field], f"validation provenance.pool_ref.{field}")
+    for field in ("expected_pool_id", "pool_id"):
+        pool_id = _text(
+            pool_ref[field],
+            f"validation provenance.pool_ref.{field}",
+        )
+        if _POOL_ID_RE.fullmatch(pool_id) is None:
+            raise StrategyError(
+                f"validation provenance.pool_ref.{field} is invalid"
+            )
+    for field in ("expected_revision_id", "revision_id"):
+        revision_id = _text(
+            pool_ref[field],
+            f"validation provenance.pool_ref.{field}",
+        )
+        if _POOL_REVISION_ID_RE.fullmatch(revision_id) is None:
+            raise StrategyError(
+                f"validation provenance.pool_ref.{field} is invalid"
+            )
+    _positive_int(
+        pool_ref["expected_revision"],
+        "validation provenance.pool_ref.expected_revision",
+    )
+    _validate_sample_design_ref(obj["sample_design_ref"])
+    dataset = _json_object(
+        obj["dataset_binding"],
+        "Strategy Pool validation provenance.dataset_binding",
+    )
+    _exact_fields(
+        dataset,
+        _DATASET_BINDING_FIELDS,
+        "Strategy Pool validation provenance.dataset_binding",
+    )
+    for field in (
+        "dataset_content_hash",
+        "dataset_registry_metadata_hash",
+        "semantic_mapping_hash",
+    ):
+        _hash(dataset[field], f"validation provenance.dataset_binding.{field}")
+    for field in ("task_id", "dataset_id", "dataset_source_path"):
+        _text(dataset[field], f"validation provenance.dataset_binding.{field}")
+    for field in ("workspace_revision", "workspace_generation"):
+        value = dataset[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise StrategyError(
+                f"validation provenance.dataset_binding.{field} "
+                "must be a non-negative integer"
+            )
+    target = _json_object(
+        obj["target_binding"],
+        "Strategy Pool validation provenance.target_binding",
+    )
+    _exact_fields(
+        target,
+        _TARGET_BINDING_FIELDS,
+        "Strategy Pool validation provenance.target_binding",
+    )
+    _text(target["column"], "validation provenance.target_binding.column")
+    if (
+        {target["good_value"], target["bad_value"]} != {0, 1}
+        or target["missing_policy"]
+        != "retain_population_exclude_risk_denominator"
+    ):
+        raise StrategyError(
+            "Strategy Pool validation provenance target binding changed"
         )
     fields = _json_object(
         obj["field_bindings"],
@@ -1279,12 +2527,23 @@ def _prepare_output_directory(
 def _select_artifact_row(conn, *, task_id: str, path: Path):
     return conn.execute(
         """
-        SELECT id, task_id, kind, path, content_hash, origin_tool,
-               provenance_json, created_at
+        SELECT CASE
+                   WHEN length(CAST(id AS BLOB)) = 64 THEN id
+                   ELSE NULL
+               END AS id,
+               origin_tool = ? AS origin_matches,
+               length(CAST(path AS BLOB)) AS path_bytes,
+               length(CAST(content_hash AS BLOB)) AS hash_bytes,
+               length(CAST(provenance_json AS BLOB)) AS provenance_bytes
           FROM task_artifacts
          WHERE task_id = ? AND kind = ? AND path = ?
         """,
-        (task_id, POOL_VALIDATION_ARTIFACT_KIND, str(path)),
+        (
+            POOL_VALIDATION_ORIGIN_TOOL,
+            task_id,
+            POOL_VALIDATION_ARTIFACT_KIND,
+            str(path),
+        ),
     ).fetchone()
 
 
@@ -1296,8 +2555,8 @@ def _require_existing_artifact(
     canonical: bytes,
     content_hash: str,
     provenance: Mapping[str, Any],
+    persisted_provenance_json: str,
 ) -> None:
-    record = {field: row[field] for field in _TASK_ARTIFACT_ROW_FIELDS}
     expected = {
         "task_id": task_id,
         "kind": POOL_VALIDATION_ARTIFACT_KIND,
@@ -1305,7 +2564,7 @@ def _require_existing_artifact(
         "content_hash": content_hash,
         "origin_tool": POOL_VALIDATION_ORIGIN_TOOL,
     }
-    if any(str(record[field]) != value for field, value in expected.items()):
+    if any(str(row[field]) != value for field, value in expected.items()):
         raise StrategyError(
             "existing Strategy Pool validation artifact registry row changed"
         )
@@ -1316,7 +2575,7 @@ def _require_existing_artifact(
         separators=(",", ":"),
         allow_nan=False,
     )
-    if str(record["provenance_json"]) != provenance_json:
+    if persisted_provenance_json != provenance_json:
         raise StrategyError(
             "existing Strategy Pool validation provenance changed"
         )
@@ -1484,6 +2743,31 @@ def _json_object(value: object, name: str) -> dict[str, Any]:
     return normalized
 
 
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _object_without_duplicate_keys(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise StrategyError(f"JSON contains duplicate key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> Any:
+    raise StrategyError(f"JSON contains non-finite constant: {value}")
+
+
 def _exact_fields(
     value: Mapping[str, Any],
     expected: frozenset[str],
@@ -1524,6 +2808,13 @@ __all__ = [
     "POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION",
     "POOL_VALIDATION_ORIGIN_TOOL",
     "POOL_VALIDATION_TOOL_SCHEMA_VERSION",
+    "StrategyPoolValidationArtifactBinding",
+    "authenticate_strategy_pool_validation_artifact_record",
+    "load_latest_strategy_pool_validation_artifacts",
+    "load_strategy_pool_validation_artifacts",
+    "require_strategy_pool_validation_artifact_binding_on_connection",
     "run_measure_strategy_pool_validation",
+    "select_latest_strategy_pool_validation_refs",
+    "validate_strategy_pool_validation_artifact_refs",
     "validate_measure_strategy_pool_validation_tool_output",
 ]

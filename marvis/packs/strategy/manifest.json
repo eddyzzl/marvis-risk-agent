@@ -8717,6 +8717,34 @@
             ],
             "additionalProperties": false
           },
+          "pool_validation_ref": {
+            "type": "object",
+            "properties": {
+              "partition": {
+                "type": "string",
+                "enum": ["validation", "oot"]
+              },
+              "artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_evidence_id": {
+                "type": "string",
+                "pattern": "^strategy-pool-validation-[0-9a-f]{24}$"
+              },
+              "expected_evidence_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "partition",
+              "artifact_id",
+              "expected_artifact_content_hash",
+              "expected_evidence_id",
+              "expected_evidence_content_hash"
+            ],
+            "additionalProperties": false
+          },
           "pool_impact_ref": {
             "type": "object",
             "properties": {
@@ -8947,6 +8975,14 @@
           "candidate_pool_ref": {
             "$ref": "#/$defs/candidate_pool_ref"
           },
+          "pool_validation_refs": {
+            "type": "array",
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/pool_validation_ref"
+            }
+          },
           "pool_impact_ref": {
             "$ref": "#/$defs/pool_impact_ref"
           },
@@ -9003,7 +9039,7 @@
         "type": "object",
         "properties": {
           "schema_version": {
-            "const": "strategy.build-report-bundle-v2-tool.v4"
+            "const": "strategy.build-report-bundle-v2-tool.v5"
           },
           "report_id": {
             "type": "string",

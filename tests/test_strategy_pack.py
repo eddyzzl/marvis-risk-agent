@@ -454,6 +454,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "materialize_automatic_tree_leaf_fragment",
         "revise_interactive_tree",
         "materialize_interactive_tree_frontier_selection",
+        "materialize_interactive_tree_frontier_group_selection",
         "build_voting_candidate",
         "search_voting_candidates",
         "build_voting_candidate_from_search",
@@ -467,6 +468,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "set_pool_entry_action",
         "reorder_strategy_pool",
         "compile_strategy_pool",
+        "apply_strategy_pool",
         "measure_pool_impact",
         "measure_candidate_monthly_stability",
         "measure_strategy_pool_validation",
@@ -507,7 +509,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert delivery_tool.output_schema["additionalProperties"] is False
     report_output_schema = report_bundle_tool.output_schema
     assert report_output_schema["properties"]["schema_version"] == {
-        "const": "strategy.build-report-bundle-v2-tool.v4"
+        "const": "strategy.build-report-bundle-v2-tool.v5"
     }
     report_artifacts = report_output_schema["properties"]["artifacts"]
     assert report_artifacts["minItems"] == 4

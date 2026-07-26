@@ -135,6 +135,20 @@ def _window_runtime(
     )
 
 
+def _pool_validation_ref(
+    seed: str,
+    *,
+    partition: str = "validation",
+) -> dict[str, str]:
+    return {
+        "partition": partition,
+        "artifact_id": seed * 64,
+        "expected_artifact_content_hash": chr(ord(seed) + 1) * 64,
+        "expected_evidence_id": "strategy-pool-validation-" + seed * 24,
+        "expected_evidence_content_hash": chr(ord(seed) + 2) * 64,
+    }
+
+
 def test_report_turn_binds_exact_current_sources_and_first_head(
     tmp_path: Path,
 ) -> None:
@@ -159,6 +173,7 @@ def test_report_turn_binds_exact_current_sources_and_first_head(
     assert slots["impact_cube_ref"] is None
     assert slots["candidate_stability_ref"] is None
     assert slots["voting_candidate_search_ref"] is None
+    assert slots["pool_validation_refs"] == []
     assert slots["report_revision"] == 1
     assert slots["previous_report_id"] is None
     assert slots["previous_report_content_hash"] is None
@@ -243,6 +258,163 @@ def test_report_turn_passes_exact_selected_voting_search_to_preflight(
         "expected_search_id": search.result["search_id"],
         "expected_search_content_hash": search.result["content_hash"],
     }
+
+
+def test_report_turn_binds_exact_pool_validation_refs_and_preflights_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    validation_ref = _pool_validation_ref("1")
+    validation_binding = object()
+    observed: dict[str, object] = {}
+    original_adapter = (
+        turn_handlers.build_strategy_report_bundle_source_inputs
+    )
+
+    def select_refs(runtime, *, task_id, candidate_pool, sample_design):
+        observed["select"] = (
+            runtime,
+            task_id,
+            candidate_pool,
+            sample_design,
+        )
+        return (validation_ref,)
+
+    def load_refs(
+        runtime,
+        *,
+        task_id,
+        refs,
+        candidate_pool,
+        sample_design,
+    ):
+        observed["load"] = (
+            runtime,
+            task_id,
+            refs,
+            candidate_pool,
+            sample_design,
+        )
+        return (validation_binding,)
+
+    def capture_preflight(**kwargs):
+        observed["preflight"] = kwargs.pop("pool_validations")
+        return original_adapter(**kwargs)
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "select_latest_strategy_pool_validation_refs",
+        select_refs,
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "load_strategy_pool_validation_artifacts",
+        load_refs,
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "build_strategy_report_bundle_source_inputs",
+        capture_preflight,
+    )
+
+    slots = _strategy_report_bundle_v2_plan_slots(
+        _runtime(fixture),
+        fixture["task"],
+        _draft(),
+        source_message={"content": "请生成当前审批策略迭代评审报告。"},
+    )
+
+    read_runtime, task_id, candidate_pool, sample_design = observed["select"]
+    assert task_id == fixture["task"].id
+    assert observed["load"] == (
+        read_runtime,
+        task_id,
+        (validation_ref,),
+        candidate_pool,
+        sample_design,
+    )
+    assert observed["preflight"] == (validation_binding,)
+    assert slots["pool_validation_refs"] == [validation_ref]
+
+
+def test_report_turn_pool_validation_selection_is_frozen_in_each_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    validation_ref = _pool_validation_ref("1")
+    later_oot_ref = _pool_validation_ref("4", partition="oot")
+    selected = [(validation_ref,), (validation_ref, later_oot_ref)]
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "select_latest_strategy_pool_validation_refs",
+        lambda *args, **kwargs: selected.pop(0),
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "load_strategy_pool_validation_artifacts",
+        lambda *args, **kwargs: (),
+    )
+
+    planned = _strategy_report_bundle_v2_plan_slots(
+        _runtime(fixture),
+        fixture["task"],
+        _draft(),
+        source_message={"content": "请生成当前审批策略迭代评审报告。"},
+    )
+    frozen = deepcopy(planned)
+    later = _strategy_report_bundle_v2_plan_slots(
+        _runtime(fixture),
+        fixture["task"],
+        _draft(),
+        source_message={"content": "请生成当前审批策略迭代评审报告。"},
+    )
+
+    assert planned == frozen
+    assert planned["pool_validation_refs"] == [validation_ref]
+    assert later["pool_validation_refs"] == [validation_ref, later_oot_ref]
+
+
+def test_report_turn_pool_validation_adapter_incompatibility_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    validation_ref = _pool_validation_ref("1")
+    validation_binding = object()
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "select_latest_strategy_pool_validation_refs",
+        lambda *args, **kwargs: (validation_ref,),
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "load_strategy_pool_validation_artifacts",
+        lambda *args, **kwargs: (validation_binding,),
+    )
+
+    def reject_incompatible(**kwargs):
+        assert kwargs["pool_validations"] == (validation_binding,)
+        raise StrategyError("incompatible Pool validation evidence")
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "build_strategy_report_bundle_source_inputs",
+        reject_incompatible,
+    )
+
+    with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
+        _strategy_report_bundle_v2_plan_slots(
+            _runtime(fixture),
+            fixture["task"],
+            _draft(),
+            source_message={"content": "请生成当前审批策略迭代评审报告。"},
+        )
+
+    assert raised.value.code == "strategy_report_bundle_v2_source_incompatible"
 
 
 def test_report_turn_selects_latest_compatible_candidate_stability(
@@ -425,6 +597,52 @@ def test_report_turn_clarifies_when_both_nonempty_pool_types_exist(
         )
 
     assert raised.value.code == "strategy_report_bundle_v2_pool_type_required"
+
+
+def test_report_turn_explicit_pool_type_ignores_unrelated_corrupt_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    selected = {
+        "entries": [{"entry_id": "approval-entry"}],
+        "revision": 3,
+    }
+    binding = object()
+
+    class _Repository:
+        def __init__(self, db_path: Path) -> None:
+            pass
+
+        def get_current(self, task_id: str, strategy_type: str):
+            calls.append(strategy_type)
+            if strategy_type == "approval":
+                return selected
+            raise RuntimeError(f"unrelated corrupt {strategy_type} pool")
+
+    monkeypatch.setattr(
+        "marvis.agent.turn_handlers.StrategyCandidatePoolRepository",
+        _Repository,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.turn_handlers.strategy_pool_snapshot_hash",
+        lambda pool: "a" * 64,
+    )
+    monkeypatch.setattr(
+        "marvis.agent.turn_handlers.load_current_strategy_candidate_pool_artifact",
+        lambda *args, **kwargs: binding,
+    )
+
+    result = _strategy_report_current_pool_binding(
+        SimpleNamespace(
+            settings=SimpleNamespace(db_path=tmp_path / "db.sqlite")
+        ),
+        task_id="task-1",
+        requested_type="approval",
+    )
+
+    assert result is binding
+    assert calls == ["approval"]
 
 
 def test_report_turn_clarifies_for_missing_context_sample_pool_or_impact(

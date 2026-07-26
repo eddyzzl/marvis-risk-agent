@@ -31,6 +31,7 @@ def _report_slots(
     *,
     candidate_stability_ref: dict | None,
     voting_candidate_search_ref: dict | None = None,
+    pool_validation_refs: list[dict] | None = None,
 ) -> dict[str, object]:
     return {
         "title": "策略迭代评审报告",
@@ -66,6 +67,9 @@ def _report_slots(
         },
         "candidate_stability_ref": candidate_stability_ref,
         "voting_candidate_search_ref": voting_candidate_search_ref,
+        "pool_validation_refs": (
+            [] if pool_validation_refs is None else pool_validation_refs
+        ),
         "report_revision": 1,
         "generated_at": "2026-07-25T00:00:00Z",
     }
@@ -107,6 +111,7 @@ def test_report_bundle_exposes_only_title_and_status_as_user_slots() -> None:
         "impact_cube_ref",
         "candidate_stability_ref",
         "voting_candidate_search_ref",
+        "pool_validation_refs",
         "report_revision",
         "previous_report_id",
         "previous_report_content_hash",
@@ -117,6 +122,9 @@ def test_report_bundle_exposes_only_title_and_status_as_user_slots() -> None:
         "score_evidence_ref",
     }
     assert set(template.steps[0].inputs_template) == set(slot_sources)
+    assert "pool_validation_refs" not in {
+        name for name, source in slot_sources.items() if source == "user"
+    }
     assert not {
         "metrics",
         "strategy_spec",

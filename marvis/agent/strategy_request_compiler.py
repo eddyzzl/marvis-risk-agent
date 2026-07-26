@@ -87,6 +87,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_pool_reorder",
     "strategy_pool_compile",
     "strategy_pool_apply",
+    "strategy_pool_validation",
     "strategy_pool_impact",
     "strategy_impact_cube",
     "strategy_dsl_delivery",
@@ -1774,6 +1775,9 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
 )
 _STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
 _STRATEGY_POOL_APPLY_WORKFLOWS = frozenset({"strategy_pool_apply"})
+_STRATEGY_POOL_VALIDATION_WORKFLOWS = frozenset(
+    {"strategy_pool_validation"}
+)
 _POOL_MUTATION_WORKFLOWS = _STRATEGY_POOL_WORKFLOWS - {"strategy_pool_compile"}
 _POOL_ACTION_TYPES = {
     "approval": frozenset({"approval", "reject", "review"}),
@@ -1901,6 +1905,95 @@ _POOL_APPLY_OUTPUT_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _POOL_APPLY_SAFE_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,47}$")
+_POOL_VALIDATION_TARGET_RE = re.compile(
+    r"(?=.*(?:策略池|规则池|strategy(?:\s|-|_)*pool|\bpool\b))"
+    r"(?:(?=.*(?:独立样本|独立回放|回放验证|独立验证|"
+    r"independent(?:ly)?\s+(?:(?:sample\s+)?replay|validat(?:e|ed|ion))|"
+    r"replay\s+validation))|"
+    r"(?=.*(?:验证集|验证样本|验证分区|时间外样本|时间外验证|时间外分区|"
+    r"(?<![A-Za-z0-9_])(?:validation|oot)(?![A-Za-z0-9_])))"
+    r"(?=.*(?:验证|回放|(?<![A-Za-z0-9_])(?:validate|replay)"
+    r"(?![A-Za-z0-9_]))))",
+    re.IGNORECASE,
+)
+_POOL_VALIDATION_POSITIVE_INTENT_RE = re.compile(
+    r"(?:执行|运行|开展|进行|做|验证|回放)"
+    r"[^；;。.!?？\n]{0,160}(?:独立样本|独立回放|回放验证|策略池|规则池)|"
+    r"(?:独立样本|独立回放|回放验证|策略池|规则池)"
+    r"[^；;。.!?？\n]{0,160}(?:执行|运行|开展|进行|验证|回放)|"
+    r"(?<![A-Za-z0-9_])(?:run|perform|execute|validate|replay)"
+    r"[^;.!?\n]{0,160}(?:independent|replay|validation|oot|pool)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_VALIDATION_NONCURRENT_RE = re.compile(
+    r"[?？]|(?:吗|呢)\s*$|(?:不要|不用|无需|先别|先不|暂不|取消|停止|禁止|"
+    r"能否|可否|是否|可以吗|能不能|可不可以|该不该|要不要|需不需要|"
+    r"如何|怎么|怎样|假设|假如|如果|"
+    r"以后|未来|将来|稍后|晚点|回头|等会儿|待会儿|一会儿|"
+    r"明天|明早|今晚|后天|下次|下周|下月|下个月|月底|届时|"
+    r"之前|此前|过去|上次|上一版|上个版本|历史上|曾经|曾|做过|"
+    r"已完成)|"
+    r"(?:执行|运行|开展|进行|做|验证|回放|完成)(?:了|过)|"
+    r"(?:等|待|样本|数据|材料|审核|审批|评审|确认)"
+    r"[^；;。.!?？\n]{0,24}(?:后|之后)|"
+    r"已经[^；;。.!?？\n]{0,80}(?:完成|做过|验证过|回放过)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cancel|can\s+(?:you|we)|"
+    r"could\s+(?:you|we)|would\s+you|should\s+(?:we|i)|"
+    r"do\s+we\s+need(?:\s+to)?|"
+    r"is\s+it\s+possible|"
+    r"tell\s+me\s+whether|how\s+to|what\s+if|later|previously|"
+    r"in\s+the\s+future|tomorrow|next\s+time)(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])(?:was|has\s+been)\b"
+    r"[^;.!?\n]{0,80}\b(?:validated|replayed|completed)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_VALIDATION_SECOND_OPERATION_RE = re.compile(
+    r"(?:加入|添加|入池|删除|移除|改动作|修改动作|重排|排序|编译|"
+    r"修改策略池|应用|写回|回写|回填|打标|生成报告|形成报告|出报告|"
+    r"采纳|采用|晋级|提升为|部署|上线|投产|生效|激活|切换)|"
+    r"(?<![A-Za-z0-9_])(?:add|insert|remove|delete|reorder|compile|"
+    r"apply|write[-\s]*back|report|adopt|promote|deploy|activate|switch)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_VALIDATION_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:pool_ref|sample_design_ref|population|"
+    r"comparison_mode|expected_pool_revision|expected_pool_snapshot_hash|"
+    r"pool_(?:id|artifact_id)|artifact_(?:id|hash)|"
+    r"dataset_(?:id|content_hash)|workspace_revision|target_col|"
+    r"requirements(?:_hash)?|metrics?|validation_status)"
+    r"(?![A-Za-z0-9_])|"
+    r"(?:Pool|策略池|数据集|dataset|artifact|工件|产物)"
+    r"\s*(?:hash|哈希|revision|版本)",
+    re.IGNORECASE,
+)
+_POOL_VALIDATION_EVIDENCE_SCOPE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:psi|stability|drift)(?![A-Za-z0-9_])|"
+    r"(?:稳定性|漂移)",
+    re.IGNORECASE,
+)
+_POOL_VALIDATION_PARTITION_GROUNDING = {
+    "validation": re.compile(
+        r"(?:验证集|验证样本|验证分区)|"
+        r"(?:(?<![A-Za-z0-9_])(?:on|in)\s+validation"
+        r"(?![A-Za-z0-9_])|"
+        r"(?<![A-Za-z0-9_])validation"
+        r"(?=\s*(?:上|中|里|partition|sample|set|独立样本|独立回放)))",
+        re.IGNORECASE,
+    ),
+    "oot": re.compile(
+        r"(?:时间外样本|时间外验证|时间外分区)|"
+        r"(?<![A-Za-z0-9_])oot(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    "development": re.compile(
+        r"(?:开发集|开发样本|开发分区)|"
+        r"(?<![A-Za-z0-9_])development(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+}
 _POOL_IMPACT_TARGET_RE = re.compile(
     r"(?=.*(?:策略池|规则池|strategy(?:\s|-|_)*pool|\bpool\b))"
     r"(?=.*(?:影响|效果|瀑布|逐月|通过率|坏账率|风险率|测算|评估|回测|"
@@ -3653,6 +3746,8 @@ def _validate_standard_workflow_payload(
             )
         elif workflow in _STRATEGY_POOL_APPLY_WORKFLOWS:
             normalized = _validate_strategy_pool_apply_inputs(raw_inputs)
+        elif workflow in _STRATEGY_POOL_VALIDATION_WORKFLOWS:
+            normalized = _validate_strategy_pool_validation_inputs(raw_inputs)
         elif workflow in _STRATEGY_POOL_WORKFLOWS:
             normalized = _validate_strategy_pool_workflow_inputs(
                 workflow,
@@ -6604,6 +6699,49 @@ def _validate_strategy_pool_apply_inputs(
     return normalized
 
 
+def _validate_strategy_pool_validation_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the only two user-owned independent replay controls."""
+
+    workflow = "strategy_pool_validation"
+    _reject_workflow_fields(
+        inputs,
+        {"strategy_type", "partition"},
+        workflow=workflow,
+    )
+    missing = [
+        field
+        for field in ("strategy_type", "partition")
+        if field not in inputs
+    ]
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少 " + "、".join(missing) + "。"
+        )
+    strategy_type = _required_text(
+        inputs["strategy_type"],
+        name=f"{workflow} strategy_type",
+    )
+    if strategy_type not in {"approval", "reject"}:
+        raise _DraftValidationError(
+            f"{workflow} strategy_type 只能是 approval 或 reject。"
+        )
+    partition = _required_text(
+        inputs["partition"],
+        name=f"{workflow} partition",
+    )
+    if partition not in {"validation", "oot"}:
+        raise _DraftValidationError(
+            f"{workflow} partition 只能是 validation 或 oot；"
+            "development 不是独立样本回放验证。"
+        )
+    return {
+        "strategy_type": strategy_type,
+        "partition": partition,
+    }
+
+
 def _validate_strategy_pool_impact_inputs(
     inputs: Mapping[str, Any],
     whitelist: tuple[str, ...],
@@ -8236,6 +8374,17 @@ def _ground_refinement_request(
             code="strategy_pool_apply_workflow_required",
             fields=("workflow",),
         )
+    if _utterance_targets_strategy_pool_validation(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_pool_validation"
+    ):
+        return _clarification(
+            "原话明确要求对当前 Strategy Pool 执行 validation/OOT 独立样本"
+            "回放验证，只能编译为 strategy_pool_validation；不能改路由到"
+            " Pool 影响、逐月稳定性、编译、应用、报告或生命周期操作。",
+            code="strategy_pool_validation_workflow_required",
+            fields=("workflow",),
+        )
     if utterance_targets_strategy_impact_cube(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_impact_cube"
@@ -8351,6 +8500,8 @@ def _ground_refinement_request(
         )
     if draft.workflow in _STRATEGY_POOL_APPLY_WORKFLOWS:
         return _ground_strategy_pool_apply_request(utterance, result)
+    if draft.workflow in _STRATEGY_POOL_VALIDATION_WORKFLOWS:
+        return _ground_strategy_pool_validation_request(utterance, result)
     if draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS:
         return _ground_strategy_pool_impact_request(
             utterance,
@@ -10667,6 +10818,12 @@ def _utterance_targets_strategy_pool_apply(utterance: str) -> bool:
     return _POOL_APPLY_TARGET_RE.search(utterance) is not None
 
 
+def _utterance_targets_strategy_pool_validation(utterance: str) -> bool:
+    """Reserve explicit independent validation/OOT Pool replay clauses."""
+
+    return _POOL_VALIDATION_TARGET_RE.search(utterance) is not None
+
+
 def _utterance_targets_strategy_pool_impact(utterance: str) -> bool:
     if _POOL_IMPACT_TARGET_RE.search(utterance) is None:
         return False
@@ -10783,6 +10940,90 @@ def _ground_strategy_pool_apply_request(
             + "。平台不会替用户猜测 Pool、前缀或任何数据/证据绑定。",
             code="strategy_pool_apply_controls_not_grounded",
             fields=tuple(missing_controls),
+        )
+    return result
+
+
+def _ground_strategy_pool_validation_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Prove Pool type and one independent partition came from this command."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if (
+        _POOL_VALIDATION_NONCURRENT_RE.search(utterance) is not None
+        or _POOL_VALIDATION_POSITIVE_INTENT_RE.search(utterance) is None
+        or _POOL_VALIDATION_TARGET_RE.search(utterance) is None
+    ):
+        return _clarification(
+            "请用当前轮、肯定式的单一命令明确要求对一个 approval/reject "
+            "Strategy Pool 执行 validation 或 OOT 独立样本回放验证；"
+            "否定、问句、历史/未来或假设描述不会执行。",
+            code="strategy_pool_validation_positive_command_required",
+            fields=("validation_intent",),
+        )
+    if _POOL_VALIDATION_PLATFORM_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "Pool/SampleDesign artifact、revision/hash、dataset/workspace、"
+            "target、requirements、population、comparison_mode、指标与状态"
+            "只能由平台恢复；请求中只能提供 Pool 类型和 validation/OOT 分区。",
+            code="strategy_pool_validation_platform_binding_forbidden",
+            fields=("platform_binding",),
+        )
+    if _POOL_VALIDATION_EVIDENCE_SCOPE_RE.search(utterance) is not None:
+        return _clarification(
+            "独立样本回放验证只发布实际 validation/OOT 动作、风险、金额和逐月"
+            "回放证据，不计算或声称 PSI、稳定性或漂移；这些必须使用单独的"
+            "稳定性 Workflow。",
+            code="strategy_pool_validation_evidence_scope_forbidden",
+            fields=("evidence_scope",),
+        )
+    if _POOL_VALIDATION_SECOND_OPERATION_RE.search(utterance) is not None:
+        return _clarification(
+            "Strategy Pool 独立样本回放验证必须是当前轮唯一操作；改 Pool、"
+            "应用写回、报告、晋级、采纳或部署必须拆成后续请求。",
+            code="strategy_pool_validation_single_operation_required",
+            fields=("workflow",),
+        )
+
+    missing_controls: list[str] = []
+    strategy_type = str(inputs.get("strategy_type") or "")
+    mentioned_types = {
+        item[0] for item in _voting_strategy_type_mentions(utterance)
+    }
+    type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    if (
+        type_pattern is None
+        or type_pattern.search(utterance) is None
+        or mentioned_types != {strategy_type}
+    ):
+        missing_controls.append(f"strategy_type {strategy_type or 'unknown'}")
+
+    partition = str(inputs.get("partition") or "")
+    mentioned_partitions = {
+        name
+        for name, pattern in _POOL_VALIDATION_PARTITION_GROUNDING.items()
+        if pattern.search(utterance) is not None
+    }
+    partition_pattern = _POOL_VALIDATION_PARTITION_GROUNDING.get(partition)
+    if (
+        partition_pattern is None
+        or partition_pattern.search(utterance) is None
+        or mentioned_partitions != {partition}
+    ):
+        missing_controls.append(f"partition {partition or 'unknown'}")
+
+    if missing_controls:
+        return _clarification(
+            "独立样本回放验证只能采用原话中唯一明确的 approval/reject Pool "
+            "类型和一个 validation/OOT 分区；当前无法核对："
+            + "、".join(dict.fromkeys(missing_controls))
+            + "。平台不会猜测类型、分区或证据绑定。",
+            code="strategy_pool_validation_controls_not_grounded",
+            fields=tuple(dict.fromkeys(missing_controls)),
         )
     return result
 
@@ -15201,6 +15442,18 @@ def _standard_workflow_confirmation_text(
                 else "由受控 Tool 使用默认前缀"
             )
         )
+    elif draft.workflow == "strategy_pool_validation":
+        details = [
+            "已识别为〔Strategy Pool 独立样本回放验证 Workflow〕",
+            f"策略类型：{inputs['strategy_type']}",
+            f"独立样本分区：{inputs['partition']}",
+            "平台将在计划创建时恢复当前非空 Pool、精确且成熟的 "
+            "StrategySampleDesign V2 membership/bundle、数据/目标/语义与"
+            " requirements，并由确定性 Tool 重新认证",
+            "结果是 independent replay evidence，只展示实际分区的动作、风险、"
+            "金额和逐月证据；不声称 PSI、稳定性或漂移",
+            "本步骤不会修改 Pool，不创建策略，也不晋级、不采纳、不部署",
+        ]
     elif draft.workflow == "strategy_impact_cube":
         details = [
             "已识别为〔统一 Strategy ImpactCube Workflow〕",
@@ -15905,6 +16158,15 @@ def _user_prompt(
         "metrics、conditions 或 strategy_spec。用户未指定月份/金额列时必须省略，平台只会"
         "使用唯一确认的语义角色；没有角色则 unavailable，多个角色则澄清，Agent 不得猜列。"
         "limit/pricing/segmentation、否定/问句/历史/仅报告或同轮修改/采纳/部署必须澄清。"
+        "对于 strategy_pool_validation，只能逐字抄录用户当前肯定命令中唯一"
+        "明确的 approval/reject strategy_type 和 validation/oot partition。"
+        "Pool ref/revision/hash/artifact、SampleDesign membership/bundle/ref、"
+        "dataset/workspace/target、requirements、population、comparison_mode、"
+        "指标、月份、状态与结果全部禁止填写，由平台在计划创建和 Tool 执行时恢复。"
+        "development、limit/pricing/segmentation、缺少或多个类型/分区、问句、"
+        "否定、历史/未来/假设，或同轮修改 Pool、应用、报告、晋级、采纳、部署"
+        "必须 clarification。它只发布 independent replay evidence，不得声称 "
+        "PSI、stability 或 drift，也不会修改 Pool、创建、晋级、采纳或部署策略。"
         "对于 strategy_pool_apply，只能抄录用户当前肯定命令中唯一明确的五类 "
         "strategy_type，以及用户以“输出前缀/output_prefix/output prefix/prefix”"
         "显式标注的可选 ASCII identifier output_prefix；未提供时必须省略并由 Tool"

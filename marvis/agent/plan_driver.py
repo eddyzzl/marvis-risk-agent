@@ -17,6 +17,7 @@ testable offline.
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 
 from marvis.agent.driver_turn import DriverMessage, DriverTurn
@@ -188,6 +189,11 @@ class PlanDriver:
             load_output=self._safe_output,
             load_task_artifact=(
                 artifact_repo.get_for_task if artifact_repo is not None else None
+            ),
+            tasks_root=(
+                Path(self._repo.db_path).parent / "tasks"
+                if artifact_repo is not None
+                else None
             ),
             latest_failed_step_run_error_kind=self._latest_failed_step_run_error_kind,
         )

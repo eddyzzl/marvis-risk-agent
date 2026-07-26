@@ -36,7 +36,13 @@ from marvis.packs.strategy.pool_validation_tools import (
     POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION,
     POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION,
     POOL_VALIDATION_TOOL_SCHEMA_VERSION,
+    StrategyPoolValidationArtifactBinding,
+    authenticate_strategy_pool_validation_artifact_record,
+    load_latest_strategy_pool_validation_artifacts,
+    load_strategy_pool_validation_artifacts,
+    require_strategy_pool_validation_artifact_binding_on_connection,
     run_measure_strategy_pool_validation,
+    select_latest_strategy_pool_validation_refs,
     validate_measure_strategy_pool_validation_tool_output,
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
@@ -213,6 +219,535 @@ def _validation_artifacts(fx: dict) -> list[dict]:
     ]
 
 
+def test_latest_pool_validation_loader_authenticates_each_available_partition(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    expected = {
+        partition: run_measure_strategy_pool_validation(
+            {**fx["validation_request"], "partition": partition},
+            fx["ctx"],
+            fx["runtime"],
+        )
+        for partition in ("validation", "oot")
+    }
+    pool = validation_tools._load_pool_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+    sample = validation_tools._load_sample_design_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+
+    bindings = load_latest_strategy_pool_validation_artifacts(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        candidate_pool=pool,
+        sample_design=sample,
+    )
+
+    assert tuple(binding.evidence["partition"] for binding in bindings) == (
+        "validation",
+        "oot",
+    )
+    assert all(
+        isinstance(binding, StrategyPoolValidationArtifactBinding)
+        for binding in bindings
+    )
+    assert {
+        binding.evidence["partition"]: binding.artifact_id
+        for binding in bindings
+    } == {
+        partition: output["artifact"]["artifact_id"]
+        for partition, output in expected.items()
+    }
+    with fx["runtime"].task_artifacts.transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for binding in bindings:
+            require_strategy_pool_validation_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+        conn.commit()
+
+
+def test_pool_validation_selector_refs_round_trip_through_exact_loader(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    expected = {
+        partition: run_measure_strategy_pool_validation(
+            {**fx["validation_request"], "partition": partition},
+            fx["ctx"],
+            fx["runtime"],
+        )
+        for partition in ("validation", "oot")
+    }
+    pool = validation_tools._load_pool_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+    sample = validation_tools._load_sample_design_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+
+    refs = select_latest_strategy_pool_validation_refs(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        candidate_pool=pool,
+        sample_design=sample,
+    )
+    bindings = load_strategy_pool_validation_artifacts(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        refs=refs,
+        candidate_pool=pool,
+        sample_design=sample,
+    )
+
+    assert refs == tuple(
+        {
+            "partition": partition,
+            "artifact_id": expected[partition]["artifact"]["artifact_id"],
+            "expected_artifact_content_hash": expected[partition]["artifact"][
+                "content_hash"
+            ],
+            "expected_evidence_id": expected[partition]["evidence_id"],
+            "expected_evidence_content_hash": expected[partition][
+                "content_hash"
+            ],
+        }
+        for partition in ("validation", "oot")
+    )
+    assert tuple(
+        binding.artifact_id for binding in bindings
+    ) == tuple(ref["artifact_id"] for ref in refs)
+
+
+def test_pool_validation_record_authenticator_proves_registry_file_and_evidence(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    output = run_measure_strategy_pool_validation(
+        fx["validation_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    record = _validation_artifacts(fx)[0]
+
+    assert authenticate_strategy_pool_validation_artifact_record(
+        task_id=fx["task"].id,
+        record=record,
+        evidence=output["evidence"],
+        tasks_root=fx["settings"].tasks_dir,
+    ) == output["evidence"]
+
+    forged = {**record, "id": "f" * 64}
+    with pytest.raises(StrategyError, match="stable id"):
+        authenticate_strategy_pool_validation_artifact_record(
+            task_id=fx["task"].id,
+            record=forged,
+            evidence=output["evidence"],
+            tasks_root=fx["settings"].tasks_dir,
+        )
+
+    oversized_path = {
+        **record,
+        "path": "x" * (validation_tools._MAX_REGISTRY_PATH_BYTES + 1),
+    }
+    with pytest.raises(StrategyError, match="path exceeds byte budget"):
+        authenticate_strategy_pool_validation_artifact_record(
+            task_id=fx["task"].id,
+            record=oversized_path,
+            evidence=output["evidence"],
+            tasks_root=fx["settings"].tasks_dir,
+        )
+
+
+def test_latest_pool_validation_loader_does_not_fallback_from_damaged_compatible_row(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    run_measure_strategy_pool_validation(
+        fx["validation_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    original = _validation_artifacts(fx)[0]
+    original_path = Path(original["path"])
+    damaged_path = original_path.parent / "newer-compatible-copy.json"
+    damaged_path.write_bytes(original_path.read_bytes())
+    TaskArtifactRepository(fx["settings"].db_path).register(
+        task_id=fx["task"].id,
+        kind=POOL_VALIDATION_ARTIFACT_KIND,
+        path=str(damaged_path),
+        content_hash=original["content_hash"],
+        origin_tool=original["origin_tool"],
+        provenance=original["provenance"],
+        created_at="9999-12-31T23:59:59+00:00",
+    )
+    pool = validation_tools._load_pool_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+    sample = validation_tools._load_sample_design_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+
+    with pytest.raises(StrategyError, match="path is not canonical"):
+        load_latest_strategy_pool_validation_artifacts(
+            fx["runtime"],
+            task_id=fx["task"].id,
+            candidate_pool=pool,
+            sample_design=sample,
+        )
+
+
+def test_pool_validation_loaders_reject_oversized_registry_provenance_before_parse(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    output = run_measure_strategy_pool_validation(
+        fx["validation_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    original = _validation_artifacts(fx)[0]
+    oversized = copy.deepcopy(original["provenance"])
+    oversized["task_id"] = "x" * (
+        validation_tools._MAX_PROVENANCE_BYTES + 1
+    )
+    oversized_path = Path(original["path"]).parent / "oversized-provenance.json"
+    oversized_path.write_bytes(Path(original["path"]).read_bytes())
+    record = TaskArtifactRepository(fx["settings"].db_path).register(
+        task_id=fx["task"].id,
+        kind=POOL_VALIDATION_ARTIFACT_KIND,
+        path=str(oversized_path),
+        content_hash=original["content_hash"],
+        origin_tool=original["origin_tool"],
+        provenance=oversized,
+        created_at="9999-12-31T23:59:59+00:00",
+    )
+    pool = validation_tools._load_pool_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+    sample = validation_tools._load_sample_design_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+
+    with pytest.raises(StrategyError, match="provenance exceeds byte budget"):
+        select_latest_strategy_pool_validation_refs(
+            fx["runtime"],
+            task_id=fx["task"].id,
+            candidate_pool=pool,
+            sample_design=sample,
+        )
+    with pytest.raises(StrategyError, match="provenance exceeds byte budget"):
+        load_strategy_pool_validation_artifacts(
+            fx["runtime"],
+            task_id=fx["task"].id,
+            refs=(
+                {
+                    "partition": "validation",
+                    "artifact_id": record["id"],
+                    "expected_artifact_content_hash": original[
+                        "content_hash"
+                    ],
+                    "expected_evidence_id": output["evidence_id"],
+                    "expected_evidence_content_hash": output["content_hash"],
+                },
+            ),
+            candidate_pool=pool,
+            sample_design=sample,
+        )
+
+
+def test_pool_validation_loaders_reject_oversized_registry_path_before_read(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    output = run_measure_strategy_pool_validation(
+        fx["validation_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    original = _validation_artifacts(fx)[0]
+    oversized_path = "x" * (
+        validation_tools._MAX_REGISTRY_PATH_BYTES + 1
+    )
+    record = TaskArtifactRepository(fx["settings"].db_path).register(
+        task_id=fx["task"].id,
+        kind=POOL_VALIDATION_ARTIFACT_KIND,
+        path=oversized_path,
+        content_hash=original["content_hash"],
+        origin_tool=original["origin_tool"],
+        provenance=original["provenance"],
+        created_at="9999-12-31T23:59:59+00:00",
+    )
+    pool = validation_tools._load_pool_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+    sample = validation_tools._load_sample_design_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+
+    with pytest.raises(StrategyError, match="path exceeds byte budget"):
+        select_latest_strategy_pool_validation_refs(
+            fx["runtime"],
+            task_id=fx["task"].id,
+            candidate_pool=pool,
+            sample_design=sample,
+        )
+    with pytest.raises(StrategyError, match="path exceeds byte budget"):
+        load_strategy_pool_validation_artifacts(
+            fx["runtime"],
+            task_id=fx["task"].id,
+            refs=(
+                {
+                    "partition": "validation",
+                    "artifact_id": record["id"],
+                    "expected_artifact_content_hash": original[
+                        "content_hash"
+                    ],
+                    "expected_evidence_id": output["evidence_id"],
+                    "expected_evidence_content_hash": output["content_hash"],
+                },
+            ),
+            candidate_pool=pool,
+            sample_design=sample,
+        )
+
+
+def test_pool_validation_binding_reauthentication_bounds_registry_path(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    run_measure_strategy_pool_validation(
+        fx["validation_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    pool = validation_tools._load_pool_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+    sample = validation_tools._load_sample_design_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+    binding = load_latest_strategy_pool_validation_artifacts(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        candidate_pool=pool,
+        sample_design=sample,
+    )[0]
+    oversized_path = "x" * (
+        validation_tools._MAX_REGISTRY_PATH_BYTES + 1
+    )
+    with sqlite3.connect(fx["settings"].db_path) as conn:
+        conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+        conn.execute(
+            "UPDATE task_artifacts SET path = ? WHERE id = ?",
+            (oversized_path, binding.artifact_id),
+        )
+
+    with fx["runtime"].task_artifacts.transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(StrategyError, match="path exceeds byte budget"):
+            require_strategy_pool_validation_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+
+
+def test_measure_pool_validation_rejects_provenance_over_publish_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    monkeypatch.setattr(validation_tools, "_MAX_PROVENANCE_BYTES", 64)
+
+    with pytest.raises(StrategyError, match="provenance exceeds byte budget"):
+        run_measure_strategy_pool_validation(
+            fx["validation_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert _validation_artifacts(fx) == []
+    output_dir = (
+        Path(fx["settings"].tasks_dir)
+        / fx["task"].id
+        / "strategy_pool_validations"
+    )
+    assert not output_dir.exists()
+
+
+def test_measure_pool_validation_exact_retry_bounds_persisted_provenance(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    run_measure_strategy_pool_validation(
+        fx["validation_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    original = _validation_artifacts(fx)[0]
+    oversized = copy.deepcopy(original["provenance"])
+    oversized["task_id"] = "x" * (
+        validation_tools._MAX_PROVENANCE_BYTES + 1
+    )
+    oversized_json = json.dumps(
+        oversized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    with sqlite3.connect(fx["settings"].db_path) as conn:
+        conn.execute("DROP TRIGGER trg_task_artifacts_immutable_update")
+        conn.execute(
+            "UPDATE task_artifacts SET provenance_json = ? WHERE id = ?",
+            (oversized_json, original["id"]),
+        )
+
+    with pytest.raises(StrategyError, match="provenance exceeds byte budget"):
+        run_measure_strategy_pool_validation(
+            fx["validation_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+
+def test_latest_pool_validation_selector_stops_after_both_newest_partitions(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    expected = {
+        partition: run_measure_strategy_pool_validation(
+            {**fx["validation_request"], "partition": partition},
+            fx["ctx"],
+            fx["runtime"],
+        )
+        for partition in ("validation", "oot")
+    }
+    original = _validation_artifacts(fx)[0]
+    oversized = copy.deepcopy(original["provenance"])
+    oversized["task_id"] = "x" * (
+        validation_tools._MAX_PROVENANCE_BYTES + 1
+    )
+    old_path = Path(original["path"]).parent / "old-oversized-provenance.json"
+    old_path.write_bytes(Path(original["path"]).read_bytes())
+    TaskArtifactRepository(fx["settings"].db_path).register(
+        task_id=fx["task"].id,
+        kind=POOL_VALIDATION_ARTIFACT_KIND,
+        path=str(old_path),
+        content_hash=original["content_hash"],
+        origin_tool=original["origin_tool"],
+        provenance=oversized,
+        created_at="0001-01-01T00:00:00+00:00",
+    )
+    pool = validation_tools._load_pool_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+    sample = validation_tools._load_sample_design_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+
+    refs = select_latest_strategy_pool_validation_refs(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        candidate_pool=pool,
+        sample_design=sample,
+    )
+
+    assert refs == tuple(
+        {
+            "partition": partition,
+            "artifact_id": expected[partition]["artifact"]["artifact_id"],
+            "expected_artifact_content_hash": expected[partition]["artifact"][
+                "content_hash"
+            ],
+            "expected_evidence_id": expected[partition]["evidence_id"],
+            "expected_evidence_content_hash": expected[partition][
+                "content_hash"
+            ],
+        }
+        for partition in ("validation", "oot")
+    )
+
+
+def test_latest_pool_validation_selector_fails_closed_beyond_history_window(
+    tmp_path: Path,
+) -> None:
+    fx = _setup(tmp_path)
+    run_measure_strategy_pool_validation(
+        fx["validation_request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    original = _validation_artifacts(fx)[0]
+    repository = TaskArtifactRepository(fx["settings"].db_path)
+    with repository.transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for index in range(64):
+            repository.register_on_connection(
+                conn,
+                task_id=fx["task"].id,
+                kind=POOL_VALIDATION_ARTIFACT_KIND,
+                path=f"/untrusted/history-{index}.json",
+                content_hash=original["content_hash"],
+                origin_tool=original["origin_tool"],
+                provenance=original["provenance"],
+                created_at=(
+                    "9999-12-31T22:"
+                    f"{index // 60:02d}:{index % 60:02d}+00:00"
+                ),
+            )
+        conn.commit()
+    pool = validation_tools._load_pool_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+    sample = validation_tools._load_sample_design_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+
+    with pytest.raises(StrategyError, match="history exceeds discovery budget"):
+        select_latest_strategy_pool_validation_refs(
+            fx["runtime"],
+            task_id=fx["task"].id,
+            candidate_pool=pool,
+            sample_design=sample,
+        )
+
+
 def _controlled_score_requirement(
     *,
     pool_binding,
@@ -327,6 +862,16 @@ def test_measure_pool_validation_hydrates_score_requirement_before_partition_mas
         pool=controlled_binding,
     )
     outer = controlled_binding.compiled_design["requirements"][0]
+    fx["validation_request"]["pool_ref"] = {
+        "artifact_id": controlled_binding.artifact_id,
+        "expected_artifact_content_hash": (
+            controlled_binding.artifact_content_hash
+        ),
+        "expected_pool_id": controlled_binding.pool["pool_id"],
+        "expected_revision": controlled_binding.pool["revision"],
+        "expected_revision_id": controlled_binding.pool["revision_id"],
+        "expected_snapshot_hash": controlled_binding.pool["snapshot_hash"],
+    }
     original_build = validation_tools.build_strategy_pool_validation_evidence
     original_read = validation_tools.pd.read_parquet
     calls = {"hydrate": 0, "cas": 0}
@@ -455,6 +1000,124 @@ def test_measure_pool_validation_hydrates_score_requirement_before_partition_mas
     assert bindings["requirements_hash"] == resolved.requirements_hash
     assert bindings["virtual_fields"] == list(resolved.virtual_fields)
     assert bindings["requirements"] == list(resolved.requirements)
+    sample = validation_tools._load_sample_design_binding(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        request=fx["validation_request"],
+    )
+    refs = select_latest_strategy_pool_validation_refs(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        candidate_pool=controlled_binding,
+        sample_design=sample,
+    )
+    assert len(refs) == 1
+    assert len(
+        load_strategy_pool_validation_artifacts(
+            fx["runtime"],
+            task_id=fx["task"].id,
+            refs=refs,
+            candidate_pool=controlled_binding,
+            sample_design=sample,
+        )
+    ) == 1
+    nested_outer = {
+        "rule_id": outer["rule_id"],
+        "fragment_id": outer["fragment_id"],
+        "requirement": {
+            "entry_id": "voting-entry-1",
+            "rule_id": outer["rule_id"],
+            "fragment_id": outer["fragment_id"],
+            "requirement": outer["requirement"],
+        },
+    }
+    voting_style_binding = replace(
+        controlled_binding,
+        compiled_design={
+            **controlled_binding.compiled_design,
+            "requirements": [nested_outer],
+        },
+    )
+    assert select_latest_strategy_pool_validation_refs(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        candidate_pool=voting_style_binding,
+        sample_design=sample,
+    ) == refs
+    assert len(
+        load_strategy_pool_validation_artifacts(
+            fx["runtime"],
+            task_id=fx["task"].id,
+            refs=refs,
+            candidate_pool=voting_style_binding,
+            sample_design=sample,
+        )
+    ) == 1
+    forged = copy.deepcopy(provenance)
+    forged_requirements = forged["field_bindings"]["requirements"][
+        "requirements"
+    ]
+    forged_requirement = forged_requirements[0]["requirement"]
+    forged_requirement["score_evidence_artifact_id"] = "f" * 64
+    forged_requirement["score_vector_artifact_content_hash"] = "e" * 64
+    forged["field_bindings"]["requirements"]["requirements_hash"] = (
+        hashlib.sha256(
+            json.dumps(
+                forged_requirements,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+    forged_json = json.dumps(
+        forged,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    original_record = _validation_artifacts(fx)[0]
+    forged_path = (
+        Path(original_record["path"]).parent
+        / "forged-requirement-binding.json"
+    )
+    forged_path.write_bytes(Path(original_record["path"]).read_bytes())
+    forged_record = TaskArtifactRepository(
+        fx["settings"].db_path
+    ).register(
+        task_id=fx["task"].id,
+        kind=POOL_VALIDATION_ARTIFACT_KIND,
+        path=str(forged_path),
+        content_hash=original_record["content_hash"],
+        origin_tool=original_record["origin_tool"],
+        provenance=json.loads(forged_json),
+        created_at="9999-12-31T23:59:59+00:00",
+    )
+    forged_ref = {
+        **refs[0],
+        "artifact_id": forged_record["id"],
+    }
+    with pytest.raises(
+        StrategyError,
+        match="requirements differ from the current Candidate Pool",
+    ):
+        select_latest_strategy_pool_validation_refs(
+            fx["runtime"],
+            task_id=fx["task"].id,
+            candidate_pool=controlled_binding,
+            sample_design=sample,
+        )
+    with pytest.raises(
+        StrategyError,
+        match="requirements differ from the current Candidate Pool",
+    ):
+        load_strategy_pool_validation_artifacts(
+            fx["runtime"],
+            task_id=fx["task"].id,
+            refs=(forged_ref,),
+            candidate_pool=controlled_binding,
+            sample_design=sample,
+        )
     forged_v1 = copy.deepcopy(provenance)
     forged_v1["schema_version"] = POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION
     with pytest.raises(StrategyError, match="field bindings|schema"):

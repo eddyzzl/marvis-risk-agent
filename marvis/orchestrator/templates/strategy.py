@@ -2262,6 +2262,79 @@ STRATEGY_POOL_APPLY = WorkflowTemplate(
 )
 
 
+STRATEGY_POOL_VALIDATION = WorkflowTemplate(
+    id="strategy_pool_validation",
+    title="Strategy Pool 独立样本回放验证",
+    goal_patterns=(
+        "对当前策略池执行独立样本回放验证",
+        "在 validation 或 OOT 上回放当前策略池",
+        "independent replay validation for current strategy pool",
+    ),
+    slots=(
+        SlotSpec(
+            "strategy_type",
+            True,
+            "user",
+            "Explicit approval/reject Strategy Pool type",
+        ),
+        SlotSpec(
+            "partition",
+            True,
+            "user",
+            "Explicit independent validation or OOT partition",
+        ),
+        SlotSpec(
+            "pool_ref",
+            True,
+            "task_context",
+            "Authenticated current nonempty Pool artifact and CAS identity",
+        ),
+        SlotSpec(
+            "sample_design_ref",
+            True,
+            "task_context",
+            "Exact mature StrategySampleDesign V2 membership/bundle pair",
+        ),
+        SlotSpec(
+            "population",
+            True,
+            "task_context",
+            "Platform-owned risk population selector",
+        ),
+        SlotSpec(
+            "comparison_mode",
+            True,
+            "task_context",
+            "Platform-owned absolute replay mode",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="执行 Strategy Pool 独立样本回放验证",
+            tool_ref=ToolRef("strategy", "measure_strategy_pool_validation"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "partition": "{slot:partition}",
+                "pool_ref": "{slot:pool_ref}",
+                "sample_design_ref": "{slot:sample_design_ref}",
+                "population": "{slot:population}",
+                "comparison_mode": "{slot:comparison_mode}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "schema_version"}),
+                PostCheck("nonempty", {"field": "evidence_id"}),
+                PostCheck("nonempty", {"field": "artifact.artifact_id"}),
+                PostCheck("range", {"field": "population_count", "min": 1}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_POOL_IMPACT = WorkflowTemplate(
     id="strategy_pool_impact",
     title="测算 Strategy Pool 影响",
@@ -2577,6 +2650,12 @@ STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
             "Exact current nonempty typed Candidate Pool",
         ),
         SlotSpec(
+            "pool_validation_refs",
+            True,
+            "task_context",
+            "Zero to two exact authenticated independent replay evidence refs",
+        ),
+        SlotSpec(
             "pool_impact_ref",
             False,
             "task_context",
@@ -2659,6 +2738,7 @@ STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
                 "project_context_ref": "{slot:project_context_ref}",
                 "sample_design_ref": "{slot:sample_design_ref}",
                 "candidate_pool_ref": "{slot:candidate_pool_ref}",
+                "pool_validation_refs": "{slot:pool_validation_refs}",
                 "pool_impact_ref": "{slot:pool_impact_ref}",
                 "impact_cube_ref": "{slot:impact_cube_ref}",
                 "candidate_stability_ref": "{slot:candidate_stability_ref}",

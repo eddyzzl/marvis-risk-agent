@@ -243,6 +243,10 @@ from marvis.packs.strategy.pool_tools import (
     bind_strategy_pool_development_execution,
     load_current_strategy_candidate_pool_artifact,
 )
+from marvis.packs.strategy.pool_validation_tools import (
+    load_strategy_pool_validation_artifacts,
+    select_latest_strategy_pool_validation_refs,
+)
 from marvis.packs.strategy.pool_requirement_resolver import (
     pool_requirement_bindings_provenance,
     project_pool_entry_requirements,
@@ -1711,10 +1715,10 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
 )
 _STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
 _STRATEGY_REQUEST_ACTION_RE = re.compile(
-    r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|冻结|探索|整理|梳理|汇总|归集|收集|刷新|更新|复盘|盘点|记录|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|应用|执行|写回|回写|回填|打标|"
+    r"(?:开发|设计|制定|创建|生成|构建|训练|物化|固化|冻结|探索|整理|梳理|汇总|归集|收集|刷新|更新|复盘|盘点|记录|做|计算|测算|分析|评估|查看|看一下|看下|回测|测试|验证|回放|应用|执行|写回|回写|回填|打标|"
     r"对比|比较|采纳|采用|上线|报告|文档|监控|漂移|挖掘|选择|筛选|保留|合并|编辑|"
     r"添加|加入|入池|删除|移除|排序|重排|改为|编译|预览|"
-    r"develop|design|create|build|train|materialize|aggregate|collect|compute|calculate|analy[sz]e|evaluate|backtest|apply|compare|"
+    r"develop|design|create|build|train|materialize|aggregate|collect|compute|calculate|analy[sz]e|evaluate|backtest|validate|replay|run|apply|compare|"
     r"adopt|report|monitor|mine|refine|select|merge|add|remove|delete|reorder|compile|preview)",
     re.IGNORECASE,
 )
@@ -1754,6 +1758,15 @@ _STRATEGY_POOL_IMPACT_REQUEST_RE = re.compile(
     r"(?=.*(?:影响|效果|瀑布|逐月|通过率|坏账率|风险率|测算|评估|计算|回测|"
     r"impact|effect|waterfall|monthly|approval\s+rate|bad\s+rate|risk\s+rate|"
     r"measure|assess|evaluat|calculate|backtest))",
+    re.IGNORECASE,
+)
+_STRATEGY_POOL_VALIDATION_REQUEST_RE = re.compile(
+    r"(?=.*(?:策略池|规则池|strategy(?:\s|-|_)*pool|\bpool\b))"
+    r"(?=.*(?:独立样本|独立回放|回放验证|独立验证|"
+    r"independent\s+(?:sample\s+)?replay|independent\s+validation|"
+    r"replay\s+validation))"
+    r"(?=.*(?:验证集|验证样本|验证分区|"
+    r"(?<![A-Za-z0-9_])(?:validation|oot)(?![A-Za-z0-9_])))",
     re.IGNORECASE,
 )
 _STRATEGY_NAN_LABEL_META_KEY = "strategy_nan_label_confirmation"
@@ -1887,6 +1900,7 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "interactive_tree_frontier_group_materialization",
         "interactive_tree_frontier_materialization",
         "strategy_pool_apply",
+        "strategy_pool_validation",
     }
 )
 
@@ -2222,6 +2236,9 @@ def _maybe_handle_strategy_request_turn(
     is_candidate_stability_request = (
         utterance_targets_candidate_monthly_stability(text)
     )
+    is_pool_validation_request = (
+        _STRATEGY_POOL_VALIDATION_REQUEST_RE.search(text) is not None
+    )
     is_scorecard_request = (
         utterance_targets_scorecard_band_build(text)
         or utterance_targets_scorecard_cutoff_selection(text)
@@ -2238,6 +2255,7 @@ def _maybe_handle_strategy_request_turn(
                 or is_model_evidence_v2_request
                 or is_report_bundle_v2_request
                 or is_candidate_stability_request
+                or is_pool_validation_request
                 or is_scorecard_request
             )
             else (
@@ -2991,6 +3009,19 @@ def _run_validated_strategy_request(
                 draft,
                 source_message=source_message,
             ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_pool_validation"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_pool_validation",
+            slots=_strategy_pool_validation_plan_slots(runtime, task, draft),
             auto_start=auto_start,
         )
 
@@ -3945,6 +3976,11 @@ def _standard_workflow_request_preflight(
         # Bind exact refs only once, immediately before plan creation. A
         # separate preflight read would open a second selection window where
         # current source/report heads could silently rebind.
+        return None
+    if draft.workflow == "strategy_pool_validation":
+        # Pool and exact mature SampleDesign V2 refs are authenticated together
+        # once immediately before plan creation. The Tool repeats the exact-ref
+        # checks under its artifact publication lock.
         return None
     if draft.workflow == "strategy_pool_apply":
         # Select and authenticate the exact current nonempty Pool only once,
@@ -5229,6 +5265,159 @@ def _strategy_pool_apply_plan_slots(
     if "output_prefix" in inputs:
         slots["output_prefix"] = inputs["output_prefix"]
     return slots
+
+
+def _strategy_pool_validation_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Bind one current Pool to one exact mature independent V2 partition."""
+
+    if draft.workflow != "strategy_pool_validation":
+        raise StrategySetupError(
+            "Strategy Pool 独立样本回放验证 slots 收到了错误的 Workflow。"
+        )
+    inputs = draft.to_dict()["workflow_inputs"]
+    strategy_type = str(inputs.get("strategy_type") or "")
+    partition = str(inputs.get("partition") or "")
+    if strategy_type not in {"approval", "reject"}:
+        raise StrategySetupError(
+            "独立样本回放验证只支持 approval 或 reject Strategy Pool。"
+        )
+    if partition not in {"validation", "oot"}:
+        raise StrategySetupError(
+            "独立样本回放验证 partition 只能是 validation 或 oot。"
+        )
+
+    read_runtime = _strategy_v2_read_runtime(runtime)
+    try:
+        pool = _strategy_report_current_pool_binding(
+            read_runtime,
+            task_id=task.id,
+            requested_type=strategy_type,
+        )
+    except _StrategyV2EvidenceSetupError as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_pool_validation_pool_invalid",
+            f"当前 {strategy_type} Strategy Pool 未通过非空 head、artifact、"
+            "revision/hash 或完整 candidate lineage 认证。",
+        ) from exc
+    try:
+        sample = _strategy_report_latest_sample_binding(
+            read_runtime,
+            task_id=task.id,
+        )
+    except _StrategyV2EvidenceSetupError as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_pool_validation_sample_invalid",
+            "独立样本回放验证需要最新且完整认证的 StrategySampleDesign V2 "
+            "membership/bundle；平台不会回退到旧样本。",
+        ) from exc
+
+    try:
+        design = sample.bundle["sample_design"]
+        target = design["target_selector"]
+        scope = design["sample_semantics"]["scope"]
+        risk_populations = [
+            item
+            for item in sample.bundle["populations"]
+            if item.get("role") == "risk"
+        ]
+        maturity = risk_populations[0]["maturity_evidence"]["status"]
+        partition_count = sample.membership["header"]["counts"]["risk"][
+            partition
+        ]
+        source = sample.source_binding
+        dataset_id = source.dataset_id
+        dataset_hash = source.dataset_content_hash
+        workspace_revision = source.workspace_revision
+        workspace_generation = source.workspace_generation
+        semantic_hash = source.semantic_mapping_hash
+    except (AttributeError, IndexError, KeyError, TypeError) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_pool_validation_sample_invalid",
+            "StrategySampleDesign V2 缺少 risk 总体、成熟度、独立分区、"
+            "dataset/workspace/target 或语义绑定。",
+        ) from exc
+    if len(risk_populations) != 1 or maturity != "confirmed_matured":
+        raise StrategySetupError(
+            "独立样本回放验证要求 risk 总体具有已确认成熟的表现结果。"
+        )
+    if (
+        target.get("status") != "resolved"
+        or not isinstance(target.get("column"), str)
+        or not target["column"]
+        or scope != "strategy_development"
+    ):
+        raise StrategySetupError(
+            "独立样本回放验证需要已解析的目标列和受治理的策略样本语义。"
+        )
+    if (
+        isinstance(partition_count, bool)
+        or not isinstance(partition_count, int)
+        or partition_count <= 0
+    ):
+        raise StrategySetupError(
+            f"StrategySampleDesign V2 的 risk/{partition} 独立分区为空，"
+            "不能执行回放验证。"
+        )
+    if (
+        not isinstance(dataset_id, str)
+        or not dataset_id
+        or not isinstance(dataset_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", dataset_hash) is None
+        or isinstance(workspace_revision, bool)
+        or not isinstance(workspace_revision, int)
+        or workspace_revision < 0
+        or isinstance(workspace_generation, bool)
+        or not isinstance(workspace_generation, int)
+        or workspace_generation < 0
+        or not isinstance(semantic_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", semantic_hash) is None
+    ):
+        raise StrategySetupError(
+            "独立样本回放验证的 dataset/workspace/semantic identity 不完整。"
+        )
+
+    try:
+        resolve_pool_requirements(
+            read_runtime,
+            task_id=task.id,
+            compiled_design=pool.compiled_design,
+            sample_design=sample,
+        )
+    except StrategyError as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_pool_validation_requirement_invalid",
+            "当前 Strategy Pool 的模型评分要求无法绑定到精确 "
+            "StrategySampleDesign V2；请重新生成评分证据或候选。",
+        ) from exc
+
+    snapshot = pool.pool
+    try:
+        pool_ref = {
+            "artifact_id": pool.artifact_id,
+            "expected_artifact_content_hash": pool.artifact_content_hash,
+            "expected_pool_id": snapshot["pool_id"],
+            "expected_revision": snapshot["revision"],
+            "expected_revision_id": snapshot["revision_id"],
+            "expected_snapshot_hash": snapshot["snapshot_hash"],
+        }
+        sample_ref = _strategy_report_sample_ref(sample)
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_pool_validation_binding_invalid",
+            "Strategy Pool 或 StrategySampleDesign V2 精确引用不完整。",
+        ) from exc
+    return {
+        "strategy_type": strategy_type,
+        "partition": partition,
+        "pool_ref": pool_ref,
+        "sample_design_ref": sample_ref,
+        "population": "risk",
+        "comparison_mode": "absolute",
+    }
 
 
 def _strategy_impact_cube_plan_slots(
@@ -6803,6 +6992,29 @@ def _strategy_report_bundle_v2_plan_slots(
             ],
         }
 
+    try:
+        pool_validation_refs = (
+            select_latest_strategy_pool_validation_refs(
+                read_runtime,
+                task_id=task.id,
+                candidate_pool=pool,
+                sample_design=sample,
+            )
+        )
+        pool_validations = load_strategy_pool_validation_artifacts(
+            read_runtime,
+            task_id=task.id,
+            refs=pool_validation_refs,
+            candidate_pool=pool,
+            sample_design=sample,
+        )
+    except (StrategyError, *_STRATEGY_V2_ARTIFACT_ERRORS) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_pool_validation_invalid",
+            "当前 Strategy Pool 的独立样本回放证据未通过 exact ref、"
+            "来源或文件完整性复核；本次未创建计划。",
+        ) from exc
+
     model_evidence, model_evidence_ref = (
         _strategy_report_optional_model_evidence(
             read_runtime,
@@ -6852,6 +7064,7 @@ def _strategy_report_bundle_v2_plan_slots(
             project_context=project_context,
             sample_design=sample,
             candidate_pool=pool,
+            pool_validations=pool_validations,
             candidate_stability=candidate_stability,
             voting_candidate_search=voting_candidate_search,
             pool_impact=impact,
@@ -6882,6 +7095,7 @@ def _strategy_report_bundle_v2_plan_slots(
         },
         "sample_design_ref": sample_ref,
         "candidate_pool_ref": candidate_pool_ref,
+        "pool_validation_refs": list(pool_validation_refs),
         "candidate_stability_ref": candidate_stability_ref,
         "voting_candidate_search_ref": voting_candidate_search_ref,
         "pool_impact_ref": pool_impact_ref,
@@ -7088,14 +7302,19 @@ def _strategy_report_current_pool_binding(
         read_runtime.settings.db_path
     )
     current: dict[str, Mapping] = {}
-    try:
-        for strategy_type in (
+    strategy_types = (
+        (requested_type,)
+        if requested_type is not None
+        else (
             "approval",
             "reject",
             "limit",
             "pricing",
             "segmentation",
-        ):
+        )
+    )
+    try:
+        for strategy_type in strategy_types:
             pool = repository.get_current(task_id, strategy_type)
             if pool is not None and pool.get("entries"):
                 current[strategy_type] = pool
@@ -10097,6 +10316,7 @@ def _strategy_request_requires_dataset(
             "strategy_report_bundle_v2",
             "strategy_impact_cube",
             "strategy_pool_apply",
+            "strategy_pool_validation",
             "candidate_monthly_stability",
             "scorecard_band_build",
             "scorecard_cutoff_selection",

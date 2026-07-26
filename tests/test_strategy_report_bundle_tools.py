@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from marvis.data.workspace import data_semantic_mapping_hash
 from marvis.db import TaskRepository
 from marvis.output.strategy_report_bundle import render_strategy_report_bundle
 from marvis.packs.strategy import tools as strategy_tools
@@ -24,6 +25,9 @@ from marvis.packs.strategy.impact_cube_tools import (
     run_measure_strategy_impact_cube,
 )
 from marvis.packs.strategy.pool_impact_tools import run_measure_pool_impact
+from marvis.packs.strategy.pool_validation_tools import (
+    run_measure_strategy_pool_validation,
+)
 from marvis.packs.strategy.pool_tools import (
     load_current_strategy_candidate_pool_artifact,
 )
@@ -54,6 +58,9 @@ from marvis.repositories.task_artifacts import TaskArtifactRepository
 import marvis.packs.strategy.report_bundle_tools as report_tools
 from test_strategy_pool_impact_tools import _setup as _impact_setup
 from test_strategy_impact_cube_tools import _setup as _cube_setup
+from test_strategy_pool_validation_tools import (
+    _setup as _pool_validation_setup,
+)
 
 
 def _eq(column: str, value: object) -> dict:
@@ -221,6 +228,7 @@ def _setup(tmp_path: Path) -> dict:
             "expected_artifact_id": pool.artifact_id,
             "expected_artifact_content_hash": pool.artifact_content_hash,
         },
+        "pool_validation_refs": [],
         "pool_impact_ref": {
             "artifact_id": impact_artifact["artifact_id"],
             "expected_artifact_content_hash": impact_artifact["content_hash"],
@@ -307,6 +315,7 @@ def _setup_impact_cube_report(tmp_path: Path) -> dict:
             "expected_artifact_id": pool.artifact_id,
             "expected_artifact_content_hash": pool.artifact_content_hash,
         },
+        "pool_validation_refs": [],
         # A structurally valid but nonexistent legacy ref proves the V2 source
         # wins without authenticating or projecting stale legacy evidence.
         "pool_impact_ref": {
@@ -330,6 +339,138 @@ def _setup_impact_cube_report(tmp_path: Path) -> dict:
     }
     return {
         **fixture,
+        "impact_output": impact_output,
+        "request": request,
+    }
+
+
+def _setup_pool_validation_report(
+    tmp_path: Path,
+    *,
+    partitions: tuple[str, ...] = ("validation", "oot"),
+) -> dict:
+    fixture = _pool_validation_setup(tmp_path)
+    validation_outputs = {
+        partition: run_measure_strategy_pool_validation(
+            {**fixture["validation_request"], "partition": partition},
+            fixture["ctx"],
+            fixture["runtime"],
+        )
+        for partition in partitions
+    }
+    workspace = fixture["workspace"]
+    impact_output = run_measure_pool_impact(
+        {
+            "strategy_type": "approval",
+            "expected_pool_revision": fixture["pool"]["revision"],
+            "expected_pool_snapshot_hash": fixture["pool"]["snapshot_hash"],
+            "dataset_id": fixture["dataset"].id,
+            "expected_dataset_content_hash": fixture["dataset"].content_hash,
+            "workspace_revision": workspace.revision,
+            "workspace_generation": workspace.analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(
+                workspace.semantic_mapping
+            ),
+            "target_col": "bad",
+            "sample_design_ref": fixture["request"][
+                "legacy_sample_design_ref"
+            ],
+            "month_col": "apply_month",
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+            "comparison_mode": "absolute",
+            "drop_nan_labels": True,
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    message = TaskRepository(fixture["settings"].db_path).add_agent_message(
+        fixture["task"].id,
+        role="user",
+        stage="chat",
+        content="生成包含独立验证与 OOT 重放证据的策略报告。",
+    )
+    run_materialize_project_context(
+        {
+            "expected_revision": 0,
+            "expected_revision_id": None,
+            "expected_state_hash": None,
+            "user_message_ref": {
+                "message_id": message["id"],
+                "content_hash": hashlib.sha256(
+                    message["content"].encode("utf-8")
+                ).hexdigest(),
+            },
+            "as_of": "2026-07-25",
+            "scope": "贷前准入策略",
+            "business_context": {"project.goal": "准入策略独立验证"},
+            "explicit_unavailable": ["historical_strategy_reviews"],
+            "external_report_filenames": [],
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    project_context = load_current_strategy_project_context_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+    )
+    assert project_context is not None
+    pool = load_current_strategy_candidate_pool_artifact(
+        fixture["runtime"],
+        task_id=fixture["task"].id,
+        strategy_type="approval",
+    )
+    impact_artifact = impact_output["artifacts"][0]
+    request = {
+        "title": "准入策略独立验证报告",
+        "status": "partial",
+        "report_revision": 1,
+        "previous_report_id": None,
+        "previous_report_content_hash": None,
+        "generated_at": "2026-07-25T08:00:00+00:00",
+        "project_context_ref": {
+            "artifact_id": project_context.artifact_id,
+            "expected_artifact_content_hash": (
+                project_context.artifact_content_hash
+            ),
+            "expected_revision": project_context.revision["revision"],
+            "expected_revision_id": project_context.revision["revision_id"],
+            "expected_state_hash": project_context.revision["state_hash"],
+        },
+        "sample_design_ref": deepcopy(fixture["sample_ref"]),
+        "candidate_pool_ref": {
+            "strategy_type": pool.strategy_type,
+            "expected_pool_revision": pool.pool["revision"],
+            "expected_pool_snapshot_hash": pool.pool["snapshot_hash"],
+            "expected_artifact_id": pool.artifact_id,
+            "expected_artifact_content_hash": pool.artifact_content_hash,
+        },
+        "pool_validation_refs": [
+            {
+                "partition": partition,
+                "artifact_id": output["artifact"]["artifact_id"],
+                "expected_artifact_content_hash": output["artifact"][
+                    "content_hash"
+                ],
+                "expected_evidence_id": output["evidence_id"],
+                "expected_evidence_content_hash": output["content_hash"],
+            }
+            for partition, output in validation_outputs.items()
+        ],
+        "pool_impact_ref": {
+            "artifact_id": impact_artifact["artifact_id"],
+            "expected_artifact_content_hash": impact_artifact["content_hash"],
+            "expected_assessment_id": impact_output["assessment_id"],
+            "expected_assessment_content_hash": impact_output["content_hash"],
+        },
+        "strategy_identity": None,
+        "model_evidence_ref": None,
+        "training_evidence_ref": None,
+        "score_evidence_ref": None,
+    }
+    return {
+        **fixture,
+        "validation_outputs": validation_outputs,
         "impact_output": impact_output,
         "request": request,
     }
@@ -452,6 +593,18 @@ def test_build_report_bundle_publishes_four_exact_governed_outputs(
     assert audit_detail["output_artifacts"]["docx"]["kind"] == (
         "strategy_report_docx"
     )
+    assert audit_detail["source_artifacts"]["pool_validations"] == {}
+    impact = next(
+        section
+        for section in output["bundle"]["sections"]
+        if section["key"] == "impact_assessment"
+    )
+    assert all(
+        not table["table_id"].startswith(
+            "strategy_pool_independent_validation"
+        )
+        for table in impact["tables"]
+    )
 
     tool = next(
         item
@@ -467,6 +620,270 @@ def test_build_report_bundle_publishes_four_exact_governed_outputs(
         label="report bundle input",
     )
     validate_against_schema(output, tool.output_schema, label="report bundle output")
+
+
+def test_report_bundle_projects_platform_bound_pool_validation_refs_exactly(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_pool_validation_report(tmp_path)
+
+    output = _run(fixture)
+
+    assert len(output["bundle"]["sections"]) == 7
+    impact = next(
+        section
+        for section in output["bundle"]["sections"]
+        if section["key"] == "impact_assessment"
+    )
+    summary = next(
+        table
+        for table in impact["tables"]
+        if table["table_id"] == "strategy_pool_independent_validation_summary"
+    )
+    assert summary["sheet_key"] == "10_validation"
+    assert [
+        (
+            row["cells"]["partition"]["value"],
+            row["cells"]["population_count"]["value"],
+            row["cells"]["labelled_count"]["value"],
+            row["cells"]["validation_status"]["value"],
+        )
+        for row in summary["rows"]
+    ] == [
+        ("validation", 2, 2, "independent_evidence"),
+        ("oot", 2, 1, "independent_evidence"),
+    ]
+    validation_summary_row = summary["rows"][0]["cells"]
+    assert validation_summary_row["overall_bad_count"]["value"] == 1
+    assert validation_summary_row["loan_amount_sum"]["value"] == 330.0
+    assert validation_summary_row["loan_amount_coverage_count"]["value"] == 2
+    assert validation_summary_row["overdue_amount_sum"]["value"] == 10.0
+    assert validation_summary_row["paired_coverage_count"]["value"] == 2
+    assert validation_summary_row["paired_loan_amount_sum"]["value"] == 330.0
+    assert validation_summary_row["paired_overdue_amount_sum"]["value"] == 10.0
+    assert validation_summary_row["paired_overdue_rate"]["value"] == pytest.approx(
+        10.0 / 330.0
+    )
+    monthly = next(
+        table
+        for table in impact["tables"]
+        if table["table_id"]
+        == "strategy_pool_independent_validation_monthly"
+    )
+    validation_month = next(
+        row["cells"]
+        for row in monthly["rows"]
+        if row["cells"]["partition"]["value"] == "validation"
+    )
+    assert validation_month["labelled_count"]["value"] == 2
+    assert validation_month["label_coverage"]["value"] == 1.0
+    assert validation_month["bad_count"]["value"] == 1
+    assert validation_month["loan_amount_sum"]["value"] == 330.0
+    assert validation_month["overdue_amount_sum"]["value"] == 10.0
+    assert validation_month["paired_coverage_count"]["value"] == 2
+    assert validation_month["paired_overdue_rate"]["value"] == pytest.approx(
+        10.0 / 330.0
+    )
+    assert summary["effect_stage"] is None
+    assert output["bundle"]["effect_stages"] == ["backtested"]
+    validation_stages = [
+        item
+        for item in impact["stage_evidence"]
+        if item["binding"]["result_ref"]["kind"] == "strategy_validation"
+    ]
+    assert validation_stages == []
+    assert any(
+        item["code"]
+        == "pool_validation_claim_suppressed_by_validation_blocker"
+        for item in impact["red_flags"]
+    )
+    final_document = next(
+        section
+        for section in output["bundle"]["sections"]
+        if section["key"] == "final_document"
+    )
+    final_fields = {
+        item["field_id"]: item["field"]["value"]
+        for item in final_document["summary_fields"]
+    }
+    assert final_fields["evidence_stages"] == ["backtested"]
+    assert final_fields["validation_statuses"] == ["independent_evidence"]
+    assert (
+        final_fields["validation_conclusion"]
+        == (
+            "independent_replay_evidence_available_"
+            "claim_suppressed_by_validation_blocker"
+        )
+    )
+    assert final_fields["adoption_status"] == "not_adopted"
+    assert final_fields["deployment_status"] == "not_deployed"
+    assert final_fields["creates_strategy"] is False
+    validation_refs = [
+        ref
+        for ref in output["bundle"]["strategy_artifact_refs"]
+        if ref["kind"] == "strategy_validation"
+    ]
+    assert {
+        ref["ref_id"] for ref in validation_refs
+    } == {
+        value["artifact"]["artifact_id"]
+        for value in fixture["validation_outputs"].values()
+    }
+    serialized = json.dumps(
+        impact,
+        ensure_ascii=False,
+        sort_keys=True,
+    ).lower()
+    assert "psi" not in serialized
+    assert "stability" not in serialized
+    assert output["not_created_strategy"] is True
+    assert output["not_adopted"] is True
+    assert output["not_deployed"] is True
+    audit = json.loads(str(_audit_rows(fixture)[0]["detail_json"]))
+    assert set(audit["source_artifacts"]["pool_validations"]) == {
+        "validation",
+        "oot",
+    }
+
+
+def test_report_bundle_tool_schema_version_is_v5() -> None:
+    assert (
+        BUILD_STRATEGY_REPORT_BUNDLE_V2_TOOL_SCHEMA_VERSION
+        == "strategy.build-report-bundle-v2-tool.v5"
+    )
+
+
+def test_legacy_report_plan_without_pool_validation_refs_replays_as_empty(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    explicit_request = deepcopy(fixture["request"])
+    legacy_request = deepcopy(explicit_request)
+    legacy_request.pop("pool_validation_refs")
+
+    normalized_legacy = report_tools._validate_inputs(legacy_request)
+    normalized_explicit = report_tools._validate_inputs(explicit_request)
+    assert normalized_legacy == normalized_explicit
+    assert normalized_legacy["pool_validation_refs"] == []
+    assert report_tools._request_hash(
+        normalized_legacy
+    ) == report_tools._request_hash(normalized_explicit)
+
+    fixture["request"] = legacy_request
+    first = _run(fixture)
+    fixture["request"] = explicit_request
+    replay = _run(fixture)
+
+    assert replay == first
+    assert len(_report_rows(fixture)) == 4
+    assert len(_audit_rows(fixture)) == 1
+
+
+def test_report_bundle_rejects_duplicate_pool_validation_partition_refs(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_pool_validation_report(tmp_path)
+    duplicate = deepcopy(fixture["request"]["pool_validation_refs"][0])
+    duplicate["artifact_id"] = "a" * 64
+    fixture["request"]["pool_validation_refs"] = [
+        fixture["request"]["pool_validation_refs"][0],
+        duplicate,
+    ]
+
+    with pytest.raises(
+        StrategyError,
+        match="pool_validation_refs duplicates validation",
+    ):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
+def test_report_bundle_revalidates_exact_pool_validation_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup_pool_validation_report(tmp_path)
+    artifact_id = fixture["validation_outputs"]["validation"]["artifact"][
+        "artifact_id"
+    ]
+    record = fixture["runtime"].task_artifacts.get_for_task(
+        fixture["task"].id,
+        artifact_id,
+    )
+    assert record is not None
+    source_path = Path(record["path"])
+    original_render = report_tools.render_strategy_report_bundle
+
+    def tamper_after_render(bundle):
+        rendered = original_render(bundle)
+        source_path.write_bytes(source_path.read_bytes() + b"\n")
+        return rendered
+
+    monkeypatch.setattr(
+        report_tools,
+        "render_strategy_report_bundle",
+        tamper_after_render,
+    )
+
+    with pytest.raises(
+        StrategyError,
+        match="bytes changed|canonical bytes changed",
+    ):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
+def test_report_bundle_exact_pool_validation_refs_are_idempotent_and_do_not_drift(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_pool_validation_report(tmp_path)
+
+    first = _run(fixture)
+    replay = _run(fixture)
+
+    assert replay == first
+    assert len(_report_rows(fixture)) == 4
+    assert len(_audit_rows(fixture)) == 1
+
+
+def test_new_pool_validation_evidence_does_not_rebind_an_existing_report_plan(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup_pool_validation_report(
+        tmp_path,
+        partitions=("validation",),
+    )
+    planned_refs = deepcopy(fixture["request"]["pool_validation_refs"])
+    run_measure_strategy_pool_validation(
+        {**fixture["validation_request"], "partition": "oot"},
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    output = _run(fixture)
+
+    assert fixture["request"]["pool_validation_refs"] == planned_refs
+    impact = next(
+        section
+        for section in output["bundle"]["sections"]
+        if section["key"] == "impact_assessment"
+    )
+    summary = next(
+        table
+        for table in impact["tables"]
+        if table["table_id"] == "strategy_pool_independent_validation_summary"
+    )
+    assert [
+        row["cells"]["partition"]["value"] for row in summary["rows"]
+    ] == ["validation"]
+    audit = json.loads(str(_audit_rows(fixture)[0]["detail_json"]))
+    assert set(audit["source_artifacts"]["pool_validations"]) == {
+        "validation"
+    }
 
 
 def test_report_bundle_projects_exact_candidate_stability_into_all_outputs(
@@ -582,7 +999,7 @@ def test_report_bundle_passes_exact_voting_search_binding_and_audits_it(
         "search_content_hash": search_hash,
     }
     assert output["schema_version"] == (
-        "strategy.build-report-bundle-v2-tool.v4"
+        "strategy.build-report-bundle-v2-tool.v5"
     )
 
 

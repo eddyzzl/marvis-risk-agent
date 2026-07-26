@@ -74,6 +74,20 @@ from marvis.packs.strategy.pool_impact import (
 from marvis.packs.strategy.pool_impact_tools import (
     StrategyPoolImpactArtifactBinding,
 )
+from marvis.packs.strategy.pool_validation import (
+    STRATEGY_POOL_VALIDATION_PRODUCER_VERSION,
+    build_strategy_pool_validation_evidence,
+    canonical_strategy_pool_validation_json,
+)
+from marvis.packs.strategy.pool_validation_tools import (
+    POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION,
+    POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION,
+    StrategyPoolValidationArtifactBinding,
+)
+from marvis.packs.strategy.pool_requirement_resolver import (
+    normalize_pool_requirements,
+    validate_pool_requirement_bindings_provenance,
+)
 from marvis.packs.strategy import pool_tools as strategy_pool_tools
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
@@ -103,6 +117,7 @@ from marvis.packs.strategy.report_bundle_adapters import (
     build_strategy_report_bundle_source_inputs,
     validate_candidate_stability_report_compatibility,
 )
+import marvis.packs.strategy.report_bundle_adapters as report_adapters
 from marvis.packs.strategy.sample_design_v2 import (
     build_strategy_sample_design_v2,
     build_strategy_sample_design_v2_bundle,
@@ -1600,6 +1615,204 @@ def _pool_binding_for_strategy_type(
     )
 
 
+def _sample_with_dataset_source(
+    sample: StrategySampleDesignV2ArtifactBinding,
+    tmp_path: Path,
+) -> StrategySampleDesignV2ArtifactBinding:
+    identity = sample.bundle["sample_design"]["identity"]
+    dataset = identity["dataset_ref"]
+    workspace = identity["workspace_ref"]
+    return replace(
+        sample,
+        source_binding=SimpleNamespace(
+            task_id=sample.task_id,
+            dataset_id=dataset["dataset_id"],
+            dataset_content_hash=dataset["content_hash"],
+            dataset_source_path=str(tmp_path / "dataset.parquet"),
+            dataset_registry_metadata_hash=_hash("dataset-registry-metadata"),
+            workspace_revision=workspace["revision"],
+            workspace_generation=workspace["generation"],
+            semantic_mapping_hash=workspace["semantic_mapping_hash"],
+        ),
+    )
+
+
+def _pool_validation_binding(
+    tmp_path: Path,
+    sample: StrategySampleDesignV2ArtifactBinding,
+    pool: StrategyCandidatePoolArtifactBinding,
+    *,
+    partition: str,
+) -> StrategyPoolValidationArtifactBinding:
+    design = sample.bundle["sample_design"]
+    header = sample.membership["header"]
+    target = design["target_selector"]
+    fields = design["sample_semantics"]["field_bindings"]
+    count = header["counts"]["risk"][partition]
+    frame = pd.DataFrame(
+        {
+            "customer_id": [
+                f"PII-CUSTOMER-{index + 1:04d}" for index in range(count)
+            ],
+            target["column"]: [
+                target["bad_value"] if index % 2 == 0 else target["good_value"]
+                for index in range(count)
+            ],
+            fields["month_field"]: ["202601"] * count,
+            fields["loan_amount_field"]: [100.0] * count,
+            fields["overdue_amount_field"]: [10.0] * count,
+        }
+    )
+    normalized_requirements = list(
+        normalize_pool_requirements(pool.compiled_design["requirements"])
+    )
+    for outer in normalized_requirements:
+        frame[outer["requirement"]["virtual_field"]] = [0.8] * count
+    source = sample.source_binding
+    dataset_binding = {
+        "task_id": source.task_id,
+        "dataset_id": source.dataset_id,
+        "dataset_content_hash": source.dataset_content_hash,
+        "dataset_source_path": source.dataset_source_path,
+        "dataset_registry_metadata_hash": (
+            source.dataset_registry_metadata_hash
+        ),
+        "workspace_revision": source.workspace_revision,
+        "workspace_generation": source.workspace_generation,
+        "semantic_mapping_hash": source.semantic_mapping_hash,
+    }
+    sample_ref = {
+        "membership_artifact_id": sample.membership_artifact_id,
+        "membership_artifact_content_hash": (
+            sample.membership_artifact_content_hash
+        ),
+        "membership_id": header["membership_id"],
+        "membership_content_hash": header["content_hash"],
+        "bundle_artifact_id": sample.bundle_artifact_id,
+        "bundle_artifact_content_hash": (
+            sample.bundle_artifact_content_hash
+        ),
+        "bundle_id": sample.bundle["bundle_id"],
+        "bundle_content_hash": sample.bundle["content_hash"],
+        "sample_design_id": design["sample_design_id"],
+        "sample_design_content_hash": design["content_hash"],
+        "partition_key": f"risk/{partition}",
+        "partition_count": count,
+        "analysis_universe_row_count": header["row_count"],
+    }
+    evidence = build_strategy_pool_validation_evidence(
+        pool=pool.pool,
+        frame=frame,
+        pool_artifact_ref={
+            "artifact_id": pool.artifact_id,
+            "artifact_content_hash": pool.artifact_content_hash,
+        },
+        sample_design_v2_ref=sample_ref,
+        dataset_binding=dataset_binding,
+        legacy_development_ref=design["compatibility"][
+            "legacy_development_ref"
+        ],
+        partition=partition,
+        population="risk",
+        comparison_mode="absolute",
+        target_col=target["column"],
+        target_bad_value=target["bad_value"],
+        month_col=fields["month_field"],
+        loan_amount_col=fields["loan_amount_field"],
+        overdue_amount_col=fields["overdue_amount_field"],
+        development_rows_excluded=True,
+    )
+    requirement_bindings = (
+        None
+        if not normalized_requirements
+        else validate_pool_requirement_bindings_provenance(
+            {
+                "requirements_hash": hashlib.sha256(
+                    json.dumps(
+                        normalized_requirements,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "requirements": normalized_requirements,
+                "virtual_fields": [
+                    outer["requirement"]["virtual_field"]
+                    for outer in normalized_requirements
+                ],
+            }
+        )
+    )
+    provenance = {
+        "schema_version": (
+            POOL_VALIDATION_ARTIFACT_SCHEMA_VERSION
+            if requirement_bindings is None
+            else POOL_VALIDATION_REQUIREMENTS_ARTIFACT_SCHEMA_VERSION
+        ),
+        "producer_version": STRATEGY_POOL_VALIDATION_PRODUCER_VERSION,
+        "task_id": sample.task_id,
+        "evidence_id": evidence["evidence_id"],
+        "evidence_content_hash": evidence["content_hash"],
+        "pool_ref": {
+            "artifact_id": pool.artifact_id,
+            "expected_artifact_content_hash": pool.artifact_content_hash,
+            "expected_pool_id": pool.pool["pool_id"],
+            "expected_revision": pool.pool["revision"],
+            "expected_revision_id": pool.pool["revision_id"],
+            "expected_snapshot_hash": pool.pool["snapshot_hash"],
+            "pool_id": pool.pool["pool_id"],
+            "revision_id": pool.pool["revision_id"],
+        },
+        "sample_design_ref": {
+            "membership_artifact_id": sample.membership_artifact_id,
+            "expected_membership_artifact_content_hash": (
+                sample.membership_artifact_content_hash
+            ),
+            "bundle_artifact_id": sample.bundle_artifact_id,
+            "expected_bundle_artifact_content_hash": (
+                sample.bundle_artifact_content_hash
+            ),
+            "expected_bundle_id": sample.bundle["bundle_id"],
+            "expected_sample_design_id": design["sample_design_id"],
+            "expected_sample_design_content_hash": design["content_hash"],
+        },
+        "dataset_binding": dataset_binding,
+        "target_binding": evidence["source_bindings"]["target"],
+        "field_bindings": {
+            **evidence["source_bindings"]["fields"],
+            **(
+                {}
+                if requirement_bindings is None
+                else {"requirements": requirement_bindings}
+            ),
+        },
+        "partition": partition,
+        "population": "risk",
+        "comparison_mode": "absolute",
+        "lifecycle_stage": partition,
+        "validation_status": "independent_evidence",
+    }
+    provenance_json = json.dumps(
+        provenance,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return StrategyPoolValidationArtifactBinding(
+        task_id=sample.task_id,
+        artifact_id=_hash(f"pool-validation-{partition}-artifact"),
+        artifact_path=tmp_path / f"pool-validation-{partition}.json",
+        artifact_content_hash=_file_hash(
+            canonical_strategy_pool_validation_json(evidence)
+        ),
+        artifact_provenance=provenance,
+        artifact_provenance_json=provenance_json,
+        evidence=evidence,
+        tasks_root=tmp_path,
+        db_path=tmp_path / "marvis.sqlite",
+    )
+
+
 def _impact_cube_binding(
     tmp_path: Path,
     sample: StrategySampleDesignV2ArtifactBinding,
@@ -2156,6 +2369,300 @@ def test_adapter_is_deterministic_bundle_ready_and_uses_exact_source_identities(
             "content_hash": sample.bundle_artifact_content_hash,
         }
     ]
+
+
+def test_adapter_requires_typed_authenticated_pool_validation_bindings(
+    tmp_path: Path,
+) -> None:
+    bindings = _bindings(tmp_path)
+
+    with pytest.raises(
+        StrategyReportBundleError,
+        match="authenticated StrategyPoolValidationArtifactBinding",
+    ):
+        _project(
+            bindings,
+            pool_validations=(
+                SimpleNamespace(task_id=bindings[0].task_id),
+            ),
+        )
+
+
+def test_adapter_projects_independent_pool_validation_as_oot_stage_and_conclusion(
+    tmp_path: Path,
+) -> None:
+    project, original_sample, pool, impact = _bindings(tmp_path)
+    sample = _sample_with_dataset_source(original_sample, tmp_path)
+    validations = tuple(
+        _pool_validation_binding(
+            tmp_path,
+            sample,
+            pool,
+            partition=partition,
+        )
+        for partition in ("validation", "oot")
+    )
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        pool_validations=validations,
+        pool_impact=impact,
+    )
+
+    impact_section = result["sections"][5]
+    validation_stages = [
+        item
+        for item in impact_section["stage_evidence"]
+        if item["binding"]["result_ref"]["kind"] == "strategy_validation"
+    ]
+    assert [
+        (item["effect_stage"], item["population"], item["partition"])
+        for item in validation_stages
+    ] == [
+        ("oot_validated", "risk", "validation"),
+        ("oot_validated", "risk", "oot"),
+    ]
+    assert all(
+        table["effect_stage"] == "oot_validated"
+        for table in impact_section["tables"]
+        if table["table_id"].startswith(
+            "strategy_pool_independent_validation"
+        )
+    )
+    final_fields = {
+        item["field_id"]: item["field"]["value"]
+        for item in result["sections"][6]["summary_fields"]
+    }
+    assert final_fields["evidence_stages"] == [
+        "backtested",
+        "oot_validated",
+    ]
+    assert final_fields["validation_statuses"] == ["independent_evidence"]
+    assert (
+        final_fields["validation_conclusion"]
+        == "independent_replay_evidence_only"
+    )
+    bundle = build_strategy_report_bundle(
+        task_id=project.task_id,
+        report_revision=1,
+        strategy_id=None,
+        strategy_version=None,
+        strategy_type="approval",
+        title=_present(
+            "独立策略验证",
+            result["strategy_artifact_refs"][0],
+        ),
+        status="partial",
+        generated_at="2026-07-26T12:00:00+08:00",
+        **result,
+    )
+    assert bundle["effect_stages"] == ["backtested", "oot_validated"]
+    assert bundle["strategy_id"] is None
+
+
+def test_adapter_validation_only_uses_umbrella_stage_without_claiming_oot_partition(
+    tmp_path: Path,
+) -> None:
+    project, original_sample, pool, impact = _bindings(tmp_path)
+    sample = _sample_with_dataset_source(original_sample, tmp_path)
+    validation = _pool_validation_binding(
+        tmp_path,
+        sample,
+        pool,
+        partition="validation",
+    )
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        pool_validations=(validation,),
+        pool_impact=impact,
+    )
+
+    impact_section = result["sections"][5]
+    validation_stages = [
+        item
+        for item in impact_section["stage_evidence"]
+        if item["binding"]["result_ref"]["kind"] == "strategy_validation"
+    ]
+    assert [
+        (item["effect_stage"], item["population"], item["partition"])
+        for item in validation_stages
+    ] == [("oot_validated", "risk", "validation")]
+    assert '"partition":"oot"' not in json.dumps(
+        validation_stages,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    validation_tables = [
+        table
+        for table in impact_section["tables"]
+        if table["table_id"].startswith(
+            "strategy_pool_independent_validation"
+        )
+    ]
+    assert {
+        row["cells"]["partition"]["value"]
+        for table in validation_tables
+        for row in table["rows"]
+    } == {"validation"}
+    final_fields = {
+        item["field_id"]: item["field"]["value"]
+        for item in result["sections"][6]["summary_fields"]
+    }
+    assert final_fields["evidence_stages"] == [
+        "backtested",
+        "oot_validated",
+    ]
+    assert final_fields["independent_replay_partitions"] == ["validation"]
+    validation_refs = [
+        ref
+        for ref in result["strategy_artifact_refs"]
+        if ref["kind"] == "strategy_validation"
+    ]
+    assert len(validation_refs) == 1
+    assert validation_refs[0]["ref_id"] == validation.artifact_id
+
+
+def test_pool_validation_amount_projection_keeps_unavailable_values_blank() -> None:
+    source_ref = _source("pool-validation", kind="strategy_validation")
+    amounts = {
+        "loan_amount": {
+            "status": "unavailable",
+            "column": None,
+            "coverage_count": None,
+            "coverage_rate": None,
+            "sum": None,
+        }
+    }
+
+    field = report_adapters._pool_validation_amount_field(
+        amounts,
+        amount_key="loan_amount",
+        field="sum",
+        source_ref=source_ref,
+    )
+
+    assert field["availability"] == "unavailable"
+    assert field["value"] is None
+    assert field["source_refs"] == []
+
+
+def test_adapter_binds_requirement_validation_to_normalized_current_pool(
+    tmp_path: Path,
+) -> None:
+    original_sample = _sample_binding(tmp_path)
+    sample = _sample_with_dataset_source(original_sample, tmp_path)
+    dataset = sample.bundle["sample_design"]["identity"]["dataset_ref"]
+    project = _project_binding(
+        tmp_path,
+        task_id=sample.task_id,
+        dataset_ref=build_source_ref(
+            kind="dataset",
+            ref_id=dataset["dataset_id"],
+            content_hash=dataset["content_hash"],
+        ),
+    )
+    vector_id = "1" * 64
+    requirement = {
+        "type": "model_score_vector.v1",
+        "virtual_field": "__marvis_model_pd_" + vector_id[:16],
+        "score_product": "raw_native_uncalibrated_bad_probability",
+        "score_evidence_artifact_id": "2" * 64,
+        "score_evidence_artifact_content_hash": "3" * 64,
+        "score_vector_artifact_id": vector_id,
+        "score_vector_artifact_content_hash": "4" * 64,
+    }
+    pool = _pool_binding_for_strategy_type(
+        tmp_path,
+        sample,
+        "approval",
+        score_requirement=requirement,
+    )
+    impact_cube = _impact_cube_binding(tmp_path, sample, pool)
+    validation = _pool_validation_binding(
+        tmp_path,
+        sample,
+        pool,
+        partition="validation",
+    )
+
+    result = build_strategy_report_bundle_source_inputs(
+        project_context=project,
+        sample_design=sample,
+        candidate_pool=pool,
+        pool_validations=(validation,),
+        impact_cube=impact_cube,
+    )
+    assert any(
+        ref["kind"] == "strategy_validation"
+        for ref in result["strategy_artifact_refs"]
+    )
+
+    compiled_outer = pool.compiled_design["requirements"][0]
+    voting_style = {
+        "rule_id": compiled_outer["rule_id"],
+        "fragment_id": compiled_outer["fragment_id"],
+        "requirement": {
+            "entry_id": "voting-entry-1",
+            "rule_id": compiled_outer["rule_id"],
+            "fragment_id": compiled_outer["fragment_id"],
+            "requirement": compiled_outer["requirement"],
+        },
+    }
+    report_adapters._require_pool_validation_provenance_requirements(
+        validation,
+        compiled_design={
+            **pool.compiled_design,
+            "requirements": [voting_style],
+        },
+    )
+
+    forged_provenance = json.loads(validation.artifact_provenance_json)
+    forged_requirements = forged_provenance["field_bindings"][
+        "requirements"
+    ]["requirements"]
+    forged_requirements[0]["requirement"][
+        "score_evidence_artifact_id"
+    ] = "f" * 64
+    forged_requirements[0]["requirement"][
+        "score_vector_artifact_content_hash"
+    ] = "e" * 64
+    forged_provenance["field_bindings"]["requirements"][
+        "requirements_hash"
+    ] = hashlib.sha256(
+        json.dumps(
+            forged_requirements,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    forged = replace(
+        validation,
+        artifact_provenance=forged_provenance,
+        artifact_provenance_json=json.dumps(
+            forged_provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    with pytest.raises(
+        StrategyReportBundleError,
+        match="requirements differ from the Candidate Pool",
+    ):
+        build_strategy_report_bundle_source_inputs(
+            project_context=project,
+            sample_design=sample,
+            candidate_pool=pool,
+            pool_validations=(forged,),
+            impact_cube=impact_cube,
+        )
 
 
 def test_adapter_projects_voting_search_only_as_twenty_row_development_evidence(

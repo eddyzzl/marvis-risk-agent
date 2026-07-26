@@ -7,6 +7,7 @@ message payloads and metadata envelopes returned after those transitions.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from marvis.agent.driver_turn import DriverMessage
@@ -28,10 +29,14 @@ class PlanMessageComposer:
         *,
         load_output: Callable[[str], Any],
         load_task_artifact: Callable[[str, str], Any] | None = None,
+        tasks_root: Path | str | None = None,
         latest_failed_step_run_error_kind: Callable[[str], str | None] | None = None,
     ):
         self._load_output = load_output
         self._load_task_artifact = load_task_artifact
+        self._tasks_root = (
+            None if tasks_root is None else Path(tasks_root).absolute()
+        )
         self._latest_failed_step_run_error_kind = latest_failed_step_run_error_kind
 
     def plan_overview_message(self, plan: Plan) -> DriverMessage:
@@ -264,7 +269,42 @@ class PlanMessageComposer:
                 task_id,
                 output,
             )
+        if step.tool_ref.tool == "measure_strategy_pool_validation":
+            return self._trusted_pool_validation_artifact(
+                task_id,
+                output,
+            )
         return self._trusted_delivery_artifacts(task_id, step, output)
+
+    def _trusted_pool_validation_artifact(
+        self,
+        task_id: str,
+        output: object,
+    ) -> dict[str, dict] | None:
+        if (
+            self._load_task_artifact is None
+            or self._tasks_root is None
+            or not isinstance(output, Mapping)
+        ):
+            return None
+        artifact = output.get("artifact")
+        if not isinstance(artifact, Mapping):
+            return None
+        artifact_id = artifact.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            return None
+        try:
+            record = self._load_task_artifact(task_id, artifact_id)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not isinstance(record, Mapping):
+            return None
+        return {
+            "pool_validation": {
+                "record": dict(record),
+                "tasks_root": str(self._tasks_root),
+            }
+        }
 
     def _trusted_candidate_stability_artifact(
         self,
