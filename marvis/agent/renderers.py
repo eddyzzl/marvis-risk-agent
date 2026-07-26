@@ -3076,6 +3076,96 @@ def _render_compile_strategy_pool(o: dict):
     ]
 
 
+def _render_materialize_strategy_from_pool(o: dict):
+    strategy_ref = (
+        o.get("strategy_ref") if isinstance(o.get("strategy_ref"), dict) else {}
+    )
+    pool_ref = o.get("pool_ref") if isinstance(o.get("pool_ref"), dict) else {}
+    requirements = (
+        o.get("requirements") if isinstance(o.get("requirements"), dict) else {}
+    )
+    lifecycle = (
+        o.get("lifecycle") if isinstance(o.get("lifecycle"), dict) else {}
+    )
+
+    current_status = str(lifecycle.get("current_status") or "unknown")
+    current_asset_status = str(
+        lifecycle.get("current_asset_status") or "unknown"
+    )
+    created_status = str(lifecycle.get("created_status") or "unknown")
+    created_asset_status = str(
+        lifecycle.get("created_asset_status") or "unknown"
+    )
+    blocker_code = str(requirements.get("blocker_code") or "")
+
+    text = (
+        "**Strategy Pool 已物化为 canonical Strategy**："
+        f"`{strategy_ref.get('strategy_id', '')}`（"
+        f"{strategy_ref.get('strategy_type', '')} v"
+        f"{strategy_ref.get('version', '')}）。"
+        f"来源：Pool revision {pool_ref.get('revision', '')}，"
+        f"revision id `{pool_ref.get('revision_id', '')}`。\n\n"
+        f"**生命周期**：创建时 {created_status} / {created_asset_status}；"
+        f"当前 lifecycle：{current_status} / {current_asset_status}。"
+        "**本 Tool 未采纳、未部署**。"
+    )
+
+    if blocker_code:
+        text += (
+            f"\n\n**requirements blocker**：`{blocker_code}`。"
+            "当前 Pool 依赖尚不能由 canonical Strategy runtime 安全承载，"
+            "因此 DSL 交付、回测和监控 readiness 均为 **blocked**。"
+        )
+    else:
+        text += (
+            "\n\n**requirements compatibility**：未发现 runtime blocker。"
+            "这只说明当前 requirements 可被持久化，并不替代下游数据、"
+            "独立证据或 lifecycle 检查。"
+        )
+
+    if current_asset_status == "adopted_local":
+        text += (
+            "\n\n当前已进入 adopted_local，但这是既有 lifecycle 状态，"
+            "不是本 Tool 的动作；监控仍需有效 monitoring plan 和独立执行检查。"
+        )
+    elif current_status == "draft" and current_asset_status == "draft":
+        text += (
+            "\n\n当前仍是 draft；进入 adopted_local 前必须完成独立回测证据"
+            "和**人工采纳**。监控不能仅凭本次物化结果启动。"
+        )
+    else:
+        text += (
+            f"\n\n当前已进入 {current_status} / {current_asset_status}，"
+            "但这是既有 lifecycle 状态，不是本 Tool 的动作。后续采纳或监控"
+            "必须继续通过各自的人工决策、证据与执行检查。"
+        )
+
+    requirement_support = (
+        "supported"
+        if requirements.get("runtime_requirements_supported") is True
+        else "blocked"
+    )
+    tables = [
+        {
+            "title": "Strategy 物化身份",
+            "columns": ["字段", "值"],
+            "rows": [
+                ["strategy_id", str(strategy_ref.get("strategy_id") or "")],
+                ["strategy_spec_hash", str(strategy_ref.get("strategy_spec_hash") or "")],
+                ["pool_id", str(pool_ref.get("pool_id") or "")],
+                ["pool revision", _fmt(pool_ref.get("revision"))],
+                ["design_hash", str(o.get("design_hash") or "")],
+            ],
+        },
+        {
+            "title": "运行时 requirements 兼容性（非 lifecycle readiness）",
+            "columns": ["检查范围", "状态"],
+            "rows": [["Strategy runtime requirements", requirement_support]],
+        },
+    ]
+    return text, tables
+
+
 def _strategy_pool_apply_integrity_failure() -> tuple[str, list[dict]]:
     return (
         "**Strategy Pool 应用结果完整性校验失败**：计划缓存中的 Pool、"
@@ -7970,6 +8060,7 @@ _RENDERERS = {
     "set_pool_entry_action": _render_strategy_pool_mutation,
     "reorder_strategy_pool": _render_strategy_pool_mutation,
     "compile_strategy_pool": _render_compile_strategy_pool,
+    "materialize_strategy_from_pool": _render_materialize_strategy_from_pool,
     "apply_strategy_pool": _render_apply_strategy_pool,
     "measure_strategy_pool_validation": (
         _render_measure_strategy_pool_validation

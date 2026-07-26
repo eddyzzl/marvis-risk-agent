@@ -6097,6 +6097,206 @@
       "memory_limit_mb": 2048
     },
     {
+      "name": "materialize_strategy_from_pool",
+      "summary": "Deeply authenticate one exact current non-empty Strategy Pool revision and materialize or replay its canonical design as a persistent draft Strategy without adopting or deploying it.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_type": {
+            "type": "string",
+            "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+          },
+          "expected_pool_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expected_pool_snapshot_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expected_pool_artifact_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expected_pool_artifact_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expected_design_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "strategy_type",
+          "expected_pool_revision",
+          "expected_pool_snapshot_hash",
+          "expected_pool_artifact_id",
+          "expected_pool_artifact_content_hash",
+          "expected_design_hash"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.pool-materialization-tool.v1"
+          },
+          "materialization_id": {
+            "type": "string",
+            "pattern": "^strategy-pool-materialization-[0-9a-f]{24}$"
+          },
+          "strategy_ref": {
+            "type": "object",
+            "properties": {
+              "strategy_id": {
+                "type": "string",
+                "pattern": "^strategy-pool-[0-9a-f]{24}$"
+              },
+              "strategy_type": {
+                "type": "string",
+                "enum": ["approval", "reject", "limit", "pricing", "segmentation"]
+              },
+              "version": {"type": "integer", "minimum": 1},
+              "strategy_spec_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "strategy_dsl_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "strategy_id",
+              "strategy_type",
+              "version",
+              "strategy_spec_hash",
+              "strategy_dsl_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "pool_ref": {
+            "type": "object",
+            "properties": {
+              "pool_id": {"type": "string", "minLength": 1},
+              "revision_id": {"type": "string", "minLength": 1},
+              "revision": {"type": "integer", "minimum": 1},
+              "snapshot_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "pool_id",
+              "revision_id",
+              "revision",
+              "snapshot_hash",
+              "artifact_id",
+              "artifact_content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "design_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "requirements": {
+            "type": "object",
+            "properties": {
+              "requirements_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "requirement_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "virtual_fields": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^__marvis_model_pd_[0-9a-f]{16}$"
+                },
+                "uniqueItems": true
+              },
+              "runtime_requirements_supported": {"type": "boolean"},
+              "blocker_code": {
+                "anyOf": [
+                  {"type": "string", "minLength": 1},
+                  {"type": "null"}
+                ]
+              }
+            },
+            "required": [
+              "requirements_hash",
+              "requirement_count",
+              "virtual_fields",
+              "runtime_requirements_supported",
+              "blocker_code"
+            ],
+            "additionalProperties": false
+          },
+          "lifecycle": {
+            "type": "object",
+            "properties": {
+              "created_status": {"const": "draft"},
+              "created_asset_status": {"const": "draft"},
+              "current_status": {
+                "type": "string",
+                "enum": ["draft", "adopted", "retired"]
+              },
+              "current_asset_status": {
+                "type": "string",
+                "enum": ["draft", "validated", "adopted_local", "retired"]
+              },
+              "adopted_by_this_tool": {"const": false},
+              "deployed_by_this_tool": {"const": false}
+            },
+            "required": [
+              "created_status",
+              "created_asset_status",
+              "current_status",
+              "current_asset_status",
+              "adopted_by_this_tool",
+              "deployed_by_this_tool"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "schema_version",
+          "materialization_id",
+          "strategy_ref",
+          "pool_ref",
+          "design_hash",
+          "requirements",
+          "lifecycle"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_materialize_strategy_from_pool",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:strategy"],
+      "memory_limit_mb": 2048
+    },
+    {
       "name": "apply_strategy_pool",
       "summary": "Authenticate the exact current non-empty Strategy Pool and its governed source/sample/model-score lineage, apply deterministic first-match decisions to the full source row universe, and atomically register one non-active derived dataset plus immutable evidence without adopting or deploying a Strategy.",
       "input_schema": {

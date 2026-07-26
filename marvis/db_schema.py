@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 _SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MIGRATION_TABLES = frozenset({
+    "audit",
     "tasks",
     "jobs",
     "plans",
@@ -34,6 +35,7 @@ _MIGRATION_TABLES = frozenset({
     "llm_calls",
     "datasets",
     "strategy_artifacts",
+    "strategies",
     "validation_input_contracts",
     "data_analysis_runs",
     "data_transform_runs",
@@ -50,6 +52,7 @@ _MIGRATION_TABLES = frozenset({
     "strategy_project_context_revisions",
     "strategy_report_heads",
     "strategy_report_revisions",
+    "strategy_pool_materializations",
 })
 
 # ARCH-10: schema_version mechanism.
@@ -176,7 +179,14 @@ _MIGRATION_TABLES = frozenset({
 # the frozen migration-20 ledger.  Rows created by migration 20 retain NULLs
 # and remain readable as three-output legacy evidence; every new row is guarded
 # by rebuilt triggers that require all four exact, task-owned output artifacts.
-SCHEMA_VERSION = 21
+#
+# _migration_022_strategy_pool_materializations adds the immutable bridge from
+# one exact current Strategy Pool revision to one canonical root Strategy. The
+# selected design, including its existing logical Pool lineage, is persisted
+# byte-for-byte; the separate ledger additionally binds the physical Pool
+# artifact, requirements, design/effect/DSL hashes, Strategy row, and its single
+# creation audit without enriching or rewriting that DSL.
+SCHEMA_VERSION = 22
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -3291,6 +3301,244 @@ def _migration_021_strategy_report_docx(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_022_strategy_pool_materializations(
+    conn: sqlite3.Connection,
+) -> None:
+    """Add one immutable Pool-revision to canonical-Strategy ledger."""
+
+    required_columns = {
+        "tasks": {"id"},
+        "strategies": {
+            "id",
+            "task_id",
+            "strategy_type",
+            "version",
+            "status",
+            "asset_status",
+            "parent_strategy_id",
+            "dsl_content_hash",
+        },
+        "audit": {
+            "id",
+            "kind",
+            "actor",
+            "target_ref",
+            "inputs_hash",
+            "outcome",
+            "at",
+        },
+        "task_artifacts": {"id", "task_id", "kind", "content_hash"},
+        "strategy_candidate_pool_revisions": {
+            "id",
+            "pool_id",
+            "task_id",
+            "strategy_type",
+            "revision",
+            "snapshot_hash",
+            "artifact_id",
+            "artifact_content_hash",
+        },
+        "strategy_candidate_pools": {
+            "id",
+            "task_id",
+            "strategy_type",
+            "current_revision",
+            "current_revision_id",
+            "current_snapshot_hash",
+        },
+    }
+    for table, expected in required_columns.items():
+        table_sql = _migration_table_identifier(table)
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if exists is None:
+            return
+        actual = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall()
+        }
+        if not expected <= actual:
+            return
+
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_strategies_id_task_type
+            ON strategies(id, task_id, strategy_type)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_strategy_candidate_pool_revisions_full_identity
+            ON strategy_candidate_pool_revisions(
+                id, pool_id, task_id, strategy_type
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_pool_materializations (
+            id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL
+                CHECK(schema_version = 'strategy.pool-materialization.v1'),
+            producer_version TEXT NOT NULL
+                CHECK(producer_version = 'marvis.strategy.pool-materialization/1'),
+            task_id TEXT NOT NULL,
+            strategy_type TEXT NOT NULL
+                CHECK(strategy_type IN (
+                    'approval', 'reject', 'limit', 'pricing', 'segmentation'
+                )),
+            strategy_id TEXT NOT NULL UNIQUE,
+            strategy_version INTEGER NOT NULL CHECK(strategy_version = 1),
+            pool_id TEXT NOT NULL,
+            pool_revision_id TEXT NOT NULL UNIQUE,
+            pool_revision INTEGER NOT NULL CHECK(pool_revision >= 1),
+            pool_snapshot_hash TEXT NOT NULL
+                CHECK(length(pool_snapshot_hash) = 64)
+                CHECK(pool_snapshot_hash NOT GLOB '*[^0-9a-f]*'),
+            pool_artifact_id TEXT NOT NULL,
+            pool_artifact_content_hash TEXT NOT NULL
+                CHECK(length(pool_artifact_content_hash) = 64)
+                CHECK(pool_artifact_content_hash NOT GLOB '*[^0-9a-f]*'),
+            selected_design_hash TEXT NOT NULL
+                CHECK(length(selected_design_hash) = 64)
+                CHECK(selected_design_hash NOT GLOB '*[^0-9a-f]*'),
+            requirements_json TEXT NOT NULL CHECK(json_valid(requirements_json)),
+            requirements_hash TEXT NOT NULL
+                CHECK(length(requirements_hash) = 64)
+                CHECK(requirements_hash NOT GLOB '*[^0-9a-f]*'),
+            strategy_spec_hash TEXT NOT NULL
+                CHECK(length(strategy_spec_hash) = 64)
+                CHECK(strategy_spec_hash NOT GLOB '*[^0-9a-f]*'),
+            strategy_dsl_content_hash TEXT NOT NULL
+                CHECK(length(strategy_dsl_content_hash) = 64)
+                CHECK(strategy_dsl_content_hash NOT GLOB '*[^0-9a-f]*'),
+            audit_id TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            UNIQUE(id, task_id, strategy_type),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(strategy_id, task_id, strategy_type)
+                REFERENCES strategies(id, task_id, strategy_type)
+                ON DELETE CASCADE,
+            FOREIGN KEY(pool_revision_id, pool_id, task_id, strategy_type)
+                REFERENCES strategy_candidate_pool_revisions(
+                    id, pool_id, task_id, strategy_type
+                )
+                ON DELETE CASCADE,
+            FOREIGN KEY(pool_artifact_id, task_id)
+                REFERENCES task_artifacts(id, task_id),
+            FOREIGN KEY(audit_id) REFERENCES audit(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_pool_materializations_task
+            ON strategy_pool_materializations(
+                task_id, strategy_type, pool_revision DESC, id
+            )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_pool_materializations_pool_binding
+        BEFORE INSERT ON strategy_pool_materializations
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategy_candidate_pool_revisions AS revision
+             WHERE revision.id = NEW.pool_revision_id
+               AND revision.pool_id = NEW.pool_id
+               AND revision.task_id = NEW.task_id
+               AND revision.strategy_type = NEW.strategy_type
+               AND revision.revision = NEW.pool_revision
+               AND revision.snapshot_hash = NEW.pool_snapshot_hash
+               AND revision.artifact_id = NEW.pool_artifact_id
+               AND revision.artifact_content_hash =
+                   NEW.pool_artifact_content_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy Pool materialization binding mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_pool_materializations_current_pool
+        BEFORE INSERT ON strategy_pool_materializations
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategy_candidate_pools AS head
+             WHERE head.id = NEW.pool_id
+               AND head.task_id = NEW.task_id
+               AND head.strategy_type = NEW.strategy_type
+               AND head.current_revision = NEW.pool_revision
+               AND head.current_revision_id = NEW.pool_revision_id
+               AND head.current_snapshot_hash = NEW.pool_snapshot_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy Pool materialization requires current Pool');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_pool_materializations_strategy_binding
+        BEFORE INSERT ON strategy_pool_materializations
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM strategies AS strategy
+             WHERE strategy.id = NEW.strategy_id
+               AND strategy.task_id = NEW.task_id
+               AND strategy.strategy_type = NEW.strategy_type
+               AND strategy.version = NEW.strategy_version
+               AND strategy.status = 'draft'
+               AND strategy.asset_status = 'draft'
+               AND strategy.parent_strategy_id IS NULL
+               AND strategy.created_at = NEW.created_at
+               AND strategy.dsl_content_hash =
+                   NEW.strategy_dsl_content_hash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy Pool materialized Strategy mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_pool_materializations_audit_binding
+        BEFORE INSERT ON strategy_pool_materializations
+        WHEN NOT EXISTS (
+            SELECT 1
+              FROM audit AS entry
+             WHERE entry.id = NEW.audit_id
+               AND entry.kind = 'strategy.materialize_pool'
+               AND entry.actor = 'system'
+               AND entry.target_ref = NEW.strategy_id
+               AND entry.inputs_hash = NEW.selected_design_hash
+               AND entry.outcome = 'succeeded'
+               AND entry.at = NEW.created_at
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy Pool materialization audit mismatch');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+            trg_strategy_pool_materializations_immutable_update
+        BEFORE UPDATE ON strategy_pool_materializations
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_pool_materializations are immutable');
+        END
+        """
+    )
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -3320,6 +3568,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (19, _migration_019_strategy_project_context),
     (20, _migration_020_strategy_report_revisions),
     (21, _migration_021_strategy_report_docx),
+    (22, _migration_022_strategy_pool_materializations),
 ]
 
 

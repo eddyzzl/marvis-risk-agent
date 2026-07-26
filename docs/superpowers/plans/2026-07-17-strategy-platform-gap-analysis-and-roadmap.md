@@ -295,7 +295,7 @@ MARVIS 已经具备较扎实的策略确定性内核和治理底座，包括策�
 - 交互树；
 - voting/n-of-k 组合；
 - 二维/三维交叉规则、二维矩阵切点和 cell 选择；
-- Agent 自然语言 Strategy Pool CRUD/order 已完成；后续补完整 Workbench 展示，不以复制参考平台手工页面为目标；
+- Agent 自然语言 Strategy Pool CRUD/order 和当前 Pool → canonical draft Strategy 物化已完成；后续补完整 Workbench 展示，不以复制参考平台手工页面为目标；
 - approval/reject Pool 的 first-match、逐月、件数和可用金额首纵切已完成；后续补分群、分群逐月、swap、OOT 和其余类型化口径；
 - 策略专用 OOT 验证；
 - Excel 和等价代码交付；
@@ -566,6 +566,8 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 **报告契约**：[`Strategy Report Bundle 契约`](../specs/2026-07-19-strategy-report-bundle-spec.md)；本 Phase 实现七步报告组装和主报告 artifact，但报告失败不能回滚已完成的策略 evidence。
 
+**当前 Pool → canonical Strategy 物化纵切（已完成，2026-07-25）**：新增自然语言可达、Manual typed request 同契约的 `strategy_pool_materialize` Workflow 和 `strategy.materialize_strategy_from_pool`。用户只能明确指定五类 Pool 类型；Pool revision/snapshot、Pool artifact id/content hash、compiled design hash、`StrategySpec`、requirements 和 lifecycle 全部由平台恢复，用户或 LLM 注入这些字段会失败关闭。计划创建前深度认证当前非空 Pool，Tool 在 `BEGIN IMMEDIATE` 写锁内再次认证 current head、完整 candidate lineage、artifact 和重新编译结果，把 `compiled_design.strategy_spec` byte-for-byte 持久化为 root `draft / draft` Strategy，并在同一事务中提交唯一创建 audit 与不可变 materialization ledger。ledger 绑定 Pool revision/artifact、design/requirements hash、Strategy semantic hash 与 full DSL content hash；精确重试幂等复用，同一 Strategy 后续 lifecycle 改变时返回当前状态但不会把采纳/部署归因给本 Tool。模型分数等通用 Strategy runtime 尚不能承载的 requirements 以 typed blocker 保留，禁止声称 DSL 交付、回测或监控 ready；无 requirements 也只表示 requirement compatibility。物化不采纳、不部署、不启动监控，任务级清理仍可级联清除 task-scoped 业务记录并保留全局 audit。
+
 **approval/reject Pool 影响测算首纵切（已完成，2026-07-19；样本强绑定于 2026-07-22 补齐）**：新增自然语言可达的 `strategy_pool_impact` Workflow 和 `strategy.measure_pool_impact`。用户只需说明要测算的 approval/reject Pool、可选基线及可选精确月份/金额列；Pool revision/hash、候选 lineage、精确且成熟的 development `StrategySampleDesignRef`、活动 dataset/hash、workspace revision/generation、确认 target 和 semantic mapping hash 均由平台绑定，不接受 LLM 注入。Tool 按样本设计的 `target_bad_value` 在同一 development 样本上重放 canonical first-match StrategySpec，输出总体动作/风险、每条规则 standalone/incremental/shadowed/remaining、默认未命中、标签覆盖、可用放款/逾期/配对金额观测、可选逐月及同任务同类型基线件数、风险和金额 delta；逐月件数、标签、风险、金额、动作与规则 incremental 均须回卷总体。结果以 canonical、内容寻址的 `strategy.impact-assessment.v2` JSON 和通用 TaskArtifact registry hash 双层固化，计算后在写入事务内再次复核 Sample Design、Pool/candidate lineage、dataset registry/path/bytes、DataWorkspace 与 baseline；空标签未确认、旧未绑定 active plan、任何漂移或守恒失败都不落盘。artifact 内 hash 用于与可信 expected hash 对账，不是数字签名；脱离原始 frame/spec 的离线 validator 只证明 schema、派生字段和内部守恒，消费持久化 evidence 时必须先核对 TaskArtifact registry 中的 content hash，不能把任意重写后再哈希的 JSON 当成平台 provenance。该纵切只产生 `development / backtested / unvalidated` 证据，不创建、修改、采纳或部署策略。它不是 Phase 4 完成：limit/pricing/segmentation 专属影响语义、分群/分群×月、swap、OOT、代码与列写回仍须继续交付。
 
 **七步 Strategy Report Bundle 纵切（已完成，2026-07-23）**：`strategy_report_bundle_v2` 会从 task-owned project context、历史策略、`StrategySampleDesign`、单变量/模型证据、候选/Pool、ImpactCube 和用户补充的 report fields 组装固定七节、不可变 revision。可选信息缺失或用户明确“暂缺”时保留 typed availability 并在读者报告中留空，空白与数值 0 严格区分；缺少会改变策略语义、样本或确定性结果的 binding 时失败关闭。输出为同一 revision 的 canonical JSON、Markdown、模块化 XLSX 与可解析 DOCX，参考用户提供的迭代评审模板和两份项目报告，但不复制其人工操作界面；四个 artifact 使用内容 hash、task ownership、canonical path、provenance 和审计绑定原子登记，任一格式渲染/登记失败会回滚整套报告登记而不回滚上游策略 evidence。DOCX 使用固定业务简报结构、可审计 evidence 标识和安全文本投影，不允许外链、字段代码或用户文本注入媒体。额度/定价专属扩展、独立 OOT 章节和完整 browser/API 旅程仍须继续完成。
@@ -767,7 +769,7 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 ### Phase 4：Strategy Pool、回测与交付
 
-40. 稳定 rule id、pool CRUD 和完整 reorder（Agent 自然语言纵切已完成，Workbench 展示待续）；
+40. 稳定 rule id、pool CRUD、完整 reorder 和 Pool → canonical draft Strategy（Agent 自然语言、严格 Manual request、原子 ledger/audit 纵切已完成；Workbench 的物化控件与完整展示待续）；
 41. first-match 级联 waterfall（approval/reject 当前 Pool 的 standalone/incremental/shadowed/remaining 已完成；其余类型待专属口径）；
 42. 单规则/策略逐月、件数和金额回测（approval/reject 当前 Pool 的总体、逐月、规则 incremental、标签/金额覆盖、基线 delta、成熟 development Sample Design 强绑定及 `target_bad_value=0|1` 已完成；direct backtest 仅保留兼容边界，V2 Workflow 必须注入 ref；单规则独立视图、分群×月及其余类型待续）；
 43. 分群操作符与分群×月；

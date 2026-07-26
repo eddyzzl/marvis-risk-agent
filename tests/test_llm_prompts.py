@@ -12,6 +12,7 @@ text unchanged, so this refactor introduced zero prompt-wording changes.
 from __future__ import annotations
 
 from marvis.llm_prompts import ALL_PROMPTS, PromptSpec, prompt_version_snapshot
+from marvis.llm_prompts import STRATEGY_REQUEST_COMPILER_SYS
 
 
 # Hash-lock table: bump the version AND update the hash here in the same
@@ -34,7 +35,7 @@ _LOCKED_HASHES = {
     "CROSS_SYS": (1, "0d13fa241b855e51"),
     "REPORT_NARRATIVE_SYS": (1, "a6ff4690f78c4fe2"),
     "SLICE_SPEC_SYS": (1, "11e47cc62475346a"),
-    "STRATEGY_REQUEST_COMPILER_SYS": (43, "530596dc136448f6"),
+    "STRATEGY_REQUEST_COMPILER_SYS": (44, "704650b76fe8e70d"),
 }
 
 
@@ -71,6 +72,13 @@ def test_prompt_version_snapshot_covers_all_prompts():
     snapshot = prompt_version_snapshot()
     assert snapshot == {spec.name: spec.version for spec in ALL_PROMPTS}
     assert snapshot["PLAN_SYS"] == 1
+
+
+def test_strategy_compiler_prompt_owns_pool_materialization_contract():
+    assert STRATEGY_REQUEST_COMPILER_SYS.version == 44
+    assert "strategy_pool_materialize" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "draft Strategy" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "不采纳、不部署" in STRATEGY_REQUEST_COMPILER_SYS.text
 
 
 def test_call_site_constants_re_export_registry_text_unchanged():

@@ -2205,6 +2205,85 @@ STRATEGY_POOL_COMPILE = WorkflowTemplate(
 )
 
 
+STRATEGY_POOL_MATERIALIZE = WorkflowTemplate(
+    id="strategy_pool_materialize",
+    title="物化 Strategy Pool 为 draft Strategy",
+    goal_patterns=(
+        "把当前策略池物化为草案策略",
+        "从当前策略池创建 draft Strategy",
+        "materialize current strategy pool as a draft strategy",
+    ),
+    slots=(
+        SlotSpec("strategy_type", True, "user", "Explicit Strategy Pool type"),
+        SlotSpec(
+            "expected_pool_revision",
+            True,
+            "task_context",
+            "Authenticated current Pool revision",
+        ),
+        SlotSpec(
+            "expected_pool_snapshot_hash",
+            True,
+            "task_context",
+            "Authenticated current Pool snapshot hash",
+        ),
+        SlotSpec(
+            "expected_pool_artifact_id",
+            True,
+            "task_context",
+            "Authenticated current Pool artifact id",
+        ),
+        SlotSpec(
+            "expected_pool_artifact_content_hash",
+            True,
+            "task_context",
+            "Authenticated current Pool artifact content hash",
+        ),
+        SlotSpec(
+            "expected_design_hash",
+            True,
+            "task_context",
+            "Authenticated compiled Pool design hash",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="创建或复用 draft Strategy",
+            tool_ref=ToolRef("strategy", "materialize_strategy_from_pool"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "expected_pool_revision": "{slot:expected_pool_revision}",
+                "expected_pool_snapshot_hash": (
+                    "{slot:expected_pool_snapshot_hash}"
+                ),
+                "expected_pool_artifact_id": (
+                    "{slot:expected_pool_artifact_id}"
+                ),
+                "expected_pool_artifact_content_hash": (
+                    "{slot:expected_pool_artifact_content_hash}"
+                ),
+                "expected_design_hash": "{slot:expected_design_hash}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "schema_version"}),
+                PostCheck("nonempty", {"field": "materialization_id"}),
+                PostCheck("nonempty", {"field": "strategy_ref.strategy_id"}),
+                PostCheck(
+                    "nonempty",
+                    {"field": "strategy_ref.strategy_spec_hash"},
+                ),
+                PostCheck("nonempty", {"field": "pool_ref.revision_id"}),
+                PostCheck("nonempty", {"field": "lifecycle.current_status"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_POOL_APPLY = WorkflowTemplate(
     id="strategy_pool_apply",
     title="应用当前 Strategy Pool",

@@ -47,6 +47,41 @@ from marvis.strategy_lifecycle import (
 
 BacktestRecord: TypeAlias = BacktestResult | StrategyBacktestResult
 _STRATEGY_ARTIFACT_IDENTITY_NAMESPACE = "marvis.strategy_artifact.v1"
+POOL_MATERIALIZATION_LEDGER_SCHEMA_VERSION = "strategy.pool-materialization.v1"
+POOL_MATERIALIZATION_PRODUCER_VERSION = "marvis.strategy.pool-materialization/1"
+POOL_MATERIALIZATION_AUDIT_KIND = "strategy.materialize_pool"
+
+_POOL_MATERIALIZATION_INPUT_FIELDS = frozenset(
+    {
+        "id",
+        "task_id",
+        "strategy_type",
+        "strategy_id",
+        "pool_id",
+        "pool_revision_id",
+        "pool_revision",
+        "pool_snapshot_hash",
+        "pool_artifact_id",
+        "pool_artifact_content_hash",
+        "selected_design_hash",
+        "requirements",
+        "requirements_hash",
+        "strategy_spec_hash",
+        "strategy_dsl_content_hash",
+        "audit_id",
+    }
+)
+_POOL_MATERIALIZATION_HASH_FIELDS = (
+    "pool_snapshot_hash",
+    "pool_artifact_content_hash",
+    "selected_design_hash",
+    "requirements_hash",
+    "strategy_spec_hash",
+    "strategy_dsl_content_hash",
+)
+_POOL_MATERIALIZATION_STRATEGY_TYPES = frozenset(
+    {"approval", "reject", "limit", "pricing", "segmentation"}
+)
 
 
 class StrategyArtifactConflictError(RuntimeError):
@@ -55,6 +90,10 @@ class StrategyArtifactConflictError(RuntimeError):
 
 class StrategyArtifactDataError(ValueError):
     """Verified strategy artifact metadata violates its immutable contract."""
+
+
+class StrategyPoolMaterializationError(StrategyError):
+    """Pool materialization lineage or its persisted Strategy drifted."""
 
 
 def _now() -> str:
@@ -446,6 +485,234 @@ class StrategyRepository:
             "metadata": metadata,
             "strategy_spec_hash": spec_hash,
         }
+
+    def get_pool_materialization(
+        self,
+        materialization_id: str,
+    ) -> dict[str, Any] | None:
+        with connect(self.db_path) as conn:
+            return self.get_pool_materialization_on_connection(
+                conn,
+                materialization_id,
+            )
+
+    def get_pool_materialization_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        materialization_id: str,
+    ) -> dict[str, Any] | None:
+        normalized_id = _pool_materialization_text(
+            materialization_id,
+            "materialization_id",
+        )
+        row = conn.execute(
+            """
+            SELECT *
+              FROM strategy_pool_materializations
+             WHERE id = ?
+            """,
+            (normalized_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        persisted = _pool_materialization_from_row(row)
+        authenticated = _require_pool_materialization_on_connection(
+            conn,
+            expected={
+                field: persisted[field]
+                for field in _POOL_MATERIALIZATION_INPUT_FIELDS
+            },
+        )
+        return authenticated["materialization"]
+
+    def get_pool_materialization_for_pool_revision_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        pool_revision_id: str,
+    ) -> dict[str, Any] | None:
+        normalized_id = _pool_materialization_text(
+            pool_revision_id,
+            "pool_revision_id",
+        )
+        row = conn.execute(
+            """
+            SELECT *
+              FROM strategy_pool_materializations
+             WHERE pool_revision_id = ?
+            """,
+            (normalized_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        persisted = _pool_materialization_from_row(row)
+        authenticated = _require_pool_materialization_on_connection(
+            conn,
+            expected={
+                field: persisted[field]
+                for field in _POOL_MATERIALIZATION_INPUT_FIELDS
+            },
+        )
+        return authenticated["materialization"]
+
+    def require_pool_materialization_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        expected: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Re-authenticate ledger, canonical Strategy, and its one exact audit."""
+
+        normalized = _normalize_pool_materialization(expected)
+        return _require_pool_materialization_on_connection(
+            conn,
+            expected=normalized,
+        )
+
+    def materialize_pool_strategy_draft_with_audit_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        strategy: Strategy,
+        materialization: Mapping[str, Any],
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Create one canonical root draft and immutable lineage in one transaction."""
+
+        if not conn.in_transaction:
+            raise StrategyPoolMaterializationError(
+                "Pool materialization requires a caller-owned writer transaction"
+            )
+        normalized = _normalize_pool_materialization(materialization)
+        if strategy.id != normalized["strategy_id"]:
+            raise StrategyPoolMaterializationError(
+                "materialized Strategy identity does not match the ledger"
+            )
+        if strategy.strategy_type != normalized["strategy_type"]:
+            raise StrategyPoolMaterializationError(
+                "materialized Strategy type does not match the Pool"
+            )
+        if strategy.spec is None:
+            raise StrategyPoolMaterializationError(
+                "Pool materialization requires a canonical Strategy DSL"
+            )
+        if not hmac.compare_digest(
+            strategy_spec_hash(strategy.spec),
+            normalized["strategy_spec_hash"],
+        ):
+            raise StrategyPoolMaterializationError(
+                "materialized Strategy effect hash changed"
+            )
+        if not hmac.compare_digest(
+            _strategy_dsl_content_hash(strategy.spec),
+            normalized["strategy_dsl_content_hash"],
+        ):
+            raise StrategyPoolMaterializationError(
+                "materialized Strategy DSL content hash changed"
+            )
+
+        collisions = conn.execute(
+            """
+            SELECT *
+              FROM strategy_pool_materializations
+             WHERE id = ? OR pool_revision_id = ? OR strategy_id = ?
+             ORDER BY id
+            """,
+            (
+                normalized["id"],
+                normalized["pool_revision_id"],
+                normalized["strategy_id"],
+            ),
+        ).fetchall()
+        if collisions:
+            if len(collisions) != 1:
+                raise StrategyPoolMaterializationError(
+                    "Pool materialization identity collision"
+                )
+            persisted = _pool_materialization_from_row(collisions[0])
+            if not _same_pool_materialization(persisted, normalized):
+                raise StrategyPoolMaterializationError(
+                    "Pool materialization identity collision"
+                )
+            return _require_pool_materialization_on_connection(
+                conn,
+                expected=normalized,
+            )
+
+        orphan_strategy = conn.execute(
+            "SELECT 1 FROM strategies WHERE id = ?",
+            (normalized["strategy_id"],),
+        ).fetchone()
+        if orphan_strategy is not None:
+            raise StrategyPoolMaterializationError(
+                "materialized Strategy identity collision"
+            )
+
+        stamp = created_at or _now()
+        _insert_strategy_row(
+            conn,
+            normalized["task_id"],
+            strategy,
+            stamp,
+        )
+        detail = _pool_materialization_audit_detail(normalized)
+        conn.execute(
+            """
+            INSERT INTO audit(
+                id, kind, actor, target_ref, inputs_hash, outcome,
+                detail_json, at
+            )
+            VALUES (?, ?, 'system', ?, ?, 'succeeded', ?, ?)
+            """,
+            (
+                normalized["audit_id"],
+                POOL_MATERIALIZATION_AUDIT_KIND,
+                normalized["strategy_id"],
+                normalized["selected_design_hash"],
+                _pool_materialization_canonical_json(detail),
+                stamp,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO strategy_pool_materializations(
+                id, schema_version, producer_version, task_id, strategy_type,
+                strategy_id, strategy_version, pool_id, pool_revision_id,
+                pool_revision,
+                pool_snapshot_hash, pool_artifact_id,
+                pool_artifact_content_hash, selected_design_hash,
+                requirements_json, requirements_hash, strategy_spec_hash,
+                strategy_dsl_content_hash, audit_id, created_at
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                normalized["id"],
+                POOL_MATERIALIZATION_LEDGER_SCHEMA_VERSION,
+                POOL_MATERIALIZATION_PRODUCER_VERSION,
+                normalized["task_id"],
+                normalized["strategy_type"],
+                normalized["strategy_id"],
+                1,
+                normalized["pool_id"],
+                normalized["pool_revision_id"],
+                normalized["pool_revision"],
+                normalized["pool_snapshot_hash"],
+                normalized["pool_artifact_id"],
+                normalized["pool_artifact_content_hash"],
+                normalized["selected_design_hash"],
+                _pool_materialization_canonical_json(normalized["requirements"]),
+                normalized["requirements_hash"],
+                normalized["strategy_spec_hash"],
+                normalized["strategy_dsl_content_hash"],
+                normalized["audit_id"],
+                stamp,
+            ),
+        )
+        return _require_pool_materialization_on_connection(
+            conn,
+            expected=normalized,
+        )
 
     def list_for_task(self, task_id: str) -> list[Strategy]:
         with connect(self.db_path) as conn:
@@ -1118,6 +1385,377 @@ class StrategyRepository:
                 )
         due.sort(key=lambda item: (-item["overdue_days"], item["strategy_id"]))
         return due
+
+
+def _normalize_pool_materialization(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise StrategyPoolMaterializationError(
+            "Pool materialization must be an object"
+        )
+    missing = sorted(_POOL_MATERIALIZATION_INPUT_FIELDS - set(value))
+    unexpected = sorted(set(value) - _POOL_MATERIALIZATION_INPUT_FIELDS)
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if unexpected:
+            details.append("unsupported: " + ", ".join(unexpected))
+        raise StrategyPoolMaterializationError(
+            "Pool materialization fields are invalid (" + "; ".join(details) + ")"
+        )
+    strategy_type = _pool_materialization_text(
+        value["strategy_type"],
+        "strategy_type",
+    )
+    if strategy_type not in _POOL_MATERIALIZATION_STRATEGY_TYPES:
+        raise StrategyPoolMaterializationError(
+            "Pool materialization strategy_type is unsupported"
+        )
+    revision = value["pool_revision"]
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise StrategyPoolMaterializationError(
+            "Pool materialization pool_revision must be a positive integer"
+        )
+    raw_requirements = value["requirements"]
+    if not isinstance(raw_requirements, list):
+        raise StrategyPoolMaterializationError(
+            "Pool materialization requirements must be an array"
+        )
+    requirements_json = _pool_materialization_canonical_json(raw_requirements)
+    requirements = json.loads(requirements_json)
+    normalized = {
+        "id": _pool_materialization_text(value["id"], "materialization_id"),
+        "task_id": _pool_materialization_text(value["task_id"], "task_id"),
+        "strategy_type": strategy_type,
+        "strategy_id": _pool_materialization_text(
+            value["strategy_id"],
+            "strategy_id",
+        ),
+        "pool_id": _pool_materialization_text(value["pool_id"], "pool_id"),
+        "pool_revision_id": _pool_materialization_text(
+            value["pool_revision_id"],
+            "pool_revision_id",
+        ),
+        "pool_revision": revision,
+        "pool_artifact_id": _pool_materialization_text(
+            value["pool_artifact_id"],
+            "pool_artifact_id",
+        ),
+        "requirements": requirements,
+        "audit_id": _pool_materialization_text(value["audit_id"], "audit_id"),
+    }
+    for field in _POOL_MATERIALIZATION_HASH_FIELDS:
+        normalized[field] = _pool_materialization_hash(value[field], field)
+    computed_requirements_hash = hashlib.sha256(
+        requirements_json.encode("utf-8")
+    ).hexdigest()
+    if not hmac.compare_digest(
+        computed_requirements_hash,
+        normalized["requirements_hash"],
+    ):
+        raise StrategyPoolMaterializationError(
+            "Pool materialization requirements hash changed"
+        )
+    return normalized
+
+
+def _pool_materialization_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    if (
+        str(row["schema_version"])
+        != POOL_MATERIALIZATION_LEDGER_SCHEMA_VERSION
+        or str(row["producer_version"]) != POOL_MATERIALIZATION_PRODUCER_VERSION
+    ):
+        raise StrategyPoolMaterializationError(
+            "Pool materialization schema or producer version changed"
+        )
+    try:
+        requirements = json.loads(str(row["requirements_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise StrategyPoolMaterializationError(
+            "Pool materialization requirements are invalid"
+        ) from exc
+    normalized = _normalize_pool_materialization(
+        {
+            "id": row["id"],
+            "task_id": row["task_id"],
+            "strategy_type": row["strategy_type"],
+            "strategy_id": row["strategy_id"],
+            "pool_id": row["pool_id"],
+            "pool_revision_id": row["pool_revision_id"],
+            "pool_revision": row["pool_revision"],
+            "pool_snapshot_hash": row["pool_snapshot_hash"],
+            "pool_artifact_id": row["pool_artifact_id"],
+            "pool_artifact_content_hash": row["pool_artifact_content_hash"],
+            "selected_design_hash": row["selected_design_hash"],
+            "requirements": requirements,
+            "requirements_hash": row["requirements_hash"],
+            "strategy_spec_hash": row["strategy_spec_hash"],
+            "strategy_dsl_content_hash": row["strategy_dsl_content_hash"],
+            "audit_id": row["audit_id"],
+        }
+    )
+    canonical_requirements = _pool_materialization_canonical_json(
+        normalized["requirements"]
+    )
+    strategy_version = row["strategy_version"]
+    if (
+        isinstance(strategy_version, bool)
+        or not isinstance(strategy_version, int)
+        or strategy_version != 1
+    ):
+        raise StrategyPoolMaterializationError(
+            "Pool materialization Strategy version changed"
+        )
+    if not hmac.compare_digest(
+        canonical_requirements,
+        str(row["requirements_json"]),
+    ):
+        raise StrategyPoolMaterializationError(
+            "Pool materialization requirements are not canonical"
+        )
+    created_at = _pool_materialization_text(row["created_at"], "created_at")
+    return {
+        **normalized,
+        "schema_version": POOL_MATERIALIZATION_LEDGER_SCHEMA_VERSION,
+        "producer_version": POOL_MATERIALIZATION_PRODUCER_VERSION,
+        "strategy_version": strategy_version,
+        "created_at": created_at,
+    }
+
+
+def _same_pool_materialization(
+    persisted: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> bool:
+    return all(
+        persisted.get(field) == expected.get(field)
+        for field in _POOL_MATERIALIZATION_INPUT_FIELDS
+    )
+
+
+def _require_pool_materialization_on_connection(
+    conn: sqlite3.Connection,
+    *,
+    expected: Mapping[str, Any],
+) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT * FROM strategy_pool_materializations WHERE id = ?",
+        (expected["id"],),
+    ).fetchone()
+    if row is None:
+        raise StrategyPoolMaterializationError(
+            "Pool materialization ledger disappeared"
+        )
+    persisted = _pool_materialization_from_row(row)
+    if not _same_pool_materialization(persisted, expected):
+        raise StrategyPoolMaterializationError(
+            "Pool materialization ledger changed"
+        )
+
+    pool_revision = conn.execute(
+        """
+        SELECT id, pool_id, task_id, strategy_type, revision, snapshot_hash,
+               artifact_id, artifact_content_hash
+          FROM strategy_candidate_pool_revisions
+         WHERE id = ?
+        """,
+        (persisted["pool_revision_id"],),
+    ).fetchone()
+    expected_pool_revision = {
+        "id": persisted["pool_revision_id"],
+        "pool_id": persisted["pool_id"],
+        "task_id": persisted["task_id"],
+        "strategy_type": persisted["strategy_type"],
+        "revision": persisted["pool_revision"],
+        "snapshot_hash": persisted["pool_snapshot_hash"],
+        "artifact_id": persisted["pool_artifact_id"],
+        "artifact_content_hash": persisted["pool_artifact_content_hash"],
+    }
+    if pool_revision is None or any(
+        pool_revision[field] != expected_value
+        for field, expected_value in expected_pool_revision.items()
+    ):
+        raise StrategyPoolMaterializationError(
+            "Pool revision binding changed"
+        )
+    pool_artifact = conn.execute(
+        """
+        SELECT id, task_id, kind, content_hash
+          FROM task_artifacts
+         WHERE id = ?
+        """,
+        (persisted["pool_artifact_id"],),
+    ).fetchone()
+    expected_pool_artifact = {
+        "id": persisted["pool_artifact_id"],
+        "task_id": persisted["task_id"],
+        "kind": "strategy_candidate_pool_json",
+        "content_hash": persisted["pool_artifact_content_hash"],
+    }
+    if pool_artifact is None or any(
+        pool_artifact[field] != expected_value
+        for field, expected_value in expected_pool_artifact.items()
+    ):
+        raise StrategyPoolMaterializationError(
+            "Pool artifact binding changed"
+        )
+
+    strategy_row = conn.execute(
+        """
+        SELECT id, task_id, strategy_type, version, status, asset_status,
+               adopted_at, adoption_reason, parent_strategy_id, created_at,
+               rules_json, score_col, default_decision_json, description,
+               dsl_json, dsl_schema_version, dsl_content_hash
+          FROM strategies
+         WHERE id = ?
+        """,
+        (persisted["strategy_id"],),
+    ).fetchone()
+    if strategy_row is None:
+        raise StrategyPoolMaterializationError(
+            "materialized Strategy disappeared"
+        )
+    try:
+        strategy = _strategy_from_row(strategy_row)
+        metadata = _strategy_meta_from_row(strategy_row)
+        effect_hash = _strategy_spec_hash_from_row(strategy_row)
+    except (StrategyError, StrategyLifecycleError, TypeError, ValueError) as exc:
+        raise StrategyPoolMaterializationError(
+            "materialized Strategy is invalid"
+        ) from exc
+    if (
+        strategy.id != persisted["strategy_id"]
+        or strategy.strategy_type != persisted["strategy_type"]
+        or metadata["task_id"] != persisted["task_id"]
+        or metadata["version"] != persisted["strategy_version"]
+        or metadata["parent_strategy_id"] is not None
+        or metadata["created_at"] != persisted["created_at"]
+        or not hmac.compare_digest(
+            effect_hash,
+            persisted["strategy_spec_hash"],
+        )
+        or not hmac.compare_digest(
+            str(strategy_row["dsl_content_hash"]),
+            persisted["strategy_dsl_content_hash"],
+        )
+    ):
+        raise StrategyPoolMaterializationError(
+            "materialized Strategy binding changed"
+        )
+
+    audit_detail = _pool_materialization_audit_detail(persisted)
+    audit = conn.execute(
+        """
+        SELECT id, kind, actor, target_ref, inputs_hash, outcome,
+               detail_json, at
+          FROM audit
+         WHERE id = ?
+        """,
+        (persisted["audit_id"],),
+    ).fetchone()
+    expected_audit = {
+        "id": persisted["audit_id"],
+        "kind": POOL_MATERIALIZATION_AUDIT_KIND,
+        "actor": "system",
+        "target_ref": persisted["strategy_id"],
+        "inputs_hash": persisted["selected_design_hash"],
+        "outcome": "succeeded",
+        "detail_json": _pool_materialization_canonical_json(audit_detail),
+        "at": persisted["created_at"],
+    }
+    if audit is None or any(
+        str(audit[field]) != expected_value
+        for field, expected_value in expected_audit.items()
+    ):
+        raise StrategyPoolMaterializationError(
+            "Pool materialization audit changed"
+        )
+    audit_count = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM audit
+         WHERE kind = ? AND target_ref = ?
+        """,
+        (
+            POOL_MATERIALIZATION_AUDIT_KIND,
+            persisted["strategy_id"],
+        ),
+    ).fetchone()
+    if audit_count is None or int(audit_count[0]) != 1:
+        raise StrategyPoolMaterializationError(
+            "Pool materialization must own exactly one creation audit"
+        )
+    return {
+        "materialization": persisted,
+        "strategy": strategy,
+        "metadata": metadata,
+    }
+
+
+def _pool_materialization_audit_detail(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": POOL_MATERIALIZATION_LEDGER_SCHEMA_VERSION,
+        "materialization_id": value["id"],
+        "task_id": value["task_id"],
+        "strategy_type": value["strategy_type"],
+        "strategy_id": value["strategy_id"],
+        "strategy_version": value.get("strategy_version", 1),
+        "pool_id": value["pool_id"],
+        "pool_revision_id": value["pool_revision_id"],
+        "pool_revision": value["pool_revision"],
+        "pool_snapshot_hash": value["pool_snapshot_hash"],
+        "pool_artifact_id": value["pool_artifact_id"],
+        "pool_artifact_content_hash": value["pool_artifact_content_hash"],
+        "selected_design_hash": value["selected_design_hash"],
+        "requirements_hash": value["requirements_hash"],
+        "strategy_spec_hash": value["strategy_spec_hash"],
+        "strategy_dsl_content_hash": value["strategy_dsl_content_hash"],
+    }
+
+
+def _pool_materialization_text(value: object, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or "\x00" in value
+    ):
+        raise StrategyPoolMaterializationError(
+            f"Pool materialization {field} must be canonical text"
+        )
+    return value
+
+
+def _pool_materialization_hash(value: object, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or value != value.lower()
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise StrategyPoolMaterializationError(
+            f"Pool materialization {field} must be a lowercase SHA-256"
+        )
+    return value
+
+
+def _pool_materialization_canonical_json(value: object) -> str:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise StrategyPoolMaterializationError(
+            "Pool materialization must be finite canonical JSON"
+        ) from exc
 
 
 def _write_audit_row(

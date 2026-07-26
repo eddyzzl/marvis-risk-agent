@@ -265,6 +265,9 @@ def test_migration_018_backfills_existing_canonical_strategy_hash(tmp_path):
     strategy = _strategy()
     repo.create_strategy("task-1", strategy)
     with connect(db_path) as conn:
+        # Rewind to a real pre-v18 shape: the v22-only dependent ledger would
+        # not exist yet and must not block dropping the later hash column.
+        conn.execute("DROP TABLE strategy_pool_materializations")
         conn.execute("ALTER TABLE strategies DROP COLUMN dsl_content_hash")
         conn.execute("PRAGMA user_version = 17")
 

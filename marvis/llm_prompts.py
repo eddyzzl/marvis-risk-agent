@@ -247,7 +247,7 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=43,
+    version=44,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
@@ -268,6 +268,7 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "cross_matrix_cell_selection/"
         "strategy_pool_add_candidate/strategy_pool_remove_entry/"
         "strategy_pool_set_action/strategy_pool_reorder/strategy_pool_compile/"
+        "strategy_pool_materialize/"
         "strategy_pool_apply/strategy_pool_validation/strategy_pool_impact/"
         "strategy_impact_cube/strategy_pool_stability/"
         "strategy_dsl_delivery/"
@@ -382,6 +383,18 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "问句、否定、假设、历史或未来描述必须 clarification。同一句不得串联选叶、Strategy Pool、"
         "业务动作、报告、采纳或部署。该 Workflow 只创建 development / unvalidated 派生数据集，"
         "不激活或替换当前 workspace。"
+        "strategy_pool_materialize 表示把当前任务中一个明确类型的当前非空 "
+        "Strategy Pool 物化为持久化 draft Strategy。workflow_inputs 必须且只能"
+        "包含用户当前肯定命令中唯一明确的五类 strategy_type。Pool revision/"
+        "snapshot hash、Pool artifact id/content hash、design hash、StrategySpec、"
+        "requirements、指标和 lifecycle 全部由平台在计划创建与 Tool 执行时恢复，"
+        "禁止输出。请求必须明确说物化/固化/创建当前 Pool 为 draft Strategy，且"
+        "必须是当前、肯定、单步骤命令；否定、问句、历史/未来/假设、模糊或多个"
+        " Pool，以及同轮串联采纳、部署、回测、应用、报告、监控或 DSL 导出必须"
+        " clarification。紧随物化命令且只声明“不要采纳或部署/do not adopt or "
+        "deploy”的否定 lifecycle 免责声明不算第二个操作。本步骤只创建 draft "
+        "Strategy，不采纳、不部署，也不得声称后续 delivery/backtest/monitoring "
+        "readiness。"
         "strategy_pool_apply 表示把当前任务中一个明确类型的当前非空 Strategy Pool "
         "确定性应用或写回当前样本。workflow_inputs 只允许五类 strategy_type 和可选 "
         "output_prefix；output_prefix 只有在用户以输出前缀/output_prefix/output prefix/"
@@ -572,6 +585,8 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "完整、无重复 rule_id/entry_id 顺序；用户只说把某条放前面，或要求按效果/坏率/最好自动排序时，"
         "必须 clarification，不能补全或推荐顺序。strategy_pool_compile 只需要 strategy_type，表示只读编译"
         "当前 Pool 的 StrategySpec 草案；它不是 build/adopt/deploy。"
+        "strategy_pool_materialize 也只需要 strategy_type，但会创建或精确复用"
+        "持久化 draft Strategy；不得把 compile preview 与 materialize 混为同一 Workflow。"
         "strategy_pool_impact 表示对当前 task 的非空 approval/reject Strategy Pool 做只读影响测算。"
         "workflow_inputs 只允许用户拥有的 strategy_type、comparison_mode、baseline_strategy_id、"
         "month_col、loan_amount_col、overdue_amount_col 和 drop_nan_labels；comparison_mode 只能是"

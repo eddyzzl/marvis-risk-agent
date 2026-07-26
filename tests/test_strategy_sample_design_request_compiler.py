@@ -216,7 +216,7 @@ def test_v2_sample_validates_and_compiler_grounds_every_user_control() -> None:
     assert compiled.draft is not None
     assert compiled.draft.to_dict() == payload
     assert len(llm.calls) == 1
-    assert llm.calls[0]["prompt_version"] == 43
+    assert llm.calls[0]["prompt_version"] == 44
     assert "strategy_sample_design_v2" in llm.calls[0]["system_prompt"]
     assert "strategy_model_evidence_v2" in llm.calls[0]["system_prompt"]
 
@@ -613,7 +613,7 @@ def test_model_evidence_v2_compiles_only_existing_authenticated_univariate_summa
 
     assert result.draft is not None
     assert result.draft.to_dict() == payload
-    assert llm.calls[0]["prompt_version"] == 43
+    assert llm.calls[0]["prompt_version"] == 44
 
 
 @pytest.mark.parametrize(

@@ -86,6 +86,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_pool_set_action",
     "strategy_pool_reorder",
     "strategy_pool_compile",
+    "strategy_pool_materialize",
     "strategy_pool_apply",
     "strategy_pool_validation",
     "strategy_pool_impact",
@@ -1776,6 +1777,9 @@ _STRATEGY_POOL_WORKFLOWS = frozenset(
 )
 _STRATEGY_POOL_MEASUREMENT_WORKFLOWS = frozenset({"strategy_pool_impact"})
 _STRATEGY_POOL_APPLY_WORKFLOWS = frozenset({"strategy_pool_apply"})
+_STRATEGY_POOL_MATERIALIZE_WORKFLOWS = frozenset(
+    {"strategy_pool_materialize"}
+)
 _STRATEGY_POOL_VALIDATION_WORKFLOWS = frozenset(
     {"strategy_pool_validation"}
 )
@@ -1895,6 +1899,51 @@ _POOL_APPLY_PLATFORM_CONTROL_RE = re.compile(
     r"requirements(?:_hash)?|strategy_spec|design_hash|action_counts|"
     r"activated|adopted|deployed)(?![A-Za-z0-9_])|"
     r"(?:Pool|策略池|数据集|dataset|artifact|工件|产物)\s*(?:hash|哈希|revision|版本)",
+    re.IGNORECASE,
+)
+_POOL_MATERIALIZE_TARGET_RE = re.compile(
+    r"(?=.*(?:策略池|规则池|strategy(?:\s|-|_)*pool|\bpool\b))"
+    r"(?=.*(?:物化|固化|创建|生成|"
+    r"(?<![A-Za-z0-9_])(?:materialize|create)(?![A-Za-z0-9_])))"
+    r"(?=.*(?:草案策略|策略草案|draft\s+strategy|strategy\s+draft))",
+    re.IGNORECASE,
+)
+_POOL_MATERIALIZE_POSITIVE_INTENT_RE = re.compile(
+    r"(?:物化|固化|创建|生成)[^；;。.!?？\n]{0,180}"
+    r"(?:草案策略|策略草案|draft\s+strategy|strategy\s+draft)|"
+    r"(?<![A-Za-z0-9_])(?:materialize|create)[^;.!?\n]{0,180}"
+    r"(?:draft\s+strategy|strategy\s+draft)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_MATERIALIZE_NONCURRENT_RE = _POOL_APPLY_NONCURRENT_RE
+_POOL_MATERIALIZE_SECOND_OPERATION_RE = re.compile(
+    r"(?:采纳|采用|部署|上线|投产|生效|回测|测试|验证|应用|写回|"
+    r"生成报告|形成报告|出报告|监控|漂移|导出|下载)|"
+    r"(?<![A-Za-z0-9_])(?:adopt|deploy|promote|backtest|test|validate|"
+    r"apply|write[-\s]*back|report|monitor|export|download)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_MATERIALIZE_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:expected_pool_revision|"
+    r"expected_pool_snapshot_hash|expected_pool_artifact_id|"
+    r"expected_pool_artifact_content_hash|expected_design_hash|"
+    r"pool_(?:id|artifact_id)|artifact_(?:id|hash)|strategy_spec|"
+    r"requirements?|metrics?|design_hash)(?![A-Za-z0-9_])|"
+    r"(?:Pool|策略池|artifact|工件|产物|design|设计)\s*"
+    r"(?:hash|哈希|revision|版本)",
+    re.IGNORECASE,
+)
+_POOL_MATERIALIZE_NEGATED_LIFECYCLE_DISCLAIMER_RE = re.compile(
+    r"(?:，|,|；|;)\s*(?:"
+    r"(?:不要|不用|无需|不需要|不得|不会)\s*"
+    r"(?:采纳|采用|部署|上线|投产)"
+    r"(?:\s*(?:或|和|、|以及|并且?)\s*(?:采纳|采用|部署|上线|投产))*"
+    r"|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|without)\s+"
+    r"(?:adopt|deploy|promote)"
+    r"(?:\s*(?:or|and|,)\s*(?:adopt|deploy|promote))*"
+    r")\s*[。.!]?\s*$",
     re.IGNORECASE,
 )
 _POOL_APPLY_OUTPUT_PREFIX_LABEL_RE = re.compile(
@@ -3801,6 +3850,8 @@ def _validate_standard_workflow_payload(
             )
         elif workflow in _STRATEGY_POOL_APPLY_WORKFLOWS:
             normalized = _validate_strategy_pool_apply_inputs(raw_inputs)
+        elif workflow in _STRATEGY_POOL_MATERIALIZE_WORKFLOWS:
+            normalized = _validate_strategy_pool_materialize_inputs(raw_inputs)
         elif workflow in _STRATEGY_POOL_VALIDATION_WORKFLOWS:
             normalized = _validate_strategy_pool_validation_inputs(raw_inputs)
         elif workflow in _STRATEGY_POOL_WORKFLOWS:
@@ -6754,6 +6805,26 @@ def _validate_strategy_pool_apply_inputs(
     return normalized
 
 
+def _validate_strategy_pool_materialize_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the single user-owned Pool-to-draft control."""
+
+    workflow = "strategy_pool_materialize"
+    _reject_workflow_fields(inputs, {"strategy_type"}, workflow=workflow)
+    if "strategy_type" not in inputs:
+        raise _DraftValidationError(f"{workflow} 缺少 strategy_type。")
+    strategy_type = _required_text(
+        inputs["strategy_type"],
+        name=f"{workflow} strategy_type",
+    )
+    if strategy_type not in STRATEGY_TYPES:
+        raise _DraftValidationError(
+            f"{workflow} strategy_type 只能是：" + "、".join(STRATEGY_TYPES) + "。"
+        )
+    return {"strategy_type": strategy_type}
+
+
 def _validate_strategy_pool_validation_inputs(
     inputs: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -8440,6 +8511,23 @@ def _ground_refinement_request(
             code="automatic_tree_apply_workflow_required",
             fields=("workflow",),
         )
+    if utterance_targets_strategy_pool_materialize(utterance):
+        if not (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow == "strategy_pool_materialize"
+        ):
+            return _clarification(
+                "原话明确要求把当前 Strategy Pool 物化为持久化 draft Strategy，"
+                "只能编译为 strategy_pool_materialize；不能改路由到 Pool 编译预览、"
+                "已有策略 build、采纳、部署或其他 Workflow。",
+                code="strategy_pool_materialize_workflow_required",
+                fields=("workflow",),
+            )
+        # This dedicated command owns the whole utterance. Ground it now so
+        # words such as "backtest/report" in a chained follow-up cannot be
+        # mistaken for a different Pool workflow before the single-operation
+        # guard reports the precise materialization error.
+        return _ground_strategy_pool_materialize_request(utterance, result)
     if _utterance_targets_strategy_pool_apply(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
         and (
@@ -8594,6 +8682,8 @@ def _ground_refinement_request(
         )
     if draft.workflow in _STRATEGY_POOL_APPLY_WORKFLOWS:
         return _ground_strategy_pool_apply_request(utterance, result)
+    if draft.workflow in _STRATEGY_POOL_MATERIALIZE_WORKFLOWS:
+        return _ground_strategy_pool_materialize_request(utterance, result)
     if draft.workflow in _STRATEGY_POOL_VALIDATION_WORKFLOWS:
         return _ground_strategy_pool_validation_request(utterance, result)
     if draft.workflow in _STRATEGY_POOL_MEASUREMENT_WORKFLOWS:
@@ -10930,6 +11020,12 @@ def _utterance_targets_strategy_pool_apply(utterance: str) -> bool:
     return _POOL_APPLY_TARGET_RE.search(utterance) is not None
 
 
+def utterance_targets_strategy_pool_materialize(utterance: str) -> bool:
+    """Reserve an explicit current-Pool-to-draft-Strategy command."""
+
+    return _POOL_MATERIALIZE_TARGET_RE.search(utterance) is not None
+
+
 def _utterance_targets_strategy_pool_validation(utterance: str) -> bool:
     """Reserve explicit independent validation/OOT Pool replay clauses."""
 
@@ -11054,6 +11150,65 @@ def _ground_strategy_pool_apply_request(
             + "。平台不会替用户猜测 Pool、前缀或任何数据/证据绑定。",
             code="strategy_pool_apply_controls_not_grounded",
             fields=tuple(missing_controls),
+        )
+    return result
+
+
+def _ground_strategy_pool_materialize_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Prove one current Pool type and a draft-only materialization command."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    intent_text = _POOL_MATERIALIZE_NEGATED_LIFECYCLE_DISCLAIMER_RE.sub(
+        "",
+        utterance,
+    )
+    if (
+        _POOL_MATERIALIZE_NONCURRENT_RE.search(intent_text) is not None
+        or _POOL_MATERIALIZE_POSITIVE_INTENT_RE.search(intent_text) is None
+        or _POOL_MATERIALIZE_TARGET_RE.search(intent_text) is None
+    ):
+        return _clarification(
+            "请用当前轮、肯定式的单一命令明确要求把一个指定类型的当前 "
+            "Strategy Pool 物化为 draft Strategy；否定、问句、历史/未来或"
+            "假设描述不会创建策略。",
+            code="strategy_pool_materialize_positive_command_required",
+            fields=("materialize_intent",),
+        )
+    if _POOL_MATERIALIZE_PLATFORM_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "Pool revision/hash、artifact、design hash、StrategySpec、"
+            "requirements 和指标只能由平台恢复；请求中只能提供 Pool 类型。",
+            code="strategy_pool_materialize_platform_binding_forbidden",
+            fields=("platform_binding",),
+        )
+    if _POOL_MATERIALIZE_SECOND_OPERATION_RE.search(intent_text) is not None:
+        return _clarification(
+            "Strategy Pool 物化必须是当前轮唯一操作；采纳、部署、回测、应用、"
+            "报告、监控和 DSL 导出必须拆成后续请求。本步骤只创建 draft Strategy。",
+            code="strategy_pool_materialize_single_operation_required",
+            fields=("workflow",),
+        )
+
+    strategy_type = str(inputs.get("strategy_type") or "")
+    mentioned_types = {
+        item[0] for item in _voting_strategy_type_mentions(utterance)
+    }
+    pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    if (
+        pattern is None
+        or pattern.search(utterance) is None
+        or mentioned_types != {strategy_type}
+    ):
+        return _clarification(
+            "Strategy Pool 物化只能采用原话中唯一明确的 Pool 类型；平台不会"
+            "替用户猜测 Pool、hash、StrategySpec、requirements 或指标。",
+            code="strategy_pool_materialize_controls_not_grounded",
+            fields=("strategy_type",),
         )
     return result
 
@@ -15597,6 +15752,15 @@ def _standard_workflow_confirmation_text(
             "平台只读编译当前 task Pool 为 canonical StrategySpec 并计算 design hash",
             "结果只是草案预览，不会创建已采纳策略，也不会采纳或部署",
         ]
+    elif draft.workflow == "strategy_pool_materialize":
+        details = [
+            "已识别为〔Strategy Pool 物化 draft Strategy Workflow〕",
+            f"策略类型：{inputs['strategy_type']}",
+            "平台将在计划创建时完整认证当前非空 Pool，并冻结 revision、snapshot、"
+            "artifact 与 design hash",
+            "本步骤只创建或精确复用持久化 draft Strategy；不采纳、不部署，"
+            "后续回测、DSL 交付、采纳和监控仍受各自证据与生命周期门禁约束",
+        ]
     elif draft.workflow == "strategy_pool_apply":
         details = [
             "已识别为〔Strategy Pool 应用写回 Workflow〕",
@@ -16367,6 +16531,14 @@ def _user_prompt(
         "且必须是当前、肯定、单步骤命令；否定、问句、历史/未来/假设、模糊或多 Pool，"
         "或同轮串联 Pool 修改、采纳、激活、部署、上线、导出或报告必须 clarification。"
         "结果只创建不可变派生数据集，不激活当前 workspace，不采纳、不部署。"
+        "对于 strategy_pool_materialize，只能抄录用户当前肯定命令中唯一明确的"
+        "五类 strategy_type。Pool revision/snapshot hash、Pool artifact id/content "
+        "hash、design hash、StrategySpec、requirements、指标和 lifecycle 全部禁止"
+        "填写，由平台在计划创建和 Tool 执行时恢复。请求必须明确把当前 Pool 物化/"
+        "固化/创建为 draft Strategy，且必须是当前、肯定、单步骤命令；否定、问句、"
+        "历史/未来/假设、模糊或多 Pool，或同轮串联采纳、部署、回测、应用、报告、"
+        "监控或 DSL 导出必须 clarification。本步骤只创建 draft Strategy，不采纳、"
+        "不部署，也不声称后续 readiness。"
     )
 
 
@@ -16464,6 +16636,7 @@ __all__ = [
     "utterance_targets_scorecard_band_build",
     "utterance_targets_scorecard_cutoff_selection",
     "utterance_targets_strategy_dsl_delivery",
+    "utterance_targets_strategy_pool_materialize",
     "utterance_targets_strategy_pool_stability",
     "utterance_targets_strategy_project_context",
     "utterance_targets_strategy_report_bundle_v2",

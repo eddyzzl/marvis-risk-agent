@@ -93,6 +93,9 @@ from marvis.packs.strategy.pool_tools import (
     run_reorder_strategy_pool,
     run_set_pool_entry_action,
 )
+from marvis.packs.strategy.pool_materialization_tools import (
+    run_materialize_strategy_from_pool,
+)
 from marvis.packs.strategy.pool_apply_tools import run_apply_strategy_pool
 from marvis.packs.strategy.apply_projection import (
     DEFAULT_STRATEGY_APPLY_PREFIX,
@@ -982,6 +985,12 @@ def tool_compile_strategy_pool(inputs: dict, ctx) -> dict:
     """Compile an exact pool revision to a canonical, unexecuted design."""
 
     return run_compile_strategy_pool(inputs, ctx, _runtime(ctx))
+
+
+def tool_materialize_strategy_from_pool(inputs: dict, ctx) -> dict:
+    """Persist the exact current Pool design as one canonical draft Strategy."""
+
+    return run_materialize_strategy_from_pool(inputs, ctx, _runtime(ctx))
 
 
 def tool_apply_strategy_pool(inputs: dict, ctx) -> dict:

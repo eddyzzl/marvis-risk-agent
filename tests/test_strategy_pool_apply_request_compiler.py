@@ -99,7 +99,7 @@ def test_pool_apply_accepts_one_explicit_ascii_output_prefix() -> None:
         "output_prefix": "decision_",
     }
     assert "decision_" in result.confirmation
-    assert llm.calls[0]["prompt_version"] == 43
+    assert llm.calls[0]["prompt_version"] == 44
     assert "strategy_pool_apply" in llm.calls[0]["system_prompt"]
     assert "Pool revision/snapshot hash" in llm.calls[0]["system_prompt"]
 

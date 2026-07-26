@@ -21,6 +21,7 @@ def test_strategy_pool_templates_are_registered_with_one_narrow_tool_each() -> N
         "strategy_pool_set_action": "set_pool_entry_action",
         "strategy_pool_reorder": "reorder_strategy_pool",
         "strategy_pool_compile": "compile_strategy_pool",
+        "strategy_pool_materialize": "materialize_strategy_from_pool",
     }
 
     for template_id, tool_name in expected.items():
@@ -41,6 +42,10 @@ def test_pool_draft_mutations_and_compile_do_not_require_human_confirmation() ->
         get_template(item).steps[0].needs_confirmation is False for item in mutations
     )
     assert get_template("strategy_pool_compile").steps[0].needs_confirmation is False
+    assert (
+        get_template("strategy_pool_materialize").steps[0].needs_confirmation
+        is False
+    )
 
 
 def test_pool_templates_bind_only_platform_resolved_integrity_fields() -> None:
@@ -59,6 +64,7 @@ def test_pool_templates_bind_only_platform_resolved_integrity_fields() -> None:
         "strategy_pool_set_action",
         "strategy_pool_reorder",
         "strategy_pool_compile",
+        "strategy_pool_materialize",
     ):
         inputs = get_template(template_id).steps[0].inputs_template
         assert inputs["expected_pool_revision"] == "{slot:expected_pool_revision}"
@@ -113,6 +119,12 @@ def test_pool_templates_instantiate_against_the_real_tool_manifests(
             "ordered_rule_ids": ["candidate-rule-" + "e" * 32],
         },
         "strategy_pool_compile": common,
+        "strategy_pool_materialize": {
+            **common,
+            "expected_pool_artifact_id": "b" * 64,
+            "expected_pool_artifact_content_hash": "c" * 64,
+            "expected_design_hash": "d" * 64,
+        },
     }
 
     for template_id, slots in slots_by_template.items():

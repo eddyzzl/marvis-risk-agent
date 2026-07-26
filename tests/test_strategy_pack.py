@@ -442,6 +442,11 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     compile_pool_tool = next(
         tool for tool in manifest.tools if tool.name == "compile_strategy_pool"
     )
+    materialize_pool_tool = next(
+        tool
+        for tool in manifest.tools
+        if tool.name == "materialize_strategy_from_pool"
+    )
     measure_pool_impact_tool = next(
         tool for tool in manifest.tools if tool.name == "measure_pool_impact"
     )
@@ -518,6 +523,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "set_pool_entry_action",
         "reorder_strategy_pool",
         "compile_strategy_pool",
+        "materialize_strategy_from_pool",
         "apply_strategy_pool",
         "measure_pool_impact",
         "measure_candidate_monthly_stability",
@@ -1140,6 +1146,9 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         } <= required
     assert compile_pool_tool.policy.human_decision_gate == "none"
     assert compile_pool_tool.policy.effect_authorization == "none"
+    assert materialize_pool_tool.policy.human_decision_gate == "none"
+    assert materialize_pool_tool.policy.effect_authorization == "none"
+    assert "write:strategy" in materialize_pool_tool.side_effects
     assert measure_pool_impact_tool.determinism == "deterministic"
     assert measure_pool_impact_tool.policy.human_decision_gate == "none"
     assert measure_pool_impact_tool.policy.effect_authorization == "none"

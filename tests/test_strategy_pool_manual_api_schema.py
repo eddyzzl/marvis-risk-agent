@@ -28,6 +28,7 @@ def _request(workflow: str, workflow_inputs: dict) -> dict:
     ("workflow", "workflow_inputs"),
     [
         ("strategy_pool_compile", {"strategy_type": "approval"}),
+        ("strategy_pool_materialize", {"strategy_type": "limit"}),
         (
             "strategy_pool_remove_entry",
             {
@@ -58,6 +59,35 @@ def test_manual_pool_operation_accepts_only_user_owned_controls(
     assert request.workflow == workflow
     assert request.workflow_inputs == workflow_inputs
     assert workflow in _MANUAL_STRATEGY_WORKFLOWS
+
+
+@pytest.mark.parametrize(
+    "platform_field",
+    [
+        "expected_pool_revision",
+        "expected_pool_snapshot_hash",
+        "expected_pool_artifact_id",
+        "expected_pool_artifact_content_hash",
+        "expected_design_hash",
+        "strategy_spec",
+        "requirements",
+        "metrics",
+    ],
+)
+def test_manual_pool_materialize_rejects_platform_owned_inputs(
+    platform_field: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        ManualStrategyRequest.model_validate(
+            _request(
+                "strategy_pool_materialize",
+                {
+                    "strategy_type": "approval",
+                    platform_field: "forged",
+                },
+            ),
+            strict=True,
+        )
 
 
 @pytest.mark.parametrize(

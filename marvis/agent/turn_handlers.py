@@ -81,6 +81,7 @@ from marvis.agent.strategy_request_compiler import (
     utterance_targets_scorecard_cutoff_selection,
     utterance_targets_strategy_dsl_delivery,
     utterance_targets_strategy_impact_cube,
+    utterance_targets_strategy_pool_materialize,
     utterance_targets_strategy_pool_stability,
     utterance_targets_strategy_project_context,
     utterance_targets_strategy_report_bundle_v2,
@@ -1883,6 +1884,7 @@ def _is_strategy_request_intent(text: str) -> bool:
         or utterance_targets_scorecard_band_build(text)
         or utterance_targets_scorecard_cutoff_selection(text)
         or utterance_targets_strategy_dsl_delivery(text)
+        or utterance_targets_strategy_pool_materialize(text)
         or utterance_targets_strategy_pool_stability(text)
         or _STRATEGY_AUTOMATIC_TREE_SHORTHAND_RE.search(text)
         or (
@@ -1908,6 +1910,7 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "interactive_tree_frontier_materialization",
         "strategy_pool_add_candidate",
         "strategy_pool_compile",
+        "strategy_pool_materialize",
         "strategy_pool_remove_entry",
         "strategy_pool_set_action",
         "strategy_pool_reorder",
@@ -3072,6 +3075,19 @@ def _run_validated_strategy_request(
 
     if (
         isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_pool_materialize"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_pool_materialize",
+            slots=_strategy_pool_materialize_plan_slots(runtime, task, draft),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow in _STRATEGY_POOL_WORKFLOWS
     ):
         template_id = {
@@ -4018,6 +4034,11 @@ def _standard_workflow_request_preflight(
         # Select and authenticate the exact current nonempty Pool only once,
         # immediately before plan creation. The Tool revalidates the CAS under
         # its writer lock before deriving any dataset.
+        return None
+    if draft.workflow == "strategy_pool_materialize":
+        # Deep Pool/artifact/lineage authentication and all six immutable Tool
+        # inputs are selected together once, immediately before plan creation.
+        # The Tool repeats those exact-ref checks under its writer lock.
         return None
     if draft.workflow == "strategy_dsl_delivery":
         # Strategy and dataset refs are selected and authenticated together
@@ -5302,6 +5323,74 @@ def _strategy_pool_apply_plan_slots(
     if "output_prefix" in inputs:
         slots["output_prefix"] = inputs["output_prefix"]
     return slots
+
+
+def _strategy_pool_materialize_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Deeply authenticate one current nonempty Pool and freeze Tool identity."""
+
+    if draft.workflow != "strategy_pool_materialize":
+        raise StrategySetupError(
+            "Strategy Pool 物化 slots 收到了错误的 Workflow。"
+        )
+    strategy_type = str(draft.workflow_inputs["strategy_type"])
+    read_runtime = _strategy_v2_read_runtime(runtime)
+    try:
+        binding = load_current_strategy_candidate_pool_artifact(
+            read_runtime,
+            task_id=task.id,
+            strategy_type=strategy_type,
+        )
+    except (StrategyError, *_STRATEGY_V2_ARTIFACT_ERRORS) as exc:
+        raise StrategySetupError(
+            f"当前 {strategy_type} Strategy Pool 的 artifact、来源、编译结果"
+            "或 lineage 未通过完整认证，不能创建 draft Strategy。"
+        ) from exc
+
+    pool = binding.pool
+    design = binding.compiled_design
+    try:
+        if (
+            binding.task_id != task.id
+            or binding.strategy_type != strategy_type
+            or not _strategy_pool_entries(pool)
+        ):
+            raise ValueError("Pool binding is not the requested nonempty current Pool")
+        revision = pool["revision"]
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise ValueError("invalid Pool revision")
+        snapshot_hash = pool["snapshot_hash"]
+        artifact_id = binding.artifact_id
+        artifact_content_hash = binding.artifact_content_hash
+        design_hash = design["design_hash"]
+        for value in (
+            snapshot_hash,
+            artifact_id,
+            artifact_content_hash,
+            design_hash,
+        ):
+            if (
+                not isinstance(value, str)
+                or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            ):
+                raise ValueError("invalid authenticated hash")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StrategySetupError(
+            "当前 Strategy Pool 的完整认证绑定不完整或 Pool 非空条件不成立，"
+            "不能创建 draft Strategy。"
+        ) from exc
+
+    return {
+        "strategy_type": strategy_type,
+        "expected_pool_revision": revision,
+        "expected_pool_snapshot_hash": snapshot_hash,
+        "expected_pool_artifact_id": artifact_id,
+        "expected_pool_artifact_content_hash": artifact_content_hash,
+        "expected_design_hash": design_hash,
+    }
 
 
 def _strategy_pool_validation_plan_slots(
@@ -10512,6 +10601,7 @@ def _strategy_request_requires_dataset(
             "strategy_impact_cube",
             "strategy_pool_stability",
             "strategy_pool_apply",
+            "strategy_pool_materialize",
             "strategy_pool_validation",
             "candidate_monthly_stability",
             "scorecard_band_build",

@@ -224,6 +224,7 @@ ManualStrategyWorkflow = Literal[
     "interactive_tree_frontier_materialization",
     "strategy_pool_add_candidate",
     "strategy_pool_compile",
+    "strategy_pool_materialize",
     "strategy_pool_remove_entry",
     "strategy_pool_set_action",
     "strategy_pool_reorder",
@@ -740,6 +741,14 @@ class ManualStrategyPoolCompileInputs(BaseModel):
     strategy_type: ManualStrategyType
 
 
+class ManualStrategyPoolMaterializeInputs(BaseModel):
+    """The Pool type is the only user-owned draft-materialization control."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: ManualStrategyType
+
+
 class ManualStrategyPoolAddCandidateInputs(BaseModel):
     """One authenticated candidate pointer plus minimal Pool-owned actions."""
 
@@ -1023,6 +1032,9 @@ _MANUAL_VOTING_CANDIDATE_BUILD_FROM_SEARCH_INPUTS = TypeAdapter(
 _MANUAL_STRATEGY_POOL_COMPILE_INPUTS = TypeAdapter(
     ManualStrategyPoolCompileInputs
 )
+_MANUAL_STRATEGY_POOL_MATERIALIZE_INPUTS = TypeAdapter(
+    ManualStrategyPoolMaterializeInputs
+)
 _MANUAL_STRATEGY_POOL_ADD_CANDIDATE_INPUTS = TypeAdapter(
     ManualStrategyPoolAddCandidateInputs
 )
@@ -1144,6 +1156,11 @@ class ManualStrategyRequest(BaseModel):
             )
         elif self.workflow == "strategy_pool_compile":
             _MANUAL_STRATEGY_POOL_COMPILE_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "strategy_pool_materialize":
+            _MANUAL_STRATEGY_POOL_MATERIALIZE_INPUTS.validate_python(
                 self.workflow_inputs,
                 strict=True,
             )
