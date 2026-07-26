@@ -1842,6 +1842,7 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "univariate_candidate_refinement",
         "scorecard_band_build",
         "scorecard_cutoff_selection",
+        "candidate_monthly_stability",
     }
 )
 

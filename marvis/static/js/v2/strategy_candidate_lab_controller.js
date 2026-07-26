@@ -11,6 +11,7 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "automatic_tree_candidate_build",
   "scorecard_band_build",
   "scorecard_cutoff_selection",
+  "candidate_monthly_stability",
 ]);
 
 const WORKFLOW_LABELS = Object.freeze({
@@ -20,6 +21,7 @@ const WORKFLOW_LABELS = Object.freeze({
   automatic_tree_candidate_build: "启动自动规则树",
   scorecard_band_build: "生成评分卡分档证据",
   scorecard_cutoff_selection: "记录评分卡 Cutoff 选择",
+  candidate_monthly_stability: "测算候选逐月稳定性",
 });
 
 const COLLECTION_DEFINITIONS = Object.freeze([
@@ -1187,6 +1189,34 @@ function collectScorecardCutoffSelectionInputs(form) {
   return inputs;
 }
 
+function collectCandidateMonthlyStabilityInputs(form) {
+  const mode = formValue(form, "stability_source_mode");
+  if (mode === "pool_entry") {
+    const entry = selectedProjectionOption(
+      form,
+      "stability_pool_entry",
+      "当前 Strategy Pool 条目",
+    );
+    const strategyType = nonEmptyText(entry.dataset?.strategyType);
+    if (!strategyType) {
+      throw new Error("当前 Pool 条目缺少受认证策略类型。");
+    }
+    return {
+      strategy_type: strategyType,
+      entry_id: nonEmptyText(entry.value),
+    };
+  }
+  if (mode === "univariate_asset") {
+    const asset = selectedProjectionOption(
+      form,
+      "stability_asset_id",
+      "单变量候选资产",
+    );
+    return { asset_id: nonEmptyText(asset.value) };
+  }
+  throw new Error("请选择当前 Pool 条目或单变量候选资产。");
+}
+
 export function collectStrategyCandidateLabRequest(form) {
   const workflow = nonEmptyText(form?.dataset?.candidateLabWorkflow);
   if (!STRATEGY_CANDIDATE_LAB_WORKFLOWS.includes(workflow)) {
@@ -1199,6 +1229,7 @@ export function collectStrategyCandidateLabRequest(form) {
     automatic_tree_candidate_build: collectTreeInputs,
     scorecard_band_build: collectScorecardBandInputs,
     scorecard_cutoff_selection: collectScorecardCutoffSelectionInputs,
+    candidate_monthly_stability: collectCandidateMonthlyStabilityInputs,
   }[workflow](form);
   return {
     request_kind: "standard_workflow",
@@ -1568,6 +1599,115 @@ function syncScorecardForms(root, payload) {
   );
 }
 
+function candidateStabilityForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="candidate_monthly_stability"]',
+  ) || null;
+}
+
+function setCandidateStabilityPanelVisible(panel, visible) {
+  if (!panel) return;
+  panel.classList?.toggle?.("hidden", !visible);
+  panel.setAttribute?.("aria-hidden", visible ? "false" : "true");
+  const controls = panel.querySelectorAll?.("input, select, textarea, button") || [];
+  for (const control of controls) control.disabled = !visible;
+}
+
+function candidateStabilityPoolOptions(payload) {
+  const pools = collectionItems(isRecord(payload?.pools) ? payload.pools : {});
+  const result = [];
+  for (const pool of pools) {
+    const strategyType = nonEmptyText(pool?.strategy_type);
+    if (!["approval", "reject", "limit", "pricing", "segmentation"].includes(
+      strategyType,
+    )) {
+      continue;
+    }
+    for (const entry of Array.isArray(pool?.entries) ? pool.entries : []) {
+      const entryId = nonEmptyText(entry?.entry_id);
+      if (!/^pool-entry-[0-9a-f]{32}$/.test(entryId)) continue;
+      result.push({
+        entryId,
+        strategyType,
+        ruleId: nonEmptyText(entry.rule_id),
+        assetId: nonEmptyText(entry?.source?.asset_id),
+        assetType: nonEmptyText(entry?.source?.asset_type),
+      });
+    }
+  }
+  return result;
+}
+
+function syncCandidateStabilityControls(form, payload) {
+  if (!form) return;
+  const mode = formValue(form, "stability_source_mode") || "pool_entry";
+  const panels = form.querySelectorAll?.(
+    "[data-candidate-lab-stability-panel]",
+  ) || [];
+  for (const modePanel of panels) {
+    setCandidateStabilityPanelVisible(
+      modePanel,
+      modePanel.dataset?.candidateLabStabilityPanel === mode,
+    );
+  }
+
+  const entries = candidateStabilityPoolOptions(payload);
+  const entrySelect = formField(form, "stability_pool_entry");
+  if (entrySelect) {
+    const previousEntry = nonEmptyText(entrySelect.value);
+    entrySelect.innerHTML = [
+      '<option value="">请选择当前 Pool 条目</option>',
+      ...entries.map((entry) => projectionOptionHtml(
+        entry.entryId,
+        `${entry.strategyType} · ${entry.ruleId || entry.entryId} · ${entry.assetType || "candidate"}`,
+        {
+          "candidate-lab-projection": "1",
+          "strategy-type": entry.strategyType,
+        },
+      )),
+    ].join("");
+    entrySelect.value = selectContainsValue(entrySelect, previousEntry)
+      ? previousEntry
+      : "";
+  }
+
+  const assets = [];
+  const seenAssets = new Set();
+  for (const entry of entries) {
+    if (
+      entry.assetType !== "univariate_refinement"
+      || !/^candidate-asset-[0-9a-f]{32}$/.test(entry.assetId)
+      || seenAssets.has(entry.assetId)
+    ) {
+      continue;
+    }
+    seenAssets.add(entry.assetId);
+    assets.push(entry);
+  }
+  const assetSelect = formField(form, "stability_asset_id");
+  if (assetSelect) {
+    const previousAsset = nonEmptyText(assetSelect.value);
+    assetSelect.innerHTML = [
+      '<option value="">请选择 Pool 中可见的单变量候选资产</option>',
+      ...assets.map((entry) => projectionOptionHtml(
+        entry.assetId,
+        `${entry.assetId} · ${entry.strategyType}`,
+        { "candidate-lab-projection": "1" },
+      )),
+    ].join("");
+    assetSelect.value = selectContainsValue(assetSelect, previousAsset)
+      ? previousAsset
+      : "";
+  }
+
+  const empty = form.querySelector?.("[data-candidate-lab-stability-empty]");
+  if (empty) {
+    empty.textContent = entries.length
+      ? "必须明确选择当前受认证投影中的来源；平台会绑定完整 Pool revision、样本和月份口径。"
+      : "当前任务尚无可测算的 Strategy Pool 条目。";
+  }
+}
+
 function submissionClarificationText(result) {
   const direct = nonEmptyText(result?.message);
   if (direct) return direct;
@@ -1630,9 +1770,13 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       const scorecardPanel = control.closest?.(
         "[data-candidate-lab-scorecard-banding-panel]",
       );
+      const stabilityPanel = control.closest?.(
+        "[data-candidate-lab-stability-panel]",
+      );
       const hiddenByMode = Boolean(
         refinementPanel?.classList?.contains?.("hidden")
-        || scorecardPanel?.classList?.contains?.("hidden"),
+        || scorecardPanel?.classList?.contains?.("hidden")
+        || stabilityPanel?.classList?.contains?.("hidden"),
       );
       control.disabled = Boolean(reason) || hiddenByMode;
     }
@@ -1676,6 +1820,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     }
     syncRefinementForm(root, state.payload);
     syncScorecardForms(root, state.payload);
+    syncCandidateStabilityControls(
+      candidateStabilityForm(root),
+      state.payload,
+    );
     renderAvailability();
   }
 
@@ -1688,6 +1836,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     }
     syncRefinementForm(root, state.payload, { preserveBins: false });
     syncScorecardForms(root, state.payload);
+    syncCandidateStabilityControls(
+      candidateStabilityForm(root),
+      state.payload,
+    );
   }
 
   function clear() {
@@ -1946,6 +2098,20 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         scorecardSelection,
         state.payload,
         { preserveCutoff: false },
+      );
+      renderAvailability();
+      return true;
+    }
+    const candidateStability = field.closest?.(
+      '[data-candidate-lab-workflow="candidate_monthly_stability"]',
+    );
+    if (
+      candidateStability
+      && fieldName === "stability_source_mode"
+    ) {
+      syncCandidateStabilityControls(
+        candidateStability,
+        state.payload,
       );
       renderAvailability();
       return true;

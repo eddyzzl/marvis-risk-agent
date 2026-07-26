@@ -13,13 +13,16 @@ import hashlib
 import hmac
 import json
 import re
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from marvis.db import ModelingRepository
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.evidence import RAW_SCORE_PRODUCT
+from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.score_evidence_tools import (
     ModelScoreEvidenceArtifactBinding,
     load_model_score_evidence_artifacts,
@@ -34,6 +37,10 @@ from marvis.packs.strategy.sample_design_v2_tools import (
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MODEL_SCORE_VIRTUAL_FIELD_PREFIX = "__marvis_model_pd_"
 _OUTER_REQUIREMENT_FIELDS = frozenset({"rule_id", "fragment_id", "requirement"})
+_REQUIREMENT_LINEAGE_ENVELOPE_FIELDS = frozenset(
+    {"entry_id", "rule_id", "fragment_id", "requirement"}
+)
+_MAX_REQUIREMENT_LINEAGE_DEPTH = 8
 _MODEL_SCORE_REQUIREMENT_FIELDS = frozenset(
     {
         "type",
@@ -93,6 +100,125 @@ def model_score_virtual_field(score_vector_artifact_id: str) -> str:
     return _MODEL_SCORE_VIRTUAL_FIELD_PREFIX + score_vector_artifact_id[:16]
 
 
+def normalize_pool_requirements(
+    value: object,
+) -> tuple[dict[str, Any], ...]:
+    """Flatten and validate executable Pool requirements.
+
+    Voting assets retain their selected-member lineage as nested envelopes.
+    Downstream execution needs the terminal typed requirement while preserving
+    the innermost rule/fragment attribution. Ordering and multiplicity are
+    preserved because they are part of the existing provenance hash contract;
+    only the authenticated score-vector bindings are de-duplicated later.
+    """
+
+    if isinstance(value, str | bytes | bytearray) or not isinstance(
+        value,
+        Sequence,
+    ):
+        raise StrategyError("Pool requirements must be an array")
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise StrategyError(f"compiled requirement[{index}] must be an object")
+        if set(item) != _OUTER_REQUIREMENT_FIELDS:
+            raise StrategyError(
+                f"compiled requirement[{index}] fields must be exactly "
+                "rule_id, fragment_id, requirement"
+            )
+        rule_id = _text(
+            item["rule_id"],
+            f"compiled requirement[{index}].rule_id",
+        )
+        fragment_id = _text(
+            item["fragment_id"],
+            f"compiled requirement[{index}].fragment_id",
+        )
+        requirement = item["requirement"]
+        depth = 0
+        while isinstance(requirement, Mapping) and (
+            set(requirement) & _REQUIREMENT_LINEAGE_ENVELOPE_FIELDS
+        ):
+            if set(requirement) != _REQUIREMENT_LINEAGE_ENVELOPE_FIELDS:
+                raise StrategyError(
+                    f"compiled requirement[{index}] Voting lineage envelope "
+                    "fields are invalid"
+                )
+            depth += 1
+            if depth > _MAX_REQUIREMENT_LINEAGE_DEPTH:
+                raise StrategyError(
+                    f"compiled requirement[{index}] Voting lineage depth "
+                    f"exceeds {_MAX_REQUIREMENT_LINEAGE_DEPTH}"
+                )
+            _text(
+                requirement["entry_id"],
+                f"compiled requirement[{index}] Voting entry_id",
+            )
+            rule_id = _text(
+                requirement["rule_id"],
+                f"compiled requirement[{index}] Voting rule_id",
+            )
+            fragment_id = _text(
+                requirement["fragment_id"],
+                f"compiled requirement[{index}] Voting fragment_id",
+            )
+            requirement = requirement["requirement"]
+        outer = {
+            "rule_id": rule_id,
+            "fragment_id": fragment_id,
+            "requirement": _model_score_requirement(requirement),
+        }
+        normalized.append(outer)
+    return tuple(normalized)
+
+
+def project_pool_entry_requirements(
+    entries: object,
+) -> tuple[dict[str, Any], ...]:
+    """Project canonical Pool entries into normalized executable requirements."""
+
+    if isinstance(entries, str | bytes | bytearray) or not isinstance(
+        entries,
+        Sequence,
+    ):
+        raise StrategyError("Strategy Pool entries must be an array")
+    projected: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, Mapping):
+            raise StrategyError(f"Strategy Pool entry[{index}] must be an object")
+        source = entry.get("source")
+        execution = entry.get("execution")
+        if not isinstance(source, Mapping) or not isinstance(execution, Mapping):
+            raise StrategyError(
+                f"Strategy Pool entry[{index}] execution lineage is invalid"
+            )
+        raw_requirements = execution.get("requirements")
+        if isinstance(
+            raw_requirements,
+            str | bytes | bytearray,
+        ) or not isinstance(raw_requirements, Sequence):
+            raise StrategyError(
+                f"Strategy Pool entry[{index}] requirements must be an array"
+            )
+        rule_id = _text(
+            entry.get("rule_id"),
+            f"Strategy Pool entry[{index}].rule_id",
+        )
+        fragment_id = _text(
+            source.get("fragment_id"),
+            f"Strategy Pool entry[{index}].source.fragment_id",
+        )
+        projected.extend(
+            {
+                "rule_id": rule_id,
+                "fragment_id": fragment_id,
+                "requirement": requirement,
+            }
+            for requirement in raw_requirements
+        )
+    return normalize_pool_requirements(projected)
+
+
 def resolve_pool_requirements(
     runtime,
     *,
@@ -109,15 +235,8 @@ def resolve_pool_requirements(
         raise StrategyError("Pool requirements and sample design task differ")
     if not isinstance(compiled_design, Mapping):
         raise StrategyError("compiled design must be an object")
-    raw_requirements = compiled_design.get("requirements")
-    if isinstance(raw_requirements, str | bytes | bytearray) or not isinstance(
-        raw_requirements, Sequence
-    ):
-        raise StrategyError("compiled design requirements must be an array")
-
-    requirements = tuple(
-        _outer_requirement(item, index=index)
-        for index, item in enumerate(raw_requirements)
+    requirements = normalize_pool_requirements(
+        compiled_design.get("requirements")
     )
     requirements_hash = _sha256(_canonical_json(list(requirements)))
     if not requirements:
@@ -154,7 +273,7 @@ def resolve_pool_requirements(
     for requirement in unique:
         try:
             binding = load_model_score_evidence_artifacts(
-                runtime,
+                _modeling_runtime(runtime),
                 task_id=task,
                 evidence_artifact_id=requirement[
                     "score_evidence_artifact_id"
@@ -180,6 +299,17 @@ def resolve_pool_requirements(
         requirements=requirements,
         field_bindings=tuple(field_bindings),
     )
+
+
+def _modeling_runtime(runtime):
+    """Add modeling repositories without mutating the owning pack runtime."""
+
+    if hasattr(runtime, "experiments") and hasattr(runtime, "modeling_repo"):
+        return runtime
+    proxy = SimpleNamespace(**vars(runtime))
+    proxy.experiments = ExperimentStore(runtime.settings.db_path)
+    proxy.modeling_repo = ModelingRepository(runtime.settings.db_path)
+    return proxy
 
 
 def hydrate_requirement_fields(
@@ -266,10 +396,7 @@ def validate_pool_requirement_bindings_provenance(
         Sequence,
     ):
         raise StrategyError("Pool requirement bindings requirements must be an array")
-    requirements = [
-        _outer_requirement(item, index=index)
-        for index, item in enumerate(raw_requirements)
-    ]
+    requirements = list(normalize_pool_requirements(raw_requirements))
     if not requirements:
         raise StrategyError("Pool requirement bindings requirements must not be empty")
     requirements_hash = _hash(
@@ -450,10 +577,7 @@ def _require_resolved(value: object) -> None:
     _text(value.task_id, "resolved Pool requirements task_id")
     if not isinstance(value.requirements, tuple):
         raise StrategyError("resolved Pool requirements must be a tuple")
-    normalized = tuple(
-        _outer_requirement(item, index=index)
-        for index, item in enumerate(value.requirements)
-    )
+    normalized = normalize_pool_requirements(value.requirements)
     if normalized != value.requirements:
         raise StrategyError("resolved Pool requirements are not canonical")
     if _SHA256_RE.fullmatch(value.requirements_hash) is None:

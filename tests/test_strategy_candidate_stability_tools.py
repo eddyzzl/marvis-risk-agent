@@ -78,6 +78,7 @@ def _setup(tmp_path: Path, *, bind_month: bool = True) -> dict:
     frame = pd.DataFrame(
         {
             "score": list(range(120)),
+            "age": [20 + (index % 60) for index in range(120)],
             "month": ["2026-01"] * 40 + ["2026-02"] * 40 + ["2026-03"] * 40,
             "bad": [index % 2 for index in range(120)],
         }
@@ -107,6 +108,7 @@ def _setup(tmp_path: Path, *, bind_month: bool = True) -> dict:
         target_col="bad",
         field_roles={
             "score": "score",
+            "age": "feature",
             "month": "month",
             "bad": "target",
         },
@@ -157,7 +159,7 @@ def _setup(tmp_path: Path, *, bind_month: bool = True) -> dict:
             "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
             "target_col": "bad",
             "sample_design_ref": sample_ref,
-            "features": ["score"],
+            "features": ["score", "age"],
             "methods": ["equal_width"],
             "bin_count": 3,
         },
@@ -195,6 +197,9 @@ def _setup(tmp_path: Path, *, bind_month: bool = True) -> dict:
         "dataset": dataset,
         "workspace": workspace,
         "mapping": mapping,
+        "source": source,
+        "source_report": report,
+        "sample_ref": sample_ref,
         "first": refine(0),
         "refine": refine,
     }
@@ -343,6 +348,167 @@ def test_pool_entry_stability_uses_incremental_first_match_and_exact_pool_cas(
             fixture["ctx"],
             fixture["runtime"],
         )
+
+
+def test_cross_matrix_pool_entry_stability_uses_full_waterfall_first_match(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    matrix_output = strategy_tools.tool_build_cross_matrix_candidate(
+        {
+            "source_artifact_id": fixture["source_report"]["artifact_id"],
+            "expected_artifact_content_hash": fixture["source_report"][
+                "content_hash"
+            ],
+            "expected_candidate_id": fixture["source"]["candidate_id"],
+            "expected_evidence_hash": fixture["source"]["evidence_hash"],
+            "x_feature": "age",
+            "x_method": "equal_width",
+            "y_feature": "score",
+            "y_method": "equal_width",
+        },
+        fixture["ctx"],
+    )
+    matrix = matrix_output["cross_matrix_candidate"]
+    populated = [
+        cell for cell in matrix["matrix"]["cells"] if cell["effect"]["count"] > 0
+    ]
+    selection = strategy_tools.tool_materialize_cross_matrix_cell_selection(
+        {
+            "source_artifact_id": matrix_output["artifacts"][0]["artifact_id"],
+            "expected_artifact_content_hash": matrix_output["artifacts"][0][
+                "content_hash"
+            ],
+            "expected_asset_id": matrix["asset_id"],
+            "expected_asset_hash": matrix["asset_hash"],
+            "expected_candidate_id": matrix["candidate_evidence"]["candidate_id"],
+            "expected_evidence_hash": matrix["candidate_evidence"]["evidence_hash"],
+            "cell_ids": [populated[0]["cell_id"]],
+        },
+        fixture["ctx"],
+    )
+    selection_artifact = selection["artifacts"][0]
+    pool = run_add_candidate_to_pool(
+        {
+            "source_artifact_id": selection_artifact["artifact_id"],
+            "expected_artifact_content_hash": selection_artifact["content_hash"],
+            "expected_asset_id": selection["source_asset_id"],
+            "expected_asset_hash": selection["source_asset_hash"],
+            "strategy_type": "approval",
+            "default_action": _action("approval"),
+            "action": _action("reject", reason="CROSS_RISK"),
+            "expected_pool_revision": 0,
+            "expected_pool_snapshot_hash": ABSENT_POOL_SNAPSHOT_HASH,
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    [entry] = pool["entries"]
+
+    output = run_measure_candidate_monthly_stability(
+        resolve_candidate_monthly_stability_inputs(
+            fixture["runtime"],
+            task_id=fixture["task"].id,
+            user_pointer={
+                "source_kind": "pool_entry",
+                "strategy_type": "approval",
+                "entry_id": entry["entry_id"],
+            },
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    assert output["basis"] == "pool_entry_incremental_first_match"
+    assert output["source_kind"] == "pool_entry"
+    assert output["stability"]["source_ref"]["entry_id"] == entry["entry_id"]
+    assert sum(
+        row["hit_count"] for row in output["stability"]["monthly"]
+    ) == populated[0]["effect"]["count"]
+
+
+def test_automatic_tree_pool_entry_stability_uses_governed_month_sample(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    tree = strategy_tools.tool_build_automatic_tree_candidate(
+        {
+            "dataset_id": fixture["dataset"].id,
+            "expected_content_hash": fixture["dataset"].content_hash,
+            "workspace_revision": fixture["workspace"].revision,
+            "analysis_generation": fixture["workspace"].analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(
+                fixture["mapping"]
+            ),
+            "target_col": "bad",
+            "sample_design_ref": fixture["sample_ref"],
+            "features": ["score", "age"],
+            "directions": {"score": "increasing", "age": "increasing"},
+            "max_depth": 2,
+            "min_leaf_count": 5,
+            "budgets": {
+                "max_rows": 200,
+                "max_features": 5,
+                "max_cells": 1_000,
+                "max_nodes": 31,
+                "max_cutpoint_evaluations": 2_000,
+            },
+        },
+        fixture["ctx"],
+    )
+    tree_artifact = next(
+        artifact
+        for artifact in tree["artifacts"]
+        if artifact["kind"] == "strategy_automatic_tree_asset_json"
+    )
+    leaf = tree["leaf_index"][0]
+    selection = strategy_tools.tool_materialize_automatic_tree_leaf_fragment(
+        {
+            "source_artifact_id": tree_artifact["artifact_id"],
+            "expected_artifact_content_hash": tree_artifact["content_hash"],
+            "expected_asset_id": tree["summary"]["asset_id"],
+            "expected_asset_hash": tree["summary"]["asset_hash"],
+            "expected_tree_result_hash": tree["summary"]["tree_result_hash"],
+            "leaf_id": leaf["leaf_id"],
+        },
+        fixture["ctx"],
+    )
+    selection_artifact = selection["artifacts"][0]
+    pool = run_add_candidate_to_pool(
+        {
+            "source_artifact_id": selection_artifact["artifact_id"],
+            "expected_artifact_content_hash": selection_artifact["content_hash"],
+            "expected_asset_id": selection["tree_asset_id"],
+            "expected_asset_hash": selection["tree_asset_hash"],
+            "strategy_type": "approval",
+            "default_action": _action("approval"),
+            "action": _action("reject", reason="TREE_RISK"),
+            "expected_pool_revision": 0,
+            "expected_pool_snapshot_hash": ABSENT_POOL_SNAPSHOT_HASH,
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    [entry] = pool["entries"]
+
+    output = run_measure_candidate_monthly_stability(
+        resolve_candidate_monthly_stability_inputs(
+            fixture["runtime"],
+            task_id=fixture["task"].id,
+            user_pointer={
+                "source_kind": "pool_entry",
+                "strategy_type": "approval",
+                "entry_id": entry["entry_id"],
+            },
+        ),
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    assert output["month_col"] == "month"
+    assert sum(
+        row["hit_count"] for row in output["stability"]["monthly"]
+    ) == leaf["measurements"]["unweighted"]["total"]
 
 
 def test_stability_rejects_caller_metric_or_dataset_injection(tmp_path: Path) -> None:

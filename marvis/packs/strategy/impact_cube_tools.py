@@ -36,6 +36,8 @@ from marvis.packs.strategy.impact_cube import (
 )
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
+    StrategyPoolDevelopmentExecutionBinding,
+    bind_strategy_pool_development_execution,
     load_current_strategy_candidate_pool_artifact,
     require_strategy_candidate_pool_artifact_binding_on_connection,
 )
@@ -43,6 +45,7 @@ from marvis.packs.strategy.pool_requirement_resolver import (
     ResolvedPoolRequirements,
     hydrate_requirement_fields,
     pool_requirement_bindings_provenance,
+    project_pool_entry_requirements,
     require_resolved_pool_requirements_on_connection,
     resolve_pool_requirements,
     validate_pool_requirement_bindings_provenance,
@@ -289,14 +292,20 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
             task_id=task_id,
             request=request,
         )
+        development = bind_strategy_pool_development_execution(runtime, pool)
         resolved_requirements = resolve_pool_requirements(
             runtime,
             task_id=task_id,
-            compiled_design=pool.compiled_design,
+            compiled_design={
+                "requirements": list(
+                    project_pool_entry_requirements(pool.pool["entries"])
+                )
+            },
             sample_design=sample,
         )
         semantics = _require_sample_contract(
             pool=pool,
+            development=development,
             sample=sample,
             partitions=request["partitions"],
         )
@@ -770,11 +779,10 @@ def _load_sample_design_binding(
 def _require_sample_contract(
     *,
     pool: StrategyCandidatePoolArtifactBinding,
+    development: StrategyPoolDevelopmentExecutionBinding,
     sample: StrategySampleDesignV2ArtifactBinding,
     partitions: Sequence[str],
 ) -> dict[str, Any]:
-    from marvis.packs.strategy import pool_impact_tools
-
     design = sample.bundle["sample_design"]
     target = design["target_selector"]
     if target["status"] != "resolved":
@@ -807,19 +815,13 @@ def _require_sample_contract(
         raise StrategyError(
             "StrategySampleDesign V2 legacy development mapping changed"
         )
-    for lineage in pool.lineages:
-        if pool_impact_tools._lineage_sample_design_ref(
-            lineage
-        ) != legacy_ref:
-            raise StrategyError(
-                "Strategy Pool source lineage does not match the exact "
-                "StrategySampleDesign V2 legacy development ref"
-            )
-        if pool_impact_tools._lineage_target_col(lineage) != target["column"]:
-            raise StrategyError(
-                "Strategy Pool source target does not match "
-                "StrategySampleDesign V2"
-            )
+    _require_pool_development_contract(
+        pool=pool,
+        development=development,
+        sample=sample,
+        legacy_ref=legacy_ref,
+        target_col=target["column"],
+    )
     if (
         sample.source_binding.legacy.target_col != target["column"]
         or sample.source_binding.legacy.target_bad_value
@@ -837,6 +839,66 @@ def _require_sample_contract(
         "loan_amount_col": fields["loan_amount_field"],
         "overdue_amount_col": fields["overdue_amount_field"],
     }
+
+
+def _require_pool_development_contract(
+    *,
+    pool: StrategyCandidatePoolArtifactBinding,
+    development: StrategyPoolDevelopmentExecutionBinding,
+    sample: StrategySampleDesignV2ArtifactBinding,
+    legacy_ref: StrategySampleDesignRef,
+    target_col: str,
+) -> None:
+    if (
+        development.pool is not pool
+        or development.task_id != pool.task_id
+        or development.sample_design.reference != legacy_ref
+        or development.target_col != target_col
+    ):
+        raise StrategyError(
+            "Strategy Pool development binding does not match "
+            "StrategySampleDesign V2"
+        )
+    dataset = development.dataset
+    source = sample.source_binding
+    if (
+        dataset.task_id != source.task_id
+        or dataset.dataset_id != source.dataset_id
+        or dataset.source_path != source.dataset_source_path
+        or dataset.path != source.dataset_path
+        or not hmac.compare_digest(
+            dataset.content_hash,
+            source.dataset_content_hash,
+        )
+        or dataset.columns != source.columns
+        or dataset.row_count != source.row_count
+    ):
+        raise StrategyError(
+            "Strategy Pool development dataset does not match "
+            "StrategySampleDesign V2"
+        )
+    bound_v2 = development.sample_design_v2
+    if bound_v2 is not None and _sample_design_v2_identity(
+        bound_v2
+    ) != _sample_design_v2_identity(sample):
+        raise StrategyError(
+            "Strategy Pool development SampleDesign V2 binding changed"
+        )
+
+
+def _sample_design_v2_identity(
+    binding: StrategySampleDesignV2ArtifactBinding,
+) -> tuple[str, ...]:
+    return (
+        binding.task_id,
+        binding.membership_artifact_id,
+        binding.membership_artifact_content_hash,
+        binding.bundle_artifact_id,
+        binding.bundle_artifact_content_hash,
+        str(binding.bundle["bundle_id"]),
+        str(binding.bundle["sample_design"]["sample_design_id"]),
+        str(binding.bundle["sample_design"]["content_hash"]),
+    )
 
 
 def _load_current_strategy(
@@ -1028,6 +1090,10 @@ def _read_partition_frames(
         raise StrategyError(
             "ImpactCube analysis universe row count changed"
         )
+    # Model score vectors are bound to raw row ordinals, not a user-provided
+    # persisted Parquet index. Normalize only after the full universe has been
+    # authenticated and before any partition mask is applied.
+    frame = frame.reset_index(drop=True)
     frame = hydrate_requirement_fields(
         frame,
         resolved=resolved_requirements,

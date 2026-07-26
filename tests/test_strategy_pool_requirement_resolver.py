@@ -18,7 +18,9 @@ from marvis.packs.strategy.pool_requirement_resolver import (
     ResolvedPoolRequirements,
     hydrate_requirement_fields,
     model_score_virtual_field,
+    normalize_pool_requirements,
     pool_requirement_bindings_provenance,
+    project_pool_entry_requirements,
     require_resolved_pool_requirements_on_connection,
     resolve_pool_requirements,
     validate_pool_requirement_bindings_provenance,
@@ -87,6 +89,106 @@ def _compiled(*requirements: dict) -> dict:
     }
 
 
+def _nested_requirement(
+    requirement: dict,
+    *,
+    depth: int,
+) -> dict:
+    nested = requirement
+    for index in range(depth):
+        nested = {
+            "entry_id": f"parent-entry-{index}",
+            "rule_id": f"parent-rule-{index}",
+            "fragment_id": f"parent-fragment-{index}",
+            "requirement": nested,
+        }
+    return nested
+
+
+def test_requirement_projection_flattens_voting_and_preserves_multiplicity() -> None:
+    vector_id = "0123456789abcdef" + "a" * 48
+    requirement = {
+        "type": "model_score_vector.v1",
+        "virtual_field": model_score_virtual_field(vector_id),
+        "score_product": "raw_native_uncalibrated_bad_probability",
+        "score_evidence_artifact_id": "1" * 64,
+        "score_evidence_artifact_content_hash": "2" * 64,
+        "score_vector_artifact_id": vector_id,
+        "score_vector_artifact_content_hash": "3" * 64,
+    }
+    nested = _nested_requirement(requirement, depth=2)
+    entries = [
+        {
+            "rule_id": "voting-rule",
+            "source": {"fragment_id": "voting-fragment"},
+            "execution": {"requirements": [nested, nested]},
+        }
+    ]
+
+    projected = project_pool_entry_requirements(entries)
+
+    expected = {
+        "rule_id": "parent-rule-0",
+        "fragment_id": "parent-fragment-0",
+        "requirement": requirement,
+    }
+    assert projected == (expected, expected)
+    assert normalize_pool_requirements(projected) == projected
+
+
+@pytest.mark.parametrize(
+    ("requirements", "error"),
+    [
+        (
+            [
+                {
+                    "rule_id": "outer-rule",
+                    "fragment_id": "outer-fragment",
+                    "requirement": {
+                        "entry_id": "missing-lineage-fields",
+                        "requirement": {},
+                    },
+                }
+            ],
+            "lineage envelope",
+        ),
+        (
+            [
+                {
+                    "rule_id": "outer-rule",
+                    "fragment_id": "outer-fragment",
+                    "requirement": _nested_requirement(
+                        {
+                            "type": "model_score_vector.v1",
+                            "virtual_field": (
+                                "__marvis_model_pd_0123456789abcdef"
+                            ),
+                            "score_product": (
+                                "raw_native_uncalibrated_bad_probability"
+                            ),
+                            "score_evidence_artifact_id": "1" * 64,
+                            "score_evidence_artifact_content_hash": "2" * 64,
+                            "score_vector_artifact_id": (
+                                "0123456789abcdef" + "a" * 48
+                            ),
+                            "score_vector_artifact_content_hash": "3" * 64,
+                        },
+                        depth=9,
+                    ),
+                }
+            ],
+            "depth",
+        ),
+    ],
+)
+def test_requirement_projection_rejects_malformed_or_excessive_envelopes(
+    requirements: list[dict],
+    error: str,
+) -> None:
+    with pytest.raises(StrategyError, match=error):
+        normalize_pool_requirements(requirements)
+
+
 def test_model_score_virtual_field_is_deterministic_and_strict() -> None:
     artifact_id = "0123456789abcdef" + "a" * 48
 
@@ -107,9 +209,16 @@ def test_resolver_authenticates_exact_score_reference_and_deduplicates(
     binding = governed_score["binding"]
     requirement = _requirement(governed_score)
     compiled = _compiled(requirement, requirement)
+    strategy_runtime = SimpleNamespace(
+        **{
+            key: value
+            for key, value in vars(fx["runtime"]).items()
+            if key not in {"experiments", "modeling_repo"}
+        }
+    )
 
     resolved = resolve_pool_requirements(
-        fx["runtime"],
+        strategy_runtime,
         task_id=fx["task"].id,
         compiled_design=compiled,
         sample_design=binding.training.sample,

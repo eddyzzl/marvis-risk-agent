@@ -48,8 +48,12 @@ from marvis.packs.strategy.candidate_asset_tools import (
 )
 from marvis.packs.strategy.candidate_evidence import validate_candidate_evidence
 from marvis.packs.strategy.candidate_fragment import (
+    sample_context_hash_from_candidate_evidence,
     univariate_asset_to_verified_fragment,
     verified_fragment_pool_parts,
+)
+from marvis.packs.strategy.automatic_tree_sample_design import (
+    sample_design_ref_from_automatic_tree_source_refs,
 )
 from marvis.packs.strategy.automatic_tree_leaf_fragment import (
     AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_KIND,
@@ -139,6 +143,19 @@ from marvis.packs.strategy.pool import (
     reorder_strategy_pool,
     set_pool_entry_action,
     validate_strategy_pool,
+)
+from marvis.packs.strategy.sample_design_binding import (
+    StrategySampleDesignExecutionBinding,
+    StrategySampleDesignRef,
+    load_strategy_sample_design_execution_binding,
+    require_strategy_sample_design_execution_binding_on_connection,
+)
+from marvis.packs.strategy.sample_design_tools import (
+    load_strategy_sample_design_artifact,
+)
+from marvis.packs.strategy.sample_design_v2_tools import (
+    StrategySampleDesignV2ArtifactBinding,
+    require_strategy_sample_design_v2_artifact_binding_on_connection,
 )
 from marvis.repositories.strategy_pool import (
     ABSENT_POOL_REVISION,
@@ -385,6 +402,49 @@ class StrategyCandidatePoolArtifactBinding:
     tasks_root: Path
     datasets_root: Path
     db_path: Path
+
+
+@dataclass(frozen=True)
+class StrategyPoolDevelopmentDatasetBinding:
+    """Public immutable dataset projection shared by every Pool lineage."""
+
+    task_id: str
+    dataset_id: str
+    source_path: str
+    path: Path
+    content_hash: str
+    registry_metadata_hash: str
+    columns: tuple[str, ...]
+    row_count: int
+
+
+@dataclass(frozen=True)
+class StrategyPoolDevelopmentExecutionBinding:
+    """One exact governed development universe for an authenticated Pool.
+
+    Consumers intentionally receive no private candidate-lineage classes.
+    The Pool boundary recursively authenticates concrete univariate, tree,
+    Cross, scorecard, and Voting sources, then proves that all of them share
+    this dataset, target, sample design, and evidence identity.
+    """
+
+    task_id: str
+    pool: StrategyCandidatePoolArtifactBinding
+    dataset: StrategyPoolDevelopmentDatasetBinding
+    sample_design: StrategySampleDesignExecutionBinding
+    sample_design_v2: StrategySampleDesignV2ArtifactBinding | None
+    evidence_identity: dict[str, Any]
+    target_col: str
+    month_col: str | None
+
+
+@dataclass(frozen=True)
+class _PoolDevelopmentLineageFacts:
+    dataset: StrategyPoolDevelopmentDatasetBinding
+    sample_ref: StrategySampleDesignRef
+    sample_design_v2: StrategySampleDesignV2ArtifactBinding | None
+    evidence_identity: dict[str, Any]
+    target_col: str
 
 
 def project_scorecard_report_evidence(
@@ -1598,6 +1658,531 @@ def load_current_strategy_candidate_pool_artifact(
         raise
     except _BOUNDARY_ERRORS as exc:
         raise StrategyError(str(exc)) from exc
+
+
+def bind_strategy_pool_development_execution(
+    runtime,
+    pool_binding: StrategyCandidatePoolArtifactBinding,
+) -> StrategyPoolDevelopmentExecutionBinding:
+    """Resolve one public development/sample binding for an exact Pool."""
+
+    if not isinstance(pool_binding, StrategyCandidatePoolArtifactBinding):
+        raise StrategyError(
+            "strategy Pool development requires an authenticated Pool binding"
+        )
+    facts = _project_pool_development_lineages(pool_binding)
+    reference = facts.sample_ref
+    sample_artifact = load_strategy_sample_design_artifact(
+        runtime,
+        task_id=pool_binding.task_id,
+        artifact_id=reference.artifact_id,
+        expected_artifact_content_hash=reference.artifact_content_hash,
+        expected_sample_design_id=reference.sample_design_id,
+        expected_sample_design_content_hash=reference.sample_design_content_hash,
+    )
+    design = sample_artifact.bundle["sample_design"]
+    drop_nan_labels = design["target_definition"]["drop_nan_labels"]
+    if not isinstance(drop_nan_labels, bool):
+        raise StrategyError(
+            "strategy Pool sample-design drop_nan_labels binding is invalid"
+        )
+    identity = facts.evidence_identity
+    sample = load_strategy_sample_design_execution_binding(
+        runtime,
+        task_id=pool_binding.task_id,
+        sample_design_ref=reference.to_ref_dict(),
+        dataset_id=identity["dataset_id"],
+        dataset_content_hash=identity["dataset_content_hash"],
+        workspace_revision=identity["workspace_revision"],
+        workspace_generation=identity["workspace_generation"],
+        semantic_mapping_hash=identity["semantic_mapping_hash"],
+        target_col=facts.target_col,
+        drop_nan_labels=drop_nan_labels,
+    )
+    if (
+        sample.reference != reference
+        or sample.dataset_id != facts.dataset.dataset_id
+        or not hmac.compare_digest(
+            sample.dataset_content_hash,
+            facts.dataset.content_hash,
+        )
+        or sample.target_col != facts.target_col
+    ):
+        raise StrategyError(
+            "strategy Pool development sample changed from candidate lineage"
+        )
+    if facts.sample_design_v2 is not None:
+        source = facts.sample_design_v2.source_binding
+        if source.legacy != sample:
+            raise StrategyError(
+                "strategy Pool SampleDesign V2 legacy mapping changed"
+            )
+    binding = StrategyPoolDevelopmentExecutionBinding(
+        task_id=pool_binding.task_id,
+        pool=pool_binding,
+        dataset=facts.dataset,
+        sample_design=sample,
+        sample_design_v2=facts.sample_design_v2,
+        evidence_identity=dict(facts.evidence_identity),
+        target_col=facts.target_col,
+        month_col=sample.month_col,
+    )
+    with runtime.task_artifacts.transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        require_strategy_pool_development_execution_binding_on_connection(
+            conn,
+            binding,
+        )
+        conn.commit()
+    return binding
+
+
+def require_strategy_pool_development_execution_binding_on_connection(
+    conn,
+    binding: StrategyPoolDevelopmentExecutionBinding,
+) -> None:
+    """Re-authenticate a Pool and its exact development universe under lock."""
+
+    if not isinstance(binding, StrategyPoolDevelopmentExecutionBinding):
+        raise StrategyError("strategy Pool development binding is invalid")
+    if binding.task_id != binding.pool.task_id:
+        raise StrategyError("strategy Pool development task binding changed")
+    require_strategy_candidate_pool_artifact_binding_on_connection(
+        conn,
+        binding.pool,
+    )
+    facts = _project_pool_development_lineages(binding.pool)
+    if (
+        facts.dataset != binding.dataset
+        or facts.sample_ref != binding.sample_design.reference
+        or facts.evidence_identity != binding.evidence_identity
+        or facts.target_col != binding.target_col
+        or binding.sample_design.task_id != binding.task_id
+        or binding.sample_design.dataset_id != binding.dataset.dataset_id
+        or not hmac.compare_digest(
+            binding.sample_design.dataset_content_hash,
+            binding.dataset.content_hash,
+        )
+        or binding.sample_design.target_col != binding.target_col
+        or binding.sample_design.month_col != binding.month_col
+        or _sample_design_v2_identity(facts.sample_design_v2)
+        != _sample_design_v2_identity(binding.sample_design_v2)
+    ):
+        raise StrategyError("strategy Pool development binding changed")
+    require_strategy_sample_design_execution_binding_on_connection(
+        conn,
+        binding.sample_design,
+    )
+    if binding.sample_design_v2 is not None:
+        require_strategy_sample_design_v2_artifact_binding_on_connection(
+            conn,
+            binding.sample_design_v2,
+        )
+        if binding.sample_design_v2.source_binding.legacy != binding.sample_design:
+            raise StrategyError(
+                "strategy Pool SampleDesign V2 legacy mapping changed"
+            )
+
+
+def _project_pool_development_lineages(
+    binding: StrategyCandidatePoolArtifactBinding,
+) -> _PoolDevelopmentLineageFacts:
+    pool = validate_strategy_pool(binding.pool)
+    if (
+        pool != binding.pool
+        or pool["task_id"] != binding.task_id
+        or pool["strategy_type"] != binding.strategy_type
+        or compile_strategy_pool(pool) != binding.compiled_design
+    ):
+        raise StrategyError("strategy Pool development Pool binding changed")
+    entries = pool["entries"]
+    if not entries or len(entries) != len(binding.lineages):
+        raise StrategyError(
+            "strategy Pool development requires complete non-empty lineages"
+    )
+    projected: list[_PoolDevelopmentLineageFacts] = []
+    active_voting: set[str] = set()
+    voting_nodes: set[str] = set()
+    facts_by_lineage: dict[str, _PoolDevelopmentLineageFacts] = {}
+    for entry, lineage in zip(entries, binding.lineages, strict=True):
+        if lineage.source_binding != entry["source"]:
+            raise StrategyError(
+                "strategy Pool development entry lineage changed"
+            )
+        facts = _pool_lineage_development_facts(
+            lineage,
+            active_voting=active_voting,
+            voting_nodes=voting_nodes,
+            facts_by_lineage=facts_by_lineage,
+        )
+        if facts.evidence_identity != entry["source"]["evidence_identity"]:
+            raise StrategyError(
+                "strategy Pool development evidence identity changed"
+            )
+        if (
+            facts.dataset.task_id != binding.task_id
+            or facts.dataset.dataset_id
+            != facts.evidence_identity["dataset_id"]
+            or not hmac.compare_digest(
+                facts.dataset.content_hash,
+                facts.evidence_identity["dataset_content_hash"],
+            )
+        ):
+            raise StrategyError(
+                "strategy Pool development dataset identity changed"
+            )
+        projected.append(facts)
+    first = projected[0]
+    selected_v2 = first.sample_design_v2
+    for facts in projected[1:]:
+        _require_same_pool_development_facts(first, facts)
+        if facts.sample_design_v2 is not None:
+            if selected_v2 is None:
+                selected_v2 = facts.sample_design_v2
+            elif _sample_design_v2_identity(
+                selected_v2
+            ) != _sample_design_v2_identity(facts.sample_design_v2):
+                raise StrategyError(
+                    "strategy Pool candidates resolve different SampleDesign V2"
+                )
+    return _PoolDevelopmentLineageFacts(
+        dataset=first.dataset,
+        sample_ref=first.sample_ref,
+        sample_design_v2=selected_v2,
+        evidence_identity=dict(first.evidence_identity),
+        target_col=first.target_col,
+    )
+
+
+def _pool_lineage_development_facts(
+    lineage: _CandidateLineage,
+    *,
+    active_voting: set[str],
+    voting_nodes: set[str],
+    facts_by_lineage: dict[str, _PoolDevelopmentLineageFacts],
+) -> _PoolDevelopmentLineageFacts:
+    cache_identity = _canonical_json(lineage.source_binding)
+    cached = facts_by_lineage.get(cache_identity)
+    if cached is not None:
+        return cached
+
+    def remember(
+        facts: _PoolDevelopmentLineageFacts,
+    ) -> _PoolDevelopmentLineageFacts:
+        facts_by_lineage[cache_identity] = facts
+        return facts
+
+    if isinstance(lineage, (_UnivariateCandidateLineage, _CrossMatrixCandidateLineage)):
+        evidence = lineage.evidence
+        parameters = evidence["generation"]["parameters"]
+        target_col = _required_text(
+            evidence["analysis"]["target"],
+            "strategy Pool candidate target",
+        )
+        if parameters.get("target_col") != target_col:
+            raise StrategyError(
+                "strategy Pool candidate target binding is inconsistent"
+            )
+        verified_identity = _verified_lineage_evidence_identity(lineage)
+        if not hmac.compare_digest(
+            sample_context_hash_from_candidate_evidence(evidence),
+            verified_identity["sample_context_hash"],
+        ):
+            raise StrategyError(
+                "strategy Pool candidate sample context changed"
+            )
+        return remember(_PoolDevelopmentLineageFacts(
+            dataset=_pool_development_dataset(lineage.dataset),
+            sample_ref=StrategySampleDesignRef.from_value(
+                parameters.get("sample_design_ref")
+            ),
+            sample_design_v2=None,
+            evidence_identity=verified_identity,
+            target_col=target_col,
+        ))
+    if isinstance(lineage, _AutomaticTreeCandidateLineage):
+        asset = lineage.tree.asset
+        training = asset["tree_result"]["training"]
+        asset_identity = asset["identity"]
+        verified_identity = _verified_lineage_evidence_identity(lineage)
+        if _evidence_identity_from_concrete(asset_identity) != verified_identity:
+            raise StrategyError(
+                "automatic-tree strategy Pool evidence identity changed"
+            )
+        sample_ref = sample_design_ref_from_automatic_tree_source_refs(
+            asset["source_refs"]
+        )
+        if StrategySampleDesignRef.from_value(
+            lineage.tree.provenance.get("sample_design_ref")
+        ).to_ref_dict() != sample_ref:
+            raise StrategyError(
+                "automatic-tree sample-design asset and provenance disagree"
+            )
+        return remember(_PoolDevelopmentLineageFacts(
+            dataset=_pool_development_dataset(lineage.dataset),
+            sample_ref=StrategySampleDesignRef.from_value(sample_ref),
+            sample_design_v2=None,
+            evidence_identity=verified_identity,
+            target_col=_required_text(
+                training["target_col"],
+                "automatic-tree strategy Pool target",
+            ),
+        ))
+    if isinstance(lineage, _ScorecardCandidateLineage):
+        sample_v2 = lineage.asset.sample_design
+        source = sample_v2.source_binding
+        design = sample_v2.bundle["sample_design"]
+        target = design["target_selector"]
+        if target["status"] != "resolved":
+            raise StrategyError(
+                "scorecard strategy Pool target selector is unresolved"
+            )
+        target_col = _required_text(
+            target["column"],
+            "scorecard strategy Pool target",
+        )
+        if (
+            source.legacy.target_col != target_col
+            or source.legacy.target_bad_value != target["bad_value"]
+            or source.legacy.drop_nan_labels is not target["drop_missing"]
+        ):
+            raise StrategyError(
+                "scorecard strategy Pool target semantics changed"
+            )
+        verified_identity = _verified_lineage_evidence_identity(lineage)
+        if _evidence_identity_from_concrete(
+            lineage.asset.asset["identity"]
+        ) != verified_identity:
+            raise StrategyError(
+                "scorecard strategy Pool evidence identity changed"
+            )
+        return remember(_PoolDevelopmentLineageFacts(
+            dataset=_pool_development_dataset(lineage.dataset),
+            sample_ref=source.legacy.reference,
+            sample_design_v2=sample_v2,
+            evidence_identity=verified_identity,
+            target_col=target_col,
+        ))
+    if isinstance(lineage, _VotingCandidateLineage):
+        if cache_identity in active_voting:
+            raise StrategyError(
+                "strategy Pool development Voting ancestry contains a cycle"
+            )
+        voting_nodes.add(cache_identity)
+        if len(voting_nodes) > _MAX_VOTING_ANCESTRY_NODES:
+            raise StrategyError(
+                "strategy Pool development Voting ancestry is too large"
+            )
+        active_voting.add(cache_identity)
+        try:
+            selected = lineage.candidate.asset["selected_entries"]
+            if not selected or len(selected) != len(lineage.parent_lineages):
+                raise StrategyError(
+                    "strategy Pool development Voting parents are incomplete"
+                )
+            parents = [
+                _pool_lineage_development_facts(
+                    parent,
+                    active_voting=active_voting,
+                    voting_nodes=voting_nodes,
+                    facts_by_lineage=facts_by_lineage,
+                )
+                for parent in lineage.parent_lineages
+            ]
+        finally:
+            active_voting.remove(cache_identity)
+        first = parents[0]
+        selected_v2 = first.sample_design_v2
+        for facts in parents[1:]:
+            _require_same_pool_development_facts(first, facts)
+            if facts.sample_design_v2 is not None:
+                if selected_v2 is None:
+                    selected_v2 = facts.sample_design_v2
+                elif _sample_design_v2_identity(
+                    selected_v2
+                ) != _sample_design_v2_identity(facts.sample_design_v2):
+                    raise StrategyError(
+                        "Voting parents resolve different SampleDesign V2"
+                    )
+        asset = lineage.candidate.asset
+        if "sample_design_ref" not in asset:
+            raise StrategyError(
+                "legacy Voting candidate is not bound to a governed sample "
+                "design; regenerate it before stability measurement"
+            )
+        sample_ref = StrategySampleDesignRef.from_value(
+            asset["sample_design_ref"]
+        )
+        verified_identity = _verified_lineage_evidence_identity(lineage)
+        target_col = _required_text(
+            asset["measurement_context"]["target_col"],
+            "Voting strategy Pool target",
+        )
+        if (
+            sample_ref != first.sample_ref
+            or asset["evidence_identity"] != verified_identity
+            or asset["measurement_context"]["sample_context_hash"]
+            != verified_identity["sample_context_hash"]
+            or first.evidence_identity != verified_identity
+            or first.target_col != target_col
+        ):
+            raise StrategyError(
+                "Voting strategy Pool development binding changed"
+            )
+        return remember(_PoolDevelopmentLineageFacts(
+            dataset=first.dataset,
+            sample_ref=sample_ref,
+            sample_design_v2=selected_v2,
+            evidence_identity=verified_identity,
+            target_col=target_col,
+        ))
+    raise StrategyError("unsupported strategy Pool development lineage type")
+
+
+def _verified_lineage_evidence_identity(
+    lineage: _CandidateLineage,
+) -> dict[str, Any]:
+    try:
+        identity = lineage.verified_fragment["evidence"]["identity"]
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise StrategyError(
+            "strategy Pool development evidence binding is invalid"
+        ) from exc
+    return _evidence_identity_from_concrete(identity)
+
+
+def _evidence_identity_from_concrete(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise StrategyError("strategy Pool evidence identity must be an object")
+    expected = {
+        "dataset_id",
+        "dataset_content_hash",
+        "workspace_revision",
+        "workspace_generation",
+        "semantic_mapping_hash",
+        "sample_context_hash",
+    }
+    if not expected.issubset(set(value)):
+        raise StrategyError("strategy Pool evidence identity is incomplete")
+    return {
+        "dataset_id": _required_text(
+            value["dataset_id"],
+            "strategy Pool evidence dataset_id",
+        ),
+        "dataset_content_hash": _required_hash(
+            value["dataset_content_hash"],
+            "strategy Pool evidence dataset_content_hash",
+        ),
+        "workspace_revision": _non_negative_int(
+            value["workspace_revision"],
+            "strategy Pool evidence workspace_revision",
+        ),
+        "workspace_generation": _non_negative_int(
+            value["workspace_generation"],
+            "strategy Pool evidence workspace_generation",
+        ),
+        "semantic_mapping_hash": _required_hash(
+            value["semantic_mapping_hash"],
+            "strategy Pool evidence semantic_mapping_hash",
+        ),
+        "sample_context_hash": _required_hash(
+            value["sample_context_hash"],
+            "strategy Pool evidence sample_context_hash",
+        ),
+    }
+
+
+def _pool_development_dataset(
+    dataset: object,
+) -> StrategyPoolDevelopmentDatasetBinding:
+    try:
+        columns = tuple(
+            _required_text(column, "strategy Pool dataset column")
+            for column in dataset.columns
+        )
+        path = dataset.path
+        binding = StrategyPoolDevelopmentDatasetBinding(
+            task_id=_required_text(
+                dataset.task_id,
+                "strategy Pool dataset task_id",
+            ),
+            dataset_id=_required_text(
+                dataset.dataset_id,
+                "strategy Pool dataset_id",
+            ),
+            source_path=_required_text(
+                dataset.source_path,
+                "strategy Pool dataset source_path",
+            ),
+            path=path,
+            content_hash=_required_hash(
+                dataset.content_hash,
+                "strategy Pool dataset content_hash",
+            ),
+            registry_metadata_hash=_required_hash(
+                dataset.registry_metadata_hash,
+                "strategy Pool dataset registry_metadata_hash",
+            ),
+            columns=columns,
+            row_count=_non_negative_int(
+                dataset.row_count,
+                "strategy Pool dataset row_count",
+            ),
+        )
+    except (AttributeError, TypeError) as exc:
+        raise StrategyError(
+            "strategy Pool development dataset binding is invalid"
+        ) from exc
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise StrategyError(
+            "strategy Pool development dataset path changed"
+        )
+    return binding
+
+
+def _require_same_pool_development_facts(
+    first: _PoolDevelopmentLineageFacts,
+    other: _PoolDevelopmentLineageFacts,
+) -> None:
+    if (
+        first.dataset != other.dataset
+        or first.sample_ref != other.sample_ref
+        or first.evidence_identity != other.evidence_identity
+        or first.target_col != other.target_col
+    ):
+        raise StrategyError(
+            "strategy Pool candidates do not share one exact development sample"
+        )
+
+
+def _sample_design_v2_identity(
+    binding: StrategySampleDesignV2ArtifactBinding | None,
+) -> tuple[object, ...] | None:
+    if binding is None:
+        return None
+    design = binding.bundle["sample_design"]
+    header = binding.membership["header"]
+    source = binding.source_binding
+    return (
+        binding.task_id,
+        binding.membership_artifact_id,
+        binding.membership_artifact_content_hash,
+        binding.bundle_artifact_id,
+        binding.bundle_artifact_content_hash,
+        binding.bundle["bundle_id"],
+        design["sample_design_id"],
+        design["content_hash"],
+        header["membership_id"],
+        header["content_hash"],
+        header["payload_hash"],
+        header["row_count"],
+        source.dataset_id,
+        source.dataset_content_hash,
+        source.workspace_revision,
+        source.workspace_generation,
+        source.semantic_mapping_hash,
+        source.legacy.reference,
+    )
 
 
 def load_verified_univariate_candidate_lineage(
@@ -3743,11 +4328,15 @@ __all__ = [
     "POOL_ARTIFACT_SCHEMA_VERSION",
     "SCORECARD_REPORT_PROJECTION_SCHEMA_VERSION",
     "StrategyCandidatePoolArtifactBinding",
+    "StrategyPoolDevelopmentDatasetBinding",
+    "StrategyPoolDevelopmentExecutionBinding",
     "VerifiedUnivariateCandidateLineageBinding",
+    "bind_strategy_pool_development_execution",
     "load_current_strategy_candidate_pool_artifact",
     "load_verified_univariate_candidate_lineage",
     "project_scorecard_report_evidence",
     "require_strategy_candidate_pool_artifact_binding_on_connection",
+    "require_strategy_pool_development_execution_binding_on_connection",
     "require_verified_univariate_candidate_lineage_on_connection",
     "run_add_candidate_to_pool",
     "run_compile_strategy_pool",

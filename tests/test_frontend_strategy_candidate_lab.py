@@ -823,6 +823,93 @@ def test_sentinel_types_are_explicit_and_preserve_textual_leading_zeroes():
     )
 
 
+def test_candidate_stability_launcher_submits_only_current_projection_pointer():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          collectStrategyCandidateLabRequest,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const entryId = `pool-entry-${"a".repeat(32)}`;
+        const assetId = `candidate-asset-${"b".repeat(32)}`;
+        function form(mode, option) {
+          const fields = {
+            stability_source_mode: { value: mode },
+            stability_pool_entry: {
+              value: mode === "pool_entry" ? option.value : "",
+              selectedOptions: mode === "pool_entry" ? [option] : [],
+            },
+            stability_asset_id: {
+              value: mode === "univariate_asset" ? option.value : "",
+              selectedOptions: mode === "univariate_asset" ? [option] : [],
+            },
+          };
+          return {
+            dataset: { candidateLabWorkflow: "candidate_monthly_stability" },
+            querySelector(selector) {
+              const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+              return match ? fields[match[1]] || null : null;
+            },
+            querySelectorAll() { return []; },
+          };
+        }
+
+        const poolOption = {
+          value: entryId,
+          dataset: {
+            candidateLabProjection: "1",
+            strategyType: "approval",
+          },
+        };
+        assert.deepEqual(
+          collectStrategyCandidateLabRequest(form("pool_entry", poolOption)),
+          {
+            request_kind: "standard_workflow",
+            workflow: "candidate_monthly_stability",
+            workflow_inputs: {
+              strategy_type: "approval",
+              entry_id: entryId,
+            },
+          },
+        );
+
+        const assetOption = {
+          value: assetId,
+          dataset: { candidateLabProjection: "1" },
+        };
+        assert.deepEqual(
+          collectStrategyCandidateLabRequest(
+            form("univariate_asset", assetOption),
+          ).workflow_inputs,
+          { asset_id: assetId },
+        );
+
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(
+            form("pool_entry", {
+              value: entryId,
+              dataset: { strategyType: "approval" },
+            }),
+          ),
+          /受认证投影/,
+        );
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(
+            form("pool_entry", {
+              value: entryId,
+              dataset: {
+                candidateLabProjection: "1",
+                strategyType: "",
+              },
+            }),
+          ),
+          /策略类型/,
+        );
+        """
+    )
+
+
 def test_refinement_fresh_and_existing_payloads_match_manual_api_contract():
     run_node(
         """
@@ -1470,6 +1557,7 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
         "automatic_tree_candidate_build",
         "scorecard_band_build",
         "scorecard_cutoff_selection",
+        "candidate_monthly_stability",
     ):
         assert f'data-candidate-lab-workflow="{workflow}"' in index_html
     refinement_start = index_html.index(
@@ -1502,6 +1590,22 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
         "sample_design_ref",
     ):
         assert forbidden not in scorecard_selection_html
+    stability_start = index_html.index(
+        'data-candidate-lab-workflow="candidate_monthly_stability"'
+    )
+    stability_end = index_html.index("</form>", stability_start)
+    stability_html = index_html[stability_start:stability_end]
+    assert 'data-candidate-lab-field="stability_pool_entry"' in stability_html
+    assert 'data-candidate-lab-field="stability_asset_id"' in stability_html
+    for forbidden in (
+        "expected_pool_revision",
+        "expected_pool_snapshot_hash",
+        "dataset_id",
+        "sample_design_ref",
+        "target_col",
+        "month_col",
+    ):
+        assert forbidden not in stability_html
     assert "原始 PD 越高表示风险越高" in index_html
     assert "评分卡分数越高表示更安全" in index_html
     assert "不等于通过或拒绝动作" in index_html

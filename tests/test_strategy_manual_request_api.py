@@ -83,6 +83,99 @@ def _request(workflow: str, workflow_inputs: dict) -> dict:
 
 
 @pytest.mark.parametrize(
+    "workflow_inputs",
+    [
+        {"asset_id": "candidate-asset-" + "a" * 32},
+        {
+            "strategy_type": "approval",
+            "entry_id": "pool-entry-" + "b" * 32,
+        },
+    ],
+)
+def test_candidate_stability_manual_request_accepts_visible_pointer_only(
+    workflow_inputs: dict,
+) -> None:
+    request = ManualStrategyRequest.model_validate(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "candidate_monthly_stability",
+            "workflow_inputs": workflow_inputs,
+        },
+        strict=True,
+    )
+
+    assert request.workflow == "candidate_monthly_stability"
+    assert request.workflow_inputs == workflow_inputs
+
+
+@pytest.mark.parametrize(
+    "workflow_inputs",
+    [
+        {"asset_id": "candidate-asset-" + "a" * 31},
+        {"asset_id": "candidate-asset-" + "a" * 32, "strategy_type": "approval"},
+        {
+            "strategy_type": "unsupported",
+            "entry_id": "pool-entry-" + "b" * 32,
+        },
+        {
+            "strategy_type": "approval",
+            "entry_id": "pool-entry-" + "b" * 32,
+            "expected_pool_revision": 2,
+        },
+        {
+            "strategy_type": "approval",
+            "entry_id": "pool-entry-" + "b" * 32,
+            "snapshot_hash": "f" * 64,
+        },
+    ],
+)
+def test_candidate_stability_manual_request_rejects_forged_or_invalid_inputs(
+    workflow_inputs: dict,
+) -> None:
+    with pytest.raises(ValidationError):
+        ManualStrategyRequest.model_validate(
+            {
+                "request_kind": "standard_workflow",
+                "workflow": "candidate_monthly_stability",
+                "workflow_inputs": workflow_inputs,
+            },
+            strict=True,
+        )
+
+
+def test_candidate_stability_manual_pointer_reaches_governed_preflight_without_llm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(create_app(tmp_path))
+    task_id = _task(client, tmp_path)
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("typed stability request must not resolve an LLM")
+        ),
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_request(
+            "candidate_monthly_stability",
+            {
+                "strategy_type": "approval",
+                "entry_id": "pool-entry-" + "c" * 32,
+            },
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "clarification_required"
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert (
+        client.get(f"/api/tasks/{task_id}/task-artifacts").json()["artifacts"] == []
+    )
+
+
+@pytest.mark.parametrize(
     ("workflow", "workflow_inputs"),
     [
         ("scorecard_band_build", {}),

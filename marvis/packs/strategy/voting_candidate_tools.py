@@ -44,6 +44,7 @@ from marvis.packs.strategy.pool import validate_strategy_pool
 from marvis.packs.strategy.pool_requirement_resolver import (
     ResolvedPoolRequirements,
     hydrate_requirement_fields,
+    project_pool_entry_requirements,
     require_resolved_pool_requirements_on_connection,
     resolve_pool_requirements,
 )
@@ -1135,7 +1136,7 @@ def _read_exact_sample_frame(
     sample: _SampleBinding,
     entries: Sequence[Mapping[str, Any]],
 ) -> tuple[pd.DataFrame, ResolvedPoolRequirements | None]:
-    requirements = _pool_requirements_from_entries(entries)
+    requirements = project_pool_entry_requirements(entries)
     resolved: ResolvedPoolRequirements | None = None
     if requirements:
         if sample.sample_design_v2 is None:
@@ -1145,7 +1146,7 @@ def _read_exact_sample_frame(
         resolved = resolve_pool_requirements(
             _modeling_runtime(runtime),
             task_id=sample.sample_design_v2.task_id,
-            compiled_design={"requirements": requirements},
+            compiled_design={"requirements": list(requirements)},
             sample_design=sample.sample_design_v2,
         )
     virtual_fields = set(() if resolved is None else resolved.virtual_fields)
@@ -1184,71 +1185,6 @@ def _read_exact_sample_frame(
         ),
         resolved,
     )
-
-
-def _pool_requirements_from_entries(
-    entries: Sequence[Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    """Project entry requirements into the resolver's canonical outer shape.
-
-    Voting fragments preserve each selected member requirement in a lineage
-    envelope.  The resolver consumes the terminal executable requirement;
-    this projection does not mutate the Pool entry or the Voting asset.
-    """
-
-    envelope_fields = {
-        "entry_id",
-        "rule_id",
-        "fragment_id",
-        "requirement",
-    }
-    projected: list[dict[str, Any]] = []
-    for entry in entries:
-        execution = entry.get("execution")
-        source = entry.get("source")
-        if not isinstance(execution, Mapping) or not isinstance(source, Mapping):
-            raise StrategyError("Voting Pool entry execution lineage is invalid")
-        raw_requirements = execution.get("requirements")
-        if isinstance(
-            raw_requirements,
-            str | bytes | bytearray,
-        ) or not isinstance(raw_requirements, Sequence):
-            raise StrategyError("Voting Pool entry requirements must be an array")
-        outer_rule_id = _required_text(entry.get("rule_id"), "Voting rule_id")
-        outer_fragment_id = _required_text(
-            source.get("fragment_id"),
-            "Voting fragment_id",
-        )
-        for raw in raw_requirements:
-            rule_id = outer_rule_id
-            fragment_id = outer_fragment_id
-            requirement = raw
-            while (
-                isinstance(requirement, Mapping)
-                and set(requirement) == envelope_fields
-            ):
-                _required_text(
-                    requirement.get("entry_id"),
-                    "Voting requirement entry_id",
-                )
-                rule_id = _required_text(
-                    requirement.get("rule_id"),
-                    "Voting requirement rule_id",
-                )
-                fragment_id = _required_text(
-                    requirement.get("fragment_id"),
-                    "Voting requirement fragment_id",
-                )
-                requirement = requirement.get("requirement")
-            projected.append(
-                {
-                    "rule_id": rule_id,
-                    "fragment_id": fragment_id,
-                    "requirement": requirement,
-                }
-            )
-    return projected
-
 
 def _modeling_runtime(runtime):
     """Add score-evidence repositories without mutating the pack runtime."""

@@ -216,6 +216,7 @@ ManualStrategyWorkflow = Literal[
     "univariate_candidate_refinement",
     "scorecard_band_build",
     "scorecard_cutoff_selection",
+    "candidate_monthly_stability",
 ]
 
 ManualUnivariateRefinementMethod = Literal[
@@ -244,6 +245,14 @@ ManualScorecardAssetId = Annotated[
 ManualScorecardCutoffId = Annotated[
     StrictStr,
     StringConstraints(pattern=r"^scorecard-cutoff-[0-9a-f]{32}$"),
+]
+ManualCandidateAssetId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^candidate-asset-[0-9a-f]{32}$"),
+]
+ManualPoolEntryId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^pool-entry-[0-9a-f]{32}$"),
 ]
 ManualSelectionReason = Annotated[
     StrictStr,
@@ -353,6 +362,35 @@ class ManualScorecardCutoffSelectionInputs(BaseModel):
         if "reason" in self.model_fields_set and self.reason is None:
             raise ValueError("optional fields must be omitted instead of null: reason")
         return self
+
+
+class ManualCandidateStabilityAssetInputs(BaseModel):
+    """One visible standalone univariate candidate pointer."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    asset_id: ManualCandidateAssetId
+
+
+class ManualCandidateStabilityPoolEntryInputs(BaseModel):
+    """One visible entry in the current task-owned Strategy Pool."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: Literal[
+        "approval",
+        "reject",
+        "limit",
+        "pricing",
+        "segmentation",
+    ]
+    entry_id: ManualPoolEntryId
+
+
+ManualCandidateStabilityInputs = (
+    ManualCandidateStabilityAssetInputs
+    | ManualCandidateStabilityPoolEntryInputs
+)
 
 
 class ManualRiskThresholdSelectionRequest(BaseModel):
@@ -469,6 +507,9 @@ _MANUAL_SCORECARD_BAND_BUILD_INPUTS = TypeAdapter(
 _MANUAL_SCORECARD_CUTOFF_SELECTION_INPUTS = TypeAdapter(
     ManualScorecardCutoffSelectionInputs
 )
+_MANUAL_CANDIDATE_STABILITY_INPUTS = TypeAdapter(
+    ManualCandidateStabilityInputs
+)
 
 _MANUAL_STRATEGY_PLATFORM_FIELDS = frozenset(
     {
@@ -534,9 +575,15 @@ class ManualStrategyRequest(BaseModel):
                 self.workflow_inputs,
                 strict=True,
             )
+        elif self.workflow == "candidate_monthly_stability":
+            _MANUAL_CANDIDATE_STABILITY_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
         user_owned_identity_fields = {
             "univariate_candidate_refinement": {"source_candidate_id"},
             "scorecard_cutoff_selection": {"asset_id", "cutoff_id"},
+            "candidate_monthly_stability": {"asset_id", "entry_id"},
         }.get(self.workflow, set())
         forbidden = sorted(
             key

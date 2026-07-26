@@ -7,9 +7,15 @@ import pytest
 
 from marvis.packs.strategy import voting_candidate_tools
 from marvis.packs.strategy.pool import ABSENT_POOL_SNAPSHOT_HASH
+from marvis.packs.strategy.impact_cube_tools import (
+    run_measure_strategy_impact_cube,
+)
 from marvis.packs.strategy.pool_tools import (
     run_add_candidate_to_pool,
     run_compile_strategy_pool,
+)
+from marvis.packs.strategy.pool_validation_tools import (
+    run_measure_strategy_pool_validation,
 )
 from marvis.packs.strategy.scorecard_candidate_tools import (
     run_build_scorecard_band_asset,
@@ -287,3 +293,48 @@ def test_scorecard_cutoffs_build_load_and_replay_as_voting(
     )
     assert voting_rule["condition"]["op"] == "n_of_k"
     assert voting_rule["condition"]["n"] == 2
+
+    pool_artifact = admitted["artifacts"][0]
+    pool_ref = {
+        "artifact_id": pool_artifact["artifact_id"],
+        "expected_artifact_content_hash": pool_artifact["content_hash"],
+        "expected_pool_id": admitted["pool_id"],
+        "expected_revision": admitted["revision"],
+        "expected_revision_id": admitted["pool"]["revision_id"],
+        "expected_snapshot_hash": admitted["snapshot_hash"],
+    }
+    validation = run_measure_strategy_pool_validation(
+        {
+            "strategy_type": "approval",
+            "pool_ref": pool_ref,
+            "sample_design_ref": real["fx"]["sample_ref"],
+            "partition": "validation",
+            "population": "risk",
+            "comparison_mode": "absolute",
+        },
+        real["fx"]["ctx"],
+        real["runtime"],
+    )
+    assert validation["population_count"] > 0
+    assert validation["evidence"]["identity"]["pool_id"] == admitted["pool_id"]
+
+    impact = run_measure_strategy_impact_cube(
+        {
+            "strategy_type": "approval",
+            "pool_ref": pool_ref,
+            "sample_design_ref": real["fx"]["sample_ref"],
+            "partitions": ["development", "validation"],
+            "population": "risk",
+            "dimension_bindings": {
+                "month_col": "apply_month",
+                "group_col": "channel",
+                "segment_col": "sample_partition",
+            },
+            "current_strategy_ref": None,
+            "economics_inputs": None,
+        },
+        real["fx"]["ctx"],
+        real["runtime"],
+    )
+    assert impact["pool_id"] == admitted["pool_id"]
+    assert impact["partitions"] == ["development", "validation"]

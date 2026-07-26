@@ -1752,6 +1752,52 @@
                         <button type="submit" class="button compact primary">记录 Cutoff 选择</button>
                       </form>
                     </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>候选逐月稳定性</strong><small>按完整 Pool 瀑布或独立单变量规则观察跨月漂移</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="candidate_monthly_stability">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>测算来源</span>
+                          <select data-candidate-lab-field="stability_source_mode">
+                            <option value="pool_entry" selected>当前 Strategy Pool 条目（增量 first-match）</option>
+                            <option value="univariate_asset">Pool 中的单变量候选资产（独立规则命中）</option>
+                          </select>
+                        </label>
+                        <div data-candidate-lab-stability-panel="pool_entry">
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>Pool 条目 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="stability_pool_entry">
+                              <option value="">请选择当前 Pool 条目</option>
+                            </select>
+                          </label>
+                        </div>
+                        <div
+                          class="hidden"
+                          data-candidate-lab-stability-panel="univariate_asset"
+                          aria-hidden="true"
+                        >
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>单变量候选资产 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="stability_asset_id">
+                              <option value="">请选择 Pool 中可见的单变量候选资产</option>
+                            </select>
+                          </label>
+                        </div>
+                        <p
+                          class="candidate-lab-field-help"
+                          data-candidate-lab-stability-empty
+                        >
+                          当前任务尚无可测算的 Strategy Pool 条目。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          这里只提交当前投影中的策略类型与 Entry ID，或单变量 Asset ID；Pool revision、hash、样本、目标与月份口径全部由平台重新绑定。测算不会改 Pool、采纳或部署策略。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">测算逐月稳定性</button>
+                      </form>
+                    </details>
                   </div>
                   <section class="candidate-lab-evidence" aria-label="受认证候选结果">
                     <header>

@@ -12,14 +12,17 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 
 import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.db import ModelingRepository
 from marvis.domain import STRATEGY_TYPES
 from marvis.files import sha256_file
+from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.strategy.candidate_fragment import (
     sample_context_hash_from_candidate_evidence,
 )
@@ -42,11 +45,20 @@ from marvis.packs.strategy.evaluator import (
 )
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
+    StrategyPoolDevelopmentExecutionBinding,
     VerifiedUnivariateCandidateLineageBinding,
+    bind_strategy_pool_development_execution,
     load_current_strategy_candidate_pool_artifact,
     load_verified_univariate_candidate_lineage,
-    require_strategy_candidate_pool_artifact_binding_on_connection,
+    require_strategy_pool_development_execution_binding_on_connection,
     require_verified_univariate_candidate_lineage_on_connection,
+)
+from marvis.packs.strategy.pool_requirement_resolver import (
+    ResolvedPoolRequirements,
+    hydrate_requirement_fields,
+    project_pool_entry_requirements,
+    require_resolved_pool_requirements_on_connection,
+    resolve_pool_requirements,
 )
 from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignExecutionBinding,
@@ -145,8 +157,10 @@ class _ExecutionBinding:
     task_id: str
     source_kind: str
     basis: str
-    candidate: VerifiedUnivariateCandidateLineageBinding
+    candidate: VerifiedUnivariateCandidateLineageBinding | None
     pool: StrategyCandidatePoolArtifactBinding | None
+    pool_development: StrategyPoolDevelopmentExecutionBinding | None
+    resolved_requirements: ResolvedPoolRequirements | None
     entry: dict[str, Any] | None
     sample_design: StrategySampleDesignExecutionBinding
     identity: dict[str, Any]
@@ -156,7 +170,11 @@ class _ExecutionBinding:
 
     @property
     def dataset(self):
-        return self.candidate.dataset
+        if self.candidate is not None:
+            return self.candidate.dataset
+        if self.pool_development is not None:
+            return self.pool_development.dataset
+        raise StrategyError("candidate stability dataset binding is incomplete")
 
 
 @dataclass(frozen=True)
@@ -469,7 +487,7 @@ def resolve_candidate_monthly_stability_inputs(
             task_id=normalized_task,
             strategy_type=strategy_type,
         )
-        _select_univariate_pool_entry(runtime, pool, entry_id=entry_id)
+        _select_pool_entry(pool, entry_id=entry_id)
         resolved = {
             "source_kind": "pool_entry",
             "strategy_type": strategy_type,
@@ -591,6 +609,8 @@ def _load_execution_binding(
     request: Mapping[str, Any],
 ) -> _ExecutionBinding:
     pool: StrategyCandidatePoolArtifactBinding | None = None
+    pool_development: StrategyPoolDevelopmentExecutionBinding | None = None
+    resolved_requirements: ResolvedPoolRequirements | None = None
     entry: dict[str, Any] | None = None
     if request["source_kind"] == "univariate_asset":
         candidate = load_verified_univariate_candidate_lineage(
@@ -604,7 +624,25 @@ def _load_execution_binding(
         basis = "asset_rule_hit"
         condition = dict(candidate.asset["rule"]["condition"])
         strategy_spec = None
+        evidence = candidate.evidence
+        evidence_identity = evidence["identity"]
+        sample_context_hash = sample_context_hash_from_candidate_evidence(evidence)
+        identity = {
+            "task_id": task_id,
+            "dataset_id": evidence_identity["dataset_id"],
+            "dataset_content_hash": evidence_identity["dataset_content_hash"],
+            "workspace_revision": evidence_identity["workspace_revision"],
+            "workspace_generation": evidence_identity["workspace_generation"],
+            "semantic_mapping_hash": evidence_identity["semantic_mapping_hash"],
+            "sample_context_hash": sample_context_hash,
+        }
+        sample = _load_sample_design_binding(
+            runtime,
+            task_id=task_id,
+            candidate=candidate,
+        )
     else:
+        candidate = None
         pool = load_current_strategy_candidate_pool_artifact(
             runtime,
             task_id=task_id,
@@ -612,28 +650,21 @@ def _load_execution_binding(
             expected_pool_revision=request["expected_pool_revision"],
             expected_pool_snapshot_hash=request["expected_pool_snapshot_hash"],
         )
-        entry, candidate = _select_univariate_pool_entry(
-            runtime,
+        entry = _select_pool_entry(
             pool,
             entry_id=request["entry_id"],
+        )
+        pool_development = bind_strategy_pool_development_execution(
+            runtime,
+            pool,
         )
         basis = "pool_entry_incremental_first_match"
         condition = None
         strategy_spec = dict(pool.compiled_design["strategy_spec"])
-
-    evidence = candidate.evidence
-    evidence_identity = evidence["identity"]
-    sample_context_hash = sample_context_hash_from_candidate_evidence(evidence)
-    identity = {
-        "task_id": task_id,
-        "dataset_id": evidence_identity["dataset_id"],
-        "dataset_content_hash": evidence_identity["dataset_content_hash"],
-        "workspace_revision": evidence_identity["workspace_revision"],
-        "workspace_generation": evidence_identity["workspace_generation"],
-        "semantic_mapping_hash": evidence_identity["semantic_mapping_hash"],
-        "sample_context_hash": sample_context_hash,
-    }
-    if pool is not None:
+        identity = {
+            "task_id": task_id,
+            **pool_development.evidence_identity,
+        }
         source_identity = entry["source"]["evidence_identity"]
         if source_identity != {
             key: identity[key]
@@ -649,12 +680,20 @@ def _load_execution_binding(
             raise StrategyError(
                 "Pool entry evidence identity changed from its candidate lineage"
             )
-
-    sample = _load_sample_design_binding(
-        runtime,
-        task_id=task_id,
-        candidate=candidate,
-    )
+        sample = pool_development.sample_design
+        requirements = project_pool_entry_requirements(pool.pool["entries"])
+        if requirements:
+            if pool_development.sample_design_v2 is None:
+                raise StrategyError(
+                    "candidate stability score requirements require one exact "
+                    "StrategySampleDesign V2"
+                )
+            resolved_requirements = resolve_pool_requirements(
+                _modeling_runtime(runtime),
+                task_id=task_id,
+                compiled_design={"requirements": list(requirements)},
+                sample_design=pool_development.sample_design_v2,
+            )
     if not sample.month_col:
         raise StrategyError(
             "candidate monthly stability requires a month field in the "
@@ -687,6 +726,8 @@ def _load_execution_binding(
         basis=basis,
         candidate=candidate,
         pool=pool,
+        pool_development=pool_development,
+        resolved_requirements=resolved_requirements,
         entry=entry,
         sample_design=sample,
         identity=identity,
@@ -696,12 +737,11 @@ def _load_execution_binding(
     )
 
 
-def _select_univariate_pool_entry(
-    runtime,
+def _select_pool_entry(
     pool: StrategyCandidatePoolArtifactBinding,
     *,
     entry_id: str,
-) -> tuple[dict[str, Any], VerifiedUnivariateCandidateLineageBinding]:
+) -> dict[str, Any]:
     matches = [
         (index, entry)
         for index, entry in enumerate(pool.pool["entries"])
@@ -709,26 +749,19 @@ def _select_univariate_pool_entry(
     ]
     if len(matches) != 1:
         raise StrategyError(f"unknown or ambiguous Strategy Pool entry: {entry_id}")
-    index, entry = matches[0]
-    if entry["source"]["asset_type"] != "univariate_refinement":
-        raise StrategyError(
-            "candidate stability Pool entry currently supports "
-            "univariate_refinement only"
-        )
-    lineage = pool.lineages[index]
-    # The public loader replays the exact concrete artifact independently of
-    # the Pool adapter, then both projections must agree byte-for-byte.
-    candidate = load_verified_univariate_candidate_lineage(
-        runtime,
-        task_id=pool.task_id,
-        artifact_id=entry["source"]["artifact_id"],
-        expected_content_hash=entry["source"]["artifact_content_hash"],
-        expected_asset_id=entry["source"]["asset_id"],
-        expected_asset_hash=entry["source"]["asset_hash"],
-    )
-    if candidate.lineage != lineage or candidate.source_binding != entry["source"]:
-        raise StrategyError("Strategy Pool entry candidate lineage changed")
-    return dict(entry), candidate
+    _index, entry = matches[0]
+    return dict(entry)
+
+
+def _modeling_runtime(runtime):
+    """Add score-evidence repositories without mutating the pack runtime."""
+
+    if hasattr(runtime, "experiments") and hasattr(runtime, "modeling_repo"):
+        return runtime
+    proxy = SimpleNamespace(**vars(runtime))
+    proxy.experiments = ExperimentStore(runtime.settings.db_path)
+    proxy.modeling_repo = ModelingRepository(runtime.settings.db_path)
+    return proxy
 
 
 def _load_sample_design_binding(
@@ -773,6 +806,12 @@ def _read_development_frame(runtime, *, binding: _ExecutionBinding) -> pd.DataFr
     fields = _expression_fields(
         binding.condition if binding.condition is not None else binding.strategy_spec
     )
+    virtual_fields = set(
+        ()
+        if binding.resolved_requirements is None
+        else binding.resolved_requirements.virtual_fields
+    )
+    fields -= virtual_fields
     fields.add(binding.sample_design.target_col)
     fields.add(binding.sample_design.month_col)
     if binding.sample_design.split_column is not None:
@@ -791,6 +830,12 @@ def _read_development_frame(runtime, *, binding: _ExecutionBinding) -> pd.DataFr
     )
     if len(frame) != dataset.row_count:
         raise StrategyError("candidate stability dataset row count changed")
+    frame = frame.reset_index(drop=True)
+    if binding.resolved_requirements is not None:
+        frame = hydrate_requirement_fields(
+            frame,
+            resolved=binding.resolved_requirements,
+        )
     return bind_strategy_development_frame(
         frame,
         binding=binding.sample_design,
@@ -829,32 +874,33 @@ def _revalidate_before_registration(runtime, *, binding: _ExecutionBinding) -> N
         raise StrategyError(
             "candidate stability sample design changed during measurement"
         )
-    reloaded_candidate = load_verified_univariate_candidate_lineage(
-        runtime,
-        task_id=binding.task_id,
-        artifact_id=binding.candidate.lineage.asset_record.artifact_id,
-        expected_content_hash=binding.candidate.lineage.asset_record.content_hash,
-        expected_asset_id=binding.candidate.asset["asset_id"],
-        expected_asset_hash=binding.candidate.asset["asset_hash"],
-    )
-    if reloaded_candidate != binding.candidate:
-        raise StrategyError(
-            "candidate stability source changed during measurement"
-        )
-    if binding.pool is not None:
-        reloaded_pool = load_current_strategy_candidate_pool_artifact(
+    if binding.candidate is not None:
+        reloaded_candidate = load_verified_univariate_candidate_lineage(
             runtime,
             task_id=binding.task_id,
-            strategy_type=binding.pool.strategy_type,
-            expected_pool_revision=binding.pool.pool["revision"],
-            expected_pool_snapshot_hash=binding.pool.pool["snapshot_hash"],
-            expected_artifact_id=binding.pool.artifact_id,
-            expected_artifact_content_hash=binding.pool.artifact_content_hash,
+            artifact_id=binding.candidate.lineage.asset_record.artifact_id,
+            expected_content_hash=binding.candidate.lineage.asset_record.content_hash,
+            expected_asset_id=binding.candidate.asset["asset_id"],
+            expected_asset_hash=binding.candidate.asset["asset_hash"],
         )
-        if reloaded_pool != binding.pool:
+        if reloaded_candidate != binding.candidate:
             raise StrategyError(
-                "Strategy Pool changed during candidate stability measurement"
+                "candidate stability source changed during measurement"
             )
+    if binding.pool is not None and binding.pool_development is not None:
+        # Generic Pool lineages may contain NumPy-backed V2 sample masks.
+        # Re-authenticate their stable governed identities under a lock instead
+        # of relying on recursive dataclass equality, whose ndarray comparison
+        # is not a scalar truth value.
+        with runtime.task_artifacts.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_strategy_pool_development_execution_binding_on_connection(
+                conn,
+                binding.pool_development,
+            )
+            conn.commit()
+    elif binding.pool is not None:
+        raise StrategyError("candidate stability Pool development binding is incomplete")
 
 
 def _persist_artifact(
@@ -900,18 +946,28 @@ def _persist_artifact(
         with runtime.task_artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                require_verified_univariate_candidate_lineage_on_connection(
-                    conn,
-                    binding.candidate,
-                )
-                require_strategy_sample_design_execution_binding_on_connection(
-                    conn,
-                    binding.sample_design,
-                )
-                if binding.pool is not None:
-                    require_strategy_candidate_pool_artifact_binding_on_connection(
+                if binding.candidate is not None:
+                    require_verified_univariate_candidate_lineage_on_connection(
                         conn,
-                        binding.pool,
+                        binding.candidate,
+                    )
+                    require_strategy_sample_design_execution_binding_on_connection(
+                        conn,
+                        binding.sample_design,
+                    )
+                elif binding.pool_development is not None:
+                    require_strategy_pool_development_execution_binding_on_connection(
+                        conn,
+                        binding.pool_development,
+                    )
+                else:
+                    raise StrategyError(
+                        "candidate stability source binding is incomplete"
+                    )
+                if binding.resolved_requirements is not None:
+                    require_resolved_pool_requirements_on_connection(
+                        conn,
+                        binding.resolved_requirements,
                     )
                 _require_dataset_bytes(binding.dataset)
                 row = conn.execute(

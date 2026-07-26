@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import copy
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -97,8 +98,16 @@ def test_measure_impact_cube_hydrates_score_requirement_before_all_masks(
         task_id=fx["task"].id,
         request=fx["impact_request"],
     )
+    base_development = impact_tools.bind_strategy_pool_development_execution(
+        fx["runtime"],
+        base_binding,
+    )
     controlled_binding, resolved = _controlled_score_requirement(
         pool_binding=base_binding,
+    )
+    controlled_development = replace(
+        base_development,
+        pool=controlled_binding,
     )
     virtual_field = resolved.virtual_fields[0]
     original_read = impact_tools.pd.read_parquet
@@ -107,6 +116,11 @@ def test_measure_impact_cube_hydrates_score_requirement_before_all_masks(
 
     def load_with_requirement(*args, **kwargs):
         return controlled_binding
+
+    def bind_development(runtime, pool):
+        assert runtime is fx["runtime"]
+        assert pool is controlled_binding
+        return controlled_development
 
     def hydrate(frame: pd.DataFrame, *, resolved: object) -> pd.DataFrame:
         assert resolved is score_requirements
@@ -122,7 +136,12 @@ def test_measure_impact_cube_hydrates_score_requirement_before_all_masks(
 
     def read_snapshot(source, *args, **kwargs):
         assert virtual_field not in kwargs["columns"]
-        return original_read(source, *args, **kwargs)
+        frame = original_read(source, *args, **kwargs)
+        frame.index = pd.Index(
+            range(1000, 1000 + len(frame)),
+            name="persisted_source_index",
+        )
+        return frame
 
     def build(**kwargs):
         frames = [
@@ -149,6 +168,11 @@ def test_measure_impact_cube_hydrates_score_requirement_before_all_masks(
 
     score_requirements = resolved
     monkeypatch.setattr(impact_tools, "_load_pool_binding", load_with_requirement)
+    monkeypatch.setattr(
+        impact_tools,
+        "bind_strategy_pool_development_execution",
+        bind_development,
+    )
     monkeypatch.setattr(
         impact_tools,
         "resolve_pool_requirements",

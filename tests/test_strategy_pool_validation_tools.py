@@ -313,8 +313,18 @@ def test_measure_pool_validation_hydrates_score_requirement_before_partition_mas
         task_id=fx["task"].id,
         request=fx["validation_request"],
     )
+    base_development = (
+        validation_tools.bind_strategy_pool_development_execution(
+            fx["runtime"],
+            base_binding,
+        )
+    )
     controlled_binding, resolved = _controlled_score_requirement(
         pool_binding=base_binding,
+    )
+    controlled_development = replace(
+        base_development,
+        pool=controlled_binding,
     )
     outer = controlled_binding.compiled_design["requirements"][0]
     original_build = validation_tools.build_strategy_pool_validation_evidence
@@ -323,6 +333,11 @@ def test_measure_pool_validation_hydrates_score_requirement_before_partition_mas
 
     def load_with_requirement(*args, **kwargs):
         return controlled_binding
+
+    def bind_development(runtime, pool):
+        assert runtime is fx["runtime"]
+        assert pool is controlled_binding
+        return controlled_development
 
     def resolve_requirements(
         runtime,
@@ -351,7 +366,12 @@ def test_measure_pool_validation_hydrates_score_requirement_before_partition_mas
 
     def read_snapshot(source, *args, **kwargs):
         assert resolved.virtual_fields[0] not in kwargs["columns"]
-        return original_read(source, *args, **kwargs)
+        frame = original_read(source, *args, **kwargs)
+        frame.index = pd.Index(
+            range(1000, 1000 + len(frame)),
+            name="persisted_source_index",
+        )
+        return frame
 
     def build(**kwargs):
         frame = kwargs["frame"]
@@ -374,6 +394,11 @@ def test_measure_pool_validation_hydrates_score_requirement_before_partition_mas
 
     globals_resolved = resolved
     monkeypatch.setattr(validation_tools, "_load_pool_binding", load_with_requirement)
+    monkeypatch.setattr(
+        validation_tools,
+        "bind_strategy_pool_development_execution",
+        bind_development,
+    )
     monkeypatch.setattr(
         validation_tools,
         "resolve_pool_requirements",
