@@ -222,6 +222,7 @@ ManualStrategyWorkflow = Literal[
     "interactive_tree_revision",
     "interactive_tree_frontier_group_materialization",
     "interactive_tree_frontier_materialization",
+    "strategy_pool_add_candidate",
     "strategy_pool_compile",
     "strategy_pool_remove_entry",
     "strategy_pool_set_action",
@@ -260,6 +261,18 @@ ManualScorecardCutoffId = Annotated[
 ManualCandidateAssetId = Annotated[
     StrictStr,
     StringConstraints(pattern=r"^candidate-asset-[0-9a-f]{32}$"),
+]
+ManualPoolSelectionId = Annotated[
+    StrictStr,
+    StringConstraints(
+        pattern=(
+            r"^(?:automatic-tree-leaf-selection|"
+            r"interactive-tree-frontier-selection|"
+            r"interactive-tree-frontier-group-selection|"
+            r"cross-matrix-cell-selection|"
+            r"scorecard-cutoff-selection)-[0-9a-f]{32}$"
+        )
+    ),
 ]
 ManualPoolEntryId = Annotated[
     StrictStr,
@@ -726,6 +739,57 @@ class ManualStrategyPoolCompileInputs(BaseModel):
     strategy_type: ManualStrategyType
 
 
+class ManualStrategyPoolAddCandidateInputs(BaseModel):
+    """One authenticated candidate pointer plus minimal Pool-owned actions."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: ManualStrategyType
+    candidate_asset_id: ManualCandidateAssetId | None = None
+    selection_id: ManualPoolSelectionId | None = None
+    default_action: ManualStrategyPoolAction
+    action: ManualStrategyPoolAction
+    placement_mode: Literal[
+        "before_selected_members",
+        "replace_selected_members",
+    ] | None = None
+    reason: ManualSelectionReason | None = None
+
+    @model_validator(mode="after")
+    def validate_source_actions_and_optional_controls(self) -> Self:
+        explicit_nulls = sorted(
+            field
+            for field in self.model_fields_set
+            if getattr(self, field) is None
+        )
+        if explicit_nulls:
+            raise ValueError(
+                "optional fields must be omitted instead of null: "
+                + ", ".join(explicit_nulls)
+            )
+        if (self.candidate_asset_id is None) == (self.selection_id is None):
+            raise ValueError(
+                "candidate_asset_id and selection_id are mutually exclusive "
+                "and exactly one is required"
+            )
+        if self.selection_id is not None and self.placement_mode is not None:
+            raise ValueError(
+                "placement_mode is only admissible for a verified Voting "
+                "candidate asset"
+            )
+        allowed = _MANUAL_STRATEGY_POOL_ACTION_TYPES[self.strategy_type]
+        for field, action in (
+            ("default_action", self.default_action),
+            ("action", self.action),
+        ):
+            if action.type not in allowed:
+                raise ValueError(
+                    f"{field} {action.type} is not compatible with "
+                    f"{self.strategy_type} Strategy Pool"
+                )
+        return self
+
+
 class ManualStrategyPoolRemoveEntryInputs(BaseModel):
     """Remove one currently visible Pool entry by its projection identity."""
 
@@ -950,6 +1014,9 @@ _MANUAL_VOTING_CANDIDATE_BUILD_FROM_SEARCH_INPUTS = TypeAdapter(
 _MANUAL_STRATEGY_POOL_COMPILE_INPUTS = TypeAdapter(
     ManualStrategyPoolCompileInputs
 )
+_MANUAL_STRATEGY_POOL_ADD_CANDIDATE_INPUTS = TypeAdapter(
+    ManualStrategyPoolAddCandidateInputs
+)
 _MANUAL_STRATEGY_POOL_REMOVE_ENTRY_INPUTS = TypeAdapter(
     ManualStrategyPoolRemoveEntryInputs
 )
@@ -1068,6 +1135,11 @@ class ManualStrategyRequest(BaseModel):
                 self.workflow_inputs,
                 strict=True,
             )
+        elif self.workflow == "strategy_pool_add_candidate":
+            _MANUAL_STRATEGY_POOL_ADD_CANDIDATE_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
         elif self.workflow == "strategy_pool_remove_entry":
             _MANUAL_STRATEGY_POOL_REMOVE_ENTRY_INPUTS.validate_python(
                 self.workflow_inputs,
@@ -1113,6 +1185,10 @@ class ManualStrategyRequest(BaseModel):
             "voting_candidate_build_from_search": {
                 "search_id",
                 "combo_id",
+            },
+            "strategy_pool_add_candidate": {
+                "candidate_asset_id",
+                "selection_id",
             },
             "strategy_pool_remove_entry": {"entry_id"},
             "strategy_pool_set_action": {"entry_id"},

@@ -1940,6 +1940,12 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
                 "voting_search",
             )
         },
+        "pool_add_sources": {
+            "latest": None,
+            "all": [],
+            "total": 0,
+            "truncated": False,
+        },
         "pools": {"latest": None, "all": [], "total": 0, "truncated": False},
     }
 

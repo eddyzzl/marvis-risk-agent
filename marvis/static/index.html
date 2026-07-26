@@ -1413,6 +1413,79 @@
 
                     <details class="candidate-lab-launcher">
                       <summary>
+                        <span><strong>加入 Strategy Pool</strong><small>从受认证、已物化候选中明确加入一条规则</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_pool_add_candidate">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Strategy Pool 类型 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_add_strategy_type">
+                            <option value="">请选择 Strategy Pool 类型</option>
+                            <option value="approval">approval</option>
+                            <option value="reject">reject</option>
+                            <option value="limit">limit</option>
+                            <option value="pricing">pricing</option>
+                            <option value="segmentation">segmentation</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>已物化候选来源 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_add_source_id">
+                            <option value="">请先选择 Strategy Pool 类型</option>
+                          </select>
+                        </label>
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>Pool 默认动作 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="pool_add_default_action_type">
+                              <option value="">请先选择 Strategy Pool 类型</option>
+                            </select>
+                          </label>
+                          <div class="hidden" data-candidate-lab-pool-add-default-value-panel aria-hidden="true">
+                            <label class="candidate-lab-field">
+                              <span>默认动作值 <b aria-hidden="true">*</b></span>
+                              <input autocomplete="off" data-candidate-lab-field="pool_add_default_action_value" placeholder="额度、0～1 定价值或默认客群标签">
+                            </label>
+                          </div>
+                          <label class="candidate-lab-field">
+                            <span>命中动作 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="pool_add_action_type">
+                              <option value="">请先选择 Strategy Pool 类型</option>
+                            </select>
+                          </label>
+                          <div class="hidden" data-candidate-lab-pool-add-action-value-panel aria-hidden="true">
+                            <label class="candidate-lab-field">
+                              <span>命中动作值 <b aria-hidden="true">*</b></span>
+                              <input autocomplete="off" data-candidate-lab-field="pool_add_action_value" placeholder="额度、0～1 定价值或命中客群标签">
+                            </label>
+                          </div>
+                        </div>
+                        <div class="hidden" data-candidate-lab-pool-add-placement-panel aria-hidden="true">
+                          <label class="candidate-lab-field candidate-lab-field-wide">
+                            <span>Voting 放置方式 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="pool_add_placement_mode">
+                              <option value="">请选择 Voting 放置方式</option>
+                              <option value="before_selected_members">保留成员作为未达 n 时的后续规则</option>
+                              <option value="replace_selected_members">用 Voting 原子替代已选成员</option>
+                            </select>
+                          </label>
+                        </div>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>入池理由</span>
+                          <textarea rows="2" maxlength="500" data-candidate-lab-field="pool_add_reason" placeholder="可选；记录本次候选治理理由"></textarea>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-pool-add-help>
+                          请先选择 Pool 类型；页面只允许选择受认证、已物化且属于当前任务的候选。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          已有 Pool 的默认动作从当前完整投影恢复并锁定；首条入池才由你明确设置。Voting 必须选择放置方式。操作只创建可逆 Pool revision，不会自动采纳、发布、应用或部署策略。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">加入 Strategy Pool</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
                         <span><strong>物化交互树前沿 OR 分组</strong><small>把 2–50 个明确 frontier 节点固化为一个任一命中候选</small></span>
                       </summary>
                       <form

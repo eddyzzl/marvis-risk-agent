@@ -227,6 +227,7 @@ _MAX_INTERACTIVE_TREE_REVISIONS = 20
 _MAX_SCORECARD_CANDIDATES_PER_KIND = 3
 _MAX_VOTING_SEARCHES = 20
 _MAX_VOTING_SEARCH_COMBINATIONS = 20
+_MAX_POOL_ADD_SOURCES_PER_KIND = 20
 _MAX_RANKINGS = 50
 _MAX_METRICS = 100
 _MAX_BIN_POINTERS = 200
@@ -489,6 +490,7 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         _project_voting_search(context, record)
         for record in voting_search_records
     ]
+    pool_add_sources = _project_pool_add_sources(context)
     pools = _project_current_pools(
         context,
     )
@@ -545,10 +547,300 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
                 total=voting_search_total,
             ),
         },
+        "pool_add_sources": pool_add_sources,
         "pools": _collection(pools, len(STRATEGY_TYPES)),
     }
     _require_projection_payload_budget(projection)
     return projection
+
+
+def _project_pool_add_sources(
+    context: _ProjectionContext,
+) -> dict[str, Any]:
+    """Project only independently replayed, already materialized Pool sources."""
+
+    univariate_records, univariate_total = (
+        context.artifact_repository.list_recent_for_task_kind_with_count(
+            context.task_id,
+            ASSET_ARTIFACT_KIND,
+            limit=_MAX_POOL_ADD_SOURCES_PER_KIND,
+        )
+    )
+    automatic_records, automatic_total = (
+        context.artifact_repository.list_recent_for_task_kind_with_count(
+            context.task_id,
+            AUTOMATIC_TREE_LEAF_FRAGMENT_ARTIFACT_KIND,
+            limit=_MAX_POOL_ADD_SOURCES_PER_KIND,
+        )
+    )
+    cross_records, cross_total = (
+        context.artifact_repository.list_recent_for_task_kind_with_count(
+            context.task_id,
+            CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND,
+            limit=_MAX_POOL_ADD_SOURCES_PER_KIND,
+        )
+    )
+    interactive_records, interactive_total = (
+        context.artifact_repository.list_recent_for_task_kind_with_count(
+            context.task_id,
+            INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
+            limit=_MAX_POOL_ADD_SOURCES_PER_KIND,
+        )
+    )
+    interactive_group_records, interactive_group_total = (
+        context.artifact_repository.list_recent_for_task_kind_with_count(
+            context.task_id,
+            INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND,
+            limit=_MAX_POOL_ADD_SOURCES_PER_KIND,
+        )
+    )
+    scorecard_records, scorecard_total = (
+        context.artifact_repository.list_recent_for_task_kind_with_count(
+            context.task_id,
+            SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
+            limit=_MAX_POOL_ADD_SOURCES_PER_KIND,
+        )
+    )
+    voting_records, voting_total = (
+        context.artifact_repository.list_recent_for_task_kind_with_count(
+            context.task_id,
+            VOTING_CANDIDATE_ARTIFACT_KIND,
+            limit=_MAX_POOL_ADD_SOURCES_PER_KIND,
+        )
+    )
+    projected = []
+    for record in univariate_records:
+        fragment = _verified_univariate_asset_fragment(context, record)
+        projected.append(
+            (
+                record,
+                _pool_add_source_from_fragment(
+                    fragment,
+                    source_kind="univariate_asset",
+                    candidate_asset_id=_text(
+                        _mapping(
+                            fragment.get("asset"),
+                            "univariate Pool source asset",
+                        ).get("asset_id"),
+                        "univariate Pool source asset_id",
+                    ),
+                ),
+            )
+        )
+    for record in automatic_records:
+        fragment = _verified_automatic_tree_selection_fragment(
+            context,
+            record,
+        )
+        provenance = _mapping(
+            record.get("provenance"),
+            "automatic-tree Pool source provenance",
+        )
+        projected.append(
+            (
+                record,
+                _pool_add_source_from_fragment(
+                    fragment,
+                    source_kind="automatic_tree_leaf_selection",
+                    selection_id=_text(
+                        provenance.get("selection_id"),
+                        "automatic-tree Pool source selection_id",
+                    ),
+                ),
+            )
+        )
+    for record in cross_records:
+        fragment = _verified_cross_matrix_selection_fragment(
+            context,
+            record,
+        )
+        provenance = _mapping(
+            record.get("provenance"),
+            "cross-matrix Pool source provenance",
+        )
+        projected.append(
+            (
+                record,
+                _pool_add_source_from_fragment(
+                    fragment,
+                    source_kind="cross_matrix_cell_selection",
+                    selection_id=_text(
+                        provenance.get("selection_id"),
+                        "cross-matrix Pool source selection_id",
+                    ),
+                ),
+            )
+        )
+    for records, source_kind, verifier in (
+        (
+            interactive_records,
+            "interactive_tree_frontier_selection",
+            _verified_interactive_tree_selection_fragment,
+        ),
+        (
+            interactive_group_records,
+            "interactive_tree_frontier_group_selection",
+            _verified_interactive_tree_group_selection_fragment,
+        ),
+    ):
+        for record in records:
+            provenance = _mapping(
+                record.get("provenance"),
+                f"{source_kind} Pool source provenance",
+            )
+            source_binding = {
+                "artifact_id": record.get("id"),
+                "artifact_content_hash": record.get("content_hash"),
+                "asset_id": provenance.get("semantic_tree_id"),
+                "asset_hash": provenance.get("tree_hash"),
+            }
+            fragment = verifier(context, source_binding, record)
+            projected.append(
+                (
+                    record,
+                    _pool_add_source_from_fragment(
+                        fragment,
+                        source_kind=source_kind,
+                        selection_id=_text(
+                            provenance.get("selection_id"),
+                            f"{source_kind} Pool source selection_id",
+                        ),
+                    ),
+                )
+            )
+    for record in scorecard_records:
+        verified = _verified_scorecard_cutoff_selection(context, record)
+        selection = _mapping(
+            verified.get("selection"),
+            "scorecard Pool source selection",
+        )
+        projected.append(
+            (
+                record,
+                _pool_add_source_from_fragment(
+                    _mapping(
+                        verified.get("fragment"),
+                        "scorecard Pool source fragment",
+                    ),
+                    source_kind="scorecard_cutoff_selection",
+                    selection_id=_text(
+                        selection.get("selection_id"),
+                        "scorecard Pool source selection_id",
+                    ),
+                ),
+            )
+        )
+    for record in voting_records:
+        fragment = _verified_voting_candidate_fragment(context, record)
+        provenance = _mapping(
+            record.get("provenance"),
+            "Voting Pool source provenance",
+        )
+        asset = _mapping(
+            fragment.get("asset"),
+            "Voting Pool source asset",
+        )
+        strategy_type = _text(
+            provenance.get("strategy_type"),
+            "Voting Pool source strategy_type",
+        )
+        if strategy_type not in STRATEGY_TYPES:
+            raise CandidateLabProjectionError(
+                "Voting Pool source strategy_type is unsupported"
+            )
+        projected.append(
+            (
+                record,
+                _pool_add_source_from_fragment(
+                    fragment,
+                    source_kind="voting_candidate",
+                    candidate_asset_id=_text(
+                        asset.get("asset_id"),
+                        "Voting Pool source asset_id",
+                    ),
+                    strategy_type=strategy_type,
+                ),
+            )
+        )
+    return _pool_add_source_collection(
+        projected,
+        total=(
+            univariate_total
+            + automatic_total
+            + cross_total
+            + interactive_total
+            + interactive_group_total
+            + scorecard_total
+            + voting_total
+        ),
+        limit=_MAX_POOL_ADD_SOURCES_PER_KIND * 7,
+    )
+
+
+def _pool_add_source_from_fragment(
+    fragment: Mapping[str, Any],
+    *,
+    source_kind: str,
+    candidate_asset_id: str | None = None,
+    selection_id: str | None = None,
+    strategy_type: str | None = None,
+) -> dict[str, Any]:
+    if (candidate_asset_id is None) == (selection_id is None):
+        raise CandidateLabProjectionError(
+            "Pool add source must expose exactly one candidate or selection id"
+        )
+    return {
+        "source_kind": _text(source_kind, "Pool add source kind"),
+        **(
+            {"candidate_asset_id": candidate_asset_id}
+            if candidate_asset_id is not None
+            else {"selection_id": selection_id}
+        ),
+        "strategy_type": strategy_type,
+        "candidate_stage": _text(
+            fragment.get("candidate_stage"),
+            "Pool add source candidate_stage",
+        ),
+        "validation_status": _text(
+            fragment.get("validation_status"),
+            "Pool add source validation_status",
+        ),
+    }
+
+
+def _pool_add_source_collection(
+    projected: Sequence[tuple[Mapping[str, Any], dict[str, Any]]],
+    *,
+    total: int,
+    limit: int,
+) -> dict[str, Any]:
+    identities: set[str] = set()
+    for _record, source in projected:
+        identity = source.get("candidate_asset_id") or source.get("selection_id")
+        if not isinstance(identity, str) or identity in identities:
+            raise CandidateLabProjectionError(
+                "Pool add source identity is missing or duplicated"
+            )
+        identities.add(identity)
+    ordered = sorted(
+        projected,
+        key=lambda pair: (
+            pair[0]["created_at"],
+            pair[0]["id"],
+        ),
+        reverse=True,
+    )
+    visible = [source for _record, source in ordered[:limit]]
+    if total < len(projected):
+        raise CandidateLabProjectionError(
+            "Pool add source total is inconsistent"
+        )
+    return {
+        "latest": visible[0] if visible else None,
+        "all": visible,
+        "total": total,
+        "truncated": total > len(visible),
+    }
 
 
 def _project_univariate(

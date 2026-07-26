@@ -1899,6 +1899,7 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "interactive_tree_revision",
         "interactive_tree_frontier_group_materialization",
         "interactive_tree_frontier_materialization",
+        "strategy_pool_add_candidate",
         "strategy_pool_compile",
         "strategy_pool_remove_entry",
         "strategy_pool_set_action",
