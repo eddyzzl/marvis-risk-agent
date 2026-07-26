@@ -3326,6 +3326,188 @@ def _render_measure_strategy_pool_validation(
     ]
 
 
+def _strategy_pool_stability_integrity_failure() -> tuple[str, list[dict]]:
+    return (
+        "**Strategy Pool 跨分区稳定性结果完整性校验失败**：计划缓存中的 "
+        "exact ImpactCube 引用、稳定性 evidence、TaskArtifact 或 measurement "
+        "audit 摘要不一致，已停止展示 PSI 与分布变化。请从当前已认证 "
+        "ImpactCube 重新测量。",
+        [],
+    )
+
+
+def _validated_strategy_pool_stability_output(
+    value: object,
+    *,
+    trusted_task_id: str | None,
+    trusted_inputs: Mapping[str, Any] | None,
+    trusted_artifacts: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    from marvis.packs.strategy.pool_stability_tools import (
+        authenticate_strategy_pool_stability_artifact_record,
+        load_strategy_pool_stability_artifact,
+        validate_measure_strategy_pool_stability_tool_output,
+    )
+    from marvis.repositories.task_artifacts import TaskArtifactRepository
+    from types import SimpleNamespace
+
+    if (
+        not isinstance(value, Mapping)
+        or not isinstance(trusted_task_id, str)
+        or not trusted_task_id
+        or not isinstance(trusted_inputs, Mapping)
+        or not isinstance(trusted_artifacts, Mapping)
+        or set(trusted_artifacts) != {"pool_stability"}
+    ):
+        raise ValueError(
+            "Pool stability trusted terminal context is unavailable"
+        )
+    trusted = trusted_artifacts["pool_stability"]
+    if (
+        not isinstance(trusted, Mapping)
+        or set(trusted) != {"record", "tasks_root", "db_path"}
+        or not isinstance(trusted["record"], Mapping)
+        or not isinstance(trusted["tasks_root"], str)
+        or not trusted["tasks_root"]
+        or not isinstance(trusted["db_path"], str)
+        or not trusted["db_path"]
+    ):
+        raise ValueError(
+            "Pool stability trusted registry context is unavailable"
+        )
+    stability = value.get("stability")
+    if not isinstance(stability, Mapping):
+        raise ValueError("Pool stability evidence is unavailable")
+    authenticated = authenticate_strategy_pool_stability_artifact_record(
+        task_id=trusted_task_id,
+        record=trusted["record"],
+        stability=stability,
+        tasks_root=trusted["tasks_root"],
+    )
+    source_ref = authenticated["stability"][
+        "source_bindings"
+    ]["impact_cube"]
+    if dict(trusted_inputs) != source_ref:
+        raise ValueError("Pool stability terminal ImpactCube input changed")
+    tasks_root = Path(trusted["tasks_root"])
+    db_path = Path(trusted["db_path"])
+    if (
+        not tasks_root.is_absolute()
+        or not db_path.is_absolute()
+        or db_path.parent != tasks_root.parent
+    ):
+        raise ValueError("Pool stability governed storage root changed")
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            tasks_dir=tasks_root,
+            db_path=db_path,
+        ),
+        task_artifacts=TaskArtifactRepository(db_path),
+    )
+    binding = load_strategy_pool_stability_artifact(
+        runtime,
+        task_id=trusted_task_id,
+        artifact_id=authenticated["artifact_id"],
+        expected_artifact_content_hash=authenticated[
+            "artifact_content_hash"
+        ],
+        expected_stability_id=authenticated["stability"]["stability_id"],
+        expected_stability_content_hash=authenticated["stability"][
+            "content_hash"
+        ],
+    )
+    if (
+        binding.stability != authenticated["stability"]
+        or binding.artifact_provenance["producer_run"]
+        != authenticated["producer_run"]
+    ):
+        raise ValueError("Pool stability live evidence changed")
+    producer_run = binding.artifact_provenance["producer_run"]
+    output = validate_measure_strategy_pool_stability_tool_output(
+        value,
+        trusted_task_id=trusted_task_id,
+        trusted_artifact_id=binding.artifact_id,
+        trusted_artifact_content_hash=binding.artifact_content_hash,
+        trusted_producer_run_id=producer_run["run_id"],
+        trusted_producer_run_content_hash=producer_run["content_hash"],
+    )
+    if output["stability"] != binding.stability:
+        raise ValueError("Pool stability registered evidence changed")
+    return output
+
+
+def _render_measure_strategy_pool_stability(
+    o: dict,
+    *,
+    trusted_task_id: str | None,
+    trusted_inputs: Mapping[str, Any] | None,
+    trusted_artifacts: Mapping[str, Any] | None = None,
+):
+    """Render authenticated PSI evidence without claiming effect validation."""
+
+    try:
+        o = _validated_strategy_pool_stability_output(
+            o,
+            trusted_task_id=trusted_task_id,
+            trusted_inputs=trusted_inputs,
+            trusted_artifacts=trusted_artifacts,
+        )
+    except Exception:
+        return _strategy_pool_stability_integrity_failure()
+
+    stability = o["stability"]
+    identity = stability["identity"]
+    comparisons = "、".join(stability["comparison_partitions"])
+    artifact = o["artifact"]
+    text = (
+        f"**Strategy Pool 跨分区稳定性测量完成**：以 `development` 为固定"
+        f"基线，对 `{comparisons}` 比较 `{identity['strategy_type']}` Pool "
+        f"`{identity['pool_id']}` revision {identity['revision']} 的 first-match "
+        "分配与 typed action 分布。\n"
+        f"- approval 与 risk 两类 population 分开计算；全局最大 PSI 为 "
+        f"**{float(o['max_psi']):.4f}**。\n"
+        "- 这是只读分布漂移证据，**不是策略效果验证**；PSI 较低也不代表"
+        "风险、通过率或收益效果相同。\n"
+        "- 本步骤未修改 Pool、未晋级、未采纳、未部署，也不会创建策略。\n\n"
+        f"**Pool stability evidence**：[{artifact['artifact_id']}]"
+        f"({artifact['download_url']})"
+    )
+    if o["warnings"]:
+        text += "\n\n**漂移提醒**：" + "；".join(o["warnings"])
+    rows = []
+    for population in stability["populations"]:
+        for comparison in population["comparisons"]:
+            for distribution in comparison["distributions"]:
+                rows.append(
+                    [
+                        str(population["population_role"]),
+                        str(comparison["partition"]),
+                        str(distribution["basis"]),
+                        _num(distribution["development_sample_count"]),
+                        _num(distribution["comparison_sample_count"]),
+                        f"{float(distribution['psi']):.4f}",
+                        _pct(distribution["max_abs_share_delta"]),
+                        str(distribution["severity"]),
+                    ]
+                )
+    return text, [
+        {
+            "title": "Pool 跨分区分布稳定性",
+            "columns": [
+                "Population",
+                "比较分区",
+                "分布口径",
+                "Development 样本",
+                "比较样本",
+                "PSI",
+                "最大占比变化",
+                "严重度",
+            ],
+            "rows": rows,
+        }
+    ]
+
+
 def _render_apply_strategy_pool(o: dict):
     """Render only the strictly validated, non-activating Pool application."""
 
@@ -7792,6 +7974,9 @@ _RENDERERS = {
     "measure_strategy_pool_validation": (
         _render_measure_strategy_pool_validation
     ),
+    "measure_strategy_pool_stability": (
+        _render_measure_strategy_pool_stability
+    ),
     "measure_candidate_monthly_stability": (
         _render_measure_candidate_monthly_stability
     ),
@@ -7864,6 +8049,7 @@ def render_tool_output(
             "export_strategy_delivery",
             "measure_candidate_monthly_stability",
             "measure_strategy_pool_validation",
+            "measure_strategy_pool_stability",
         }:
             return renderer(
                 output or {},
@@ -7883,6 +8069,8 @@ def render_tool_output(
             return _candidate_stability_integrity_failure()
         if tool == "measure_strategy_pool_validation":
             return _strategy_pool_validation_integrity_failure()
+        if tool == "measure_strategy_pool_stability":
+            return _strategy_pool_stability_integrity_failure()
         if tool == "materialize_sample_design":
             return _sample_design_integrity_failure()
         if tool == "materialize_sample_design_v2":

@@ -415,6 +415,11 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         for tool in manifest.tools
         if tool.name == "measure_strategy_impact_cube"
     )
+    measure_pool_stability_tool = next(
+        tool
+        for tool in manifest.tools
+        if tool.name == "measure_strategy_pool_stability"
+    )
     delivery_tool = next(
         tool for tool in manifest.tools if tool.name == "export_strategy_delivery"
     )
@@ -473,6 +478,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "measure_candidate_monthly_stability",
         "measure_strategy_pool_validation",
         "measure_strategy_impact_cube",
+        "measure_strategy_pool_stability",
         "export_strategy_delivery",
         "build_report_bundle_v2",
         "design_strategy_candidate",
@@ -1273,6 +1279,29 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         assert measure_impact_cube_tool.output_schema["properties"][
             boundary
         ] == {"const": True}
+    assert measure_pool_stability_tool.determinism == "deterministic"
+    assert measure_pool_stability_tool.failure_policy == "fail"
+    assert measure_pool_stability_tool.policy.human_decision_gate == "none"
+    assert measure_pool_stability_tool.policy.effect_authorization == "none"
+    assert set(measure_pool_stability_tool.side_effects) == {
+        "read:artifacts",
+        "read:task",
+        "write:artifact",
+    }
+    assert (
+        measure_pool_stability_tool.input_schema["additionalProperties"]
+        is False
+    )
+    assert set(measure_pool_stability_tool.input_schema["required"]) == {
+        "artifact_id",
+        "expected_artifact_content_hash",
+        "expected_cube_id",
+        "expected_cube_content_hash",
+    }
+    assert (
+        measure_pool_stability_tool.output_schema["additionalProperties"]
+        is False
+    )
     assert set(run_monitoring_tool.side_effects) == {
         "read:task",
         "read:dataset",

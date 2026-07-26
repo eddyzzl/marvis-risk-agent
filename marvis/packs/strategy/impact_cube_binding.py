@@ -230,9 +230,14 @@ def require_strategy_impact_cube_artifact_binding_on_connection(
         raise StrategyError(
             "ImpactCube binding requires a caller-owned transaction"
         )
-    database = conn.execute(
-        "SELECT file FROM pragma_database_list WHERE name = 'main'"
-    ).fetchone()
+    database = next(
+        (
+            row
+            for row in conn.execute("PRAGMA database_list").fetchall()
+            if str(row["name"]) == "main"
+        ),
+        None,
+    )
     if (
         database is None
         or not str(database["file"])
@@ -253,7 +258,7 @@ def require_strategy_impact_cube_artifact_binding_on_connection(
         """
         SELECT id, task_id, kind, path, content_hash, origin_tool,
                provenance_json
-          FROM task_artifacts
+          FROM main.task_artifacts
          WHERE task_id = ? AND id = ?
         """,
         (binding.task_id, binding.artifact_id),

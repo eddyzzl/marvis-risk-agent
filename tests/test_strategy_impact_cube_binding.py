@@ -84,6 +84,62 @@ def test_shared_binding_recheck_rejects_missing_measurement_audit(
         conn.rollback()
 
 
+@pytest.mark.parametrize("missing_main_evidence", ["artifact", "audit"])
+def test_shared_binding_recheck_ignores_temp_schema_shadows(
+    tmp_path,
+    missing_main_evidence: str,
+) -> None:
+    fixture = _setup_impact_cube_report(tmp_path)
+    binding = load_strategy_impact_cube_artifact(
+        fixture["runtime"],
+        **_load_kwargs(fixture),
+    )
+
+    with fixture["runtime"].task_artifacts.transaction() as conn:
+        main_path = next(
+            str(row["file"])
+            for row in conn.execute("PRAGMA database_list").fetchall()
+            if str(row["name"]) == "main"
+        )
+        conn.execute(
+            "CREATE TEMP TABLE pragma_database_list(name TEXT, file TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO temp.pragma_database_list(name, file) VALUES (?, ?)",
+            ("main", main_path),
+        )
+        conn.execute(
+            "CREATE TEMP TABLE task_artifacts "
+            "AS SELECT * FROM main.task_artifacts"
+        )
+        conn.execute("CREATE TEMP TABLE audit AS SELECT * FROM main.audit")
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        if missing_main_evidence == "artifact":
+            conn.execute(
+                "DELETE FROM main.task_artifacts WHERE id = ?",
+                (binding.artifact_id,),
+            )
+        else:
+            conn.execute(
+                """
+                DELETE FROM main.audit
+                 WHERE kind = ? AND target_ref = ?
+                """,
+                (
+                    IMPACT_CUBE_MEASUREMENT_AUDIT_KIND,
+                    binding.artifact_provenance["producer_run"]["run_id"],
+                ),
+            )
+
+        with pytest.raises(StrategyError):
+            require_strategy_impact_cube_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+        conn.rollback()
+
+
 @pytest.mark.parametrize(
     "prefix",
     [

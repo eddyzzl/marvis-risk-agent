@@ -195,6 +195,11 @@ class PlanDriver:
                 if artifact_repo is not None
                 else None
             ),
+            db_path=(
+                Path(self._repo.db_path)
+                if artifact_repo is not None
+                else None
+            ),
             latest_failed_step_run_error_kind=self._latest_failed_step_run_error_kind,
         )
         self._gate_execution = GateExecutionAdapter(

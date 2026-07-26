@@ -111,6 +111,9 @@ from marvis.packs.strategy.pool_validation_tools import (
 from marvis.packs.strategy.impact_cube_tools import (
     run_measure_strategy_impact_cube,
 )
+from marvis.packs.strategy.pool_stability_tools import (
+    run_measure_strategy_pool_stability,
+)
 from marvis.packs.strategy.dsl_delivery_tools import (
     run_export_strategy_delivery,
 )
@@ -1009,6 +1012,12 @@ def tool_measure_strategy_impact_cube(inputs: dict, ctx) -> dict:
     """Publish unified deterministic impact slices for an exact current Pool."""
 
     return run_measure_strategy_impact_cube(inputs, ctx, _runtime(ctx))
+
+
+def tool_measure_strategy_pool_stability(inputs: dict, ctx) -> dict:
+    """Publish read-only cross-partition stability from one exact ImpactCube."""
+
+    return run_measure_strategy_pool_stability(inputs, ctx, _runtime(ctx))
 
 
 def tool_export_strategy_delivery(inputs: dict, ctx) -> dict:

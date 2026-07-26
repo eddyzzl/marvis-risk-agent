@@ -2190,7 +2190,7 @@ def require_impact_cube_measurement_audit_on_connection(
     rows = conn.execute(
         """
         SELECT actor, inputs_hash, outcome, detail_json
-          FROM audit
+          FROM main.audit
          WHERE kind = ? AND target_ref = ?
          ORDER BY at, id
         """,
