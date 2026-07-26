@@ -4,6 +4,17 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT_DIR"
 
+# Keep Matplotlib's font/config cache inside the checkout so repeated test
+# processes reuse it even when the caller's home directory is not writable.
+# An explicit caller value wins, matching Python's ``setdefault`` semantics.
+if [[ -z "${MPLCONFIGDIR+x}" ]]; then
+  MPLCONFIGDIR="$ROOT_DIR/.pytest_cache/matplotlib"
+fi
+export MPLCONFIGDIR
+if [[ -n "$MPLCONFIGDIR" ]]; then
+  mkdir -p -- "$MPLCONFIGDIR"
+fi
+
 PYTHON_BIN="${PYTHON:-python}"
 NODE_BIN="${NODE:-node}"
 RUFF_BIN="${RUFF:-}"

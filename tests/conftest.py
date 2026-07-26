@@ -17,10 +17,23 @@ focused development tests start immediately.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Protocol
+import os
 
-import pytest
+# This must stay before pytest and application imports: Matplotlib resolves its
+# cache location when first imported. ``setdefault`` preserves caller/CI
+# overrides while direct pytest runs get a persistent, ignored, writable cache.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_MATPLOTLIB_CACHE = os.environ.setdefault(
+    "MPLCONFIGDIR",
+    os.path.join(_PROJECT_ROOT, ".pytest_cache", "matplotlib"),
+)
+if _MATPLOTLIB_CACHE:
+    os.makedirs(_MATPLOTLIB_CACHE, exist_ok=True)
+
+from collections.abc import Iterable  # noqa: E402
+from typing import Protocol  # noqa: E402
+
+import pytest  # noqa: E402
 
 
 class _CollectedItem(Protocol):
