@@ -25,7 +25,9 @@ from marvis.packs.modeling.evidence import RAW_SCORE_PRODUCT
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.score_evidence_tools import (
     ModelScoreEvidenceArtifactBinding,
+    load_historical_model_score_evidence_artifacts,
     load_model_score_evidence_artifacts,
+    require_historical_model_score_evidence_artifact_binding_on_connection,
     require_model_score_evidence_artifact_binding_on_connection,
 )
 from marvis.packs.strategy.errors import StrategyError
@@ -228,6 +230,41 @@ def resolve_pool_requirements(
 ) -> ResolvedPoolRequirements:
     """Authenticate every supported requirement against the exact V2 sample."""
 
+    return _resolve_pool_requirements(
+        runtime,
+        task_id=task_id,
+        compiled_design=compiled_design,
+        sample_design=sample_design,
+        require_current_scores=True,
+    )
+
+
+def resolve_historical_pool_requirements(
+    runtime,
+    *,
+    task_id: str,
+    compiled_design: Mapping[str, Any],
+    sample_design: StrategySampleDesignV2ArtifactBinding,
+) -> ResolvedPoolRequirements:
+    """Authenticate requirements without requiring score samples to be head."""
+
+    return _resolve_pool_requirements(
+        runtime,
+        task_id=task_id,
+        compiled_design=compiled_design,
+        sample_design=sample_design,
+        require_current_scores=False,
+    )
+
+
+def _resolve_pool_requirements(
+    runtime,
+    *,
+    task_id: str,
+    compiled_design: Mapping[str, Any],
+    sample_design: StrategySampleDesignV2ArtifactBinding,
+    require_current_scores: bool,
+) -> ResolvedPoolRequirements:
     task = _text(task_id, "task_id")
     if not isinstance(sample_design, StrategySampleDesignV2ArtifactBinding):
         raise StrategyError("sample-design V2 artifact binding is invalid")
@@ -272,7 +309,12 @@ def resolve_pool_requirements(
     field_bindings: list[tuple[str, ModelScoreEvidenceArtifactBinding]] = []
     for requirement in unique:
         try:
-            binding = load_model_score_evidence_artifacts(
+            score_loader = (
+                load_model_score_evidence_artifacts
+                if require_current_scores
+                else load_historical_model_score_evidence_artifacts
+            )
+            binding = score_loader(
                 _modeling_runtime(runtime),
                 task_id=task,
                 evidence_artifact_id=requirement[
@@ -353,13 +395,45 @@ def require_resolved_pool_requirements_on_connection(
 ) -> None:
     """Re-authenticate all resolved evidence under a downstream transaction."""
 
+    _require_resolved_pool_requirements_on_connection(
+        conn,
+        resolved,
+        require_current_scores=True,
+    )
+
+
+def require_historical_resolved_pool_requirements_on_connection(
+    conn,
+    resolved: ResolvedPoolRequirements,
+) -> None:
+    """Re-authenticate requirements without requiring score samples to be head."""
+
+    _require_resolved_pool_requirements_on_connection(
+        conn,
+        resolved,
+        require_current_scores=False,
+    )
+
+
+def _require_resolved_pool_requirements_on_connection(
+    conn,
+    resolved: ResolvedPoolRequirements,
+    *,
+    require_current_scores: bool,
+) -> None:
     _require_resolved(resolved)
     for binding in resolved.evidence_bindings:
         try:
-            require_model_score_evidence_artifact_binding_on_connection(
-                conn,
-                binding,
-            )
+            if require_current_scores:
+                require_model_score_evidence_artifact_binding_on_connection(
+                    conn,
+                    binding,
+                )
+            else:
+                require_historical_model_score_evidence_artifact_binding_on_connection(
+                    conn,
+                    binding,
+                )
         except ModelingError as exc:
             raise StrategyError(str(exc)) from exc
 
@@ -687,7 +761,9 @@ __all__ = [
     "hydrate_requirement_fields",
     "model_score_virtual_field",
     "pool_requirement_bindings_provenance",
+    "require_historical_resolved_pool_requirements_on_connection",
     "require_resolved_pool_requirements_on_connection",
+    "resolve_historical_pool_requirements",
     "resolve_pool_requirements",
     "validate_pool_requirement_bindings_provenance",
 ]

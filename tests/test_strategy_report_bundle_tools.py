@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -512,6 +513,101 @@ def test_report_bundle_projects_exact_candidate_stability_into_all_outputs(
     }
 
 
+def test_report_bundle_passes_exact_voting_search_binding_and_audits_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    search_id = "voting-search-" + ("1" * 32)
+    search_hash = "c" * 64
+    voting_ref = {
+        "artifact_id": "a" * 64,
+        "expected_artifact_content_hash": "b" * 64,
+        "expected_search_id": search_id,
+        "expected_search_content_hash": search_hash,
+    }
+    fixture["request"]["voting_candidate_search_ref"] = voting_ref
+    binding = SimpleNamespace(
+        artifact_id=voting_ref["artifact_id"],
+        artifact_content_hash=voting_ref[
+            "expected_artifact_content_hash"
+        ],
+        result={
+            "search_id": search_id,
+            "content_hash": search_hash,
+        },
+    )
+    observed = {}
+    original_adapter = report_tools.build_strategy_report_bundle_source_inputs
+
+    def load_search(runtime, **kwargs):
+        observed["loader"] = (runtime, kwargs)
+        return binding
+
+    def capture_search_binding(**kwargs):
+        observed["binding"] = kwargs["voting_candidate_search"]
+        kwargs.pop("voting_candidate_search")
+        return original_adapter(**kwargs)
+
+    monkeypatch.setattr(
+        report_tools,
+        "load_voting_candidate_search_artifact",
+        load_search,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "require_voting_candidate_search_artifact_binding_on_connection",
+        lambda conn, actual: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "build_strategy_report_bundle_source_inputs",
+        capture_search_binding,
+    )
+
+    output = _run(fixture)
+
+    assert observed["binding"] is binding
+    assert observed["loader"][1] == {
+        "task_id": fixture["task"].id,
+        **voting_ref,
+    }
+    audit = json.loads(str(_audit_rows(fixture)[0]["detail_json"]))
+    assert audit["source_artifacts"]["voting_candidate_search"] == {
+        "artifact_id": binding.artifact_id,
+        "content_hash": binding.artifact_content_hash,
+        "search_id": search_id,
+        "search_content_hash": search_hash,
+    }
+    assert output["schema_version"] == (
+        "strategy.build-report-bundle-v2-tool.v4"
+    )
+
+
+def test_report_bundle_rejects_unknown_voting_search_ref_fields(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    fixture["request"]["voting_candidate_search_ref"] = {
+        "artifact_id": "a" * 64,
+        "expected_artifact_content_hash": "b" * 64,
+        "expected_search_id": "voting-search-" + ("1" * 32),
+        "expected_search_content_hash": "c" * 64,
+        "schema_version": "forged.v1",
+    }
+
+    with pytest.raises(
+        StrategyError,
+        match="voting_candidate_search_ref.*fields",
+    ):
+        _run(fixture)
+
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+
+
 def test_report_bundle_manifest_accepts_exactly_supported_impact_source_shapes(
     tmp_path: Path,
 ) -> None:
@@ -579,10 +675,7 @@ def test_build_report_bundle_prefers_authenticated_impact_cube_v2(
     assert fixture["request"]["pool_impact_ref"]["artifact_id"] not in {
         item["ref_id"] for item in refs
     }
-    assert output["bundle"]["effect_stages"] == [
-        "backtested",
-        "oot_validated",
-    ]
+    assert output["bundle"]["effect_stages"] == ["backtested"]
     impact = output["bundle"]["sections"][5]
     assert {
         (item["population"], item["partition"])
@@ -590,24 +683,16 @@ def test_build_report_bundle_prefers_authenticated_impact_cube_v2(
     } == {
         ("approval", "development"),
         ("risk", "development"),
-        ("approval", "validation"),
-        ("risk", "validation"),
     }
-    assert "oot_claim_suppressed_by_validation_blocker" not in {
+    assert "oot_claim_suppressed_by_validation_blocker" in {
         item["code"] for item in impact["red_flags"]
     }
     final_fields = {
         item["field_id"]: item["field"]["value"]
         for item in output["bundle"]["sections"][6]["summary_fields"]
     }
-    assert final_fields["evidence_stages"] == [
-        "backtested",
-        "oot_validated",
-    ]
-    assert final_fields["validation_statuses"] == [
-        "unvalidated",
-        "independent_evidence",
-    ]
+    assert final_fields["evidence_stages"] == ["backtested"]
+    assert final_fields["validation_statuses"] == ["unvalidated"]
     slice_table = next(
         table
         for table in impact["tables"]
@@ -1019,6 +1104,81 @@ def test_build_report_bundle_revalidates_candidate_stability_before_commit(
 
     assert _report_rows(fixture) == []
     assert _audit_rows(fixture) == []
+
+
+def test_build_report_bundle_revalidates_voting_search_immediately_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    voting_ref = {
+        "artifact_id": "a" * 64,
+        "expected_artifact_content_hash": "b" * 64,
+        "expected_search_id": "voting-search-" + ("1" * 32),
+        "expected_search_content_hash": "c" * 64,
+    }
+    fixture["request"]["voting_candidate_search_ref"] = voting_ref
+    binding = SimpleNamespace(
+        artifact_id=voting_ref["artifact_id"],
+        artifact_content_hash=voting_ref[
+            "expected_artifact_content_hash"
+        ],
+        result={
+            "search_id": voting_ref["expected_search_id"],
+            "content_hash": voting_ref["expected_search_content_hash"],
+        },
+    )
+    original_adapter = report_tools.build_strategy_report_bundle_source_inputs
+    guard_calls = 0
+
+    def adapter_without_fake_binding(**kwargs):
+        assert kwargs.pop("voting_candidate_search") is binding
+        return original_adapter(**kwargs)
+
+    def revalidate_search(conn, actual):
+        nonlocal guard_calls
+        assert actual is binding
+        guard_calls += 1
+        if guard_calls == 2:
+            raise StrategyError("Voting search bytes changed")
+
+    monkeypatch.setattr(
+        report_tools,
+        "load_voting_candidate_search_artifact",
+        lambda runtime, **kwargs: binding,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "require_voting_candidate_search_artifact_binding_on_connection",
+        revalidate_search,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "build_strategy_report_bundle_source_inputs",
+        adapter_without_fake_binding,
+    )
+
+    with pytest.raises(
+        StrategyError,
+        match="Voting search|artifact|hash|bytes",
+    ):
+        _run(fixture)
+
+    assert guard_calls == 2
+    assert _report_rows(fixture) == []
+    assert _audit_rows(fixture) == []
+    with fixture["runtime"].task_artifacts.transaction() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM strategy_report_revisions"
+        ).fetchone()[0] == 0
+    report_root = (
+        Path(fixture["settings"].tasks_dir)
+        / fixture["task"].id
+        / "strategy_reports"
+    )
+    assert not any(report_root.rglob("report.*")) if report_root.exists() else True
 
 
 def test_build_report_bundle_revalidates_impact_cube_tamper_before_commit(

@@ -25,10 +25,14 @@ from marvis.data.workspace import (
 )
 from marvis.files import sha256_file
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.sample_design import (
+    canonical_strategy_sample_design_bundle_json,
+)
 from marvis.packs.strategy.sample_design_tools import (
     SAMPLE_DESIGN_ARTIFACT_KIND,
     SAMPLE_DESIGN_ORIGIN_TOOL,
     StrategySampleDesignArtifactBinding,
+    load_historical_strategy_sample_design_artifact,
     load_strategy_sample_design_artifact,
 )
 
@@ -174,6 +178,81 @@ def load_strategy_sample_design_execution_binding(
 ) -> StrategySampleDesignExecutionBinding:
     """Load and match one mature development sample to live tool bindings."""
 
+    return _load_strategy_sample_design_execution_binding(
+        runtime,
+        task_id=task_id,
+        sample_design_ref=sample_design_ref,
+        dataset_id=dataset_id,
+        dataset_content_hash=dataset_content_hash,
+        workspace_revision=workspace_revision,
+        workspace_generation=workspace_generation,
+        semantic_mapping_hash=semantic_mapping_hash,
+        target_col=target_col,
+        drop_nan_labels=drop_nan_labels,
+        month_col=month_col,
+        weight_col=weight_col,
+        loan_amount_col=loan_amount_col,
+        overdue_amount_col=overdue_amount_col,
+        require_current_workspace=True,
+    )
+
+
+def load_historical_strategy_sample_design_execution_binding(
+    runtime,
+    *,
+    task_id: str,
+    sample_design_ref: object,
+    dataset_id: str,
+    dataset_content_hash: str,
+    workspace_revision: int,
+    workspace_generation: int,
+    semantic_mapping_hash: str,
+    target_col: str,
+    drop_nan_labels: bool,
+    month_col: str | None = None,
+    weight_col: str | None = None,
+    loan_amount_col: str | None = None,
+    overdue_amount_col: str | None = None,
+) -> StrategySampleDesignExecutionBinding:
+    """Load immutable development semantics independent of workspace head."""
+
+    return _load_strategy_sample_design_execution_binding(
+        runtime,
+        task_id=task_id,
+        sample_design_ref=sample_design_ref,
+        dataset_id=dataset_id,
+        dataset_content_hash=dataset_content_hash,
+        workspace_revision=workspace_revision,
+        workspace_generation=workspace_generation,
+        semantic_mapping_hash=semantic_mapping_hash,
+        target_col=target_col,
+        drop_nan_labels=drop_nan_labels,
+        month_col=month_col,
+        weight_col=weight_col,
+        loan_amount_col=loan_amount_col,
+        overdue_amount_col=overdue_amount_col,
+        require_current_workspace=False,
+    )
+
+
+def _load_strategy_sample_design_execution_binding(
+    runtime,
+    *,
+    task_id: str,
+    sample_design_ref: object,
+    dataset_id: str,
+    dataset_content_hash: str,
+    workspace_revision: int,
+    workspace_generation: int,
+    semantic_mapping_hash: str,
+    target_col: str,
+    drop_nan_labels: bool,
+    month_col: str | None,
+    weight_col: str | None,
+    loan_amount_col: str | None,
+    overdue_amount_col: str | None,
+    require_current_workspace: bool,
+) -> StrategySampleDesignExecutionBinding:
     reference = StrategySampleDesignRef.from_value(sample_design_ref)
     normalized_task_id = _text(task_id, "task_id")
     normalized_dataset_id = _text(dataset_id, "dataset_id")
@@ -197,7 +276,12 @@ def load_strategy_sample_design_execution_binding(
         ),
     }
 
-    artifact = load_strategy_sample_design_artifact(
+    artifact_loader = (
+        load_strategy_sample_design_artifact
+        if require_current_workspace
+        else load_historical_strategy_sample_design_artifact
+    )
+    artifact = artifact_loader(
         runtime,
         task_id=normalized_task_id,
         artifact_id=reference.artifact_id,
@@ -332,34 +416,10 @@ def require_strategy_sample_design_execution_binding_on_connection(
 ) -> None:
     """Recheck artifact and workspace state while a caller holds a DB lock."""
 
-    row = conn.execute(
-        """
-        SELECT task_id, kind, path, content_hash, origin_tool, provenance_json
-          FROM task_artifacts
-         WHERE task_id = ? AND id = ?
-        """,
-        (binding.task_id, binding.reference.artifact_id),
-    ).fetchone()
-    if row is None:
-        raise StrategyError("strategy sample-design artifact disappeared")
-    try:
-        provenance = json.loads(str(row["provenance_json"]))
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise StrategyError(
-            "strategy sample-design artifact provenance is invalid"
-        ) from exc
-    expected_artifact = binding.artifact
-    if (
-        str(row["task_id"]) != binding.task_id
-        or str(row["kind"]) != SAMPLE_DESIGN_ARTIFACT_KIND
-        or str(row["path"]) != str(expected_artifact.path)
-        or str(row["content_hash"]) != expected_artifact.content_hash
-        or str(row["origin_tool"]) != SAMPLE_DESIGN_ORIGIN_TOOL
-        or _canonical_json(provenance) != _canonical_json(expected_artifact.provenance)
-        or sha256_file(expected_artifact.path) != expected_artifact.content_hash
-    ):
-        raise StrategyError("strategy sample-design artifact binding changed")
-
+    require_historical_strategy_sample_design_execution_binding_on_connection(
+        conn,
+        binding,
+    )
     workspace = conn.execute(
         """
         SELECT revision, active_dataset_id, active_dataset_content_hash,
@@ -392,6 +452,136 @@ def require_strategy_sample_design_execution_binding_on_connection(
         or mapping.target_col != binding.target_col
     ):
         raise StrategyError("strategy sample-design DataWorkspace binding changed")
+
+
+def require_historical_strategy_sample_design_execution_binding_on_connection(
+    conn,
+    binding: StrategySampleDesignExecutionBinding,
+) -> None:
+    """Recheck immutable sample, registry, and bytes without workspace head."""
+
+    if not isinstance(binding, StrategySampleDesignExecutionBinding):
+        raise StrategyError("strategy sample-design execution binding is invalid")
+    row = conn.execute(
+        """
+        SELECT task_id, kind, path, content_hash, origin_tool, provenance_json
+          FROM task_artifacts
+         WHERE task_id = ? AND id = ?
+        """,
+        (binding.task_id, binding.reference.artifact_id),
+    ).fetchone()
+    if row is None:
+        raise StrategyError("strategy sample-design artifact disappeared")
+    try:
+        provenance = json.loads(str(row["provenance_json"]))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StrategyError(
+            "strategy sample-design artifact provenance is invalid"
+        ) from exc
+    expected_artifact = binding.artifact
+    try:
+        canonical = canonical_strategy_sample_design_bundle_json(
+            expected_artifact.bundle
+        ).encode("utf-8")
+        canonical_hash = hashlib.sha256(canonical).hexdigest()
+        artifact_hash = sha256_file(expected_artifact.path)
+    except (OSError, TypeError, ValueError) as exc:
+        raise StrategyError(
+            "strategy sample-design artifact binding changed"
+        ) from exc
+    if (
+        str(row["task_id"]) != binding.task_id
+        or str(row["kind"]) != SAMPLE_DESIGN_ARTIFACT_KIND
+        or str(row["path"]) != str(expected_artifact.path)
+        or str(row["content_hash"]) != expected_artifact.content_hash
+        or str(row["origin_tool"]) != SAMPLE_DESIGN_ORIGIN_TOOL
+        or _canonical_json(provenance) != _canonical_json(expected_artifact.provenance)
+        or not hmac.compare_digest(
+            canonical_hash,
+            expected_artifact.content_hash,
+        )
+        or not hmac.compare_digest(
+            artifact_hash,
+            expected_artifact.content_hash,
+        )
+    ):
+        raise StrategyError("strategy sample-design artifact binding changed")
+    design = expected_artifact.bundle["sample_design"]
+    identity = design["identity"]
+    dataset_ref = identity["dataset_ref"]
+    workspace_ref = identity["workspace_ref"]
+    target = design["target_definition"]
+    reference = binding.reference
+    if (
+        expected_artifact.task_id != binding.task_id
+        or expected_artifact.artifact_id != reference.artifact_id
+        or not hmac.compare_digest(
+            expected_artifact.content_hash,
+            reference.artifact_content_hash,
+        )
+        or design["sample_design_id"] != reference.sample_design_id
+        or not hmac.compare_digest(
+            design["content_hash"],
+            reference.sample_design_content_hash,
+        )
+        or identity["task_id"] != binding.task_id
+        or dataset_ref["dataset_id"] != binding.dataset_id
+        or not hmac.compare_digest(
+            dataset_ref["content_hash"],
+            binding.dataset_content_hash,
+        )
+        or workspace_ref["revision"] != binding.workspace_revision
+        or workspace_ref["generation"] != binding.workspace_generation
+        or not hmac.compare_digest(
+            workspace_ref["semantic_mapping_hash"],
+            binding.semantic_mapping_hash,
+        )
+        or target["column"] != binding.target_col
+        or target["bad_value"] != binding.target_bad_value
+        or target["drop_nan_labels"] is not binding.drop_nan_labels
+    ):
+        raise StrategyError("strategy sample-design execution binding changed")
+    dataset = conn.execute(
+        """
+        SELECT task_id, source_path, content_hash, row_count, columns_json,
+               has_target, target_col
+          FROM datasets
+         WHERE task_id = ? AND id = ?
+        """,
+        (binding.task_id, binding.dataset_id),
+    ).fetchone()
+    if dataset is None:
+        raise StrategyError("strategy sample-design source dataset disappeared")
+    try:
+        columns_json = dataset["columns_json"]
+        if not isinstance(columns_json, str):
+            raise ValueError("columns_json must be text")
+        json.loads(columns_json)
+        metadata = {
+            "row_count": int(dataset["row_count"]),
+            "columns_json": columns_json,
+            "has_target": int(dataset["has_target"]),
+            "target_col": dataset["target_col"],
+        }
+        metadata_hash = hashlib.sha256(
+            _canonical_json(metadata).encode("utf-8")
+        ).hexdigest()
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise StrategyError(
+            "strategy sample-design dataset metadata is invalid"
+        ) from exc
+    artifact_provenance = expected_artifact.provenance
+    if (
+        str(dataset["task_id"]) != binding.task_id
+        or str(dataset["source_path"])
+        != artifact_provenance["dataset_source_path"]
+        or str(dataset["content_hash"]) != binding.dataset_content_hash
+        or not hmac.compare_digest(
+            metadata_hash,
+            artifact_provenance["registry_metadata_hash"],
+        )
+    ):
+        raise StrategyError("strategy sample-design dataset binding changed")
 
 
 def bind_strategy_development_frame(
@@ -570,7 +760,9 @@ __all__ = [
     "StrategySampleDesignExecutionBinding",
     "StrategySampleDesignRef",
     "bind_strategy_development_frame",
+    "load_historical_strategy_sample_design_execution_binding",
     "load_strategy_sample_design_execution_binding",
+    "require_historical_strategy_sample_design_execution_binding_on_connection",
     "require_strategy_sample_design_execution_binding_on_connection",
     "revalidate_strategy_sample_design_execution_binding",
     "sample_design_ref_hash",

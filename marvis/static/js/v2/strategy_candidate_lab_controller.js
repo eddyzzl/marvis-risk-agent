@@ -12,6 +12,8 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "scorecard_band_build",
   "scorecard_cutoff_selection",
   "candidate_monthly_stability",
+  "voting_candidate_search",
+  "voting_candidate_build_from_search",
 ]);
 
 const WORKFLOW_LABELS = Object.freeze({
@@ -22,6 +24,8 @@ const WORKFLOW_LABELS = Object.freeze({
   scorecard_band_build: "生成评分卡分档证据",
   scorecard_cutoff_selection: "记录评分卡 Cutoff 选择",
   candidate_monthly_stability: "测算候选逐月稳定性",
+  voting_candidate_search: "搜索 Voting 组合",
+  voting_candidate_build_from_search: "从搜索结果构建 Voting 候选",
 });
 
 const COLLECTION_DEFINITIONS = Object.freeze([
@@ -55,7 +59,39 @@ const COLLECTION_DEFINITIONS = Object.freeze([
     description: "人工选择的 Cutoff 指针及其受认证来源证据",
     pointerKey: "",
   },
+  {
+    key: "voting_search",
+    title: "Voting 组合搜索",
+    description: "确定性枚举结果、约束资格与精确组合指针",
+    pointerKey: "",
+  },
 ]);
+
+const VOTING_SEARCH_METRICS = Object.freeze([
+  "hit_count",
+  "hit_share",
+  "good_count",
+  "bad_count",
+  "bad_rate",
+  "lift",
+  "bad_capture_rate",
+  "weighted_hit_total",
+  "weighted_hit_share",
+  "weighted_good_total",
+  "weighted_bad_total",
+  "weighted_bad_rate",
+  "weighted_bad_capture_rate",
+  "hit_amount",
+  "hit_amount_share",
+  "good_amount",
+  "bad_amount",
+  "bad_amount_rate",
+  "bad_amount_capture_rate",
+]);
+
+const VOTING_RULE_ID_RE = /^candidate-rule-[0-9a-f]{32}$/;
+const VOTING_SEARCH_ID_RE = /^voting-search-[0-9a-f]{32}$/;
+const VOTING_COMBO_ID_RE = /^voting-combo-[0-9a-f]{32}$/;
 
 const FIELD_LABELS = Object.freeze({
   action: "动作",
@@ -594,12 +630,68 @@ function scorecardSelectionDetailHtml(item) {
   ].join("");
 }
 
+function votingSearchDetailHtml(item) {
+  const combinations = Array.isArray(item?.combinations)
+    ? item.combinations.filter(isRecord)
+    : [];
+  const title = nonEmptyText(item?.search_id) || "Voting 组合搜索";
+  const summary = {
+    strategy_type: item?.strategy_type,
+    pool_revision: item?.pool_revision,
+    member_count: item?.member_count,
+    n: item?.n,
+    objective: item?.objective,
+    constraints: item?.constraints,
+    include_rule_ids: item?.include_rule_ids,
+    exclude_rule_ids: item?.exclude_rule_ids,
+    max_combinations: item?.max_combinations,
+    search_space: item?.search_space,
+    evaluated: item?.evaluated,
+    eligible: item?.eligible,
+    truncated: item?.truncated,
+  };
+  return [
+    '<details class="candidate-lab-evidence-card candidate-lab-voting-card">',
+    "<summary>",
+    '<span class="candidate-lab-card-title">',
+    `<strong>${escapeHtml(title)}</strong>`,
+    "<small>development search evidence · 未构建/未入池</small>",
+    "</span>",
+    '<span class="candidate-lab-card-state">查看组合证据</span>',
+    "</summary>",
+    '<div class="candidate-lab-card-body">',
+    evidenceIdentityHtml({ artifact: item?.artifact }),
+    '<div class="candidate-lab-boundary-note" data-tone="info">',
+    "<strong>候选边界</strong>",
+    "<p>这里按确定性目标和约束展示已评估组合，不表达最佳、冠军或平台选择；搜索不会自动构建、选择、入池或部署。</p>",
+    "</div>",
+    '<section class="candidate-lab-subsection"><h5>搜索参数与计数</h5>',
+    factsTableHtml(summary),
+    "</section>",
+    '<section class="candidate-lab-subsection"><h5>精确组合指针</h5>',
+    scorecardRowsTableHtml(
+      combinations,
+      ["combo_id", "members", "eligible", "failures", "metrics"],
+      "当前受认证搜索没有可见组合。",
+    ),
+    "</section>",
+    item?.truncated
+      ? '<p class="candidate-lab-truncated">搜索空间或可见组合已按服务端预算截断；页面不会推断窗口外结果。</p>'
+      : "",
+    "</div>",
+    "</details>",
+  ].join("");
+}
+
 function candidateItemHtml(item, definition) {
   if (definition.key === "scorecard_band") {
     return scorecardBandDetailHtml(item);
   }
   if (definition.key === "scorecard_cutoff_selection") {
     return scorecardSelectionDetailHtml(item);
+  }
+  if (definition.key === "voting_search") {
+    return votingSearchDetailHtml(item);
   }
   return candidateDetailHtml(item, definition.pointerKey);
 }
@@ -905,6 +997,19 @@ function selectedProjectionValues(form, name, label) {
   }
   return uniqueValues(
     selected.map((option) => nonEmptyText(option.value)).filter(Boolean),
+    label,
+  );
+}
+
+function optionalProjectionValues(form, name, label) {
+  const field = formField(form, name);
+  const selected = Array.from(field?.selectedOptions || [])
+    .filter((option) => nonEmptyText(option.value));
+  if (selected.some((option) => option.dataset?.candidateLabProjection !== "1")) {
+    throw new Error(`${label}必须来自当前 Strategy Pool 的受认证投影。`);
+  }
+  return uniqueValues(
+    selected.map((option) => nonEmptyText(option.value)),
     label,
   );
 }
@@ -1217,6 +1322,183 @@ function collectCandidateMonthlyStabilityInputs(form) {
   throw new Error("请选择当前 Pool 条目或单变量候选资产。");
 }
 
+function parseVotingConstraints(value) {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  const rows = text
+    .split(/[;；\n]+/)
+    .map((row) => row.trim())
+    .filter(Boolean);
+  if (rows.length > 32) {
+    throw new Error("Voting 资格约束最多填写 32 项。");
+  }
+  const seen = new Set();
+  const constraints = rows.map((row) => {
+    const match = row.match(
+      /^([a-z_]+)\s*(>=|<=|gte|lte)\s*(\d+(?:\.\d+)?%?)$/i,
+    );
+    if (!match) {
+      throw new Error(
+        `Voting 资格约束“${row}”格式无效；请使用 metric >= value 或 metric <= value。`,
+      );
+    }
+    const metric = match[1].toLowerCase();
+    if (!VOTING_SEARCH_METRICS.includes(metric)) {
+      throw new Error(`Voting 资格约束指标 ${metric} 不受支持。`);
+    }
+    const operator = [">=", "gte"].includes(match[2].toLowerCase())
+      ? "gte"
+      : "lte";
+    const percent = match[3].endsWith("%");
+    const number = Number(percent ? match[3].slice(0, -1) : match[3]);
+    const normalized = percent ? number / 100 : number;
+    if (!Number.isFinite(normalized) || normalized < 0) {
+      throw new Error(`Voting 资格约束 ${metric} 必须使用非负有限数字。`);
+    }
+    const identity = `${metric}\u001f${operator}`;
+    if (seen.has(identity)) {
+      throw new Error(`Voting 资格约束不能重复 ${metric} ${operator}。`);
+    }
+    seen.add(identity);
+    return { metric, operator, value: normalized };
+  });
+  return constraints.sort(
+    (left, right) => (
+      left.metric.localeCompare(right.metric)
+      || left.operator.localeCompare(right.operator)
+      || left.value - right.value
+    ),
+  );
+}
+
+function collectVotingCandidateSearchInputs(form) {
+  const strategy = selectedProjectionOption(
+    form,
+    "voting_strategy_type",
+    "当前 Strategy Pool",
+  );
+  const strategyType = nonEmptyText(strategy.value);
+  const memberCount = optionalNumber(
+    form,
+    "voting_member_count",
+    { integer: true },
+  );
+  const n = optionalNumber(form, "voting_n", { integer: true });
+  const maxCombinations = optionalNumber(
+    form,
+    "voting_max_combinations",
+    { integer: true },
+  );
+  if (memberCount === undefined || memberCount < 2 || memberCount > 50) {
+    throw new Error("Voting 每个组合的成员数 K 必须是 2 到 50 的整数。");
+  }
+  if (n === undefined || n < 1 || n > memberCount) {
+    throw new Error(`Voting 命中阈值 n 必须是 1 到 K=${memberCount} 的整数。`);
+  }
+  if (
+    maxCombinations === undefined
+    || maxCombinations < 1
+    || maxCombinations > 10000
+  ) {
+    throw new Error("Voting 确定性搜索预算必须是 1 到 10000 的整数。");
+  }
+  const objectiveMetric = formValue(form, "voting_objective_metric");
+  const objectiveDirection = formValue(form, "voting_objective_direction");
+  if (!VOTING_SEARCH_METRICS.includes(objectiveMetric)) {
+    throw new Error("请选择受支持的 Voting 排序指标。");
+  }
+  if (!["maximize", "minimize"].includes(objectiveDirection)) {
+    throw new Error("Voting 排序方向只能是最大化或最小化。");
+  }
+  const includeRuleIds = optionalProjectionValues(
+    form,
+    "voting_include_rule_ids",
+    "必须包含规则",
+  ).sort();
+  const excludeRuleIds = optionalProjectionValues(
+    form,
+    "voting_exclude_rule_ids",
+    "排除规则",
+  ).sort();
+  if (
+    [...includeRuleIds, ...excludeRuleIds].some(
+      (ruleId) => !VOTING_RULE_ID_RE.test(ruleId),
+    )
+  ) {
+    throw new Error("Voting 规则选择包含无效的 rule_id。");
+  }
+  const overlap = includeRuleIds.filter((ruleId) => excludeRuleIds.includes(ruleId));
+  if (overlap.length) {
+    throw new Error("Voting 必须包含规则与排除规则不能重叠。");
+  }
+  if (includeRuleIds.length > memberCount) {
+    throw new Error("Voting 必须包含规则数量不能超过 K。");
+  }
+  const constraints = parseVotingConstraints(
+    formValue(form, "voting_constraints"),
+  );
+  const minimumShareMetric = {
+    bad_rate: "hit_share",
+    lift: "hit_share",
+    weighted_bad_rate: "weighted_hit_share",
+    bad_amount_rate: "hit_amount_share",
+  }[objectiveMetric];
+  if (
+    objectiveDirection === "minimize"
+    && minimumShareMetric
+    && !constraints.some((constraint) => (
+      constraint.metric === minimumShareMetric
+      && constraint.operator === "gte"
+      && constraint.value > 0
+    ))
+  ) {
+    throw new Error(
+      `最小化 ${objectiveMetric} 时必须设置正数 ${minimumShareMetric} >= 约束，避免空命中组合排在最前。`,
+    );
+  }
+  return {
+    strategy_type: strategyType,
+    member_count: memberCount,
+    n,
+    objective: {
+      metric: objectiveMetric,
+      direction: objectiveDirection,
+    },
+    constraints,
+    include_rule_ids: includeRuleIds,
+    exclude_rule_ids: excludeRuleIds,
+    max_combinations: maxCombinations,
+  };
+}
+
+function collectVotingCandidateBuildFromSearchInputs(form) {
+  const search = selectedProjectionOption(
+    form,
+    "voting_search_id",
+    "Voting 搜索证据",
+  );
+  const combo = selectedProjectionOption(
+    form,
+    "voting_combo_id",
+    "Voting 组合",
+  );
+  const searchId = nonEmptyText(search.value);
+  const comboId = nonEmptyText(combo.value);
+  if (!VOTING_SEARCH_ID_RE.test(searchId) || !VOTING_COMBO_ID_RE.test(comboId)) {
+    throw new Error("Voting 搜索或组合指针格式无效。");
+  }
+  if (nonEmptyText(combo.dataset?.sourceSearchId) !== searchId) {
+    throw new Error("Voting 组合必须属于当前选择的受认证搜索证据。");
+  }
+  const inputs = {
+    search_id: searchId,
+    combo_id: comboId,
+  };
+  const strategyType = nonEmptyText(search.dataset?.strategyType);
+  if (strategyType) inputs.strategy_type = strategyType;
+  return inputs;
+}
+
 export function collectStrategyCandidateLabRequest(form) {
   const workflow = nonEmptyText(form?.dataset?.candidateLabWorkflow);
   if (!STRATEGY_CANDIDATE_LAB_WORKFLOWS.includes(workflow)) {
@@ -1230,6 +1512,9 @@ export function collectStrategyCandidateLabRequest(form) {
     scorecard_band_build: collectScorecardBandInputs,
     scorecard_cutoff_selection: collectScorecardCutoffSelectionInputs,
     candidate_monthly_stability: collectCandidateMonthlyStabilityInputs,
+    voting_candidate_search: collectVotingCandidateSearchInputs,
+    voting_candidate_build_from_search:
+      collectVotingCandidateBuildFromSearchInputs,
   }[workflow](form);
   return {
     request_kind: "standard_workflow",
@@ -1708,6 +1993,220 @@ function syncCandidateStabilityControls(form, payload) {
   }
 }
 
+function votingSearchForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="voting_candidate_search"]',
+  ) || null;
+}
+
+function votingBuildForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="voting_candidate_build_from_search"]',
+  ) || null;
+}
+
+function votingPoolOptions(payload) {
+  const pools = collectionItems(isRecord(payload?.pools) ? payload.pools : {});
+  const seen = new Set();
+  const result = [];
+  for (const pool of pools) {
+    const strategyType = nonEmptyText(pool?.strategy_type);
+    if (
+      !["approval", "reject", "limit", "pricing", "segmentation"].includes(
+        strategyType,
+      )
+      || seen.has(strategyType)
+    ) {
+      continue;
+    }
+    const rules = (Array.isArray(pool?.entries) ? pool.entries : [])
+      .filter((entry) => (
+        isRecord(entry)
+        && entry.enabled === true
+        && nonEmptyText(entry?.source?.asset_type) !== "voting_n_of_k"
+        && VOTING_RULE_ID_RE.test(nonEmptyText(entry.rule_id))
+      ))
+      .map((entry) => ({
+        ruleId: nonEmptyText(entry.rule_id),
+        assetType: nonEmptyText(entry?.source?.asset_type),
+      }));
+    if (rules.length < 2) continue;
+    seen.add(strategyType);
+    result.push({
+      strategyType,
+      revision: pool.revision,
+      rules,
+    });
+  }
+  return result;
+}
+
+function syncVotingSearchControls(form, payload) {
+  if (!form) return;
+  const pools = votingPoolOptions(payload);
+  const strategySelect = formField(form, "voting_strategy_type");
+  const includeSelect = formField(form, "voting_include_rule_ids");
+  const excludeSelect = formField(form, "voting_exclude_rule_ids");
+  if (!strategySelect || !includeSelect || !excludeSelect) return;
+  const previousType = nonEmptyText(strategySelect.value);
+  strategySelect.innerHTML = [
+    '<option value="">请选择当前 Strategy Pool</option>',
+    ...pools.map((pool) => projectionOptionHtml(
+      pool.strategyType,
+      `${pool.strategyType} · revision ${stablePrimitiveText(pool.revision)} · ${pool.rules.length} 条可搜索规则`,
+      { "candidate-lab-projection": "1" },
+    )),
+  ].join("");
+  if (selectContainsValue(strategySelect, previousType)) {
+    strategySelect.value = previousType;
+  } else if (pools.length === 1) {
+    strategySelect.value = pools[0].strategyType;
+  } else {
+    strategySelect.value = "";
+  }
+  const selectedType = nonEmptyText(strategySelect.value);
+  const selectedPool = pools.find((pool) => pool.strategyType === selectedType);
+  const rules = selectedPool?.rules || [];
+  for (const [select, placeholder] of [
+    [includeSelect, "可选：必须包含的规则"],
+    [excludeSelect, "可选：排除的规则"],
+  ]) {
+    const previous = new Set(selectedValues(select));
+    select.innerHTML = [
+      `<option value="" disabled>${escapeHtml(placeholder)}</option>`,
+      ...rules.map((rule) => projectionOptionHtml(
+        rule.ruleId,
+        `${rule.ruleId} · ${rule.assetType || "candidate"}`,
+        { "candidate-lab-projection": "1" },
+      )),
+    ].join("");
+    for (const option of Array.from(select.options || [])) {
+      option.selected = previous.has(option.value);
+    }
+  }
+  const empty = form.querySelector?.("[data-candidate-lab-voting-pool-empty]");
+  if (empty) {
+    empty.textContent = pools.length
+      ? selectedType
+        ? "必须包含/排除项只能来自该 Pool 当前已启用且非 Voting 的受认证规则。"
+        : "当前存在多个可搜索 Pool，请明确选择策略类型。"
+      : "当前没有包含至少两条可搜索规则的 Strategy Pool。";
+  }
+}
+
+function votingSearchProjectionCandidates(payload) {
+  const collection = isRecord(payload?.candidates?.voting_search)
+    ? payload.candidates.voting_search
+    : {};
+  const currentPoolRevisions = new Map(
+    collectionItems(isRecord(payload?.pools) ? payload.pools : {})
+      .map((pool) => [
+        nonEmptyText(pool?.strategy_type),
+        pool?.revision,
+      ]),
+  );
+  const seen = new Set();
+  return collectionItems(collection).filter((item) => {
+    const searchId = nonEmptyText(item?.search_id);
+    const strategyType = nonEmptyText(item?.strategy_type);
+    if (
+      !VOTING_SEARCH_ID_RE.test(searchId)
+      || seen.has(searchId)
+      || currentPoolRevisions.get(strategyType) !== item?.pool_revision
+    ) {
+      return false;
+    }
+    seen.add(searchId);
+    return true;
+  });
+}
+
+function votingSearchCombinations(search) {
+  const seen = new Set();
+  return (Array.isArray(search?.combinations) ? search.combinations : [])
+    .filter((combo) => {
+      const comboId = nonEmptyText(combo?.combo_id);
+      if (!isRecord(combo) || !VOTING_COMBO_ID_RE.test(comboId) || seen.has(comboId)) {
+        return false;
+      }
+      seen.add(comboId);
+      return true;
+    });
+}
+
+function syncVotingBuildControls(
+  form,
+  payload,
+  { preserveCombo = true } = {},
+) {
+  if (!form) return;
+  const searches = votingSearchProjectionCandidates(payload);
+  const searchSelect = formField(form, "voting_search_id");
+  const comboSelect = formField(form, "voting_combo_id");
+  if (!searchSelect || !comboSelect) return;
+  const previousSearchId = nonEmptyText(searchSelect.value);
+  searchSelect.innerHTML = [
+    '<option value="">请选择受认证 Voting 搜索</option>',
+    ...searches.map((search) => projectionOptionHtml(
+      search.search_id,
+      `${search.search_id} · ${search.strategy_type} · K=${stablePrimitiveText(search.member_count)} / n=${stablePrimitiveText(search.n)}`,
+      {
+        "candidate-lab-projection": "1",
+        "strategy-type": nonEmptyText(search.strategy_type),
+      },
+    )),
+  ].join("");
+  if (selectContainsValue(searchSelect, previousSearchId)) {
+    searchSelect.value = previousSearchId;
+  } else if (searches.length === 1) {
+    searchSelect.value = searches[0].search_id;
+  } else {
+    searchSelect.value = "";
+  }
+  const searchId = nonEmptyText(searchSelect.value);
+  const search = searches.find((item) => item.search_id === searchId);
+  const combinations = votingSearchCombinations(search);
+  const previousComboId = nonEmptyText(comboSelect.value);
+  const previousSource = nonEmptyText(
+    Array.from(comboSelect.selectedOptions || [])[0]?.dataset?.sourceSearchId,
+  );
+  comboSelect.innerHTML = [
+    '<option value="">请选择该搜索中的精确组合</option>',
+    ...combinations.map((combo) => projectionOptionHtml(
+      combo.combo_id,
+      `${combo.combo_id} · ${readableValue(combo.members)} · ${combo.eligible ? "约束通过" : "约束未通过"}`,
+      {
+        "candidate-lab-projection": "1",
+        "source-search-id": searchId,
+      },
+    )),
+  ].join("");
+  if (
+    preserveCombo
+    && previousSource === searchId
+    && selectContainsValue(comboSelect, previousComboId)
+  ) {
+    comboSelect.value = previousComboId;
+  } else {
+    comboSelect.value = "";
+  }
+  const empty = form.querySelector?.("[data-candidate-lab-voting-search-empty]");
+  if (empty) {
+    empty.textContent = searches.length
+      ? searchId
+        ? combinations.length
+          ? "请明确选择组合；页面不会按名次、最好或冠军自动代选。"
+          : "该受认证搜索没有可见的已评估组合。"
+        : "请先选择一份受认证 Voting 搜索证据。"
+      : "当前任务尚无受认证 Voting 搜索，请先运行组合搜索。";
+  }
+}
+
+function syncVotingForms(root, payload) {
+  syncVotingSearchControls(votingSearchForm(root), payload);
+  syncVotingBuildControls(votingBuildForm(root), payload);
+}
+
 function submissionClarificationText(result) {
   const direct = nonEmptyText(result?.message);
   if (direct) return direct;
@@ -1824,6 +2323,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       candidateStabilityForm(root),
       state.payload,
     );
+    syncVotingForms(root, state.payload);
     renderAvailability();
   }
 
@@ -1840,6 +2340,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       candidateStabilityForm(root),
       state.payload,
     );
+    syncVotingForms(root, state.payload);
   }
 
   function clear() {
@@ -2112,6 +2613,26 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       syncCandidateStabilityControls(
         candidateStability,
         state.payload,
+      );
+      renderAvailability();
+      return true;
+    }
+    const votingSearch = field.closest?.(
+      '[data-candidate-lab-workflow="voting_candidate_search"]',
+    );
+    if (votingSearch && fieldName === "voting_strategy_type") {
+      syncVotingSearchControls(votingSearch, state.payload);
+      renderAvailability();
+      return true;
+    }
+    const votingBuild = field.closest?.(
+      '[data-candidate-lab-workflow="voting_candidate_build_from_search"]',
+    );
+    if (votingBuild && fieldName === "voting_search_id") {
+      syncVotingBuildControls(
+        votingBuild,
+        state.payload,
+        { preserveCombo: false },
       );
       renderAvailability();
       return true;

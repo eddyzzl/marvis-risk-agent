@@ -39,15 +39,20 @@ from marvis.packs.strategy.pool_requirement_resolver import (
     hydrate_requirement_fields,
     pool_requirement_bindings_provenance,
     project_pool_entry_requirements,
+    require_historical_resolved_pool_requirements_on_connection,
     require_resolved_pool_requirements_on_connection,
+    resolve_historical_pool_requirements,
     resolve_pool_requirements,
 )
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
     StrategyPoolDevelopmentExecutionBinding,
     bind_strategy_pool_development_execution,
+    bind_strategy_pool_revision_development_execution,
     load_current_strategy_candidate_pool_artifact,
+    load_strategy_candidate_pool_revision_artifact,
     require_strategy_pool_development_execution_binding_on_connection,
+    require_strategy_pool_revision_development_execution_binding_on_connection,
 )
 from marvis.packs.strategy.sample_design_binding import (
     bind_strategy_development_frame,
@@ -348,15 +353,23 @@ def resolve_voting_candidate_search_selection(
             )
             if record is None:
                 continue
-            provenance = _validate_provenance(record.get("provenance"))
-            artifact = load_voting_candidate_search_artifact(
+            artifact = load_historical_voting_candidate_search_artifact(
                 runtime,
                 task_id=task,
                 artifact_id=record["id"],
                 expected_artifact_content_hash=record["content_hash"],
-                expected_search_id=search,
-                expected_search_content_hash=provenance["search_content_hash"],
             )
+            if artifact.result["search_id"] != search:
+                raise StrategyError(
+                    "Voting search artifact embedded identity changed"
+                )
+            with runtime.task_artifacts.transaction() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                require_voting_candidate_search_artifact_binding_on_connection(
+                    conn,
+                    artifact,
+                )
+                conn.commit()
             matches.append((candidate_type, artifact))
         if not matches:
             raise StrategyError(
@@ -538,7 +551,51 @@ def load_voting_candidate_search_artifact(
     expected_search_id: str,
     expected_search_content_hash: str,
 ) -> VotingCandidateSearchArtifactBinding:
-    """Load, authenticate, and reconnect aggregate search evidence to its Pool."""
+    """Load aggregate evidence and additionally require its Pool as current."""
+
+    try:
+        task = _text(task_id, "task_id")
+        search_id = _search_id(expected_search_id, "expected_search_id")
+        search_hash = _hash(
+            expected_search_content_hash,
+            "expected_search_content_hash",
+        )
+        binding = load_historical_voting_candidate_search_artifact(
+            runtime,
+            task_id=task,
+            artifact_id=artifact_id,
+            expected_artifact_content_hash=expected_artifact_content_hash,
+        )
+        if (
+            binding.result["search_id"] != search_id
+            or not hmac.compare_digest(
+                binding.result["content_hash"],
+                search_hash,
+            )
+        ):
+            raise StrategyError("Voting search embedded identity changed")
+        with runtime.task_artifacts.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_voting_candidate_search_artifact_binding_on_connection(
+                conn,
+                binding,
+            )
+            conn.commit()
+        return binding
+    except StrategyError:
+        raise
+    except _BOUNDARY_ERRORS as exc:
+        raise StrategyError(str(exc)) from exc
+
+
+def load_historical_voting_candidate_search_artifact(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+) -> VotingCandidateSearchArtifactBinding:
+    """Authenticate aggregate evidence against its immutable Pool/source chain."""
 
     try:
         task = _text(task_id, "task_id")
@@ -547,14 +604,37 @@ def load_voting_candidate_search_artifact(
             expected_artifact_content_hash,
             "expected_artifact_content_hash",
         )
-        search_id = _search_id(expected_search_id, "expected_search_id")
-        search_hash = _hash(
-            expected_search_content_hash,
-            "expected_search_content_hash",
-        )
         record = runtime.task_artifacts.get_for_task(task, artifact)
         if record is None:
             raise StrategyError("Voting search artifact not found")
+        if (
+            not isinstance(record, Mapping)
+            or record.get("id") != artifact
+            or record.get("task_id") != task
+            or record.get("kind") != VOTING_CANDIDATE_SEARCH_ARTIFACT_KIND
+            or record.get("origin_tool") != VOTING_CANDIDATE_SEARCH_ORIGIN_TOOL
+            or not isinstance(record.get("content_hash"), str)
+            or not hmac.compare_digest(
+                record["content_hash"],
+                artifact_hash,
+            )
+        ):
+            raise StrategyError("Voting search artifact registry binding changed")
+        tasks_root = Path(runtime.settings.tasks_dir).absolute()
+        path = Path(_text(record.get("path"), "artifact path"))
+        raw = _read_exact_file(
+            path,
+            root=tasks_root,
+            expected_content_hash=artifact_hash,
+        )
+        result = parse_voting_candidate_search_result_json(raw)
+        canonical = canonical_voting_candidate_search_result_json(result).encode(
+            "utf-8"
+        )
+        if raw != canonical:
+            raise StrategyError("Voting search artifact bytes are not canonical")
+        search_id = result["search_id"]
+        search_hash = result["content_hash"]
         provenance = _validate_provenance(record.get("provenance"))
         if (
             provenance["task_id"] != task
@@ -565,48 +645,45 @@ def load_voting_candidate_search_artifact(
             )
         ):
             raise StrategyError("Voting search artifact provenance changed")
-        pool_ref = provenance["pool_ref"]
-        path = _expected_search_path(
-            runtime.settings.tasks_dir,
-            task_id=task,
-            search_id=search_id,
-            pool_snapshot_hash=pool_ref["snapshot_hash"],
-        )
-        if Path(str(record["path"])) != path:
-            raise StrategyError("Voting search artifact path is not canonical")
-        raw = _read_exact_file(
-            path,
-            root=Path(runtime.settings.tasks_dir).absolute(),
-            expected_content_hash=artifact_hash,
-        )
-        result = parse_voting_candidate_search_result_json(raw)
-        canonical = canonical_voting_candidate_search_result_json(result).encode(
-            "utf-8"
-        )
-        if raw != canonical:
-            raise StrategyError("Voting search artifact bytes are not canonical")
-        if result["search_id"] != search_id or not hmac.compare_digest(
-            result["content_hash"], search_hash
-        ):
-            raise StrategyError("Voting search embedded identity changed")
         if not hmac.compare_digest(
             provenance["request_hash"],
             result["request_hash"],
         ):
             raise StrategyError("Voting search artifact provenance changed")
-        pool = load_current_strategy_candidate_pool_artifact(
+        pool_ref = provenance["pool_ref"]
+        expected_path = _expected_search_path(
+            runtime.settings.tasks_dir,
+            task_id=task,
+            search_id=search_id,
+            pool_snapshot_hash=pool_ref["snapshot_hash"],
+        )
+        if path != expected_path:
+            raise StrategyError("Voting search artifact path is not canonical")
+        pool = load_strategy_candidate_pool_revision_artifact(
             runtime,
             task_id=task,
             strategy_type=pool_ref["strategy_type"],
-            expected_pool_revision=pool_ref["revision"],
-            expected_pool_snapshot_hash=pool_ref["snapshot_hash"],
-            expected_artifact_id=pool_ref["artifact_id"],
+            revision_id=pool_ref["revision_id"],
+            artifact_id=pool_ref["artifact_id"],
             expected_artifact_content_hash=pool_ref["artifact_content_hash"],
         )
-        development = bind_strategy_pool_development_execution(runtime, pool)
+        if (
+            pool.pool["pool_id"] != pool_ref["pool_id"]
+            or pool.pool["revision"] != pool_ref["revision"]
+            or pool.pool["revision_id"] != pool_ref["revision_id"]
+            or not hmac.compare_digest(
+                pool.pool["snapshot_hash"],
+                pool_ref["snapshot_hash"],
+            )
+        ):
+            raise StrategyError("Voting search Pool provenance changed")
+        development = bind_strategy_pool_revision_development_execution(
+            runtime,
+            pool,
+        )
         entries, excluded = _searchable_entries(pool)
         requirements = project_pool_entry_requirements(entries)
-        resolved = _resolve_requirements(
+        resolved = _resolve_historical_requirements(
             runtime,
             development=development,
             requirements=requirements,
@@ -633,12 +710,12 @@ def load_voting_candidate_search_artifact(
             result=result,
             pool_development=development,
             resolved_requirements=resolved,
-            tasks_root=Path(runtime.settings.tasks_dir).absolute(),
+            tasks_root=tasks_root,
             db_path=Path(runtime.settings.db_path).absolute(),
         )
         with runtime.task_artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            require_voting_candidate_search_artifact_binding_on_connection(
+            require_historical_voting_candidate_search_artifact_binding_on_connection(
                 conn,
                 binding,
             )
@@ -654,7 +731,28 @@ def require_voting_candidate_search_artifact_binding_on_connection(
     conn,
     binding: VotingCandidateSearchArtifactBinding,
 ) -> None:
-    """Re-authenticate a search artifact and every governed source under lock."""
+    """Re-authenticate a search and additionally require its Pool as current."""
+
+    require_historical_voting_candidate_search_artifact_binding_on_connection(
+        conn,
+        binding,
+    )
+    require_strategy_pool_development_execution_binding_on_connection(
+        conn,
+        binding.pool_development,
+    )
+    if binding.resolved_requirements is not None:
+        require_resolved_pool_requirements_on_connection(
+            conn,
+            binding.resolved_requirements,
+        )
+
+
+def require_historical_voting_candidate_search_artifact_binding_on_connection(
+    conn,
+    binding: VotingCandidateSearchArtifactBinding,
+) -> None:
+    """Re-authenticate search evidence against its immutable source chain."""
 
     if not isinstance(binding, VotingCandidateSearchArtifactBinding):
         raise StrategyError("Voting search artifact binding is invalid")
@@ -686,12 +784,12 @@ def require_voting_candidate_search_artifact_binding_on_connection(
         )
     ):
         raise StrategyError("Voting search artifact provenance binding changed")
-    require_strategy_pool_development_execution_binding_on_connection(
+    require_strategy_pool_revision_development_execution_binding_on_connection(
         conn,
         binding.pool_development,
     )
     if binding.resolved_requirements is not None:
-        require_resolved_pool_requirements_on_connection(
+        require_historical_resolved_pool_requirements_on_connection(
             conn,
             binding.resolved_requirements,
         )
@@ -1023,6 +1121,26 @@ def _resolve_requirements(
             "Voting search score requirements require one exact StrategySampleDesign V2"
         )
     return resolve_pool_requirements(
+        _modeling_runtime(runtime),
+        task_id=development.task_id,
+        compiled_design={"requirements": list(requirements)},
+        sample_design=development.sample_design_v2,
+    )
+
+
+def _resolve_historical_requirements(
+    runtime,
+    *,
+    development: StrategyPoolDevelopmentExecutionBinding,
+    requirements: Sequence[Mapping[str, Any]],
+) -> ResolvedPoolRequirements | None:
+    if not requirements:
+        return None
+    if development.sample_design_v2 is None:
+        raise StrategyError(
+            "Voting search score requirements require one exact StrategySampleDesign V2"
+        )
+    return resolve_historical_pool_requirements(
         _modeling_runtime(runtime),
         task_id=development.task_id,
         compiled_design={"requirements": list(requirements)},
@@ -1701,26 +1819,447 @@ def _read_exact_file(
 ) -> bytes:
     if not path.is_absolute() or not root.is_absolute():
         raise StrategyError("Voting search artifact path is not canonical")
+    descriptor = -1
+    reopened_descriptor = -1
+    chunks: list[bytes] = []
+    digest = hashlib.sha256()
+    total = 0
     try:
-        path.relative_to(root)
-        opened = os.lstat(path)
+        descriptor = _open_file_beneath_root(path, root=root)
+        opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
-            or stat.S_ISLNK(opened.st_mode)
+            or int(opened.st_size) < 0
             or int(opened.st_size) > MAX_JSON_BYTES
         ):
             raise StrategyError("Voting search artifact file is invalid")
-        raw = path.read_bytes()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_JSON_BYTES:
+                raise StrategyError("Voting search artifact file is invalid")
+            digest.update(chunk)
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        reopened_descriptor = _open_file_beneath_root(path, root=root)
+        reopened = os.fstat(reopened_descriptor)
+        if (
+            _stable_file_identity(after) != _stable_file_identity(opened)
+            or _stable_file_identity(reopened) != _stable_file_identity(opened)
+        ):
+            raise StrategyError("Voting search artifact file is invalid")
     except StrategyError:
         raise
-    except (OSError, ValueError) as exc:
+    except (NotImplementedError, OSError, TypeError, ValueError) as exc:
         raise StrategyError("Voting search artifact is unavailable") from exc
-    if len(raw) > MAX_JSON_BYTES or not hmac.compare_digest(
-        hashlib.sha256(raw).hexdigest(),
-        expected_content_hash,
+    finally:
+        if reopened_descriptor >= 0:
+            os.close(reopened_descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+    raw = b"".join(chunks)
+    if (
+        len(raw) != opened.st_size
+        or not hmac.compare_digest(
+            digest.hexdigest(),
+            expected_content_hash,
+        )
     ):
         raise StrategyError("Voting search artifact content hash changed")
     return raw
+
+
+def _open_file_beneath_root(path: Path, *, root: Path) -> int:
+    if os.name == "nt":
+        return _open_file_beneath_root_windows(path, root=root)
+    return _open_file_beneath_root_posix(path, root=root)
+
+
+def _open_file_beneath_root_windows(path: Path, *, root: Path) -> int:
+    snapshots = _audit_windows_path_chain(path, root=root)
+    directory_handles: list[int] = []
+    file_handle = -1
+    descriptor = -1
+    try:
+        for index, (entry, expected_identity) in enumerate(snapshots):
+            directory = index != len(snapshots) - 1
+            handle = _open_windows_path_handle(
+                entry,
+                directory=directory,
+            )
+            if directory:
+                directory_handles.append(handle)
+            else:
+                file_handle = handle
+            attributes = _windows_handle_file_attributes(handle)
+            if attributes & 0x400:
+                raise StrategyError(
+                    "Voting search artifact path contains a symlink, "
+                    "junction, or reparse point"
+                )
+            if directory != bool(attributes & 0x10):
+                raise StrategyError(
+                    "Voting search artifact Windows handle type changed"
+                )
+            current = os.lstat(entry)
+            if (
+                _is_windows_reparse_point(entry, current)
+                or _stable_file_identity(current) != expected_identity
+            ):
+                raise StrategyError(
+                    "Voting search artifact path changed during secure open"
+                )
+        descriptor = _windows_handle_to_descriptor(file_handle)
+        file_handle = -1
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _stable_file_identity(opened) != snapshots[-1][1]
+        ):
+            raise StrategyError(
+                "Voting search artifact Windows file identity changed"
+            )
+        _require_windows_path_chain_unchanged(
+            snapshots,
+            root=root,
+        )
+    except Exception:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        handles = []
+        if file_handle >= 0:
+            handles.append(file_handle)
+        handles.extend(reversed(directory_handles))
+        _close_windows_handles(handles)
+        raise
+    cleanup_error = _close_windows_handles(
+        list(reversed(directory_handles))
+    )
+    if cleanup_error is not None:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise cleanup_error
+    return descriptor
+
+
+def _audit_windows_path_chain(
+    path: Path,
+    *,
+    root: Path,
+) -> tuple[tuple[Path, tuple[int, int, int, int, int, int, int, int]], ...]:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise StrategyError(
+            "Voting search artifact path is not canonical"
+        ) from exc
+    parts = relative.parts
+    if (
+        not parts
+        or any(
+            part in {"", ".", ".."}
+            or ":" in part
+            or os.path.basename(part) != part
+            for part in parts
+        )
+    ):
+        raise StrategyError("Voting search artifact path is not canonical")
+    chain = [root]
+    current = root
+    for part in parts:
+        current = current / part
+        chain.append(current)
+    snapshots = []
+    try:
+        for index, entry in enumerate(chain):
+            metadata = os.lstat(entry)
+            if _is_windows_reparse_point(entry, metadata):
+                raise StrategyError(
+                    "Voting search artifact path contains a symlink, "
+                    "junction, or reparse point"
+                )
+            if index == len(chain) - 1:
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise StrategyError(
+                        "Voting search artifact file is invalid"
+                    )
+            elif not stat.S_ISDIR(metadata.st_mode):
+                raise StrategyError(
+                    "Voting search artifact directory is invalid"
+                )
+            snapshots.append((entry, _stable_file_identity(metadata)))
+    except StrategyError:
+        raise
+    except OSError as exc:
+        raise StrategyError(
+            "Voting search artifact secure Windows path traversal is unavailable"
+        ) from exc
+    return tuple(snapshots)
+
+
+def _require_windows_path_chain_unchanged(
+    snapshots: tuple[
+        tuple[Path, tuple[int, int, int, int, int, int, int, int]],
+        ...,
+    ],
+    *,
+    root: Path,
+) -> None:
+    try:
+        for index, (entry, expected_identity) in enumerate(snapshots):
+            metadata = os.lstat(entry)
+            if (
+                _is_windows_reparse_point(entry, metadata)
+                or _stable_file_identity(metadata) != expected_identity
+                or (
+                    index == len(snapshots) - 1
+                    and not stat.S_ISREG(metadata.st_mode)
+                )
+                or (
+                    index != len(snapshots) - 1
+                    and not stat.S_ISDIR(metadata.st_mode)
+                )
+            ):
+                raise StrategyError(
+                    "Voting search artifact path changed during secure open"
+                )
+        resolved_root = root.resolve(strict=True)
+        resolved_path = snapshots[-1][0].resolve(strict=True)
+        resolved_path.relative_to(resolved_root)
+    except StrategyError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise StrategyError(
+            "Voting search artifact escaped its authenticated task root"
+        ) from exc
+
+
+def _is_windows_reparse_point(path: Path, metadata) -> bool:
+    file_attributes = int(getattr(metadata, "st_file_attributes", 0))
+    reparse_flag = int(
+        getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+    is_junction = getattr(os.path, "isjunction", None)
+    try:
+        junction = bool(is_junction(path)) if is_junction is not None else False
+    except OSError:
+        junction = True
+    return (
+        stat.S_ISLNK(metadata.st_mode)
+        or bool(file_attributes & reparse_flag)
+        or junction
+    )
+
+
+def _open_windows_path_handle(path: Path, *, directory: bool) -> int:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        desired_access = 0x80 if directory else 0x80000000
+        flags = 0x00200000
+        if directory:
+            flags |= 0x02000000
+        handle = create_file(
+            str(path),
+            desired_access,
+            0x1 | 0x2,
+            None,
+            3,
+            flags,
+            None,
+        )
+        handle_value = ctypes.cast(handle, ctypes.c_void_p).value
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle_value is None or handle_value == invalid_handle:
+            error = ctypes.get_last_error()
+            raise OSError(
+                error,
+                "CreateFileW could not open Voting search path",
+            )
+        return int(handle_value)
+    except OSError:
+        raise
+    except (AttributeError, ImportError, TypeError, ValueError) as exc:
+        raise OSError(
+            "Windows secure handle API is unavailable"
+        ) from exc
+
+
+def _windows_handle_file_attributes(handle: int) -> int:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _FileAttributeTagInfo(ctypes.Structure):
+            _fields_ = (
+                ("file_attributes", wintypes.DWORD),
+                ("reparse_tag", wintypes.DWORD),
+            )
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_information = kernel32.GetFileInformationByHandleEx
+        get_information.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        )
+        get_information.restype = wintypes.BOOL
+        information = _FileAttributeTagInfo()
+        if not get_information(
+            wintypes.HANDLE(handle),
+            9,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+        ):
+            error = ctypes.get_last_error()
+            raise OSError(
+                error,
+                "GetFileInformationByHandleEx could not inspect "
+                "Voting search path",
+            )
+        return int(information.file_attributes)
+    except OSError:
+        raise
+    except (AttributeError, ImportError, TypeError, ValueError) as exc:
+        raise OSError(
+            "Windows secure handle inspection is unavailable"
+        ) from exc
+
+
+def _windows_handle_to_descriptor(handle: int) -> int:
+    try:
+        import msvcrt
+
+        return int(
+            msvcrt.open_osfhandle(
+                handle,
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOINHERIT", 0),
+            )
+        )
+    except (ImportError, OSError, TypeError, ValueError) as exc:
+        raise OSError(
+            "Windows Voting search handle could not become a descriptor"
+        ) from exc
+
+
+def _close_windows_handle(handle: int) -> None:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        if not close_handle(wintypes.HANDLE(handle)):
+            error = ctypes.get_last_error()
+            raise OSError(
+                error,
+                "CloseHandle could not close Voting search path",
+            )
+    except OSError:
+        raise
+    except (AttributeError, ImportError, TypeError, ValueError) as exc:
+        raise OSError(
+            "Windows secure handle close is unavailable"
+        ) from exc
+
+
+def _close_windows_handles(handles: Sequence[int]) -> OSError | None:
+    first_error = None
+    for handle in handles:
+        try:
+            _close_windows_handle(handle)
+        except OSError as exc:
+            if first_error is None:
+                first_error = exc
+    return first_error
+
+
+def _open_file_beneath_root_posix(path: Path, *, root: Path) -> int:
+    if (
+        not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+        or os.open not in getattr(os, "supports_dir_fd", ())
+    ):
+        raise StrategyError(
+            "Voting search artifact secure path traversal is unavailable"
+        )
+    relative = path.relative_to(root)
+    parts = relative.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise StrategyError("Voting search artifact path is not canonical")
+    directory_flags = (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | getattr(os, "O_CLOEXEC", 0)
+        | os.O_NOFOLLOW
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | os.O_NOFOLLOW
+    )
+    directory_descriptors: list[int] = []
+    descriptor = -1
+    try:
+        current = os.open(root, directory_flags)
+        directory_descriptors.append(current)
+        if not stat.S_ISDIR(os.fstat(current).st_mode):
+            raise StrategyError("Voting search artifact root is invalid")
+        for part in parts[:-1]:
+            current = os.open(part, directory_flags, dir_fd=current)
+            directory_descriptors.append(current)
+            if not stat.S_ISDIR(os.fstat(current).st_mode):
+                raise StrategyError("Voting search artifact directory is invalid")
+        descriptor = os.open(parts[-1], file_flags, dir_fd=current)
+        return descriptor
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    finally:
+        for directory_descriptor in reversed(directory_descriptors):
+            os.close(directory_descriptor)
+
+
+def _stable_file_identity(
+    value,
+) -> tuple[int, int, int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
 
 
 def _require_artifact_row(
@@ -1970,7 +2509,9 @@ __all__ = [
     "VOTING_CANDIDATE_SEARCH_TOOL_SCHEMA_VERSION",
     "VotingCandidateSearchArtifactBinding",
     "VotingCandidateSearchSelectionBinding",
+    "load_historical_voting_candidate_search_artifact",
     "load_voting_candidate_search_artifact",
+    "require_historical_voting_candidate_search_artifact_binding_on_connection",
     "require_voting_candidate_search_artifact_binding_on_connection",
     "run_build_voting_candidate_from_search",
     "resolve_voting_candidate_search_inputs",

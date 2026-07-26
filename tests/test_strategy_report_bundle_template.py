@@ -27,7 +27,11 @@ def _tool_registry(tmp_path: Path) -> ToolRegistry:
     return ToolRegistry(plugins)
 
 
-def _report_slots(*, candidate_stability_ref: dict | None) -> dict[str, object]:
+def _report_slots(
+    *,
+    candidate_stability_ref: dict | None,
+    voting_candidate_search_ref: dict | None = None,
+) -> dict[str, object]:
     return {
         "title": "策略迭代评审报告",
         "status": "partial",
@@ -61,6 +65,7 @@ def _report_slots(*, candidate_stability_ref: dict | None) -> dict[str, object]:
             "expected_cube_content_hash": "a" * 64,
         },
         "candidate_stability_ref": candidate_stability_ref,
+        "voting_candidate_search_ref": voting_candidate_search_ref,
         "report_revision": 1,
         "generated_at": "2026-07-25T00:00:00Z",
     }
@@ -101,6 +106,7 @@ def test_report_bundle_exposes_only_title_and_status_as_user_slots() -> None:
         "pool_impact_ref",
         "impact_cube_ref",
         "candidate_stability_ref",
+        "voting_candidate_search_ref",
         "report_revision",
         "previous_report_id",
         "previous_report_content_hash",
@@ -189,3 +195,46 @@ def test_report_bundle_omits_none_candidate_stability_task_context(
 
     assert validator.validate(plan) == []
     assert "candidate_stability_ref" not in plan.steps[0].inputs
+
+
+def test_report_bundle_passes_exact_optional_voting_search_task_context(
+    tmp_path: Path,
+) -> None:
+    load_builtin_templates()
+    tools = _tool_registry(tmp_path)
+    validator = PlanValidator(tools)
+    voting_ref = {
+        "artifact_id": "b" * 64,
+        "expected_artifact_content_hash": "c" * 64,
+        "expected_search_id": "voting-search-" + ("1" * 32),
+        "expected_search_content_hash": "d" * 64,
+    }
+
+    plan = Planner(tools, lambda: None, validator).from_template(
+        get_template("strategy_report_bundle_v2"),
+        _report_slots(
+            candidate_stability_ref=None,
+            voting_candidate_search_ref=voting_ref,
+        ),
+        task_id="task-1",
+    )
+
+    assert validator.validate(plan) == []
+    assert plan.steps[0].inputs["voting_candidate_search_ref"] == voting_ref
+
+
+def test_report_bundle_omits_none_voting_search_task_context(
+    tmp_path: Path,
+) -> None:
+    load_builtin_templates()
+    tools = _tool_registry(tmp_path)
+    validator = PlanValidator(tools)
+
+    plan = Planner(tools, lambda: None, validator).from_template(
+        get_template("strategy_report_bundle_v2"),
+        _report_slots(candidate_stability_ref=None),
+        task_id="task-1",
+    )
+
+    assert validator.validate(plan) == []
+    assert "voting_candidate_search_ref" not in plan.steps[0].inputs

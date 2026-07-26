@@ -92,6 +92,11 @@ from marvis.packs.strategy.sample_design_v2_tools import (
     load_strategy_sample_design_v2_artifacts,
     require_strategy_sample_design_v2_artifact_binding_on_connection,
 )
+from marvis.packs.strategy.voting_candidate_search_tools import (
+    VotingCandidateSearchArtifactBinding,
+    load_voting_candidate_search_artifact,
+    require_voting_candidate_search_artifact_binding_on_connection,
+)
 from marvis.repositories.strategy_reports import (
     STRATEGY_REPORT_ORIGIN_TOOL,
     STRATEGY_REPORT_OUTPUT_KINDS,
@@ -109,7 +114,7 @@ from marvis.repositories.task_artifacts import (
 
 
 BUILD_STRATEGY_REPORT_BUNDLE_V2_TOOL_SCHEMA_VERSION = (
-    "strategy.build-report-bundle-v2-tool.v3"
+    "strategy.build-report-bundle-v2-tool.v4"
 )
 BUILD_STRATEGY_REPORT_BUNDLE_V2_AUDIT_KIND = (
     "strategy.report_bundle.published"
@@ -128,6 +133,7 @@ _INPUT_FIELDS = frozenset(
         "sample_design_ref",
         "candidate_pool_ref",
         "candidate_stability_ref",
+        "voting_candidate_search_ref",
         "pool_impact_ref",
         "impact_cube_ref",
         "strategy_identity",
@@ -183,6 +189,14 @@ _CANDIDATE_STABILITY_REF_FIELDS = frozenset(
         "expected_artifact_content_hash",
         "expected_stability_id",
         "expected_stability_content_hash",
+    }
+)
+_VOTING_CANDIDATE_SEARCH_REF_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "expected_artifact_content_hash",
+        "expected_search_id",
+        "expected_search_content_hash",
     }
 )
 _IMPACT_REF_FIELDS = frozenset(
@@ -266,6 +280,9 @@ _REPORT_ID_RE = re.compile(r"^strategy-report-[0-9a-f]{24}$")
 _CANDIDATE_STABILITY_ID_RE = re.compile(
     r"^candidate-stability-[0-9a-f]{24}$"
 )
+_VOTING_CANDIDATE_SEARCH_ID_RE = re.compile(
+    r"^voting-search-[0-9a-f]{32}$"
+)
 _IMPACT_CUBE_ID_RE = re.compile(
     r"^strategy-impact-cube-[0-9a-f]{24}$"
 )
@@ -304,6 +321,7 @@ class _ReportSources:
     sample_design: StrategySampleDesignV2ArtifactBinding
     candidate_pool: StrategyCandidatePoolArtifactBinding
     candidate_stability: StrategyCandidateStabilityArtifactBinding | None
+    voting_candidate_search: VotingCandidateSearchArtifactBinding | None
     pool_impact: StrategyPoolImpactArtifactBinding | None
     impact_cube: StrategyImpactCubeArtifactBinding | None
     model_evidence: StrategyModelEvidenceV2ArtifactBinding | None
@@ -328,6 +346,7 @@ def run_build_strategy_report_bundle_v2(inputs, ctx, runtime) -> dict[str, Any]:
             sample_design=sources.sample_design,
             candidate_pool=sources.candidate_pool,
             candidate_stability=sources.candidate_stability,
+            voting_candidate_search=sources.voting_candidate_search,
             pool_impact=sources.pool_impact,
             impact_cube=sources.impact_cube,
             model_evidence=sources.model_evidence,
@@ -519,6 +538,15 @@ def _load_sources(
             **request["candidate_stability_ref"],
         )
     )
+    voting_candidate_search = (
+        None
+        if request["voting_candidate_search_ref"] is None
+        else load_voting_candidate_search_artifact(
+            runtime,
+            task_id=task_id,
+            **request["voting_candidate_search_ref"],
+        )
+    )
     impact_cube = (
         None
         if request["impact_cube_ref"] is None
@@ -589,6 +617,7 @@ def _load_sources(
         sample_design=sample_design,
         candidate_pool=candidate_pool,
         candidate_stability=candidate_stability,
+        voting_candidate_search=voting_candidate_search,
         pool_impact=pool_impact,
         impact_cube=impact_cube,
         model_evidence=model_evidence,
@@ -1126,6 +1155,11 @@ def _revalidate_sources(conn, sources: _ReportSources) -> None:
             conn,
             sources.candidate_stability,
         )
+    if sources.voting_candidate_search is not None:
+        require_voting_candidate_search_artifact_binding_on_connection(
+            conn,
+            sources.voting_candidate_search,
+        )
     if sources.impact_cube is not None:
         _require_strategy_impact_cube_artifact_binding_on_connection(
             conn,
@@ -1251,6 +1285,7 @@ def _audit_source_artifacts(sources: _ReportSources) -> dict[str, Any]:
             "content_hash": sources.candidate_pool.artifact_content_hash,
         },
         "candidate_stability": None,
+        "voting_candidate_search": None,
         "pool_impact": None,
         "impact_cube": None,
         "model_evidence": None,
@@ -1288,6 +1323,17 @@ def _audit_source_artifacts(sources: _ReportSources) -> dict[str, Any]:
             "stability_content_hash": sources.candidate_stability.stability[
                 "content_hash"
             ],
+        }
+    if sources.voting_candidate_search is not None:
+        result["voting_candidate_search"] = {
+            "artifact_id": sources.voting_candidate_search.artifact_id,
+            "content_hash": (
+                sources.voting_candidate_search.artifact_content_hash
+            ),
+            "search_id": sources.voting_candidate_search.result["search_id"],
+            "search_content_hash": (
+                sources.voting_candidate_search.result["content_hash"]
+            ),
         }
     if sources.model_evidence is not None:
         result["model_evidence"] = {
@@ -1431,6 +1477,11 @@ def _validate_inputs(value: object) -> dict[str, Any]:
     request["candidate_pool_ref"] = _pool_ref(request["candidate_pool_ref"])
     request["candidate_stability_ref"] = _optional_candidate_stability_ref(
         request["candidate_stability_ref"]
+    )
+    request["voting_candidate_search_ref"] = (
+        _optional_voting_candidate_search_ref(
+            request["voting_candidate_search_ref"]
+        )
     )
     request["impact_cube_ref"] = _optional_impact_cube_ref(
         request["impact_cube_ref"]
@@ -1609,6 +1660,41 @@ def _optional_candidate_stability_ref(
         "expected_stability_content_hash": _hash(
             obj["expected_stability_content_hash"],
             "candidate_stability_ref.expected_stability_content_hash",
+        ),
+    }
+
+
+def _optional_voting_candidate_search_ref(
+    value: object,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    obj = _exact_object(
+        value,
+        _VOTING_CANDIDATE_SEARCH_REF_FIELDS,
+        "voting_candidate_search_ref",
+    )
+    search_id = _text(
+        obj["expected_search_id"],
+        "voting_candidate_search_ref.expected_search_id",
+    )
+    if _VOTING_CANDIDATE_SEARCH_ID_RE.fullmatch(search_id) is None:
+        raise StrategyError(
+            "voting_candidate_search_ref.expected_search_id is not canonical"
+        )
+    return {
+        "artifact_id": _hash(
+            obj["artifact_id"],
+            "voting_candidate_search_ref.artifact_id",
+        ),
+        "expected_artifact_content_hash": _hash(
+            obj["expected_artifact_content_hash"],
+            "voting_candidate_search_ref.expected_artifact_content_hash",
+        ),
+        "expected_search_id": search_id,
+        "expected_search_content_hash": _hash(
+            obj["expected_search_content_hash"],
+            "voting_candidate_search_ref.expected_search_content_hash",
         ),
     }
 

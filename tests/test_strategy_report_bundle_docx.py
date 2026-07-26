@@ -17,7 +17,10 @@ from marvis.output.strategy_report_bundle import (
     _assert_safe_docx_package,
     render_strategy_report_bundle_docx,
 )
-from marvis.packs.strategy.report_bundle import build_named_report_field
+from marvis.packs.strategy.report_bundle import (
+    build_named_report_field,
+    build_strategy_report_table,
+)
 from tests.test_strategy_report_bundle import (
     _bundle,
     _present,
@@ -330,6 +333,156 @@ def test_docx_large_bundle_is_deterministically_bounded_and_discloses_truncation
     rows = _table_rows(document)
     assert any("引用已截断" in cell for row in rows for cell in row)
     assert any("内容已截断" in cell for row in rows for cell in row)
+
+
+def test_docx_voting_rows_share_the_global_fact_budget():
+    sections = _sections()
+    voting_ref = _source(
+        "voting_candidate_search",
+        "voting-search-evidence",
+        "d" * 64,
+    )
+    column_labels = {
+        "search_id": "搜索ID",
+        "combo_id": "组合ID",
+        "member_ids": "成员规则ID",
+        "n": "命中阈值 n",
+        "eligible": "约束是否通过",
+        "objective_metric": "目标指标",
+        "objective_direction": "目标方向",
+        "objective_value": "目标值",
+        "constraint_failures": "约束未通过明细",
+        "metrics": "完整指标",
+    }
+    voting_rows = []
+    for index in range(20):
+        combo_id = f"combo-{index:02d}"
+        voting_rows.append(
+            {
+                "row_id": combo_id,
+                "cells": {
+                    "search_id": _present(
+                        "voting-search-" + ("1" * 32),
+                        source=voting_ref,
+                    ),
+                    "combo_id": _present(combo_id, source=voting_ref),
+                    "member_ids": _present(
+                        ["rule-a", "rule-b"],
+                        source=voting_ref,
+                    ),
+                    "n": _present(1, source=voting_ref),
+                    "eligible": _present(True, source=voting_ref),
+                    "objective_metric": _present(
+                        "bad_capture_rate",
+                        source=voting_ref,
+                    ),
+                    "objective_direction": _present(
+                        "maximize",
+                        source=voting_ref,
+                    ),
+                    "objective_value": _present(
+                        0.5 + index / 100,
+                        source=voting_ref,
+                    ),
+                    "constraint_failures": _present([], source=voting_ref),
+                    "metrics": _present(
+                        {"hit_share": 0.1 + index / 100},
+                        source=voting_ref,
+                    ),
+                },
+            }
+        )
+    sections[4]["tables"] = [
+        build_strategy_report_table(
+            table_id="voting_candidate_search_combinations",
+            title=(
+                "Voting候选组合搜索结果"
+                "（开发回测，仅供选择，未构建/未入池）"
+            ),
+            sheet_key="appendix_voting_search",
+            granularity="aggregate",
+            content_class="metric_summary",
+            effect_stage="backtested",
+            columns=[
+                {
+                    "key": key,
+                    "label": label,
+                    "unit": None,
+                    "precision": None,
+                }
+                for key, label in column_labels.items()
+            ],
+            rows=voting_rows,
+            source_refs=[voting_ref],
+        )
+    ]
+    sections[4]["stage_evidence"] = [
+        {
+            "effect_stage": "backtested",
+            "population": "risk",
+            "partition": "development",
+            "binding": {
+                "kind": "development_backtest",
+                "dataset_ref": _source(
+                    "dataset",
+                    "dataset-1",
+                    "a" * 64,
+                ),
+                "frozen_artifact_ref": _source(
+                    "strategy_candidate_pool",
+                    "pool-1",
+                    "b" * 64,
+                ),
+                "result_ref": voting_ref,
+            },
+        }
+    ]
+    sections[4]["source_refs"].extend(
+        [
+            _source(
+                "dataset",
+                "dataset-1",
+                "a" * 64,
+            ),
+            voting_ref,
+        ]
+    )
+    source_table = sections[5]["tables"][0]
+    fact_tables = []
+    for table_index in range(4):
+        table = deepcopy(source_table)
+        table["table_id"] = f"monthly_impact_{table_index}"
+        template = source_table["rows"][0]
+        table["rows"] = []
+        for row_index in range(100):
+            row = deepcopy(template)
+            row["row_id"] = f"table-{table_index}-row-{row_index:03d}"
+            table["rows"].append(row)
+        fact_tables.append(table)
+    sections[5]["tables"] = fact_tables
+
+    document = _document(
+        render_strategy_report_bundle_docx(_bundle(sections=sections))
+    )
+    voting_tables = [
+        table
+        for table in document.tables
+        if table.rows[0].cells[0].text == "搜索ID"
+    ]
+    generic_fact_tables = [
+        table
+        for table in document.tables
+        if table.rows[0].cells[0].text == "行 ID"
+    ]
+
+    assert len(voting_tables) == 1
+    assert len(voting_tables[0].rows) - 1 == 20
+    assert (
+        sum(len(table.rows) - 1 for table in generic_fact_tables)
+        + len(voting_tables[0].rows)
+        - 1
+        == 360
+    )
 
 
 def test_docx_field_code_rejection_is_namespace_aware_not_prefix_dependent():

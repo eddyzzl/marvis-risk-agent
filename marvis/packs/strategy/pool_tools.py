@@ -105,7 +105,9 @@ from marvis.packs.strategy.scorecard_candidate import (
 from marvis.packs.strategy.scorecard_candidate_tools import (
     ScorecardBandAssetArtifactBinding,
     ScorecardCutoffSelectionArtifactBinding,
+    load_historical_scorecard_cutoff_selection_artifact,
     load_scorecard_cutoff_selection_artifact,
+    require_historical_scorecard_cutoff_selection_artifact_binding_on_connection,
     require_scorecard_cutoff_selection_artifact_binding_on_connection,
 )
 from marvis.packs.strategy.voting_candidate import (
@@ -147,14 +149,18 @@ from marvis.packs.strategy.pool import (
 from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignExecutionBinding,
     StrategySampleDesignRef,
+    load_historical_strategy_sample_design_execution_binding,
     load_strategy_sample_design_execution_binding,
+    require_historical_strategy_sample_design_execution_binding_on_connection,
     require_strategy_sample_design_execution_binding_on_connection,
 )
 from marvis.packs.strategy.sample_design_tools import (
+    load_historical_strategy_sample_design_artifact,
     load_strategy_sample_design_artifact,
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
+    require_historical_strategy_sample_design_v2_artifact_binding_on_connection,
     require_strategy_sample_design_v2_artifact_binding_on_connection,
 )
 from marvis.repositories.strategy_pool import (
@@ -379,13 +385,15 @@ _CandidateLineage = (
 
 @dataclass(frozen=True)
 class StrategyCandidatePoolArtifactBinding:
-    """Authenticated current Pool, compiled design, and all source lineages.
+    """Authenticated immutable Pool revision and all of its source lineages.
 
     The nested domain payloads remain ordinary canonical JSON objects so the
-    deterministic kernels can consume them directly.  Downstream writers must
-    call :func:`require_strategy_candidate_pool_artifact_binding_on_connection`
-    while holding their own transaction; that seam detects any in-memory,
-    registry, file, head, or upstream-lineage drift.
+    deterministic kernels can consume them directly. Historical readers call
+    ``require_strategy_candidate_pool_revision_artifact_binding_on_connection``;
+    current-head writers call
+    ``require_strategy_candidate_pool_artifact_binding_on_connection``. Both
+    seams detect in-memory, registry, file, and upstream-lineage drift, while
+    only the latter additionally enforces current-head identity.
     """
 
     task_id: str
@@ -1592,8 +1600,6 @@ def load_current_strategy_candidate_pool_artifact(
                 "expected_artifact_content_hash",
             )
         )
-        tasks_root = Path(runtime.settings.tasks_dir).absolute()
-        datasets_root = Path(runtime.settings.datasets_dir).absolute()
         db_path = Path(runtime.settings.db_path).absolute()
         repository = StrategyCandidatePoolRepository(db_path)
         current = repository.get_current(normalized_task, normalized_type)
@@ -1607,14 +1613,6 @@ def load_current_strategy_candidate_pool_artifact(
             snapshot_hash,
         ):
             raise StrategyError("stale strategy candidate pool snapshot hash")
-
-        lineages = tuple(
-            _load_pool_lineages(
-                runtime,
-                task_id=normalized_task,
-                pool=pool,
-            )
-        )
         artifact_record = _normalize_source_record(
             _load_pool_artifact(
                 runtime,
@@ -1629,22 +1627,14 @@ def load_current_strategy_candidate_pool_artifact(
             artifact_content_hash,
         ):
             raise StrategyError("current strategy pool artifact content hash changed")
-        compiled_design = compile_strategy_pool(pool)
-        binding = StrategyCandidatePoolArtifactBinding(
+        binding = _load_strategy_candidate_pool_revision_artifact(
+            runtime,
             task_id=normalized_task,
             strategy_type=normalized_type,
-            pool=pool,
-            compiled_design=compiled_design,
+            revision_id=pool["revision_id"],
             artifact_id=artifact_record.artifact_id,
-            artifact_path=artifact_record.path,
-            artifact_content_hash=artifact_record.content_hash,
-            artifact_origin_tool=artifact_record.origin_tool,
-            artifact_provenance=artifact_record.provenance,
-            artifact_provenance_json=artifact_record.provenance_json,
-            lineages=lineages,
-            tasks_root=tasks_root,
-            datasets_root=datasets_root,
-            db_path=db_path,
+            expected_artifact_content_hash=artifact_record.content_hash,
+            require_current_sources=True,
         )
         with repository.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1660,19 +1650,164 @@ def load_current_strategy_candidate_pool_artifact(
         raise StrategyError(str(exc)) from exc
 
 
+def load_strategy_candidate_pool_revision_artifact(
+    runtime,
+    *,
+    task_id: str,
+    strategy_type: str,
+    revision_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+) -> StrategyCandidatePoolArtifactBinding:
+    """Authenticate one immutable Pool revision without requiring it as head."""
+
+    return _load_strategy_candidate_pool_revision_artifact(
+        runtime,
+        task_id=task_id,
+        strategy_type=strategy_type,
+        revision_id=revision_id,
+        artifact_id=artifact_id,
+        expected_artifact_content_hash=expected_artifact_content_hash,
+        require_current_sources=False,
+    )
+
+
+def _load_strategy_candidate_pool_revision_artifact(
+    runtime,
+    *,
+    task_id: str,
+    strategy_type: str,
+    revision_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+    require_current_sources: bool,
+) -> StrategyCandidatePoolArtifactBinding:
+    try:
+        normalized_task = _required_text(task_id, "task_id")
+        normalized_type = _required_text(strategy_type, "strategy_type")
+        normalized_revision_id = _required_text(revision_id, "revision_id")
+        normalized_artifact_id = _required_hash(artifact_id, "artifact_id")
+        normalized_artifact_hash = _required_hash(
+            expected_artifact_content_hash,
+            "expected_artifact_content_hash",
+        )
+        tasks_root = Path(runtime.settings.tasks_dir).absolute()
+        datasets_root = Path(runtime.settings.datasets_dir).absolute()
+        db_path = Path(runtime.settings.db_path).absolute()
+        repository = StrategyCandidatePoolRepository(db_path)
+        historical = repository.get_revision_by_id(
+            normalized_task,
+            normalized_type,
+            normalized_revision_id,
+        )
+        if historical is None:
+            raise StrategyError("strategy candidate pool revision not found")
+        pool = validate_strategy_pool(historical)
+        if (
+            pool["task_id"] != normalized_task
+            or pool["strategy_type"] != normalized_type
+            or pool["revision_id"] != normalized_revision_id
+        ):
+            raise StrategyError("strategy candidate pool revision identity changed")
+        lineages = tuple(
+            _load_pool_lineages(
+                runtime,
+                task_id=normalized_task,
+                pool=pool,
+                require_current_sources=require_current_sources,
+            )
+        )
+        artifact_record = _normalize_source_record(
+            _load_pool_artifact(
+                runtime,
+                task_id=normalized_task,
+                snapshot=pool,
+            )
+        )
+        if artifact_record.artifact_id != normalized_artifact_id:
+            raise StrategyError("strategy candidate pool revision artifact id changed")
+        if not hmac.compare_digest(
+            artifact_record.content_hash,
+            normalized_artifact_hash,
+        ):
+            raise StrategyError(
+                "strategy candidate pool revision artifact content hash changed"
+            )
+        binding = StrategyCandidatePoolArtifactBinding(
+            task_id=normalized_task,
+            strategy_type=normalized_type,
+            pool=pool,
+            compiled_design=compile_strategy_pool(pool),
+            artifact_id=artifact_record.artifact_id,
+            artifact_path=artifact_record.path,
+            artifact_content_hash=artifact_record.content_hash,
+            artifact_origin_tool=artifact_record.origin_tool,
+            artifact_provenance=artifact_record.provenance,
+            artifact_provenance_json=artifact_record.provenance_json,
+            lineages=lineages,
+            tasks_root=tasks_root,
+            datasets_root=datasets_root,
+            db_path=db_path,
+        )
+        with repository.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _require_strategy_candidate_pool_revision_artifact_binding_on_connection(
+                conn,
+                binding,
+                require_current_sources=require_current_sources,
+            )
+            conn.commit()
+        return binding
+    except StrategyError:
+        raise
+    except _BOUNDARY_ERRORS as exc:
+        raise StrategyError(str(exc)) from exc
+
+
 def bind_strategy_pool_development_execution(
     runtime,
     pool_binding: StrategyCandidatePoolArtifactBinding,
 ) -> StrategyPoolDevelopmentExecutionBinding:
     """Resolve one public development/sample binding for an exact Pool."""
 
+    return _bind_strategy_pool_development_execution(
+        runtime,
+        pool_binding,
+        require_current_pool=True,
+    )
+
+
+def bind_strategy_pool_revision_development_execution(
+    runtime,
+    pool_binding: StrategyCandidatePoolArtifactBinding,
+) -> StrategyPoolDevelopmentExecutionBinding:
+    """Resolve development evidence for an authenticated immutable revision."""
+
+    return _bind_strategy_pool_development_execution(
+        runtime,
+        pool_binding,
+        require_current_pool=False,
+    )
+
+
+def _bind_strategy_pool_development_execution(
+    runtime,
+    pool_binding: StrategyCandidatePoolArtifactBinding,
+    *,
+    require_current_pool: bool,
+) -> StrategyPoolDevelopmentExecutionBinding:
     if not isinstance(pool_binding, StrategyCandidatePoolArtifactBinding):
         raise StrategyError(
             "strategy Pool development requires an authenticated Pool binding"
         )
     facts = _project_pool_development_lineages(pool_binding)
     reference = facts.sample_ref
-    sample_artifact = load_strategy_sample_design_artifact(
+    sample_artifact_loader = (
+        load_strategy_sample_design_artifact
+        if require_current_pool
+        else load_historical_strategy_sample_design_artifact
+    )
+    sample_artifact = sample_artifact_loader(
         runtime,
         task_id=pool_binding.task_id,
         artifact_id=reference.artifact_id,
@@ -1687,7 +1822,12 @@ def bind_strategy_pool_development_execution(
             "strategy Pool sample-design drop_nan_labels binding is invalid"
         )
     identity = facts.evidence_identity
-    sample = load_strategy_sample_design_execution_binding(
+    sample_execution_loader = (
+        load_strategy_sample_design_execution_binding
+        if require_current_pool
+        else load_historical_strategy_sample_design_execution_binding
+    )
+    sample = sample_execution_loader(
         runtime,
         task_id=pool_binding.task_id,
         sample_design_ref=reference.to_ref_dict(),
@@ -1729,10 +1869,16 @@ def bind_strategy_pool_development_execution(
     )
     with runtime.task_artifacts.transaction() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        require_strategy_pool_development_execution_binding_on_connection(
-            conn,
-            binding,
-        )
+        if require_current_pool:
+            require_strategy_pool_development_execution_binding_on_connection(
+                conn,
+                binding,
+            )
+        else:
+            require_strategy_pool_revision_development_execution_binding_on_connection(
+                conn,
+                binding,
+            )
         conn.commit()
     return binding
 
@@ -1743,14 +1889,46 @@ def require_strategy_pool_development_execution_binding_on_connection(
 ) -> None:
     """Re-authenticate a Pool and its exact development universe under lock."""
 
+    _require_strategy_pool_development_execution_binding_on_connection(
+        conn,
+        binding,
+        require_current_pool=True,
+    )
+
+
+def require_strategy_pool_revision_development_execution_binding_on_connection(
+    conn,
+    binding: StrategyPoolDevelopmentExecutionBinding,
+) -> None:
+    """Re-authenticate an immutable Pool revision's development universe."""
+
+    _require_strategy_pool_development_execution_binding_on_connection(
+        conn,
+        binding,
+        require_current_pool=False,
+    )
+
+
+def _require_strategy_pool_development_execution_binding_on_connection(
+    conn,
+    binding: StrategyPoolDevelopmentExecutionBinding,
+    *,
+    require_current_pool: bool,
+) -> None:
     if not isinstance(binding, StrategyPoolDevelopmentExecutionBinding):
         raise StrategyError("strategy Pool development binding is invalid")
     if binding.task_id != binding.pool.task_id:
         raise StrategyError("strategy Pool development task binding changed")
-    require_strategy_candidate_pool_artifact_binding_on_connection(
-        conn,
-        binding.pool,
-    )
+    if require_current_pool:
+        require_strategy_candidate_pool_artifact_binding_on_connection(
+            conn,
+            binding.pool,
+        )
+    else:
+        require_strategy_candidate_pool_revision_artifact_binding_on_connection(
+            conn,
+            binding.pool,
+        )
     facts = _project_pool_development_lineages(binding.pool)
     if (
         facts.dataset != binding.dataset
@@ -1769,15 +1947,27 @@ def require_strategy_pool_development_execution_binding_on_connection(
         != _sample_design_v2_identity(binding.sample_design_v2)
     ):
         raise StrategyError("strategy Pool development binding changed")
-    require_strategy_sample_design_execution_binding_on_connection(
-        conn,
-        binding.sample_design,
-    )
-    if binding.sample_design_v2 is not None:
-        require_strategy_sample_design_v2_artifact_binding_on_connection(
+    if require_current_pool:
+        require_strategy_sample_design_execution_binding_on_connection(
             conn,
-            binding.sample_design_v2,
+            binding.sample_design,
         )
+    else:
+        require_historical_strategy_sample_design_execution_binding_on_connection(
+            conn,
+            binding.sample_design,
+        )
+    if binding.sample_design_v2 is not None:
+        if require_current_pool:
+            require_strategy_sample_design_v2_artifact_binding_on_connection(
+                conn,
+                binding.sample_design_v2,
+            )
+        else:
+            require_historical_strategy_sample_design_v2_artifact_binding_on_connection(
+                conn,
+                binding.sample_design_v2,
+            )
         if binding.sample_design_v2.source_binding.legacy != binding.sample_design:
             raise StrategyError(
                 "strategy Pool SampleDesign V2 legacy mapping changed"
@@ -2289,6 +2479,42 @@ def require_strategy_candidate_pool_artifact_binding_on_connection(
 ) -> None:
     """Re-authenticate one current Pool while a downstream writer owns the lock."""
 
+    _require_strategy_candidate_pool_revision_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_sources=True,
+    )
+    repository = StrategyCandidatePoolRepository(binding.db_path)
+    current = repository.get_current_on_connection(
+        conn,
+        binding.task_id,
+        binding.strategy_type,
+    )
+    if current is None:
+        raise StrategyError("strategy candidate pool is no longer current")
+    if validate_strategy_pool(current) != binding.pool:
+        raise StrategyError("strategy candidate pool revision is no longer current")
+
+
+def require_strategy_candidate_pool_revision_artifact_binding_on_connection(
+    conn,
+    binding: StrategyCandidatePoolArtifactBinding,
+) -> None:
+    """Re-authenticate one immutable Pool revision under a caller-owned lock."""
+
+    _require_strategy_candidate_pool_revision_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_sources=False,
+    )
+
+
+def _require_strategy_candidate_pool_revision_artifact_binding_on_connection(
+    conn,
+    binding: StrategyCandidatePoolArtifactBinding,
+    *,
+    require_current_sources: bool,
+) -> None:
     if not isinstance(binding, StrategyCandidatePoolArtifactBinding):
         raise StrategyError("strategy candidate pool artifact binding is invalid")
     _require_binding_connection(
@@ -2312,20 +2538,23 @@ def require_strategy_candidate_pool_artifact_binding_on_connection(
     ):
         raise StrategyError("strategy candidate pool task ownership changed")
 
-    repository = StrategyCandidatePoolRepository(binding.db_path)
-    current = repository.get_current_on_connection(
+    bound_pool = validate_strategy_pool(binding.pool)
+    if (
+        bound_pool["task_id"] != task_id
+        or bound_pool["strategy_type"] != strategy_type
+    ):
+        raise StrategyError("strategy candidate pool binding identity changed")
+    historical = StrategyCandidatePoolRepository.get_revision_by_id_on_connection(
         conn,
         task_id,
         strategy_type,
+        bound_pool["revision_id"],
     )
-    if current is None:
-        raise StrategyError("strategy candidate pool is no longer current")
-    pool = validate_strategy_pool(current)
-    bound_pool = validate_strategy_pool(binding.pool)
+    if historical is None:
+        raise StrategyError("strategy candidate pool revision disappeared")
+    pool = validate_strategy_pool(historical)
     if pool != bound_pool:
-        raise StrategyError("strategy candidate pool revision is no longer current")
-    if bound_pool["task_id"] != task_id or bound_pool["strategy_type"] != strategy_type:
-        raise StrategyError("strategy candidate pool binding identity changed")
+        raise StrategyError("strategy candidate pool revision binding changed")
     if not isinstance(binding.lineages, tuple) or len(binding.lineages) != len(
         bound_pool["entries"]
     ):
@@ -2384,6 +2613,7 @@ def require_strategy_candidate_pool_artifact_binding_on_connection(
             lineage,
             tasks_root=binding.tasks_root,
             cache=cache,
+            require_current_sources=require_current_sources,
         )
         _require_lineage_dataset_paths(
             lineage,
@@ -2545,6 +2775,7 @@ def _load_pool_lineages(
     task_id: str,
     pool: Mapping[str, Any] | None,
     cache: _LineageCache | None = None,
+    require_current_sources: bool = True,
 ) -> list[_CandidateLineage]:
     if pool is None:
         return []
@@ -2561,6 +2792,7 @@ def _load_pool_lineages(
             expected_asset_id=source["asset_id"],
             expected_asset_hash=source["asset_hash"],
             cache=lineage_cache,
+            require_current_sources=require_current_sources,
         )
         if lineage.source_binding != source:
             raise StrategyError(
@@ -2587,6 +2819,7 @@ def _load_candidate_lineage(
     expected_asset_id: str,
     expected_asset_hash: str,
     cache: _LineageCache | None = None,
+    require_current_sources: bool = True,
 ) -> _CandidateLineage:
     record = runtime.task_artifacts.get_for_task(task_id, artifact_id)
     if record is None:
@@ -2685,6 +2918,7 @@ def _load_candidate_lineage(
             expected_content_hash=expected_content_hash,
             expected_asset_id=expected_asset_id,
             expected_asset_hash=expected_asset_hash,
+            require_current_sources=require_current_sources,
         )
     if triple == scorecard_asset_triple:
         raise StrategyError(
@@ -2700,6 +2934,7 @@ def _load_candidate_lineage(
             expected_asset_id=expected_asset_id,
             expected_asset_hash=expected_asset_hash,
             cache=cache if cache is not None else _LineageCache.empty(),
+            require_current_sources=require_current_sources,
         )
     raise StrategyError(
         "strategy pool contains an unsupported candidate fragment adapter triple"
@@ -3157,13 +3392,19 @@ def _load_scorecard_candidate_lineage(
     expected_content_hash: str,
     expected_asset_id: str,
     expected_asset_hash: str,
+    require_current_sources: bool,
 ) -> _ScorecardCandidateLineage:
     record = runtime.task_artifacts.get_for_task(task_id, artifact_id)
     if record is None:
         raise StrategyError("scorecard cutoff selection artifact not found")
     source_record = _normalize_source_record(record)
     provenance = source_record.provenance
-    selection = load_scorecard_cutoff_selection_artifact(
+    selection_loader = (
+        load_scorecard_cutoff_selection_artifact
+        if require_current_sources
+        else load_historical_scorecard_cutoff_selection_artifact
+    )
+    selection = selection_loader(
         runtime,
         task_id=task_id,
         artifact_id=artifact_id,
@@ -3243,6 +3484,7 @@ def _load_voting_candidate_lineage(
     expected_asset_id: str,
     expected_asset_hash: str,
     cache: _LineageCache,
+    require_current_sources: bool,
 ) -> _VotingCandidateLineage:
     key = (artifact_id, expected_content_hash)
     cached = cache.voting.get(key)
@@ -3313,6 +3555,7 @@ def _load_voting_candidate_lineage(
                 expected_asset_id=source["asset_id"],
                 expected_asset_hash=source["asset_hash"],
                 cache=cache,
+                require_current_sources=require_current_sources,
             )
             if selected_lineage.source_binding != source:
                 raise StrategyError(
@@ -3523,6 +3766,7 @@ def _require_lineage_on_connection(
     *,
     tasks_root: Path,
     cache: _LineageCache | None = None,
+    require_current_sources: bool = True,
 ) -> None:
     if isinstance(lineage, _UnivariateCandidateLineage):
         _require_univariate_lineage_on_connection(
@@ -3552,6 +3796,7 @@ def _require_lineage_on_connection(
         _require_scorecard_lineage_on_connection(
             conn,
             lineage,
+            require_current_sources=require_current_sources,
         )
         return
     if isinstance(lineage, _VotingCandidateLineage):
@@ -3560,6 +3805,7 @@ def _require_lineage_on_connection(
             lineage,
             tasks_root=tasks_root,
             cache=cache if cache is not None else _LineageCache.empty(),
+            require_current_sources=require_current_sources,
         )
         return
     raise StrategyError("unsupported candidate lineage type")
@@ -3568,11 +3814,19 @@ def _require_lineage_on_connection(
 def _require_scorecard_lineage_on_connection(
     conn,
     lineage: _ScorecardCandidateLineage,
+    *,
+    require_current_sources: bool,
 ) -> None:
-    require_scorecard_cutoff_selection_artifact_binding_on_connection(
-        conn,
-        lineage.selection,
-    )
+    if require_current_sources:
+        require_scorecard_cutoff_selection_artifact_binding_on_connection(
+            conn,
+            lineage.selection,
+        )
+    else:
+        require_historical_scorecard_cutoff_selection_artifact_binding_on_connection(
+            conn,
+            lineage.selection,
+        )
     asset = lineage.selection.source_asset_binding
     if asset is not lineage.asset:
         raise StrategyError(
@@ -3823,6 +4077,7 @@ def _require_voting_lineage_on_connection(
     *,
     tasks_root: Path,
     cache: _LineageCache,
+    require_current_sources: bool,
 ) -> None:
     key = (lineage.candidate.artifact_id, lineage.candidate.content_hash)
     if key in cache.voting_verified:
@@ -3879,6 +4134,7 @@ def _require_voting_lineage_on_connection(
                 parent_lineage,
                 tasks_root=tasks_root,
                 cache=cache,
+                require_current_sources=require_current_sources,
             )
         verified_fragment = voting_candidate_to_verified_fragment(
             candidate.asset,
@@ -3941,15 +4197,22 @@ def _load_pool_artifact(runtime, *, task_id: str, snapshot: Mapping[str, Any]):
         / "strategy_candidate_pools"
         / _pool_filename(snapshot)
     )
-    matches = [
-        record
-        for record in runtime.task_artifacts.list_for_task(task_id)
-        if record["kind"] == POOL_ARTIFACT_KIND
-        and Path(record["path"]) == expected_path
-    ]
-    if len(matches) != 1:
+    record = runtime.task_artifacts.get_for_task_kind_path(
+        task_id,
+        POOL_ARTIFACT_KIND,
+        str(expected_path),
+    )
+    if record is None:
         raise StrategyError("current strategy pool artifact not found")
-    record = matches[0]
+    if (
+        not isinstance(record, Mapping)
+        or _required_hash(record.get("id"), "strategy pool artifact id")
+        != record["id"]
+        or record.get("task_id") != task_id
+        or record.get("kind") != POOL_ARTIFACT_KIND
+        or record.get("path") != str(expected_path)
+    ):
+        raise StrategyError("current strategy pool artifact registry binding changed")
     expected_hash = strategy_pool_artifact_content_hash(snapshot)
     if not hmac.compare_digest(record["content_hash"], expected_hash):
         raise StrategyError("current strategy pool artifact content hash changed")
@@ -4332,11 +4595,15 @@ __all__ = [
     "StrategyPoolDevelopmentExecutionBinding",
     "VerifiedUnivariateCandidateLineageBinding",
     "bind_strategy_pool_development_execution",
+    "bind_strategy_pool_revision_development_execution",
     "load_current_strategy_candidate_pool_artifact",
+    "load_strategy_candidate_pool_revision_artifact",
     "load_verified_univariate_candidate_lineage",
     "project_scorecard_report_evidence",
     "require_strategy_candidate_pool_artifact_binding_on_connection",
+    "require_strategy_candidate_pool_revision_artifact_binding_on_connection",
     "require_strategy_pool_development_execution_binding_on_connection",
+    "require_strategy_pool_revision_development_execution_binding_on_connection",
     "require_verified_univariate_candidate_lineage_on_connection",
     "run_add_candidate_to_pool",
     "run_compile_strategy_pool",

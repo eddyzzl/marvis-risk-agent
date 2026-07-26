@@ -42,13 +42,16 @@ from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignExecutionBinding,
     StrategySampleDesignRef,
     bind_strategy_development_frame,
+    load_historical_strategy_sample_design_execution_binding,
     load_strategy_sample_design_execution_binding,
+    require_historical_strategy_sample_design_execution_binding_on_connection,
     require_strategy_sample_design_execution_binding_on_connection,
     revalidate_strategy_sample_design_execution_binding,
 )
 from marvis.packs.strategy.sample_design_tools import (
     SAMPLE_DESIGN_ARTIFACT_KIND,
     SAMPLE_DESIGN_ORIGIN_TOOL,
+    load_historical_strategy_sample_design_artifact,
     load_strategy_sample_design_artifact,
 )
 from marvis.packs.strategy.voting_candidate import (
@@ -520,6 +523,49 @@ def load_strategy_pool_impact_artifact(
 ) -> StrategyPoolImpactArtifactBinding:
     """Load one authenticated legacy PoolImpact as development backtest only."""
 
+    return _load_strategy_pool_impact_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_artifact_content_hash=expected_artifact_content_hash,
+        expected_assessment_id=expected_assessment_id,
+        expected_assessment_content_hash=expected_assessment_content_hash,
+        require_current_sources=True,
+    )
+
+
+def load_historical_strategy_pool_impact_artifact(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+    expected_assessment_id: str | None = None,
+    expected_assessment_content_hash: str | None = None,
+) -> StrategyPoolImpactArtifactBinding:
+    """Authenticate immutable PoolImpact without requiring source heads."""
+
+    return _load_strategy_pool_impact_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_artifact_content_hash=expected_artifact_content_hash,
+        expected_assessment_id=expected_assessment_id,
+        expected_assessment_content_hash=expected_assessment_content_hash,
+        require_current_sources=False,
+    )
+
+
+def _load_strategy_pool_impact_artifact(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+    expected_assessment_id: str | None,
+    expected_assessment_content_hash: str | None,
+    require_current_sources: bool,
+) -> StrategyPoolImpactArtifactBinding:
     try:
         from marvis.packs.strategy import pool_tools
 
@@ -578,17 +624,30 @@ def load_strategy_pool_impact_artifact(
             raise StrategyError("Pool impact artifact path is not canonical")
 
         identity = assessment["identity"]
-        pool = pool_tools.load_current_strategy_candidate_pool_artifact(
-            runtime,
-            task_id=normalized_task,
-            strategy_type=identity["strategy_type"],
-            expected_pool_revision=identity["revision"],
-            expected_pool_snapshot_hash=identity["snapshot_hash"],
-        )
+        if require_current_sources:
+            pool = pool_tools.load_current_strategy_candidate_pool_artifact(
+                runtime,
+                task_id=normalized_task,
+                strategy_type=identity["strategy_type"],
+                expected_pool_revision=identity["revision"],
+                expected_pool_snapshot_hash=identity["snapshot_hash"],
+            )
+        else:
+            pool = _load_historical_impact_pool(
+                runtime,
+                task_id=normalized_task,
+                identity=identity,
+                provenance=provenance,
+            )
         sample_ref = StrategySampleDesignRef.from_value(
             provenance["sample_design_ref"]
         )
-        sample_artifact = load_strategy_sample_design_artifact(
+        sample_artifact_loader = (
+            load_strategy_sample_design_artifact
+            if require_current_sources
+            else load_historical_strategy_sample_design_artifact
+        )
+        sample_artifact = sample_artifact_loader(
             runtime,
             task_id=normalized_task,
             artifact_id=sample_ref.artifact_id,
@@ -612,8 +671,14 @@ def load_strategy_pool_impact_artifact(
             request=request,
             task_id=normalized_task,
             sample=sample,
+            require_current_workspace=require_current_sources,
         )
-        sample_design = load_strategy_sample_design_execution_binding(
+        sample_execution_loader = (
+            load_strategy_sample_design_execution_binding
+            if require_current_sources
+            else load_historical_strategy_sample_design_execution_binding
+        )
+        sample_design = sample_execution_loader(
             runtime,
             task_id=normalized_task,
             sample_design_ref=request["sample_design_ref"],
@@ -655,9 +720,10 @@ def load_strategy_pool_impact_artifact(
         _require_impact_binding_relationships(binding)
         with runtime.task_artifacts.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            require_strategy_pool_impact_artifact_binding_on_connection(
+            _require_strategy_pool_impact_artifact_binding_on_connection(
                 conn,
                 binding,
+                require_current_sources=require_current_sources,
             )
             conn.commit()
         return binding
@@ -673,6 +739,32 @@ def require_strategy_pool_impact_artifact_binding_on_connection(
 ) -> None:
     """Re-authenticate PoolImpact while a downstream writer owns the lock."""
 
+    _require_strategy_pool_impact_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_sources=True,
+    )
+
+
+def require_historical_strategy_pool_impact_artifact_binding_on_connection(
+    conn,
+    binding: StrategyPoolImpactArtifactBinding,
+) -> None:
+    """Re-authenticate immutable PoolImpact without requiring source heads."""
+
+    _require_strategy_pool_impact_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_sources=False,
+    )
+
+
+def _require_strategy_pool_impact_artifact_binding_on_connection(
+    conn,
+    binding: StrategyPoolImpactArtifactBinding,
+    *,
+    require_current_sources: bool,
+) -> None:
     from marvis.packs.strategy import pool_tools
 
     if not isinstance(binding, StrategyPoolImpactArtifactBinding):
@@ -685,19 +777,30 @@ def require_strategy_pool_impact_artifact_binding_on_connection(
     if binding.tasks_root != binding.tasks_root.absolute():
         raise StrategyError("Pool impact task root changed")
     _require_impact_binding_relationships(binding)
-    pool_tools.require_strategy_candidate_pool_artifact_binding_on_connection(
-        conn,
-        binding.pool,
-    )
-    require_strategy_sample_design_execution_binding_on_connection(
-        conn,
-        binding.sample_design,
-    )
+    if require_current_sources:
+        pool_tools.require_strategy_candidate_pool_artifact_binding_on_connection(
+            conn,
+            binding.pool,
+        )
+        require_strategy_sample_design_execution_binding_on_connection(
+            conn,
+            binding.sample_design,
+        )
+    else:
+        pool_tools.require_strategy_candidate_pool_revision_artifact_binding_on_connection(
+            conn,
+            binding.pool,
+        )
+        require_historical_strategy_sample_design_execution_binding_on_connection(
+            conn,
+            binding.sample_design,
+        )
     _require_dataset_and_workspace_on_connection(
         conn,
         request=binding.request,
         task_id=binding.task_id,
         dataset=binding.dataset,
+        require_current_workspace=require_current_sources,
     )
     _require_baseline_on_connection(
         conn,
@@ -712,6 +815,69 @@ def require_strategy_pool_impact_artifact_binding_on_connection(
         root=binding.tasks_root,
         canonical=canonical,
         content_hash=binding.artifact_content_hash,
+    )
+
+
+def _load_historical_impact_pool(
+    runtime,
+    *,
+    task_id: str,
+    identity: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+):
+    from marvis.packs.strategy import pool_tools
+
+    strategy_type = _text(identity["strategy_type"], "assessment strategy_type")
+    revision_id = _text(provenance["pool_revision_id"], "pool revision id")
+    if (
+        identity["task_id"] != task_id
+        or identity["revision_id"] != revision_id
+        or provenance["task_id"] != task_id
+        or provenance["pool_id"] != identity["pool_id"]
+        or provenance["pool_revision"] != identity["revision"]
+        or provenance["pool_snapshot_hash"] != identity["snapshot_hash"]
+        or provenance["design_hash"] != identity["design_hash"]
+        or provenance["strategy_spec_hash"] != identity["strategy_spec_hash"]
+    ):
+        raise StrategyError(
+            "Pool impact historical Pool provenance identity changed"
+        )
+    repository = StrategyCandidatePoolRepository(runtime.settings.db_path)
+    historical = repository.get_revision_by_id(
+        task_id,
+        strategy_type,
+        revision_id,
+    )
+    if historical is None:
+        raise StrategyError("Pool impact historical Pool revision not found")
+    pool = validate_strategy_pool(historical)
+    compiled = compile_strategy_pool(pool)
+    if (
+        pool["pool_id"] != identity["pool_id"]
+        or pool["task_id"] != task_id
+        or pool["strategy_type"] != strategy_type
+        or pool["revision"] != identity["revision"]
+        or pool["revision_id"] != revision_id
+        or pool["snapshot_hash"] != identity["snapshot_hash"]
+        or compiled["design_hash"] != identity["design_hash"]
+        or strategy_spec_hash(compiled["strategy_spec"])
+        != identity["strategy_spec_hash"]
+    ):
+        raise StrategyError("Pool impact historical Pool revision changed")
+    artifact = pool_tools._normalize_source_record(
+        pool_tools._load_pool_artifact(
+            runtime,
+            task_id=task_id,
+            snapshot=pool,
+        )
+    )
+    return pool_tools.load_strategy_candidate_pool_revision_artifact(
+        runtime,
+        task_id=task_id,
+        strategy_type=strategy_type,
+        revision_id=revision_id,
+        artifact_id=artifact.artifact_id,
+        expected_artifact_content_hash=artifact.content_hash,
     )
 
 
@@ -1431,6 +1597,7 @@ def _load_dataset_binding(
     request: Mapping[str, Any],
     task_id: str,
     sample: Mapping[str, Any],
+    require_current_workspace: bool = True,
 ) -> _DatasetBinding:
     comparisons = {
         "dataset_id": request["dataset_id"],
@@ -1442,18 +1609,29 @@ def _load_dataset_binding(
     for field, actual in comparisons.items():
         if sample[field] != actual:
             raise StrategyError(f"Pool sample {field} does not match the request")
-    workspace = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(task_id)
-    semantic_hash = data_semantic_mapping_hash(workspace.semantic_mapping)
-    if (
-        workspace.active_dataset_id != request["dataset_id"]
-        or workspace.active_dataset_content_hash
-        != request["expected_dataset_content_hash"]
-        or workspace.revision != request["workspace_revision"]
-        or workspace.analysis_generation != request["workspace_generation"]
-        or not hmac.compare_digest(semantic_hash, request["semantic_mapping_hash"])
-        or workspace.semantic_mapping.target_col != request["target_col"]
-    ):
-        raise StrategyError("DataWorkspace binding changed before Pool impact")
+    workspace_revision = request["workspace_revision"]
+    workspace_generation = request["workspace_generation"]
+    semantic_hash = request["semantic_mapping_hash"]
+    if require_current_workspace:
+        workspace = DataWorkspaceRepository(
+            runtime.settings.db_path
+        ).get_or_default(task_id)
+        semantic_hash = data_semantic_mapping_hash(workspace.semantic_mapping)
+        if (
+            workspace.active_dataset_id != request["dataset_id"]
+            or workspace.active_dataset_content_hash
+            != request["expected_dataset_content_hash"]
+            or workspace.revision != request["workspace_revision"]
+            or workspace.analysis_generation != request["workspace_generation"]
+            or not hmac.compare_digest(
+                semantic_hash,
+                request["semantic_mapping_hash"],
+            )
+            or workspace.semantic_mapping.target_col != request["target_col"]
+        ):
+            raise StrategyError("DataWorkspace binding changed before Pool impact")
+        workspace_revision = workspace.revision
+        workspace_generation = workspace.analysis_generation
     try:
         dataset = runtime.registry.get(request["dataset_id"])
         path = Path(runtime.registry.resolve_verified_path(request["dataset_id"]))
@@ -1495,8 +1673,8 @@ def _load_dataset_binding(
         registry_metadata_hash=registry_hash,
         row_count=int(dataset.row_count),
         columns=columns,
-        workspace_revision=workspace.revision,
-        workspace_generation=workspace.analysis_generation,
+        workspace_revision=workspace_revision,
+        workspace_generation=workspace_generation,
         semantic_mapping_hash=semantic_hash,
         target_col=request["target_col"],
     )
@@ -1761,6 +1939,7 @@ def _require_dataset_and_workspace_on_connection(
     request: Mapping[str, Any],
     task_id: str,
     dataset: _DatasetBinding,
+    require_current_workspace: bool = True,
 ) -> None:
     from marvis.packs.strategy.candidate_asset_tools import (
         _registry_metadata_hash_on_connection,
@@ -1786,6 +1965,8 @@ def _require_dataset_and_workspace_on_connection(
         dataset.content_hash,
         "Pool impact dataset bytes changed before registration",
     )
+    if not require_current_workspace:
+        return
     row = conn.execute(
         """
         SELECT revision, active_dataset_id, active_dataset_content_hash,
@@ -2181,7 +2362,9 @@ __all__ = [
     "POOL_IMPACT_ORIGIN_TOOL",
     "POOL_IMPACT_TOOL_SCHEMA_VERSION",
     "StrategyPoolImpactArtifactBinding",
+    "load_historical_strategy_pool_impact_artifact",
     "load_strategy_pool_impact_artifact",
+    "require_historical_strategy_pool_impact_artifact_binding_on_connection",
     "require_strategy_pool_impact_artifact_binding_on_connection",
     "run_measure_pool_impact",
     "validate_measure_pool_impact_tool_output",

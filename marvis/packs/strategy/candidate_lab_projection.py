@@ -140,6 +140,11 @@ from marvis.packs.strategy.voting_candidate_tools import (
     validate_voting_candidate_artifact_document,
     voting_candidate_artifact_provenance,
 )
+from marvis.packs.strategy.voting_candidate_search_tools import (
+    VOTING_CANDIDATE_SEARCH_ARTIFACT_KIND,
+    VOTING_CANDIDATE_SEARCH_ORIGIN_TOOL,
+    load_historical_voting_candidate_search_artifact,
+)
 from marvis.repositories.plans import PlanRepository
 from marvis.repositories.datasets import DatasetRepository
 from marvis.repositories.strategy_pool import (
@@ -194,6 +199,8 @@ _MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 _MAX_PROJECTION_BYTES = 64 * 1024 * 1024
 _MAX_CANDIDATES_PER_KIND = 20
 _MAX_SCORECARD_CANDIDATES_PER_KIND = 3
+_MAX_VOTING_SEARCHES = 20
+_MAX_VOTING_SEARCH_COMBINATIONS = 20
 _MAX_RANKINGS = 50
 _MAX_METRICS = 100
 _MAX_BIN_POINTERS = 200
@@ -389,6 +396,24 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
             r"^scorecard-cutoff-selection-[0-9a-f]{32}\.json$"
         ),
     )
+    voting_search_records, voting_search_total = (
+        artifact_repository.list_recent_for_task_kind_with_count(
+            task_id,
+            VOTING_CANDIDATE_SEARCH_ARTIFACT_KIND,
+            limit=_MAX_VOTING_SEARCHES,
+        )
+    )
+    voting_search_records = _candidate_record_window(
+        settings,
+        task_id,
+        voting_search_records,
+        kind=VOTING_CANDIDATE_SEARCH_ARTIFACT_KIND,
+        origin_tool=VOTING_CANDIDATE_SEARCH_ORIGIN_TOOL,
+        directory_name="strategy_voting_candidate_searches",
+        filename_pattern=re.compile(
+            r"^voting-search-[0-9a-f]{32}-[0-9a-f]{16}\.json$"
+        ),
+    )
     univariate = [
         _project_univariate(context, record)
         for record in univariate_records
@@ -411,6 +436,10 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
     scorecard_cutoff_selection = [
         _project_scorecard_cutoff_selection(context, record)
         for record in scorecard_selection_records
+    ]
+    voting_search = [
+        _project_voting_search(context, record)
+        for record in voting_search_records
     ]
     pools = _project_current_pools(
         context,
@@ -456,6 +485,11 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
                 scorecard_cutoff_selection,
                 _MAX_SCORECARD_CANDIDATES_PER_KIND,
                 total=scorecard_selection_total,
+            ),
+            "voting_search": _collection(
+                voting_search,
+                _MAX_VOTING_SEARCHES,
+                total=voting_search_total,
             ),
         },
         "pools": _collection(pools, len(STRATEGY_TYPES)),
@@ -539,6 +573,61 @@ def _project_univariate(
         "pointers": {"bins": projected_bins},
         "total": total,
         "truncated": item_truncated,
+    }
+
+
+def _project_voting_search(
+    context: _ProjectionContext,
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    _read_candidate_record(
+        context,
+        record,
+        kind=VOTING_CANDIDATE_SEARCH_ARTIFACT_KIND,
+        origin_tool=VOTING_CANDIDATE_SEARCH_ORIGIN_TOOL,
+        directory_name="strategy_voting_candidate_searches",
+    )
+    binding = load_historical_voting_candidate_search_artifact(
+        _scorecard_live_runtime(context),
+        task_id=context.task_id,
+        artifact_id=_text(record.get("id"), "Voting search artifact id"),
+        expected_artifact_content_hash=_sha256(
+            record.get("content_hash"),
+            "Voting search artifact content hash",
+        ),
+    )
+    result = binding.result
+    configuration = result["configuration"]
+    pool = binding.pool_development.pool.pool
+    combinations = [
+        {
+            "combo_id": item["combo_id"],
+            "members": list(item["member_ids"]),
+            "eligible": item["eligible"],
+            "failures": [dict(failure) for failure in item["constraint_failures"]],
+            "metrics": dict(item["metrics"]),
+        }
+        for item in result["combinations"][:_MAX_VOTING_SEARCH_COMBINATIONS]
+    ]
+    return {
+        "search_id": result["search_id"],
+        "strategy_type": pool["strategy_type"],
+        "pool_revision": pool["revision"],
+        "member_count": configuration["member_count"],
+        "n": configuration["n"],
+        "objective": dict(configuration["objective"]),
+        "constraints": [
+            dict(constraint) for constraint in configuration["constraints"]
+        ],
+        "include_rule_ids": list(configuration["include"]),
+        "exclude_rule_ids": list(configuration["exclude"]),
+        "max_combinations": configuration["max_combinations"],
+        "search_space": result["search_space"],
+        "evaluated": result["evaluated"],
+        "eligible": result["eligible"],
+        "truncated": result["truncated"],
+        "combinations": combinations,
+        "artifact": _artifact_projection(record, context.task_id),
     }
 
 

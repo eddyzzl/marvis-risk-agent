@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
+import json
 import sqlite3
 
 import pytest
 
 from marvis.db_schema import connect, init_db
+import marvis.repositories.task_artifacts as task_artifacts_module
 from marvis.repositories.task_artifacts import (
     TaskArtifactConflictError,
     TaskArtifactDataError,
@@ -198,3 +201,77 @@ def test_registry_rows_are_immutable_and_follow_task_ownership(tmp_path):
         conn.execute("DELETE FROM tasks WHERE id = 'task-1'")
 
     assert repo.list_for_task("task-1") == []
+
+
+def test_recent_window_and_exact_count_share_one_read_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    _seed_task(db_path, "task-1")
+    repo = TaskArtifactRepository(db_path)
+    original = _register(repo)
+    original_connect = task_artifacts_module.connect
+    inserted = False
+
+    class _CountCursor:
+        def __init__(self, cursor):
+            self._cursor = cursor
+
+        def fetchone(self):
+            nonlocal inserted
+            row = self._cursor.fetchone()
+            if not inserted:
+                inserted = True
+                with original_connect(db_path) as writer:
+                    writer.execute(
+                        """
+                        INSERT INTO task_artifacts(
+                            id, task_id, kind, path, content_hash,
+                            origin_tool, provenance_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "f" * 64,
+                            "task-1",
+                            "strategy_plan",
+                            "outputs/newer-plan.json",
+                            _sha("newer-plan"),
+                            "strategy.render_plan",
+                            json.dumps(
+                                {"plan_id": "plan-2", "revision": 2},
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            "2026-07-18T02:02:03+00:00",
+                        ),
+                    )
+            return row
+
+    class _Connection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            cursor = self._connection.execute(sql, parameters)
+            if "SELECT COUNT(*) AS total" in sql:
+                return _CountCursor(cursor)
+            return cursor
+
+    @contextmanager
+    def raced_connect(path):
+        with original_connect(path) as connection:
+            yield _Connection(connection)
+
+    monkeypatch.setattr(task_artifacts_module, "connect", raced_connect)
+
+    records, total = repo.list_recent_for_task_kind_with_count(
+        "task-1",
+        "strategy_plan",
+        limit=1,
+    )
+
+    assert inserted is True
+    assert total == 1
+    assert records == [original]
+    assert len(repo.list_for_task("task-1")) == 2

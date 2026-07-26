@@ -76,7 +76,9 @@ from marvis.packs.modeling.training_dataset import TrainingDataset
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
+    load_historical_strategy_sample_design_v2_artifacts,
     load_strategy_sample_design_v2_artifacts,
+    require_historical_strategy_sample_design_v2_artifact_binding_on_connection,
     require_strategy_sample_design_v2_artifact_binding_on_connection,
 )
 from marvis.repositories.task_artifacts import (
@@ -553,9 +555,85 @@ def load_modeling_training_evidence_artifacts(
 ) -> ModelingTrainingEvidenceArtifactBinding:
     """Load and fully re-authenticate one published training evidence pair."""
 
+    return _load_modeling_training_evidence_artifacts(
+        runtime,
+        task_id=task_id,
+        sample_design_ref=sample_design_ref,
+        model_binary_artifact_id=model_binary_artifact_id,
+        expected_model_binary_artifact_content_hash=(
+            expected_model_binary_artifact_content_hash
+        ),
+        evidence_artifact_id=evidence_artifact_id,
+        expected_evidence_artifact_content_hash=(
+            expected_evidence_artifact_content_hash
+        ),
+        expected_experiment_id=expected_experiment_id,
+        expected_model_artifact_id=expected_model_artifact_id,
+        expected_evidence_id=expected_evidence_id,
+        expected_evidence_content_hash=expected_evidence_content_hash,
+        require_current_sample=True,
+    )
+
+
+def load_historical_modeling_training_evidence_artifacts(
+    runtime,
+    *,
+    task_id: str,
+    sample_design_ref: Mapping[str, Any],
+    model_binary_artifact_id: str,
+    expected_model_binary_artifact_content_hash: str,
+    evidence_artifact_id: str,
+    expected_evidence_artifact_content_hash: str,
+    expected_experiment_id: str,
+    expected_model_artifact_id: str,
+    expected_evidence_id: str,
+    expected_evidence_content_hash: str,
+) -> ModelingTrainingEvidenceArtifactBinding:
+    """Load one immutable training-evidence pair without requiring sample head."""
+
+    return _load_modeling_training_evidence_artifacts(
+        runtime,
+        task_id=task_id,
+        sample_design_ref=sample_design_ref,
+        model_binary_artifact_id=model_binary_artifact_id,
+        expected_model_binary_artifact_content_hash=(
+            expected_model_binary_artifact_content_hash
+        ),
+        evidence_artifact_id=evidence_artifact_id,
+        expected_evidence_artifact_content_hash=(
+            expected_evidence_artifact_content_hash
+        ),
+        expected_experiment_id=expected_experiment_id,
+        expected_model_artifact_id=expected_model_artifact_id,
+        expected_evidence_id=expected_evidence_id,
+        expected_evidence_content_hash=expected_evidence_content_hash,
+        require_current_sample=False,
+    )
+
+
+def _load_modeling_training_evidence_artifacts(
+    runtime,
+    *,
+    task_id: str,
+    sample_design_ref: Mapping[str, Any],
+    model_binary_artifact_id: str,
+    expected_model_binary_artifact_content_hash: str,
+    evidence_artifact_id: str,
+    expected_evidence_artifact_content_hash: str,
+    expected_experiment_id: str,
+    expected_model_artifact_id: str,
+    expected_evidence_id: str,
+    expected_evidence_content_hash: str,
+    require_current_sample: bool,
+) -> ModelingTrainingEvidenceArtifactBinding:
     normalized_task = _text(task_id, "task_id")
     sample_request = {"sample_design_ref": _sample_ref(sample_design_ref)}
-    sample = _load_sample(runtime, task_id=normalized_task, request=sample_request)
+    sample = _load_sample(
+        runtime,
+        task_id=normalized_task,
+        request=sample_request,
+        require_current=require_current_sample,
+    )
     model_record = _registered_record(
         runtime,
         task_id=normalized_task,
@@ -687,13 +765,45 @@ def require_modeling_training_evidence_artifact_binding_on_connection(
 ) -> None:
     """Re-authenticate training evidence while a downstream writer holds a lock."""
 
+    _require_modeling_training_evidence_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_sample=True,
+    )
+
+
+def require_historical_modeling_training_evidence_artifact_binding_on_connection(
+    conn,
+    binding: ModelingTrainingEvidenceArtifactBinding,
+) -> None:
+    """Re-authenticate immutable training evidence without requiring sample head."""
+
+    _require_modeling_training_evidence_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_sample=False,
+    )
+
+
+def _require_modeling_training_evidence_artifact_binding_on_connection(
+    conn,
+    binding: ModelingTrainingEvidenceArtifactBinding,
+    *,
+    require_current_sample: bool,
+) -> None:
     if not isinstance(binding, ModelingTrainingEvidenceArtifactBinding):
         raise ModelingError("training-evidence artifact binding is invalid")
     try:
-        require_strategy_sample_design_v2_artifact_binding_on_connection(
-            conn,
-            binding.sample,
-        )
+        if require_current_sample:
+            require_strategy_sample_design_v2_artifact_binding_on_connection(
+                conn,
+                binding.sample,
+            )
+        else:
+            require_historical_strategy_sample_design_v2_artifact_binding_on_connection(
+                conn,
+                binding.sample,
+            )
     except StrategyError as exc:
         raise ModelingError(str(exc)) from exc
 
@@ -1541,10 +1651,21 @@ def _sample_ref(value: object) -> dict[str, str]:
     }
 
 
-def _load_sample(runtime, *, task_id: str, request: Mapping[str, Any]):
+def _load_sample(
+    runtime,
+    *,
+    task_id: str,
+    request: Mapping[str, Any],
+    require_current: bool = True,
+):
     ref = request["sample_design_ref"]
     try:
-        return load_strategy_sample_design_v2_artifacts(
+        loader = (
+            load_strategy_sample_design_v2_artifacts
+            if require_current
+            else load_historical_strategy_sample_design_v2_artifacts
+        )
+        return loader(
             runtime,
             task_id=task_id,
             membership_artifact_id=ref["membership_artifact_id"],
@@ -2330,7 +2451,9 @@ __all__ = [
     "TRAIN_MODEL_WITH_EVIDENCE_V2_TOOL_SCHEMA_VERSION",
     "ModelingTrainingEvidenceArtifactBinding",
     "build_training_evidence_ref",
+    "load_historical_modeling_training_evidence_artifacts",
     "load_modeling_training_evidence_artifacts",
+    "require_historical_modeling_training_evidence_artifact_binding_on_connection",
     "require_modeling_training_evidence_artifact_binding_on_connection",
     "run_train_model_with_evidence_v2",
     "tool_train_model_with_evidence_v2",

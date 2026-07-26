@@ -19,6 +19,7 @@ from marvis.output.strategy_candidate_report import render_strategy_candidate_bu
 from marvis.orchestrator.contracts import Plan, PlanStatus
 from marvis.packs.strategy import (
     candidate_lab_projection,
+    voting_candidate_search_tools,
     voting_candidate_tools,
 )
 from marvis.packs.modeling.evidence import (
@@ -53,6 +54,7 @@ from marvis.packs.strategy.cross_matrix_candidate import (
 from marvis.packs.strategy.evaluator import evaluate_expression_frame
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.pool import add_verified_candidate_fragment
+from marvis.packs.strategy.pool_tools import run_add_candidate_to_pool
 from marvis.packs.strategy.scorecard_candidate import (
     SCORECARD_BAND_ASSET_ARTIFACT_KIND,
     SCORECARD_BAND_ASSET_ARTIFACT_SCHEMA_VERSION,
@@ -67,6 +69,10 @@ from marvis.packs.strategy.scorecard_candidate import (
     scorecard_cutoff_selection_to_verified_candidate_fragment,
 )
 from marvis.packs.strategy.voting_candidate import build_voting_candidate_asset
+from marvis.packs.strategy.voting_candidate_search import (
+    canonical_voting_candidate_search_result_json,
+    search_voting_candidate_combinations,
+)
 from marvis.packs.strategy.voting_candidate_fragment import (
     VOTING_CANDIDATE_ARTIFACT_KIND,
     VOTING_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
@@ -95,6 +101,10 @@ from marvis.repositories.strategy_pool import (
 )
 from marvis.repositories.plans import PlanRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from tests.test_strategy_candidate_stability_tools import (
+    _pool_add_inputs,
+    _setup,
+)
 
 
 HASH_A = "a" * 64
@@ -143,6 +153,67 @@ def _strategy_task(app) -> str:
         )
     )
     return task.id
+
+
+def _searched_candidate_lab_fixture(tmp_path: Path) -> dict:
+    fixture = _setup(tmp_path)
+    pool = None
+    for candidate in (
+        fixture["first"],
+        fixture["refine"](1),
+        fixture["refine"](2),
+    ):
+        added = run_add_candidate_to_pool(
+            _pool_add_inputs(
+                candidate,
+                expected_revision=0 if pool is None else pool["revision"],
+                expected_hash=(
+                    ABSENT_POOL_SNAPSHOT_HASH
+                    if pool is None
+                    else pool["snapshot_hash"]
+                ),
+            ),
+            fixture["ctx"],
+            fixture["runtime"],
+        )
+        pool = added["pool"]
+    assert pool is not None
+    controls = {
+        "strategy_type": "approval",
+        "member_count": 2,
+        "n": 1,
+        "objective": {
+            "metric": "bad_capture_rate",
+            "direction": "maximize",
+        },
+        "constraints": [
+            {"metric": "hit_share", "operator": "gte", "value": 0.05}
+        ],
+        "include_rule_ids": [],
+        "exclude_rule_ids": [],
+        "max_combinations": 100,
+    }
+    inputs = (
+        voting_candidate_search_tools.resolve_voting_candidate_search_inputs(
+            fixture["runtime"],
+            task_id=fixture["task"].id,
+            user_controls=controls,
+        )
+    )
+    search = voting_candidate_search_tools.run_search_voting_candidates(
+        inputs,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+    app = create_app(fixture["settings"])
+    return {
+        **fixture,
+        "app": app,
+        "client": TestClient(app),
+        "pool": pool,
+        "controls": controls,
+        "search": search,
+    }
 
 
 def _register_univariate_candidate(
@@ -1865,6 +1936,7 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
                 "automatic_tree",
                 "scorecard_band",
                 "scorecard_cutoff_selection",
+                "voting_search",
             )
         },
         "pools": {"latest": None, "all": [], "total": 0, "truncated": False},
@@ -2120,6 +2192,320 @@ def test_candidate_lab_reads_duplicate_pool_source_only_once(
     assert response.status_code == 200, response.text
     assert response.json()["pools"]["total"] == 2
     assert reads == 1
+
+
+def test_candidate_lab_projects_authenticated_voting_search_as_ui_safe_evidence(
+    tmp_path: Path,
+) -> None:
+    fixture = _searched_candidate_lab_fixture(tmp_path)
+    task_id = fixture["task"].id
+    search = fixture["search"]
+    [descriptor] = search["artifacts"]
+
+    response = fixture["client"].get(
+        f"/api/tasks/{task_id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 200, response.text
+    collection = response.json()["candidates"]["voting_search"]
+    assert collection["total"] == 1
+    assert collection["truncated"] is False
+    assert collection["latest"] == collection["all"][0]
+    item = collection["latest"]
+    assert set(item) == {
+        "search_id",
+        "strategy_type",
+        "pool_revision",
+        "member_count",
+        "n",
+        "objective",
+        "constraints",
+        "include_rule_ids",
+        "exclude_rule_ids",
+        "max_combinations",
+        "search_space",
+        "evaluated",
+        "eligible",
+        "truncated",
+        "combinations",
+        "artifact",
+    }
+    assert item == {
+        "search_id": search["search_id"],
+        "strategy_type": "approval",
+        "pool_revision": fixture["pool"]["revision"],
+        "member_count": fixture["controls"]["member_count"],
+        "n": fixture["controls"]["n"],
+        "objective": fixture["controls"]["objective"],
+        "constraints": fixture["controls"]["constraints"],
+        "include_rule_ids": fixture["controls"]["include_rule_ids"],
+        "exclude_rule_ids": fixture["controls"]["exclude_rule_ids"],
+        "max_combinations": fixture["controls"]["max_combinations"],
+        "search_space": search["search_space"],
+        "evaluated": search["evaluated"],
+        "eligible": search["search_result"]["eligible"],
+        "truncated": search["truncated"],
+        "combinations": [
+            {
+                "combo_id": combo["combo_id"],
+                "members": combo["member_ids"],
+                "eligible": combo["eligible"],
+                "failures": combo["constraint_failures"],
+                "metrics": combo["metrics"],
+            }
+            for combo in search["search_result"]["combinations"][:20]
+        ],
+        "artifact": {
+            "artifact_id": descriptor["artifact_id"],
+            "created_at": TaskArtifactRepository(
+                fixture["settings"].db_path
+            ).get_for_task(task_id, descriptor["artifact_id"])["created_at"],
+            "download_url": (
+                f"/api/tasks/{task_id}/task-artifacts/"
+                f"{descriptor['artifact_id']}/download"
+            ),
+        },
+    }
+    forbidden_keys = {
+        "candidate_ids",
+        "content_hash",
+        "dataset_binding",
+        "hit_count_distribution",
+        "hit_matrix",
+        "labels",
+        "lifecycle",
+        "objective_value",
+        "path",
+        "population",
+        "provenance",
+        "rank",
+        "request_hash",
+        "score_vector",
+        "selected",
+        "target",
+        "weights",
+    }
+
+    def visit(value) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                assert key not in forbidden_keys
+                assert not key.endswith("_hash")
+                visit(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested)
+
+    visit(item)
+    serialized = json.dumps(item, ensure_ascii=False).lower()
+    assert "champion" not in serialized
+    assert '"best"' not in serialized
+
+
+def test_candidate_lab_bounds_voting_search_history_before_authentication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _searched_candidate_lab_fixture(tmp_path)
+    task_id = fixture["task"].id
+    repository = TaskArtifactRepository(fixture["settings"].db_path)
+    [oldest_descriptor] = fixture["search"]["artifacts"]
+    oldest_record = repository.get_for_task(
+        task_id,
+        oldest_descriptor["artifact_id"],
+    )
+    assert oldest_record is not None
+    for index in range(21):
+        threshold = index / 100
+        if threshold == 0.05:
+            continue
+        controls = {
+            **fixture["controls"],
+            "constraints": [
+                {
+                    "metric": "hit_share",
+                    "operator": "gte",
+                    "value": threshold,
+                }
+            ],
+        }
+        inputs = (
+            voting_candidate_search_tools.resolve_voting_candidate_search_inputs(
+                fixture["runtime"],
+                task_id=task_id,
+                user_controls=controls,
+            )
+        )
+        voting_candidate_search_tools.run_search_voting_candidates(
+            inputs,
+            fixture["ctx"],
+            fixture["runtime"],
+        )
+    Path(oldest_record["path"]).write_text(
+        '{"old_search_outside_the_projection_window":true}',
+        encoding="utf-8",
+    )
+
+    def reject_unbounded_history(*_args, **_kwargs):
+        raise AssertionError("Candidate Lab must not call list_for_task")
+
+    monkeypatch.setattr(
+        TaskArtifactRepository,
+        "list_for_task",
+        reject_unbounded_history,
+    )
+
+    response = fixture["client"].get(
+        f"/api/tasks/{task_id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 200, response.text
+    collection = response.json()["candidates"]["voting_search"]
+    assert collection["total"] == 21
+    assert collection["truncated"] is True
+    assert len(collection["all"]) == 20
+    assert all(
+        item["artifact"]["artifact_id"] != oldest_descriptor["artifact_id"]
+        for item in collection["all"]
+    )
+
+
+def test_candidate_lab_fails_closed_when_latest_voting_search_is_corrupt(
+    tmp_path: Path,
+) -> None:
+    fixture = _searched_candidate_lab_fixture(tmp_path)
+    task_id = fixture["task"].id
+    [descriptor] = fixture["search"]["artifacts"]
+    record = TaskArtifactRepository(
+        fixture["settings"].db_path
+    ).get_for_task(task_id, descriptor["artifact_id"])
+    assert record is not None
+    Path(record["path"]).write_text('{"forged":true}', encoding="utf-8")
+
+    response = fixture["client"].get(
+        f"/api/tasks/{task_id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "strategy candidate lab evidence verification failed"
+    )
+
+
+def test_candidate_lab_requires_authoritative_voting_search_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _searched_candidate_lab_fixture(tmp_path)
+    task_id = fixture["task"].id
+
+    def reject_live_sources(*_args, **_kwargs):
+        raise StrategyError("historical Voting search replay failed")
+
+    monkeypatch.setattr(
+        candidate_lab_projection,
+        "load_historical_voting_candidate_search_artifact",
+        reject_live_sources,
+    )
+
+    response = fixture["client"].get(
+        f"/api/tasks/{task_id}/strategy-candidate-lab"
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "strategy candidate lab evidence verification failed"
+    )
+
+
+def test_candidate_lab_caps_projected_voting_combinations_at_twenty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _strategy_task(app)
+    candidate_ids = [f"rule-{index}" for index in range(7)]
+    target = [index % 2 for index in range(20)]
+    result = search_voting_candidate_combinations(
+        {
+            "schema_version": "strategy.voting-candidate-search-request.v1",
+            "candidate_ids": candidate_ids,
+            "hit_matrix": [
+                [
+                    (row_index + candidate_index) % (candidate_index + 2) == 0
+                    for row_index in range(20)
+                ]
+                for candidate_index in range(7)
+            ],
+            "target": target,
+            "weights": None,
+            "amounts": None,
+            "member_count": 3,
+            "n": 2,
+            "objective": {
+                "metric": "bad_capture_rate",
+                "direction": "maximize",
+            },
+            "constraints": [
+                {"metric": "hit_share", "operator": "gte", "value": 0.01}
+            ],
+            "include": [],
+            "exclude": [],
+            "max_combinations": 35,
+        }
+    )
+    raw = canonical_voting_candidate_search_result_json(result).encode("utf-8")
+    content_hash = hashlib.sha256(raw).hexdigest()
+    path = (
+        app.state.settings.tasks_dir
+        / task_id
+        / "strategy_voting_candidate_searches"
+        / f"{result['search_id']}-{'d' * 16}.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    record = TaskArtifactRepository(app.state.settings.db_path).register(
+        task_id=task_id,
+        kind="strategy_voting_candidate_search_json",
+        path=str(path),
+        content_hash=content_hash,
+        origin_tool="strategy.search_voting_candidates",
+        provenance={},
+    )
+
+    def load(_runtime, **request):
+        assert request == {
+            "task_id": task_id,
+            "artifact_id": record["id"],
+            "expected_artifact_content_hash": content_hash,
+        }
+        return SimpleNamespace(
+            result=result,
+            pool_development=SimpleNamespace(
+                pool=SimpleNamespace(
+                    pool={"strategy_type": "approval", "revision": 4}
+                )
+            ),
+        )
+
+    monkeypatch.setattr(
+        candidate_lab_projection,
+        "load_historical_voting_candidate_search_artifact",
+        load,
+    )
+
+    response = client.get(f"/api/tasks/{task_id}/strategy-candidate-lab")
+
+    assert response.status_code == 200, response.text
+    item = response.json()["candidates"]["voting_search"]["latest"]
+    assert result["evaluated"] == 35
+    assert item["evaluated"] == 35
+    assert item["truncated"] is False
+    assert len(item["combinations"]) == 20
+    assert [combo["combo_id"] for combo in item["combinations"]] == [
+        combo["combo_id"] for combo in result["combinations"][:20]
+    ]
 
 
 def test_candidate_lab_bounds_deep_validation_to_latest_twenty_candidates(

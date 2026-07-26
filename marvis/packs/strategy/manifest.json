@@ -8074,6 +8074,29 @@
             ],
             "additionalProperties": false
           },
+          "voting_candidate_search_ref": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {"$ref": "#/$defs/sha256"},
+              "expected_artifact_content_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "expected_search_id": {
+                "type": "string",
+                "pattern": "^voting-search-[0-9a-f]{32}$"
+              },
+              "expected_search_content_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "expected_artifact_content_hash",
+              "expected_search_id",
+              "expected_search_content_hash"
+            ],
+            "additionalProperties": false
+          },
           "strategy_identity": {
             "type": "object",
             "properties": {
@@ -8221,6 +8244,9 @@
           "candidate_stability_ref": {
             "$ref": "#/$defs/candidate_stability_ref"
           },
+          "voting_candidate_search_ref": {
+            "$ref": "#/$defs/voting_candidate_search_ref"
+          },
           "strategy_identity": {
             "oneOf": [
               {"$ref": "#/$defs/strategy_identity"},
@@ -8265,7 +8291,7 @@
         "type": "object",
         "properties": {
           "schema_version": {
-            "const": "strategy.build-report-bundle-v2-tool.v3"
+            "const": "strategy.build-report-bundle-v2-tool.v4"
           },
           "report_id": {
             "type": "string",

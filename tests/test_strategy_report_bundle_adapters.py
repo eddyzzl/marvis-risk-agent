@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZipFile
 
+from docx import Document
 import numpy as np
 import pandas as pd
 import pytest
@@ -74,6 +77,8 @@ from marvis.packs.strategy.pool_impact_tools import (
 from marvis.packs.strategy import pool_tools as strategy_pool_tools
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
+    StrategyPoolDevelopmentDatasetBinding,
+    StrategyPoolDevelopmentExecutionBinding,
     project_scorecard_report_evidence,
 )
 from marvis.packs.strategy.project_context import (
@@ -106,6 +111,10 @@ from marvis.packs.strategy.sample_design_v2 import (
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
 )
+from marvis.packs.strategy.sample_design_binding import (
+    StrategySampleDesignExecutionBinding,
+    StrategySampleDesignRef,
+)
 from marvis.packs.strategy.scorecard_candidate import (
     build_scorecard_cutoff_selection,
     canonical_scorecard_band_asset_json,
@@ -131,6 +140,16 @@ from marvis.packs.strategy.voting_candidate_tools import (
     VerifiedVotingCandidateArtifact,
     build_voting_candidate_artifact_document,
     canonical_voting_candidate_artifact_json,
+)
+from marvis.packs.strategy.voting_candidate_search import (
+    VOTING_CANDIDATE_SEARCH_PRODUCER_VERSION,
+    VOTING_CANDIDATE_SEARCH_REQUEST_SCHEMA_VERSION,
+    canonical_voting_candidate_search_result_json,
+    search_voting_candidate_combinations,
+)
+from marvis.packs.strategy.voting_candidate_search_tools import (
+    VOTING_CANDIDATE_SEARCH_ARTIFACT_SCHEMA_VERSION,
+    VotingCandidateSearchArtifactBinding,
 )
 from tests.test_modeling_evidence_contract import (
     _artifact as _model_artifact,
@@ -365,6 +384,8 @@ def _action(action_type: str) -> dict:
 def _pool_and_impact_bindings(
     tmp_path: Path,
     sample: StrategySampleDesignV2ArtifactBinding,
+    *,
+    candidate_count: int = 1,
 ) -> tuple[
     StrategyCandidatePoolArtifactBinding,
     StrategyPoolImpactArtifactBinding,
@@ -380,43 +401,48 @@ def _pool_and_impact_bindings(
         "semantic_mapping_hash": workspace["semantic_mapping_hash"],
         "sample_context_hash": _hash("sample-context"),
     }
-    fragment = build_verified_candidate_fragment(
-        artifact={
-            "artifact_id": "candidate-artifact-1",
-            "artifact_kind": "test_candidate_json",
-            "artifact_schema_version": "test.candidate-artifact.v1",
-            "artifact_content_hash": _hash("candidate-artifact"),
-            "origin_tool": "strategy.test_candidate",
-        },
-        asset={
-            "schema_version": "test.candidate.v1",
-            "asset_id": "candidate-asset-1",
-            "asset_hash": _hash("candidate-asset"),
-            "asset_type": "univariate_refinement",
-        },
-        fragment_type="strategy_rule",
-        rule_id="rule-risk-1",
-        condition={
-            "op": "compare",
-            "field": "customer_id",
-            "operator": "==",
-            "value": "PII-CUSTOMER-0001",
-            "missing": "no_match",
-        },
-        requirements=[],
-        effect_id="candidate-effect-1",
-        evidence_id="candidate-evidence-1",
-        evidence_hash=_hash("candidate-evidence"),
-        evidence_identity=evidence_identity,
-    )
-    pool = add_verified_candidate_fragment(
-        None,
-        task_id="task-v2",
-        strategy_type="approval",
-        default_action=_action("approval"),
-        verified_candidate_fragment=fragment,
-        action=_action("reject"),
-    )
+    pool = None
+    for ordinal in range(1, candidate_count + 1):
+        fragment = build_verified_candidate_fragment(
+            artifact={
+                "artifact_id": f"candidate-artifact-{ordinal}",
+                "artifact_kind": "test_candidate_json",
+                "artifact_schema_version": "test.candidate-artifact.v1",
+                "artifact_content_hash": _hash(
+                    f"candidate-artifact-{ordinal}"
+                ),
+                "origin_tool": "strategy.test_candidate",
+            },
+            asset={
+                "schema_version": "test.candidate.v1",
+                "asset_id": f"candidate-asset-{ordinal}",
+                "asset_hash": _hash(f"candidate-asset-{ordinal}"),
+                "asset_type": "univariate_refinement",
+            },
+            fragment_type="strategy_rule",
+            rule_id=f"rule-risk-{ordinal}",
+            condition={
+                "op": "compare",
+                "field": "customer_id",
+                "operator": "==",
+                "value": f"PII-CUSTOMER-{ordinal:04d}",
+                "missing": "no_match",
+            },
+            requirements=[],
+            effect_id=f"candidate-effect-{ordinal}",
+            evidence_id=f"candidate-evidence-{ordinal}",
+            evidence_hash=_hash(f"candidate-evidence-{ordinal}"),
+            evidence_identity=evidence_identity,
+        )
+        pool = add_verified_candidate_fragment(
+            pool,
+            task_id="task-v2",
+            strategy_type="approval",
+            default_action=_action("approval"),
+            verified_candidate_fragment=fragment,
+            action=_action("reject"),
+        )
+    assert pool is not None
     compiled = compile_strategy_pool(pool)
     pool_canonical = canonical_strategy_pool_json(pool)
     pool_binding = StrategyCandidatePoolArtifactBinding(
@@ -1190,6 +1216,7 @@ def _bindings(
     tmp_path: Path,
     *,
     maturity_status: str = "confirmed_matured",
+    candidate_count: int = 1,
 ) -> tuple[
     StrategyProjectContextArtifactBinding,
     StrategySampleDesignV2ArtifactBinding,
@@ -1207,8 +1234,236 @@ def _bindings(
             content_hash=dataset["content_hash"],
         ),
     )
-    pool, impact = _pool_and_impact_bindings(tmp_path, sample)
+    pool, impact = _pool_and_impact_bindings(
+        tmp_path,
+        sample,
+        candidate_count=candidate_count,
+    )
     return project, sample, pool, impact
+
+
+def _voting_search_binding(
+    tmp_path: Path,
+    sample: StrategySampleDesignV2ArtifactBinding,
+    pool: StrategyCandidatePoolArtifactBinding,
+) -> VotingCandidateSearchArtifactBinding:
+    design = sample.bundle["sample_design"]
+    dataset = design["identity"]["dataset_ref"]
+    workspace = design["identity"]["workspace_ref"]
+    semantics = design["sample_semantics"]
+    target = design["target_selector"]
+    legacy_ref = design["compatibility"]["legacy_development_ref"]
+    risk_population = next(
+        item for item in sample.bundle["populations"] if item["role"] == "risk"
+    )
+    development_count = next(
+        item["row_count"]
+        for item in risk_population["partitions"]
+        if item["name"] == "development"
+    )
+    candidate_ids = sorted(
+        entry["rule_id"]
+        for entry in pool.pool["entries"]
+        if entry["enabled"]
+        and entry["source"]["asset_type"] != "voting_candidate"
+    )
+    assert len(candidate_ids) == 7
+    request = {
+        "schema_version": VOTING_CANDIDATE_SEARCH_REQUEST_SCHEMA_VERSION,
+        "candidate_ids": candidate_ids,
+        "hit_matrix": [
+            [
+                bool((candidate_index + row_index) % 2)
+                for row_index in range(development_count)
+            ]
+            for candidate_index in range(len(candidate_ids))
+        ],
+        "target": [row_index % 2 for row_index in range(development_count)],
+        "weights": None,
+        "amounts": [
+            float((row_index + 1) * 100)
+            for row_index in range(development_count)
+        ],
+        "member_count": 3,
+        "n": 2,
+        "objective": {
+            "metric": "bad_capture_rate",
+            "direction": "maximize",
+        },
+        "constraints": [
+            {
+                "metric": "hit_share",
+                "operator": "lte",
+                "value": 0.0,
+            }
+        ],
+        "include": [],
+        "exclude": [],
+        "max_combinations": 20,
+    }
+    result = search_voting_candidate_combinations(request)
+    assert result["evaluated"] == 20
+    assert all(not item["eligible"] for item in result["combinations"])
+
+    reference = StrategySampleDesignRef.from_value(legacy_ref)
+    legacy_sample = StrategySampleDesignExecutionBinding(
+        reference=reference,
+        artifact=SimpleNamespace(),
+        task_id=sample.task_id,
+        dataset_id=dataset["dataset_id"],
+        dataset_content_hash=dataset["content_hash"],
+        workspace_revision=workspace["revision"],
+        workspace_generation=workspace["generation"],
+        semantic_mapping_hash=workspace["semantic_mapping_hash"],
+        target_col=target["column"],
+        target_bad_value=target["bad_value"],
+        drop_nan_labels=target["drop_missing"],
+        split_column=semantics["split_definition"]["column"],
+        development_values=tuple(
+            semantics["split_definition"]["development_values"]
+        ),
+        development_population_count=development_count,
+        active_population_count=risk_population["total_count"],
+        month_col=semantics["field_bindings"]["month_field"],
+        weight_col=semantics["field_bindings"]["weight_field"],
+        loan_amount_col=semantics["field_bindings"]["loan_amount_field"],
+        overdue_amount_col=semantics["field_bindings"][
+            "overdue_amount_field"
+        ],
+    )
+    development_dataset = StrategyPoolDevelopmentDatasetBinding(
+        task_id=sample.task_id,
+        dataset_id=dataset["dataset_id"],
+        source_path="datasets/dataset-v2.parquet",
+        path=tmp_path / "dataset-v2.parquet",
+        content_hash=dataset["content_hash"],
+        registry_metadata_hash=_hash("dataset-v2-registry-metadata"),
+        columns=(
+            "customer_id",
+            "target",
+            "apply_month",
+            "loan_amount",
+            "overdue_amount",
+        ),
+        row_count=8,
+    )
+    evidence_identity = {
+        "dataset_id": dataset["dataset_id"],
+        "dataset_content_hash": dataset["content_hash"],
+        "workspace_revision": workspace["revision"],
+        "workspace_generation": workspace["generation"],
+        "semantic_mapping_hash": workspace["semantic_mapping_hash"],
+        "sample_context_hash": _hash("sample-context"),
+    }
+    development = StrategyPoolDevelopmentExecutionBinding(
+        task_id=sample.task_id,
+        pool=pool,
+        dataset=development_dataset,
+        sample_design=legacy_sample,
+        sample_design_v2=sample,
+        evidence_identity=evidence_identity,
+        target_col=target["column"],
+        month_col=semantics["field_bindings"]["month_field"],
+    )
+    provenance = {
+        "schema_version": VOTING_CANDIDATE_SEARCH_ARTIFACT_SCHEMA_VERSION,
+        "producer_version": VOTING_CANDIDATE_SEARCH_PRODUCER_VERSION,
+        "task_id": sample.task_id,
+        "search_id": result["search_id"],
+        "search_content_hash": result["content_hash"],
+        "request_hash": result["request_hash"],
+        "pool_ref": {
+            "artifact_id": pool.artifact_id,
+            "artifact_content_hash": pool.artifact_content_hash,
+            "pool_id": pool.pool["pool_id"],
+            "strategy_type": pool.pool["strategy_type"],
+            "revision": pool.pool["revision"],
+            "revision_id": pool.pool["revision_id"],
+            "snapshot_hash": pool.pool["snapshot_hash"],
+        },
+        "dataset_binding": {
+            "task_id": sample.task_id,
+            "dataset_id": development_dataset.dataset_id,
+            "dataset_source_path": development_dataset.source_path,
+            "dataset_content_hash": development_dataset.content_hash,
+            "dataset_registry_metadata_hash": (
+                development_dataset.registry_metadata_hash
+            ),
+            "workspace_revision": legacy_sample.workspace_revision,
+            "workspace_generation": legacy_sample.workspace_generation,
+            "semantic_mapping_hash": legacy_sample.semantic_mapping_hash,
+        },
+        "sample_design_ref": legacy_sample.to_ref_dict(),
+        "sample_context_hash": evidence_identity["sample_context_hash"],
+        "target_binding": {
+            "column": legacy_sample.target_col,
+            "raw_bad_value": legacy_sample.target_bad_value,
+            "normalized_bad_value": 1,
+            "drop_nan_labels": legacy_sample.drop_nan_labels,
+            "nan_labels_dropped": 0,
+            "labeled_count": development_count,
+            "sample_partition": "development",
+        },
+        "observation_bindings": {
+            "weight_col": legacy_sample.weight_col,
+            "amount_col": legacy_sample.loan_amount_col,
+        },
+        "requirement_bindings": None,
+        "excluded_unsupported_rule_ids": [],
+        "lifecycle": {
+            "mutated_pool": False,
+            "selected": False,
+            "admitted": False,
+            "applied": False,
+            "adopted": False,
+            "deployed": False,
+        },
+    }
+    provenance_json = json.dumps(
+        provenance,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    canonical = canonical_voting_candidate_search_result_json(result)
+    return VotingCandidateSearchArtifactBinding(
+        task_id=sample.task_id,
+        artifact_id=_hash("voting-search-artifact"),
+        artifact_path=tmp_path / "voting-search.json",
+        artifact_content_hash=_file_hash(canonical),
+        artifact_provenance=provenance,
+        artifact_provenance_json=provenance_json,
+        result=result,
+        pool_development=development,
+        resolved_requirements=None,
+        tasks_root=tmp_path,
+        db_path=tmp_path / "marvis.sqlite",
+    )
+
+
+def _zip_xml_text(raw: bytes) -> str:
+    with ZipFile(BytesIO(raw), "r") as archive:
+        return "".join(
+            archive.read(name).decode("utf-8", errors="ignore")
+            for name in archive.namelist()
+            if name.endswith(".xml")
+        )
+
+
+def _docx_visible_text(raw: bytes) -> str:
+    document = Document(BytesIO(raw))
+    return "\n".join(
+        [
+            *(paragraph.text for paragraph in document.paragraphs),
+            *(
+                cell.text
+                for table in document.tables
+                for row in table.rows
+                for cell in row.cells
+            ),
+        ]
+    )
 
 
 def _pool_binding_for_strategy_type(
@@ -1901,6 +2156,142 @@ def test_adapter_is_deterministic_bundle_ready_and_uses_exact_source_identities(
             "content_hash": sample.bundle_artifact_content_hash,
         }
     ]
+
+
+def test_adapter_projects_voting_search_only_as_twenty_row_development_evidence(
+    tmp_path: Path,
+) -> None:
+    bindings = _bindings(tmp_path, candidate_count=7)
+    project, sample, pool, _impact = bindings
+    search = _voting_search_binding(tmp_path, sample, pool)
+
+    without_search = _project(bindings)
+    projected = _project(bindings, voting_candidate_search=search)
+
+    assert len(projected["sections"]) == 7
+    candidate_without = without_search["sections"][4]
+    candidate_with = projected["sections"][4]
+    base_tables = {
+        table["table_id"]: table for table in candidate_without["tables"]
+    }
+    projected_tables = {
+        table["table_id"]: table for table in candidate_with["tables"]
+    }
+    assert (
+        projected_tables["candidate_pool_entries"]
+        == base_tables["candidate_pool_entries"]
+    )
+    assert (
+        projected_tables["compiled_candidate_design"]
+        == base_tables["compiled_candidate_design"]
+    )
+    assert projected["sections"][5:] == without_search["sections"][5:]
+    assert all(
+        ref["kind"] != "voting_candidate_search"
+        for ref in without_search["strategy_artifact_refs"]
+    )
+
+    table = projected_tables["voting_candidate_search_combinations"]
+    assert table["title"] == (
+        "Voting候选组合搜索结果（开发回测，仅供选择，未构建/未入池）"
+    )
+    assert table["sheet_key"] == "appendix_voting_search"
+    expected_combinations = search.result["combinations"][:20]
+    assert [
+        row["cells"]["combo_id"]["value"] for row in table["rows"]
+    ] == [item["combo_id"] for item in expected_combinations]
+    assert [
+        row["cells"]["eligible"]["value"] for row in table["rows"]
+    ] == [item["eligible"] for item in expected_combinations]
+    assert "selected" not in {
+        column["key"] for column in table["columns"]
+    }
+    first = table["rows"][0]["cells"]
+    assert {
+        "search_id",
+        "combo_id",
+        "member_ids",
+        "n",
+        "eligible",
+        "objective_metric",
+        "objective_direction",
+        "objective_value",
+        "constraint_failures",
+        "metrics",
+    } <= set(first)
+
+    summary = {
+        item["field_id"]: item["field"]["value"]
+        for item in candidate_with["summary_fields"]
+    }
+    assert summary["voting_search_search_space"] == search.result["search_space"]
+    assert summary["voting_search_evaluated"] == search.result["evaluated"]
+    assert summary["voting_search_truncated"] is True
+    assert summary["voting_search_eligible"] == search.result["eligible"]
+    assert summary["voting_search_displayed"] == 20
+    assert any(
+        item["binding"]["result_ref"]["kind"]
+        == "voting_candidate_search"
+        for item in candidate_with["stage_evidence"]
+    )
+
+    bundle = build_strategy_report_bundle(
+        task_id=project.task_id,
+        report_revision=1,
+        strategy_id=None,
+        strategy_version=None,
+        strategy_type="approval",
+        title=_present(
+            "Voting搜索开发回测",
+            projected["strategy_artifact_refs"][0],
+        ),
+        status="partial",
+        generated_at="2026-07-25T12:00:00+08:00",
+        **projected,
+    )
+    rendered = render_strategy_report_bundle(bundle)
+    markdown = rendered["markdown"].decode("utf-8")
+    docx_text = _docx_visible_text(rendered["docx"])
+    xlsx_text = _zip_xml_text(rendered["xlsx"])
+    json_text = rendered["json"].decode("utf-8")
+    for combination in expected_combinations:
+        combo_id = combination["combo_id"]
+        assert combo_id in json_text
+        assert combo_id in markdown
+        assert combo_id in xlsx_text
+        assert combo_id in docx_text
+    assert table["title"] in markdown
+    assert table["title"] in docx_text
+    for forbidden in ("winner", "champion", "selected", "冠军", "最佳"):
+        assert forbidden not in markdown.lower()
+        assert forbidden not in docx_text.lower()
+
+
+def test_adapter_rejects_voting_search_sample_context_drift(
+    tmp_path: Path,
+) -> None:
+    bindings = _bindings(tmp_path, candidate_count=7)
+    _project_binding_value, sample, pool, _impact = bindings
+    search = _voting_search_binding(tmp_path, sample, pool)
+    development = replace(
+        search.pool_development,
+        evidence_identity={
+            **search.pool_development.evidence_identity,
+            "sample_context_hash": _hash("different-sample-context"),
+        },
+    )
+
+    with pytest.raises(
+        StrategyReportBundleError,
+        match="Voting search.*sample context",
+    ):
+        _project(
+            bindings,
+            voting_candidate_search=replace(
+                search,
+                pool_development=development,
+            ),
+        )
 
 
 def test_adapter_prefers_impact_cube_and_projects_all_populations_partitions(

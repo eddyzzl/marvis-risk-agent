@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 import pytest
 
+import marvis.agent.turn_handlers as turn_handlers
 from marvis.agent.strategy_request_compiler import StandardWorkflowRequestDraft
 from marvis.agent.turn_handlers import (
     _StrategyV2EvidenceSetupError,
@@ -40,6 +41,7 @@ from marvis.packs.strategy.report_bundle_tools import (
 )
 from marvis.plugins.manifest import ToolRef
 from marvis.repositories.strategy_reports import StrategyReportRepository
+from marvis.repositories.task_artifacts import TaskArtifactRepository
 from test_strategy_report_bundle_tools import (
     _attach_candidate_stability,
     _run,
@@ -87,6 +89,52 @@ def _runtime(fixture: dict) -> SimpleNamespace:
     return SimpleNamespace(settings=fixture["settings"])
 
 
+class _ArtifactRepositoryStub:
+    def __init__(
+        self,
+        *records: dict,
+        totals: dict[str, int] | None = None,
+    ) -> None:
+        self.records = tuple(records)
+        self.totals = dict(totals or {})
+
+    def list_recent_for_task_kind_with_count(
+        self,
+        task_id: str,
+        kind: str,
+        *,
+        limit: int,
+    ):
+        del task_id
+        matching = tuple(
+            record for record in self.records if record.get("kind") == kind
+        )
+        return list(matching[:limit]), self.totals.get(kind, len(matching))
+
+    def get_for_task(self, task_id: str, artifact_id: object):
+        del task_id
+        return next(
+            (
+                record
+                for record in self.records
+                if record.get("id") == artifact_id
+            ),
+            None,
+        )
+
+    def list_for_task(self, *_args, **_kwargs):
+        raise AssertionError("report selector must not scan full history")
+
+
+def _window_runtime(
+    *records: dict,
+    totals: dict[str, int] | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        task_artifacts=_ArtifactRepositoryStub(*records, totals=totals)
+    )
+
+
 def test_report_turn_binds_exact_current_sources_and_first_head(
     tmp_path: Path,
 ) -> None:
@@ -110,6 +158,7 @@ def test_report_turn_binds_exact_current_sources_and_first_head(
         assert slots[field] == fixture["request"][field]
     assert slots["impact_cube_ref"] is None
     assert slots["candidate_stability_ref"] is None
+    assert slots["voting_candidate_search_ref"] is None
     assert slots["report_revision"] == 1
     assert slots["previous_report_id"] is None
     assert slots["previous_report_content_hash"] is None
@@ -119,6 +168,81 @@ def test_report_turn_binds_exact_current_sources_and_first_head(
     assert slots["score_evidence_ref"] is None
     generated_at = datetime.fromisoformat(slots["generated_at"])
     assert generated_at.utcoffset() == timedelta(0)
+
+
+def test_report_turn_never_scans_full_artifact_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+
+    def reject_unbounded_history(*_args, **_kwargs):
+        raise AssertionError("Strategy report plan must not call list_for_task")
+
+    monkeypatch.setattr(
+        TaskArtifactRepository,
+        "list_for_task",
+        reject_unbounded_history,
+    )
+
+    slots = _strategy_report_bundle_v2_plan_slots(
+        _runtime(fixture),
+        fixture["task"],
+        _draft(),
+        source_message={"content": "请生成当前审批策略迭代评审报告。"},
+    )
+
+    assert slots["sample_design_ref"] == fixture["request"]["sample_design_ref"]
+    assert slots["pool_impact_ref"] == fixture["request"]["pool_impact_ref"]
+
+
+def test_report_turn_passes_exact_selected_voting_search_to_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    search = SimpleNamespace(
+        artifact_id="a" * 64,
+        artifact_content_hash="b" * 64,
+        result={
+            "search_id": "voting-search-" + ("1" * 32),
+            "content_hash": "c" * 64,
+        },
+    )
+    observed = {}
+    original_adapter = (
+        turn_handlers.build_strategy_report_bundle_source_inputs
+    )
+
+    def capture_preflight(**kwargs):
+        observed["search"] = kwargs.pop("voting_candidate_search")
+        return original_adapter(**kwargs)
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "_strategy_report_latest_voting_search_binding",
+        lambda *args, **kwargs: search,
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "build_strategy_report_bundle_source_inputs",
+        capture_preflight,
+    )
+
+    slots = _strategy_report_bundle_v2_plan_slots(
+        _runtime(fixture),
+        fixture["task"],
+        _draft(),
+        source_message={"content": "请生成当前审批策略迭代评审报告。"},
+    )
+
+    assert observed["search"] is search
+    assert slots["voting_candidate_search_ref"] == {
+        "artifact_id": search.artifact_id,
+        "expected_artifact_content_hash": search.artifact_content_hash,
+        "expected_search_id": search.result["search_id"],
+        "expected_search_content_hash": search.result["content_hash"],
+    }
 
 
 def test_report_turn_selects_latest_compatible_candidate_stability(
@@ -310,9 +434,6 @@ def test_report_turn_clarifies_for_missing_context_sample_pool_or_impact(
     fixture = _setup(tmp_path)
     runtime = _runtime(fixture)
     read_runtime = _strategy_report_read_runtime(runtime)
-    artifacts = tuple(
-        read_runtime.task_artifacts.list_for_task(fixture["task"].id)
-    )
 
     monkeypatch.setattr(
         "marvis.agent.turn_handlers.load_current_strategy_project_context_artifact",
@@ -331,9 +452,8 @@ def test_report_turn_clarifies_for_missing_context_sample_pool_or_impact(
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as missing_sample:
         _strategy_report_latest_sample_binding(
-            read_runtime,
+            _window_runtime(),
             task_id=fixture["task"].id,
-            artifacts=(),
         )
     assert missing_sample.value.code == "strategy_report_bundle_v2_sample_required"
 
@@ -362,21 +482,156 @@ def test_report_turn_clarifies_for_missing_context_sample_pool_or_impact(
         task_id=fixture["task"].id,
         requested_type="approval",
     )
-    without_impacts = tuple(
-        item
-        for item in artifacts
-        if item["kind"] != "strategy_pool_impact_json"
-    )
     with pytest.raises(_StrategyV2EvidenceSetupError) as missing_impact:
         _strategy_report_latest_pool_impact_binding(
-            read_runtime,
+            _window_runtime(),
             task_id=fixture["task"].id,
-            artifacts=without_impacts,
             pool=pool,
         )
     assert missing_impact.value.code == (
         "strategy_report_bundle_v2_pool_impact_required"
     )
+
+
+def test_report_turn_authenticates_newest_pool_impact_before_binding_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = SimpleNamespace(
+        artifact_id="1" * 64,
+        artifact_content_hash="2" * 64,
+        pool={
+            "pool_id": "strategy-pool-" + "3" * 32,
+            "revision": 4,
+            "snapshot_hash": "5" * 64,
+        },
+    )
+    newest = {
+        "kind": turn_handlers.POOL_IMPACT_ARTIFACT_KIND,
+        "id": "6" * 64,
+        "content_hash": "7" * 64,
+        "provenance": {
+            "pool_id": "strategy-pool-" + "8" * 32,
+            "pool_revision": 9,
+            "pool_snapshot_hash": "9" * 64,
+            "assessment_id": "assessment-newest",
+            "assessment_content_hash": "a" * 64,
+        },
+    }
+    older = {
+        "kind": turn_handlers.POOL_IMPACT_ARTIFACT_KIND,
+        "id": "b" * 64,
+        "content_hash": "c" * 64,
+        "provenance": {
+            "pool_id": pool.pool["pool_id"],
+            "pool_revision": pool.pool["revision"],
+            "pool_snapshot_hash": pool.pool["snapshot_hash"],
+            "assessment_id": "assessment-older",
+            "assessment_content_hash": "d" * 64,
+        },
+    }
+    calls: list[str] = []
+
+    def authenticate(*_args, **kwargs):
+        artifact_id = kwargs["artifact_id"]
+        calls.append(artifact_id)
+        if artifact_id == newest["id"]:
+            raise StrategyError("registry provenance drift")
+        return SimpleNamespace(
+            stage="development_backtest",
+            pool=SimpleNamespace(
+                artifact_id=pool.artifact_id,
+                artifact_content_hash=pool.artifact_content_hash,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "marvis.agent.turn_handlers.load_historical_strategy_pool_impact_artifact",
+        authenticate,
+    )
+
+    with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
+        _strategy_report_latest_pool_impact_binding(
+            _window_runtime(newest, older),
+            task_id="task-1",
+            pool=pool,
+        )
+
+    assert raised.value.code == (
+        "strategy_report_bundle_v2_pool_impact_invalid"
+    )
+    assert calls == [newest["id"]]
+
+
+def test_report_turn_skips_authenticated_unrelated_pool_impact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = SimpleNamespace(
+        artifact_id="1" * 64,
+        artifact_content_hash="2" * 64,
+        pool={
+            "pool_id": "strategy-pool-" + "3" * 32,
+            "revision": 4,
+            "snapshot_hash": "5" * 64,
+        },
+    )
+    newest = {
+        "kind": turn_handlers.POOL_IMPACT_ARTIFACT_KIND,
+        "id": "6" * 64,
+        "content_hash": "7" * 64,
+        "provenance": {
+            "assessment_id": "assessment-newest",
+            "assessment_content_hash": "8" * 64,
+        },
+    }
+    older = {
+        "kind": turn_handlers.POOL_IMPACT_ARTIFACT_KIND,
+        "id": "9" * 64,
+        "content_hash": "a" * 64,
+        "provenance": {
+            "assessment_id": "assessment-older",
+            "assessment_content_hash": "b" * 64,
+        },
+    }
+    unrelated = SimpleNamespace(
+        stage="development_backtest",
+        pool=SimpleNamespace(
+            artifact_id="c" * 64,
+            artifact_content_hash="d" * 64,
+            pool={
+                "pool_id": "strategy-pool-" + "e" * 32,
+                "revision": 1,
+                "snapshot_hash": "f" * 64,
+            },
+        ),
+    )
+    exact = SimpleNamespace(
+        stage="development_backtest",
+        pool=SimpleNamespace(
+            artifact_id=pool.artifact_id,
+            artifact_content_hash=pool.artifact_content_hash,
+            pool=pool.pool,
+        ),
+    )
+    calls: list[str] = []
+
+    def authenticate(*_args, **kwargs):
+        artifact_id = kwargs["artifact_id"]
+        calls.append(artifact_id)
+        return unrelated if artifact_id == newest["id"] else exact
+
+    monkeypatch.setattr(
+        "marvis.agent.turn_handlers.load_historical_strategy_pool_impact_artifact",
+        authenticate,
+    )
+
+    selected = _strategy_report_latest_pool_impact_binding(
+        _window_runtime(newest, older),
+        task_id="task-1",
+        pool=pool,
+    )
+
+    assert selected is exact
+    assert calls == [newest["id"], older["id"]]
 
 
 def test_report_turn_prefers_latest_exact_impact_cube(
@@ -517,9 +772,8 @@ def test_report_turn_selects_latest_exact_cube_not_latest_other_cube(
     )
 
     binding = _strategy_report_latest_impact_cube_binding(
-        SimpleNamespace(),
+        _window_runtime(latest_other, older_exact),
         task_id="task-1",
-        artifacts=(older_exact, latest_other),
         pool=pool,
         sample_ref=sample_ref,
     )
@@ -545,6 +799,119 @@ def test_report_turn_selects_latest_exact_cube_not_latest_other_cube(
             ],
         }
     ]
+
+
+def test_report_turn_impact_cube_selection_window_exhaustion_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = SimpleNamespace(
+        artifact_id="1" * 64,
+        artifact_content_hash="2" * 64,
+        pool={
+            "pool_id": "strategy-pool-" + "3" * 32,
+            "revision": 4,
+            "revision_id": "strategy-pool-revision-" + "5" * 32,
+            "snapshot_hash": "6" * 64,
+        },
+    )
+    sample_ref = {
+        "membership_artifact_id": "7" * 64,
+        "expected_membership_artifact_content_hash": "8" * 64,
+        "bundle_artifact_id": "9" * 64,
+        "expected_bundle_artifact_content_hash": "a" * 64,
+        "expected_bundle_id": "strategy-sample-design-bundle-" + "b" * 24,
+        "expected_sample_design_id": "strategy-sample-design-" + "c" * 24,
+        "expected_sample_design_content_hash": "d" * 64,
+    }
+    replay_limit = turn_handlers._STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT
+    records = tuple(
+        {
+            "kind": "strategy_impact_cube_json",
+            "id": f"{index:064x}",
+            "content_hash": f"{index + replay_limit:064x}",
+            "provenance": {
+                "cube_id": "strategy-impact-cube-" + f"{index:024x}",
+                "cube_content_hash": f"{index + replay_limit * 2:064x}",
+            },
+        }
+        for index in range(replay_limit)
+    )
+
+    class _ArtifactWindow:
+        def list_recent_for_task_kind_with_count(
+            self,
+            task_id: str,
+            kind: str,
+            *,
+            limit: int,
+        ):
+            assert (task_id, kind, limit) == (
+                "task-1",
+                "strategy_impact_cube_json",
+                replay_limit,
+            )
+            return list(records), replay_limit + 1
+
+    unrelated_pool_ref = {
+        "artifact_id": "e" * 64,
+        "artifact_content_hash": "f" * 64,
+    }
+
+    def load_unrelated(*_args, **kwargs):
+        return SimpleNamespace(
+            artifact_id=kwargs["artifact_id"],
+            artifact_content_hash=kwargs[
+                "expected_artifact_content_hash"
+            ],
+            cube={
+                "identity": {
+                    "pool_id": "strategy-pool-" + "0" * 32,
+                    "revision": 99,
+                    "revision_id": "strategy-pool-revision-" + "0" * 32,
+                    "snapshot_hash": "0" * 64,
+                },
+                "source_bindings": {
+                    "pool_artifact": unrelated_pool_ref,
+                    "sample_design_v2": {
+                        "membership_artifact_id": sample_ref[
+                            "membership_artifact_id"
+                        ],
+                        "membership_artifact_content_hash": sample_ref[
+                            "expected_membership_artifact_content_hash"
+                        ],
+                        "bundle_artifact_id": sample_ref["bundle_artifact_id"],
+                        "bundle_artifact_content_hash": sample_ref[
+                            "expected_bundle_artifact_content_hash"
+                        ],
+                        "bundle_id": sample_ref["expected_bundle_id"],
+                        "sample_design_id": sample_ref[
+                            "expected_sample_design_id"
+                        ],
+                        "sample_design_content_hash": sample_ref[
+                            "expected_sample_design_content_hash"
+                        ],
+                    },
+                },
+            },
+        )
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "load_strategy_impact_cube_artifact",
+        load_unrelated,
+    )
+
+    with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
+        _strategy_report_latest_impact_cube_binding(
+            SimpleNamespace(task_artifacts=_ArtifactWindow()),
+            task_id="task-1",
+            pool=pool,
+            sample_ref=sample_ref,
+        )
+
+    assert raised.value.code == (
+        "strategy_report_bundle_v2_impact_cube_selection_window_exhausted"
+    )
 
 
 def test_nonlegacy_report_type_without_exact_cube_never_uses_pool_impact(
@@ -594,29 +961,30 @@ def test_report_turn_corrupt_exact_impact_cube_fails_without_fallback(
         fixture["runtime"],
     )
     read_runtime = _strategy_report_read_runtime(_runtime(fixture))
-    artifacts = tuple(
-        read_runtime.task_artifacts.list_for_task(fixture["task"].id)
+    cube_record = read_runtime.task_artifacts.get_for_task(
+        fixture["task"].id,
+        newer["artifact"]["artifact_id"],
+    )
+    _, cube_total = (
+        read_runtime.task_artifacts.list_recent_for_task_kind_with_count(
+            fixture["task"].id,
+            "strategy_impact_cube_json",
+            limit=64,
+        )
     )
     pool = _strategy_report_current_pool_binding(
         read_runtime,
         task_id=fixture["task"].id,
         requested_type="approval",
     )
-    cube_record = next(
-        item
-        for item in artifacts
-        if item["id"] == newer["artifact"]["artifact_id"]
-    )
-    assert sum(
-        item["kind"] == "strategy_impact_cube_json" for item in artifacts
-    ) == 2
+    assert cube_record is not None
+    assert cube_total == 2
     Path(cube_record["path"]).write_text("{}", encoding="utf-8")
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_latest_impact_cube_binding(
             read_runtime,
             task_id=fixture["task"].id,
-            artifacts=artifacts,
             pool=pool,
             sample_ref=fixture["request"]["sample_design_ref"],
         )
@@ -661,9 +1029,6 @@ def test_report_turn_disguised_latest_exact_cube_fails_without_fallback(
         conn.commit()
 
     read_runtime = _strategy_report_read_runtime(_runtime(fixture))
-    artifacts = tuple(
-        read_runtime.task_artifacts.list_for_task(fixture["task"].id)
-    )
     pool = _strategy_report_current_pool_binding(
         read_runtime,
         task_id=fixture["task"].id,
@@ -674,7 +1039,6 @@ def test_report_turn_disguised_latest_exact_cube_fails_without_fallback(
         _strategy_report_latest_impact_cube_binding(
             read_runtime,
             task_id=fixture["task"].id,
-            artifacts=artifacts,
             pool=pool,
             sample_ref=fixture["request"]["sample_design_ref"],
         )
@@ -742,9 +1106,8 @@ def test_report_turn_latest_optional_evidence_is_compatible_or_omitted(
     )
 
     _, reference = _strategy_report_optional_model_evidence(
-        SimpleNamespace(),
+        _window_runtime(*records),
         task_id="task-1",
-        artifacts=records,
         sample_ref=sample_ref,
     )
     assert reference == {
@@ -757,9 +1120,8 @@ def test_report_turn_latest_optional_evidence_is_compatible_or_omitted(
     incompatible_ref = {**sample_ref, "expected_bundle_id": "other-bundle"}
     model_binding.sample_design_binding = _sample_binding(incompatible_ref)
     binding, reference = _strategy_report_optional_model_evidence(
-        SimpleNamespace(),
+        _window_runtime(*records),
         task_id="task-1",
-        artifacts=records,
         sample_ref=sample_ref,
     )
     assert binding is None
@@ -800,9 +1162,8 @@ def test_report_turn_compatible_score_can_supply_its_own_training_chain(
     )
 
     binding, reference = _strategy_report_optional_score_evidence(
-        SimpleNamespace(),
+        _window_runtime(*records),
         task_id="task-1",
-        artifacts=records,
         sample_ref=sample_ref,
         training_ref=None,
     )
@@ -844,9 +1205,8 @@ def test_report_turn_corrupt_latest_same_kind_never_falls_back(
 
     with pytest.raises(_StrategyV2EvidenceSetupError) as raised:
         _strategy_report_optional_model_evidence(
-            SimpleNamespace(),
+            _window_runtime(records[1], records[0]),
             task_id="task-1",
-            artifacts=records,
             sample_ref={},
         )
 
@@ -974,7 +1334,7 @@ def test_report_command_autostarts_exact_one_step_without_dataset_preview(
     )
     assert output["report_id"] in rendered_messages
     assert "未创建策略、未采纳、未部署或上线" in rendered_messages
-    assert rendered_messages.count("](/api/tasks/") == 3
+    assert rendered_messages.count("](/api/tasks/") == 4
     assert len(llm.calls) == 1
 
 

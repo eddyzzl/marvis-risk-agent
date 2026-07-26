@@ -318,6 +318,216 @@ def test_scorecard_launchers_submit_only_visible_projection_ids_and_user_control
     )
 
 
+def test_voting_launchers_submit_only_user_controls_and_authenticated_pointers():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          collectStrategyCandidateLabRequest,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        function projectionOption(value, dataset = {}) {
+          return {
+            value,
+            dataset: { candidateLabProjection: "1", ...dataset },
+          };
+        }
+
+        function makeForm(workflow, values = {}, fields = {}) {
+          return {
+            dataset: { candidateLabWorkflow: workflow },
+            querySelector(selector) {
+              const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+              if (!match) return null;
+              return fields[match[1]] || { value: values[match[1]] || "" };
+            },
+            querySelectorAll() { return []; },
+          };
+        }
+
+        const includeId = `candidate-rule-${"a".repeat(32)}`;
+        const excludeId = `candidate-rule-${"b".repeat(32)}`;
+        const strategyType = projectionOption("approval");
+        const include = projectionOption(includeId);
+        const exclude = projectionOption(excludeId);
+        const search = collectStrategyCandidateLabRequest(makeForm(
+          "voting_candidate_search",
+          {
+            voting_member_count: "3",
+            voting_n: "2",
+            voting_objective_metric: "bad_rate",
+            voting_objective_direction: "maximize",
+            voting_constraints: "hit_share >= 0.10\\nbad_rate <= 0.30",
+            voting_max_combinations: "250",
+          },
+          {
+            voting_strategy_type: {
+              value: "approval",
+              selectedOptions: [strategyType],
+            },
+            voting_include_rule_ids: {
+              selectedOptions: [include],
+            },
+            voting_exclude_rule_ids: {
+              selectedOptions: [exclude],
+            },
+          },
+        ));
+        assert.deepEqual(search, {
+          request_kind: "standard_workflow",
+          workflow: "voting_candidate_search",
+          workflow_inputs: {
+            strategy_type: "approval",
+            member_count: 3,
+            n: 2,
+            objective: { metric: "bad_rate", direction: "maximize" },
+            constraints: [
+              { metric: "bad_rate", operator: "lte", value: 0.3 },
+              { metric: "hit_share", operator: "gte", value: 0.1 },
+            ],
+            include_rule_ids: [includeId],
+            exclude_rule_ids: [excludeId],
+            max_combinations: 250,
+          },
+        });
+
+        const searchId = `voting-search-${"c".repeat(32)}`;
+        const comboId = `voting-combo-${"d".repeat(32)}`;
+        const searchOption = projectionOption(searchId, {
+          strategyType: "approval",
+        });
+        const comboOption = projectionOption(comboId, {
+          sourceSearchId: searchId,
+        });
+        const build = collectStrategyCandidateLabRequest(makeForm(
+          "voting_candidate_build_from_search",
+          {},
+          {
+            voting_search_id: {
+              value: searchId,
+              selectedOptions: [searchOption],
+            },
+            voting_combo_id: {
+              value: comboId,
+              selectedOptions: [comboOption],
+            },
+          },
+        ));
+        assert.deepEqual(build, {
+          request_kind: "standard_workflow",
+          workflow: "voting_candidate_build_from_search",
+          workflow_inputs: {
+            search_id: searchId,
+            combo_id: comboId,
+            strategy_type: "approval",
+          },
+        });
+
+        for (const forbidden of [
+          "pool_ref",
+          "artifact_id",
+          "content_hash",
+          "dataset_id",
+          "target_col",
+          "hit_matrix",
+          "score_vector",
+        ]) {
+          assert.equal(forbidden in search.workflow_inputs, false);
+          assert.equal(forbidden in build.workflow_inputs, false);
+        }
+
+        assert.throws(
+          () => collectStrategyCandidateLabRequest(makeForm(
+            "voting_candidate_build_from_search",
+            {},
+            {
+              voting_search_id: {
+                value: searchId,
+                selectedOptions: [{ value: searchId, dataset: {} }],
+              },
+              voting_combo_id: {
+                value: comboId,
+                selectedOptions: [comboOption],
+              },
+            },
+          )),
+          /受认证投影/,
+        );
+        """
+    )
+
+
+def test_candidate_lab_renders_voting_search_as_unselected_development_evidence():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          strategyCandidateLabResultsHtml,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        const searchId = `voting-search-${"a".repeat(32)}`;
+        const comboId = `voting-combo-${"b".repeat(32)}`;
+        const ruleId = `candidate-rule-${"c".repeat(32)}`;
+        const item = {
+          search_id: searchId,
+          strategy_type: "approval",
+          pool_revision: 7,
+          member_count: 3,
+          n: 2,
+          objective: { metric: "bad_rate", direction: "minimize" },
+          constraints: [{ metric: "hit_share", operator: "gte", value: 0.1 }],
+          include_rule_ids: [],
+          exclude_rule_ids: [],
+          max_combinations: 500,
+          search_space: 50,
+          evaluated: 20,
+          eligible: 12,
+          truncated: true,
+          combinations: [{
+            combo_id: comboId,
+            members: [ruleId],
+            eligible: false,
+            failures: [{ metric: "hit_share", operator: "gte", value: 0.1 }],
+            metrics: { hit_share: 0.08, bad_rate: 0.2 },
+          }],
+          artifact: {
+            artifact_id: "task-artifact-voting",
+            created_at: "2026-07-25T00:00:00+00:00",
+            download_url: "/api/tasks/task-1/task-artifacts/artifact/download",
+          },
+        };
+        const html = strategyCandidateLabResultsHtml({
+          candidates: {
+            voting_search: {
+              latest: item,
+              all: [item],
+              total: 1,
+              limit: 20,
+              truncated: false,
+            },
+          },
+          pools: { latest: null, all: [], total: 0, truncated: false },
+        });
+
+        assert.match(html, /Voting 组合搜索/);
+        assert.ok(html.includes(searchId));
+        assert.ok(html.includes(comboId));
+        assert.ok(html.includes(ruleId));
+        assert.match(html, /未构建\\/未入池/);
+        assert.match(html, /不表达最佳、冠军或平台选择/);
+        for (const secret of [
+          "hit_matrix",
+          "score_vector",
+          "dataset_binding",
+          "content_hash",
+          "raw_provenance",
+        ]) {
+          assert.equal(html.includes(secret), false, secret);
+        }
+        """
+    )
+
+
 def test_scorecard_projection_has_dedicated_band_and_cutoff_evidence_tables():
     run_node(
         """
@@ -1558,6 +1768,8 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
         "scorecard_band_build",
         "scorecard_cutoff_selection",
         "candidate_monthly_stability",
+        "voting_candidate_search",
+        "voting_candidate_build_from_search",
     ):
         assert f'data-candidate-lab-workflow="{workflow}"' in index_html
     refinement_start = index_html.index(
@@ -1606,11 +1818,51 @@ def test_candidate_lab_refreshes_after_settle_once_but_never_per_poll_tick():
         "month_col",
     ):
         assert forbidden not in stability_html
+    voting_search_start = index_html.index(
+        'data-candidate-lab-workflow="voting_candidate_search"'
+    )
+    voting_search_end = index_html.index("</form>", voting_search_start)
+    voting_search_html = index_html[voting_search_start:voting_search_end]
+    for field in (
+        "voting_strategy_type",
+        "voting_member_count",
+        "voting_n",
+        "voting_objective_metric",
+        "voting_objective_direction",
+        "voting_constraints",
+        "voting_include_rule_ids",
+        "voting_exclude_rule_ids",
+        "voting_max_combinations",
+    ):
+        assert f'data-candidate-lab-field="{field}"' in voting_search_html
+    voting_build_start = index_html.index(
+        'data-candidate-lab-workflow="voting_candidate_build_from_search"'
+    )
+    voting_build_end = index_html.index("</form>", voting_build_start)
+    voting_build_html = index_html[voting_build_start:voting_build_end]
+    assert 'data-candidate-lab-field="voting_search_id"' in voting_build_html
+    assert 'data-candidate-lab-field="voting_combo_id"' in voting_build_html
+    for forbidden in (
+        "pool_ref",
+        "artifact_id",
+        "content_hash",
+        "dataset_id",
+        "target_col",
+        "hit_matrix",
+        "score_vector",
+        "objective_value",
+        "rank",
+        "best",
+        "champion",
+    ):
+        assert forbidden not in voting_search_html
+        assert forbidden not in voting_build_html
     assert "原始 PD 越高表示风险越高" in index_html
     assert "评分卡分数越高表示更安全" in index_html
     assert "不等于通过或拒绝动作" in index_html
     assert "不会自动进入 Strategy Pool" in index_html
     assert "最佳 Cutoff" not in index_html
+    assert "不会自动构建、选择、入池或部署" in index_html
     assert "text:001" in index_html
     assert "number:-9999" in index_html
     assert ".candidate-lab-layout" in workbench_css

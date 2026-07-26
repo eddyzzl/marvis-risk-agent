@@ -39,10 +39,13 @@ from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignExecutionBinding,
     StrategySampleDesignRef,
     bind_strategy_development_frame,
+    load_historical_strategy_sample_design_execution_binding,
     load_strategy_sample_design_execution_binding,
+    require_historical_strategy_sample_design_execution_binding_on_connection,
     require_strategy_sample_design_execution_binding_on_connection,
 )
 from marvis.packs.strategy.sample_design_tools import (
+    load_historical_strategy_sample_design_artifact,
     load_strategy_sample_design_artifact,
 )
 from marvis.packs.strategy.sample_design_v2 import (
@@ -436,6 +439,46 @@ def load_strategy_sample_design_v2_artifacts(
             expected_sample_design_content_hash=(
                 expected_sample_design_content_hash
             ),
+            require_current_workspace=True,
+        )
+    except StrategyError:
+        raise
+    except _BOUNDARY_ERRORS as exc:
+        raise StrategyError(str(exc)) from exc
+
+
+def load_historical_strategy_sample_design_v2_artifacts(
+    runtime,
+    *,
+    task_id: str,
+    membership_artifact_id: str,
+    expected_membership_artifact_content_hash: str,
+    bundle_artifact_id: str,
+    expected_bundle_artifact_content_hash: str,
+    expected_bundle_id: str,
+    expected_sample_design_id: str,
+    expected_sample_design_content_hash: str,
+) -> StrategySampleDesignV2ArtifactBinding:
+    """Load immutable V2 evidence without requiring its workspace as head."""
+
+    try:
+        return _load_strategy_sample_design_v2_artifacts(
+            runtime,
+            task_id=task_id,
+            membership_artifact_id=membership_artifact_id,
+            expected_membership_artifact_content_hash=(
+                expected_membership_artifact_content_hash
+            ),
+            bundle_artifact_id=bundle_artifact_id,
+            expected_bundle_artifact_content_hash=(
+                expected_bundle_artifact_content_hash
+            ),
+            expected_bundle_id=expected_bundle_id,
+            expected_sample_design_id=expected_sample_design_id,
+            expected_sample_design_content_hash=(
+                expected_sample_design_content_hash
+            ),
+            require_current_workspace=False,
         )
     except StrategyError:
         raise
@@ -449,9 +492,39 @@ def require_strategy_sample_design_v2_artifact_binding_on_connection(
 ) -> None:
     """Revalidate a loaded V2 artifact pair while a downstream writer holds a lock."""
 
+    _require_strategy_sample_design_v2_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_workspace=True,
+    )
+
+
+def require_historical_strategy_sample_design_v2_artifact_binding_on_connection(
+    conn,
+    binding: StrategySampleDesignV2ArtifactBinding,
+) -> None:
+    """Revalidate immutable V2 evidence without requiring workspace head."""
+
+    _require_strategy_sample_design_v2_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_workspace=False,
+    )
+
+
+def _require_strategy_sample_design_v2_artifact_binding_on_connection(
+    conn,
+    binding: StrategySampleDesignV2ArtifactBinding,
+    *,
+    require_current_workspace: bool,
+) -> None:
     if not isinstance(binding, StrategySampleDesignV2ArtifactBinding):
         raise StrategyError("sample-design V2 artifact binding is invalid")
-    _require_live_binding_on_connection(conn, binding=binding.source_binding)
+    _require_live_binding_on_connection(
+        conn,
+        binding=binding.source_binding,
+        require_current_workspace=require_current_workspace,
+    )
     membership_raw = encode_sample_membership(
         task_id=binding.membership["header"]["task_id"],
         dataset_id=binding.membership["header"]["dataset_ref"]["dataset_id"],
@@ -528,6 +601,7 @@ def _load_strategy_sample_design_v2_artifacts(
     expected_bundle_id: str,
     expected_sample_design_id: str,
     expected_sample_design_content_hash: str,
+    require_current_workspace: bool,
 ) -> StrategySampleDesignV2ArtifactBinding:
 
     normalized_task = _text(task_id, "task_id")
@@ -626,7 +700,20 @@ def _load_strategy_sample_design_v2_artifacts(
         bundle_file_hash=bundle_file_hash,
     )
     request = _validate_inputs(bundle_provenance["request"])
-    binding = _load_live_binding(runtime, task_id=normalized_task, request=request)
+    binding = (
+        _load_live_binding(
+            runtime,
+            task_id=normalized_task,
+            request=request,
+        )
+        if require_current_workspace
+        else _load_historical_live_binding(
+            runtime,
+            task_id=normalized_task,
+            request=request,
+            source=bundle_provenance,
+        )
+    )
     normalized_request = _normalize_request_against_columns(request, binding)
     if _canonical_json(normalized_request) != _canonical_json(bundle_provenance["request"]):
         raise StrategyError("sample-design V2 provenance request is not canonical")
@@ -678,7 +765,13 @@ def _load_strategy_sample_design_v2_artifacts(
         raise StrategyError("sample-design V2 bundle no longer matches deterministic evidence")
     _require_source_provenance(membership_provenance, binding=binding)
     _require_source_provenance(bundle_provenance, binding=binding)
-    _require_live_binding(runtime, binding=binding, request=normalized_request)
+    _require_live_binding(
+        runtime,
+        binding=binding,
+        request=normalized_request,
+        source=bundle_provenance,
+        require_current_workspace=require_current_workspace,
+    )
     return StrategySampleDesignV2ArtifactBinding(
         task_id=normalized_task,
         membership_artifact_id=membership_aid,
@@ -934,6 +1027,102 @@ def _load_live_binding(runtime, *, task_id: str, request: Mapping[str, Any]) -> 
                 (str(column), str(role))
                 for column, role in workspace.semantic_mapping.field_roles.items()
             )
+        ),
+        legacy=legacy,
+    )
+
+
+def _load_historical_live_binding(
+    runtime,
+    *,
+    task_id: str,
+    request: Mapping[str, Any],
+    source: Mapping[str, Any],
+) -> _LiveBinding:
+    """Recover an immutable V2 source without consulting workspace head."""
+
+    ref = StrategySampleDesignRef.from_value(request["legacy_sample_design_ref"])
+    if source["task_id"] != task_id or source["legacy_sample_design_ref"] != (
+        ref.to_ref_dict()
+    ):
+        raise StrategyError("sample-design V2 historical source binding changed")
+    legacy_artifact = load_historical_strategy_sample_design_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=ref.artifact_id,
+        expected_artifact_content_hash=ref.artifact_content_hash,
+        expected_sample_design_id=ref.sample_design_id,
+        expected_sample_design_content_hash=ref.sample_design_content_hash,
+    )
+    legacy_design = legacy_artifact.bundle["sample_design"]
+    target_definition = legacy_design["target_definition"]
+    optional = legacy_design["optional_fields"]
+    legacy = load_historical_strategy_sample_design_execution_binding(
+        runtime,
+        task_id=task_id,
+        sample_design_ref=ref.to_ref_dict(),
+        dataset_id=source["dataset_id"],
+        dataset_content_hash=source["dataset_content_hash"],
+        workspace_revision=source["workspace_revision"],
+        workspace_generation=source["workspace_generation"],
+        semantic_mapping_hash=source["semantic_mapping_hash"],
+        target_col=target_definition["column"],
+        drop_nan_labels=target_definition["drop_nan_labels"],
+        month_col=optional["month_field"],
+        weight_col=optional["weight_field"],
+        loan_amount_col=optional["loan_amount_field"],
+        overdue_amount_col=optional["overdue_amount_field"],
+    )
+    try:
+        dataset = runtime.registry.get(source["dataset_id"])
+        path = Path(runtime.registry.resolve_verified_path(source["dataset_id"]))
+    except (KeyError, OSError, TypeError, ValueError, DatasetContentDriftError) as exc:
+        raise StrategyError(
+            "sample-design V2 historical dataset is unavailable or drifted"
+        ) from exc
+    if (
+        str(dataset.task_id) != task_id
+        or str(dataset.id) != source["dataset_id"]
+        or str(dataset.source_path) != source["dataset_source_path"]
+        or not _matches_hash(
+            dataset.content_hash,
+            source["dataset_content_hash"],
+        )
+        or not hmac.compare_digest(
+            sha256_file(path),
+            source["dataset_content_hash"],
+        )
+    ):
+        raise StrategyError("sample-design V2 historical dataset binding changed")
+    with runtime.task_artifacts.transaction() as conn:
+        metadata_hash = _dataset_metadata_hash_on_connection(
+            conn,
+            task_id=task_id,
+            dataset_id=str(dataset.id),
+            expected_content_hash=str(dataset.content_hash),
+        )
+    if not hmac.compare_digest(
+        metadata_hash,
+        source["dataset_registry_metadata_hash"],
+    ):
+        raise StrategyError(
+            "sample-design V2 historical dataset metadata changed"
+        )
+    time_field = request["field_bindings"]["time_field"]
+    return _LiveBinding(
+        task_id=task_id,
+        dataset_id=str(dataset.id),
+        dataset_content_hash=str(dataset.content_hash),
+        dataset_source_path=str(dataset.source_path),
+        dataset_path=path,
+        dataset_registry_metadata_hash=metadata_hash,
+        row_count=int(dataset.row_count),
+        columns=tuple(str(column.name) for column in dataset.columns),
+        workspace_revision=source["workspace_revision"],
+        workspace_generation=source["workspace_generation"],
+        semantic_mapping_hash=source["semantic_mapping_hash"],
+        semantic_field_roles=(
+            () if time_field is None else ((str(time_field), "date"),)
         ),
         legacy=legacy,
     )
@@ -1808,14 +1997,66 @@ def _warnings(bundle: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _require_live_binding(runtime, *, binding: _LiveBinding, request: Mapping[str, Any]) -> None:
-    current = _load_live_binding(runtime, task_id=binding.task_id, request=request)
+def _require_live_binding(
+    runtime,
+    *,
+    binding: _LiveBinding,
+    request: Mapping[str, Any],
+    source: Mapping[str, Any] | None = None,
+    require_current_workspace: bool = True,
+) -> None:
+    current = (
+        _load_live_binding(
+            runtime,
+            task_id=binding.task_id,
+            request=request,
+        )
+        if require_current_workspace
+        else _load_historical_live_binding(
+            runtime,
+            task_id=binding.task_id,
+            request=request,
+            source=(
+                source
+                if source is not None
+                else {
+                    "task_id": binding.task_id,
+                    "dataset_id": binding.dataset_id,
+                    "dataset_content_hash": binding.dataset_content_hash,
+                    "dataset_source_path": binding.dataset_source_path,
+                    "dataset_registry_metadata_hash": (
+                        binding.dataset_registry_metadata_hash
+                    ),
+                    "workspace_revision": binding.workspace_revision,
+                    "workspace_generation": binding.workspace_generation,
+                    "semantic_mapping_hash": binding.semantic_mapping_hash,
+                    "legacy_sample_design_ref": (
+                        binding.legacy.reference.to_ref_dict()
+                    ),
+                }
+            ),
+        )
+    )
     if current != binding:
         raise StrategyError("sample-design V2 live binding changed during computation")
 
 
-def _require_live_binding_on_connection(conn, *, binding: _LiveBinding) -> None:
-    require_strategy_sample_design_execution_binding_on_connection(conn, binding.legacy)
+def _require_live_binding_on_connection(
+    conn,
+    *,
+    binding: _LiveBinding,
+    require_current_workspace: bool = True,
+) -> None:
+    if require_current_workspace:
+        require_strategy_sample_design_execution_binding_on_connection(
+            conn,
+            binding.legacy,
+        )
+    else:
+        require_historical_strategy_sample_design_execution_binding_on_connection(
+            conn,
+            binding.legacy,
+        )
     metadata_hash = _dataset_metadata_hash_on_connection(
         conn,
         task_id=binding.task_id,
@@ -2503,7 +2744,9 @@ __all__ = [
     "SAMPLE_DESIGN_V2_ORIGIN_TOOL",
     "SAMPLE_DESIGN_V2_TOOL_SCHEMA_VERSION",
     "StrategySampleDesignV2ArtifactBinding",
+    "load_historical_strategy_sample_design_v2_artifacts",
     "load_strategy_sample_design_v2_artifacts",
+    "require_historical_strategy_sample_design_v2_artifact_binding_on_connection",
     "require_strategy_sample_design_v2_artifact_binding_on_connection",
     "run_materialize_sample_design_v2",
     "validate_materialize_sample_design_v2_tool_output",

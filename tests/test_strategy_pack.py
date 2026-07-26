@@ -247,6 +247,45 @@ def test_report_bundle_manifest_accepts_only_exact_optional_candidate_stability_
         )
 
 
+def test_report_bundle_manifest_accepts_only_exact_optional_voting_search_ref(
+    tmp_path,
+) -> None:
+    manifest = _real_builtin_registry(tmp_path).get("strategy")
+    tool = next(
+        item for item in manifest.tools if item.name == "build_report_bundle_v2"
+    )
+    schema = tool.input_schema
+    voting_schema = {
+        **schema["$defs"]["voting_candidate_search_ref"],
+        "$defs": {"sha256": schema["$defs"]["sha256"]},
+    }
+    voting_ref = {
+        "artifact_id": "a" * 64,
+        "expected_artifact_content_hash": "b" * 64,
+        "expected_search_id": "voting-search-" + ("1" * 32),
+        "expected_search_content_hash": "c" * 64,
+    }
+
+    assert schema["properties"]["voting_candidate_search_ref"] == {
+        "$ref": "#/$defs/voting_candidate_search_ref"
+    }
+    assert "voting_candidate_search_ref" not in schema["required"]
+    assert set(voting_schema["properties"]) == set(voting_ref)
+    assert set(voting_schema["required"]) == set(voting_ref)
+    assert voting_schema["additionalProperties"] is False
+    validate_against_schema(
+        voting_ref,
+        voting_schema,
+        label="voting_candidate_search_ref",
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_against_schema(
+            {**voting_ref, "schema_version": "forged.v1"},
+            voting_schema,
+            label="voting_candidate_search_ref",
+        )
+
+
 def test_strategy_v2_materializers_are_thin_runtime_forwarders(monkeypatch):
     ctx = object()
     runtime = object()
@@ -461,7 +500,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert delivery_tool.output_schema["additionalProperties"] is False
     report_output_schema = report_bundle_tool.output_schema
     assert report_output_schema["properties"]["schema_version"] == {
-        "const": "strategy.build-report-bundle-v2-tool.v3"
+        "const": "strategy.build-report-bundle-v2-tool.v4"
     }
     report_artifacts = report_output_schema["properties"]["artifacts"]
     assert report_artifacts["minItems"] == 4

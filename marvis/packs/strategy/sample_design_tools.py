@@ -359,6 +359,49 @@ def load_strategy_sample_design_artifact(
 ) -> StrategySampleDesignArtifactBinding:
     """Load a task-owned sample design only after strict registry/byte validation."""
 
+    return _load_strategy_sample_design_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_artifact_content_hash=expected_artifact_content_hash,
+        expected_sample_design_id=expected_sample_design_id,
+        expected_sample_design_content_hash=expected_sample_design_content_hash,
+        require_current_workspace=True,
+    )
+
+
+def load_historical_strategy_sample_design_artifact(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+    expected_sample_design_id: str,
+    expected_sample_design_content_hash: str,
+) -> StrategySampleDesignArtifactBinding:
+    """Load immutable sample evidence without requiring its workspace as head."""
+
+    return _load_strategy_sample_design_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_artifact_content_hash=expected_artifact_content_hash,
+        expected_sample_design_id=expected_sample_design_id,
+        expected_sample_design_content_hash=expected_sample_design_content_hash,
+        require_current_workspace=False,
+    )
+
+
+def _load_strategy_sample_design_artifact(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+    expected_sample_design_id: str,
+    expected_sample_design_content_hash: str,
+    require_current_workspace: bool,
+) -> StrategySampleDesignArtifactBinding:
     normalized_task_id = _text(task_id, "task_id")
     normalized_artifact_id = _hash(artifact_id, "artifact_id")
     artifact_hash = _hash(
@@ -443,7 +486,10 @@ def load_strategy_sample_design_artifact(
     ):
         raise StrategyError("strategy sample-design artifact content binding changed")
     _require_bundle_provenance(bundle, provenance)
-    _require_loaded_source_live(runtime, provenance=provenance)
+    if require_current_workspace:
+        _require_loaded_source_live(runtime, provenance=provenance)
+    else:
+        _require_loaded_source_available(runtime, provenance=provenance)
     return StrategySampleDesignArtifactBinding(
         artifact_id=normalized_artifact_id,
         task_id=normalized_task_id,
@@ -1246,6 +1292,36 @@ def _validate_provenance_scalars(provenance: Mapping[str, Any]) -> None:
 def _require_loaded_source_live(runtime, *, provenance: Mapping[str, Any]) -> None:
     """Re-authenticate the dataset registry, bytes, and current workspace binding."""
 
+    _require_loaded_source_available(runtime, provenance=provenance)
+    task_id = provenance["task_id"]
+    dataset_id = provenance["dataset_id"]
+    try:
+        workspace = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
+            task_id
+        )
+    except (DataWorkspaceDataError, DataWorkspaceDatasetNotFound) as exc:
+        raise StrategyError("strategy sample-design DataWorkspace is unavailable") from exc
+    if (
+        workspace.active_dataset_id != dataset_id
+        or workspace.active_dataset_content_hash != provenance["dataset_content_hash"]
+        or workspace.revision != provenance["workspace_revision"]
+        or workspace.analysis_generation != provenance["workspace_generation"]
+        or not hmac.compare_digest(
+            data_semantic_mapping_hash(workspace.semantic_mapping),
+            provenance["semantic_mapping_hash"],
+        )
+        or workspace.semantic_mapping.target_col != provenance["target_col"]
+    ):
+        raise StrategyError("strategy sample-design DataWorkspace binding changed")
+
+
+def _require_loaded_source_available(
+    runtime,
+    *,
+    provenance: Mapping[str, Any],
+) -> None:
+    """Re-authenticate immutable source rows and bytes, independent of head."""
+
     task_id = provenance["task_id"]
     dataset_id = provenance["dataset_id"]
     try:
@@ -1271,24 +1347,6 @@ def _require_loaded_source_live(runtime, *, provenance: Mapping[str, Any]) -> No
         )
     if not _matches_hash(metadata_hash, provenance["registry_metadata_hash"]):
         raise StrategyError("strategy sample-design dataset metadata changed")
-    try:
-        workspace = DataWorkspaceRepository(runtime.settings.db_path).get_or_default(
-            task_id
-        )
-    except (DataWorkspaceDataError, DataWorkspaceDatasetNotFound) as exc:
-        raise StrategyError("strategy sample-design DataWorkspace is unavailable") from exc
-    if (
-        workspace.active_dataset_id != dataset_id
-        or workspace.active_dataset_content_hash != provenance["dataset_content_hash"]
-        or workspace.revision != provenance["workspace_revision"]
-        or workspace.analysis_generation != provenance["workspace_generation"]
-        or not hmac.compare_digest(
-            data_semantic_mapping_hash(workspace.semantic_mapping),
-            provenance["semantic_mapping_hash"],
-        )
-        or workspace.semantic_mapping.target_col != provenance["target_col"]
-    ):
-        raise StrategyError("strategy sample-design DataWorkspace binding changed")
 
 
 def _tool_output(
@@ -1475,6 +1533,7 @@ __all__ = [
     "SAMPLE_DESIGN_ORIGIN_TOOL",
     "SAMPLE_DESIGN_TOOL_SCHEMA_VERSION",
     "StrategySampleDesignArtifactBinding",
+    "load_historical_strategy_sample_design_artifact",
     "load_strategy_sample_design_artifact",
     "run_materialize_sample_design",
     "validate_materialize_sample_design_tool_output",

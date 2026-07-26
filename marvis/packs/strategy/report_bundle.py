@@ -180,7 +180,12 @@ _STAGE_REF_KINDS = {
         }
     ),
     "backtest_result_ref": frozenset(
-        {"backtest", "pool_impact", "strategy_impact"}
+        {
+            "backtest",
+            "pool_impact",
+            "strategy_impact",
+            "voting_candidate_search",
+        }
     ),
     "validation_result_ref": frozenset(
         {"model_score_evidence", "strategy_impact", "strategy_validation"}

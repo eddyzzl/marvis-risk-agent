@@ -217,6 +217,10 @@ class TaskArtifactRepository:
         normalized_kind = _required_text(kind, field="kind")
         bounded_limit = max(1, int(limit))
         with connect(self.db_path) as conn:
+            # The count and bounded window form one selection decision.  An
+            # explicit read transaction is required because sqlite3's
+            # DEFERRED isolation does not begin a snapshot for bare SELECTs.
+            conn.execute("BEGIN")
             count_row = conn.execute(
                 """
                 SELECT COUNT(*) AS total

@@ -141,6 +141,8 @@ _DOCX_MAX_STAGE_ROWS_TOTAL = 50
 _DOCX_MAX_REPORT_TABLES = 20
 _DOCX_MAX_FACT_ROWS_PER_TABLE = 120
 _DOCX_MAX_FACT_ROWS_TOTAL = 360
+_DOCX_VOTING_SEARCH_TABLE_ID = "voting_candidate_search_combinations"
+_DOCX_MAX_VOTING_SEARCH_ROWS = 20
 _DOCX_MAX_RED_FLAGS_PER_SECTION = 30
 _DOCX_MAX_RED_FLAGS_TOTAL = 80
 _DOCX_MAX_MISSING_INFORMATION_ROWS = 100
@@ -149,6 +151,16 @@ _DOCX_TRUNCATION_SUFFIX = "…[内容已截断；完整内容见 JSON/XLSX]"
 _DOCX_SUMMARY_WIDTHS = (1_600, 1_800, 1_200, 2_000, 2_760)
 _DOCX_STAGE_WIDTHS = (1_450, 1_300, 1_300, 5_310)
 _DOCX_FACT_WIDTHS = (1_200, 1_600, 1_400, 1_300, 2_100, 1_760)
+_DOCX_VOTING_SEARCH_WIDTHS = (
+    1_200,
+    1_360,
+    1_460,
+    420,
+    620,
+    1_100,
+    1_360,
+    1_840,
+)
 _DOCX_FLAG_WIDTHS = (1_150, 1_700, 4_150, 2_360)
 _DOCX_COMPLETENESS_WIDTHS = (2_100, 4_000, 3_260)
 _DOCX_MISSING_WIDTHS = (1_850, 1_150, 1_150, 4_050, 1_160)
@@ -685,6 +697,90 @@ def _set_docx_paragraph_bottom_border(
     bottom.set(qn("w:color"), color)
 
 
+def _write_docx_voting_search_table(
+    document: Any,
+    table: Mapping[str, Any],
+    *,
+    maximum_rows: int,
+) -> tuple[int, int]:
+    """Render the reserved Voting table within local and global row budgets."""
+
+    expected_keys = (
+        "search_id",
+        "combo_id",
+        "member_ids",
+        "n",
+        "eligible",
+        "objective_metric",
+        "objective_direction",
+        "objective_value",
+        "constraint_failures",
+        "metrics",
+    )
+    columns = {column["key"]: column for column in table["columns"]}
+    if set(columns) != set(expected_keys):
+        raise StrategyReportOutputError(
+            "Voting search report table columns are invalid"
+        )
+    total = len(table["rows"])
+    shown_rows = list(
+        islice(
+            table["rows"],
+            min(
+                _DOCX_MAX_VOTING_SEARCH_ROWS,
+                max(0, maximum_rows),
+            ),
+        )
+    )
+    rendered_rows = []
+    for row in shown_rows:
+        cells = row["cells"]
+
+        def display(key: str) -> str:
+            return _docx_text(
+                _table_field_display_value(
+                    cells[key],
+                    column=columns[key],
+                )
+            )
+
+        rendered_rows.append(
+            (
+                display("search_id"),
+                display("combo_id"),
+                display("member_ids"),
+                display("n"),
+                display("eligible"),
+                " / ".join(
+                    (
+                        display("objective_metric"),
+                        display("objective_direction"),
+                        display("objective_value"),
+                    )
+                ),
+                display("constraint_failures"),
+                display("metrics"),
+            )
+        )
+    _add_docx_table(
+        document,
+        headers=(
+            "搜索ID",
+            "组合ID",
+            "成员规则ID",
+            "n",
+            "约束通过",
+            "目标指标 / 方向 / 值",
+            "约束未通过明细",
+            "完整指标",
+        ),
+        rows=rendered_rows,
+        widths=_DOCX_VOTING_SEARCH_WIDTHS,
+        centered_columns=frozenset({3, 4}),
+    )
+    return len(rendered_rows), total
+
+
 def _write_docx_section(
     document: Any,
     *,
@@ -805,45 +901,60 @@ def _write_docx_section(
         _add_docx_run(metadata, "    内容类型: ", bold=True)
         _add_docx_run(metadata, table["content_class"])
 
-        fact_total = len(table["rows"]) * len(table["columns"])
-        fact_limit = min(
-            fact_total,
-            _DOCX_MAX_FACT_ROWS_PER_TABLE,
-            budget.fact_rows_remaining,
-        )
-        fact_rows = []
-        for row in table["rows"]:
-            for column in table["columns"]:
+        if table["table_id"] == _DOCX_VOTING_SEARCH_TABLE_ID:
+            voting_shown, voting_total = _write_docx_voting_search_table(
+                document,
+                table,
+                maximum_rows=budget.fact_rows_remaining,
+            )
+            budget.fact_rows_remaining -= voting_shown
+            if voting_shown < voting_total:
+                _write_docx_truncation_notice(
+                    document,
+                    scope=f"表 {table['table_id']} 组合行",
+                    shown=voting_shown,
+                    total=voting_total,
+                )
+        else:
+            fact_total = len(table["rows"]) * len(table["columns"])
+            fact_limit = min(
+                fact_total,
+                _DOCX_MAX_FACT_ROWS_PER_TABLE,
+                budget.fact_rows_remaining,
+            )
+            fact_rows = []
+            for row in table["rows"]:
+                for column in table["columns"]:
+                    if len(fact_rows) >= fact_limit:
+                        break
+                    field = row["cells"][column["key"]]
+                    fact_rows.append(
+                        (
+                            row["row_id"],
+                            column["label"],
+                            _table_field_display_value(field, column=column),
+                            _AVAILABILITY_LABELS[field["availability"]],
+                            field["note"],
+                            _docx_compact_refs(field["source_refs"]),
+                        )
+                    )
                 if len(fact_rows) >= fact_limit:
                     break
-                field = row["cells"][column["key"]]
-                fact_rows.append(
-                    (
-                        row["row_id"],
-                        column["label"],
-                        _table_field_display_value(field, column=column),
-                        _AVAILABILITY_LABELS[field["availability"]],
-                        field["note"],
-                        _docx_compact_refs(field["source_refs"]),
-                    )
-                )
-            if len(fact_rows) >= fact_limit:
-                break
-        _add_docx_table(
-            document,
-            headers=("行 ID", "字段", "值", "状态", "说明", "来源"),
-            rows=fact_rows,
-            widths=_DOCX_FACT_WIDTHS,
-            centered_columns=frozenset({2, 3}),
-        )
-        budget.fact_rows_remaining -= len(fact_rows)
-        if len(fact_rows) < fact_total:
-            _write_docx_truncation_notice(
+            _add_docx_table(
                 document,
-                scope=f"表 {table['table_id']} 事实行",
-                shown=len(fact_rows),
-                total=fact_total,
+                headers=("行 ID", "字段", "值", "状态", "说明", "来源"),
+                rows=fact_rows,
+                widths=_DOCX_FACT_WIDTHS,
+                centered_columns=frozenset({2, 3}),
             )
+            budget.fact_rows_remaining -= len(fact_rows)
+            if len(fact_rows) < fact_total:
+                _write_docx_truncation_notice(
+                    document,
+                    scope=f"表 {table['table_id']} 事实行",
+                    shown=len(fact_rows),
+                    total=fact_total,
+                )
         source = document.add_paragraph()
         source.paragraph_format.space_before = Pt(4)
         source.paragraph_format.space_after = Pt(4)

@@ -33,14 +33,18 @@ from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.evidence import RAW_SCORE_PRODUCT
 from marvis.packs.modeling.score_evidence_tools import (
     ModelScoreEvidenceArtifactBinding,
+    load_historical_model_score_evidence_artifacts,
     load_model_score_evidence_artifacts,
+    require_historical_model_score_evidence_artifact_binding_on_connection,
     require_model_score_evidence_artifact_binding_on_connection,
 )
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
+    load_historical_strategy_sample_design_v2_artifacts,
     load_strategy_sample_design_v2_artifacts,
+    require_historical_strategy_sample_design_v2_artifact_binding_on_connection,
     require_strategy_sample_design_v2_artifact_binding_on_connection,
 )
 from marvis.packs.strategy.scorecard_candidate import (
@@ -371,6 +375,49 @@ def load_scorecard_band_asset_artifact(
 ) -> ScorecardBandAssetArtifactBinding:
     """Strictly reload one canonical full-band artifact and registry binding."""
 
+    return _load_scorecard_band_asset_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_artifact_content_hash=expected_artifact_content_hash,
+        expected_asset_id=expected_asset_id,
+        expected_asset_hash=expected_asset_hash,
+        require_current_sources=True,
+    )
+
+
+def load_historical_scorecard_band_asset_artifact(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+    expected_asset_id: str,
+    expected_asset_hash: str,
+) -> ScorecardBandAssetArtifactBinding:
+    """Reload an immutable band asset without requiring source sample head."""
+
+    return _load_scorecard_band_asset_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_artifact_content_hash=expected_artifact_content_hash,
+        expected_asset_id=expected_asset_id,
+        expected_asset_hash=expected_asset_hash,
+        require_current_sources=False,
+    )
+
+
+def _load_scorecard_band_asset_artifact(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+    expected_asset_id: str,
+    expected_asset_hash: str,
+    require_current_sources: bool,
+) -> ScorecardBandAssetArtifactBinding:
     normalized_task = _safe_component(task_id, "task_id")
     normalized_artifact_id = _hash(artifact_id, "artifact_id")
     normalized_content_hash = _hash(
@@ -427,6 +474,7 @@ def load_scorecard_band_asset_artifact(
         runtime,
         task_id=normalized_task,
         asset=asset,
+        require_current_sources=require_current_sources,
     )
     return ScorecardBandAssetArtifactBinding(
         task_id=normalized_task,
@@ -452,6 +500,49 @@ def load_scorecard_cutoff_selection_artifact(
 ) -> ScorecardCutoffSelectionArtifactBinding:
     """Strictly reload one canonical pointer-only cutoff selection."""
 
+    return _load_scorecard_cutoff_selection_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_artifact_content_hash=expected_artifact_content_hash,
+        expected_selection_id=expected_selection_id,
+        expected_selection_hash=expected_selection_hash,
+        require_current_sources=True,
+    )
+
+
+def load_historical_scorecard_cutoff_selection_artifact(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+    expected_selection_id: str,
+    expected_selection_hash: str,
+) -> ScorecardCutoffSelectionArtifactBinding:
+    """Reload an immutable cutoff without requiring source sample head."""
+
+    return _load_scorecard_cutoff_selection_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_artifact_content_hash=expected_artifact_content_hash,
+        expected_selection_id=expected_selection_id,
+        expected_selection_hash=expected_selection_hash,
+        require_current_sources=False,
+    )
+
+
+def _load_scorecard_cutoff_selection_artifact(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_artifact_content_hash: str,
+    expected_selection_id: str,
+    expected_selection_hash: str,
+    require_current_sources: bool,
+) -> ScorecardCutoffSelectionArtifactBinding:
     normalized_task = _safe_component(task_id, "task_id")
     normalized_artifact_id = _hash(artifact_id, "artifact_id")
     normalized_content_hash = _hash(
@@ -512,7 +603,12 @@ def load_scorecard_cutoff_selection_artifact(
     if provenance != expected_provenance:
         raise StrategyError("scorecard cutoff selection provenance changed")
     source_ref = selection["source_asset_ref"]
-    source_asset = load_scorecard_band_asset_artifact(
+    source_loader = (
+        load_scorecard_band_asset_artifact
+        if require_current_sources
+        else load_historical_scorecard_band_asset_artifact
+    )
+    source_asset = source_loader(
         runtime,
         task_id=normalized_task,
         artifact_id=source_ref["artifact_id"],
@@ -550,6 +646,32 @@ def require_scorecard_band_asset_artifact_binding_on_connection(
 ) -> None:
     """CAS one loaded full-band artifact while a writer owns a transaction."""
 
+    _require_scorecard_band_asset_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_sources=True,
+    )
+
+
+def require_historical_scorecard_band_asset_artifact_binding_on_connection(
+    conn,
+    binding: ScorecardBandAssetArtifactBinding,
+) -> None:
+    """CAS an immutable band asset without requiring source sample head."""
+
+    _require_scorecard_band_asset_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_sources=False,
+    )
+
+
+def _require_scorecard_band_asset_artifact_binding_on_connection(
+    conn,
+    binding: ScorecardBandAssetArtifactBinding,
+    *,
+    require_current_sources: bool,
+) -> None:
     if not isinstance(binding, ScorecardBandAssetArtifactBinding):
         raise StrategyError("scorecard band artifact binding is invalid")
     _require_binding_on_connection(
@@ -562,16 +684,28 @@ def require_scorecard_band_asset_artifact_binding_on_connection(
         canonicalizer=canonical_scorecard_band_asset_json,
     )
     try:
-        require_model_score_evidence_artifact_binding_on_connection(
-            conn,
-            binding.score_evidence,
-        )
+        if require_current_sources:
+            require_model_score_evidence_artifact_binding_on_connection(
+                conn,
+                binding.score_evidence,
+            )
+        else:
+            require_historical_model_score_evidence_artifact_binding_on_connection(
+                conn,
+                binding.score_evidence,
+            )
     except ModelingError as exc:
         raise StrategyError(str(exc)) from exc
-    require_strategy_sample_design_v2_artifact_binding_on_connection(
-        conn,
-        binding.sample_design,
-    )
+    if require_current_sources:
+        require_strategy_sample_design_v2_artifact_binding_on_connection(
+            conn,
+            binding.sample_design,
+        )
+    else:
+        require_historical_strategy_sample_design_v2_artifact_binding_on_connection(
+            conn,
+            binding.sample_design,
+        )
     _require_same_sample_binding(
         binding.score_evidence,
         sample=binding.sample_design,
@@ -584,6 +718,32 @@ def require_scorecard_cutoff_selection_artifact_binding_on_connection(
 ) -> None:
     """CAS one loaded cutoff selection while a writer owns a transaction."""
 
+    _require_scorecard_cutoff_selection_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_sources=True,
+    )
+
+
+def require_historical_scorecard_cutoff_selection_artifact_binding_on_connection(
+    conn,
+    binding: ScorecardCutoffSelectionArtifactBinding,
+) -> None:
+    """CAS an immutable cutoff without requiring source sample head."""
+
+    _require_scorecard_cutoff_selection_artifact_binding_on_connection(
+        conn,
+        binding,
+        require_current_sources=False,
+    )
+
+
+def _require_scorecard_cutoff_selection_artifact_binding_on_connection(
+    conn,
+    binding: ScorecardCutoffSelectionArtifactBinding,
+    *,
+    require_current_sources: bool,
+) -> None:
     if not isinstance(binding, ScorecardCutoffSelectionArtifactBinding):
         raise StrategyError(
             "scorecard cutoff selection artifact binding is invalid"
@@ -597,10 +757,16 @@ def require_scorecard_cutoff_selection_artifact_binding_on_connection(
         parser=_parse_cutoff_selection,
         canonicalizer=canonical_scorecard_cutoff_selection_json,
     )
-    require_scorecard_band_asset_artifact_binding_on_connection(
-        conn,
-        binding.source_asset_binding,
-    )
+    if require_current_sources:
+        require_scorecard_band_asset_artifact_binding_on_connection(
+            conn,
+            binding.source_asset_binding,
+        )
+    else:
+        require_historical_scorecard_band_asset_artifact_binding_on_connection(
+            conn,
+            binding.source_asset_binding,
+        )
 
 
 def _validate_build_inputs(value: object) -> dict[str, Any]:
@@ -774,6 +940,7 @@ def _load_and_rebuild_band_sources(
     *,
     task_id: str,
     asset: Mapping[str, Any],
+    require_current_sources: bool,
 ) -> tuple[
     ModelScoreEvidenceArtifactBinding,
     StrategySampleDesignV2ArtifactBinding,
@@ -782,7 +949,12 @@ def _load_and_rebuild_band_sources(
     score_ref = refs["score_evidence"]
     vector_ref = refs["score_vector"]
     try:
-        score = load_model_score_evidence_artifacts(
+        score_loader = (
+            load_model_score_evidence_artifacts
+            if require_current_sources
+            else load_historical_model_score_evidence_artifacts
+        )
+        score = score_loader(
             _modeling_runtime(runtime),
             task_id=task_id,
             evidence_artifact_id=score_ref["artifact_id"],
@@ -796,7 +968,12 @@ def _load_and_rebuild_band_sources(
         )
     except ModelingError as exc:
         raise StrategyError(str(exc)) from exc
-    sample = load_strategy_sample_design_v2_artifacts(
+    sample_loader = (
+        load_strategy_sample_design_v2_artifacts
+        if require_current_sources
+        else load_historical_strategy_sample_design_v2_artifacts
+    )
+    sample = sample_loader(
         runtime,
         task_id=task_id,
         **asset["sample_design_ref"],
@@ -2143,8 +2320,12 @@ __all__ = [
     "SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND",
     "ScorecardBandAssetArtifactBinding",
     "ScorecardCutoffSelectionArtifactBinding",
+    "load_historical_scorecard_band_asset_artifact",
+    "load_historical_scorecard_cutoff_selection_artifact",
     "load_scorecard_band_asset_artifact",
     "load_scorecard_cutoff_selection_artifact",
+    "require_historical_scorecard_band_asset_artifact_binding_on_connection",
+    "require_historical_scorecard_cutoff_selection_artifact_binding_on_connection",
     "require_scorecard_band_asset_artifact_binding_on_connection",
     "require_scorecard_cutoff_selection_artifact_binding_on_connection",
     "run_build_scorecard_band_asset",

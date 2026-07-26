@@ -2337,6 +2337,12 @@ STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
             "Optional exact authenticated candidate monthly stability evidence",
         ),
         SlotSpec(
+            "voting_candidate_search_ref",
+            False,
+            "task_context",
+            "Optional exact authenticated Voting candidate search evidence",
+        ),
+        SlotSpec(
             "report_revision",
             True,
             "task_context",
@@ -2398,6 +2404,9 @@ STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
                 "pool_impact_ref": "{slot:pool_impact_ref}",
                 "impact_cube_ref": "{slot:impact_cube_ref}",
                 "candidate_stability_ref": "{slot:candidate_stability_ref}",
+                "voting_candidate_search_ref": (
+                    "{slot:voting_candidate_search_ref}"
+                ),
                 "report_revision": "{slot:report_revision}",
                 "previous_report_id": "{slot:previous_report_id}",
                 "previous_report_content_hash": (

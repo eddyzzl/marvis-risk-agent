@@ -1798,6 +1798,121 @@
                         <button type="submit" class="button compact primary">测算逐月稳定性</button>
                       </form>
                     </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>Voting 组合搜索</strong><small>在当前 Pool 规则中确定性枚举 n-of-k 组合</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="voting_candidate_search">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Strategy Pool <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="voting_strategy_type">
+                            <option value="">等待当前 Pool 受认证投影</option>
+                          </select>
+                        </label>
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>组合成员数 K <b aria-hidden="true">*</b></span>
+                            <input type="number" min="2" max="50" step="1" value="3" data-candidate-lab-field="voting_member_count">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>命中阈值 n <b aria-hidden="true">*</b></span>
+                            <input type="number" min="1" max="50" step="1" value="2" data-candidate-lab-field="voting_n">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>排序指标 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="voting_objective_metric">
+                              <option value="bad_capture_rate">坏样本捕获率</option>
+                              <option value="bad_rate">坏率</option>
+                              <option value="lift">Lift</option>
+                              <option value="hit_share">命中占比</option>
+                              <option value="hit_count">命中样本数</option>
+                              <option value="good_count">好样本数</option>
+                              <option value="bad_count">坏样本数</option>
+                              <option value="weighted_hit_total">加权命中总量</option>
+                              <option value="weighted_hit_share">加权命中占比</option>
+                              <option value="weighted_good_total">加权好样本总量</option>
+                              <option value="weighted_bad_total">加权坏样本总量</option>
+                              <option value="weighted_bad_rate">加权坏率</option>
+                              <option value="weighted_bad_capture_rate">加权坏样本捕获率</option>
+                              <option value="hit_amount">命中金额</option>
+                              <option value="hit_amount_share">命中金额占比</option>
+                              <option value="good_amount">好样本金额</option>
+                              <option value="bad_amount">坏样本金额</option>
+                              <option value="bad_amount_rate">坏样本金额率</option>
+                              <option value="bad_amount_capture_rate">坏样本金额捕获率</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>排序方向 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="voting_objective_direction">
+                              <option value="maximize">最大化</option>
+                              <option value="minimize">最小化</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最多评估组合数 <b aria-hidden="true">*</b></span>
+                            <input type="number" min="1" max="10000" step="1" value="10000" data-candidate-lab-field="voting_max_combinations">
+                          </label>
+                        </div>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>资格约束</span>
+                          <textarea
+                            rows="3"
+                            data-candidate-lab-field="voting_constraints"
+                            placeholder="可选；每行一项，例如 hit_share >= 0.10 或 bad_rate <= 30%"
+                          ></textarea>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>必须包含的规则</span>
+                          <select multiple size="5" data-candidate-lab-field="voting_include_rule_ids">
+                            <option value="" disabled>等待当前 Pool 规则投影</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>排除的规则</span>
+                          <select multiple size="5" data-candidate-lab-field="voting_exclude_rule_ids">
+                            <option value="" disabled>等待当前 Pool 规则投影</option>
+                          </select>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-voting-pool-empty>
+                          当前没有可搜索的受认证 Strategy Pool。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          页面只提交可见的搜索参数与当前 Pool 规则指针；样本、目标、Pool revision 和执行证据由平台重新绑定。搜索不会自动构建、选择、入池或部署。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">搜索 Voting 组合</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>构建 Voting 候选</strong><small>从一份受认证搜索中明确选择一个已评估组合</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="voting_candidate_build_from_search">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Voting 搜索证据 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="voting_search_id">
+                            <option value="">请选择受认证 Voting 搜索</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>精确组合 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="voting_combo_id">
+                            <option value="">请先选择搜索证据</option>
+                          </select>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-voting-search-empty>
+                          当前任务尚无受认证 Voting 搜索，请先运行组合搜索。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          必须人工明确选择搜索与组合指针；平台不会按名次、最好或冠军自动代选。构建结果仍是 development/backtested/unvalidated，不会自动加入或修改 Strategy Pool。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">构建所选 Voting 候选</button>
+                      </form>
+                    </details>
                   </div>
                   <section class="candidate-lab-evidence" aria-label="受认证候选结果">
                     <header>

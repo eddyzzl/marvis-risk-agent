@@ -49,7 +49,9 @@ from marvis.packs.modeling.evidence import (
 from marvis.packs.modeling.evidence_tools import (
     ModelingTrainingEvidenceArtifactBinding,
     build_training_evidence_ref,
+    load_historical_modeling_training_evidence_artifacts,
     load_modeling_training_evidence_artifacts,
+    require_historical_modeling_training_evidence_artifact_binding_on_connection,
     require_modeling_training_evidence_artifact_binding_on_connection,
 )
 from marvis.packs.modeling.score_evidence import (
@@ -407,6 +409,36 @@ def load_model_score_evidence_artifacts(
             expected_score_vector_artifact_content_hash=(
                 expected_score_vector_artifact_content_hash
             ),
+            require_current_training=True,
+        )
+    except _BOUNDARY_ERRORS as exc:
+        raise ModelingError(str(exc)) from exc
+
+
+def load_historical_model_score_evidence_artifacts(
+    runtime,
+    *,
+    task_id: str,
+    evidence_artifact_id: str,
+    expected_evidence_artifact_content_hash: str,
+    score_vector_artifact_id: str | None = None,
+    expected_score_vector_artifact_content_hash: str | None = None,
+) -> ModelScoreEvidenceArtifactBinding:
+    """Load immutable score evidence without requiring its sample to be head."""
+
+    try:
+        return _load_model_score_evidence_artifacts(
+            runtime,
+            task_id=task_id,
+            evidence_artifact_id=evidence_artifact_id,
+            expected_evidence_artifact_content_hash=(
+                expected_evidence_artifact_content_hash
+            ),
+            score_vector_artifact_id=score_vector_artifact_id,
+            expected_score_vector_artifact_content_hash=(
+                expected_score_vector_artifact_content_hash
+            ),
+            require_current_training=False,
         )
     except _BOUNDARY_ERRORS as exc:
         raise ModelingError(str(exc)) from exc
@@ -420,6 +452,7 @@ def _load_model_score_evidence_artifacts(
     expected_evidence_artifact_content_hash: str,
     score_vector_artifact_id: str | None = None,
     expected_score_vector_artifact_content_hash: str | None = None,
+    require_current_training: bool,
 ) -> ModelScoreEvidenceArtifactBinding:
     """Load and rebuild one score evidence pair from live governed sources."""
 
@@ -474,7 +507,12 @@ def _load_model_score_evidence_artifacts(
         raise ModelingError(
             "score vector artifact id and expected hash must be supplied together"
         )
-    training = load_modeling_training_evidence_artifacts(
+    training_loader = (
+        load_modeling_training_evidence_artifacts
+        if require_current_training
+        else load_historical_modeling_training_evidence_artifacts
+    )
+    training = training_loader(
         runtime,
         task_id=normalized_task,
         **training_ref,
@@ -578,6 +616,23 @@ def require_model_score_evidence_artifact_binding_on_connection(
         _require_model_score_evidence_artifact_binding_on_connection(
             conn,
             binding,
+            require_current_training=True,
+        )
+    except _BOUNDARY_ERRORS as exc:
+        raise ModelingError(str(exc)) from exc
+
+
+def require_historical_model_score_evidence_artifact_binding_on_connection(
+    conn,
+    binding: ModelScoreEvidenceArtifactBinding,
+) -> None:
+    """Re-authenticate score evidence without requiring its sample to be head."""
+
+    try:
+        _require_model_score_evidence_artifact_binding_on_connection(
+            conn,
+            binding,
+            require_current_training=False,
         )
     except _BOUNDARY_ERRORS as exc:
         raise ModelingError(str(exc)) from exc
@@ -586,6 +641,8 @@ def require_model_score_evidence_artifact_binding_on_connection(
 def _require_model_score_evidence_artifact_binding_on_connection(
     conn,
     binding: ModelScoreEvidenceArtifactBinding,
+    *,
+    require_current_training: bool,
 ) -> None:
     if not isinstance(binding, ModelScoreEvidenceArtifactBinding):
         raise ModelingError("model-score-evidence artifact binding is invalid")
@@ -596,10 +653,16 @@ def _require_model_score_evidence_artifact_binding_on_connection(
     task_id = _text(binding.task_id, "task_id")
     if binding.training.task_id != task_id:
         raise ModelingError("model-score-evidence training task binding changed")
-    require_modeling_training_evidence_artifact_binding_on_connection(
-        conn,
-        binding.training,
-    )
+    if require_current_training:
+        require_modeling_training_evidence_artifact_binding_on_connection(
+            conn,
+            binding.training,
+        )
+    else:
+        require_historical_modeling_training_evidence_artifact_binding_on_connection(
+            conn,
+            binding.training,
+        )
     canonical_ref = build_training_evidence_ref(binding.training)
     request = {"training_evidence_ref": canonical_ref}
     if (
@@ -1932,7 +1995,9 @@ __all__ = [
     "MODEL_SCORE_EVIDENCE_ARTIFACT_KIND",
     "MODEL_SCORE_VECTOR_ARTIFACT_KIND",
     "ModelScoreEvidenceArtifactBinding",
+    "load_historical_model_score_evidence_artifacts",
     "load_model_score_evidence_artifacts",
+    "require_historical_model_score_evidence_artifact_binding_on_connection",
     "require_model_score_evidence_artifact_binding_on_connection",
     "run_materialize_model_score_evidence_v2",
     "tool_materialize_model_score_evidence_v2",

@@ -75,9 +75,13 @@ from marvis.packs.strategy.pool_impact_tools import (
 )
 from marvis.packs.strategy.pool_tools import (
     StrategyCandidatePoolArtifactBinding,
+    StrategyPoolDevelopmentDatasetBinding,
+    StrategyPoolDevelopmentExecutionBinding,
     project_scorecard_report_evidence,
 )
 from marvis.packs.strategy.pool_requirement_resolver import (
+    ResolvedPoolRequirements,
+    pool_requirement_bindings_provenance,
     validate_pool_requirement_bindings_provenance,
 )
 from marvis.packs.strategy.project_context import (
@@ -101,14 +105,60 @@ from marvis.packs.strategy.sample_design_v2 import (
     canonical_strategy_sample_design_v2_bundle_json,
     validate_strategy_sample_design_v2_bundle,
 )
+from marvis.packs.strategy.sample_design_binding import (
+    StrategySampleDesignExecutionBinding,
+)
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
+)
+from marvis.packs.strategy.voting_candidate import (
+    VOTING_CANDIDATE_ASSET_TYPE,
+)
+from marvis.packs.strategy.voting_candidate_search import (
+    VOTING_CANDIDATE_SEARCH_PRODUCER_VERSION,
+    canonical_voting_candidate_search_result_json,
+    validate_voting_candidate_search_result,
+)
+from marvis.packs.strategy.voting_candidate_search_tools import (
+    VOTING_CANDIDATE_SEARCH_ARTIFACT_SCHEMA_VERSION,
+    VotingCandidateSearchArtifactBinding,
 )
 
 
 _MAX_SCORECARD_REPORT_TABLE_FIELDS = 50_000
 _MAX_SCORECARD_REPORT_TABLE_REFS = 10_000
 _MAX_SCORECARD_REPORT_TABLE_JSON_BYTES = 8 * 1024 * 1024
+_MAX_VOTING_SEARCH_REPORT_COMBINATIONS = 20
+_VOTING_SEARCH_REPORT_TITLE = (
+    "Voting候选组合搜索结果（开发回测，仅供选择，未构建/未入池）"
+)
+_VOTING_SEARCH_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "producer_version",
+        "task_id",
+        "search_id",
+        "search_content_hash",
+        "request_hash",
+        "pool_ref",
+        "dataset_binding",
+        "sample_design_ref",
+        "sample_context_hash",
+        "target_binding",
+        "observation_bindings",
+        "requirement_bindings",
+        "excluded_unsupported_rule_ids",
+        "lifecycle",
+    }
+)
+_VOTING_SEARCH_LIFECYCLE = {
+    "mutated_pool": False,
+    "selected": False,
+    "admitted": False,
+    "applied": False,
+    "adopted": False,
+    "deployed": False,
+}
 
 
 _SECTION_TITLES = {
@@ -255,6 +305,7 @@ def build_strategy_report_bundle_source_inputs(
     sample_design: StrategySampleDesignV2ArtifactBinding,
     candidate_pool: StrategyCandidatePoolArtifactBinding,
     candidate_stability: StrategyCandidateStabilityArtifactBinding | None = None,
+    voting_candidate_search: VotingCandidateSearchArtifactBinding | None = None,
     pool_impact: StrategyPoolImpactArtifactBinding | None = None,
     impact_cube: StrategyImpactCubeArtifactBinding | None = None,
     model_evidence: StrategyModelEvidenceV2ArtifactBinding | None = None,
@@ -276,6 +327,7 @@ def build_strategy_report_bundle_source_inputs(
         sample_design=sample_design,
         candidate_pool=candidate_pool,
         candidate_stability=candidate_stability,
+        voting_candidate_search=voting_candidate_search,
         pool_impact=(
             None if impact_cube is not None else pool_impact
         ),
@@ -286,6 +338,18 @@ def build_strategy_report_bundle_source_inputs(
     )
     sample = _authenticated_sample_design(sample_design)
     pool, design = _authenticated_candidate_pool(candidate_pool)
+    voting_search = (
+        None
+        if voting_candidate_search is None
+        else _authenticated_voting_candidate_search(
+            voting_candidate_search,
+            sample_binding=sample_design,
+            sample=sample,
+            pool_binding=candidate_pool,
+            pool=pool,
+            compiled_design=design,
+        )
+    )
     try:
         scorecard_report = project_scorecard_report_evidence(candidate_pool)
     except StrategyError as exc:
@@ -385,6 +449,15 @@ def build_strategy_report_bundle_source_inputs(
             pool_ref=pool_ref,
         )
     )
+    voting_search_ref = (
+        None
+        if voting_candidate_search is None
+        else _artifact_ref(
+            "voting_candidate_search",
+            voting_candidate_search.artifact_id,
+            voting_candidate_search.artifact_content_hash,
+        )
+    )
     refs = _EvidenceRefs(
         project=_artifact_ref(
             "strategy_project_context",
@@ -471,6 +544,8 @@ def build_strategy_report_bundle_source_inputs(
             stability=stability,
             stability_ref=refs.stability,
             stability_source_ref=refs.stability_source,
+            voting_search=voting_search,
+            voting_search_ref=voting_search_ref,
             dataset_ref=_dataset_ref_from_sample(sample),
         ),
     }
@@ -567,6 +642,11 @@ def build_strategy_report_bundle_source_inputs(
                     []
                     if refs.stability_source is None
                     else [refs.stability_source]
+                ),
+                *(
+                    []
+                    if voting_search_ref is None
+                    else [voting_search_ref]
                 ),
             ]
         ),
@@ -691,6 +771,344 @@ def _authenticated_candidate_pool(
         "candidate-pool",
     )
     return pool, compiled
+
+
+def _authenticated_voting_candidate_search(
+    binding: VotingCandidateSearchArtifactBinding,
+    *,
+    sample_binding: StrategySampleDesignV2ArtifactBinding,
+    sample: Mapping[str, Any],
+    pool_binding: StrategyCandidatePoolArtifactBinding,
+    pool: Mapping[str, Any],
+    compiled_design: Mapping[str, Any],
+) -> dict[str, Any]:
+    _require_binding_type(
+        binding,
+        VotingCandidateSearchArtifactBinding,
+        "Voting search",
+    )
+    try:
+        result = validate_voting_candidate_search_result(binding.result)
+    except StrategyError as exc:
+        raise StrategyReportBundleError(
+            "Voting search result evidence is invalid"
+        ) from exc
+    if result != binding.result or binding.task_id != sample_binding.task_id:
+        raise StrategyReportBundleError(
+            "Voting search binding identity changed"
+        )
+    _require_canonical_artifact_hash(
+        binding.artifact_content_hash,
+        canonical_voting_candidate_search_result_json(result),
+        "Voting search",
+    )
+    try:
+        canonical_provenance = json.dumps(
+            binding.artifact_provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        provenance = json.loads(canonical_provenance)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise StrategyReportBundleError(
+            "Voting search artifact provenance is invalid"
+        ) from exc
+    if (
+        not isinstance(provenance, dict)
+        or set(provenance) != _VOTING_SEARCH_PROVENANCE_FIELDS
+        or binding.artifact_provenance_json != canonical_provenance
+    ):
+        raise StrategyReportBundleError(
+            "Voting search artifact provenance fields changed"
+        )
+
+    development = binding.pool_development
+    _require_binding_type(
+        development,
+        StrategyPoolDevelopmentExecutionBinding,
+        "Voting search Pool development",
+    )
+    development_dataset = development.dataset
+    _require_binding_type(
+        development_dataset,
+        StrategyPoolDevelopmentDatasetBinding,
+        "Voting search development dataset",
+    )
+    if development.task_id != binding.task_id:
+        raise StrategyReportBundleError(
+            "Voting search Pool development belongs to another task"
+        )
+    development_pool, development_design = _authenticated_candidate_pool(
+        development.pool
+    )
+    if (
+        development.pool is not pool_binding
+        and (
+            development.pool.artifact_id != pool_binding.artifact_id
+            or development.pool.artifact_content_hash
+            != pool_binding.artifact_content_hash
+        )
+    ) or development_pool != pool or development_design != compiled_design:
+        raise StrategyReportBundleError(
+            "Voting search references another Candidate Pool"
+        )
+    if (
+        development.sample_design_v2 is None
+        or _sample_identity(development.sample_design_v2)
+        != _sample_identity(sample_binding)
+        or _authenticated_sample_design(development.sample_design_v2) != sample
+    ):
+        raise StrategyReportBundleError(
+            "Voting search references another sample-design V2 artifact"
+        )
+
+    design = sample["sample_design"]
+    identity = design["identity"]
+    dataset = identity["dataset_ref"]
+    workspace = identity["workspace_ref"]
+    target = design["target_selector"]
+    semantics = design["sample_semantics"]
+    field_bindings = semantics["field_bindings"]
+    legacy_sample = development.sample_design
+    _require_binding_type(
+        legacy_sample,
+        StrategySampleDesignExecutionBinding,
+        "Voting search legacy sample design",
+    )
+    expected_legacy_ref = design["compatibility"]["legacy_development_ref"]
+    risk_population = next(
+        (
+            item
+            for item in sample["populations"]
+            if item["role"] == "risk"
+        ),
+        None,
+    )
+    if risk_population is None:
+        raise StrategyReportBundleError(
+            "Voting search sample-design risk population is missing"
+        )
+    development_population = next(
+        (
+            item
+            for item in risk_population["partitions"]
+            if item["name"] == "development"
+        ),
+        None,
+    )
+    if development_population is None:
+        raise StrategyReportBundleError(
+            "Voting search development population is missing"
+        )
+    expected_development_count = development_population["row_count"]
+    if (
+        legacy_sample.to_ref_dict() != expected_legacy_ref
+        or legacy_sample.task_id != sample_binding.task_id
+        or legacy_sample.dataset_id != dataset["dataset_id"]
+        or legacy_sample.dataset_content_hash != dataset["content_hash"]
+        or legacy_sample.workspace_revision != workspace["revision"]
+        or legacy_sample.workspace_generation != workspace["generation"]
+        or legacy_sample.semantic_mapping_hash
+        != workspace["semantic_mapping_hash"]
+        or legacy_sample.target_col != target["column"]
+        or legacy_sample.target_bad_value != target["bad_value"]
+        or legacy_sample.drop_nan_labels != target["drop_missing"]
+        or legacy_sample.split_column
+        != semantics["split_definition"]["column"]
+        or legacy_sample.development_values
+        != tuple(semantics["split_definition"]["development_values"])
+        or legacy_sample.development_population_count
+        != expected_development_count
+        or legacy_sample.active_population_count != risk_population["total_count"]
+        or legacy_sample.month_col != field_bindings["month_field"]
+        or legacy_sample.weight_col != field_bindings["weight_field"]
+        or legacy_sample.loan_amount_col
+        != field_bindings["loan_amount_field"]
+        or legacy_sample.overdue_amount_col
+        != field_bindings["overdue_amount_field"]
+        or development.target_col != target["column"]
+        or development.month_col != field_bindings["month_field"]
+    ):
+        raise StrategyReportBundleError(
+            "Voting search sample-design, target, or observation binding changed"
+        )
+    if (
+        development_dataset.task_id != sample_binding.task_id
+        or development_dataset.dataset_id != dataset["dataset_id"]
+        or development_dataset.content_hash != dataset["content_hash"]
+    ):
+        raise StrategyReportBundleError(
+            "Voting search dataset binding differs from the current sample"
+        )
+
+    pool_evidence_identities = [
+        entry["source"].get("evidence_identity")
+        for entry in pool["entries"]
+    ]
+    if (
+        not pool_evidence_identities
+        or any(
+            evidence is None
+            or evidence.get("sample_context_hash")
+            != development.evidence_identity.get("sample_context_hash")
+            for evidence in pool_evidence_identities
+        )
+    ):
+        raise StrategyReportBundleError(
+            "Voting search Candidate Pool sample context changed"
+        )
+    if any(
+        evidence != development.evidence_identity
+        for evidence in pool_evidence_identities
+    ):
+        raise StrategyReportBundleError(
+            "Voting search Candidate Pool development identity changed"
+        )
+    expected_development_identity = {
+        "dataset_id": dataset["dataset_id"],
+        "dataset_content_hash": dataset["content_hash"],
+        "workspace_revision": workspace["revision"],
+        "workspace_generation": workspace["generation"],
+        "semantic_mapping_hash": workspace["semantic_mapping_hash"],
+        "sample_context_hash": development.evidence_identity[
+            "sample_context_hash"
+        ],
+    }
+    if development.evidence_identity != expected_development_identity:
+        raise StrategyReportBundleError(
+            "Voting search sample context or workspace binding changed"
+        )
+
+    requirements = list(compiled_design["requirements"])
+    if requirements:
+        resolved = binding.resolved_requirements
+        if (
+            resolved is None
+            or type(resolved) is not ResolvedPoolRequirements
+            or resolved.task_id != binding.task_id
+        ):
+            raise StrategyReportBundleError(
+                "Voting search requirement bindings are missing"
+            )
+        try:
+            expected_requirements = pool_requirement_bindings_provenance(
+                resolved
+            )
+        except StrategyError as exc:
+            raise StrategyReportBundleError(
+                "Voting search requirement bindings are invalid"
+            ) from exc
+        if expected_requirements["requirements"] != requirements:
+            raise StrategyReportBundleError(
+                "Voting search requirements differ from the Candidate Pool"
+            )
+    else:
+        if binding.resolved_requirements is not None:
+            raise StrategyReportBundleError(
+                "Voting search has requirements absent from the Candidate Pool"
+            )
+        expected_requirements = None
+
+    searchable = sorted(
+        entry["rule_id"]
+        for entry in pool["entries"]
+        if entry["enabled"] is True
+        and entry["source"]["asset_type"] != VOTING_CANDIDATE_ASSET_TYPE
+    )
+    excluded = sorted(
+        entry["rule_id"]
+        for entry in pool["entries"]
+        if entry["enabled"] is True
+        and entry["source"]["asset_type"] == VOTING_CANDIDATE_ASSET_TYPE
+    )
+    if result["configuration"]["candidate_ids"] != searchable:
+        raise StrategyReportBundleError(
+            "Voting search candidate universe differs from the current Pool"
+        )
+
+    target_binding = provenance["target_binding"]
+    if not isinstance(target_binding, Mapping):
+        raise StrategyReportBundleError(
+            "Voting search target provenance is invalid"
+        )
+    dropped = target_binding.get("nan_labels_dropped")
+    if (
+        isinstance(dropped, bool)
+        or not isinstance(dropped, int)
+        or dropped < 0
+        or result["population"]["row_count"] + dropped
+        != expected_development_count
+        or (dropped > 0 and not legacy_sample.drop_nan_labels)
+    ):
+        raise StrategyReportBundleError(
+            "Voting search NaN-label population binding changed"
+        )
+    if (
+        bool(result["population"]["weight"]["available"])
+        is not (legacy_sample.weight_col is not None)
+        or bool(result["population"]["amount"]["available"])
+        is not (legacy_sample.loan_amount_col is not None)
+    ):
+        raise StrategyReportBundleError(
+            "Voting search observation availability changed"
+        )
+
+    expected_provenance = {
+        "schema_version": VOTING_CANDIDATE_SEARCH_ARTIFACT_SCHEMA_VERSION,
+        "producer_version": VOTING_CANDIDATE_SEARCH_PRODUCER_VERSION,
+        "task_id": binding.task_id,
+        "search_id": result["search_id"],
+        "search_content_hash": result["content_hash"],
+        "request_hash": result["request_hash"],
+        "pool_ref": {
+            "artifact_id": pool_binding.artifact_id,
+            "artifact_content_hash": pool_binding.artifact_content_hash,
+            "pool_id": pool["pool_id"],
+            "strategy_type": pool["strategy_type"],
+            "revision": pool["revision"],
+            "revision_id": pool["revision_id"],
+            "snapshot_hash": pool["snapshot_hash"],
+        },
+        "dataset_binding": {
+            "task_id": development_dataset.task_id,
+            "dataset_id": development_dataset.dataset_id,
+            "dataset_source_path": development_dataset.source_path,
+            "dataset_content_hash": development_dataset.content_hash,
+            "dataset_registry_metadata_hash": (
+                development_dataset.registry_metadata_hash
+            ),
+            "workspace_revision": legacy_sample.workspace_revision,
+            "workspace_generation": legacy_sample.workspace_generation,
+            "semantic_mapping_hash": legacy_sample.semantic_mapping_hash,
+        },
+        "sample_design_ref": legacy_sample.to_ref_dict(),
+        "sample_context_hash": development.evidence_identity[
+            "sample_context_hash"
+        ],
+        "target_binding": {
+            "column": legacy_sample.target_col,
+            "raw_bad_value": legacy_sample.target_bad_value,
+            "normalized_bad_value": 1,
+            "drop_nan_labels": legacy_sample.drop_nan_labels,
+            "nan_labels_dropped": dropped,
+            "labeled_count": result["population"]["row_count"],
+            "sample_partition": legacy_sample.reference.partition,
+        },
+        "observation_bindings": {
+            "weight_col": legacy_sample.weight_col,
+            "amount_col": legacy_sample.loan_amount_col,
+        },
+        "requirement_bindings": expected_requirements,
+        "excluded_unsupported_rule_ids": excluded,
+        "lifecycle": _VOTING_SEARCH_LIFECYCLE,
+    }
+    if provenance != expected_provenance:
+        raise StrategyReportBundleError(
+            "Voting search artifact provenance identity changed"
+        )
+    return result
 
 
 def _authenticated_candidate_stability(
@@ -2062,6 +2480,8 @@ def _candidate_section(
     stability: Mapping[str, Any] | None,
     stability_ref: Mapping[str, str] | None,
     stability_source_ref: Mapping[str, str] | None,
+    voting_search: Mapping[str, Any] | None,
+    voting_search_ref: Mapping[str, str] | None,
     dataset_ref: Mapping[str, str],
 ) -> dict[str, Any]:
     source_ref = pool_ref
@@ -2314,6 +2734,37 @@ def _candidate_section(
                 stability_ref,
             ]
         )
+    if voting_search is not None:
+        if voting_search_ref is None:
+            raise StrategyReportBundleError(
+                "Voting search projection requires an authenticated result reference"
+            )
+        voting_projection = _voting_search_report_projection(
+            voting_search,
+            source_ref=voting_search_ref,
+        )
+        summary_fields.extend(voting_projection["summary_fields"])
+        tables.append(voting_projection["table"])
+        stage_evidence.append(
+            {
+                "effect_stage": "backtested",
+                "population": "risk",
+                "partition": "development",
+                "binding": {
+                    "kind": "development_backtest",
+                    "dataset_ref": dataset_ref,
+                    "frozen_artifact_ref": pool_ref,
+                    "result_ref": voting_search_ref,
+                },
+            }
+        )
+        section_refs = _dedupe_refs(
+            [
+                *section_refs,
+                dataset_ref,
+                voting_search_ref,
+            ]
+        )
     return build_strategy_report_section(
         key="candidate_combinations",
         title=_SECTION_TITLES["candidate_combinations"],
@@ -2324,6 +2775,111 @@ def _candidate_section(
         red_flags=red_flags,
         source_refs=section_refs,
     )
+
+
+def _voting_search_report_projection(
+    result: Mapping[str, Any],
+    *,
+    source_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    objective = result["configuration"]["objective"]
+    combinations = list(
+        result["combinations"][:_MAX_VOTING_SEARCH_REPORT_COMBINATIONS]
+    )
+    rows = [
+        {
+            "row_id": combination["combo_id"],
+            "cells": {
+                "search_id": _present_field(result["search_id"], source_ref),
+                "combo_id": _present_field(
+                    combination["combo_id"],
+                    source_ref,
+                ),
+                "member_ids": _present_field(
+                    list(combination["member_ids"]),
+                    source_ref,
+                ),
+                "n": _present_field(combination["n"], source_ref),
+                "eligible": _present_field(
+                    combination["eligible"],
+                    source_ref,
+                ),
+                "objective_metric": _present_field(
+                    objective["metric"],
+                    source_ref,
+                ),
+                "objective_direction": _present_field(
+                    objective["direction"],
+                    source_ref,
+                ),
+                "objective_value": _present_field(
+                    combination["objective_value"],
+                    source_ref,
+                ),
+                "constraint_failures": _present_field(
+                    list(combination["constraint_failures"]),
+                    source_ref,
+                ),
+                "metrics": _present_field(
+                    dict(combination["metrics"]),
+                    source_ref,
+                ),
+            },
+        }
+        for combination in combinations
+    ]
+    table = build_strategy_report_table(
+        table_id="voting_candidate_search_combinations",
+        title=_VOTING_SEARCH_REPORT_TITLE,
+        sheet_key="appendix_voting_search",
+        granularity="aggregate",
+        content_class="metric_summary",
+        effect_stage="backtested",
+        columns=[
+            _column("search_id", "搜索ID"),
+            _column("combo_id", "组合ID"),
+            _column("member_ids", "成员规则ID"),
+            _column("n", "命中阈值 n"),
+            _column("eligible", "约束是否通过"),
+            _column("objective_metric", "目标指标"),
+            _column("objective_direction", "目标方向"),
+            _column("objective_value", "目标值"),
+            _column("constraint_failures", "约束未通过明细"),
+            _column("metrics", "完整指标"),
+        ],
+        rows=rows,
+        source_refs=[source_ref],
+    )
+    return {
+        "summary_fields": [
+            _named(
+                "voting_search_search_space",
+                "Voting搜索空间",
+                _present_field(result["search_space"], source_ref),
+            ),
+            _named(
+                "voting_search_evaluated",
+                "Voting已评估组合数",
+                _present_field(result["evaluated"], source_ref),
+            ),
+            _named(
+                "voting_search_truncated",
+                "Voting搜索是否截断",
+                _present_field(result["truncated"], source_ref),
+            ),
+            _named(
+                "voting_search_eligible",
+                "Voting约束通过组合数",
+                _present_field(result["eligible"], source_ref),
+            ),
+            _named(
+                "voting_search_displayed",
+                "Voting报告展示组合数",
+                _present_field(len(combinations), source_ref),
+            ),
+        ],
+        "table": table,
+    }
 
 
 def _scorecard_report_tables(

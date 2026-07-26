@@ -147,10 +147,15 @@ from marvis.packs.strategy.voting_candidate_fragment import (
     VOTING_CANDIDATE_ARTIFACT_KIND,
     VOTING_CANDIDATE_ORIGIN_TOOL,
 )
+from marvis.packs.strategy.voting_candidate import (
+    VOTING_CANDIDATE_ASSET_TYPE,
+)
 from marvis.packs.strategy.voting_candidate_tools import (
     load_verified_voting_candidate_artifact_on_connection,
 )
 from marvis.packs.strategy.voting_candidate_search_tools import (
+    VOTING_CANDIDATE_SEARCH_ARTIFACT_KIND,
+    load_historical_voting_candidate_search_artifact,
     resolve_voting_candidate_search_selection,
     resolve_voting_candidate_search_inputs,
 )
@@ -213,12 +218,15 @@ from marvis.packs.strategy.model_evidence_tools import (
 from marvis.packs.strategy.impact_cube_tools import IMPACT_CUBE_ARTIFACT_KIND
 from marvis.packs.strategy.pool_impact_tools import (
     POOL_IMPACT_ARTIFACT_KIND,
-    load_strategy_pool_impact_artifact,
+    load_historical_strategy_pool_impact_artifact,
 )
 from marvis.packs.strategy.pool_tools import (
+    bind_strategy_pool_development_execution,
     load_current_strategy_candidate_pool_artifact,
 )
 from marvis.packs.strategy.pool_requirement_resolver import (
+    pool_requirement_bindings_provenance,
+    project_pool_entry_requirements,
     resolve_pool_requirements,
 )
 from marvis.packs.strategy.project_context_tools import (
@@ -1847,6 +1855,8 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "scorecard_band_build",
         "scorecard_cutoff_selection",
         "candidate_monthly_stability",
+        "voting_candidate_search",
+        "voting_candidate_build_from_search",
     }
 )
 
@@ -6492,6 +6502,10 @@ _STRATEGY_REPORT_POOL_HISTORY_RE = re.compile(
     r"last\s+time|archived|already\s+generated)(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
+_STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT = 64
+_STRATEGY_REPORT_VOTING_SEARCH_REPLAY_LIMIT = (
+    _STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT
+)
 
 
 def _strategy_report_bundle_v2_plan_slots(
@@ -6505,10 +6519,6 @@ def _strategy_report_bundle_v2_plan_slots(
 
     inputs = draft.to_dict()["workflow_inputs"]
     read_runtime = _strategy_report_read_runtime(runtime)
-    artifacts = _strategy_report_artifact_snapshot(
-        read_runtime,
-        task_id=task.id,
-    )
 
     try:
         project_context = load_current_strategy_project_context_artifact(
@@ -6534,7 +6544,6 @@ def _strategy_report_bundle_v2_plan_slots(
     sample = _strategy_report_latest_sample_binding(
         read_runtime,
         task_id=task.id,
-        artifacts=artifacts,
     )
     sample_ref = _strategy_report_sample_ref(sample)
     requested_pool_type = _strategy_report_requested_pool_type(source_message)
@@ -6554,7 +6563,6 @@ def _strategy_report_bundle_v2_plan_slots(
         _strategy_report_latest_candidate_stability_binding(
             read_runtime,
             task_id=task.id,
-            artifacts=artifacts,
             sample=sample,
             pool=pool,
         )
@@ -6575,10 +6583,30 @@ def _strategy_report_bundle_v2_plan_slots(
             ),
         }
     )
+    voting_candidate_search = _strategy_report_latest_voting_search_binding(
+        read_runtime,
+        task_id=task.id,
+        sample=sample,
+        sample_ref=sample_ref,
+        pool=pool,
+    )
+    voting_candidate_search_ref = (
+        None
+        if voting_candidate_search is None
+        else {
+            "artifact_id": voting_candidate_search.artifact_id,
+            "expected_artifact_content_hash": (
+                voting_candidate_search.artifact_content_hash
+            ),
+            "expected_search_id": voting_candidate_search.result["search_id"],
+            "expected_search_content_hash": (
+                voting_candidate_search.result["content_hash"]
+            ),
+        }
+    )
     impact_cube = _strategy_report_latest_impact_cube_binding(
         read_runtime,
         task_id=task.id,
-        artifacts=artifacts,
         pool=pool,
         sample_ref=sample_ref,
     )
@@ -6607,7 +6635,6 @@ def _strategy_report_bundle_v2_plan_slots(
         impact = _strategy_report_latest_pool_impact_binding(
             read_runtime,
             task_id=task.id,
-            artifacts=artifacts,
             pool=pool,
         )
         pool_impact_ref = {
@@ -6623,7 +6650,6 @@ def _strategy_report_bundle_v2_plan_slots(
         _strategy_report_optional_model_evidence(
             read_runtime,
             task_id=task.id,
-            artifacts=artifacts,
             sample_ref=sample_ref,
         )
     )
@@ -6631,14 +6657,12 @@ def _strategy_report_bundle_v2_plan_slots(
         _strategy_report_optional_training_evidence(
             read_runtime,
             task_id=task.id,
-            artifacts=artifacts,
             sample_ref=sample_ref,
         )
     )
     score_evidence, score_evidence_ref = _strategy_report_optional_score_evidence(
         read_runtime,
         task_id=task.id,
-        artifacts=artifacts,
         sample_ref=sample_ref,
         training_ref=training_evidence_ref,
     )
@@ -6672,6 +6696,7 @@ def _strategy_report_bundle_v2_plan_slots(
             sample_design=sample,
             candidate_pool=pool,
             candidate_stability=candidate_stability,
+            voting_candidate_search=voting_candidate_search,
             pool_impact=impact,
             impact_cube=impact_cube,
             model_evidence=model_evidence,
@@ -6701,6 +6726,7 @@ def _strategy_report_bundle_v2_plan_slots(
         "sample_design_ref": sample_ref,
         "candidate_pool_ref": candidate_pool_ref,
         "candidate_stability_ref": candidate_stability_ref,
+        "voting_candidate_search_ref": voting_candidate_search_ref,
         "pool_impact_ref": pool_impact_ref,
         "impact_cube_ref": impact_cube_ref,
         "report_revision": int(head["current_revision"]) + 1,
@@ -6718,28 +6744,64 @@ def _strategy_report_read_runtime(
     runtime: DriverTurnRuntime,
 ) -> SimpleNamespace:
     backend, registry = _modeling_data_runtime(runtime.settings)
+    task_artifacts = TaskArtifactRepository(runtime.settings.db_path)
     return SimpleNamespace(
         settings=runtime.settings,
         backend=backend,
         registry=registry,
-        task_artifacts=TaskArtifactRepository(runtime.settings.db_path),
+        task_artifacts=task_artifacts,
         strategies=StrategyRepository(runtime.settings.db_path),
         experiments=ExperimentStore(runtime.settings.db_path),
         modeling_repo=ModelingRepository(runtime.settings.db_path),
     )
 
 
-def _strategy_report_artifact_snapshot(
+def _strategy_report_artifact_window(
     read_runtime: SimpleNamespace,
     *,
     task_id: str,
-) -> tuple[dict, ...]:
+    kind: str,
+    limit: int,
+    unavailable_code: str,
+    invalid_code: str,
+    label: str,
+) -> tuple[tuple[Mapping, ...], int]:
+    """Read one exact newest-first artifact window without full-task allocation."""
+
     try:
-        return tuple(read_runtime.task_artifacts.list_for_task(task_id))
+        records, total = (
+            read_runtime.task_artifacts.list_recent_for_task_kind_with_count(
+                task_id,
+                kind,
+                limit=limit,
+            )
+        )
     except _STRATEGY_V2_ARTIFACT_ERRORS as exc:
         raise _StrategyV2EvidenceSetupError(
-            "strategy_report_bundle_v2_registry_unavailable",
-            "无法完整读取当前任务的 StrategyReportBundle V2 source registry。",
+            unavailable_code,
+            f"无法读取当前任务最新的 {label} artifact 窗口。",
+        ) from exc
+    try:
+        if (
+            not isinstance(records, Sequence)
+            or isinstance(records, str | bytes | bytearray)
+            or isinstance(total, bool)
+            or not isinstance(total, int)
+            or total < 0
+        ):
+            raise ValueError(f"{label} artifact window is invalid")
+        window = tuple(records)
+        if len(window) != min(total, limit) or any(
+            not isinstance(item, Mapping) or item.get("kind") != kind
+            for item in window
+        ):
+            raise ValueError(f"{label} artifact window is inconsistent")
+        return window, total
+    except (TypeError, ValueError) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            invalid_code,
+            f"{label} artifact 窗口与精确总数或 kind 不一致；"
+            "其 newest-first 选择边界无法确认。",
         ) from exc
 
 
@@ -6928,19 +6990,22 @@ def _strategy_report_latest_sample_binding(
     read_runtime: SimpleNamespace,
     *,
     task_id: str,
-    artifacts: Sequence[Mapping],
 ):
-    bundles = [
-        item
-        for item in artifacts
-        if item.get("kind") == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
-    ]
+    bundles, _total = _strategy_report_artifact_window(
+        read_runtime,
+        task_id=task_id,
+        kind=SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+        limit=1,
+        unavailable_code="strategy_report_bundle_v2_sample_registry_unavailable",
+        invalid_code="strategy_report_bundle_v2_sample_invalid",
+        label="StrategySampleDesign V2 bundle",
+    )
     if not bundles:
         raise _StrategyV2EvidenceSetupError(
             "strategy_report_bundle_v2_sample_required",
             "当前任务没有 StrategySampleDesign V2 membership/bundle 证据。",
         )
-    newest = bundles[-1]
+    newest = bundles[0]
     provenance = newest.get("provenance")
     if not isinstance(provenance, Mapping):
         raise _StrategyV2EvidenceSetupError(
@@ -6998,7 +7063,6 @@ def _strategy_report_latest_candidate_stability_binding(
     read_runtime: SimpleNamespace,
     *,
     task_id: str,
-    artifacts: Sequence[Mapping],
     sample,
     pool,
 ):
@@ -7010,12 +7074,18 @@ def _strategy_report_latest_candidate_stability_binding(
     and the selector must not silently fall back to older evidence.
     """
 
-    records = [
-        item
-        for item in artifacts
-        if item.get("kind") == CANDIDATE_STABILITY_ARTIFACT_KIND
-    ]
-    for item in reversed(records):
+    records, total = _strategy_report_artifact_window(
+        read_runtime,
+        task_id=task_id,
+        kind=CANDIDATE_STABILITY_ARTIFACT_KIND,
+        limit=_STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT,
+        unavailable_code=(
+            "strategy_report_bundle_v2_candidate_stability_registry_unavailable"
+        ),
+        invalid_code="strategy_report_bundle_v2_candidate_stability_invalid",
+        label="candidate stability",
+    )
+    for item in records:
         provenance = item.get("provenance")
         try:
             binding = load_candidate_stability_artifact(
@@ -7055,24 +7125,245 @@ def _strategy_report_latest_candidate_stability_binding(
         except StrategyError:
             continue
         return binding
+    if total > _STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_candidate_stability_"
+            "selection_window_exhausted",
+            "已完整认证最新 "
+            f"{_STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT} 个候选逐月稳定性 "
+            "artifact，但 registry 仍有更早记录；平台无法证明窗口外"
+            "不存在与当前 Pool/SampleDesign 完全一致的稳定性证据，"
+            "本次未创建报告计划。",
+        )
     return None
+
+
+def _strategy_report_latest_voting_search_binding(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    sample,
+    sample_ref: Mapping[str, object],
+    pool,
+):
+    """Select newest-to-oldest fully authenticated exact Voting search evidence."""
+
+    records, total = _strategy_report_artifact_window(
+        read_runtime,
+        task_id=task_id,
+        kind=VOTING_CANDIDATE_SEARCH_ARTIFACT_KIND,
+        limit=_STRATEGY_REPORT_VOTING_SEARCH_REPLAY_LIMIT,
+        unavailable_code=(
+            "strategy_report_bundle_v2_voting_candidate_search_"
+            "registry_unavailable"
+        ),
+        invalid_code=(
+            "strategy_report_bundle_v2_voting_candidate_search_invalid"
+        ),
+        label="Voting candidate search",
+    )
+    if not records:
+        return None
+    try:
+        current_development = bind_strategy_pool_development_execution(
+            read_runtime,
+            pool,
+        )
+        entries = [
+            dict(entry)
+            for entry in pool.pool["entries"]
+            if entry["enabled"] is True
+            and entry["source"]["asset_type"]
+            != VOTING_CANDIDATE_ASSET_TYPE
+        ]
+        candidate_ids = sorted(str(entry["rule_id"]) for entry in entries)
+        requirements = project_pool_entry_requirements(entries)
+        if requirements:
+            resolved = resolve_pool_requirements(
+                read_runtime,
+                task_id=task_id,
+                compiled_design={"requirements": list(requirements)},
+                sample_design=sample,
+            )
+            requirement_bindings = pool_requirement_bindings_provenance(
+                resolved
+            )
+        else:
+            requirement_bindings = None
+        if (
+            current_development.sample_design_v2 is None
+            or _strategy_report_sample_ref(
+                current_development.sample_design_v2
+            )
+            != dict(sample_ref)
+        ):
+            return None
+    except (
+        KeyError,
+        ModelingError,
+        StrategyError,
+        TypeError,
+        ValueError,
+        *_STRATEGY_V2_ARTIFACT_ERRORS,
+    ) as exc:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_voting_candidate_search_invalid",
+            "当前 Strategy Pool 的 Voting 搜索匹配身份无法通过完整认证；"
+            "本次未创建报告计划。",
+        ) from exc
+
+    for item in records:
+        try:
+            binding = load_historical_voting_candidate_search_artifact(
+                read_runtime,
+                task_id=task_id,
+                artifact_id=item.get("id"),
+                expected_artifact_content_hash=item.get("content_hash"),
+            )
+        except (
+            KeyError,
+            ModelingError,
+            StrategyError,
+            TypeError,
+            ValueError,
+            *_STRATEGY_V2_ARTIFACT_ERRORS,
+        ) as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_report_bundle_v2_voting_candidate_search_invalid",
+                "最新待判定的 Voting 候选搜索 artifact 未通过历史安全的"
+                "文件、registry、provenance、Pool 或数据绑定复核；其真实"
+                "身份无法确认，平台不会回退到旧搜索证据。",
+            ) from exc
+        if _strategy_report_voting_search_matches(
+            binding,
+            task_id=task_id,
+            sample_ref=sample_ref,
+            pool=pool,
+            current_development=current_development,
+            candidate_ids=candidate_ids,
+            requirement_bindings=requirement_bindings,
+        ):
+            return binding
+    if total > _STRATEGY_REPORT_VOTING_SEARCH_REPLAY_LIMIT:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_voting_candidate_search_"
+            "selection_window_exhausted",
+            "已完整认证最新 "
+            f"{_STRATEGY_REPORT_VOTING_SEARCH_REPLAY_LIMIT} 个 Voting 候选"
+            "搜索 artifact，但 registry 仍有更早的搜索记录；平台无法证明"
+            "窗口外不存在与当前 Pool/SampleDesign 完全一致的搜索证据，"
+            "本次未创建报告计划。",
+        )
+    return None
+
+
+def _strategy_report_voting_search_matches(
+    binding,
+    *,
+    task_id: str,
+    sample_ref: Mapping[str, object],
+    pool,
+    current_development,
+    candidate_ids: Sequence[str],
+    requirement_bindings: Mapping[str, object] | None,
+) -> bool:
+    provenance = binding.artifact_provenance
+    historical_development = binding.pool_development
+    historical_pool = historical_development.pool
+    if (
+        binding.task_id != task_id
+        or historical_pool.artifact_id != pool.artifact_id
+        or historical_pool.artifact_content_hash
+        != pool.artifact_content_hash
+        or historical_pool.pool != pool.pool
+        or provenance["task_id"] != task_id
+        or provenance["pool_ref"]
+        != {
+            "artifact_id": pool.artifact_id,
+            "artifact_content_hash": pool.artifact_content_hash,
+            "pool_id": pool.pool["pool_id"],
+            "strategy_type": pool.pool["strategy_type"],
+            "revision": pool.pool["revision"],
+            "revision_id": pool.pool["revision_id"],
+            "snapshot_hash": pool.pool["snapshot_hash"],
+        }
+    ):
+        return False
+    historical_sample_v2 = historical_development.sample_design_v2
+    if (
+        historical_sample_v2 is None
+        or _strategy_report_sample_ref(historical_sample_v2)
+        != dict(sample_ref)
+    ):
+        return False
+
+    dataset = current_development.dataset
+    execution_sample = current_development.sample_design
+    expected_dataset = {
+        "task_id": dataset.task_id,
+        "dataset_id": dataset.dataset_id,
+        "dataset_source_path": dataset.source_path,
+        "dataset_content_hash": dataset.content_hash,
+        "dataset_registry_metadata_hash": dataset.registry_metadata_hash,
+        "workspace_revision": execution_sample.workspace_revision,
+        "workspace_generation": execution_sample.workspace_generation,
+        "semantic_mapping_hash": execution_sample.semantic_mapping_hash,
+    }
+    target = provenance["target_binding"]
+    expected_target_identity = {
+        "column": execution_sample.target_col,
+        "raw_bad_value": execution_sample.target_bad_value,
+        "normalized_bad_value": 1,
+        "drop_nan_labels": execution_sample.drop_nan_labels,
+        "sample_partition": execution_sample.reference.partition,
+    }
+    if (
+        provenance["dataset_binding"] != expected_dataset
+        or provenance["sample_design_ref"]
+        != execution_sample.to_ref_dict()
+        or provenance["sample_context_hash"]
+        != current_development.evidence_identity["sample_context_hash"]
+        or any(
+            target.get(field) != expected
+            for field, expected in expected_target_identity.items()
+        )
+        or target["labeled_count"] + target["nan_labels_dropped"]
+        != execution_sample.development_population_count
+        or (
+            target["nan_labels_dropped"] > 0
+            and not execution_sample.drop_nan_labels
+        )
+        or provenance["observation_bindings"]
+        != {
+            "weight_col": execution_sample.weight_col,
+            "amount_col": execution_sample.loan_amount_col,
+        }
+        or provenance["requirement_bindings"]
+        != (
+            None
+            if requirement_bindings is None
+            else dict(requirement_bindings)
+        )
+        or binding.result["configuration"]["candidate_ids"]
+        != list(candidate_ids)
+    ):
+        return False
+    return True
 
 
 def _strategy_report_latest_impact_cube_binding(
     read_runtime: SimpleNamespace,
     *,
     task_id: str,
-    artifacts: Sequence[Mapping],
     pool,
     sample_ref: Mapping[str, object],
 ):
     """Prefer the newest exact Pool + SampleDesign ImpactCube.
 
-    Registry order is stable oldest-to-newest.  Authenticate each candidate
-    from newest to oldest before inspecting its embedded Pool/SampleDesign
-    identity.  A valid unrelated cube can therefore be skipped, while an
-    unauthenticatable candidate fails closed because its raw provenance cannot
-    safely prove that it was unrelated.
+    The repository window is newest-first. Authenticate each candidate before
+    inspecting its embedded Pool/SampleDesign identity. A valid unrelated cube
+    can be skipped, while an unauthenticatable candidate fails closed because
+    its raw provenance cannot safely prove that it was unrelated.
     """
 
     expected_pool_ref = {
@@ -7083,12 +7374,18 @@ def _strategy_report_latest_impact_cube_binding(
         "expected_revision_id": pool.pool["revision_id"],
         "expected_snapshot_hash": pool.pool["snapshot_hash"],
     }
-    same_kind = [
-        item
-        for item in artifacts
-        if item.get("kind") == IMPACT_CUBE_ARTIFACT_KIND
-    ]
-    for item in reversed(same_kind):
+    same_kind, total = _strategy_report_artifact_window(
+        read_runtime,
+        task_id=task_id,
+        kind=IMPACT_CUBE_ARTIFACT_KIND,
+        limit=_STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT,
+        unavailable_code=(
+            "strategy_report_bundle_v2_impact_cube_registry_unavailable"
+        ),
+        invalid_code="strategy_report_bundle_v2_impact_cube_invalid",
+        label="ImpactCube",
+    )
+    for item in same_kind:
         provenance = item.get("provenance")
         try:
             binding = load_strategy_impact_cube_artifact(
@@ -7158,6 +7455,15 @@ def _strategy_report_latest_impact_cube_binding(
             and authenticated_sample_ref == dict(sample_ref)
         ):
             return binding
+    if total > _STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_impact_cube_"
+            "selection_window_exhausted",
+            "已完整认证最新 "
+            f"{_STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT} 个 ImpactCube artifact，"
+            "但 registry 仍有更早记录；平台无法证明窗口外不存在与当前 "
+            "Pool/SampleDesign 完全一致的 ImpactCube，本次未创建报告计划。",
+        )
     return None
 
 
@@ -7165,90 +7471,96 @@ def _strategy_report_latest_pool_impact_binding(
     read_runtime: SimpleNamespace,
     *,
     task_id: str,
-    artifacts: Sequence[Mapping],
     pool,
 ):
-    same_kind = [
-        item
-        for item in artifacts
-        if item.get("kind") == POOL_IMPACT_ARTIFACT_KIND
-    ]
-    exact: list[Mapping] = []
+    same_kind, total = _strategy_report_artifact_window(
+        read_runtime,
+        task_id=task_id,
+        kind=POOL_IMPACT_ARTIFACT_KIND,
+        limit=_STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT,
+        unavailable_code=(
+            "strategy_report_bundle_v2_pool_impact_registry_unavailable"
+        ),
+        invalid_code="strategy_report_bundle_v2_pool_impact_invalid",
+        label="PoolImpact",
+    )
     for item in same_kind:
         provenance = item.get("provenance")
-        if not isinstance(provenance, Mapping):
-            if item is same_kind[-1]:
-                raise _StrategyV2EvidenceSetupError(
-                    "strategy_report_bundle_v2_pool_impact_invalid",
-                    "最新 PoolImpact artifact provenance 已损坏；"
-                    "平台不会回退到旧影响证据。",
-                )
-            continue
+        try:
+            binding = load_historical_strategy_pool_impact_artifact(
+                read_runtime,
+                task_id=task_id,
+                artifact_id=item.get("id"),
+                expected_artifact_content_hash=item.get("content_hash"),
+                expected_assessment_id=(
+                    provenance.get("assessment_id")
+                    if isinstance(provenance, Mapping)
+                    else None
+                ),
+                expected_assessment_content_hash=(
+                    provenance.get("assessment_content_hash")
+                    if isinstance(provenance, Mapping)
+                    else None
+                ),
+            )
+        except (
+            StrategyError,
+            TypeError,
+            ValueError,
+            *_STRATEGY_V2_ARTIFACT_ERRORS,
+        ) as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_report_bundle_v2_pool_impact_invalid",
+                "最新待判定的 PoolImpact 未通过历史安全的文件、registry、"
+                "provenance、Pool 或样本绑定复核；其真实身份无法确认，"
+                "平台不会回退到旧影响证据。",
+            ) from exc
         if (
-            provenance.get("pool_id") == pool.pool["pool_id"]
-            and provenance.get("pool_revision") == pool.pool["revision"]
-            and provenance.get("pool_snapshot_hash")
-            == pool.pool["snapshot_hash"]
+            binding.stage != "development_backtest"
+            or binding.pool.artifact_id != pool.artifact_id
+            or binding.pool.artifact_content_hash
+            != pool.artifact_content_hash
+            or binding.pool.pool != pool.pool
         ):
-            exact.append(item)
-    if not exact:
+            continue
+        return binding
+    if total > _STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT:
         raise _StrategyV2EvidenceSetupError(
-            "strategy_report_bundle_v2_pool_impact_required",
-            "当前非空 Strategy Pool 没有同 revision/snapshot 的 development "
-            "PoolImpact；请先单独完成影响测算。",
+            "strategy_report_bundle_v2_pool_impact_"
+            "selection_window_exhausted",
+            "已检查最新 "
+            f"{_STRATEGY_REPORT_EVIDENCE_REPLAY_LIMIT} 个 PoolImpact artifact，"
+            "但 registry 仍有更早记录；平台无法证明窗口外不存在当前 "
+            "Pool revision/snapshot 的精确 development 证据，"
+            "本次未创建报告计划。",
         )
-    newest = exact[-1]
-    provenance = newest.get("provenance")
-    assert isinstance(provenance, Mapping)
-    try:
-        binding = load_strategy_pool_impact_artifact(
-            read_runtime,
-            task_id=task_id,
-            artifact_id=newest.get("id"),
-            expected_artifact_content_hash=newest.get("content_hash"),
-            expected_assessment_id=provenance.get("assessment_id"),
-            expected_assessment_content_hash=provenance.get(
-                "assessment_content_hash"
-            ),
-        )
-    except (
-        StrategyError,
-        TypeError,
-        ValueError,
-        *_STRATEGY_V2_ARTIFACT_ERRORS,
-    ) as exc:
-        raise _StrategyV2EvidenceSetupError(
-            "strategy_report_bundle_v2_pool_impact_invalid",
-            "最新匹配 PoolImpact 未通过文件、registry、provenance、Pool 或"
-            "样本绑定复核；平台不会回退到旧影响证据。",
-        ) from exc
-    if (
-        binding.stage != "development_backtest"
-        or binding.pool.artifact_id != pool.artifact_id
-        or binding.pool.artifact_content_hash != pool.artifact_content_hash
-    ):
-        raise _StrategyV2EvidenceSetupError(
-            "strategy_report_bundle_v2_pool_impact_invalid",
-            "最新 PoolImpact 不是当前 Pool 的精确 development 证据。",
-        )
-    return binding
+    raise _StrategyV2EvidenceSetupError(
+        "strategy_report_bundle_v2_pool_impact_required",
+        "当前非空 Strategy Pool 没有同 revision/snapshot 的 development "
+        "PoolImpact；请先单独完成影响测算。",
+    )
 
 
 def _strategy_report_optional_model_evidence(
     read_runtime: SimpleNamespace,
     *,
     task_id: str,
-    artifacts: Sequence[Mapping],
     sample_ref: Mapping[str, object],
 ) -> tuple[object | None, dict[str, object] | None]:
-    records = [
-        item
-        for item in artifacts
-        if item.get("kind") == MODEL_EVIDENCE_V2_ARTIFACT_KIND
-    ]
+    records, _total = _strategy_report_artifact_window(
+        read_runtime,
+        task_id=task_id,
+        kind=MODEL_EVIDENCE_V2_ARTIFACT_KIND,
+        limit=1,
+        unavailable_code=(
+            "strategy_report_bundle_v2_optional_evidence_registry_unavailable"
+        ),
+        invalid_code="strategy_report_bundle_v2_optional_evidence_invalid",
+        label="ModelEvidence",
+    )
     if not records:
         return None, None
-    newest = records[-1]
+    newest = records[0]
     provenance = newest.get("provenance")
     if not isinstance(provenance, Mapping):
         _raise_corrupt_report_optional("ModelEvidence")
@@ -7287,21 +7599,27 @@ def _strategy_report_optional_training_evidence(
     read_runtime: SimpleNamespace,
     *,
     task_id: str,
-    artifacts: Sequence[Mapping],
     sample_ref: Mapping[str, object],
 ) -> tuple[object | None, dict[str, object] | None]:
-    records = [
-        item
-        for item in artifacts
-        if item.get("kind") == MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND
-    ]
+    records, _total = _strategy_report_artifact_window(
+        read_runtime,
+        task_id=task_id,
+        kind=MODELING_TRAINING_EVIDENCE_ARTIFACT_KIND,
+        limit=1,
+        unavailable_code=(
+            "strategy_report_bundle_v2_optional_evidence_registry_unavailable"
+        ),
+        invalid_code="strategy_report_bundle_v2_optional_evidence_invalid",
+        label="training evidence",
+    )
     if not records:
         return None, None
-    newest = records[-1]
+    newest = records[0]
     try:
         reference = _strategy_report_training_ref(
-            newest,
-            artifacts=artifacts,
+            read_runtime,
+            task_id=task_id,
+            record=newest,
         )
         binding = load_modeling_training_evidence_artifacts(
             read_runtime,
@@ -7323,15 +7641,17 @@ def _strategy_report_optional_training_evidence(
 
 
 def _strategy_report_training_ref(
-    record: Mapping,
+    read_runtime: SimpleNamespace,
     *,
-    artifacts: Sequence[Mapping],
+    task_id: str,
+    record: Mapping,
 ) -> dict[str, object]:
     provenance = record.get("provenance")
     if not isinstance(provenance, Mapping):
         raise ValueError("training evidence provenance is invalid")
-    sample_ref = _strategy_report_sample_ref_from_artifacts(
-        artifacts,
+    sample_ref = _strategy_report_sample_ref_from_registry(
+        read_runtime,
+        task_id=task_id,
         membership_artifact_id=provenance.get(
             "sample_membership_artifact_id"
         ),
@@ -7356,32 +7676,28 @@ def _strategy_report_training_ref(
     }
 
 
-def _strategy_report_sample_ref_from_artifacts(
-    artifacts: Sequence[Mapping],
+def _strategy_report_sample_ref_from_registry(
+    read_runtime: SimpleNamespace,
     *,
+    task_id: str,
     membership_artifact_id: object,
     bundle_artifact_id: object,
 ) -> dict[str, object]:
-    membership = next(
-        (
-            item
-            for item in artifacts
-            if item.get("id") == membership_artifact_id
-            and item.get("kind")
-            == SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND
-        ),
-        None,
+    membership = read_runtime.task_artifacts.get_for_task(
+        task_id,
+        membership_artifact_id,
     )
-    bundle = next(
-        (
-            item
-            for item in artifacts
-            if item.get("id") == bundle_artifact_id
-            and item.get("kind") == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
-        ),
-        None,
+    bundle = read_runtime.task_artifacts.get_for_task(
+        task_id,
+        bundle_artifact_id,
     )
-    if membership is None or bundle is None:
+    if (
+        not isinstance(membership, Mapping)
+        or membership.get("kind")
+        != SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND
+        or not isinstance(bundle, Mapping)
+        or bundle.get("kind") != SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+    ):
         raise ValueError("training evidence sample artifact pair is missing")
     provenance = bundle.get("provenance")
     if not isinstance(provenance, Mapping):
@@ -7405,18 +7721,23 @@ def _strategy_report_optional_score_evidence(
     read_runtime: SimpleNamespace,
     *,
     task_id: str,
-    artifacts: Sequence[Mapping],
     sample_ref: Mapping[str, object],
     training_ref: Mapping[str, object] | None,
 ) -> tuple[object | None, dict[str, object] | None]:
-    records = [
-        item
-        for item in artifacts
-        if item.get("kind") == MODEL_SCORE_EVIDENCE_ARTIFACT_KIND
-    ]
+    records, _total = _strategy_report_artifact_window(
+        read_runtime,
+        task_id=task_id,
+        kind=MODEL_SCORE_EVIDENCE_ARTIFACT_KIND,
+        limit=1,
+        unavailable_code=(
+            "strategy_report_bundle_v2_optional_evidence_registry_unavailable"
+        ),
+        invalid_code="strategy_report_bundle_v2_optional_evidence_invalid",
+        label="score evidence",
+    )
     if not records:
         return None, None
-    newest = records[-1]
+    newest = records[0]
     provenance = newest.get("provenance")
     if not isinstance(provenance, Mapping):
         _raise_corrupt_report_optional("score evidence")
