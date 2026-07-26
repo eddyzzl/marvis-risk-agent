@@ -159,7 +159,7 @@ def test_leaf_materialization_compiles_one_exact_asset_and_leaf_with_verbatim_re
     assert result.draft.to_dict() == reply
     assert len(llm.calls) == 1
     call = llm.calls[0]
-    assert call["prompt_version"] == 41
+    assert call["prompt_version"] == 42
     assert "automatic_tree_leaf_materialization" in call["system_prompt"]
     assert "pointer" in call["system_prompt"]
     assert "leaf_id" in call["user_prompt"]

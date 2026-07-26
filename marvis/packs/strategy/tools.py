@@ -66,6 +66,9 @@ from marvis.packs.strategy.interactive_tree_tools import (
 from marvis.packs.strategy.interactive_tree_frontier_tools import (
     run_materialize_interactive_tree_frontier_selection,
 )
+from marvis.packs.strategy.interactive_tree_frontier_group_tools import (
+    run_materialize_interactive_tree_frontier_group_selection,
+)
 from marvis.packs.strategy.voting_candidate_tools import (
     run_build_voting_candidate,
 )
@@ -879,6 +882,19 @@ def tool_materialize_interactive_tree_frontier_selection(
     """Persist one explicit pointer to an authenticated revision frontier."""
 
     return run_materialize_interactive_tree_frontier_selection(
+        inputs,
+        ctx,
+        _runtime(ctx),
+    )
+
+
+def tool_materialize_interactive_tree_frontier_group_selection(
+    inputs: dict,
+    ctx,
+) -> dict:
+    """Persist one pointer-only explicit OR group from a revision frontier."""
+
+    return run_materialize_interactive_tree_frontier_group_selection(
         inputs,
         ctx,
         _runtime(ctx),

@@ -90,6 +90,14 @@ from marvis.packs.strategy.interactive_tree_frontier_selection import (
 from marvis.packs.strategy.interactive_tree_frontier_tools import (
     load_verified_interactive_tree_frontier_selection_artifact,
 )
+from marvis.packs.strategy.interactive_tree_frontier_group_selection import (
+    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND,
+    INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ORIGIN_TOOL,
+    interactive_tree_frontier_group_selection_to_verified_candidate_fragment,
+)
+from marvis.packs.strategy.interactive_tree_frontier_group_tools import (
+    load_verified_interactive_tree_frontier_group_selection_artifact,
+)
 from marvis.packs.strategy.interactive_tree_tools import (
     INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
     INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
@@ -2152,6 +2160,15 @@ def _verified_pool_source_fragment(
             record,
         )
     if dispatch == (
+        INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ARTIFACT_KIND,
+        INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ORIGIN_TOOL,
+    ):
+        return _verified_interactive_tree_group_selection_fragment(
+            context,
+            source,
+            record,
+        )
+    if dispatch == (
         VOTING_CANDIDATE_ARTIFACT_KIND,
         VOTING_CANDIDATE_ORIGIN_TOOL,
     ):
@@ -2445,6 +2462,70 @@ def _verified_interactive_tree_selection_fragment(
         ) from exc
     context.verified_cache[cache_key] = {
         "kind": "interactive_tree_selection_fragment",
+        "fragment": fragment,
+    }
+    return fragment
+
+
+def _verified_interactive_tree_group_selection_fragment(
+    context: _ProjectionContext,
+    source: Mapping[str, Any],
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    cache_key = _record_cache_key(record)
+    cached = context.verified_cache.get(cache_key)
+    if cached is not None:
+        return _cached_fragment(
+            cached,
+            "interactive_tree_group_selection_fragment",
+        )
+    runtime = SimpleNamespace(
+        settings=context.settings,
+        task_artifacts=context.artifact_repository,
+    )
+    try:
+        selection = (
+            load_verified_interactive_tree_frontier_group_selection_artifact(
+                runtime,
+                task_id=context.task_id,
+                artifact_id=_text(
+                    source.get("artifact_id"),
+                    "interactive-tree group selection artifact_id",
+                ),
+                expected_content_hash=_sha256(
+                    source.get("artifact_content_hash"),
+                    "interactive-tree group selection content hash",
+                ),
+                expected_asset_id=_text(
+                    source.get("asset_id"),
+                    "interactive-tree group semantic asset_id",
+                ),
+                expected_asset_hash=_sha256(
+                    source.get("asset_hash"),
+                    "interactive-tree group semantic asset hash",
+                ),
+                reserve_bytes=context.budget.reserve,
+            )
+        )
+        revision = selection.revision
+        ancestry = revision.ancestor_revisions
+        fragment = (
+            interactive_tree_frontier_group_selection_to_verified_candidate_fragment(
+                selection.selection,
+                revision.revision,
+                revision.automatic_source.asset,
+                selection_artifact_binding=selection.artifact_binding(),
+                revision_artifact_binding=revision.builder_binding(),
+                parent_revision=ancestry[0] if ancestry else None,
+                ancestor_revisions=ancestry[1:],
+            )
+        )
+    except StrategyError as exc:
+        raise CandidateLabProjectionError(
+            "interactive-tree frontier group selection verification failed"
+        ) from exc
+    context.verified_cache[cache_key] = {
+        "kind": "interactive_tree_group_selection_fragment",
         "fragment": fragment,
     }
     return fragment

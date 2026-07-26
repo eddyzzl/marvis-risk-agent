@@ -220,6 +220,7 @@ ManualStrategyWorkflow = Literal[
     "voting_candidate_search",
     "voting_candidate_build_from_search",
     "interactive_tree_revision",
+    "interactive_tree_frontier_group_materialization",
     "interactive_tree_frontier_materialization",
     "strategy_pool_apply",
 ]
@@ -515,6 +516,32 @@ class ManualInteractiveTreeFrontierMaterializationInputs(BaseModel):
         return self
 
 
+class ManualInteractiveTreeFrontierGroupMaterializationInputs(BaseModel):
+    """Visible revision/frontier pointers for one immutable OR group."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    revision_id: ManualInteractiveTreeRevisionId
+    source_node_ids: Annotated[
+        list[ManualInteractiveTreeFrontierNodeId],
+        Field(min_length=2, max_length=50),
+    ]
+    selection_reason: ManualSelectionReason | None = None
+
+    @model_validator(mode="after")
+    def reject_invalid_optional_reason_or_duplicate_members(self) -> Self:
+        if (
+            "selection_reason" in self.model_fields_set
+            and self.selection_reason is None
+        ):
+            raise ValueError(
+                "optional fields must be omitted instead of null: selection_reason"
+            )
+        if len(self.source_node_ids) != len(set(self.source_node_ids)):
+            raise ValueError("source_node_ids cannot contain duplicate node ids")
+        return self
+
+
 class ManualVotingObjective(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -758,6 +785,9 @@ _MANUAL_INTERACTIVE_TREE_REVISION_INPUTS = TypeAdapter(
 _MANUAL_INTERACTIVE_TREE_FRONTIER_MATERIALIZATION_INPUTS = TypeAdapter(
     ManualInteractiveTreeFrontierMaterializationInputs
 )
+_MANUAL_INTERACTIVE_TREE_FRONTIER_GROUP_MATERIALIZATION_INPUTS = TypeAdapter(
+    ManualInteractiveTreeFrontierGroupMaterializationInputs
+)
 _MANUAL_VOTING_CANDIDATE_SEARCH_INPUTS = TypeAdapter(
     ManualVotingCandidateSearchInputs
 )
@@ -847,6 +877,14 @@ class ManualStrategyRequest(BaseModel):
                 self.workflow_inputs,
                 strict=True,
             )
+        elif self.workflow == "interactive_tree_frontier_group_materialization":
+            (
+                _MANUAL_INTERACTIVE_TREE_FRONTIER_GROUP_MATERIALIZATION_INPUTS
+                .validate_python(
+                    self.workflow_inputs,
+                    strict=True,
+                )
+            )
         elif self.workflow == "voting_candidate_search":
             _MANUAL_VOTING_CANDIDATE_SEARCH_INPUTS.validate_python(
                 self.workflow_inputs,
@@ -870,6 +908,10 @@ class ManualStrategyRequest(BaseModel):
             "interactive_tree_frontier_materialization": {
                 "revision_id",
                 "source_node_id",
+            },
+            "interactive_tree_frontier_group_materialization": {
+                "revision_id",
+                "source_node_ids",
             },
             "voting_candidate_search": {
                 "include_rule_ids",

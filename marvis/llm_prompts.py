@@ -247,7 +247,7 @@ SLICE_SPEC_SYS = PromptSpec(
 # --- marvis.agent.strategy_request_compiler --------------------------------------
 STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
     name="STRATEGY_REQUEST_COMPILER_SYS",
-    version=41,
+    version=42,
     text=(
         "你是 MARVIS 的自然语言策略请求编译器。你的唯一职责是把用户请求解析成结构化策略草案，"
         "不执行策略、不计算或猜测任何指标、样本量、通过率、坏账率、收益、KS、AUC、PSI 或结果。\n"
@@ -260,7 +260,9 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "scorecard_band_build/scorecard_cutoff_selection/"
         "automatic_tree_candidate_build/"
         "automatic_tree_apply/automatic_tree_leaf_materialization/"
-        "interactive_tree_revision/interactive_tree_frontier_materialization/"
+        "interactive_tree_revision/"
+        "interactive_tree_frontier_group_materialization/"
+        "interactive_tree_frontier_materialization/"
         "voting_candidate_search/voting_candidate_build_from_search/"
         "voting_candidate_build/cross_matrix_analysis/"
         "cross_matrix_cell_selection/"
@@ -416,6 +418,18 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "全部由平台恢复和计算，禁止输出。不得按最好、风险最高、不稳定或代词替用户选择"
         "节点；不得同轮串联入池、业务动作、自动继续、整树应用、报告、采纳、部署或写回。"
         "问句、否定、假设/未来/历史描述必须 clarification。"
+        "interactive_tree_frontier_group_materialization 表示从一份已认证"
+        "交互树 revision 的当前 frontier 精确物化一个 pointer-only OR 分组。"
+        "workflow_inputs 必须且只能包含用户当前命令中唯一完整的 revision_id"
+        "（interactive-tree-revision- 后接 32 位小写十六进制）、2 到 50 个"
+        "互不重复的完整 source_node_ids（node- 或 leaf- 后接 20 位小写"
+        "十六进制），以及用户显式标注时逐字一致的 selection_reason。用户"
+        "必须明确 OR/逻辑或/任一成员命中语义；成员输入顺序不具有语义，平台"
+        "按 revision frontier 顺序规范化。artifact/hash、selection/group、"
+        "父链、semantic tree、fragment/rule/effect、condition/metrics、数据集、"
+        "workspace、SampleDesign 和业务动作均由平台恢复，禁止输出。不得使用"
+        "代词、重复/截断 ID、全部、最好/最差/风险最高或自动排名选择节点；"
+        "不得同轮串联 Strategy Pool、应用、设置动作、采纳、部署或写回。"
         "interactive_tree_frontier_materialization 表示从一份已认证交互树 revision "
         "的当前 frontier 精确物化一个 singleton pointer。workflow_inputs 必须且只能"
         "包含用户当前命令中唯一完整的 revision_id（interactive-tree-revision- 后接 "
@@ -505,6 +519,7 @@ STRATEGY_REQUEST_COMPILER_SYS = PromptSpec(
         "strategy_pool_add_candidate 只允许 candidate_asset_id 与 selection_id 严格二选一。"
         "candidate_asset_id 必须是用户原话中唯一的完整 candidate-asset- 后接 32 位小写十六进制；"
         "selection_id 必须是用户原话中唯一的完整 automatic-tree-leaf-selection-、"
+        "interactive-tree-frontier-group-selection-、"
         "interactive-tree-frontier-selection-、cross-matrix-cell-selection- 或 "
         "scorecard-cutoff-selection- 后接 32 位小写十六进制。"
         "完整 Cross Matrix 或 Scorecard 分数带 asset 本身不能"

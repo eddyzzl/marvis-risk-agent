@@ -74,6 +74,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "automatic_tree_apply",
     "automatic_tree_leaf_materialization",
     "interactive_tree_revision",
+    "interactive_tree_frontier_group_materialization",
     "interactive_tree_frontier_materialization",
     "voting_candidate_search",
     "voting_candidate_build_from_search",
@@ -820,8 +821,17 @@ _INTERACTIVE_TREE_FRONTIER_SELECTION_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])interactive-tree-frontier-selection-[0-9a-f]{32}"
     r"(?![A-Za-z0-9_-])"
 )
+_INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ID_RE = re.compile(
+    r"^interactive-tree-frontier-group-selection-[0-9a-f]{32}$"
+)
+_INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])"
+    r"interactive-tree-frontier-group-selection-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])"
+)
 _POOL_SOURCE_LIKE_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:candidate-asset|automatic-tree-leaf-selection|"
+    r"interactive-tree-frontier-group-selection|"
     r"interactive-tree-frontier-selection|cross-matrix-cell-selection|"
     r"scorecard-cutoff-selection)-"
     r"[A-Za-z0-9_-]+(?![A-Za-z0-9_-])",
@@ -829,6 +839,7 @@ _POOL_SOURCE_LIKE_TOKEN_RE = re.compile(
 )
 _POOL_SOURCE_PREFIX_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:candidate-asset|automatic-tree-leaf-selection|"
+    r"interactive-tree-frontier-group-selection|"
     r"interactive-tree-frontier-selection|cross-matrix-cell-selection|"
     r"scorecard-cutoff-selection)-",
     re.IGNORECASE,
@@ -900,6 +911,32 @@ _INTERACTIVE_TREE_FRONTIER_SUBJECT_RE = re.compile(
 _INTERACTIVE_TREE_FRONTIER_ACTION_RE = re.compile(
     r"(?:物化|固化|创建(?:选择|指针)|选中)|"
     r"(?<![A-Za-z0-9_])(?:materialize|persist|select)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TREE_FRONTIER_GROUP_SEMANTICS_RE = re.compile(
+    r"(?<![A-Za-z0-9_])OR(?![A-Za-z0-9_])|"
+    r"(?:逻辑或|或关系|任一(?:节点|成员)?命中|"
+    r"(?:按|以|用)\s*或\s*(?:关系|条件|逻辑)?(?:组合|分组))",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TREE_FRONTIER_GROUP_INTENT_RE = re.compile(
+    r"(?:组合|分组|成组)|"
+    r"(?<![A-Za-z0-9_])group(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TREE_FRONTIER_GROUP_AMBIGUOUS_SELECTION_RE = re.compile(
+    r"(?:全部|所有|整组|一组|若干|多个|这些|上述|刚才(?:那些)?|"
+    r"最好|最优|最佳|最差|最坏|风险最高|坏率最高|"
+    r"自动(?:选择|挑选|推荐))"
+    r"[^，,；;。\n]{0,32}(?:前沿|节点|叶(?:子|节点)?)|"
+    r"(?<![A-Za-z0-9_])(?:all|every|some|several|these|those|"
+    r"best|worst|highest[-\s]+risk|automatically\s+(?:select|pick|recommend))"
+    r"[^,;.!?\n]{0,32}(?:frontier|nodes?|leaves)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_INTERACTIVE_TREE_FRONTIER_GROUP_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:group_id|selection_id|selection_hash)"
     r"(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
@@ -3578,6 +3615,12 @@ def _validate_standard_workflow_payload(
             )
         elif workflow == "interactive_tree_revision":
             normalized = _validate_interactive_tree_revision_inputs(raw_inputs)
+        elif workflow == "interactive_tree_frontier_group_materialization":
+            normalized = (
+                _validate_interactive_tree_frontier_group_materialization_inputs(
+                    raw_inputs
+                )
+            )
         elif workflow == "interactive_tree_frontier_materialization":
             normalized = _validate_interactive_tree_frontier_materialization_inputs(
                 raw_inputs
@@ -5421,6 +5464,87 @@ def _validate_interactive_tree_frontier_materialization_inputs(
     return normalized
 
 
+def _validate_interactive_tree_frontier_group_materialization_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate only an explicit revision/frontier OR-group pointer."""
+
+    workflow = "interactive_tree_frontier_group_materialization"
+    allowed = {"revision_id", "source_node_ids", "selection_reason"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted({"revision_id", "source_node_ids"} - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+    revision_id = _required_text(
+        inputs["revision_id"],
+        name=f"{workflow} revision_id",
+    )
+    if _INTERACTIVE_TREE_REVISION_ID_RE.fullmatch(revision_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} revision_id 必须是 interactive-tree-revision- "
+            "后接 32 位小写十六进制字符。"
+        )
+    raw_node_ids = inputs["source_node_ids"]
+    if not isinstance(raw_node_ids, list):
+        raise _DraftValidationError(
+            f"{workflow} source_node_ids 必须是数组。"
+        )
+    if not 2 <= len(raw_node_ids) <= 50:
+        raise _DraftValidationError(
+            f"{workflow} source_node_ids 必须包含 2 到 50 个完整节点 ID。"
+        )
+    source_node_ids: list[str] = []
+    for index, value in enumerate(raw_node_ids):
+        source_node_id = _required_text(
+            value,
+            name=f"{workflow} source_node_ids[{index}]",
+        )
+        if (
+            _INTERACTIVE_TREE_FRONTIER_NODE_ID_RE.fullmatch(source_node_id)
+            is None
+        ):
+            raise _DraftValidationError(
+                f"{workflow} source_node_ids[{index}] 必须是 node- 或 leaf- "
+                "后接 20 位小写十六进制字符。"
+            )
+        source_node_ids.append(source_node_id)
+    if len(source_node_ids) != len(set(source_node_ids)):
+        raise _DraftValidationError(
+            f"{workflow} source_node_ids 不能包含重复节点 ID。"
+        )
+    normalized: dict[str, Any] = {
+        "revision_id": revision_id,
+        "source_node_ids": source_node_ids,
+    }
+    if "selection_reason" in inputs:
+        normalized["selection_reason"] = _interactive_tree_frontier_group_reason(
+            inputs["selection_reason"]
+        )
+    return normalized
+
+
+def _interactive_tree_frontier_group_reason(value: object) -> str:
+    if not isinstance(value, str):
+        raise _DraftValidationError(
+            "interactive_tree_frontier_group_materialization "
+            "selection_reason 必须是文本。"
+        )
+    if "\x00" in value:
+        raise _DraftValidationError(
+            "interactive_tree_frontier_group_materialization "
+            "selection_reason 不能包含 NUL。"
+        )
+    canonical = " ".join(unicodedata.normalize("NFC", value).split())
+    if not canonical or len(canonical) > 500:
+        raise _DraftValidationError(
+            "interactive_tree_frontier_group_materialization "
+            "selection_reason 必须是 1 到 500 字符的非空文本。"
+        )
+    return canonical
+
+
 def _interactive_tree_frontier_reason(value: object) -> str:
     if not isinstance(value, str):
         raise _DraftValidationError(
@@ -6355,6 +6479,10 @@ def _validate_strategy_pool_workflow_inputs(
         if (
             source_field == "selection_id"
             and _AUTOMATIC_TREE_LEAF_SELECTION_ID_RE.fullmatch(source_id) is None
+            and _INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ID_RE.fullmatch(
+                source_id
+            )
+            is None
             and _INTERACTIVE_TREE_FRONTIER_SELECTION_ID_RE.fullmatch(source_id)
             is None
             and _CROSS_MATRIX_CELL_SELECTION_ID_RE.fullmatch(source_id) is None
@@ -6362,7 +6490,8 @@ def _validate_strategy_pool_workflow_inputs(
         ):
             raise _DraftValidationError(
                 f"{workflow} selection_id 必须是 automatic-tree-leaf-selection- "
-                "、interactive-tree-frontier-selection-、"
+                "、interactive-tree-frontier-group-selection-、"
+                "interactive-tree-frontier-selection-、"
                 "cross-matrix-cell-selection- 或 "
                 "scorecard-cutoff-selection- 后接 32 位小写十六进制字符。"
             )
@@ -8053,6 +8182,21 @@ def _ground_refinement_request(
             code="scorecard_band_build_workflow_required",
             fields=("workflow",),
         )
+    if utterance_targets_interactive_tree_frontier_group_materialization(
+        utterance
+    ) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow
+        == "interactive_tree_frontier_group_materialization"
+    ):
+        return _clarification(
+            "原话明确要求从一个交互树 revision 精确物化多个 frontier "
+            "node/leaf 的 OR 分组，只能编译为 "
+            "interactive_tree_frontier_group_materialization；不能改路由到"
+            " singleton、修剪、Strategy Pool 或其他 Workflow。",
+            code="interactive_tree_frontier_group_workflow_required",
+            fields=("workflow",),
+        )
     if utterance_targets_interactive_tree_frontier_materialization(
         utterance
     ) and not (
@@ -8231,6 +8375,11 @@ def _ground_refinement_request(
         return _ground_automatic_tree_leaf_materialization(utterance, result)
     if draft.workflow == "interactive_tree_revision":
         return _ground_interactive_tree_revision(utterance, result)
+    if draft.workflow == "interactive_tree_frontier_group_materialization":
+        return _ground_interactive_tree_frontier_group_materialization(
+            utterance,
+            result,
+        )
     if draft.workflow == "interactive_tree_frontier_materialization":
         return _ground_interactive_tree_frontier_materialization(
             utterance,
@@ -11843,12 +11992,165 @@ def _ground_interactive_tree_revision(
     return result
 
 
+def utterance_targets_interactive_tree_frontier_group_materialization(
+    utterance: str,
+) -> bool:
+    """Recognize an explicit interactive-tree frontier OR-group action."""
+
+    return bool(
+        _INTERACTIVE_TREE_FRONTIER_SUBJECT_RE.search(utterance)
+        and _INTERACTIVE_TREE_FRONTIER_ACTION_RE.search(utterance)
+        and (
+            _INTERACTIVE_TREE_FRONTIER_GROUP_SEMANTICS_RE.search(utterance)
+            or _INTERACTIVE_TREE_FRONTIER_GROUP_INTENT_RE.search(utterance)
+        )
+        and (
+            _INTERACTIVE_TREE_REVISION_ID_TOKEN_RE.search(utterance)
+            or re.search(
+                r"(?:交互(?:式)?树|树修订|tree\s+revision).{0,80}"
+                r"(?:前沿|frontier)",
+                utterance,
+                re.IGNORECASE,
+            )
+        )
+    )
+
+
+def _ground_interactive_tree_frontier_group_materialization(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Require one explicit 2..50-member OR pointer over one exact revision."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if (
+        _INTERACTIVE_TREE_FRONTIER_GROUP_AMBIGUOUS_SELECTION_RE.search(utterance)
+        is not None
+        or _AUTOMATIC_TREE_LEAF_REASON_EXTREME_RE.search(utterance) is not None
+        or _INTERACTIVE_TREE_FRONTIER_GROUP_SEMANTICS_RE.search(utterance)
+        is None
+    ):
+        return _clarification(
+            "请从交互树 revision 的完整 frontier 清单中复制 2 到 50 个"
+            "明确 node/leaf ID，并明确它们按 OR 组合；平台不会按全部、最好、"
+            "最差、风险或指标排名替你选节点。",
+            code="interactive_tree_frontier_group_selection_ambiguous",
+            fields=("source_node_ids", "or_semantics"),
+        )
+    if (
+        _INTERACTIVE_TREE_FRONTIER_NEGATED_OR_NONCURRENT_RE.search(utterance)
+        is not None
+        or _INTERACTIVE_TREE_FRONTIER_ACTION_RE.search(utterance) is None
+    ):
+        return _clarification(
+            "原话必须是当前、肯定的一次交互树前沿 OR 分组物化命令；"
+            "问句、否定、假设、历史或未来描述不会创建 group pointer。",
+            code="interactive_tree_frontier_group_intent_negated",
+            fields=("materialization_intent",),
+        )
+    if (
+        _INTERACTIVE_TREE_FRONTIER_PLATFORM_CONTROL_RE.search(utterance)
+        is not None
+        or _INTERACTIVE_TREE_FRONTIER_GROUP_PLATFORM_CONTROL_RE.search(utterance)
+        is not None
+    ):
+        return _clarification(
+            "selection/group/revision artifact、hash、tree、fragment、condition、"
+            "metrics、数据集与 workspace 绑定由平台恢复，不能由自然语言指定"
+            "或覆盖。",
+            code="interactive_tree_frontier_group_platform_controls_forbidden",
+            fields=("platform_bindings",),
+        )
+    if any(
+        pattern.search(utterance) is not None
+        for pattern in (
+            _AUTOMATIC_TREE_LEAF_POOL_CHAIN_RE,
+            _AUTOMATIC_TREE_LEAF_ACTION_CHAIN_RE,
+            _AUTOMATIC_TREE_LEAF_LIFECYCLE_CHAIN_RE,
+            _AUTOMATIC_TREE_LEAF_WRITEBACK_CHAIN_RE,
+            _SCORECARD_SECOND_OPERATION_RE,
+        )
+    ):
+        return _clarification(
+            "本轮只创建一个交互树 frontier OR group pointer；加入 Strategy "
+            "Pool、设置业务动作、应用、采纳、部署或写回必须分别发起后续请求。",
+            code="interactive_tree_frontier_group_single_step_required",
+            fields=("next_action",),
+        )
+
+    revision_matches = tuple(
+        _INTERACTIVE_TREE_REVISION_ID_TOKEN_RE.finditer(utterance)
+    )
+    node_matches = tuple(
+        _INTERACTIVE_TREE_FRONTIER_NODE_ID_TOKEN_RE.finditer(utterance)
+    )
+    revision_ids = frozenset(match.group(0) for match in revision_matches)
+    observed_node_ids = tuple(match.group(0) for match in node_matches)
+    node_ids = frozenset(observed_node_ids)
+    missing_or_ambiguous: list[str] = []
+    if len(revision_matches) != 1 or len(revision_ids) != 1:
+        missing_or_ambiguous.append("revision_id")
+    if (
+        not 2 <= len(node_matches) <= 50
+        or len(node_ids) != len(node_matches)
+    ):
+        missing_or_ambiguous.append("source_node_ids")
+    if missing_or_ambiguous:
+        return _clarification(
+            "请在同一条命令中逐字提供且只提供一个完整 interactive-tree "
+            "revision ID，以及 2 到 50 个互不重复的完整 frontier node/leaf "
+            "ID；不能使用代词、截断 ID 或重复 ID。",
+            code="interactive_tree_frontier_group_explicit_ids_required",
+            fields=tuple(missing_or_ambiguous),
+        )
+
+    ungrounded: list[str] = []
+    if revision_ids != {inputs["revision_id"]}:
+        ungrounded.append("revision_id")
+    supplied_node_ids = inputs.get("source_node_ids")
+    if (
+        not isinstance(supplied_node_ids, list)
+        or len(supplied_node_ids) != len(node_ids)
+        or frozenset(supplied_node_ids) != node_ids
+    ):
+        ungrounded.append("source_node_ids")
+    if ungrounded:
+        return _clarification(
+            "模型草案中的 revision 或 frontier node/leaf ID 集合与用户原话"
+            "不一致；平台不会替换、补全、猜测、新增或删除节点。成员输入顺序"
+            "不具有语义，最终顺序由 revision frontier 规范化。",
+            code="interactive_tree_frontier_group_controls_not_grounded",
+            fields=tuple(ungrounded),
+        )
+
+    explicit_reasons = _automatic_tree_leaf_explicit_reasons(utterance)
+    supplied_reason = inputs.get("selection_reason")
+    if bool(explicit_reasons or supplied_reason is not None) and (
+        len(explicit_reasons) != 1
+        or not isinstance(supplied_reason, str)
+        or supplied_reason != explicit_reasons[0]
+    ):
+        return _clarification(
+            "selection_reason 只有在用户以“选择理由/理由/原因/说明/reason”"
+            "显式标注时才能逐字抄录；未提供时模型必须省略。",
+            code="interactive_tree_frontier_group_reason_not_grounded",
+            fields=("selection_reason",),
+        )
+    return result
+
+
 def utterance_targets_interactive_tree_frontier_materialization(
     utterance: str,
 ) -> bool:
     """Recognize only an explicit interactive-tree revision frontier action."""
 
     return bool(
+        not utterance_targets_interactive_tree_frontier_group_materialization(
+            utterance
+        )
+        and
         _INTERACTIVE_TREE_FRONTIER_SUBJECT_RE.search(utterance)
         and _INTERACTIVE_TREE_FRONTIER_ACTION_RE.search(utterance)
         and (
@@ -13065,6 +13367,7 @@ def _pool_add_unconsumed_text(utterance: str) -> str:
         for pattern in (
             _AUTOMATIC_TREE_ASSET_ID_TOKEN_RE,
             _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE,
+            _INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ID_TOKEN_RE,
             _INTERACTIVE_TREE_FRONTIER_SELECTION_ID_TOKEN_RE,
             _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE,
             _SCORECARD_CUTOFF_SELECTION_ID_TOKEN_RE,
@@ -13759,6 +14062,7 @@ def _ground_strategy_pool_add_request(
         match
         for pattern in (
             _AUTOMATIC_TREE_LEAF_SELECTION_ID_TOKEN_RE,
+            _INTERACTIVE_TREE_FRONTIER_GROUP_SELECTION_ID_TOKEN_RE,
             _INTERACTIVE_TREE_FRONTIER_SELECTION_ID_TOKEN_RE,
             _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE,
             _SCORECARD_CUTOFF_SELECTION_ID_TOKEN_RE,
@@ -14737,6 +15041,23 @@ def _standard_workflow_confirmation_text(
         ]
         if "reason" in inputs and inputs["reason"] is not None:
             details.append(f"用户原话修剪说明：{inputs['reason']}")
+    elif draft.workflow == "interactive_tree_frontier_group_materialization":
+        details = [
+            "已识别为〔交互树前沿显式 OR 分组物化 Workflow〕",
+            f"不可变 revision pointer：{inputs['revision_id']}",
+            (
+                "精确 frontier node/leaf pointers："
+                + "、".join(inputs["source_node_ids"])
+            ),
+            "组合语义：任一成员命中（OR）；成员顺序不具有语义，平台会按"
+            " revision frontier 顺序规范化",
+            "平台将从当前 task 唯一恢复并认证 revision artifact、完整父链、"
+            "原始自动树与所有成员 candidate fragment",
+            "本步骤只创建 pointer-only OR group，不复制 condition、metrics "
+            "或业务动作；不会加入 Strategy Pool，也不会应用、采纳、部署或写回",
+        ]
+        if "selection_reason" in inputs:
+            details.append(f"用户原话选择说明：{inputs['selection_reason']}")
     elif draft.workflow == "interactive_tree_frontier_materialization":
         details = [
             "已识别为〔交互树前沿精确物化 Workflow〕",
@@ -15486,6 +15807,16 @@ def _user_prompt(
         "SampleDesign 或重放结果，这些均由平台恢复。不得按最好、风险最高、不稳定或"
         "代词替用户选节点，也不得同轮串联入池、业务动作、自动继续、整树应用、报告、"
         "采纳、部署或写回。"
+        "对于 interactive_tree_frontier_group_materialization，只能逐字抄录用户"
+        "当前肯定命令中唯一完整的 revision_id（interactive-tree-revision- 后接 "
+        "32 位小写十六进制）、2 到 50 个互不重复的完整 source_node_ids（node- "
+        "或 leaf- 后接 20 位小写十六进制），以及用户显式标注时逐字一致的 "
+        "selection_reason。用户必须明确 OR/逻辑或/任一成员命中语义；成员输入顺序"
+        "不具有语义，平台按 revision frontier 顺序规范化。不得输出 selection/group/"
+        "revision artifact、hash、父链、semantic tree、fragment/rule/effect、condition/"
+        "metrics、dataset/workspace/SampleDesign 或动作。不得用全部、最好、最差、"
+        "风险最高、自动排名或代词替用户选节点，也不得同轮串联 Strategy Pool、"
+        "业务动作、应用、采纳、部署或写回。"
         "对于 interactive_tree_frontier_materialization，只能逐字抄录用户当前肯定"
         "命令中唯一完整的 revision_id（interactive-tree-revision- 后接 32 位小写"
         "十六进制）、唯一完整的 source_node_id（node- 或 leaf- 后接 20 位小写"
@@ -15545,7 +15876,8 @@ def _user_prompt(
         "逐字抄录 before_selected_members/replace_selected_members，或从“保留成员"
         "作为回退并放在成员前/由 Voting 替代成员”二选一映射；用户未提供时省略。"
         "否定入池或串联采纳/部署时"
-        "必须澄清。selection_id 只允许 automatic-tree-leaf-selection- 或"
+        "必须澄清。selection_id 只允许 automatic-tree-leaf-selection-、"
+        "interactive-tree-frontier-group-selection-、"
         "interactive-tree-frontier-selection-、cross-matrix-cell-selection- 后接 "
         "32 位小写十六进制；完整 Cross Matrix asset"
         "不能直接入池。source ID 必须与唯一正向入池命令位于同一子句，不能从否定子句、"
@@ -15674,6 +16006,7 @@ __all__ = [
     "compile_strategy_request",
     "strategy_request_confirmation_text",
     "utterance_targets_candidate_monthly_stability",
+    "utterance_targets_interactive_tree_frontier_group_materialization",
     "utterance_targets_interactive_tree_frontier_materialization",
     "utterance_targets_scorecard_band_build",
     "utterance_targets_scorecard_cutoff_selection",

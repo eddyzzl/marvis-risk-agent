@@ -15,6 +15,7 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "voting_candidate_search",
   "voting_candidate_build_from_search",
   "interactive_tree_revision",
+  "interactive_tree_frontier_group_materialization",
   "interactive_tree_frontier_materialization",
 ]);
 
@@ -29,6 +30,7 @@ const WORKFLOW_LABELS = Object.freeze({
   voting_candidate_search: "搜索 Voting 组合",
   voting_candidate_build_from_search: "从搜索结果构建 Voting 候选",
   interactive_tree_revision: "创建不可变交互式树修订",
+  interactive_tree_frontier_group_materialization: "物化交互树前沿 OR 分组",
   interactive_tree_frontier_materialization: "物化交互树前沿节点",
 });
 
@@ -1796,6 +1798,54 @@ function collectInteractiveTreeFrontierMaterializationInputs(form) {
   return inputs;
 }
 
+function collectInteractiveTreeFrontierGroupMaterializationInputs(form) {
+  const revision = selectedProjectionOption(
+    form,
+    "interactive_tree_frontier_group_revision_id",
+    "交互树 revision",
+  );
+  const revisionId = nonEmptyText(revision.value);
+  const nodeSelect = formField(
+    form,
+    "interactive_tree_frontier_group_source_node_ids",
+  );
+  const nodeOptions = Array.from(nodeSelect?.selectedOptions || []);
+  if (nodeOptions.length < 2 || nodeOptions.length > 50) {
+    throw new Error("交互树前沿 OR 分组必须选择 2 到 50 个节点。");
+  }
+  const sourceNodeIds = uniqueValues(
+    nodeOptions.map((option) => nonEmptyText(option.value)),
+    "交互树前沿 OR 分组节点",
+  );
+  if (
+    !INTERACTIVE_TREE_REVISION_ID_RE.test(revisionId)
+    || nonEmptyText(revision.dataset?.revisionId) !== revisionId
+    || sourceNodeIds.some((sourceNodeId, index) => {
+      const option = nodeOptions[index];
+      return (
+        option.dataset?.candidateLabProjection !== "1"
+        || !INTERACTIVE_TREE_FRONTIER_SOURCE_NODE_ID_RE.test(sourceNodeId)
+        || nonEmptyText(option.dataset?.revisionId) !== revisionId
+        || nonEmptyText(option.dataset?.sourceNodeId) !== sourceNodeId
+      );
+    })
+  ) {
+    throw new Error(
+      "交互树前沿 OR 分组节点必须来自当前 revision 的受认证 frontier 投影。",
+    );
+  }
+  const inputs = {
+    revision_id: revisionId,
+    source_node_ids: sourceNodeIds,
+  };
+  optionalText(
+    inputs,
+    "selection_reason",
+    formValue(form, "interactive_tree_frontier_group_selection_reason"),
+  );
+  return inputs;
+}
+
 export function collectStrategyCandidateLabRequest(form) {
   const workflow = nonEmptyText(form?.dataset?.candidateLabWorkflow);
   if (!STRATEGY_CANDIDATE_LAB_WORKFLOWS.includes(workflow)) {
@@ -1813,6 +1863,8 @@ export function collectStrategyCandidateLabRequest(form) {
     voting_candidate_build_from_search:
       collectVotingCandidateBuildFromSearchInputs,
     interactive_tree_revision: collectInteractiveTreeRevisionInputs,
+    interactive_tree_frontier_group_materialization:
+      collectInteractiveTreeFrontierGroupMaterializationInputs,
     interactive_tree_frontier_materialization:
       collectInteractiveTreeFrontierMaterializationInputs,
   }[workflow](form);
@@ -2028,6 +2080,12 @@ function interactiveTreeFrontierMaterializationForm(root) {
   ) || null;
 }
 
+function interactiveTreeFrontierGroupMaterializationForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="interactive_tree_frontier_group_materialization"]',
+  ) || null;
+}
+
 function interactiveTreeFrontierProjectionSources(payload) {
   const collection = payload?.candidates?.interactive_tree_revision;
   const seen = new Set();
@@ -2053,6 +2111,32 @@ function interactiveTreeFrontierPointer(payload, revisionId, sourceNodeId) {
   return interactiveTreeFrontierEligiblePointers(source).find(
     (pointer) => pointer.source_node_id === sourceNodeId,
   ) || null;
+}
+
+function interactiveTreeFrontierGroupPointers(
+  payload,
+  revisionId,
+  sourceNodeIds,
+) {
+  if (
+    !Array.isArray(sourceNodeIds)
+    || sourceNodeIds.length < 2
+    || sourceNodeIds.length > 50
+    || new Set(sourceNodeIds).size !== sourceNodeIds.length
+  ) {
+    return [];
+  }
+  const source = interactiveTreeFrontierProjectionSources(payload).find(
+    (item) => item?.detail?.revision_id === revisionId,
+  );
+  if (!source) return [];
+  const byId = new Map(
+    interactiveTreeFrontierEligiblePointers(source).map(
+      (pointer) => [pointer.source_node_id, pointer],
+    ),
+  );
+  const pointers = sourceNodeIds.map((sourceNodeId) => byId.get(sourceNodeId));
+  return pointers.every(Boolean) ? pointers : [];
 }
 
 function syncInteractiveTreeFrontierMaterializationControls(
@@ -2143,6 +2227,90 @@ function syncInteractiveTreeFrontierMaterializationControls(
       ? pointers.length
         ? "每次只物化一个明确前沿节点；入池必须在后续单独请求中完成。"
         : "该 revision 当前没有可物化的受认证 frontier 节点。"
+      : "当前任务尚无不可变交互树 revision，请先完成一次明确剪枝。";
+  }
+}
+
+function syncInteractiveTreeFrontierGroupMaterializationControls(
+  form,
+  payload,
+  { preserveNodes = true } = {},
+) {
+  if (!form) return;
+  const revisionSelect = formField(
+    form,
+    "interactive_tree_frontier_group_revision_id",
+  );
+  const nodeSelect = formField(
+    form,
+    "interactive_tree_frontier_group_source_node_ids",
+  );
+  if (!revisionSelect || !nodeSelect) return;
+  const revisions = interactiveTreeFrontierProjectionSources(payload);
+  const previousRevision = nonEmptyText(revisionSelect.value);
+  revisionSelect.innerHTML = [
+    '<option value="">请选择不可变 revision</option>',
+    ...revisions.map((item) => {
+      const revisionId = nonEmptyText(item?.detail?.revision_id);
+      const frontierCount = interactiveTreeFrontierEligiblePointers(item).length;
+      return projectionOptionHtml(
+        revisionId,
+        `${revisionId} · ${frontierCount} 个可分组前沿节点`,
+        {
+          "candidate-lab-projection": "1",
+          "revision-id": revisionId,
+        },
+      );
+    }),
+  ].join("");
+  if (
+    previousRevision
+    && selectContainsValue(revisionSelect, previousRevision)
+  ) {
+    revisionSelect.value = previousRevision;
+  } else if (revisions.length) {
+    revisionSelect.value = nonEmptyText(revisions[0]?.detail?.revision_id);
+  }
+
+  const revisionId = nonEmptyText(revisionSelect.value);
+  const selectedRevision = revisions.find(
+    (item) => item?.detail?.revision_id === revisionId,
+  );
+  const pointers = selectedRevision
+    ? interactiveTreeFrontierEligiblePointers(selectedRevision)
+    : [];
+  const previousNodeIds = preserveNodes
+    ? new Set(selectedValues(nodeSelect))
+    : new Set();
+  nodeSelect.innerHTML = pointers.map((pointer) => {
+    const sourceNodeId = nonEmptyText(pointer.source_node_id);
+    const node = selectedRevision?.pointers?.nodes?.find?.(
+      (item) => item?.node_id === sourceNodeId,
+    );
+    const label = node?.condition
+      ? `${sourceNodeId} · ${readableValue(node.condition)}`
+      : sourceNodeId;
+    return projectionOptionHtml(
+      sourceNodeId,
+      label,
+      {
+        "candidate-lab-projection": "1",
+        "revision-id": revisionId,
+        "source-node-id": sourceNodeId,
+      },
+    );
+  }).join("");
+  for (const option of Array.from(nodeSelect.options || [])) {
+    option.selected = previousNodeIds.has(option.value);
+  }
+  const help = form.querySelector?.(
+    "[data-candidate-lab-interactive-tree-frontier-group-help]",
+  );
+  if (help) {
+    help.textContent = revisions.length
+      ? pointers.length >= 2
+        ? "按住 Command/Ctrl 选择 2–50 个节点；只创建 pointer-only OR 分组，入池需后续单独请求。"
+        : "该 revision 当前不足 2 个受认证 frontier 节点，不能创建 OR 分组。"
       : "当前任务尚无不可变交互树 revision，请先完成一次明确剪枝。";
   }
 }
@@ -2876,6 +3044,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       interactiveTreeForm(root),
       state.payload,
     );
+    syncInteractiveTreeFrontierGroupMaterializationControls(
+      interactiveTreeFrontierGroupMaterializationForm(root),
+      state.payload,
+    );
     syncInteractiveTreeFrontierMaterializationControls(
       interactiveTreeFrontierMaterializationForm(root),
       state.payload,
@@ -2901,6 +3073,11 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       interactiveTreeForm(root),
       state.payload,
       { preserveNode: false },
+    );
+    syncInteractiveTreeFrontierGroupMaterializationControls(
+      interactiveTreeFrontierGroupMaterializationForm(root),
+      state.payload,
+      { preserveNodes: false },
     );
     syncInteractiveTreeFrontierMaterializationControls(
       interactiveTreeFrontierMaterializationForm(root),
@@ -3047,6 +3224,19 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       ) {
         throw new Error(
           "交互式树剪枝指针已过期或不属于当前任务的受认证投影，请刷新 Candidate Lab 后重选。",
+        );
+      }
+      if (
+        strategyRequest.workflow
+          === "interactive_tree_frontier_group_materialization"
+        && interactiveTreeFrontierGroupPointers(
+          state.payload,
+          strategyRequest.workflow_inputs.revision_id,
+          strategyRequest.workflow_inputs.source_node_ids,
+        ).length !== strategyRequest.workflow_inputs.source_node_ids.length
+      ) {
+        throw new Error(
+          "交互树前沿 OR 分组指针已过期或不属于当前任务的受认证投影，请刷新 Candidate Lab 后重选。",
         );
       }
       if (
@@ -3347,6 +3537,21 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         interactiveTreeFrontier,
         state.payload,
         { preserveNode: false },
+      );
+      renderAvailability();
+      return true;
+    }
+    const interactiveTreeFrontierGroup = field.closest?.(
+      '[data-candidate-lab-workflow="interactive_tree_frontier_group_materialization"]',
+    );
+    if (
+      interactiveTreeFrontierGroup
+      && fieldName === "interactive_tree_frontier_group_revision_id"
+    ) {
+      syncInteractiveTreeFrontierGroupMaterializationControls(
+        interactiveTreeFrontierGroup,
+        state.payload,
+        { preserveNodes: false },
       );
       renderAvailability();
       return true;

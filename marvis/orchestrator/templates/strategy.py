@@ -1489,6 +1489,74 @@ STRATEGY_INTERACTIVE_TREE_REVISION = WorkflowTemplate(
 )
 
 
+STRATEGY_INTERACTIVE_TREE_FRONTIER_GROUP_MATERIALIZATION = WorkflowTemplate(
+    id="strategy_interactive_tree_frontier_group_materialization",
+    title="交互式决策树前沿 OR 分组物化",
+    goal_patterns=(
+        "物化交互式决策树前沿 OR 分组",
+        "组合交互式树前沿节点",
+        "将多个交互式树节点准备为一个 OR 候选",
+        "materialize an interactive tree frontier OR group",
+        "select exact interactive tree frontier nodes as one OR group",
+    ),
+    slots=(
+        SlotSpec(
+            "revision_id",
+            True,
+            "user",
+            "Exact immutable interactive-tree revision id",
+        ),
+        SlotSpec(
+            "source_node_ids",
+            True,
+            "user",
+            "Two to fifty exact source node ids from the revision frontier",
+        ),
+        SlotSpec(
+            "selection_reason",
+            False,
+            "user",
+            "Optional user-owned frontier OR-group selection rationale",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="物化交互式树精确前沿 OR 分组",
+            tool_ref=ToolRef(
+                "strategy",
+                "materialize_interactive_tree_frontier_group_selection",
+            ),
+            inputs_template={
+                "revision_id": "{slot:revision_id}",
+                "source_node_ids": "{slot:source_node_ids}",
+                "selection_reason": "{slot:selection_reason}",
+            },
+            depends_on_titles=(),
+            post_checks=tuple(
+                PostCheck("nonempty", {"field": field})
+                for field in (
+                    "selection_id",
+                    "selection_hash",
+                    "group_id",
+                    "revision_id",
+                    "semantic_tree_id",
+                    "tree_hash",
+                    "source_node_ids",
+                    "member_count",
+                    "fragment_id",
+                    "rule_id",
+                    "effect_id",
+                    "artifacts",
+                )
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_INTERACTIVE_TREE_FRONTIER_MATERIALIZATION = WorkflowTemplate(
     id="strategy_interactive_tree_frontier_materialization",
     title="交互式决策树前沿节点物化",
