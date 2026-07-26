@@ -175,6 +175,114 @@ def test_candidate_stability_manual_pointer_reaches_governed_preflight_without_l
     )
 
 
+@pytest.mark.parametrize(
+    "strategy_type",
+    ["approval", "reject", "limit", "pricing", "segmentation"],
+)
+def test_pool_stability_manual_request_accepts_only_strategy_type(
+    strategy_type: str,
+) -> None:
+    request = ManualStrategyRequest.model_validate(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_pool_stability",
+            "workflow_inputs": {"strategy_type": strategy_type},
+        },
+        strict=True,
+    )
+
+    assert request.workflow == "strategy_pool_stability"
+    assert request.workflow_inputs == {"strategy_type": strategy_type}
+
+
+@pytest.mark.parametrize(
+    "workflow_inputs",
+    [
+        {},
+        {"strategy_type": None},
+        {"strategy_type": "unsupported"},
+        {"strategy_type": "approval", "partitions": ["oot"]},
+        {"strategy_type": "approval", "artifact_id": "a" * 64},
+        {"strategy_type": "approval", "psi_threshold": 0.25},
+    ],
+)
+def test_pool_stability_manual_request_rejects_platform_controls(
+    workflow_inputs: dict,
+) -> None:
+    with pytest.raises(ValidationError):
+        ManualStrategyRequest.model_validate(
+            {
+                "request_kind": "standard_workflow",
+                "workflow": "strategy_pool_stability",
+                "workflow_inputs": workflow_inputs,
+            },
+            strict=True,
+        )
+
+
+def test_pool_stability_manual_pointer_reaches_governed_preflight_without_llm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(create_app(tmp_path))
+    task_id = _task(client, tmp_path)
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("typed Pool stability request must not resolve an LLM")
+        ),
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_request(
+            "strategy_pool_stability",
+            {"strategy_type": "approval"},
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "clarification_required"
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert (
+        client.get(f"/api/tasks/{task_id}/task-artifacts").json()["artifacts"] == []
+    )
+
+
+def test_pool_add_manual_pointer_reaches_governed_preflight_without_llm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = TestClient(create_app(tmp_path))
+    task_id = _task(client, tmp_path)
+    monkeypatch.setattr(
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("typed Pool add request must not resolve an LLM")
+        ),
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json=_request(
+            "strategy_pool_add_candidate",
+            {
+                "candidate_asset_id": "candidate-asset-" + "a" * 32,
+                "strategy_type": "approval",
+                "default_action": {"type": "approval"},
+                "action": {"type": "reject"},
+            },
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "clarification_required"
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    assert (
+        client.get(f"/api/tasks/{task_id}/task-artifacts").json()["artifacts"] == []
+    )
+
+
 def test_voting_search_selection_manual_pointer_reaches_preflight_without_llm(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

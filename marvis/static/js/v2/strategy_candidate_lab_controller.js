@@ -19,6 +19,7 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "strategy_pool_reorder",
   "strategy_pool_apply",
   "strategy_pool_validation",
+  "strategy_pool_stability",
   "voting_candidate_search",
   "voting_candidate_build_from_search",
   "interactive_tree_revision",
@@ -41,6 +42,7 @@ const WORKFLOW_LABELS = Object.freeze({
   strategy_pool_reorder: "完整重排当前 Strategy Pool",
   strategy_pool_apply: "应用当前 Strategy Pool",
   strategy_pool_validation: "执行 Strategy Pool 独立样本回放验证",
+  strategy_pool_stability: "测算 Strategy Pool 稳定性",
   voting_candidate_search: "搜索 Voting 组合",
   voting_candidate_build_from_search: "从搜索结果构建 Voting 候选",
   interactive_tree_revision: "创建不可变交互式树修订",
@@ -1629,6 +1631,15 @@ function collectStrategyPoolValidationInputs(form) {
   };
 }
 
+function collectStrategyPoolStabilityInputs(form) {
+  return {
+    strategy_type: selectedStrategyPoolType(
+      form,
+      "pool_stability_strategy_type",
+    ),
+  };
+}
+
 function collectStrategyPoolApplyInputs(form) {
   const selected = selectedProjectionOption(
     form,
@@ -2231,6 +2242,7 @@ export function collectStrategyCandidateLabRequest(form) {
     strategy_pool_reorder: collectStrategyPoolReorderInputs,
     strategy_pool_apply: collectStrategyPoolApplyInputs,
     strategy_pool_validation: collectStrategyPoolValidationInputs,
+    strategy_pool_stability: collectStrategyPoolStabilityInputs,
     voting_candidate_search: collectVotingCandidateSearchInputs,
     voting_candidate_build_from_search:
       collectVotingCandidateBuildFromSearchInputs,
@@ -3557,6 +3569,12 @@ function strategyPoolValidationForm(root) {
   ) || null;
 }
 
+function strategyPoolStabilityForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="strategy_pool_stability"]',
+  ) || null;
+}
+
 function strategyPoolRemoveEntryForm(root) {
   return root?.querySelector?.(
     '[data-candidate-lab-workflow="strategy_pool_remove_entry"]',
@@ -3666,6 +3684,25 @@ function syncStrategyPoolValidationControls(form, payload) {
       : pools.length === 1
         ? `已选择当前唯一的 ${selectedType} Pool；请选择 validation 或 OOT 分区。`
         : "当前存在多个可验证的非空 Pool，请明确选择 approval 或 reject。";
+  }
+}
+
+function syncStrategyPoolStabilityControls(form, payload) {
+  if (!form) return;
+  const pools = strategyPoolOperationPools(payload);
+  const selectedType = syncStrategyPoolTypeSelect(
+    formField(form, "pool_stability_strategy_type"),
+    pools,
+  );
+  const help = form.querySelector?.(
+    "[data-candidate-lab-pool-stability-help]",
+  );
+  if (help) {
+    help.textContent = pools.length === 0
+      ? "当前任务尚无可测算的受认证非空 Strategy Pool。"
+      : pools.length === 1
+        ? `已选择当前唯一的 ${selectedType} Pool；平台将自动比较 development 与所有可用 validation / OOT。`
+        : "当前存在多个受认证非空 Strategy Pool，请明确选择要测算稳定性的策略类型。";
   }
 }
 
@@ -3938,6 +3975,19 @@ function strategyPoolValidationRequestIsCurrent(request, payload) {
   );
   return (
     ["approval", "reject"].includes(strategyType)
+    && strategyPoolOperationPools(payload).some(
+      (pool) => pool.strategyType === strategyType,
+    )
+  );
+}
+
+function strategyPoolStabilityRequestIsCurrent(request, payload) {
+  if (request?.workflow !== "strategy_pool_stability") return true;
+  const strategyType = nonEmptyText(
+    request?.workflow_inputs?.strategy_type,
+  );
+  return (
+    STRATEGY_POOL_TYPES.includes(strategyType)
     && strategyPoolOperationPools(payload).some(
       (pool) => pool.strategyType === strategyType,
     )
@@ -4303,6 +4353,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       strategyPoolValidationForm(root),
       state.payload,
     );
+    syncStrategyPoolStabilityControls(
+      strategyPoolStabilityForm(root),
+      state.payload,
+    );
     syncStrategyPoolApplyControls(
       strategyPoolApplyForm(root),
       state.payload,
@@ -4344,6 +4398,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     );
     syncStrategyPoolValidationControls(
       strategyPoolValidationForm(root),
+      state.payload,
+    );
+    syncStrategyPoolStabilityControls(
+      strategyPoolStabilityForm(root),
       state.payload,
     );
     syncStrategyPoolApplyControls(
@@ -4521,6 +4579,14 @@ export function createStrategyCandidateLabController(dependencies = {}) {
           "所选审批或拒绝 Pool 已过期、为空或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
         );
       }
+      if (!strategyPoolStabilityRequestIsCurrent(
+        strategyRequest,
+        state.payload,
+      )) {
+        throw new Error(
+          "所选 Strategy Pool 已过期、为空或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
+        );
+      }
       if (
         strategyRequest.workflow === "strategy_pool_apply"
         && !strategyPoolApplyOptions(state.payload).some(
@@ -4622,6 +4688,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       if (selectedTaskId() !== requestTaskId) return result;
       if (
         strategyRequest.workflow === "strategy_pool_apply"
+        || strategyRequest.workflow === "strategy_pool_stability"
         || strategyRequest.workflow === "strategy_pool_add_candidate"
         || STRATEGY_POOL_OPERATION_WORKFLOWS.includes(strategyRequest.workflow)
       ) {

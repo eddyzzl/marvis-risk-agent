@@ -90,6 +90,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "strategy_pool_validation",
     "strategy_pool_impact",
     "strategy_impact_cube",
+    "strategy_pool_stability",
     "strategy_dsl_delivery",
     "strategy_report_bundle_v2",
 )
@@ -1778,6 +1779,9 @@ _STRATEGY_POOL_APPLY_WORKFLOWS = frozenset({"strategy_pool_apply"})
 _STRATEGY_POOL_VALIDATION_WORKFLOWS = frozenset(
     {"strategy_pool_validation"}
 )
+_STRATEGY_POOL_STABILITY_WORKFLOWS = frozenset(
+    {"strategy_pool_stability"}
+)
 _POOL_MUTATION_WORKFLOWS = _STRATEGY_POOL_WORKFLOWS - {"strategy_pool_compile"}
 _POOL_ACTION_TYPES = {
     "approval": frozenset({"approval", "reject", "review"}),
@@ -1994,6 +1998,55 @@ _POOL_VALIDATION_PARTITION_GROUNDING = {
         re.IGNORECASE,
     ),
 }
+_POOL_STABILITY_TARGET_RE = re.compile(
+    r"(?=.*(?:策略池|规则池|strategy(?:\s|-|_)*pool|\bpool\b))"
+    r"(?=.*(?:跨(?:分区|样本)(?:分布)?(?:稳定性|漂移)?|"
+    r"分布(?:稳定性|漂移)|稳定性|漂移|"
+    r"(?<![A-Za-z0-9_])psi(?![A-Za-z0-9_])|"
+    r"cross[-\s]*partition\s+stability))",
+    re.IGNORECASE,
+)
+_POOL_STABILITY_POSITIVE_INTENT_RE = re.compile(
+    r"(?:测量|测算|分析|计算|评估|检查)"
+    r"[^；;。.!?？\n]{0,160}(?:稳定性|漂移|PSI|策略池|规则池)|"
+    r"(?:策略池|规则池)[^；;。.!?？\n]{0,160}"
+    r"(?:测量|测算|分析|计算|评估|检查)|"
+    r"(?<![A-Za-z0-9_])(?:measure|calculate|analy[sz]e|assess|evaluate|check)"
+    r"[^;.!?\n]{0,160}(?:stability|drift|psi|pool)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_STABILITY_NONCURRENT_RE = re.compile(
+    r"[?？]|(?:吗|呢)\s*$|(?:不要|不用|无需|先别|先不|暂不|取消|停止|禁止|"
+    r"能否|可否|是否|可以吗|能不能|可不可以|该不该|要不要|需不需要|"
+    r"如何|怎么|怎样|假设|假如|如果|以后|未来|将来|稍后|"
+    r"明天|下次|之前|此前|过去|上次|上一版|历史上|曾经|昨天)|"
+    r"(?<![A-Za-z0-9_])(?:do\s+not|don't|never|cancel|can\s+(?:you|we)|"
+    r"could\s+(?:you|we)|would\s+you|should\s+(?:we|i)|how\s+to|"
+    r"what\s+if|later|previously|historically|yesterday|tomorrow|"
+    r"in\s+the\s+future)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_STABILITY_SECOND_OPERATION_RE = re.compile(
+    r"(?:加入|添加|入池|删除|移除|改动作|修改动作|重排|排序|编译|"
+    r"应用|写回|回写|回填|打标|生成报告|形成报告|出报告|"
+    r"创建策略|采纳|采用|晋级|提升为|部署|上线|投产|生效|激活|切换)|"
+    r"(?<![A-Za-z0-9_])(?:add|insert|remove|delete|reorder|compile|"
+    r"apply|write[-\s]*back|report|create\s+strategy|adopt|promote|"
+    r"deploy|activate|switch)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_POOL_STABILITY_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:impact_cube_ref|pool_stability_ref|pool_ref|"
+    r"sample_design_ref|artifact_id|content_hash|expected_[a-z0-9_]+|"
+    r"pool_(?:id|revision|snapshot_hash)|dataset_(?:id|content_hash)|"
+    r"workspace_revision|target_col|metrics?|psi_threshold|thresholds?)"
+    r"(?![A-Za-z0-9_])|"
+    r"(?:Pool|策略池|数据集|dataset|artifact|工件|产物)"
+    r"\s*(?:hash|哈希|revision|版本)|"
+    r"(?:PSI|稳定性|漂移)\s*(?:阈值|threshold)\s*(?:=|:|：)?\s*[-+]?\d",
+    re.IGNORECASE,
+)
 _POOL_IMPACT_TARGET_RE = re.compile(
     r"(?=.*(?:策略池|规则池|strategy(?:\s|-|_)*pool|\bpool\b))"
     r"(?=.*(?:影响|效果|瀑布|逐月|通过率|坏账率|风险率|测算|评估|回测|"
@@ -3734,6 +3787,8 @@ def _validate_standard_workflow_payload(
             )
         elif workflow == "cross_matrix_cell_selection":
             normalized = _validate_cross_matrix_cell_selection_inputs(raw_inputs)
+        elif workflow == "strategy_pool_stability":
+            normalized = _validate_strategy_pool_stability_inputs(raw_inputs)
         elif workflow == "strategy_impact_cube":
             normalized = _validate_strategy_impact_cube_inputs(
                 raw_inputs,
@@ -6742,6 +6797,32 @@ def _validate_strategy_pool_validation_inputs(
     }
 
 
+def _validate_strategy_pool_stability_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the sole user-owned cross-partition stability control."""
+
+    workflow = "strategy_pool_stability"
+    _reject_workflow_fields(
+        inputs,
+        {"strategy_type"},
+        workflow=workflow,
+    )
+    if "strategy_type" not in inputs:
+        raise _DraftValidationError(f"{workflow} 缺少 strategy_type。")
+    strategy_type = _required_text(
+        inputs["strategy_type"],
+        name=f"{workflow} strategy_type",
+    )
+    if strategy_type not in STRATEGY_TYPES:
+        raise _DraftValidationError(
+            f"{workflow} strategy_type 只能是："
+            + "、".join(STRATEGY_TYPES)
+            + "。"
+        )
+    return {"strategy_type": strategy_type}
+
+
 def _validate_strategy_pool_impact_inputs(
     inputs: Mapping[str, Any],
     whitelist: tuple[str, ...],
@@ -8374,6 +8455,17 @@ def _ground_refinement_request(
             code="strategy_pool_apply_workflow_required",
             fields=("workflow",),
         )
+    if utterance_targets_strategy_pool_stability(utterance) and not (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_pool_stability"
+    ):
+        return _clarification(
+            "原话明确要求测量当前 Strategy Pool 的跨分区分布稳定性，只能编译为 "
+            "strategy_pool_stability；不能改路由到 ImpactCube、独立效果验证、"
+            "报告或生命周期操作。",
+            code="strategy_pool_stability_workflow_required",
+            fields=("workflow",),
+        )
     if _utterance_targets_strategy_pool_validation(utterance) and not (
         isinstance(draft, StandardWorkflowRequestDraft)
         and draft.workflow == "strategy_pool_validation"
@@ -8492,6 +8584,8 @@ def _ground_refinement_request(
         return _ground_strategy_dsl_delivery_request(utterance, result)
     if draft.workflow == "strategy_report_bundle_v2":
         return _ground_strategy_report_bundle_v2_request(utterance, result)
+    if draft.workflow == "strategy_pool_stability":
+        return _ground_strategy_pool_stability_request(utterance, result)
     if draft.workflow == "strategy_impact_cube":
         return _ground_strategy_impact_cube_request(
             utterance,
@@ -10786,9 +10880,27 @@ def _ground_voting_candidate_build(
     return result
 
 
+def utterance_targets_strategy_pool_stability(utterance: str) -> bool:
+    """Reserve a positive current-Pool distribution-stability command."""
+
+    if utterance_targets_candidate_monthly_stability(utterance):
+        return False
+    if _POOL_VALIDATION_TARGET_RE.search(utterance) is not None:
+        return False
+    if (
+        _POOL_STABILITY_TARGET_RE.search(utterance) is None
+        or _POOL_STABILITY_POSITIVE_INTENT_RE.search(utterance) is None
+        or _POOL_IMPACT_REPORT_ONLY_RE.search(utterance) is not None
+    ):
+        return False
+    return True
+
+
 def utterance_targets_strategy_impact_cube(utterance: str) -> bool:
     """Reserve only a positive, executable unified/non-binary impact clause."""
 
+    if utterance_targets_strategy_pool_stability(utterance):
+        return False
     if _POOL_IMPACT_TARGET_RE.search(utterance) is None:
         return False
     if (
@@ -10825,6 +10937,8 @@ def _utterance_targets_strategy_pool_validation(utterance: str) -> bool:
 
 
 def _utterance_targets_strategy_pool_impact(utterance: str) -> bool:
+    if utterance_targets_strategy_pool_stability(utterance):
+        return False
     if _POOL_IMPACT_TARGET_RE.search(utterance) is None:
         return False
     if (
@@ -11024,6 +11138,64 @@ def _ground_strategy_pool_validation_request(
             + "。平台不会猜测类型、分区或证据绑定。",
             code="strategy_pool_validation_controls_not_grounded",
             fields=tuple(dict.fromkeys(missing_controls)),
+        )
+    return result
+
+
+def _ground_strategy_pool_stability_request(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Prove the one current Pool type came from this stability command."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if (
+        _POOL_STABILITY_NONCURRENT_RE.search(utterance) is not None
+        or _POOL_STABILITY_POSITIVE_INTENT_RE.search(utterance) is None
+        or _POOL_STABILITY_TARGET_RE.search(utterance) is None
+        or _POOL_IMPACT_REPORT_ONLY_RE.search(utterance) is not None
+    ):
+        return _clarification(
+            "请用当前轮、肯定式的单一命令明确要求测量一个当前 Strategy Pool "
+            "的跨分区 PSI 稳定性；否定、问句、历史/未来、假设或仅生成报告"
+            "不会执行测量。",
+            code="strategy_pool_stability_positive_command_required",
+            fields=("stability_intent",),
+        )
+    if _POOL_STABILITY_PLATFORM_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "ImpactCube/Pool/SampleDesign artifact、revision/hash、dataset、"
+            "阈值、指标与结果只能由平台冻结或计算；请求中只能提供五类 Pool "
+            "之一的 strategy_type。",
+            code="strategy_pool_stability_platform_binding_forbidden",
+            fields=("platform_binding",),
+        )
+    if _POOL_STABILITY_SECOND_OPERATION_RE.search(utterance) is not None:
+        return _clarification(
+            "Strategy Pool 跨分区稳定性测量必须是当前轮唯一操作；Pool 修改、"
+            "应用写回、报告、创建、采纳、晋级或部署必须拆成后续请求。",
+            code="strategy_pool_stability_single_operation_required",
+            fields=("workflow",),
+        )
+
+    strategy_type = str(inputs.get("strategy_type") or "")
+    mentioned_types = {
+        item[0] for item in _impact_cube_strategy_type_mentions(utterance)
+    }
+    type_pattern = _POOL_STRATEGY_TYPE_GROUNDING.get(strategy_type)
+    if (
+        type_pattern is None
+        or type_pattern.search(utterance) is None
+        or mentioned_types != {strategy_type}
+    ):
+        return _clarification(
+            "跨分区稳定性只能采用原话中唯一明确的 approval、reject、limit、"
+            "pricing 或 segmentation Pool 类型；平台不会从动作、指标或历史"
+            "证据猜测类型。",
+            code="strategy_pool_stability_controls_not_grounded",
+            fields=(f"strategy_type {strategy_type or 'unknown'}",),
         )
     return result
 
@@ -15454,6 +15626,18 @@ def _standard_workflow_confirmation_text(
             "金额和逐月证据；不声称 PSI、稳定性或漂移",
             "本步骤不会修改 Pool，不创建策略，也不晋级、不采纳、不部署",
         ]
+    elif draft.workflow == "strategy_pool_stability":
+        details = [
+            "已识别为〔Strategy Pool 跨分区稳定性 Workflow〕",
+            f"策略类型：{inputs['strategy_type']}",
+            "平台将在计划创建时冻结当前非空 Pool、最新认证且风险结果成熟的 "
+            "StrategySampleDesign V2，以及 development 和全部可用非空 "
+            "validation/OOT 分区",
+            "Agent 会先生成 exact ImpactCube，再把该步骤的四个精确输出引用"
+            "直接交给确定性 Tool 计算 waterfall/action 分布 PSI",
+            "结果只表示跨分区分布稳定性，不等于独立效果验证；不会修改 Pool、"
+            "创建策略，也不采纳、不晋级、不部署",
+        ]
     elif draft.workflow == "strategy_impact_cube":
         details = [
             "已识别为〔统一 Strategy ImpactCube Workflow〕",
@@ -16136,6 +16320,13 @@ def _user_prompt(
         "不能直接入池。source ID 必须与唯一正向入池命令位于同一子句，不能从否定子句、"
         "reason、引用或代词上下文借用；未来/条件指令、问句、how-to、演示和测试也"
         "必须澄清。"
+        "对于 strategy_pool_stability，只能逐字抄录用户当前肯定命令中唯一明确"
+        "的五类 strategy_type。partitions、exact ImpactCube/Pool/SampleDesign "
+        "artifact、revision/hash、dataset/workspace/target、阈值、PSI、分布、"
+        "指标与结果全部禁止填写，由平台在计划创建和两步 Workflow 执行时冻结或"
+        "确定性计算。否定、问句、历史/未来/假设、仅报告，或同轮修改 Pool、应用、"
+        "创建、采纳、晋级、部署时必须 clarification。结果只是跨分区分布稳定性，"
+        "不是独立效果验证，也不会修改 Pool 或进入策略生命周期。"
         "对于 strategy_impact_cube，只能抄录用户明确的五类 strategy_type、"
         "可选 development/validation/oot partitions、精确 month_col/group_col/"
         "segment_col、完整 current_strategy_id，以及 typed economics_inputs"
@@ -16273,6 +16464,7 @@ __all__ = [
     "utterance_targets_scorecard_band_build",
     "utterance_targets_scorecard_cutoff_selection",
     "utterance_targets_strategy_dsl_delivery",
+    "utterance_targets_strategy_pool_stability",
     "utterance_targets_strategy_project_context",
     "utterance_targets_strategy_report_bundle_v2",
     "utterance_targets_strategy_sample_design",

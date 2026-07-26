@@ -2550,6 +2550,96 @@ STRATEGY_IMPACT_CUBE = WorkflowTemplate(
 )
 
 
+STRATEGY_POOL_STABILITY = WorkflowTemplate(
+    id="strategy_pool_stability",
+    title="测量当前策略池跨分区稳定性",
+    goal_patterns=(
+        "测量策略池跨分区稳定性",
+        "分析策略池分布漂移",
+        "measure pool cross-partition stability",
+    ),
+    slots=(
+        SlotSpec(
+            "strategy_type",
+            True,
+            "user",
+            "Explicit approval/reject/limit/pricing/segmentation Pool type",
+        ),
+        SlotSpec(
+            "pool_ref",
+            True,
+            "task_context",
+            "Exact current Candidate Pool artifact and revision binding",
+        ),
+        SlotSpec(
+            "sample_design_ref",
+            True,
+            "task_context",
+            "Exact authenticated StrategySampleDesign V2 artifact binding",
+        ),
+        SlotSpec(
+            "partitions",
+            True,
+            "task_context",
+            "Development plus every available independent comparison partition",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="生成策略池稳定性基准",
+            tool_ref=ToolRef("strategy", "measure_strategy_impact_cube"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "pool_ref": "{slot:pool_ref}",
+                "sample_design_ref": "{slot:sample_design_ref}",
+                "partitions": "{slot:partitions}",
+                "population": "risk",
+                "dimension_bindings": {
+                    "month_col": None,
+                    "group_col": None,
+                    "segment_col": None,
+                },
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "cube_id"}),
+                PostCheck("nonempty", {"field": "content_hash"}),
+                PostCheck("nonempty", {"field": "artifact.artifact_id"}),
+            ),
+            needs_confirmation=False,
+        ),
+        StepTemplate(
+            title="测量策略池跨分区稳定性",
+            tool_ref=ToolRef("strategy", "measure_strategy_pool_stability"),
+            inputs_template={
+                "artifact_id": (
+                    "$ref:生成策略池稳定性基准.output.artifact.artifact_id"
+                ),
+                "expected_artifact_content_hash": (
+                    "$ref:生成策略池稳定性基准.output.artifact.content_hash"
+                ),
+                "expected_cube_id": (
+                    "$ref:生成策略池稳定性基准.output.cube_id"
+                ),
+                "expected_cube_content_hash": (
+                    "$ref:生成策略池稳定性基准.output.content_hash"
+                ),
+            },
+            depends_on_titles=("生成策略池稳定性基准",),
+            post_checks=(
+                PostCheck("nonempty", {"field": "stability_id"}),
+                PostCheck("nonempty", {"field": "content_hash"}),
+                PostCheck("nonempty", {"field": "artifact.artifact_id"}),
+                PostCheck("nonempty", {"field": "comparison_partitions"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_DSL_DELIVERY = WorkflowTemplate(
     id="strategy_dsl_delivery",
     title="导出离线策略代码与等价证据",

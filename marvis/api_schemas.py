@@ -229,6 +229,7 @@ ManualStrategyWorkflow = Literal[
     "strategy_pool_reorder",
     "strategy_pool_apply",
     "strategy_pool_validation",
+    "strategy_pool_stability",
 ]
 
 ManualUnivariateRefinementMethod = Literal[
@@ -879,6 +880,14 @@ class ManualStrategyPoolValidationInputs(BaseModel):
     partition: Literal["validation", "oot"]
 
 
+class ManualStrategyPoolStabilityInputs(BaseModel):
+    """The platform owns exact evidence and comparison partition selection."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    strategy_type: ManualStrategyType
+
+
 class ManualRiskThresholdSelectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -1032,6 +1041,9 @@ _MANUAL_STRATEGY_POOL_APPLY_INPUTS = TypeAdapter(
 _MANUAL_STRATEGY_POOL_VALIDATION_INPUTS = TypeAdapter(
     ManualStrategyPoolValidationInputs
 )
+_MANUAL_STRATEGY_POOL_STABILITY_INPUTS = TypeAdapter(
+    ManualStrategyPoolStabilityInputs
+)
 
 _MANUAL_STRATEGY_PLATFORM_FIELDS = frozenset(
     {
@@ -1162,6 +1174,11 @@ class ManualStrategyRequest(BaseModel):
             )
         elif self.workflow == "strategy_pool_validation":
             _MANUAL_STRATEGY_POOL_VALIDATION_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "strategy_pool_stability":
+            _MANUAL_STRATEGY_POOL_STABILITY_INPUTS.validate_python(
                 self.workflow_inputs,
                 strict=True,
             )

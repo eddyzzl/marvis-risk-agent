@@ -1998,6 +1998,28 @@
 
                     <details class="candidate-lab-launcher">
                       <summary>
+                        <span><strong>Strategy Pool 稳定性</strong><small>自动比较 development 与所有可用 validation / OOT 样本</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="strategy_pool_stability">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Strategy Pool 类型 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="pool_stability_strategy_type">
+                            <option value="">等待当前非空 Pool 受认证投影</option>
+                          </select>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-pool-stability-help>
+                          当前任务尚无可测算的受认证非空 Strategy Pool。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          平台自动使用 development 作为基线，并对所有可用 validation / OOT 样本生成只读 PSI 分布漂移证据。本操作不修改 Pool、不做效果验证、不创建策略，也不晋级、采纳或部署。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">测算 Strategy Pool 稳定性</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
                         <span><strong>Strategy Pool 独立样本回放验证</strong><small>在 validation 或 OOT 实际样本上复核当前 Pool</small></span>
                       </summary>
                       <form data-candidate-lab-form data-candidate-lab-workflow="strategy_pool_validation">

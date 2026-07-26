@@ -81,6 +81,7 @@ from marvis.agent.strategy_request_compiler import (
     utterance_targets_scorecard_cutoff_selection,
     utterance_targets_strategy_dsl_delivery,
     utterance_targets_strategy_impact_cube,
+    utterance_targets_strategy_pool_stability,
     utterance_targets_strategy_project_context,
     utterance_targets_strategy_report_bundle_v2,
     utterance_targets_strategy_sample_design,
@@ -1562,6 +1563,7 @@ def dispatch_driver_turn(
         or utterance_targets_strategy_dsl_delivery(text)
         or utterance_targets_strategy_report_bundle_v2(text)
         or utterance_targets_strategy_impact_cube(text)
+        or utterance_targets_strategy_pool_stability(text)
         or _STRATEGY_MODEL_EVIDENCE_V2_REQUEST_RE.search(text) is not None
     ):
         strategy_evidence_request = _maybe_handle_strategy_request_turn(
@@ -1877,6 +1879,7 @@ def _is_strategy_request_intent(text: str) -> bool:
         or utterance_targets_scorecard_band_build(text)
         or utterance_targets_scorecard_cutoff_selection(text)
         or utterance_targets_strategy_dsl_delivery(text)
+        or utterance_targets_strategy_pool_stability(text)
         or _STRATEGY_AUTOMATIC_TREE_SHORTHAND_RE.search(text)
         or (
             _STRATEGY_REQUEST_ACTION_RE.search(text)
@@ -1906,6 +1909,7 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "strategy_pool_reorder",
         "strategy_pool_apply",
         "strategy_pool_validation",
+        "strategy_pool_stability",
     }
 )
 
@@ -2249,6 +2253,7 @@ def _maybe_handle_strategy_request_turn(
         or utterance_targets_scorecard_cutoff_selection(text)
     )
     is_impact_cube_request = utterance_targets_strategy_impact_cube(text)
+    is_pool_stability_request = utterance_targets_strategy_pool_stability(text)
     is_model_evidence_v2_request = (
         _STRATEGY_MODEL_EVIDENCE_V2_REQUEST_RE.search(text) is not None
     )
@@ -2261,6 +2266,7 @@ def _maybe_handle_strategy_request_turn(
                 or is_report_bundle_v2_request
                 or is_candidate_stability_request
                 or is_pool_validation_request
+                or is_pool_stability_request
                 or is_scorecard_request
             )
             else (
@@ -2659,6 +2665,23 @@ def _run_validated_strategy_request(
             task,
             template_id="stored_strategy_report",
             slots={"strategy_id": draft.strategy_id},
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "strategy_pool_stability"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_pool_stability",
+            slots=_strategy_pool_stability_plan_slots(
+                runtime,
+                task,
+                draft,
+            ),
             auto_start=auto_start,
         )
 
@@ -3999,6 +4022,11 @@ def _standard_workflow_request_preflight(
     if draft.workflow == "strategy_impact_cube":
         # SampleDesign, Pool and optional current Strategy are selected and
         # authenticated together exactly once immediately before plan creation.
+        return None
+    if draft.workflow == "strategy_pool_stability":
+        # The exact current Pool and latest complete SampleDesign V2 are bound
+        # once during plan creation. The first step publishes the exact
+        # ImpactCube and the second consumes only its direct output refs.
         return None
     if draft.workflow == "strategy_pool_impact":
         try:
@@ -5425,12 +5453,62 @@ def _strategy_pool_validation_plan_slots(
     }
 
 
+def _strategy_pool_stability_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Freeze one current Pool and all usable comparison partitions once."""
+
+    if draft.workflow != "strategy_pool_stability":
+        raise StrategySetupError(
+            "Strategy Pool stability slots 收到了错误的 Workflow。"
+        )
+    strategy_type = draft.workflow_inputs.get("strategy_type")
+    impact_draft = StandardWorkflowRequestDraft(
+        workflow="strategy_impact_cube",
+        workflow_inputs={"strategy_type": strategy_type},
+    )
+    impact_slots = _strategy_impact_cube_plan_slots(
+        runtime,
+        task,
+        impact_draft,
+        fixed_dimension_bindings={
+            "month_col": None,
+            "group_col": None,
+            "segment_col": None,
+        },
+        include_optional_context=False,
+    )
+    partitions = impact_slots["partitions"]
+    if (
+        not isinstance(partitions, list)
+        or "development" not in partitions
+        or not any(
+            partition in partitions for partition in ("validation", "oot")
+        )
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_pool_stability_comparison_required",
+            "Pool 跨分区稳定性需要非空 development 基线，并至少具备一个"
+            "非空 validation 或 OOT 比较分区；请先完善样本设计。",
+        )
+    return {
+        "strategy_type": impact_slots["strategy_type"],
+        "pool_ref": impact_slots["pool_ref"],
+        "sample_design_ref": impact_slots["sample_design_ref"],
+        "partitions": partitions,
+    }
+
+
 def _strategy_impact_cube_plan_slots(
     runtime: DriverTurnRuntime,
     task: TaskRecord,
     draft: StandardWorkflowRequestDraft,
     *,
     expected_sample_binding: Mapping | None = None,
+    fixed_dimension_bindings: Mapping[str, str | None] | None = None,
+    include_optional_context: bool = True,
 ) -> dict[str, object]:
     """Bind one ImpactCube plan to a single authenticated evidence snapshot."""
 
@@ -5548,16 +5626,28 @@ def _strategy_impact_cube_plan_slots(
         )
 
     partitions = _strategy_impact_cube_partitions(inputs, sample=sample)
-    dimensions = _strategy_impact_cube_dimensions(inputs, sample=sample)
-    economics_inputs = _strategy_impact_cube_economics(
-        inputs.get("economics_inputs"),
-        sample=sample,
+    dimensions = (
+        _strategy_impact_cube_dimensions(inputs, sample=sample)
+        if fixed_dimension_bindings is None
+        else dict(fixed_dimension_bindings)
     )
-    current_strategy_ref = _strategy_impact_cube_current_strategy_ref(
-        runtime,
-        task_id=task.id,
-        strategy_type=strategy_type,
-        requested_id=inputs.get("current_strategy_id"),
+    economics_inputs = (
+        _strategy_impact_cube_economics(
+            inputs.get("economics_inputs"),
+            sample=sample,
+        )
+        if include_optional_context
+        else None
+    )
+    current_strategy_ref = (
+        _strategy_impact_cube_current_strategy_ref(
+            runtime,
+            task_id=task.id,
+            strategy_type=strategy_type,
+            requested_id=inputs.get("current_strategy_id"),
+        )
+        if include_optional_context
+        else None
     )
 
     selected_artifact_ids = {
@@ -10320,6 +10410,7 @@ def _strategy_request_requires_dataset(
             "strategy_model_evidence_v2",
             "strategy_report_bundle_v2",
             "strategy_impact_cube",
+            "strategy_pool_stability",
             "strategy_pool_apply",
             "strategy_pool_validation",
             "candidate_monthly_stability",
