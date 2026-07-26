@@ -87,6 +87,46 @@ def _validate_output(fx: dict, output: dict) -> dict:
     )
 
 
+def test_impact_cube_native_sample_fails_closed_before_artifact_or_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    original_load = impact_tools._load_sample_design_binding
+
+    def load_native_sample(*args, **kwargs):
+        binding = original_load(*args, **kwargs)
+        bundle = copy.deepcopy(binding.bundle)
+        bundle["sample_design"]["compatibility"] = {
+            "source_mode": "native_active_dataset",
+            "development_partition": "risk/development",
+        }
+        return replace(binding, bundle=bundle)
+
+    monkeypatch.setattr(
+        impact_tools,
+        "_load_sample_design_binding",
+        load_native_sample,
+    )
+    artifacts_before = _artifacts(fx)
+    audits_before = _measurement_audits(fx)
+
+    with pytest.raises(StrategyError) as raised:
+        run_measure_strategy_impact_cube(
+            fx["impact_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert (
+        getattr(raised.value, "code", None)
+        == "strategy_sample_design_v2_native_source_unsupported"
+    )
+    assert getattr(raised.value, "consumer", None) == "strategy_impact_cube"
+    assert _artifacts(fx) == artifacts_before
+    assert _measurement_audits(fx) == audits_before
+
+
 def test_measure_impact_cube_hydrates_score_requirement_before_all_masks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -13,6 +13,7 @@ from marvis.orchestrator.templates.strategy import (
     STRATEGY_MODEL_EVIDENCE_V2,
     STRATEGY_SAMPLE_DESIGN,
     STRATEGY_SAMPLE_DESIGN_V2,
+    STRATEGY_SAMPLE_DESIGN_V2_NATIVE,
 )
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.loader import load_builtin_packs
@@ -56,14 +57,19 @@ def _policy() -> dict:
     }
 
 
-def test_three_sample_and_evidence_templates_are_registered_without_replacing_v1() -> None:
+def test_four_sample_and_evidence_templates_are_registered_without_replacing_v1() -> None:
     load_builtin_templates()
 
     assert STRATEGY_SAMPLE_DESIGN in BUILTIN_TEMPLATES
     assert STRATEGY_SAMPLE_DESIGN_V2 in BUILTIN_TEMPLATES
+    assert STRATEGY_SAMPLE_DESIGN_V2_NATIVE in BUILTIN_TEMPLATES
     assert STRATEGY_MODEL_EVIDENCE_V2 in BUILTIN_TEMPLATES
     assert get_template("strategy_sample_design") == STRATEGY_SAMPLE_DESIGN
     assert get_template("strategy_sample_design_v2") == STRATEGY_SAMPLE_DESIGN_V2
+    assert (
+        get_template("strategy_sample_design_v2_native")
+        == STRATEGY_SAMPLE_DESIGN_V2_NATIVE
+    )
     assert get_template("strategy_model_evidence_v2") == STRATEGY_MODEL_EVIDENCE_V2
 
 
@@ -82,6 +88,34 @@ def test_v2_sample_template_uses_v1_anchor_then_v2_materialization() -> None:
     assert v2.inputs_template["relationship"] == "{slot:relationship}"
     assert v2.inputs_template["scope"] == "{slot:scope}"
     assert v2.inputs_template["policy"] == "{slot:policy}"
+
+
+def test_v2_native_sample_template_materializes_directly_from_active_dataset() -> None:
+    template = STRATEGY_SAMPLE_DESIGN_V2_NATIVE
+
+    assert len(template.steps) == 1
+    step = template.steps[0]
+    assert step.tool_ref == ToolRef(
+        "strategy",
+        "materialize_sample_design_v2_native",
+    )
+    assert step.depends_on_titles == ()
+    assert step.inputs_template["source_mode"] == "native_active_dataset"
+    assert step.inputs_template["dataset_id"] == "{slot:dataset_id}"
+    assert (
+        step.inputs_template["expected_dataset_content_hash"]
+        == "{slot:expected_dataset_content_hash}"
+    )
+    assert step.inputs_template["relationship"] == "{slot:relationship}"
+    assert "legacy_sample_design_ref" not in step.inputs_template
+    assert PostCheck(
+        "nonempty",
+        {"field": "source_binding.source_mode"},
+    ) in step.post_checks
+    assert PostCheck(
+        "nonempty",
+        {"field": "source_binding.development_partition"},
+    ) in step.post_checks
 
 
 def test_v2_sample_legacy_ref_has_four_anchor_refs_and_fixed_partition() -> None:
@@ -138,6 +172,7 @@ def test_v2_sample_user_and_platform_slot_ownership_is_explicit() -> None:
     user_fields = {
         "target_bad_value",
         "drop_nan_labels",
+        "relationship",
         "approval_population",
         "risk_population",
         "partitioning",
@@ -149,7 +184,7 @@ def test_v2_sample_user_and_platform_slot_ownership_is_explicit() -> None:
     }
 
     assert {name for name, source in sources.items() if source == "user"} == user_fields
-    assert sources["relationship"] == "task_context"
+    assert sources["relationship"] == "user"
     assert sources["scope"] == "task_context"
     assert sources["policy"] == "task_context"
     assert sources["dataset_id"] == "task_context"

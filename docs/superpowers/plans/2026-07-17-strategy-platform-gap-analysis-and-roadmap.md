@@ -494,6 +494,10 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 
 下游单变量、automatic tree、Voting、Cross/refinement lineage、既有 candidate/tradeoff/bands/rule 工具、typed V2 Workflow backtest 和 Pool impact 现在统一要求精确的成熟 development `StrategySampleDesignRef`，其规范字段为 artifact id/hash、sample design id/hash 与 `partition=development`。平台解析并复核同一 task、活动 dataset/hash、workspace revision/generation、semantic mapping、target 与空标签策略，在落盘前再次检查漂移；`target_bad_value=0` 由确定性内核归一为同一坏样本语义。旧的未绑定 active plan 不得继续用于这些 V2 路径，必须 fail closed。底层 direct `backtest_strategy` 仍为既有 V1/外部调用保留未绑定兼容边界，但所有 V2 策略开发 Workflow 都必须解析并注入该 ref，不能借兼容入口跳过样本设计。当前样本设计仍把同一上游数据边界同时用于风险与通过率观测；风险/通过率双样本、渠道/客群纳排、历史回溯打分、泄漏/选择偏差检测、`CurrentProjectSnapshot` 和历史资料映射仍是 V2 Phase 2 待办；独立 OOT、七步最终报告和统一 Strategy Workbench 也仍分别按 Phase 4-6 继续开发，未因本纵切完成而提前标记完成。
 
+**原生 approval/risk 双人群样本纵切（已完成，2026-07-25）**：自然语言 Agent 与 Manual typed request 现在可分别提交 approval/risk 的纳入、排除条件，显式说明 `nested_same_cohort` 或 `parallel_time_cohorts` 关系，并用受限的一层 `all/any` 条件组合、简单三分区谓词或三分区时间窗固化原生 `StrategySampleDesign V2`。平台直接从当前活动 DataWorkspace 计算六张物理 membership mask、诊断统计和版本化指标，不再要求为 V2 请求先创建合成 V1 development ref；用户不能提交 artifact/hash、workspace、dataset 或平台结果字段，目标列不能进入人群或切分条件，原始递归 AST 只允许用于已持久化兼容重放。membership、bundle、registry、canonical path、文件 bytes、dataset metadata、workspace revision/generation、semantic mapping、目标好坏极性和空标签策略在执行与写入锁内重复认证；membership 文件名额外绑定 dataset/workspace/target source digest，使相同物理掩码在不同业务口径下不会冲突。旧 `legacy_development_ref + maps_to` compatibility 形态的规范 JSON、ID 和 hash 有 golden contract 保持不变。
+
+Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再做完整认证；缺 provenance、错 hash、错路径或其他无法证明无关的损坏证据均失败关闭，不回退旧 V1 样本。已认证且明确属于其他 dataset/workspace/target 的原生样本可以跳过。仍依赖 V1 `StrategySampleDesignExecutionBinding` 的单变量、树、Cross、Pool、ImpactCube、独立验证与报告消费者目前返回稳定的 `strategy_sample_design_v2_native_source_unsupported`，不能误用 approval 总体或悄悄降级；后续纵切必须把这些消费者迁移到原生 `risk/development` 物理 membership 后，才可宣称双人群策略开发主链完成。本段覆盖上段“风险/通过率双样本待办”的旧状态；渠道/客群产品化纳排、历史回溯打分、泄漏/选择偏差检测、`CurrentProjectSnapshot` 与历史资料映射仍在 V2 Phase 2 内待续。
+
 交付：
 
 1. 策略任务创建、列表、加载、删除、显式保存、dirty 切换保护和分析状态恢复；
@@ -754,7 +758,7 @@ Phase 0B 的完成结论只覆盖上述治理底座及当时已有监控门禁�
 28. 受控填充、删列、转换、派生、过滤、重命名和历史；
 29. 隔离自定义派生 Tool 与资源/权限护栏；
 30. 字段语义、中英文/节点映射和风险方向；
-31. 描述统计、相关矩阵、分布、当前项目快照、历史资料映射和 `MetricDefinition/MetricObservation` 数据导出（描述分析、`StrategySampleDesign`、版本化指标及其下游成熟 development 强绑定已完成；风险/通过率双样本、纳排/泄漏检测、`CurrentProjectSnapshot` 与历史资料映射待续）。
+31. 描述统计、相关矩阵、分布、当前项目快照、历史资料映射和 `MetricDefinition/MetricObservation` 数据导出（描述分析、`StrategySampleDesign`、版本化指标、下游成熟 development 强绑定及原生 approval/risk 双人群物理样本底座已完成；原生样本的单变量/树/Pool/影响/验证/报告消费迁移、产品化纳排/泄漏检测、`CurrentProjectSnapshot` 与历史资料映射待续）。
 
 ### Phase 3：Candidate Lab
 

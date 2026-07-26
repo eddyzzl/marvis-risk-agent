@@ -13,8 +13,12 @@ from marvis.data.registry import DatasetRegistry
 from marvis.data.workspace import DataSemanticMapping, DataWorkspaceDraft
 from marvis.db import DatasetRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
+from marvis.error_kinds import ErrorKind
 from marvis.packs.strategy import tools as strategy_tools
-from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.errors import (
+    StrategyError,
+    StrategySampleDesignV2NativeSourceUnsupportedError,
+)
 from marvis.packs.strategy.sample_design_tools import (
     load_strategy_sample_design_artifact,
     run_materialize_sample_design,
@@ -23,8 +27,10 @@ from marvis.packs.strategy.sample_design_v2_tools import (
     SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
     SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
     SAMPLE_DESIGN_V2_TOOL_SCHEMA_VERSION,
+    load_any_strategy_sample_design_v2_artifacts,
     load_strategy_sample_design_v2_artifacts,
     require_strategy_sample_design_v2_artifact_binding_on_connection,
+    resolve_strategy_sample_design_v2_source_mode,
     run_materialize_sample_design_v2,
     validate_materialize_sample_design_v2_tool_output,
 )
@@ -40,6 +46,60 @@ def _eq(column: str, value: object) -> dict:
         "op": "eq",
         "left": {"column": column},
         "right": {"literal": value},
+    }
+
+
+def test_v2_source_mode_resolver_is_typed_and_capability_aware() -> None:
+    legacy_design = {
+        "compatibility": {
+            "legacy_development_ref": {
+                "artifact_id": "a" * 64,
+                "artifact_content_hash": "b" * 64,
+                "sample_design_id": "strategy-sample-design-" + ("d" * 24),
+                "sample_design_content_hash": "c" * 64,
+                "partition": "development",
+            },
+            "maps_to": "risk/development",
+        }
+    }
+    native_design = {
+        "compatibility": {
+            "source_mode": "native_active_dataset",
+            "development_partition": "risk/development",
+        }
+    }
+
+    assert (
+        resolve_strategy_sample_design_v2_source_mode(
+            legacy_design, capability="physical_v2"
+        )
+        == "legacy_anchored"
+    )
+    assert (
+        resolve_strategy_sample_design_v2_source_mode(
+            native_design, capability="physical_v2"
+        )
+        == "native_active_dataset"
+    )
+    with pytest.raises(
+        StrategySampleDesignV2NativeSourceUnsupportedError
+    ) as raised:
+        resolve_strategy_sample_design_v2_source_mode(
+            native_design,
+            capability="legacy_development",
+            consumer="strategy_pool_stability",
+        )
+    assert raised.value.code == (
+        "strategy_sample_design_v2_native_source_unsupported"
+    )
+    assert raised.value.consumer == "strategy_pool_stability"
+    assert raised.value.source_mode == "native_active_dataset"
+    assert raised.value.to_detail() == {
+        "kind": (
+            ErrorKind.STRATEGY_SAMPLE_DESIGN_V2_NATIVE_SOURCE_UNSUPPORTED
+        ),
+        "consumer": "strategy_pool_stability",
+        "source_mode": "native_active_dataset",
     }
 
 
@@ -300,6 +360,42 @@ def test_materialize_v2_is_idempotent_strict_and_verified(
     assert loaded.bundle == first["bundle"]
     assert loaded.membership["header"] == first["membership"]
     assert fx["runtime"].strategies.list_for_task(fx["task"].id) == []
+
+
+def test_any_v2_loader_dispatches_the_exact_legacy_pair(tmp_path: Path) -> None:
+    fx = _setup(tmp_path)
+    output = run_materialize_sample_design_v2(
+        fx["request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    membership = _live_v2_artifact(
+        fx,
+        SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
+    )
+    bundle = _live_v2_artifact(
+        fx,
+        SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+    )
+
+    loaded = load_any_strategy_sample_design_v2_artifacts(
+        fx["runtime"],
+        task_id=fx["task"].id,
+        membership_artifact_id=membership["id"],
+        expected_membership_artifact_content_hash=membership["content_hash"],
+        bundle_artifact_id=bundle["id"],
+        expected_bundle_artifact_content_hash=bundle["content_hash"],
+        expected_bundle_id=output["bundle_id"],
+        expected_sample_design_id=output["sample_design_id"],
+        expected_sample_design_content_hash=output[
+            "sample_design_content_hash"
+        ],
+    )
+
+    assert loaded.bundle == output["bundle"]
+    assert loaded.source_binding.legacy.to_ref_dict() == fx["request"][
+        "legacy_sample_design_ref"
+    ]
 
 
 def test_v2_cached_artifact_summaries_reject_unbound_identity_fields_and_swaps(

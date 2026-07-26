@@ -4,6 +4,7 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sqlite3
+import sys
 import threading
 
 import pytest
@@ -24,13 +25,22 @@ from marvis.packs.strategy.sample_design_v2_tools import (
     SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
     run_materialize_sample_design_v2,
 )
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
+    run_materialize_sample_design_v2_native,
+)
 from marvis.packs.strategy.sample_design_tools import run_materialize_sample_design
-from marvis.db import TaskRepository
+from marvis.db import PluginRepository, TaskRepository
 from marvis.domain import TaskCreate
+from marvis.plugins.loader import load_builtin_packs
+from marvis.plugins.manifest import ToolRef
+from marvis.plugins.registry import PluginRegistry, ToolRegistry
+from marvis.plugins.runner import ToolRunner
 from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.repositories.task_artifacts import TaskArtifactDataError
 
 from test_strategy_sample_design_v2_tool import _setup as _sample_v2_setup
+from tests.test_strategy_sample_design_v2_native_tool import _setup_native
 
 
 def _fixture(tmp_path: Path, *, not_matured: bool = False) -> dict:
@@ -410,6 +420,146 @@ def test_model_evidence_requires_the_exact_v2_legacy_compatibility_ref(
 
     with pytest.raises(StrategyError, match="legacy sample binding.*V2 compatibility"):
         run_materialize_model_evidence_v2(inputs, fx["ctx"], fx["runtime"])
+
+
+def test_model_evidence_native_sample_fails_closed_before_artifact_write(
+    tmp_path: Path,
+) -> None:
+    fx = _setup_native(tmp_path)
+    native = run_materialize_sample_design_v2_native(
+        fx["request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    repository = TaskArtifactRepository(fx["settings"].db_path)
+    records = repository.list_for_task(fx["task"].id)
+    membership = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+    )
+    bundle = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+    )
+    inputs = {
+        "sample_design_ref": {
+            "membership_artifact_id": membership["id"],
+            "expected_membership_artifact_content_hash": membership[
+                "content_hash"
+            ],
+            "bundle_artifact_id": bundle["id"],
+            "expected_bundle_artifact_content_hash": bundle["content_hash"],
+            "expected_bundle_id": native["bundle_id"],
+            "expected_sample_design_id": native["sample_design_id"],
+            "expected_sample_design_content_hash": native[
+                "sample_design_content_hash"
+            ],
+        },
+        "univariate_sources": [
+            {
+                "artifact_id": "1" * 64,
+                "expected_artifact_content_hash": "2" * 64,
+                "expected_candidate_id": "candidate-native-blocked",
+                "expected_evidence_hash": "3" * 64,
+            }
+        ],
+    }
+    records_before = repository.list_for_task(fx["task"].id)
+
+    with pytest.raises(StrategyError) as raised:
+        run_materialize_model_evidence_v2(
+            inputs,
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert (
+        getattr(raised.value, "code", None)
+        == "strategy_sample_design_v2_native_source_unsupported"
+    )
+    assert getattr(raised.value, "consumer", None) == "strategy_model_evidence"
+    assert repository.list_for_task(fx["task"].id) == records_before
+
+
+@pytest.mark.slow
+def test_model_evidence_native_blocker_survives_real_tool_runner_subprocess(
+    tmp_path: Path,
+) -> None:
+    fx = _setup_native(tmp_path)
+    native = run_materialize_sample_design_v2_native(
+        fx["request"],
+        fx["ctx"],
+        fx["runtime"],
+    )
+    records = TaskArtifactRepository(
+        fx["settings"].db_path
+    ).list_for_task(fx["task"].id)
+    membership = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND
+    )
+    bundle = next(
+        item
+        for item in records
+        if item["kind"] == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+    )
+    plugin_repository = PluginRepository(fx["settings"].db_path)
+    plugin_registry = PluginRegistry(plugin_repository)
+    load_builtin_packs(
+        plugin_registry,
+        Path(__file__).parents[1] / "marvis" / "packs",
+    )
+    runner = ToolRunner(
+        ToolRegistry(plugin_registry),
+        plugin_repository,
+        python_executable=sys.executable,
+        datasets_root=fx["settings"].datasets_dir,
+        workspace=fx["settings"].workspace,
+    )
+
+    result = runner.invoke(
+        ToolRef("strategy", "materialize_model_evidence_v2"),
+        {
+            "sample_design_ref": {
+                "membership_artifact_id": membership["id"],
+                "expected_membership_artifact_content_hash": membership[
+                    "content_hash"
+                ],
+                "bundle_artifact_id": bundle["id"],
+                "expected_bundle_artifact_content_hash": bundle[
+                    "content_hash"
+                ],
+                "expected_bundle_id": native["bundle_id"],
+                "expected_sample_design_id": native["sample_design_id"],
+                "expected_sample_design_content_hash": native[
+                    "sample_design_content_hash"
+                ],
+            },
+            "univariate_sources": [
+                {
+                    "artifact_id": "1" * 64,
+                    "expected_artifact_content_hash": "2" * 64,
+                    "expected_candidate_id": "candidate-" + "3" * 32,
+                    "expected_evidence_hash": "4" * 64,
+                }
+            ],
+        },
+        task_id=fx["task"].id,
+    )
+
+    assert result.ok is False
+    assert (
+        result.error_kind
+        == "strategy_sample_design_v2_native_source_unsupported"
+    )
+    assert result.error_detail == {
+        "kind": "strategy_sample_design_v2_native_source_unsupported",
+        "consumer": "strategy_model_evidence",
+        "source_mode": "native_active_dataset",
+    }
 
 
 def test_model_evidence_types_immature_outcomes_without_inventing_values(

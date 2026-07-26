@@ -4093,6 +4093,33 @@ def _render_materialize_sample_design_v2(o: dict):
         o = validate_materialize_sample_design_v2_tool_output(o)
     except (StrategyError, RecursionError):
         return _sample_design_v2_integrity_failure()
+    return _render_validated_sample_design_v2(o)
+
+
+def _render_materialize_sample_design_v2_native(o: dict):
+    """Render only facts validated from the native V2 sample envelope."""
+
+    from marvis.packs.strategy.errors import StrategyError
+    from marvis.packs.strategy.sample_design_v2_native_tools import (
+        validate_materialize_sample_design_v2_native_tool_output,
+    )
+
+    try:
+        o = validate_materialize_sample_design_v2_native_tool_output(o)
+    except (StrategyError, RecursionError):
+        return _sample_design_v2_integrity_failure()
+    return _render_validated_sample_design_v2(
+        o,
+        native_source=True,
+    )
+
+
+def _render_validated_sample_design_v2(
+    o: dict,
+    *,
+    native_source: bool = False,
+):
+    """Render one already authenticated V2 envelope."""
 
     bundle = o["bundle"]
     design = bundle["sample_design"]
@@ -4115,6 +4142,11 @@ def _render_materialize_sample_design_v2(o: dict):
         f"- 风险样本成熟度：`{maturity['status']}`；历史评分：`{score_detail}`。\n"
         "- 本步骤只固化样本与诊断证据，未创建策略、未采纳、未部署。"
     )
+    if native_source:
+        text += (
+            "\n- 样本来源：原生活动数据集 "
+            f"`{o['source_binding']['source_mode']}`。"
+        )
     if semantics["scope"] == "exploration_only":
         text += "\n- 当前范围为 exploration-only，不可声称已完成成熟样本验证。"
     if o["warnings"]:
@@ -8077,6 +8109,9 @@ _RENDERERS = {
     "materialize_project_context": _render_materialize_project_context,
     "materialize_sample_design": _render_materialize_sample_design,
     "materialize_sample_design_v2": _render_materialize_sample_design_v2,
+    "materialize_sample_design_v2_native": (
+        _render_materialize_sample_design_v2_native
+    ),
     "materialize_model_evidence_v2": _render_materialize_model_evidence_v2,
     "backtest_strategy": _render_backtest_strategy,
     "tradeoff_view": _render_tradeoff_view,
@@ -8164,7 +8199,10 @@ def render_tool_output(
             return _strategy_pool_stability_integrity_failure()
         if tool == "materialize_sample_design":
             return _sample_design_integrity_failure()
-        if tool == "materialize_sample_design_v2":
+        if tool in {
+            "materialize_sample_design_v2",
+            "materialize_sample_design_v2_native",
+        }:
             return _sample_design_v2_integrity_failure()
         if tool == "materialize_model_evidence_v2":
             return _model_evidence_v2_integrity_failure()

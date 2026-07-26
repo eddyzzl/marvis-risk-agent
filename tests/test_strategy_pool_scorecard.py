@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from contextlib import contextmanager
+from dataclasses import replace
 import hashlib
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from marvis.packs.strategy.pool_requirement_resolver import (
     model_score_virtual_field,
 )
 from marvis.packs.strategy.pool_tools import (
+    bind_strategy_pool_development_execution,
     load_current_strategy_candidate_pool_artifact,
     run_add_candidate_to_pool,
     run_compile_strategy_pool,
@@ -274,6 +276,65 @@ def test_complete_scorecard_band_artifact_requires_pointer_selection(
             ctx,
             runtime,
         )
+
+
+@pytest.mark.slow
+def test_native_scorecard_pool_development_fails_closed_before_legacy_binding(
+    tmp_path: Path,
+) -> None:
+    real = _real_scorecard(tmp_path)
+    selection = _selection(real)
+    added = run_add_candidate_to_pool(
+        _add_inputs(
+            selection,
+            expected_revision=0,
+            expected_snapshot_hash=ABSENT_POOL_SNAPSHOT_HASH,
+        ),
+        real["fx"]["ctx"],
+        real["runtime"],
+    )
+    current = load_current_strategy_candidate_pool_artifact(
+        real["runtime"],
+        task_id=real["fx"]["task"].id,
+        strategy_type="approval",
+        expected_pool_revision=added["revision"],
+        expected_pool_snapshot_hash=added["snapshot_hash"],
+    )
+    [lineage] = current.lineages
+    sample = lineage.asset.sample_design
+    bundle = deepcopy(sample.bundle)
+    bundle["sample_design"]["compatibility"] = {
+        "source_mode": "native_active_dataset",
+        "development_partition": "risk/development",
+    }
+    native_asset = replace(
+        lineage.asset,
+        sample_design=replace(sample, bundle=bundle),
+    )
+    native_lineage = replace(
+        lineage,
+        selection=replace(
+            lineage.selection,
+            source_asset_binding=native_asset,
+        ),
+        asset=native_asset,
+    )
+    native_pool = replace(current, lineages=(native_lineage,))
+    repository = TaskArtifactRepository(real["fx"]["settings"].db_path)
+    records_before = repository.list_for_task(real["fx"]["task"].id)
+
+    with pytest.raises(StrategyError) as raised:
+        bind_strategy_pool_development_execution(
+            real["runtime"],
+            native_pool,
+        )
+
+    assert (
+        getattr(raised.value, "code", None)
+        == "strategy_sample_design_v2_native_source_unsupported"
+    )
+    assert getattr(raised.value, "consumer", None) == "strategy_pool_development"
+    assert repository.list_for_task(real["fx"]["task"].id) == records_before
 
 
 @pytest.mark.slow

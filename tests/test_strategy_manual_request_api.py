@@ -82,6 +82,241 @@ def _request(workflow: str, workflow_inputs: dict) -> dict:
     }
 
 
+def _sample_design_v2_inputs() -> dict:
+    return {
+        "target_bad_value": 1,
+        "drop_nan_labels": True,
+        "relationship": "nested_same_cohort",
+        "approval_population": {
+            "inclusion": {
+                "match": "all",
+                "conditions": [
+                    {"column": "age", "operator": "gte", "value": 20},
+                ],
+            },
+            "exclusion": None,
+        },
+        "risk_population": {"inclusion": None, "exclusion": None},
+        "partitioning": {
+            "method": "predicate_ast",
+            "selectors": {
+                "development": {
+                    "op": "eq",
+                    "left": {"column": "age"},
+                    "right": {"literal": 20},
+                },
+                "validation": {
+                    "op": "eq",
+                    "left": {"column": "age"},
+                    "right": {"literal": 22},
+                },
+                "oot": {
+                    "op": "eq",
+                    "left": {"column": "age"},
+                    "right": {"literal": 24},
+                },
+            },
+        },
+        "maturity": {
+            "status": "confirmed_matured",
+            "performance_window_days": 30,
+            "cutoff_date": "2026-04-30",
+            "reason": None,
+        },
+        "performance_window": {"status": "provided", "days": 30},
+        "observation_window": {
+            "status": "provided",
+            "start": "2026-01-01",
+            "end": "2026-04-30",
+        },
+        "field_bindings": {
+            "entity_field": "customer_id",
+            "time_field": None,
+            "group_field": None,
+            "month_field": None,
+            "weight_field": None,
+            "loan_amount_field": "loan_amount",
+            "overdue_amount_field": "overdue_amount",
+        },
+        "historical_score": {
+            "status": "available",
+            "column": "score",
+            "direction": "higher_is_riskier",
+            "reason": None,
+        },
+    }
+
+
+def test_sample_design_v2_manual_request_accepts_only_fresh_user_dto() -> None:
+    request = ManualStrategyRequest.model_validate(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_sample_design_v2",
+            "workflow_inputs": _sample_design_v2_inputs(),
+        },
+        strict=True,
+    )
+
+    assert request.workflow == "strategy_sample_design_v2"
+    assert request.workflow_inputs["relationship"] == "nested_same_cohort"
+
+
+def test_sample_design_v2_manual_request_accepts_flat_cross_column_selector() -> None:
+    inputs = _sample_design_v2_inputs()
+    inputs["partitioning"]["selectors"]["development"] = {
+        "op": "and",
+        "args": [
+            {
+                "op": "eq",
+                "left": {"column": "age"},
+                "right": {"literal": 20},
+            },
+            {
+                "op": "eq",
+                "left": {"column": "score"},
+                "right": {"literal": 100},
+            },
+        ],
+    }
+
+    request = ManualStrategyRequest.model_validate(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_sample_design_v2",
+            "workflow_inputs": inputs,
+        },
+        strict=True,
+    )
+
+    assert (
+        request.workflow_inputs["partitioning"]["selectors"]["development"][
+            "op"
+        ]
+        == "and"
+    )
+
+
+def test_sample_design_v2_manual_request_rejects_time_range_column_mismatch() -> None:
+    inputs = _sample_design_v2_inputs()
+    inputs["partitioning"] = {
+        "method": "time_ranges",
+        "column": "age",
+        "ranges": {
+            "development": {"start": "2026-01-01", "end": "2026-02-28"},
+            "validation": {"start": "2026-03-01", "end": "2026-03-31"},
+            "oot": {"start": "2026-04-01", "end": "2026-04-30"},
+        },
+    }
+    inputs["field_bindings"]["time_field"] = "score"
+
+    with pytest.raises(ValidationError):
+        ManualStrategyRequest.model_validate(
+            {
+                "request_kind": "standard_workflow",
+                "workflow": "strategy_sample_design_v2",
+                "workflow_inputs": inputs,
+            },
+            strict=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        {
+            "op": "or",
+            "args": [
+                {
+                    "op": "and",
+                    "args": [
+                        {
+                            "op": "eq",
+                            "left": {"column": "age"},
+                            "right": {"literal": 20},
+                        },
+                        {
+                            "op": "eq",
+                            "left": {"column": "score"},
+                            "right": {"literal": 100},
+                        },
+                    ],
+                },
+                {
+                    "op": "eq",
+                    "left": {"column": "age"},
+                    "right": {"literal": 22},
+                },
+            ],
+        },
+        {
+            "op": "not",
+            "arg": {
+                "op": "eq",
+                "left": {"column": "age"},
+                "right": {"literal": 20},
+            },
+        },
+        {
+            "op": "eq",
+            "left": {"column": "age"},
+            "right": {"column": "score"},
+        },
+    ],
+)
+def test_sample_design_v2_manual_request_rejects_nonflat_partition_selector(
+    selector: dict,
+) -> None:
+    inputs = _sample_design_v2_inputs()
+    inputs["partitioning"]["selectors"]["development"] = selector
+
+    with pytest.raises(ValidationError):
+        ManualStrategyRequest.model_validate(
+            {
+                "request_kind": "standard_workflow",
+                "workflow": "strategy_sample_design_v2",
+                "workflow_inputs": inputs,
+            },
+            strict=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value["approval_population"].update(
+            {
+                "inclusion": {
+                    "op": "eq",
+                    "left": {"column": "age"},
+                    "right": {"literal": 20},
+                }
+            }
+        ),
+        lambda value: value.update({"source_mode": "native_active_dataset"}),
+        lambda value: value.pop("relationship"),
+        lambda value: value.update({"target_bad_value": True}),
+        lambda value: value["approval_population"]["inclusion"]["conditions"][0].update(
+            {"value": float("nan")}
+        ),
+    ],
+)
+def test_sample_design_v2_manual_request_rejects_raw_ast_platform_or_invalid_controls(
+    mutate,
+) -> None:
+    inputs = _sample_design_v2_inputs()
+    mutate(inputs)
+
+    with pytest.raises(ValidationError):
+        ManualStrategyRequest.model_validate(
+            {
+                "request_kind": "standard_workflow",
+                "workflow": "strategy_sample_design_v2",
+                "workflow_inputs": inputs,
+            },
+            strict=True,
+        )
+
+
 @pytest.mark.parametrize(
     "workflow_inputs",
     [

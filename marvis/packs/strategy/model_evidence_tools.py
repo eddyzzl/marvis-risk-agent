@@ -50,8 +50,9 @@ from marvis.packs.strategy.sample_design_v2 import (
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
-    load_strategy_sample_design_v2_artifacts,
+    load_any_strategy_sample_design_v2_artifacts,
     require_strategy_sample_design_v2_artifact_binding_on_connection,
+    resolve_strategy_sample_design_v2_source_mode,
 )
 from marvis.repositories.task_artifacts import (
     TaskArtifactConflictError,
@@ -293,6 +294,11 @@ def run_materialize_model_evidence_v2(inputs, ctx, runtime) -> dict[str, Any]:
         request = _validate_inputs(inputs)
         task_id = _text(ctx.task_id, "task_id")
         sample_binding = _load_sample_design(runtime, task_id, request)
+        resolve_strategy_sample_design_v2_source_mode(
+            sample_binding.bundle["sample_design"],
+            capability="legacy_development",
+            consumer="strategy_model_evidence",
+        )
         sources = _load_candidate_sources(
             runtime,
             task_id=task_id,
@@ -753,7 +759,7 @@ def _load_sample_design(
     runtime, task_id: str, request: Mapping[str, Any]
 ) -> StrategySampleDesignV2ArtifactBinding:
     ref = request["sample_design_ref"]
-    return load_strategy_sample_design_v2_artifacts(
+    return load_any_strategy_sample_design_v2_artifacts(
         runtime,
         task_id=task_id,
         membership_artifact_id=ref["membership_artifact_id"],

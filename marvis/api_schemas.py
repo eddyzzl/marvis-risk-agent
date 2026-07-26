@@ -210,6 +210,7 @@ class ReportFieldsUpdateRequest(BaseModel):
 
 
 ManualStrategyWorkflow = Literal[
+    "strategy_sample_design_v2",
     "univariate_candidate_analysis",
     "cross_matrix_analysis",
     "automatic_tree_candidate_build",
@@ -232,6 +233,258 @@ ManualStrategyWorkflow = Literal[
     "strategy_pool_validation",
     "strategy_pool_stability",
 ]
+
+
+def _finite_sample_v2_literal(value: str | int | float | bool):
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("sample condition value must be finite")
+    return value
+
+
+ManualSampleV2Literal = Annotated[
+    StrictCanonicalNonEmptyStr | StrictInt | StrictFloat | StrictBool,
+    AfterValidator(_finite_sample_v2_literal),
+]
+ManualSampleV2Date = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+]
+ManualSampleV2BadValue = Annotated[StrictInt, Field(ge=0, le=1)]
+
+
+class ManualSampleV2ComparisonCondition(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    column: StrictCanonicalNonEmptyStr
+    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte"]
+    value: ManualSampleV2Literal
+
+
+class ManualSampleV2NullCondition(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    column: StrictCanonicalNonEmptyStr
+    operator: Literal["is_null", "is_not_null"]
+
+
+ManualSampleV2Condition = (
+    ManualSampleV2ComparisonCondition | ManualSampleV2NullCondition
+)
+
+
+class ManualSampleV2PopulationFilter(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    match: Literal["all", "any"]
+    conditions: list[ManualSampleV2Condition] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def reject_duplicate_conditions(self) -> Self:
+        identities = [
+            condition.model_dump_json(exclude_none=False)
+            for condition in self.conditions
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("population filter conditions must be unique")
+        return self
+
+
+class ManualSampleV2Population(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    inclusion: ManualSampleV2PopulationFilter | None
+    exclusion: ManualSampleV2PopulationFilter | None
+
+
+def _validate_manual_sample_v2_predicate_ast(
+    value: dict[str, Any],
+) -> dict[str, Any]:
+    def validate_leaf(node: object) -> None:
+        if not isinstance(node, dict) or not isinstance(node.get("op"), str):
+            raise ValueError("partition predicate leaf must be a strict object")
+        op = node["op"]
+        if op in {"eq", "ne", "gt", "gte", "lt", "lte"}:
+            if set(node) != {"op", "left", "right"}:
+                raise ValueError("comparison predicate fields are invalid")
+            left = node["left"]
+            right = node["right"]
+            if (
+                not isinstance(left, dict)
+                or set(left) != {"column"}
+                or not isinstance(left["column"], str)
+                or not left["column"]
+                or left["column"] != left["column"].strip()
+            ):
+                raise ValueError("comparison left operand must be a column")
+            if (
+                not isinstance(right, dict)
+                or set(right) != {"literal"}
+                or right["literal"] is None
+                or not isinstance(right["literal"], str | int | float | bool)
+                or isinstance(right["literal"], float)
+                and not math.isfinite(right["literal"])
+            ):
+                raise ValueError("comparison right operand must be a finite scalar")
+            return
+        if op in {"is_null", "is_not_null"}:
+            if set(node) != {"op", "arg"}:
+                raise ValueError("null predicate fields are invalid")
+            arg = node["arg"]
+            if (
+                not isinstance(arg, dict)
+                or set(arg) != {"column"}
+                or not isinstance(arg["column"], str)
+                or not arg["column"]
+                or arg["column"] != arg["column"].strip()
+            ):
+                raise ValueError("null predicate operand must be a column")
+            return
+        raise ValueError("partition predicate leaf operator is unsupported")
+
+    if value.get("op") in {"and", "or"}:
+        if set(value) != {"op", "args"}:
+            raise ValueError("logical predicate fields are invalid")
+        args = value["args"]
+        if not isinstance(args, list) or not 2 <= len(args) <= 8:
+            raise ValueError(
+                "flat logical predicate requires between two and eight leaves"
+            )
+        for arg in args:
+            validate_leaf(arg)
+    else:
+        validate_leaf(value)
+    return value
+
+
+ManualSampleV2PredicateAst = Annotated[
+    dict[StrictCanonicalNonEmptyStr, Any],
+    AfterValidator(_validate_manual_sample_v2_predicate_ast),
+]
+
+
+class ManualSampleV2PredicateSelectors(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    development: ManualSampleV2PredicateAst
+    validation: ManualSampleV2PredicateAst
+    oot: ManualSampleV2PredicateAst
+
+
+class ManualSampleV2PredicatePartitioning(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    method: Literal["predicate_ast"]
+    selectors: ManualSampleV2PredicateSelectors
+
+
+class ManualSampleV2TimeRange(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    start: ManualSampleV2Date | None
+    end: ManualSampleV2Date | None
+
+
+class ManualSampleV2TimeRanges(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    development: ManualSampleV2TimeRange
+    validation: ManualSampleV2TimeRange
+    oot: ManualSampleV2TimeRange
+
+
+class ManualSampleV2TimePartitioning(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    method: Literal["time_ranges"]
+    column: StrictCanonicalNonEmptyStr
+    ranges: ManualSampleV2TimeRanges
+
+
+ManualSampleV2Partitioning = (
+    ManualSampleV2PredicatePartitioning | ManualSampleV2TimePartitioning
+)
+
+
+class ManualSampleV2Maturity(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    status: Literal[
+        "confirmed_matured",
+        "not_matured",
+        "unknown",
+        "unavailable",
+    ]
+    performance_window_days: StrictInt | None
+    cutoff_date: ManualSampleV2Date | None
+    reason: StrictCanonicalNonEmptyStr | None
+
+
+class ManualSampleV2PerformanceWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    status: Literal["provided", "unavailable"]
+    days: StrictInt | None
+
+
+class ManualSampleV2ObservationWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    status: Literal["provided", "unavailable"]
+    start: ManualSampleV2Date | None
+    end: ManualSampleV2Date | None
+
+
+class ManualSampleV2FieldBindings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    entity_field: StrictCanonicalNonEmptyStr | None
+    time_field: StrictCanonicalNonEmptyStr | None
+    group_field: StrictCanonicalNonEmptyStr | None
+    month_field: StrictCanonicalNonEmptyStr | None
+    weight_field: StrictCanonicalNonEmptyStr | None
+    loan_amount_field: StrictCanonicalNonEmptyStr | None
+    overdue_amount_field: StrictCanonicalNonEmptyStr | None
+
+
+class ManualSampleV2HistoricalScore(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    status: Literal["available", "unavailable", "not_applicable"]
+    column: StrictCanonicalNonEmptyStr | None
+    direction: Literal["higher_is_riskier", "lower_is_riskier"] | None
+    reason: StrictCanonicalNonEmptyStr | None
+
+
+class ManualSampleDesignV2Inputs(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    target_bad_value: ManualSampleV2BadValue
+    drop_nan_labels: StrictBool
+    relationship: Literal["nested_same_cohort", "parallel_time_cohorts"]
+    approval_population: ManualSampleV2Population
+    risk_population: ManualSampleV2Population
+    partitioning: ManualSampleV2Partitioning
+    maturity: ManualSampleV2Maturity
+    performance_window: ManualSampleV2PerformanceWindow
+    observation_window: ManualSampleV2ObservationWindow
+    field_bindings: ManualSampleV2FieldBindings
+    historical_score: ManualSampleV2HistoricalScore
+
+    @model_validator(mode="after")
+    def require_time_range_column_to_match_time_field(self) -> Self:
+        if (
+            isinstance(self.partitioning, ManualSampleV2TimePartitioning)
+            and (
+                self.field_bindings.time_field is None
+                or self.partitioning.column
+                != self.field_bindings.time_field
+            )
+        ):
+            raise ValueError(
+                "time_ranges.column must match the non-null "
+                "field_bindings.time_field"
+            )
+        return self
 
 ManualUnivariateRefinementMethod = Literal[
     "equal_frequency",
@@ -1056,6 +1309,9 @@ _MANUAL_STRATEGY_POOL_VALIDATION_INPUTS = TypeAdapter(
 _MANUAL_STRATEGY_POOL_STABILITY_INPUTS = TypeAdapter(
     ManualStrategyPoolStabilityInputs
 )
+_MANUAL_SAMPLE_DESIGN_V2_INPUTS = TypeAdapter(
+    ManualSampleDesignV2Inputs
+)
 
 _MANUAL_STRATEGY_PLATFORM_FIELDS = frozenset(
     {
@@ -1106,7 +1362,12 @@ class ManualStrategyRequest(BaseModel):
 
     @model_validator(mode="after")
     def reject_platform_owned_inputs(self) -> Self:
-        if self.workflow == "univariate_candidate_refinement":
+        if self.workflow == "strategy_sample_design_v2":
+            _MANUAL_SAMPLE_DESIGN_V2_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "univariate_candidate_refinement":
             _MANUAL_UNIVARIATE_REFINEMENT_INPUTS.validate_python(
                 self.workflow_inputs,
                 strict=True,

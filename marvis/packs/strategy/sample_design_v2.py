@@ -206,7 +206,12 @@ _HISTORICAL_SCORE_REF_FIELDS = frozenset(
     {"historical_score_id", "content_hash"}
 )
 _POLICY_REF_FIELDS = frozenset({"policy_id", "content_hash"})
-_COMPATIBILITY_FIELDS = frozenset({"legacy_development_ref", "maps_to"})
+_LEGACY_COMPATIBILITY_FIELDS = frozenset(
+    {"legacy_development_ref", "maps_to"}
+)
+_NATIVE_COMPATIBILITY_FIELDS = frozenset(
+    {"source_mode", "development_partition"}
+)
 _FIELD_BINDINGS_FIELDS = frozenset(
     {
         "entity_field",
@@ -816,7 +821,8 @@ def build_strategy_sample_design_v2(
     risk_population: Mapping[str, Any],
     historical_score: Mapping[str, Any],
     policy: Mapping[str, Any],
-    legacy_development_ref: Mapping[str, Any],
+    legacy_development_ref: Mapping[str, Any] | None = None,
+    source_mode: str | None = None,
     source_refs: Sequence[Mapping[str, Any]] = (),
     producer_version: str = STRATEGY_SAMPLE_DESIGN_V2_PRODUCER_VERSION,
 ) -> dict[str, Any]:
@@ -887,12 +893,10 @@ def build_strategy_sample_design_v2(
         ],
         "historical_score_ref": _historical_score_ref(historical),
         "policy_ref": _policy_ref(normalized_policy),
-        "compatibility": {
-            "legacy_development_ref": _legacy_development_ref(
-                legacy_development_ref
-            ),
-            "maps_to": "risk/development",
-        },
+        "compatibility": _build_compatibility(
+            legacy_development_ref=legacy_development_ref,
+            source_mode=source_mode,
+        ),
         "source_refs": _source_refs(source_refs, "sample design.source_refs"),
     }
     return validate_strategy_sample_design_v2(
@@ -1593,9 +1597,10 @@ def build_strategy_sample_design_v2_bundle(
     risk_population: Mapping[str, Any],
     historical_score: Mapping[str, Any],
     policy: Mapping[str, Any],
-    legacy_development_ref: Mapping[str, Any],
     diagnostic_statistics: Mapping[str, Any],
     metric_observations: Sequence[Mapping[str, Any]],
+    legacy_development_ref: Mapping[str, Any] | None = None,
+    source_mode: str | None = None,
     source_refs: Sequence[Mapping[str, Any]] = (),
     producer_version: str = STRATEGY_SAMPLE_DESIGN_V2_PRODUCER_VERSION,
 ) -> dict[str, Any]:
@@ -1627,6 +1632,7 @@ def build_strategy_sample_design_v2_bundle(
         historical_score=historical,
         policy=normalized_policy,
         legacy_development_ref=legacy_development_ref,
+        source_mode=source_mode,
         source_refs=source_refs,
         producer_version=producer,
     )
@@ -2554,15 +2560,65 @@ def _policy_ref_from_value(value: object) -> dict[str, str]:
 
 def _compatibility(value: object) -> dict[str, Any]:
     obj = _object(value, "sample design.compatibility")
-    _require_exact_fields(obj, _COMPATIBILITY_FIELDS, "sample design.compatibility")
-    if obj["maps_to"] != "risk/development":
+    fields = frozenset(obj)
+    if fields == _LEGACY_COMPATIBILITY_FIELDS:
+        if obj["maps_to"] != "risk/development":
+            raise StrategySampleDesignV2Error(
+                "sample design compatibility must map to risk/development"
+            )
+        legacy_ref = _legacy_development_ref(obj["legacy_development_ref"])
+        return {
+            "legacy_development_ref": legacy_ref,
+            "maps_to": "risk/development",
+        }
+    if fields == _NATIVE_COMPATIBILITY_FIELDS:
+        if obj["source_mode"] != "native_active_dataset":
+            raise StrategySampleDesignV2Error(
+                "sample design native compatibility source_mode is invalid"
+            )
+        if obj["development_partition"] != "risk/development":
+            raise StrategySampleDesignV2Error(
+                "sample design native compatibility must use risk/development"
+            )
+        return {
+            "source_mode": "native_active_dataset",
+            "development_partition": "risk/development",
+        }
+    _require_exact_fields(
+        obj,
+        _LEGACY_COMPATIBILITY_FIELDS,
+        "sample design.compatibility",
+    )
+    raise AssertionError("unreachable")
+
+
+def _build_compatibility(
+    *,
+    legacy_development_ref: Mapping[str, Any] | None,
+    source_mode: str | None,
+) -> dict[str, Any]:
+    if source_mode is None:
+        if legacy_development_ref is None:
+            raise StrategySampleDesignV2Error(
+                "sample design requires legacy_development_ref or native source_mode"
+            )
+        return {
+            "legacy_development_ref": _legacy_development_ref(
+                legacy_development_ref
+            ),
+            "maps_to": "risk/development",
+        }
+    if source_mode != "native_active_dataset":
         raise StrategySampleDesignV2Error(
-            "sample design compatibility must map to risk/development"
+            "sample design native compatibility source_mode is invalid"
         )
-    legacy_ref = _legacy_development_ref(obj["legacy_development_ref"])
+    if legacy_development_ref is not None:
+        raise StrategySampleDesignV2Error(
+            "sample design native compatibility cannot include legacy_development_ref"
+        )
     return {
-        "legacy_development_ref": legacy_ref,
-        "maps_to": "risk/development",
+        "source_mode": "native_active_dataset",
+        "development_partition": "risk/development",
     }
 
 

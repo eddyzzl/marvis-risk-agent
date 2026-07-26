@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 from fastapi.testclient import TestClient
+import pytest
 
 from marvis.app import create_app
 from marvis.data.backend import DataBackend
@@ -18,6 +19,11 @@ from marvis.data.workspace import (
     data_semantic_mapping_hash,
 )
 from marvis.db import DatasetRepository, TaskRepository
+from marvis.packs.strategy import tools as strategy_tools
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    run_materialize_sample_design_v2_native,
+)
+from marvis.plugins.contracts import ToolContext
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestRepository,
@@ -26,6 +32,7 @@ from marvis.repositories.task_artifacts import (
     TaskArtifactDataError,
     TaskArtifactRepository,
 )
+import marvis.repositories.task_artifacts as task_artifact_repository
 
 
 def _eq(column: str, value: object) -> dict:
@@ -36,10 +43,15 @@ def _eq(column: str, value: object) -> dict:
     }
 
 
-def _sample_v2_inputs(*, drop_nan_labels: bool = False) -> dict:
+def _sample_v2_inputs(
+    *,
+    drop_nan_labels: bool = False,
+    relationship: str = "nested_same_cohort",
+) -> dict:
     return {
         "target_bad_value": 1,
         "drop_nan_labels": drop_nan_labels,
+        "relationship": relationship,
         "approval_population": {"inclusion": None, "exclusion": None},
         "risk_population": {"inclusion": None, "exclusion": None},
         "partitioning": {
@@ -80,10 +92,20 @@ def _sample_v2_inputs(*, drop_nan_labels: bool = False) -> dict:
     }
 
 
-def _sample_v2_utterance(*, drop_nan_labels: bool = False) -> str:
+def _sample_v2_utterance(
+    *,
+    drop_nan_labels: bool = False,
+    relationship: str = "nested_same_cohort",
+) -> str:
     missing_policy = "丢弃缺失标签" if drop_nan_labels else "不丢弃缺失标签"
+    relationship_text = (
+        "审批总体与风险总体是同批 cohort 的嵌套关系"
+        if relationship == "nested_same_cohort"
+        else "审批总体与风险总体是平行时间 cohort"
+    )
     return (
         f"固化 V2 策略样本设计；1 代表坏样本；{missing_policy}；"
+        f"{relationship_text}；"
         "审批总体无纳排条件；风险总体无纳排条件；切分列 sample_role；"
         "开发值 dev；验证值 valid；OOT 值 oot；表现窗 30 天；"
         "观察窗 2026-01-01 至 2026-04-30；成熟度已确认成熟；"
@@ -364,6 +386,91 @@ def test_fresh_sample_v2_executes_two_real_tools_with_platform_owned_bindings(
     assert output["not_created_strategy"] is True
     assert output["not_adopted"] is True
     assert output["not_deployed"] is True
+    assert len(llm.calls) == 1
+
+
+def test_parallel_sample_v2_manual_and_natural_requests_share_native_tool(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    dataset, workspace, mapping = _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path,
+    )
+    inputs = _sample_v2_inputs(relationship="parallel_time_cohorts")
+    llm = _SequencedStrategyLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_sample_design_v2",
+            "workflow_inputs": inputs,
+        }
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+
+    natural = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": _sample_v2_utterance(
+                relationship="parallel_time_cohorts"
+            )
+        },
+    )
+    manual = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "人工界面原生固化平行时间 cohort 样本",
+            "strategy_request": {
+                "request_kind": "standard_workflow",
+                "workflow": "strategy_sample_design_v2",
+                "workflow_inputs": inputs,
+            },
+        },
+    )
+
+    assert natural.status_code == 202, natural.text
+    assert manual.status_code == 202, manual.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2_native",
+        "strategy_sample_design_v2_native",
+    ], json.dumps(
+        {"natural": natural.json(), "manual": manual.json()},
+        ensure_ascii=False,
+    )
+    assert all(plan["status"] == "done" for plan in plans)
+    natural_plan = client.app.state.plan_repo.load_plan(plans[0]["id"])
+    manual_plan = client.app.state.plan_repo.load_plan(plans[1]["id"])
+    assert len(natural_plan.steps) == len(manual_plan.steps) == 1
+    natural_step = natural_plan.steps[0]
+    manual_step = manual_plan.steps[0]
+    assert natural_step.tool_ref == manual_step.tool_ref
+    assert natural_step.inputs == manual_step.inputs
+    assert natural_step.inputs["source_mode"] == "native_active_dataset"
+    assert natural_step.inputs["dataset_id"] == dataset.id
+    assert (
+        natural_step.inputs["expected_dataset_content_hash"]
+        == dataset.content_hash
+    )
+    assert natural_step.inputs["workspace_revision"] == workspace.revision
+    assert (
+        natural_step.inputs["semantic_mapping_hash"]
+        == data_semantic_mapping_hash(mapping)
+    )
+    assert natural_step.inputs["relationship"] == "parallel_time_cohorts"
+    natural_output = client.app.state.plan_repo.load_step_output(natural_step.id)
+    manual_output = client.app.state.plan_repo.load_step_output(manual_step.id)
+    assert natural_output["content_hash"] == manual_output["content_hash"]
+    assert natural_output["source_binding"]["source_mode"] == "native_active_dataset"
+    assert (
+        natural_output["source_binding"]["development_partition"]
+        == "risk/development"
+    )
     assert len(llm.calls) == 1
 
 
@@ -868,6 +975,388 @@ def test_model_evidence_v2_fails_closed_on_latest_sample_bundle_drift(
     assert response.json()["code"] == "strategy_model_evidence_v2_sample_invalid"
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
     assert [plan["template_id"] for plan in plans] == ["strategy_sample_design_v2"]
+
+
+def test_model_evidence_v2_never_falls_back_behind_latest_native_sample(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    _register_workspace_sample(client, task_id, tmp_path)
+    llm = _SequencedStrategyLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_sample_design_v2",
+            "workflow_inputs": _sample_v2_inputs(),
+        },
+        _model_evidence_payload(),
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+    assert client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": _sample_v2_utterance()},
+    ).status_code == 202
+
+    native_path = (
+        client.app.state.settings.tasks_dir
+        / task_id
+        / "latest-native-sample-bundle.json"
+    )
+    native_bytes = b"{}"
+    native_path.write_bytes(native_bytes)
+    TaskArtifactRepository(client.app.state.settings.db_path).register(
+        task_id=task_id,
+        kind="strategy_sample_design_v2_json",
+        path=str(native_path),
+        content_hash=hashlib.sha256(native_bytes).hexdigest(),
+        origin_tool="strategy.materialize_sample_design_v2_native",
+        provenance={},
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "生成 Strategy ModelEvidence V2，汇总当前已认证单变量候选证据"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert (
+        response.json()["code"]
+        == "strategy_sample_design_v2_native_source_unsupported"
+    )
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2"
+    ]
+
+
+@pytest.mark.parametrize(
+    "native_damage",
+    [
+        "none",
+        "missing_provenance",
+        "wrong_artifact_hash",
+        "wrong_artifact_path",
+    ],
+)
+def test_candidate_workflow_never_falls_back_to_older_v1_after_native_sample(
+    tmp_path: Path,
+    monkeypatch,
+    native_damage: str,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    dataset, workspace, mapping = _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path,
+    )
+    llm = _SequencedStrategyLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_sample_design_v2",
+            "workflow_inputs": _sample_v2_inputs(),
+        },
+        _univariate_payload(),
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+    assert client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": _sample_v2_utterance()},
+    ).status_code == 202
+
+    native_path = (
+        client.app.state.settings.tasks_dir
+        / task_id
+        / "newer-native-sample-bundle.json"
+    )
+    native_bytes = b"{}"
+    native_path.write_bytes(native_bytes)
+    registered_path = (
+        native_path.with_name("missing-native-sample-bundle.json")
+        if native_damage == "wrong_artifact_path"
+        else native_path
+    )
+    registered_hash = (
+        "0" * 64
+        if native_damage == "wrong_artifact_hash"
+        else hashlib.sha256(native_bytes).hexdigest()
+    )
+    provenance = {
+        "task_id": task_id,
+        "dataset_id": dataset.id,
+        "dataset_content_hash": dataset.content_hash,
+        "workspace_revision": workspace.revision,
+        "workspace_generation": workspace.analysis_generation,
+        "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+        "target_col": "bad",
+        "drop_nan_labels": False,
+    }
+    TaskArtifactRepository(client.app.state.settings.db_path).register(
+        task_id=task_id,
+        kind="strategy_sample_design_v2_json",
+        path=str(registered_path),
+        content_hash=registered_hash,
+        origin_tool="strategy.materialize_sample_design_v2_native",
+        provenance={} if native_damage == "missing_provenance" else provenance,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                "对 legacy_score 用 equal_width 做单变量分析，目标箱数 3，"
+                "最小箱占比 2%，放款金额列 loan_amount，"
+                "逾期金额列 overdue_amount，不设置哨兵值"
+            )
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    assert (
+        response.json()["code"]
+        == "strategy_sample_design_v2_native_source_unsupported"
+    )
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2"
+    ]
+
+
+def test_newer_matching_v1_recovers_from_older_damaged_native_sample(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    _register_workspace_sample(client, task_id, tmp_path)
+    llm = _SequencedStrategyLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_sample_design_v2",
+            "workflow_inputs": _sample_v2_inputs(),
+        },
+        _univariate_payload(),
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+    assert client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": _sample_v2_utterance()},
+    ).status_code == 202
+
+    damaged_path = (
+        client.app.state.settings.tasks_dir
+        / task_id
+        / "older-damaged-native-sample-bundle.json"
+    )
+    damaged_bytes = b"{}"
+    damaged_path.write_bytes(damaged_bytes)
+    TaskArtifactRepository(client.app.state.settings.db_path).register(
+        task_id=task_id,
+        kind="strategy_sample_design_v2_json",
+        path=str(damaged_path),
+        content_hash=hashlib.sha256(damaged_bytes).hexdigest(),
+        origin_tool="strategy.materialize_sample_design_v2_native",
+        provenance={},
+        created_at="2020-01-01T00:00:00+00:00",
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                "对 legacy_score 用 equal_width 做单变量分析，目标箱数 3，"
+                "最小箱占比 2%，放款金额列 loan_amount，"
+                "逾期金额列 overdue_amount，不设置哨兵值"
+            )
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2",
+        "strategy_univariate_candidate_analysis",
+    ]
+    assert all(plan["status"] == "done" for plan in plans)
+
+
+def test_candidate_ignores_newer_authenticated_native_from_other_dataset(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = TestClient(create_app(tmp_path / "workspace"))
+    task_id = _create_strategy_task(client, tmp_path)
+    first_dataset, first_workspace, mapping = _register_workspace_sample(
+        client,
+        task_id,
+        tmp_path / "context-a",
+    )
+    llm = _SequencedStrategyLLM(
+        {
+            "request_kind": "standard_workflow",
+            "workflow": "strategy_sample_design_v2",
+            "workflow_inputs": _sample_v2_inputs(),
+        },
+        _univariate_payload(),
+    )
+    monkeypatch.setattr(
+        "marvis.agent.validation_app_service.driver_llm_client",
+        lambda request, task: llm,
+    )
+    native_user_inputs = _sample_v2_inputs(
+        relationship="parallel_time_cohorts"
+    )
+    native_request = {
+        "source_mode": "native_active_dataset",
+        "dataset_id": first_dataset.id,
+        "expected_dataset_content_hash": first_dataset.content_hash,
+        "workspace_revision": first_workspace.revision,
+        "workspace_generation": first_workspace.analysis_generation,
+        "semantic_mapping_hash": data_semantic_mapping_hash(mapping),
+        "target_col": "bad",
+        "scope": "strategy_development",
+        **native_user_inputs,
+        "policy": {
+            "minimum_partition_count": 1,
+            "minimum_bad_count": 1,
+            "minimum_label_coverage": 0.8,
+            "minimum_historical_score_coverage": 0.8,
+            "maximum_group_coverage_gap": 0.2,
+            "diagnostic_severities": {
+                "entity_overlap": "fail",
+                "temporal_oot": "fail",
+                "risk_outside_approval": "fail",
+                "maturity": "fail",
+                "label_coverage": "fail",
+                "historical_score_coverage": "warn",
+                "group_coverage_gap": "warn",
+                "sufficiency": "fail",
+            },
+        },
+    }
+    original_now = task_artifact_repository._now
+    monkeypatch.setattr(
+        task_artifact_repository,
+        "_now",
+        lambda: "2999-01-01T00:00:00+00:00",
+    )
+    run_materialize_sample_design_v2_native(
+        native_request,
+        ToolContext(
+            task_id=task_id,
+            seed=0,
+            datasets_root=client.app.state.settings.datasets_dir,
+            workspace=client.app.state.settings.workspace,
+        ),
+        strategy_tools._runtime(
+            ToolContext(
+                task_id=task_id,
+                seed=0,
+                datasets_root=client.app.state.settings.datasets_dir,
+                workspace=client.app.state.settings.workspace,
+            )
+        ),
+    )
+    monkeypatch.setattr(task_artifact_repository, "_now", original_now)
+
+    settings = client.app.state.settings
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    second_frame = pd.read_parquet(
+        registry.resolve_verified_path(first_dataset.id)
+    )
+    second_frame.loc[0, "legacy_score"] = 101.0
+    second_source = tmp_path / "context-b.parquet"
+    second_frame.to_parquet(second_source, index=False)
+    second_dataset = registry.register_from_upload(
+        task_id,
+        second_source,
+        role="strategy_sample",
+    )
+    assert second_dataset.id != first_dataset.id
+    workspaces = DataWorkspaceRepository(settings.db_path)
+    reset_workspace = workspaces.save(
+        task_id,
+        DataWorkspaceDraft(
+            active_dataset_id=second_dataset.id,
+            active_dataset_content_hash=second_dataset.content_hash,
+        ),
+        expected_revision=first_workspace.revision,
+    )
+    second_workspace = workspaces.save(
+        task_id,
+        DataWorkspaceDraft(
+            active_dataset_id=second_dataset.id,
+            active_dataset_content_hash=second_dataset.content_hash,
+            semantic_mapping=mapping,
+        ),
+        expected_revision=reset_workspace.revision,
+    )
+    assert second_workspace.active_dataset_id == second_dataset.id
+
+    legacy_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": _sample_v2_utterance()},
+    )
+    assert legacy_response.status_code == 202, legacy_response.text
+
+    candidate_response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": (
+                "对 legacy_score 用 equal_width 做单变量分析，目标箱数 3，"
+                "最小箱占比 2%，放款金额列 loan_amount，"
+                "逾期金额列 overdue_amount，不设置哨兵值"
+            )
+        },
+    )
+
+    assert candidate_response.status_code == 202, candidate_response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design_v2",
+        "strategy_univariate_candidate_analysis",
+    ]
+    assert all(plan["status"] == "done" for plan in plans)
+    legacy_plan = client.app.state.plan_repo.load_plan(plans[0]["id"])
+    candidate_plan = client.app.state.plan_repo.load_plan(plans[1]["id"])
+    legacy_output = client.app.state.plan_repo.load_step_output(
+        legacy_plan.steps[0].id
+    )
+    registered = TaskArtifactRepository(settings.db_path)
+    native_bundle = next(
+        item
+        for item in registered.list_for_task(task_id)
+        if item["kind"] == "strategy_sample_design_v2_json"
+        and item["origin_tool"]
+        == "strategy.materialize_sample_design_v2_native"
+    )
+    legacy_artifact = registered.get_for_task(
+        task_id,
+        legacy_output["artifact"]["artifact_id"],
+    )
+    assert legacy_artifact is not None
+    assert native_bundle["created_at"] > legacy_artifact["created_at"]
+    assert candidate_plan.steps[0].inputs["sample_design_ref"] == {
+        "artifact_id": legacy_output["artifact"]["artifact_id"],
+        "artifact_content_hash": legacy_output["artifact"]["content_hash"],
+        "sample_design_id": legacy_output["sample_design_id"],
+        "sample_design_content_hash": legacy_output["content_hash"],
+        "partition": "development",
+    }
 
 
 def test_model_evidence_v2_collects_multiple_compatible_sources_in_stable_order(

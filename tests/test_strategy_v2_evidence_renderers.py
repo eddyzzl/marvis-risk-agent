@@ -9,10 +9,15 @@ from marvis.agent.renderers import render_tool_output
 from marvis.packs.strategy.model_evidence_tools import (
     run_materialize_model_evidence_v2,
 )
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    run_materialize_sample_design_v2_native,
+)
 from test_strategy_model_evidence_tool import _fixture as _model_evidence_fixture
+from test_strategy_sample_design_v2_native_tool import _setup_native
 
 
 SAMPLE_TOOL = "materialize_sample_design_v2"
+NATIVE_SAMPLE_TOOL = "materialize_sample_design_v2_native"
 MODEL_TOOL = "materialize_model_evidence_v2"
 
 
@@ -22,7 +27,19 @@ def strategy_v2_outputs(tmp_path_factory) -> dict:
     model_output = run_materialize_model_evidence_v2(
         fx["inputs"], fx["ctx"], fx["runtime"]
     )
-    return {"sample": fx["sample_v2"], "model": model_output}
+    native_fx = _setup_native(
+        tmp_path_factory.mktemp("strategy-v2-native-renderer")
+    )
+    native_output = run_materialize_sample_design_v2_native(
+        native_fx["request"],
+        native_fx["ctx"],
+        native_fx["runtime"],
+    )
+    return {
+        "sample": fx["sample_v2"],
+        "native_sample": native_output,
+        "model": model_output,
+    }
 
 
 def test_sample_v2_renderer_surfaces_only_authenticated_design_facts(
@@ -66,6 +83,34 @@ def test_sample_v2_renderer_surfaces_only_authenticated_design_facts(
     }
     membership_row = next(row for row in artifacts["rows"] if row[0] == "membership")
     assert membership_row[3] == f"semantic:{output['membership_content_hash']}"
+
+
+def test_native_sample_v2_renderer_validates_and_surfaces_native_source(
+    strategy_v2_outputs: dict,
+) -> None:
+    output = strategy_v2_outputs["native_sample"]
+
+    text, tables = render_tool_output(NATIVE_SAMPLE_TOOL, output)
+
+    assert "策略样本设计 V2 已固化" in text
+    assert "原生活动数据集" in text
+    assert "`native_active_dataset`" in text
+    assert "未创建策略、未采纳、未部署" in text
+    assert "legacy anchor" not in text.lower()
+    assert any(table["title"] == "双人群样本分区" for table in tables)
+
+
+def test_native_sample_v2_renderer_fails_closed_on_forged_output(
+    strategy_v2_outputs: dict,
+) -> None:
+    output = deepcopy(strategy_v2_outputs["native_sample"])
+    output["source_binding"]["source_mode"] = "legacy_anchor"
+
+    text, tables = render_tool_output(NATIVE_SAMPLE_TOOL, output)
+
+    assert "结果完整性校验失败" in text
+    assert "legacy_anchor" not in text
+    assert tables == []
 
 
 def test_model_evidence_v2_renderer_is_univariate_only_and_never_builds_a_link(

@@ -538,6 +538,88 @@ def _run(fixture: dict) -> dict:
     )
 
 
+def test_report_source_loading_blocks_native_before_candidate_or_pool_loaders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id = "task-native-report"
+    project = SimpleNamespace(
+        artifact_id="1" * 64,
+        artifact_content_hash="2" * 64,
+        revision={
+            "revision": 1,
+            "revision_id": "project-context-revision-" + "3" * 24,
+            "state_hash": "4" * 64,
+        },
+    )
+    native_sample = SimpleNamespace(
+        bundle={
+            "sample_design": {
+                "compatibility": {
+                    "source_mode": "native_active_dataset",
+                    "development_partition": "risk/development",
+                }
+            }
+        }
+    )
+    later_loader_calls: list[str] = []
+
+    monkeypatch.setattr(
+        report_tools,
+        "load_current_strategy_project_context_artifact",
+        lambda _runtime, *, task_id: project,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "load_any_strategy_sample_design_v2_artifacts",
+        lambda _runtime, **_kwargs: native_sample,
+    )
+
+    def forbidden_candidate_loader(*_args, **_kwargs):
+        later_loader_calls.append("candidate_pool")
+        raise AssertionError("candidate/pool loaders must not run")
+
+    monkeypatch.setattr(
+        report_tools,
+        "load_current_strategy_candidate_pool_artifact",
+        forbidden_candidate_loader,
+    )
+    request = {
+        "project_context_ref": {
+            "artifact_id": project.artifact_id,
+            "expected_artifact_content_hash": (
+                project.artifact_content_hash
+            ),
+            "expected_revision": project.revision["revision"],
+            "expected_revision_id": project.revision["revision_id"],
+            "expected_state_hash": project.revision["state_hash"],
+        },
+        "sample_design_ref": {
+            "membership_artifact_id": "5" * 64,
+            "expected_membership_artifact_content_hash": "6" * 64,
+            "bundle_artifact_id": "7" * 64,
+            "expected_bundle_artifact_content_hash": "8" * 64,
+            "expected_bundle_id": "strategy-sample-design-bundle-" + "9" * 24,
+            "expected_sample_design_id": "strategy-sample-design-" + "a" * 24,
+            "expected_sample_design_content_hash": "b" * 64,
+        },
+        "candidate_pool_ref": {},
+    }
+
+    with pytest.raises(StrategyError) as raised:
+        report_tools._load_sources(
+            SimpleNamespace(),
+            task_id=task_id,
+            request=request,
+        )
+
+    assert (
+        getattr(raised.value, "code", None)
+        == "strategy_sample_design_v2_native_source_unsupported"
+    )
+    assert getattr(raised.value, "consumer", None) == "strategy_report_bundle"
+    assert later_loader_calls == []
+
+
 def _report_rows(fixture: dict) -> list[dict]:
     return [
         item

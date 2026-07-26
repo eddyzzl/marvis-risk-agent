@@ -208,7 +208,7 @@ _SAMPLE_DESIGN_PLATFORM_CONTROL_RE = re.compile(
     re.IGNORECASE,
 )
 _SAMPLE_DESIGN_V2_PLATFORM_CONTROL_RE = re.compile(
-    r"\b(?:legacy_sample_design_ref|relationship|scope|policy|dataset_id|"
+    r"\b(?:legacy_sample_design_ref|scope|policy|dataset_id|"
     r"expected_[a-z0-9_]*hash|workspace_(?:revision|generation)|"
     r"analysis_generation|semantic_mapping_hash|target_col|artifact(?:_id)?|"
     r"sample_design_(?:id|ref)|membership_(?:id|ref)|bundle_(?:id|ref)|"
@@ -2913,7 +2913,6 @@ _NON_REPAIRABLE_CLARIFICATION_CODES = frozenset(
         "candidate_requires_observed_economics",
         "strategy_report_bundle_v2_platform_binding_forbidden",
         "strategy_dsl_delivery_platform_binding_forbidden",
-        "strategy_sample_design_v2_native_bootstrap_required",
         "strategy_request_too_complex",
     }
 )
@@ -3755,6 +3754,7 @@ def _validate_standard_workflow_payload(
                 raw_inputs,
                 whitelist,
                 target_col=target_col,
+                allow_raw_population_ast=allow_legacy_replay,
             )
         elif workflow == "strategy_model_evidence_v2":
             normalized = _validate_strategy_model_evidence_v2_inputs(raw_inputs)
@@ -4292,19 +4292,21 @@ def _validate_strategy_sample_design_v2_inputs(
     whitelist: tuple[str, ...],
     *,
     target_col: str | None,
+    allow_raw_population_ast: bool = False,
 ) -> dict[str, Any]:
     """Validate the user-owned portion of the V2 dual-population request.
 
-    V2 runtime identity, compatibility references, relationship, scope and
-    diagnostic policy are injected later from task context.  The temporary V1
-    anchor can reproduce only one simple three-value split, so unsupported
-    native designs fail with a typed clarification instead of being narrowed.
+    Relationship is business semantics and must be explicit. Runtime identity,
+    compatibility references, scope and diagnostic policy are injected later
+    from task context. Fresh requests use a deliberately small population DTO;
+    persisted replay may opt into the historical canonical predicate AST.
     """
 
     workflow = "strategy_sample_design_v2"
     allowed = {
         "target_bad_value",
         "drop_nan_labels",
+        "relationship",
         "approval_population",
         "risk_population",
         "partitioning",
@@ -4342,41 +4344,34 @@ def _validate_strategy_sample_design_v2_inputs(
             f"{workflow} drop_nan_labels 必须是布尔值。",
             fields=("drop_nan_labels",),
         )
+    relationship = inputs["relationship"]
+    if relationship not in {"nested_same_cohort", "parallel_time_cohorts"}:
+        raise _DraftValidationError(
+            f"{workflow} relationship 只能是 nested_same_cohort 或 "
+            "parallel_time_cohorts。",
+            fields=("relationship",),
+        )
 
     approval = _validate_sample_v2_population(
         inputs["approval_population"],
         name="approval_population",
         whitelist=whitelist,
         target_col=target_col,
+        allow_raw_ast=allow_raw_population_ast,
     )
     risk = _validate_sample_v2_population(
         inputs["risk_population"],
         name="risk_population",
         whitelist=whitelist,
         target_col=target_col,
+        allow_raw_ast=allow_raw_population_ast,
     )
-    filtered_populations = tuple(
-        name
-        for name, population in (
-            ("approval_population", approval),
-            ("risk_population", risk),
-        )
-        if population["inclusion"] is not None
-        or population["exclusion"] is not None
-    )
-    if filtered_populations:
-        raise _DraftValidationError(
-            "当前 V1 compatibility anchor 只能无损表达 approval/risk 同 cohort"
-            " 且两个总体均无纳排条件；任一总体存在纳排条件都需要先完成原生 V2"
-            " 样本 bootstrap。",
-            code="strategy_sample_design_v2_native_bootstrap_required",
-            fields=filtered_populations,
-        )
 
     partitioning = _validate_sample_v2_partitioning(
         inputs["partitioning"],
         whitelist=whitelist,
         target_col=target_col,
+        allow_recursive_ast=allow_raw_population_ast,
     )
     maturity = _validate_sample_v2_maturity(inputs["maturity"])
     performance = _validate_sample_v2_performance_window(
@@ -4401,6 +4396,18 @@ def _validate_strategy_sample_design_v2_inputs(
         whitelist=whitelist,
         target_col=target_col,
     )
+    if (
+        partitioning["method"] == "time_ranges"
+        and (
+            fields["time_field"] is None
+            or partitioning["column"] != fields["time_field"]
+        )
+    ):
+        raise _DraftValidationError(
+            f"{workflow} time_ranges.column 必须与非空的 "
+            "field_bindings.time_field 完全相同。",
+            fields=("partitioning.column", "field_bindings.time_field"),
+        )
     if maturity["status"] in {"confirmed_matured", "not_matured"} and fields["time_field"] is None:
         raise _DraftValidationError(
             f"{workflow} 已评估成熟度需要 time_field。",
@@ -4419,6 +4426,7 @@ def _validate_strategy_sample_design_v2_inputs(
     return {
         "target_bad_value": bad_value,
         "drop_nan_labels": drop_missing,
+        "relationship": relationship,
         "approval_population": approval,
         "risk_population": risk,
         "partitioning": partitioning,
@@ -4450,6 +4458,7 @@ def _validate_sample_v2_population(
     name: str,
     whitelist: tuple[str, ...],
     target_col: str | None,
+    allow_raw_ast: bool,
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != {"inclusion", "exclusion"}:
         raise _DraftValidationError(
@@ -4462,6 +4471,13 @@ def _validate_sample_v2_population(
         if predicate is None:
             normalized[field] = None
             continue
+        if not allow_raw_ast:
+            predicate = _sample_v2_population_filter_to_ast(
+                predicate,
+                name=f"{name}.{field}",
+                whitelist=whitelist,
+                target_col=target_col,
+            )
         try:
             canonical = canonicalize_predicate(
                 predicate,
@@ -4483,22 +4499,131 @@ def _validate_sample_v2_population(
     return normalized
 
 
+def _sample_v2_population_filter_to_ast(
+    value: object,
+    *,
+    name: str,
+    whitelist: tuple[str, ...],
+    target_col: str | None,
+) -> dict[str, Any]:
+    """Compile the bounded fresh-request population DTO to canonical AST data."""
+
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"match", "conditions"}
+        or value.get("match") not in {"all", "any"}
+    ):
+        raise _DraftValidationError(
+            f"{name} 必须是只含 match 与 conditions 的受限条件对象；"
+            "fresh 请求不能直接提交 predicate AST。",
+            code="strategy_sample_design_v2_population_dto_required",
+            fields=(name,),
+        )
+    conditions = value["conditions"]
+    if (
+        not isinstance(conditions, Sequence)
+        or isinstance(conditions, str | bytes)
+        or not 1 <= len(conditions) <= 8
+    ):
+        raise _DraftValidationError(
+            f"{name}.conditions 必须包含 1 到 8 个简单条件。",
+            code="strategy_sample_design_v2_population_dto_required",
+            fields=(name,),
+        )
+
+    compiled: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    comparison_ops = {"eq", "ne", "gt", "gte", "lt", "lte"}
+    null_ops = {"is_null", "is_not_null"}
+    for index, condition in enumerate(conditions):
+        condition_name = f"{name}.conditions[{index}]"
+        if not isinstance(condition, Mapping):
+            raise _DraftValidationError(
+                f"{condition_name} 必须是简单条件对象。",
+                code="strategy_sample_design_v2_population_dto_required",
+                fields=(name,),
+            )
+        operator = condition.get("operator")
+        expected = (
+            {"column", "operator", "value"}
+            if operator in comparison_ops
+            else {"column", "operator"}
+            if operator in null_ops
+            else set()
+        )
+        if not expected or set(condition) != expected:
+            raise _DraftValidationError(
+                f"{condition_name} 只支持简单比较或空值判断。",
+                code="strategy_sample_design_v2_population_dto_required",
+                fields=(name,),
+            )
+        column = _workflow_column(
+            condition["column"],
+            name=f"{condition_name}.column",
+            whitelist=whitelist,
+        )
+        if target_col is not None and column == target_col:
+            raise _DraftValidationError(
+                f"{condition_name} 不能使用目标列定义样本总体。",
+                fields=(name,),
+            )
+        if operator in comparison_ops:
+            literal = condition["value"]
+            if (
+                literal is None
+                or not isinstance(literal, str | int | float | bool)
+                or isinstance(literal, float) and not math.isfinite(literal)
+                or isinstance(literal, str) and not literal.strip()
+            ):
+                raise _DraftValidationError(
+                    f"{condition_name}.value 必须是有限的非空字符串、数字或布尔值。",
+                    code="strategy_sample_design_v2_population_dto_required",
+                    fields=(name,),
+                )
+            node = {
+                "op": operator,
+                "left": {"column": column},
+                "right": {"literal": literal},
+            }
+        else:
+            node = {"op": operator, "arg": {"column": column}}
+        identity = json.dumps(
+            node,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if identity in identities:
+            raise _DraftValidationError(
+                f"{name}.conditions 不能包含重复条件。",
+                code="strategy_sample_design_v2_population_dto_required",
+                fields=(name,),
+            )
+        identities.add(identity)
+        compiled.append(node)
+    if len(compiled) == 1:
+        return compiled[0]
+    return {
+        "op": "and" if value["match"] == "all" else "or",
+        "args": compiled,
+    }
+
+
 def _validate_sample_v2_partitioning(
     value: object,
     *,
     whitelist: tuple[str, ...],
     target_col: str | None,
+    allow_recursive_ast: bool,
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise _DraftValidationError("partitioning 必须是对象。", fields=("partitioning",))
     method = value.get("method")
     if method == "time_ranges":
-        _validate_sample_v2_time_ranges(value, whitelist=whitelist, target_col=target_col)
-        raise _DraftValidationError(
-            "当前 V1 compatibility anchor 无法无损表达 time_ranges；"
-            "需要先完成原生 V2 样本 bootstrap。",
-            code="strategy_sample_design_v2_native_bootstrap_required",
-            fields=("partitioning.method",),
+        return _validate_sample_v2_time_ranges(
+            value,
+            whitelist=whitelist,
+            target_col=target_col,
         )
     if method != "predicate_ast" or set(value) != {"method", "selectors"}:
         raise _DraftValidationError(
@@ -4513,46 +4638,86 @@ def _validate_sample_v2_partitioning(
             fields=("partitioning.selectors",),
         )
     normalized: dict[str, Any] = {}
-    columns: list[str] = []
-    values: list[object] = []
     for partition in partition_names:
+        if (
+            not allow_recursive_ast
+            and not _sample_v2_fresh_partition_selector_shape(
+                selectors[partition]
+            )
+        ):
+            raise _DraftValidationError(
+                f"partitioning.selectors.{partition} 只能是单个简单条件，"
+                "或由同一种 and/or 连接的单层 2 到 8 个简单条件；"
+                "fresh 请求禁止嵌套逻辑、not 和列间比较。",
+                fields=(f"partitioning.selectors.{partition}",),
+            )
         try:
-            predicate = canonicalize_predicate(
+            canonical = canonicalize_predicate(
                 selectors[partition],
                 whitelist,
                 max_nodes=256,
                 max_depth=12,
-            ).canonical
+            )
         except PredicateAstError as exc:
             raise _DraftValidationError(
                 f"partitioning.selectors.{partition} 不是严格 predicate AST：{exc}",
                 fields=(f"partitioning.selectors.{partition}",),
             ) from exc
-        column, literal = _simple_partition_equality(
-            predicate,
-            name=f"partitioning.selectors.{partition}",
-        )
-        if target_col is not None and column == target_col:
+        if (
+            target_col is not None
+            and target_col in canonical.required_columns
+        ):
             raise _DraftValidationError(
                 "partitioning 不能使用目标列。",
                 fields=(f"partitioning.selectors.{partition}",),
             )
-        normalized[partition] = predicate
-        columns.append(column)
-        values.append(literal)
-    if len(set(columns)) != 1:
-        raise _DraftValidationError(
-            "compatibility anchor 要求三组 partition 使用同一个 split 列。",
-            code="strategy_sample_design_v2_native_bootstrap_required",
-            fields=("partitioning.selectors",),
-        )
-    identities = {_sample_design_value_identity(item) for item in values}
-    if len(identities) != 3:
-        raise _DraftValidationError(
-            "compatibility anchor 要求 development、validation、oot 使用三个互异值。",
-            fields=("partitioning.selectors",),
-        )
+        normalized[partition] = canonical.canonical
     return {"method": "predicate_ast", "selectors": normalized}
+
+
+def _sample_v2_fresh_partition_selector_shape(value: object) -> bool:
+    """Accept only an unambiguous fresh selector surface.
+
+    Historical persisted requests may still replay the complete recursive
+    predicate AST.  Fresh requests deliberately expose one leaf or one flat
+    logical row so the user's words can be grounded without inferring
+    parentheses or operator precedence.
+    """
+
+    if _sample_v2_fresh_partition_leaf_shape(value):
+        return True
+    if not isinstance(value, Mapping) or set(value) != {"op", "args"}:
+        return False
+    if value.get("op") not in {"and", "or"}:
+        return False
+    args = value.get("args")
+    return (
+        isinstance(args, Sequence)
+        and not isinstance(args, str | bytes | bytearray)
+        and 2 <= len(args) <= 8
+        and all(_sample_v2_fresh_partition_leaf_shape(arg) for arg in args)
+    )
+
+
+def _sample_v2_fresh_partition_leaf_shape(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    op = value.get("op")
+    if op in {"eq", "ne", "gt", "gte", "lt", "lte"}:
+        return (
+            set(value) == {"op", "left", "right"}
+            and isinstance(value.get("left"), Mapping)
+            and set(value["left"]) == {"column"}
+            and isinstance(value.get("right"), Mapping)
+            and set(value["right"]) == {"literal"}
+        )
+    if op in {"is_null", "is_not_null"}:
+        return (
+            set(value) == {"op", "arg"}
+            and isinstance(value.get("arg"), Mapping)
+            and set(value["arg"]) == {"column"}
+        )
+    return False
 
 
 def _simple_partition_equality(
@@ -4587,7 +4752,7 @@ def _validate_sample_v2_time_ranges(
     *,
     whitelist: tuple[str, ...],
     target_col: str | None,
-) -> None:
+) -> dict[str, Any]:
     if set(value) != {"method", "column", "ranges"}:
         raise _DraftValidationError("time_ranges 字段不完整。", fields=("partitioning",))
     column = _workflow_column(value["column"], name="partitioning.column", whitelist=whitelist)
@@ -4596,12 +4761,19 @@ def _validate_sample_v2_time_ranges(
     ranges = value["ranges"]
     if not isinstance(ranges, Mapping) or set(ranges) != {"development", "validation", "oot"}:
         raise _DraftValidationError("time_ranges.ranges 必须完整包含三组。", fields=("partitioning.ranges",))
+    normalized_ranges: dict[str, dict[str, str | None]] = {}
     for name, raw in ranges.items():
         if not isinstance(raw, Mapping) or set(raw) != {"start", "end"}:
             raise _DraftValidationError(f"partitioning.ranges.{name} 字段无效。")
         bounds = [_strict_optional_iso_date(raw[field], f"partitioning.ranges.{name}.{field}") for field in ("start", "end")]
         if bounds == [None, None] or bounds[0] is not None and bounds[1] is not None and bounds[0] > bounds[1]:
             raise _DraftValidationError(f"partitioning.ranges.{name} 日期范围无效。")
+        normalized_ranges[str(name)] = {"start": bounds[0], "end": bounds[1]}
+    return {
+        "method": "time_ranges",
+        "column": column,
+        "ranges": normalized_ranges,
+    }
 
 
 def _validate_sample_v2_maturity(value: object) -> dict[str, Any]:
@@ -9410,7 +9582,7 @@ def _ground_strategy_sample_design_v2_request(
         )
     if _SAMPLE_DESIGN_V2_PLATFORM_CONTROL_RE.search(utterance):
         return _clarification(
-            "legacy ref、relationship、scope、policy、数据身份、workspace 和所有"
+            "legacy ref、scope、policy、数据身份、workspace 和所有"
             " artifact/id/hash 均由当前 task 绑定，不能由自然语言注入。",
             code="strategy_sample_design_v2_platform_binding_forbidden",
             fields=("platform_binding",),
@@ -9471,6 +9643,11 @@ def _ground_strategy_sample_design_v2_request(
         missing.append("target_bad_value")
     if not _sample_v2_drop_policy_grounded(utterance, inputs["drop_nan_labels"]):
         missing.append("drop_nan_labels")
+    if not _sample_v2_relationship_grounded(
+        utterance,
+        inputs["relationship"],
+    ):
+        missing.append("relationship")
 
     for role, labels in (
         ("approval_population", ("审批总体", "审批样本", "approval population")),
@@ -9491,31 +9668,69 @@ def _ground_strategy_sample_design_v2_request(
                 ):
                     missing.append(f"{role}.{field}")
 
-    selectors = inputs["partitioning"]["selectors"]
-    split_column: str | None = None
-    for partition, labels in (
-        ("development", ("开发", "development", "dev")),
-        ("validation", ("验证", "validation", "valid")),
+    partitioning = inputs["partitioning"]
+    partition_labels = (
+        ("development", ("开发", "development")),
+        ("validation", ("验证", "validation")),
         ("oot", ("OOT", "时间外")),
-    ):
-        column, value = _simple_partition_equality(
-            selectors[partition],
-            name=f"partitioning.selectors.{partition}",
-        )
-        split_column = column
-        if not _sample_v2_partition_equality_grounded(
+    )
+    if partitioning["method"] == "time_ranges":
+        if not _sample_design_column_role_grounded(
             utterance,
-            values=[value],
-            labels=labels,
+            column=partitioning["column"],
+            labels=(
+                "时间切分列",
+                "时间拆分列",
+                "time partition column",
+            ),
         ):
-            missing.append(f"partitioning.selectors.{partition}")
-    assert split_column is not None
-    if not _sample_design_column_role_grounded(
-        utterance,
-        column=split_column,
-        labels=("切分列", "拆分列", "split column", "split_col"),
-    ):
-        missing.append("partitioning.column")
+            missing.append("partitioning.column")
+        for partition, labels in partition_labels:
+            bounds = partitioning["ranges"][partition]
+            if not _sample_v2_partition_time_range_grounded(
+                utterance,
+                start=bounds["start"],
+                end=bounds["end"],
+                labels=labels,
+            ):
+                missing.append(f"partitioning.ranges.{partition}")
+    else:
+        selectors = partitioning["selectors"]
+        simple: dict[str, tuple[str, object]] = {}
+        for partition, _labels in partition_labels:
+            try:
+                simple[partition] = _simple_partition_equality(
+                    selectors[partition],
+                    name=f"partitioning.selectors.{partition}",
+                )
+            except _DraftValidationError:
+                simple = {}
+                break
+        simple_columns = {column for column, _value in simple.values()}
+        if len(simple) == 3 and len(simple_columns) == 1:
+            split_column = next(iter(simple_columns))
+            for partition, labels in partition_labels:
+                _column, value = simple[partition]
+                if not _sample_v2_partition_equality_grounded(
+                    utterance,
+                    values=[value],
+                    labels=labels,
+                ):
+                    missing.append(f"partitioning.selectors.{partition}")
+            if not _sample_design_column_role_grounded(
+                utterance,
+                column=split_column,
+                labels=("切分列", "拆分列", "split column", "split_col"),
+            ):
+                missing.append("partitioning.column")
+        else:
+            for partition, labels in partition_labels:
+                if not _sample_v2_partition_predicate_grounded(
+                    utterance,
+                    selectors[partition],
+                    labels=labels,
+                ):
+                    missing.append(f"partitioning.selectors.{partition}")
 
     binding_labels = {
         "entity_field": ("实体字段", "客户字段", "entity field"),
@@ -9647,6 +9862,47 @@ def _sample_v2_drop_policy_grounded(utterance: str, expected: bool) -> bool:
     return false_match is not None if expected is False else true_match is not None and false_match is None
 
 
+def _sample_v2_relationship_grounded(
+    utterance: str,
+    relationship: object,
+) -> bool:
+    """Require the user to state the two-population relationship explicitly."""
+
+    if relationship not in {"nested_same_cohort", "parallel_time_cohorts"}:
+        return False
+    observed: set[str] = set()
+    for clause in _sample_design_clauses(utterance):
+        has_both_roles = (
+            re.search(r"(?:审批总体|审批样本|approval\s+population)", clause, re.I)
+            is not None
+            and re.search(r"(?:风险总体|风险样本|risk\s+population)", clause, re.I)
+            is not None
+        )
+        if not has_both_roles:
+            continue
+        if re.search(
+            r"(?:nested[_\s-]*same[_\s-]*cohort|"
+            r"(?:同批|同一|相同).{0,8}(?:cohort|队列|样本).{0,16}"
+            r"(?:嵌套|包含|子集)|"
+            r"(?:嵌套|包含|子集).{0,16}(?:同批|同一|相同).{0,8}"
+            r"(?:cohort|队列|样本))",
+            clause,
+            re.I,
+        ):
+            observed.add("nested_same_cohort")
+        if re.search(
+            r"(?:parallel[_\s-]*time[_\s-]*cohorts?|"
+            r"(?:平行|并行|独立).{0,10}(?:时间|时点|月份).{0,8}"
+            r"(?:cohort|队列|样本)|"
+            r"(?:时间|时点|月份).{0,8}(?:cohort|队列|样本).{0,10}"
+            r"(?:平行|并行|独立))",
+            clause,
+            re.I,
+        ):
+            observed.add("parallel_time_cohorts")
+    return observed == {relationship}
+
+
 def _sample_v2_no_population_filters_grounded(
     utterance: str,
     labels: Sequence[str],
@@ -9726,73 +9982,75 @@ def _sample_v2_predicate_semantics_grounded(
     text: str,
     predicate: object,
 ) -> bool:
-    if not isinstance(predicate, Mapping):
+    if not _sample_v2_fresh_partition_selector_shape(predicate):
         return False
+    assert isinstance(predicate, Mapping)
     op = predicate.get("op")
-    if op in {"eq", "ne", "gt", "gte", "lt", "lte"}:
-        left = _sample_v2_operand_pattern(predicate.get("left"))
-        right = _sample_v2_operand_pattern(predicate.get("right"))
-        operator = _sample_v2_operator_pattern(str(op))
-        if left is None or right is None or operator is None:
-            return False
-        return (
-            re.search(
-                rf"{left}.{{0,24}}(?:{operator}).{{0,24}}{right}",
-                text,
-                re.I,
-            )
-            is not None
-        )
-    if op in {"is_null", "is_not_null"}:
-        arg = _sample_v2_operand_pattern(predicate.get("arg"))
-        if arg is None:
-            return False
-        null_operator = (
-            r"(?:为空|是空值|is\s+null)"
-            if op == "is_null"
-            else r"(?:不为空|非空|is\s+not\s+null)"
-        )
-        return (
-            re.search(
-                rf"{arg}.{{0,16}}(?:{null_operator})|"
-                rf"(?:{null_operator}).{{0,16}}{arg}",
-                text,
-                re.I,
-            )
-            is not None
-        )
+    if op not in {"and", "or"}:
+        leaf_pattern = _sample_v2_predicate_leaf_grounding_pattern(predicate)
+        return leaf_pattern is not None and re.search(
+            leaf_pattern,
+            text,
+            re.I,
+        ) is not None
     if op in {"and", "or"}:
         args = predicate.get("args")
-        if not isinstance(args, Sequence) or isinstance(
-            args,
-            str | bytes | bytearray,
-        ):
+        assert isinstance(args, Sequence)
+        patterns = [
+            _sample_v2_predicate_leaf_grounding_pattern(item)
+            for item in args
+        ]
+        if any(pattern is None for pattern in patterns):
             return False
         connector = (
             r"(?:且|并且|同时|(?<![A-Za-z0-9_])and(?![A-Za-z0-9_]))"
             if op == "and"
             else r"(?:或|或者|(?<![A-Za-z0-9_])or(?![A-Za-z0-9_]))"
         )
-        return (
-            re.search(connector, text, re.I) is not None
-            and all(
-                _sample_v2_predicate_semantics_grounded(text, item)
-                for item in args
-            )
+        opposite = (
+            r"(?:或|或者|(?<![A-Za-z0-9_])or(?![A-Za-z0-9_]))"
+            if op == "and"
+            else r"(?:且|并且|同时|(?<![A-Za-z0-9_])and(?![A-Za-z0-9_]))"
         )
-    if op == "not":
-        return bool(
-            re.search(
-                r"(?:不满足|否定|(?<![A-Za-z0-9_])not(?![A-Za-z0-9_]))",
-                text,
-                re.I,
-            )
-            and _sample_v2_predicate_semantics_grounded(
-                text,
-                predicate.get("arg"),
-            )
+        joined = patterns[0] + "".join(
+            rf"\s*(?:，|,)?\s*(?:{connector})\s*{pattern}"
+            for pattern in patterns[1:]
         )
+        match = re.search(joined, text, re.I)
+        return match is not None and re.search(
+            opposite,
+            match.group(0),
+            re.I,
+        ) is None
     return False
+
+
+def _sample_v2_predicate_leaf_grounding_pattern(
+    predicate: object,
+) -> str | None:
+    if not _sample_v2_fresh_partition_leaf_shape(predicate):
+        return None
+    assert isinstance(predicate, Mapping)
+    op = predicate.get("op")
+    if op in {"eq", "ne", "gt", "gte", "lt", "lte"}:
+        left = _sample_v2_operand_pattern(predicate.get("left"))
+        right = _sample_v2_operand_pattern(predicate.get("right"))
+        operator = _sample_v2_operator_pattern(str(op))
+        if left is None or right is None or operator is None:
+            return None
+        return rf"{left}.{{0,24}}?(?:{operator}).{{0,24}}?{right}"
+    arg = _sample_v2_operand_pattern(predicate.get("arg"))
+    if arg is None:
+        return None
+    null_operator = (
+        r"(?:(?<!不)为空|(?<!不)是空值|is\s+null)"
+        if op == "is_null"
+        else r"(?:不为空|不是空值|非空|is\s+not\s+null)"
+    )
+    return (
+        rf"(?:{arg}.{{0,16}}?(?:{null_operator})|"
+        rf"(?:{null_operator}).{{0,16}}?{arg})"
+    )
 
 
 def _sample_v2_operand_pattern(value: object) -> str | None:
@@ -9948,6 +10206,82 @@ def _sample_v2_partition_equality_grounded(
         values=values,
         labels=labels,
     )
+
+
+def _sample_v2_partition_predicate_grounded(
+    utterance: str,
+    predicate: object,
+    *,
+    labels: Sequence[str],
+) -> bool:
+    role = "|".join(
+        re.escape(label) for label in sorted(labels, key=len, reverse=True)
+    )
+    clauses = tuple(
+        clause
+        for clause in _sample_design_clauses(utterance)
+        if re.search(
+            rf"(?:{role}).{{0,10}}(?:条件|谓词|selector|predicate)",
+            clause,
+            re.I,
+        )
+    )
+    return (
+        len(clauses) == 1
+        and _sample_v2_predicate_semantics_grounded(clauses[0], predicate)
+    )
+
+
+def _sample_v2_partition_time_range_grounded(
+    utterance: str,
+    *,
+    start: object,
+    end: object,
+    labels: Sequence[str],
+) -> bool:
+    role = "|".join(
+        re.escape(label) for label in sorted(labels, key=len, reverse=True)
+    )
+    clauses = tuple(
+        clause
+        for clause in _sample_design_clauses(utterance)
+        if re.search(
+            rf"(?:{role}).{{0,10}}(?:时间范围|日期范围|time\s+range)",
+            clause,
+            re.I,
+        )
+    )
+    if len(clauses) != 1:
+        return False
+    clause = clauses[0]
+    date_pattern = r"\d{4}-\d{2}-\d{2}"
+    expected = {
+        value for value in (start, end) if isinstance(value, str)
+    }
+    observed = set(re.findall(date_pattern, clause))
+    if expected != observed:
+        return False
+    if isinstance(start, str) and isinstance(end, str):
+        return (
+            re.search(
+                rf"{re.escape(start)}\s*(?:至|到|~|—|–|to|through)\s*"
+                rf"{re.escape(end)}",
+                clause,
+                re.I,
+            )
+            is not None
+        )
+    if start is None:
+        return re.search(
+            r"(?:起始|开始|start).{0,8}(?:无|暂无|开放|none|null)",
+            clause,
+            re.I,
+        ) is not None
+    return re.search(
+        r"(?:结束|截止|end).{0,8}(?:无|暂无|开放|none|null)",
+        clause,
+        re.I,
+    ) is not None
 
 
 def _sample_v2_unavailable_role_grounded(
@@ -15147,6 +15481,19 @@ def _standard_workflow_confirmation_text(
         historical_score = inputs["historical_score"]
         details = [
             "已识别为〔V2 双总体策略样本设计 Workflow〕",
+            f"总体关系：{inputs['relationship']}",
+            (
+                "总体纳排：两者均无纳排"
+                if all(
+                    population[field] is None
+                    for population in (
+                        inputs["approval_population"],
+                        inputs["risk_population"],
+                    )
+                    for field in ("inclusion", "exclusion")
+                )
+                else "总体纳排：已按用户提供的受限条件固化"
+            ),
             (
                 f"表现窗：{performance['days']} 天"
                 if performance["status"] == "provided"
@@ -15164,10 +15511,9 @@ def _standard_workflow_confirmation_text(
                 f"方向：{historical_score['direction'] or 'null'}"
             ),
             "approval/risk 总体与 development/validation/OOT 三分区将分别固化",
-            "当前兼容模式先确定性生成 V1 development 锚点，再生成 V2 证据；"
-            "仅支持 approval/risk 同 cohort 且两者均无纳排；任一总体纳排、"
-            "时间切分或复杂 selector 都会明确要求原生 V2 bootstrap，不会静默丢失",
-            "legacy ref、relationship、scope、policy、数据/workspace 身份和所有 id/hash 由平台绑定",
+            "平台将按请求语义选择无损 compatibility 链或原生 V2 执行；"
+            "不会删减总体纳排、时间切分或复杂 selector",
+            "legacy ref、scope、policy、数据/workspace 身份和所有 id/hash 由平台绑定",
         ]
     elif draft.workflow == "strategy_model_evidence_v2":
         details = [
@@ -16347,17 +16693,21 @@ def _user_prompt(
         "一次只刷新项目上下文，不得串联样本、候选、影响、报告、采纳或部署；没有 as_of"
         "必须 clarification，不能默认今天。"
         "对于 strategy_sample_design_v2，workflow_inputs 必须精确包含用户明确提供的"
-        " target_bad_value、drop_nan_labels、approval_population、risk_population、"
-        "partitioning、maturity、performance_window、observation_window、field_bindings、"
-        "historical_score。所有嵌套字段、null、状态、列、值、方向与 reason 都必须能逐字"
-        "回到原话。approval/risk、inclusion/exclusion 与 predicate operator/column/literal"
+        " target_bad_value、drop_nan_labels、relationship、approval_population、"
+        "risk_population、partitioning、maturity、performance_window、observation_window、"
+        "field_bindings、historical_score。relationship 必须由用户明确说明为"
+        " nested_same_cohort 或 parallel_time_cohorts。所有嵌套字段、null、状态、列、值、"
+        "方向与 reason 都必须能逐字回到原话。fresh population 的非 null inclusion/exclusion"
+        " 只能输出 match=all/any 和 1 到 8 个简单 conditions；condition 只含"
+        " column/operator/value，is_null/is_not_null 不含 value。禁止直接输出 population"
+        " predicate AST。approval/risk、inclusion/exclusion 与 operator/column/value"
         " 必须在各自局部语境中逐项对应；表现窗、观察窗和 maturity cutoff 日期不得互相借用。"
         "普通表现窗不能只借用成熟表现窗；maturity cutoff 必须在同一子句带成熟度限定；"
         "historical_score 的字段和方向必须在同一局部子句绑定，不能借用其他字段的方向。"
-        "当前 compatibility bootstrap 仅允许 approval/risk 同 cohort 且两个总体"
-        "均无纳排、同列三个互异简单等值 selector；time_ranges、任一总体纳排或复杂 selector"
-        " 必须 clarification。"
-        "relationship/scope/policy、legacy ref、dataset/workspace/target、membership/bundle/"
+        "平台会把 nested_same_cohort、双总体均无纳排且同列三个互异简单等值 selector"
+        " 路由到 compatibility 链；parallel_time_cohorts、time_ranges、任一总体纳排或"
+        "复杂 selector 路由到原生 V2，禁止删减或降级。"
+        "scope/policy、legacy ref、dataset/workspace/target、membership/bundle/"
         "artifact id/hash 全部禁止填写，也不得串联建模、模型比较、报告、Strategy Pool、"
         "采纳或部署。"
         "对于 strategy_model_evidence_v2，workflow_inputs 必须是空对象；只汇总当前 task"

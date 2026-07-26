@@ -34,7 +34,10 @@ from marvis.data.predicate_ast import (
 )
 from marvis.data.workspace import data_semantic_mapping_hash
 from marvis.files import sha256_file
-from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.errors import (
+    StrategyError,
+    StrategySampleDesignV2NativeSourceUnsupportedError,
+)
 from marvis.packs.strategy.sample_design_binding import (
     StrategySampleDesignExecutionBinding,
     StrategySampleDesignRef,
@@ -252,6 +255,18 @@ class _LiveBinding:
     semantic_field_roles: tuple[tuple[str, str], ...]
     legacy: StrategySampleDesignExecutionBinding
 
+    @property
+    def target_col(self) -> str:
+        return self.legacy.target_col
+
+    @property
+    def target_bad_value(self) -> int:
+        return self.legacy.target_bad_value
+
+    @property
+    def drop_nan_labels(self) -> bool:
+        return self.legacy.drop_nan_labels
+
 
 @dataclass(frozen=True)
 class StrategySampleDesignV2ArtifactBinding:
@@ -269,6 +284,49 @@ class StrategySampleDesignV2ArtifactBinding:
     membership: dict[str, Any]
     bundle: dict[str, Any]
     source_binding: _LiveBinding
+
+
+def resolve_strategy_sample_design_v2_source_mode(
+    sample_design: Mapping[str, Any],
+    *,
+    capability: str = "physical_v2",
+    consumer: str | None = None,
+) -> str:
+    """Resolve authenticated V2 lineage without letting legacy consumers guess."""
+
+    if capability not in {"physical_v2", "legacy_development"}:
+        raise StrategyError("sample-design V2 source capability is invalid")
+    design = _json_object(sample_design, "sample-design V2 source design")
+    compatibility = _json_object(
+        design.get("compatibility"),
+        "sample-design V2 source compatibility",
+    )
+    fields = frozenset(compatibility)
+    if fields == frozenset({"legacy_development_ref", "maps_to"}):
+        if compatibility["maps_to"] != "risk/development":
+            raise StrategyError(
+                "sample-design V2 legacy compatibility mapping is invalid"
+            )
+        StrategySampleDesignRef.from_value(
+            compatibility["legacy_development_ref"]
+        )
+        return "legacy_anchored"
+    if fields == frozenset({"source_mode", "development_partition"}):
+        if (
+            compatibility["source_mode"] != "native_active_dataset"
+            or compatibility["development_partition"] != "risk/development"
+        ):
+            raise StrategyError(
+                "sample-design V2 native compatibility is invalid"
+            )
+        if capability == "legacy_development":
+            raise StrategySampleDesignV2NativeSourceUnsupportedError(
+                consumer=consumer or capability,
+            )
+        return "native_active_dataset"
+    raise StrategyError(
+        "sample-design V2 compatibility must use one exact supported shape"
+    )
 
 
 def run_materialize_sample_design_v2(inputs, ctx, runtime) -> dict[str, Any]:
@@ -447,6 +505,126 @@ def load_strategy_sample_design_v2_artifacts(
         raise StrategyError(str(exc)) from exc
 
 
+def load_any_strategy_sample_design_v2_artifacts(
+    runtime,
+    *,
+    task_id: str,
+    membership_artifact_id: str,
+    expected_membership_artifact_content_hash: str,
+    bundle_artifact_id: str,
+    expected_bundle_artifact_content_hash: str,
+    expected_bundle_id: str,
+    expected_sample_design_id: str,
+    expected_sample_design_content_hash: str,
+):
+    """Dispatch exact V2 artifact refs by authenticated kind and origin."""
+
+    normalized_task = _text(task_id, "task_id")
+    membership_aid = _hash(
+        membership_artifact_id,
+        "membership_artifact_id",
+    )
+    bundle_aid = _hash(bundle_artifact_id, "bundle_artifact_id")
+    membership_hash = _hash(
+        expected_membership_artifact_content_hash,
+        "expected_membership_artifact_content_hash",
+    )
+    bundle_hash = _hash(
+        expected_bundle_artifact_content_hash,
+        "expected_bundle_artifact_content_hash",
+    )
+    membership_record = _dispatch_record(
+        runtime,
+        task_id=normalized_task,
+        artifact_id=membership_aid,
+        expected_content_hash=membership_hash,
+    )
+    bundle_record = _dispatch_record(
+        runtime,
+        task_id=normalized_task,
+        artifact_id=bundle_aid,
+        expected_content_hash=bundle_hash,
+    )
+    pair = (
+        membership_record["kind"],
+        membership_record["origin_tool"],
+        bundle_record["kind"],
+        bundle_record["origin_tool"],
+    )
+    kwargs = {
+        "task_id": normalized_task,
+        "membership_artifact_id": membership_aid,
+        "expected_membership_artifact_content_hash": membership_hash,
+        "bundle_artifact_id": bundle_aid,
+        "expected_bundle_artifact_content_hash": bundle_hash,
+        "expected_bundle_id": expected_bundle_id,
+        "expected_sample_design_id": expected_sample_design_id,
+        "expected_sample_design_content_hash": (
+            expected_sample_design_content_hash
+        ),
+    }
+    legacy_pair = (
+        SAMPLE_DESIGN_V2_MEMBERSHIP_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+        SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+    )
+    if pair == legacy_pair:
+        return load_strategy_sample_design_v2_artifacts(
+            runtime,
+            **kwargs,
+        )
+    from marvis.packs.strategy.sample_design_v2_native_tools import (
+        SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+        load_native_strategy_sample_design_v2_artifacts,
+    )
+
+    native_pair = (
+        SAMPLE_DESIGN_V2_NATIVE_MEMBERSHIP_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+        SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND,
+        SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+    )
+    if pair == native_pair:
+        return load_native_strategy_sample_design_v2_artifacts(
+            runtime,
+            **kwargs,
+        )
+    raise StrategyError(
+        "sample-design V2 artifact refs do not form one exact supported "
+        "kind/origin pair"
+    )
+
+
+def _dispatch_record(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+) -> dict[str, Any]:
+    try:
+        record = runtime.task_artifacts.get_for_task(task_id, artifact_id)
+    except (TaskArtifactDataError, TaskArtifactNotFoundError) as exc:
+        raise StrategyError(str(exc)) from exc
+    if (
+        record is None
+        or not isinstance(record, Mapping)
+        or set(record) != _RECORD_FIELDS
+        or record["id"] != artifact_id
+        or record["task_id"] != task_id
+        or not _matches_hash(
+            record["content_hash"],
+            expected_content_hash,
+        )
+    ):
+        raise StrategyError(
+            "sample-design V2 artifact dispatch binding changed"
+        )
+    return dict(record)
+
+
 def load_historical_strategy_sample_design_v2_artifacts(
     runtime,
     *,
@@ -497,6 +675,32 @@ def require_strategy_sample_design_v2_artifact_binding_on_connection(
         binding,
         require_current_workspace=True,
     )
+
+
+def require_any_strategy_sample_design_v2_artifact_binding_on_connection(
+    conn,
+    binding,
+) -> None:
+    """Re-authenticate either exact V2 source mode without coercion."""
+
+    if isinstance(binding, StrategySampleDesignV2ArtifactBinding):
+        require_strategy_sample_design_v2_artifact_binding_on_connection(
+            conn,
+            binding,
+        )
+        return
+    from marvis.packs.strategy.sample_design_v2_native_tools import (
+        StrategySampleDesignV2NativeArtifactBinding,
+        require_native_strategy_sample_design_v2_artifact_binding_on_connection,
+    )
+
+    if isinstance(binding, StrategySampleDesignV2NativeArtifactBinding):
+        require_native_strategy_sample_design_v2_artifact_binding_on_connection(
+            conn,
+            binding,
+        )
+        return
+    raise StrategyError("sample-design V2 artifact binding is invalid")
 
 
 def require_historical_strategy_sample_design_v2_artifact_binding_on_connection(
@@ -1499,7 +1703,7 @@ def _maturity_evidence(
     eligible = risk_mask & np.array(
         [item <= maturity_date for item in dates], dtype=np.bool_
     )
-    target = frame[binding.legacy.target_col]
+    target = frame[binding.target_col]
     labeled = _binary_label_mask(target)
     eligible_count = int(np.count_nonzero(eligible))
     labeled_count = int(np.count_nonzero(eligible & labeled))
@@ -1615,7 +1819,7 @@ def _diagnostic_statistics(
             "source_refs": [],
         }
     else:
-        labeled = _binary_label_mask(frame[binding.legacy.target_col])
+        labeled = _binary_label_mask(frame[binding.target_col])
         denominator_mask = risk_union if eligible_mask is None else risk_union & eligible_mask
         groups = frame.loc[denominator_mask, group_field]
         coverages: list[float] = []
@@ -1635,8 +1839,8 @@ def _diagnostic_statistics(
     if maturity_status != "confirmed_matured" or eligible_mask is None:
         sufficiency = {"availability": "unavailable", "bad_count": None, "source_refs": []}
     else:
-        labels = _binary_label_mask(frame[binding.legacy.target_col])
-        bad = _bad_label_mask(frame[binding.legacy.target_col], binding.legacy.target_bad_value)
+        labels = _binary_label_mask(frame[binding.target_col])
+        bad = _bad_label_mask(frame[binding.target_col], binding.target_bad_value)
         dev = masks["risk/development"] & eligible_mask & labels
         sufficiency = {
             "availability": "available",
@@ -1684,8 +1888,8 @@ def _metric_observations(
             "content_hash": sample_design["content_hash"],
         },
     ]
-    labeled_all = _binary_label_mask(frame[binding.legacy.target_col])
-    bad_all = _bad_label_mask(frame[binding.legacy.target_col], binding.legacy.target_bad_value)
+    labeled_all = _binary_label_mask(frame[binding.target_col])
+    bad_all = _bad_label_mask(frame[binding.target_col], binding.target_bad_value)
     observations: list[dict[str, Any]] = []
     for role in ("approval", "risk"):
         slice_masks = {partition: masks[f"{role}/{partition}"] for partition in PARTITION_NAMES}
@@ -2135,6 +2339,7 @@ def _prepare_one_artifact_under_lock(
     provenance: Mapping[str, Any],
     root: Path,
     maximum_bytes: int,
+    origin_tool: str = SAMPLE_DESIGN_V2_ORIGIN_TOOL,
 ) -> None:
     file_exists = path.exists() or path.is_symlink()
     if row is not None:
@@ -2147,6 +2352,7 @@ def _prepare_one_artifact_under_lock(
             path=path,
             content_hash=content_hash,
             provenance=provenance,
+            origin_tool=origin_tool,
         )
         _require_exact_file(
             path,
@@ -2187,13 +2393,14 @@ def _require_existing_row(
     path: Path,
     content_hash: str,
     provenance: Mapping[str, Any],
+    origin_tool: str = SAMPLE_DESIGN_V2_ORIGIN_TOOL,
 ) -> None:
     expected = {
         "task_id": task_id,
         "kind": kind,
         "path": str(path),
         "content_hash": content_hash,
-        "origin_tool": SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+        "origin_tool": origin_tool,
         "provenance_json": _canonical_json(provenance),
     }
     if any(str(row[field]) != expected[field] for field in expected):
@@ -2207,6 +2414,7 @@ def _registered_record(
     artifact_id: str,
     kind: str,
     expected_content_hash: str,
+    origin_tool: str = SAMPLE_DESIGN_V2_ORIGIN_TOOL,
 ) -> dict[str, Any]:
     try:
         record = runtime.task_artifacts.get_for_task(task_id, artifact_id)
@@ -2218,7 +2426,7 @@ def _registered_record(
         record["id"] != artifact_id
         or record["task_id"] != task_id
         or record["kind"] != kind
-        or record["origin_tool"] != SAMPLE_DESIGN_V2_ORIGIN_TOOL
+        or record["origin_tool"] != origin_tool
         or not _matches_hash(record["content_hash"], expected_content_hash)
     ):
         raise StrategyError("sample-design V2 artifact registry binding changed")
@@ -2745,9 +2953,12 @@ __all__ = [
     "SAMPLE_DESIGN_V2_TOOL_SCHEMA_VERSION",
     "StrategySampleDesignV2ArtifactBinding",
     "load_historical_strategy_sample_design_v2_artifacts",
+    "load_any_strategy_sample_design_v2_artifacts",
     "load_strategy_sample_design_v2_artifacts",
+    "require_any_strategy_sample_design_v2_artifact_binding_on_connection",
     "require_historical_strategy_sample_design_v2_artifact_binding_on_connection",
     "require_strategy_sample_design_v2_artifact_binding_on_connection",
+    "resolve_strategy_sample_design_v2_source_mode",
     "run_materialize_sample_design_v2",
     "validate_materialize_sample_design_v2_tool_output",
 ]

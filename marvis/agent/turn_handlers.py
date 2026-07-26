@@ -282,6 +282,10 @@ from marvis.packs.strategy.sample_design_v2_tools import (
     SAMPLE_DESIGN_V2_ORIGIN_TOOL,
     load_strategy_sample_design_v2_artifacts,
 )
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+    authenticate_native_strategy_sample_design_v2_bundle_record,
+)
 from marvis.repositories.plans import PlanRepository
 from marvis.repositories.pending_strategy_requests import (
     PendingStrategyRequestConflictError,
@@ -1896,6 +1900,7 @@ def _is_strategy_request_intent(text: str) -> bool:
 
 _MANUAL_STRATEGY_WORKFLOWS = frozenset(
     {
+        "strategy_sample_design_v2",
         "univariate_candidate_analysis",
         "cross_matrix_analysis",
         "automatic_tree_candidate_build",
@@ -2997,11 +3002,14 @@ def _run_validated_strategy_request(
             raise StrategySetupError(
                 "V2 策略样本设计需要确认的活动 DataWorkspace 和二元目标列。"
             )
+        template_id = _strategy_sample_design_v2_template_id(
+            draft.to_dict()["workflow_inputs"]
+        )
         return _start_confirmed_strategy_plan(
             runtime,
             repo,
             task,
-            template_id="strategy_sample_design_v2",
+            template_id=template_id,
             slots=_strategy_sample_design_v2_plan_slots(
                 runtime,
                 task,
@@ -6513,7 +6521,7 @@ def _strategy_sample_design_v2_plan_slots(
     context,
     drop_nan_labels: bool,
 ) -> dict[str, object]:
-    """Project a strict V2 request into a lossless V1 anchor plus V2 controls."""
+    """Bind platform context, adding compatibility slots only when lossless."""
 
     workspace = _require_strategy_sample_design_workspace(runtime, task)
     if (
@@ -6548,45 +6556,7 @@ def _strategy_sample_design_v2_plan_slots(
         )
 
     inputs = draft.to_dict()["workflow_inputs"]
-    if inputs["approval_population"] != {
-        "inclusion": None,
-        "exclusion": None,
-    } or inputs["risk_population"] != {
-        "inclusion": None,
-        "exclusion": None,
-    }:
-        raise _StrategyV2EvidenceSetupError(
-            "strategy_sample_design_v2_native_bootstrap_required",
-            "当前 V1 compatibility anchor 只支持 approval/risk 同 cohort 且"
-            "两个总体均无纳排；本次未创建计划。",
-        )
-    split_col, split_values = _strategy_sample_v2_simple_split_projection(
-        inputs["partitioning"]
-    )
     fields = inputs["field_bindings"]
-    compatibility_columns = [
-        fields.get("month_field"),
-        fields.get("weight_field"),
-        fields.get("loan_amount_field"),
-        fields.get("overdue_amount_field"),
-    ]
-    present_columns = [
-        str(column) for column in compatibility_columns if column is not None
-    ]
-    if (
-        split_col == target_col
-        or split_col not in context.columns
-        or any(column not in context.columns for column in present_columns)
-        or target_col in present_columns
-        or split_col in present_columns
-        or len(present_columns) != len(set(present_columns))
-    ):
-        raise _StrategyV2EvidenceSetupError(
-            "strategy_sample_design_v2_native_bootstrap_required",
-            "当前 V2 字段绑定不能无损投影为 V1 compatibility anchor；"
-            "请调整重复/冲突字段，或先完成原生 V2 bootstrap。",
-        )
-
     maturity = inputs["maturity"]
     performance = inputs["performance_window"]
     observation = inputs["observation_window"]
@@ -6606,30 +6576,16 @@ def _strategy_sample_design_v2_plan_slots(
             _STRATEGY_SAMPLE_V2_POLICY["diagnostic_severities"]
         ),
     }
-    return {
+    slots: dict[str, object] = {
         "dataset_id": workspace.active_dataset_id,
         "expected_dataset_content_hash": workspace.active_dataset_content_hash,
         "workspace_revision": workspace.revision,
         "workspace_generation": workspace.analysis_generation,
         "semantic_mapping_hash": semantic_hash,
         "target_col": target_col,
-        "relationship": "nested_same_cohort",
+        "relationship": inputs["relationship"],
         "scope": scope,
         "policy": policy,
-        "compatibility_performance_window_status": performance["status"],
-        "compatibility_performance_window_days": performance["days"],
-        "compatibility_observation_window_status": observation["status"],
-        "compatibility_observation_start": observation["start"],
-        "compatibility_observation_end": observation["end"],
-        "compatibility_maturity_status": compatibility_maturity,
-        "compatibility_split_col": split_col,
-        "compatibility_development_values": [split_values["development"]],
-        "compatibility_validation_values": [split_values["validation"]],
-        "compatibility_oot_values": [split_values["oot"]],
-        "compatibility_month_col": fields.get("month_field"),
-        "compatibility_weight_col": fields.get("weight_field"),
-        "compatibility_loan_amount_col": fields.get("loan_amount_field"),
-        "compatibility_overdue_amount_col": fields.get("overdue_amount_field"),
         "target_bad_value": inputs["target_bad_value"],
         "drop_nan_labels": bool(drop_nan_labels),
         "approval_population": inputs["approval_population"],
@@ -6641,6 +6597,137 @@ def _strategy_sample_design_v2_plan_slots(
         "field_bindings": fields,
         "historical_score": inputs["historical_score"],
     }
+    if (
+        _strategy_sample_design_v2_template_id(inputs)
+        == "strategy_sample_design_v2_native"
+    ):
+        return slots
+
+    split_col, split_values = _strategy_sample_v2_simple_split_projection(
+        inputs["partitioning"]
+    )
+    compatibility_columns = [
+        fields.get("month_field"),
+        fields.get("weight_field"),
+        fields.get("loan_amount_field"),
+        fields.get("overdue_amount_field"),
+    ]
+    present_columns = [
+        str(column) for column in compatibility_columns if column is not None
+    ]
+    if (
+        split_col == target_col
+        or split_col not in context.columns
+        or any(column not in context.columns for column in present_columns)
+        or target_col in present_columns
+        or split_col in present_columns
+        or len(present_columns) != len(set(present_columns))
+    ):
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_sample_design_v2_native_source_unsupported",
+            "当前 V2 字段绑定无法由活动数据集安全执行；请调整重复或冲突字段。",
+        )
+    slots.update(
+        {
+            "compatibility_performance_window_status": performance["status"],
+            "compatibility_performance_window_days": performance["days"],
+            "compatibility_observation_window_status": observation["status"],
+            "compatibility_observation_start": observation["start"],
+            "compatibility_observation_end": observation["end"],
+            "compatibility_maturity_status": compatibility_maturity,
+            "compatibility_split_col": split_col,
+            "compatibility_development_values": [split_values["development"]],
+            "compatibility_validation_values": [split_values["validation"]],
+            "compatibility_oot_values": [split_values["oot"]],
+            "compatibility_month_col": fields.get("month_field"),
+            "compatibility_weight_col": fields.get("weight_field"),
+            "compatibility_loan_amount_col": fields.get("loan_amount_field"),
+            "compatibility_overdue_amount_col": fields.get(
+                "overdue_amount_field"
+            ),
+        }
+    )
+    return slots
+
+
+def _strategy_sample_design_v2_template_id(
+    inputs: Mapping[str, object],
+) -> str:
+    """Select the execution template from already validated request semantics."""
+
+    native = "strategy_sample_design_v2_native"
+    if inputs.get("relationship") != "nested_same_cohort":
+        return native
+    empty_population = {"inclusion": None, "exclusion": None}
+    if (
+        inputs.get("approval_population") != empty_population
+        or inputs.get("risk_population") != empty_population
+    ):
+        return native
+    partitioning = inputs.get("partitioning")
+    if (
+        not isinstance(partitioning, Mapping)
+        or set(partitioning) != {"method", "selectors"}
+        or partitioning.get("method") != "predicate_ast"
+        or not isinstance(partitioning.get("selectors"), Mapping)
+    ):
+        return native
+    selectors = partitioning["selectors"]
+    if set(selectors) != {"development", "validation", "oot"}:
+        return native
+    columns: list[str] = []
+    values: list[object] = []
+    for partition in ("development", "validation", "oot"):
+        predicate = selectors[partition]
+        if (
+            not isinstance(predicate, Mapping)
+            or set(predicate) != {"op", "left", "right"}
+            or predicate.get("op") != "eq"
+            or not isinstance(predicate.get("left"), Mapping)
+            or set(predicate["left"]) != {"column"}
+            or not isinstance(predicate.get("right"), Mapping)
+            or set(predicate["right"]) != {"literal"}
+        ):
+            return native
+        column = predicate["left"]["column"]
+        literal = predicate["right"]["literal"]
+        if (
+            not isinstance(column, str)
+            or not column
+            or literal is None
+            or isinstance(literal, Mapping | Sequence)
+            and not isinstance(literal, str)
+        ):
+            return native
+        columns.append(column)
+        values.append(literal)
+    if len(set(columns)) != 1:
+        return native
+    identities = {
+        json.dumps(value, sort_keys=True, ensure_ascii=False)
+        for value in values
+    }
+    if len(identities) != 3:
+        return native
+    field_bindings = inputs.get("field_bindings")
+    if not isinstance(field_bindings, Mapping):
+        return native
+    projected_fields = [
+        field_bindings.get(name)
+        for name in (
+            "month_field",
+            "weight_field",
+            "loan_amount_field",
+            "overdue_amount_field",
+        )
+        if field_bindings.get(name) is not None
+    ]
+    if (
+        columns[0] in projected_fields
+        or len(projected_fields) != len(set(projected_fields))
+    ):
+        return native
+    return "strategy_sample_design_v2"
 
 
 def _strategy_sample_v2_simple_split_projection(
@@ -6874,11 +6961,15 @@ def _latest_verified_strategy_sample_design_v2_binding(
     # TaskArtifactRepository.list_for_task is deterministic
     # ORDER BY created_at, id; the final row is therefore the latest published
     # V2 bundle, and a drifted latest bundle is never bypassed for an older one.
+    supported_origins = {
+        SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+        SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+    }
     bundles = [
         artifact
         for artifact in artifacts
         if artifact.get("kind") == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
-        and artifact.get("origin_tool") == SAMPLE_DESIGN_V2_ORIGIN_TOOL
+        and artifact.get("origin_tool") in supported_origins
     ]
     if not bundles:
         raise _StrategyV2EvidenceSetupError(
@@ -6887,6 +6978,13 @@ def _latest_verified_strategy_sample_design_v2_binding(
             "请先用自然语言固化 V2 样本设计。",
         )
     newest = bundles[-1]
+    if newest.get("origin_tool") == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_sample_design_v2_native_source_unsupported",
+            "最新 StrategySampleDesign V2 来自原生活动数据集；"
+            "当前下游 ModelEvidence 尚不能消费该来源，平台不会回退到旧"
+            " compatibility 样本。",
+        )
     provenance = newest.get("provenance")
     if not isinstance(provenance, Mapping):
         raise _StrategyV2EvidenceSetupError(
@@ -6954,7 +7052,11 @@ def _strategy_v2_registry_token(artifacts: Sequence[Mapping]) -> str:
         for artifact in artifacts
         if (
             artifact.get("kind") == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
-            and artifact.get("origin_tool") == SAMPLE_DESIGN_V2_ORIGIN_TOOL
+            and artifact.get("origin_tool")
+            in {
+                SAMPLE_DESIGN_V2_ORIGIN_TOOL,
+                SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL,
+            }
         )
         or (
             artifact.get("kind") == "strategy_candidate_json"
@@ -7598,6 +7700,13 @@ def _strategy_report_latest_sample_binding(
             "当前任务没有 StrategySampleDesign V2 membership/bundle 证据。",
         )
     newest = bundles[0]
+    if newest.get("origin_tool") == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_sample_design_v2_native_source_unsupported",
+            "最新 StrategySampleDesign V2 来自原生活动数据集；"
+            "当前报告适配器尚不能消费该来源，平台不会回退到旧"
+            " compatibility 样本。",
+        )
     provenance = newest.get("provenance")
     if not isinstance(provenance, Mapping):
         raise _StrategyV2EvidenceSetupError(
@@ -8542,15 +8651,51 @@ def _latest_matching_strategy_sample_design_ref(
         "target_col": context.target_col,
     }
     matches: list[Mapping] = []
+    latest_legacy_position = -1
+    latest_native_position = -1
+    latest_invalid_native_position = -1
+    latest_invalid_native_cause: Exception | None = None
+    artifact_repository = TaskArtifactRepository(runtime.settings.db_path)
+    native_read_runtime = SimpleNamespace(
+        settings=runtime.settings,
+        task_artifacts=artifact_repository,
+    )
     try:
-        artifacts = TaskArtifactRepository(
-            runtime.settings.db_path
-        ).list_for_task(task.id)
+        artifacts = artifact_repository.list_for_task(task.id)
     except Exception as exc:
         raise StrategySetupError(
             "无法读取当前任务的策略样本设计登记，不能安全继续策略开发。"
         ) from exc
-    for artifact in artifacts:
+    for position, artifact in enumerate(artifacts):
+        if (
+            artifact.get("kind") == SAMPLE_DESIGN_V2_BUNDLE_ARTIFACT_KIND
+            and artifact.get("origin_tool")
+            == SAMPLE_DESIGN_V2_NATIVE_ORIGIN_TOOL
+        ):
+            try:
+                authenticated = (
+                    authenticate_native_strategy_sample_design_v2_bundle_record(
+                        native_read_runtime,
+                        task_id=task.id,
+                        record=artifact,
+                    )
+                )
+            except (StrategyError, TypeError, ValueError) as exc:
+                latest_invalid_native_position = position
+                latest_invalid_native_cause = exc
+                continue
+            relation = _native_sample_design_v2_context_relation(
+                authenticated.source_provenance,
+                expected=expected,
+                drop_nan_labels=drop_nan_labels,
+            )
+            if relation == "invalid":
+                latest_invalid_native_position = position
+                latest_invalid_native_cause = None
+                continue
+            if relation == "current":
+                latest_native_position = position
+            continue
         provenance = artifact.get("provenance")
         if (
             artifact.get("kind") != SAMPLE_DESIGN_ARTIFACT_KIND
@@ -8566,6 +8711,26 @@ def _latest_matching_strategy_sample_design_ref(
         ):
             continue
         matches.append(artifact)
+        latest_legacy_position = position
+    latest_blocking_native_position = max(
+        latest_native_position,
+        latest_invalid_native_position,
+    )
+    if latest_blocking_native_position > latest_legacy_position:
+        error = _StrategyV2EvidenceSetupError(
+            "strategy_sample_design_v2_native_source_unsupported",
+            "当前执行口径的最新相关 StrategySampleDesign V2 来自原生"
+            "来源，或其 registry、文件、provenance/source identity "
+            "无法认证；这个下游 Workflow 不会静默回退到更旧的 V1 "
+            "compatibility 样本。",
+        )
+        if (
+            latest_invalid_native_position
+            == latest_blocking_native_position
+            and latest_invalid_native_cause is not None
+        ):
+            raise error from latest_invalid_native_cause
+        raise error
     if not matches:
         raise _StrategySampleDesignRequiredError(
             "当前活动数据和标签口径没有可执行的成熟策略样本设计。"
@@ -8617,6 +8782,46 @@ def _latest_matching_strategy_sample_design_ref(
             "请重新固化样本设计后再执行。"
         ) from exc
     return binding.to_ref_dict()
+
+
+def _native_sample_design_v2_context_relation(
+    source_provenance: Mapping[str, object],
+    *,
+    expected: Mapping[str, object],
+    drop_nan_labels: bool,
+) -> str:
+    """Classify one already-authenticated native source against execution."""
+
+    if source_provenance.get("task_id") != expected["task_id"]:
+        return "invalid"
+    if source_provenance.get("dataset_id") != expected["dataset_id"]:
+        return "other"
+    if (
+        source_provenance.get("dataset_content_hash")
+        != expected["dataset_content_hash"]
+    ):
+        # Dataset ids are immutable; a different hash under the same id is
+        # corruption, not another legitimate context.
+        return "invalid"
+    workspace_identity = (
+        source_provenance.get("workspace_revision"),
+        source_provenance.get("workspace_generation"),
+    )
+    expected_workspace_identity = (
+        expected["workspace_revision"],
+        expected["workspace_generation"],
+    )
+    if workspace_identity != expected_workspace_identity:
+        return "other"
+    if (
+        source_provenance.get("semantic_mapping_hash")
+        != expected["semantic_mapping_hash"]
+        or source_provenance.get("target_col") != expected["target_col"]
+        or source_provenance.get("drop_nan_labels")
+        is not bool(drop_nan_labels)
+    ):
+        return "invalid"
+    return "current"
 
 
 def _strategy_pool_impact_plan_slots(

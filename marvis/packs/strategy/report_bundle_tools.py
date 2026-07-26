@@ -93,8 +93,9 @@ from marvis.packs.strategy.report_bundle_adapters import (
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
-    load_strategy_sample_design_v2_artifacts,
+    load_any_strategy_sample_design_v2_artifacts,
     require_strategy_sample_design_v2_artifact_binding_on_connection,
+    resolve_strategy_sample_design_v2_source_mode,
 )
 from marvis.packs.strategy.voting_candidate_search_tools import (
     VotingCandidateSearchArtifactBinding,
@@ -528,10 +529,15 @@ def _load_sources(
             "current strategy project context no longer matches the exact "
             "planned revision"
         )
-    sample_design = load_strategy_sample_design_v2_artifacts(
+    sample_design = load_any_strategy_sample_design_v2_artifacts(
         runtime,
         task_id=task_id,
         **request["sample_design_ref"],
+    )
+    resolve_strategy_sample_design_v2_source_mode(
+        sample_design.bundle["sample_design"],
+        capability="legacy_development",
+        consumer="strategy_report_bundle",
     )
     candidate_pool = load_current_strategy_candidate_pool_artifact(
         runtime,

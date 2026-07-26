@@ -142,6 +142,9 @@ from marvis.packs.strategy.sample_design_tools import (
 from marvis.packs.strategy.sample_design_v2_tools import (
     run_materialize_sample_design_v2,
 )
+from marvis.packs.strategy.sample_design_v2_native_tools import (
+    run_materialize_sample_design_v2_native,
+)
 from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.contracts import Strategy
 from marvis.packs.strategy.deliverables import decision_table_csv
@@ -1065,6 +1068,16 @@ def tool_materialize_sample_design_v2(inputs: dict, ctx) -> dict:
     """Freeze governed dual-population V2 sample evidence."""
 
     return run_materialize_sample_design_v2(inputs, ctx, _runtime(ctx))
+
+
+def tool_materialize_sample_design_v2_native(inputs: dict, ctx) -> dict:
+    """Freeze native active-dataset dual-population V2 sample evidence."""
+
+    return run_materialize_sample_design_v2_native(
+        inputs,
+        ctx,
+        _runtime(ctx),
+    )
 
 
 def tool_materialize_model_evidence_v2(inputs: dict, ctx) -> dict:

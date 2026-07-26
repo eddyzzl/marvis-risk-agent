@@ -55,8 +55,37 @@ class StrategyPoolLegacyDraftNeedsRebuildError(StrategyError):
         }
 
 
+class StrategySampleDesignV2NativeSourceUnsupportedError(StrategyError):
+    """A consumer that still requires V1 development lineage saw native V2 evidence."""
+
+    code = "strategy_sample_design_v2_native_source_unsupported"
+
+    def __init__(
+        self,
+        *,
+        consumer: str,
+        source_mode: str = "native_active_dataset",
+    ) -> None:
+        self.consumer = str(consumer)
+        self.source_mode = str(source_mode)
+        super().__init__(
+            f"{self.consumer} requires legacy_development capability; "
+            f"sample-design V2 source_mode {self.source_mode} is unsupported"
+        )
+
+    def to_detail(self) -> dict:
+        return {
+            "kind": (
+                ErrorKind.STRATEGY_SAMPLE_DESIGN_V2_NATIVE_SOURCE_UNSUPPORTED
+            ),
+            "consumer": self.consumer,
+            "source_mode": self.source_mode,
+        }
+
+
 __all__ = [
     "StrategyError",
     "StrategyNotAdoptedError",
     "StrategyPoolLegacyDraftNeedsRebuildError",
+    "StrategySampleDesignV2NativeSourceUnsupportedError",
 ]

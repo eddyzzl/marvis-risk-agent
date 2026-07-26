@@ -521,6 +521,46 @@ def test_v2_bundle_binds_governed_identity_semantics_and_complete_metrics():
     assert validate_strategy_sample_design_v2_bundle(bundle) == bundle
 
 
+def test_legacy_anchored_v2_bundle_keeps_golden_identity_and_canonical_bytes():
+    bundle = _bundle()
+    canonical = canonical_strategy_sample_design_v2_bundle_json(bundle)
+
+    assert bundle["bundle_id"] == (
+        "strategy-sample-design-bundle-b49814f01db078f4878ba6cb"
+    )
+    assert bundle["content_hash"] == (
+        "d816c009074a462a4229cc749d304b953d5695375d2892b49d0850ba0613fa63"
+    )
+    assert hashlib.sha256(canonical.encode("utf-8")).hexdigest() == (
+        "6ad1b796d308f71fd0a043bdf75558a3498cbcaf291138170c83177080492898"
+    )
+
+
+def test_v2_bundle_accepts_native_active_dataset_without_legacy_compatibility():
+    decoded = _decoded_membership()
+    approval, risk, target, historical = _components(decoded)
+    kwargs = _design_kwargs()
+    kwargs.pop("legacy_development_ref")
+    design = build_strategy_sample_design_v2(
+        task_id="task-v2",
+        membership_header=decoded["header"],
+        relationship="nested_same_cohort",
+        target_selector=target,
+        approval_population=approval,
+        risk_population=risk,
+        historical_score=historical,
+        policy=_policy(),
+        source_mode="native_active_dataset",
+        source_refs=[_source_ref("design")],
+        **kwargs,
+    )
+
+    assert design["compatibility"] == {
+        "source_mode": "native_active_dataset",
+        "development_partition": "risk/development",
+    }
+
+
 @pytest.mark.parametrize(
     ("maturity_status", "expected_diagnostic", "expected_metric_status"),
     [

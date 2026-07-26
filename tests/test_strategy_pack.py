@@ -349,6 +349,10 @@ def test_strategy_v2_materializers_are_thin_runtime_forwarders(monkeypatch):
         calls.append(("model", actual_inputs, actual_ctx, actual_runtime))
         return {"result": "model"}
 
+    def fake_native(actual_inputs, actual_ctx, actual_runtime):
+        calls.append(("native", actual_inputs, actual_ctx, actual_runtime))
+        return {"result": "native"}
+
     monkeypatch.setattr(strategy_tools, "_runtime", fake_runtime)
     monkeypatch.setattr(
         strategy_tools,
@@ -360,15 +364,25 @@ def test_strategy_v2_materializers_are_thin_runtime_forwarders(monkeypatch):
         "run_materialize_model_evidence_v2",
         fake_model,
     )
+    monkeypatch.setattr(
+        strategy_tools,
+        "run_materialize_sample_design_v2_native",
+        fake_native,
+    )
 
     assert strategy_tools.tool_materialize_sample_design_v2(inputs, ctx) == {
         "result": "sample"
     }
+    assert strategy_tools.tool_materialize_sample_design_v2_native(
+        inputs,
+        ctx,
+    ) == {"result": "native"}
     assert strategy_tools.tool_materialize_model_evidence_v2(inputs, ctx) == {
         "result": "model"
     }
     assert calls == [
         ("sample", inputs, ctx, runtime),
+        ("native", inputs, ctx, runtime),
         ("model", inputs, ctx, runtime),
     ]
 
@@ -491,6 +505,11 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     sample_v2_tool = next(
         tool for tool in manifest.tools if tool.name == "materialize_sample_design_v2"
     )
+    native_sample_v2_tool = next(
+        tool
+        for tool in manifest.tools
+        if tool.name == "materialize_sample_design_v2_native"
+    )
     model_evidence_v2_tool = next(
         tool for tool in manifest.tools if tool.name == "materialize_model_evidence_v2"
     )
@@ -502,6 +521,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "materialize_project_context",
         "materialize_sample_design",
         "materialize_sample_design_v2",
+        "materialize_sample_design_v2_native",
         "materialize_model_evidence_v2",
         "analyze_univariate_candidates",
         "build_automatic_tree_candidate",
@@ -585,12 +605,21 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert set(
         report_artifacts["items"]["properties"]["filename"]["enum"]
     ) == {"report.json", "report.md", "report.xlsx", "report.docx"}
-    for tool in (project_context_tool, sample_v2_tool, model_evidence_v2_tool):
+    for tool in (
+        project_context_tool,
+        sample_v2_tool,
+        native_sample_v2_tool,
+        model_evidence_v2_tool,
+    ):
         assert tool.determinism == "deterministic"
         assert tool.failure_policy == "fail"
         assert tool.policy.human_decision_gate == "none"
         assert tool.policy.effect_authorization == "none"
-    for tool in (sample_v2_tool, model_evidence_v2_tool):
+    for tool in (
+        sample_v2_tool,
+        native_sample_v2_tool,
+        model_evidence_v2_tool,
+    ):
         assert set(tool.side_effects) == {
             "read:task",
             "read:dataset",
@@ -600,6 +629,11 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         assert tool.output_schema["additionalProperties"] is False
     assert sample_v2_tool.output_schema["properties"]["schema_version"] == {
         "const": "strategy.materialize-sample-design-v2-tool.v2"
+    }
+    assert native_sample_v2_tool.output_schema["properties"][
+        "schema_version"
+    ] == {
+        "const": "strategy.materialize-sample-design-v2-native-tool.v1"
     }
     assert sample_v2_tool.input_schema["properties"]["partitioning"]["oneOf"]
     assert sample_v2_tool.input_schema["$defs"]["predicate"]["oneOf"]

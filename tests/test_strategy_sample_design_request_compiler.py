@@ -12,6 +12,7 @@ from marvis.agent.strategy_request_compiler import (
     REPLAYABLE_STANDARD_STRATEGY_WORKFLOWS,
     STANDARD_STRATEGY_WORKFLOWS,
     STRATEGY_REQUEST_JSON_SCHEMA,
+    _sample_v2_predicate_semantics_grounded,
     _sample_v2_predicate_grounded,
     compile_strategy_request,
     utterance_targets_strategy_sample_design,
@@ -37,10 +38,18 @@ def _eq(column: str, value: object) -> dict:
     }
 
 
+def _null(column: str, *, negated: bool = False) -> dict:
+    return {
+        "op": "is_not_null" if negated else "is_null",
+        "arg": {"column": column},
+    }
+
+
 def _v2_inputs() -> dict:
     return {
         "target_bad_value": 1,
         "drop_nan_labels": True,
+        "relationship": "nested_same_cohort",
         "approval_population": {"inclusion": None, "exclusion": None},
         "risk_population": {"inclusion": None, "exclusion": None},
         "partitioning": {
@@ -125,6 +134,7 @@ _COLUMNS = [
 
 _GROUNDED_UTTERANCE = (
     "固化 V2 策略样本设计；1 代表坏样本；丢弃缺失标签；"
+    "审批总体与风险总体是同批 cohort 的嵌套关系；"
     "审批总体无纳排条件；风险总体无纳排条件；切分列 sample_role；"
     "开发值 dev；验证值 valid；OOT 值 oot；表现窗 30 天；"
     "观察窗 2026-01-01 至 2026-04-30；成熟度已确认成熟；"
@@ -212,11 +222,12 @@ def test_v2_sample_validates_and_compiler_grounds_every_user_control() -> None:
     assert validated.draft is not None
     assert validated.draft.to_dict() == payload
     assert "V2 双总体策略样本设计" in validated.confirmation
+    assert "nested_same_cohort" in validated.confirmation
     assert "两者均无纳排" in validated.confirmation
     assert compiled.draft is not None
     assert compiled.draft.to_dict() == payload
     assert len(llm.calls) == 1
-    assert llm.calls[0]["prompt_version"] == 44
+    assert llm.calls[0]["prompt_version"] == 47
     assert "strategy_sample_design_v2" in llm.calls[0]["system_prompt"]
     assert "strategy_model_evidence_v2" in llm.calls[0]["system_prompt"]
 
@@ -239,7 +250,6 @@ def test_v2_sample_confirmation_echoes_historical_score_binding() -> None:
     "field",
     [
         "legacy_sample_design_ref",
-        "relationship",
         "scope",
         "policy",
         "dataset_id",
@@ -261,6 +271,46 @@ def test_v2_sample_rejects_every_platform_owned_input(field: str) -> None:
     assert result.draft is None
     assert result.clarification_code == "strategy_sample_design_v2_platform_binding_forbidden"
     assert field in result.clarification_fields
+
+
+def test_v2_sample_requires_an_explicit_supported_relationship() -> None:
+    missing = _v2_inputs()
+    missing.pop("relationship")
+    invalid = _v2_inputs()
+    invalid["relationship"] = "platform_decides"
+
+    missing_result = validate_strategy_request(
+        _v2_payload(missing),
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+    )
+    invalid_result = validate_strategy_request(
+        _v2_payload(invalid),
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+    )
+
+    assert missing_result.draft is None
+    assert missing_result.clarification_fields == ("relationship",)
+    assert invalid_result.draft is None
+    assert invalid_result.clarification_fields == ("relationship",)
+
+
+def test_v2_sample_accepts_parallel_relationship_as_user_owned_semantics() -> None:
+    inputs = _v2_inputs()
+    inputs["relationship"] = "parallel_time_cohorts"
+
+    result = validate_strategy_request(
+        _v2_payload(inputs),
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+    )
+
+    assert result.draft is not None
+    assert (
+        result.draft.to_dict()["workflow_inputs"]["relationship"]
+        == "parallel_time_cohorts"
+    )
 
 
 def test_v2_sample_rejects_platform_identity_in_the_utterance() -> None:
@@ -307,7 +357,7 @@ def test_v2_sample_requires_explicit_null_population_and_field_controls() -> Non
     assert "field_bindings.group_field" in result.clarification_fields
 
 
-def test_v2_sample_time_ranges_returns_typed_native_bootstrap_clarification() -> None:
+def test_v2_sample_time_ranges_are_valid_native_request_semantics() -> None:
     inputs = _v2_inputs()
     inputs["partitioning"] = {
         "method": "time_ranges",
@@ -325,9 +375,279 @@ def test_v2_sample_time_ranges_returns_typed_native_bootstrap_clarification() ->
         target_col="bad",
     )
 
+    assert result.draft is not None
+    assert result.draft.to_dict()["workflow_inputs"]["partitioning"] == inputs["partitioning"]
+
+
+def test_v2_sample_time_ranges_require_the_bound_time_field() -> None:
+    inputs = _v2_inputs()
+    inputs["partitioning"] = {
+        "method": "time_ranges",
+        "column": "apply_date",
+        "ranges": {
+            "development": {"start": "2026-01-01", "end": "2026-02-28"},
+            "validation": {"start": "2026-03-01", "end": "2026-03-31"},
+            "oot": {"start": "2026-04-01", "end": "2026-04-30"},
+        },
+    }
+    inputs["field_bindings"]["time_field"] = "apply_month"
+
+    result = validate_strategy_request(
+        _v2_payload(inputs),
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+    )
+
     assert result.draft is None
-    assert result.clarification_code == "strategy_sample_design_v2_native_bootstrap_required"
-    assert result.clarification_fields == ("partitioning.method",)
+    assert result.clarification_fields == (
+        "partitioning.column",
+        "field_bindings.time_field",
+    )
+
+
+def test_v2_sample_time_ranges_compile_when_every_boundary_is_grounded() -> None:
+    inputs = _v2_inputs()
+    inputs["partitioning"] = {
+        "method": "time_ranges",
+        "column": "apply_date",
+        "ranges": {
+            "development": {"start": "2026-01-01", "end": "2026-02-28"},
+            "validation": {"start": "2026-03-01", "end": "2026-03-31"},
+            "oot": {"start": "2026-04-01", "end": "2026-04-30"},
+        },
+    }
+    utterance = (
+        _GROUNDED_UTTERANCE.replace(
+            "切分列 sample_role；开发值 dev；验证值 valid；OOT 值 oot；",
+            "时间切分列 apply_date；"
+            "开发时间范围 2026-01-01 至 2026-02-28；"
+            "验证时间范围 2026-03-01 至 2026-03-31；"
+            "OOT 时间范围 2026-04-01 至 2026-04-30；",
+        )
+    )
+
+    result = compile_strategy_request(
+        utterance,
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        llm=_FakeLLM(_v2_payload(inputs)),
+    )
+
+    assert result.draft is not None
+    assert result.draft.to_dict()["workflow_inputs"]["partitioning"] == inputs["partitioning"]
+
+
+def test_v2_sample_natural_language_time_ranges_reject_mismatched_time_field() -> None:
+    inputs = _v2_inputs()
+    inputs["partitioning"] = {
+        "method": "time_ranges",
+        "column": "apply_date",
+        "ranges": {
+            "development": {"start": "2026-01-01", "end": "2026-02-28"},
+            "validation": {"start": "2026-03-01", "end": "2026-03-31"},
+            "oot": {"start": "2026-04-01", "end": "2026-04-30"},
+        },
+    }
+    inputs["field_bindings"]["time_field"] = "apply_month"
+    utterance = _GROUNDED_UTTERANCE.replace(
+        "切分列 sample_role；开发值 dev；验证值 valid；OOT 值 oot；",
+        "时间切分列 apply_date；"
+        "开发时间范围 2026-01-01 至 2026-02-28；"
+        "验证时间范围 2026-03-01 至 2026-03-31；"
+        "OOT 时间范围 2026-04-01 至 2026-04-30；",
+    ).replace("时间字段 apply_date；", "时间字段 apply_month；")
+
+    result = compile_strategy_request(
+        utterance,
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        llm=_FakeLLM(_v2_payload(inputs)),
+    )
+
+    assert result.draft is None
+    assert result.clarification_fields == (
+        "partitioning.column",
+        "field_bindings.time_field",
+    )
+
+
+def test_v2_sample_complex_partition_compiles_only_from_explicit_predicates() -> None:
+    inputs = _v2_inputs()
+    inputs["partitioning"] = {
+        "method": "predicate_ast",
+        "selectors": {
+            "development": {
+                "op": "and",
+                "args": [
+                    _eq("sample_role", "dev"),
+                    _eq("channel", "app"),
+                ],
+            },
+            "validation": _eq("sample_role", "valid"),
+            "oot": _eq("sample_role", "oot"),
+        },
+    }
+    utterance = _GROUNDED_UTTERANCE.replace(
+        "切分列 sample_role；开发值 dev；验证值 valid；OOT 值 oot；",
+        "开发条件 sample_role 等于 dev 且 channel 等于 app；"
+        "验证条件 sample_role 等于 valid；OOT 条件 sample_role 等于 oot；",
+    )
+
+    result = compile_strategy_request(
+        utterance,
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        llm=_FakeLLM(_v2_payload(inputs)),
+    )
+
+    assert result.draft is not None
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        {
+            "op": "or",
+            "args": [
+                {
+                    "op": "and",
+                    "args": [
+                        _eq("sample_role", "dev"),
+                        _eq("channel", "app"),
+                    ],
+                },
+                _eq("customer_id", "a"),
+            ],
+        },
+        {
+            "op": "and",
+            "args": [
+                _eq("sample_role", "dev"),
+                {
+                    "op": "or",
+                    "args": [
+                        _eq("channel", "app"),
+                        _eq("customer_id", "a"),
+                    ],
+                },
+            ],
+        },
+        {"op": "not", "arg": _eq("sample_role", "dev")},
+        {
+            "op": "eq",
+            "left": {"column": "sample_role"},
+            "right": {"column": "channel"},
+        },
+    ],
+)
+def test_v2_sample_fresh_partition_rejects_recursive_not_or_column_comparison(
+    selector: dict,
+) -> None:
+    inputs = _v2_inputs()
+    inputs["partitioning"]["selectors"]["development"] = selector
+
+    result = validate_strategy_request(
+        _v2_payload(inputs),
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+    )
+
+    assert result.draft is None
+    assert result.clarification_fields == (
+        "partitioning.selectors.development",
+    )
+
+
+def test_v2_sample_persisted_replay_keeps_recursive_partition_ast() -> None:
+    inputs = _v2_inputs()
+    selector = {
+        "op": "or",
+        "args": [
+            {
+                "op": "and",
+                "args": [
+                    _eq("sample_role", "dev"),
+                    _eq("channel", "app"),
+                ],
+            },
+            _eq("customer_id", "a"),
+        ],
+    }
+    inputs["partitioning"]["selectors"]["development"] = selector
+
+    result = validate_strategy_request(
+        _v2_payload(inputs),
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        allow_legacy_replay=True,
+    )
+
+    assert result.draft is not None
+    assert (
+        result.draft.to_dict()["workflow_inputs"]["partitioning"]["selectors"][
+            "development"
+        ]
+        == selector
+    )
+
+
+@pytest.mark.parametrize(
+    ("predicate", "text"),
+    [
+        (
+            {
+                "op": "or",
+                "args": [
+                    {
+                        "op": "and",
+                        "args": [
+                            _eq("sample_role", "dev"),
+                            _eq("channel", "app"),
+                        ],
+                    },
+                    _eq("customer_id", "a"),
+                ],
+            },
+            "sample_role 等于 dev 且 channel 等于 app 或 customer_id 等于 a",
+        ),
+        (
+            {
+                "op": "and",
+                "args": [
+                    _eq("sample_role", "dev"),
+                    {
+                        "op": "or",
+                        "args": [
+                            _eq("channel", "app"),
+                            _eq("customer_id", "a"),
+                        ],
+                    },
+                ],
+            },
+            "sample_role 等于 dev 且 channel 等于 app 或 customer_id 等于 a",
+        ),
+        (
+            {"op": "not", "arg": _eq("sample_role", "dev")},
+            "不满足 sample_role 等于 dev",
+        ),
+        (
+            {
+                "op": "and",
+                "args": [
+                    _eq("sample_role", "dev"),
+                    _eq("channel", "app"),
+                    _eq("customer_id", "a"),
+                ],
+            },
+            "customer_id 等于 a 且 sample_role 等于 dev 且 channel 等于 app",
+        ),
+    ],
+)
+def test_v2_sample_fresh_partition_grounding_rejects_ambiguous_or_permuted_shape(
+    predicate: dict,
+    text: str,
+) -> None:
+    assert not _sample_v2_predicate_semantics_grounded(text, predicate)
 
 
 @pytest.mark.parametrize(
@@ -337,12 +657,17 @@ def test_v2_sample_time_ranges_returns_typed_native_bootstrap_clarification() ->
         ("risk_population", "风险总体纳入 channel 等于 app。"),
     ],
 )
-def test_v2_sample_any_population_filter_requires_native_bootstrap_without_repair(
+def test_v2_sample_fresh_population_filter_compiles_restricted_dto_to_canonical_ast(
     population: str,
     role_text: str,
 ) -> None:
     payload = _v2_payload()
-    payload["workflow_inputs"][population]["inclusion"] = _eq("channel", "app")
+    payload["workflow_inputs"][population]["inclusion"] = {
+        "match": "all",
+        "conditions": [
+            {"column": "channel", "operator": "eq", "value": "app"},
+        ],
+    }
     llm = _FakeLLM(payload)
 
     result = compile_strategy_request(
@@ -352,10 +677,45 @@ def test_v2_sample_any_population_filter_requires_native_bootstrap_without_repai
         llm=llm,
     )
 
-    assert result.draft is None
-    assert result.clarification_code == "strategy_sample_design_v2_native_bootstrap_required"
-    assert result.clarification_fields == (population,)
+    assert result.draft is not None
+    assert (
+        result.draft.to_dict()["workflow_inputs"][population]["inclusion"]
+        == _eq("channel", "app")
+    )
     assert len(llm.calls) == 1
+
+
+def test_v2_sample_fresh_population_rejects_raw_predicate_ast() -> None:
+    inputs = _v2_inputs()
+    inputs["approval_population"]["inclusion"] = _eq("channel", "app")
+
+    result = validate_strategy_request(
+        _v2_payload(inputs),
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+    )
+
+    assert result.draft is None
+    assert result.clarification_code == "strategy_sample_design_v2_population_dto_required"
+    assert result.clarification_fields == ("approval_population.inclusion",)
+
+
+def test_v2_sample_persisted_replay_may_accept_raw_predicate_ast() -> None:
+    inputs = _v2_inputs()
+    inputs["approval_population"]["inclusion"] = _eq("channel", "app")
+
+    result = validate_strategy_request(
+        _v2_payload(inputs),
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        allow_legacy_replay=True,
+    )
+
+    assert result.draft is not None
+    assert (
+        result.draft.to_dict()["workflow_inputs"]["approval_population"]["inclusion"]
+        == _eq("channel", "app")
+    )
 
 
 def test_v2_sample_no_filter_grounding_cannot_cross_population_roles() -> None:
@@ -419,6 +779,99 @@ def test_v2_population_predicate_grounding_rejects_operator_rewrite() -> None:
         role_labels=("审批总体", "审批样本", "approval population"),
         direction="inclusion",
     )
+
+
+@pytest.mark.parametrize(
+    ("operator", "wording", "accepted"),
+    [
+        ("is_null", "为空", True),
+        ("is_null", "是空值", True),
+        ("is_null", "不为空", False),
+        ("is_null", "不是空值", False),
+        ("is_not_null", "不为空", True),
+        ("is_not_null", "不是空值", True),
+        ("is_not_null", "为空", False),
+        ("is_not_null", "是空值", False),
+    ],
+)
+def test_v2_population_null_grounding_preserves_null_direction(
+    operator: str,
+    wording: str,
+    accepted: bool,
+) -> None:
+    payload = _v2_payload()
+    payload["workflow_inputs"]["approval_population"]["inclusion"] = {
+        "match": "all",
+        "conditions": [{"column": "channel", "operator": operator}],
+    }
+    utterance = _GROUNDED_UTTERANCE.replace(
+        "审批总体无纳排条件；",
+        f"审批总体纳入 channel {wording}；",
+    )
+
+    result = compile_strategy_request(
+        utterance,
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        llm=_FakeLLM(payload),
+    )
+
+    assert (result.draft is not None) is accepted
+    if not accepted:
+        assert (
+            result.clarification_code
+            == "strategy_sample_design_v2_controls_not_grounded"
+        )
+        assert "approval_population.inclusion" in result.clarification_fields
+
+
+@pytest.mark.parametrize(
+    ("operator", "wording", "accepted"),
+    [
+        ("is_null", "为空", True),
+        ("is_null", "是空值", True),
+        ("is_null", "不为空", False),
+        ("is_null", "不是空值", False),
+        ("is_not_null", "不为空", True),
+        ("is_not_null", "不是空值", True),
+        ("is_not_null", "为空", False),
+        ("is_not_null", "是空值", False),
+    ],
+)
+def test_v2_partition_null_grounding_preserves_null_direction(
+    operator: str,
+    wording: str,
+    accepted: bool,
+) -> None:
+    inputs = _v2_inputs()
+    inputs["partitioning"]["selectors"]["development"] = _null(
+        "channel",
+        negated=operator == "is_not_null",
+    )
+    utterance = _GROUNDED_UTTERANCE.replace(
+        "切分列 sample_role；开发值 dev；验证值 valid；OOT 值 oot；",
+        f"开发条件 channel {wording}；"
+        "验证条件 sample_role 等于 valid；"
+        "OOT 条件 sample_role 等于 oot；",
+    )
+
+    result = compile_strategy_request(
+        utterance,
+        allowed_columns=_COLUMNS,
+        target_col="bad",
+        llm=_FakeLLM(_v2_payload(inputs)),
+    )
+
+    assert (result.draft is not None) is accepted
+    if not accepted:
+        assert (
+            result.clarification_code
+            == "strategy_sample_design_v2_controls_not_grounded"
+        )
+        assert (
+            "partitioning.selectors.development"
+            in result.clarification_fields
+        )
 
 
 def test_v2_sample_partition_operator_cannot_be_rewritten() -> None:
@@ -532,7 +985,7 @@ def test_v2_sample_historical_direction_cannot_borrow_another_field_direction() 
         },
     ],
 )
-def test_v2_sample_requires_lossless_simple_same_column_partitioning(partitioning: dict) -> None:
+def test_v2_sample_accepts_native_complex_partitioning(partitioning: dict) -> None:
     inputs = _v2_inputs()
     inputs["partitioning"] = partitioning
 
@@ -542,8 +995,7 @@ def test_v2_sample_requires_lossless_simple_same_column_partitioning(partitionin
         target_col="bad",
     )
 
-    assert result.draft is None
-    assert result.clarification_code == "strategy_sample_design_v2_native_bootstrap_required"
+    assert result.draft is not None
 
 
 def test_model_evidence_v2_fresh_inputs_are_exactly_empty() -> None:
@@ -613,7 +1065,7 @@ def test_model_evidence_v2_compiles_only_existing_authenticated_univariate_summa
 
     assert result.draft is not None
     assert result.draft.to_dict() == payload
-    assert llm.calls[0]["prompt_version"] == 44
+    assert llm.calls[0]["prompt_version"] == 47
 
 
 @pytest.mark.parametrize(

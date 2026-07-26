@@ -219,6 +219,44 @@ def _validation_artifacts(fx: dict) -> list[dict]:
     ]
 
 
+def test_pool_validation_native_sample_fails_closed_before_artifact_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx = _setup(tmp_path)
+    original_load = validation_tools._load_sample_design_binding
+
+    def load_native_sample(*args, **kwargs):
+        binding = original_load(*args, **kwargs)
+        bundle = copy.deepcopy(binding.bundle)
+        bundle["sample_design"]["compatibility"] = {
+            "source_mode": "native_active_dataset",
+            "development_partition": "risk/development",
+        }
+        return replace(binding, bundle=bundle)
+
+    monkeypatch.setattr(
+        validation_tools,
+        "_load_sample_design_binding",
+        load_native_sample,
+    )
+    artifacts_before = _validation_artifacts(fx)
+
+    with pytest.raises(StrategyError) as raised:
+        run_measure_strategy_pool_validation(
+            fx["validation_request"],
+            fx["ctx"],
+            fx["runtime"],
+        )
+
+    assert (
+        getattr(raised.value, "code", None)
+        == "strategy_sample_design_v2_native_source_unsupported"
+    )
+    assert getattr(raised.value, "consumer", None) == "strategy_pool_validation"
+    assert _validation_artifacts(fx) == artifacts_before
+
+
 def test_latest_pool_validation_loader_authenticates_each_available_partition(
     tmp_path: Path,
 ) -> None:

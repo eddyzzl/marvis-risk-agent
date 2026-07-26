@@ -190,6 +190,7 @@ from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
     require_historical_strategy_sample_design_v2_artifact_binding_on_connection,
     require_strategy_sample_design_v2_artifact_binding_on_connection,
+    resolve_strategy_sample_design_v2_source_mode,
 )
 from marvis.repositories.strategy_pool import (
     ABSENT_POOL_REVISION,
@@ -2208,8 +2209,13 @@ def _pool_lineage_development_facts(
         ))
     if isinstance(lineage, _ScorecardCandidateLineage):
         sample_v2 = lineage.asset.sample_design
-        source = sample_v2.source_binding
         design = sample_v2.bundle["sample_design"]
+        resolve_strategy_sample_design_v2_source_mode(
+            design,
+            capability="legacy_development",
+            consumer="strategy_pool_development",
+        )
+        source = sample_v2.source_binding
         target = design["target_selector"]
         if target["status"] != "resolved":
             raise StrategyError(

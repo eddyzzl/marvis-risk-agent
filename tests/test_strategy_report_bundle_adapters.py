@@ -314,6 +314,7 @@ def _sample_binding(
     tmp_path: Path,
     *,
     maturity_status: str = "confirmed_matured",
+    native_source: bool = False,
 ) -> StrategySampleDesignV2ArtifactBinding:
     membership = _decoded_membership()
     approval, risk, target, historical = _sample_components(
@@ -321,15 +322,19 @@ def _sample_binding(
         maturity_status=maturity_status,
     )
     design_kwargs = _sample_design_kwargs(maturity_status=maturity_status)
-    design_kwargs["legacy_development_ref"] = {
-        "artifact_id": _hash("legacy-artifact-id"),
-        "artifact_content_hash": _hash("legacy-artifact"),
-        "sample_design_id": (
-            "strategy-sample-design-" + _hash("legacy-design-id")[:24]
-        ),
-        "sample_design_content_hash": _hash("legacy-design"),
-        "partition": "development",
-    }
+    if native_source:
+        design_kwargs["legacy_development_ref"] = None
+        design_kwargs["source_mode"] = "native_active_dataset"
+    else:
+        design_kwargs["legacy_development_ref"] = {
+            "artifact_id": _hash("legacy-artifact-id"),
+            "artifact_content_hash": _hash("legacy-artifact"),
+            "sample_design_id": (
+                "strategy-sample-design-" + _hash("legacy-design-id")[:24]
+            ),
+            "sample_design_content_hash": _hash("legacy-design"),
+            "partition": "development",
+        }
     source_refs = [
         _sample_source_ref("design-a"),
         _sample_source_ref("design-b"),
@@ -2369,6 +2374,27 @@ def test_adapter_is_deterministic_bundle_ready_and_uses_exact_source_identities(
             "content_hash": sample.bundle_artifact_content_hash,
         }
     ]
+
+
+def test_full_report_native_sample_fails_closed_at_legacy_evidence_boundary(
+    tmp_path: Path,
+) -> None:
+    project, _legacy_sample, pool, impact = _bindings(tmp_path)
+    native_sample = _sample_binding(tmp_path, native_source=True)
+
+    with pytest.raises(StrategyError) as raised:
+        build_strategy_report_bundle_source_inputs(
+            project_context=project,
+            sample_design=native_sample,
+            candidate_pool=pool,
+            pool_impact=impact,
+        )
+
+    assert (
+        getattr(raised.value, "code", None)
+        == "strategy_sample_design_v2_native_source_unsupported"
+    )
+    assert getattr(raised.value, "consumer", None) == "strategy_report_bundle"
 
 
 def test_adapter_requires_typed_authenticated_pool_validation_bindings(

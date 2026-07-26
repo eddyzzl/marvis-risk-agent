@@ -53,8 +53,9 @@ from marvis.packs.strategy.pool_requirement_resolver import (
 from marvis.packs.strategy.sample_design_binding import StrategySampleDesignRef
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
-    load_strategy_sample_design_v2_artifacts,
+    load_any_strategy_sample_design_v2_artifacts,
     require_strategy_sample_design_v2_artifact_binding_on_connection,
+    resolve_strategy_sample_design_v2_source_mode,
 )
 from marvis.repositories.strategy import (
     _strategy_from_row,
@@ -291,6 +292,11 @@ def run_measure_strategy_impact_cube(inputs, ctx, runtime) -> dict[str, Any]:
             runtime,
             task_id=task_id,
             request=request,
+        )
+        resolve_strategy_sample_design_v2_source_mode(
+            sample.bundle["sample_design"],
+            capability="legacy_development",
+            consumer="strategy_impact_cube",
         )
         development = bind_strategy_pool_development_execution(runtime, pool)
         resolved_requirements = resolve_pool_requirements(
@@ -757,7 +763,7 @@ def _load_sample_design_binding(
     request: Mapping[str, Any],
 ) -> StrategySampleDesignV2ArtifactBinding:
     ref = request["sample_design_ref"]
-    return load_strategy_sample_design_v2_artifacts(
+    return load_any_strategy_sample_design_v2_artifacts(
         runtime,
         task_id=task_id,
         membership_artifact_id=ref["membership_artifact_id"],

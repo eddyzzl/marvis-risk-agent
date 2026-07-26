@@ -35,7 +35,7 @@ _LOCKED_HASHES = {
     "CROSS_SYS": (1, "0d13fa241b855e51"),
     "REPORT_NARRATIVE_SYS": (1, "a6ff4690f78c4fe2"),
     "SLICE_SPEC_SYS": (1, "11e47cc62475346a"),
-    "STRATEGY_REQUEST_COMPILER_SYS": (44, "704650b76fe8e70d"),
+    "STRATEGY_REQUEST_COMPILER_SYS": (47, "97b2b7b28d643fca"),
 }
 
 
@@ -75,10 +75,17 @@ def test_prompt_version_snapshot_covers_all_prompts():
 
 
 def test_strategy_compiler_prompt_owns_pool_materialization_contract():
-    assert STRATEGY_REQUEST_COMPILER_SYS.version == 44
+    assert STRATEGY_REQUEST_COMPILER_SYS.version == 47
     assert "strategy_pool_materialize" in STRATEGY_REQUEST_COMPILER_SYS.text
     assert "draft Strategy" in STRATEGY_REQUEST_COMPILER_SYS.text
     assert "不采纳、不部署" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "match、conditions" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "parallel_time_cohorts" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "原生 V2" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "单层 flat and/or" in STRATEGY_REQUEST_COMPILER_SYS.text
+    assert "time_ranges.column 必须与非空 field_bindings.time_field" in (
+        STRATEGY_REQUEST_COMPILER_SYS.text
+    )
 
 
 def test_call_site_constants_re_export_registry_text_unchanged():

@@ -7479,6 +7479,1759 @@
       "memory_limit_mb": 4096
     },
     {
+      "name": "materialize_sample_design_v2_native",
+      "summary": "Freeze exact approval and risk populations directly from the authenticated active dataset without a legacy sample-design anchor.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source_mode": {"const": "native_active_dataset"},
+          "dataset_id": {"type": "string", "minLength": 1},
+          "expected_dataset_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "workspace_revision": {"type": "integer", "minimum": 0},
+          "workspace_generation": {"type": "integer", "minimum": 0},
+          "semantic_mapping_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "target_col": {"type": "string", "minLength": 1},
+          "target_bad_value": {"type": "integer", "enum": [0, 1]},
+          "drop_nan_labels": {"type": "boolean"},
+          "relationship": {
+            "type": "string",
+            "enum": ["nested_same_cohort", "parallel_time_cohorts"]
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["strategy_development", "exploration_only"]
+          },
+          "approval_population": {"$ref": "#/$defs/population_request"},
+          "risk_population": {"$ref": "#/$defs/population_request"},
+          "partitioning": {
+            "oneOf": [
+              {"$ref": "#/$defs/predicate_partitioning"},
+              {"$ref": "#/$defs/time_range_partitioning"}
+            ]
+          },
+          "maturity": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "confirmed_matured",
+                  "not_matured",
+                  "unknown",
+                  "unavailable"
+                ]
+              },
+              "performance_window_days": {
+                "type": ["integer", "null"],
+                "minimum": 1
+              },
+              "cutoff_date": {
+                "type": ["string", "null"],
+                "format": "date",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "reason": {"type": ["string", "null"], "minLength": 1}
+            },
+            "required": [
+              "status",
+              "performance_window_days",
+              "cutoff_date",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "performance_window": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["provided", "unavailable"]
+              },
+              "days": {"type": ["integer", "null"], "minimum": 1}
+            },
+            "required": ["status", "days"],
+            "additionalProperties": false
+          },
+          "observation_window": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["provided", "unavailable"]
+              },
+              "start": {
+                "type": ["string", "null"],
+                "format": "date",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "end": {
+                "type": ["string", "null"],
+                "format": "date",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              }
+            },
+            "required": ["status", "start", "end"],
+            "additionalProperties": false
+          },
+          "field_bindings": {
+            "type": "object",
+            "properties": {
+              "entity_field": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "time_field": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "group_field": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "month_field": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "weight_field": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "loan_amount_field": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "overdue_amount_field": {
+                "type": ["string", "null"],
+                "minLength": 1
+              }
+            },
+            "required": [
+              "entity_field",
+              "time_field",
+              "group_field",
+              "month_field",
+              "weight_field",
+              "loan_amount_field",
+              "overdue_amount_field"
+            ],
+            "additionalProperties": false
+          },
+          "historical_score": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["available", "unavailable", "not_applicable"]
+              },
+              "column": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "direction": {
+                "type": ["string", "null"],
+                "enum": [
+                  "higher_is_riskier",
+                  "lower_is_riskier",
+                  null
+                ]
+              },
+              "reason": {
+                "type": ["string", "null"],
+                "minLength": 1
+              }
+            },
+            "required": ["status", "column", "direction", "reason"],
+            "additionalProperties": false
+          },
+          "policy": {
+            "type": "object",
+            "properties": {
+              "minimum_partition_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minimum_bad_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minimum_label_coverage": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "minimum_historical_score_coverage": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "maximum_group_coverage_gap": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "diagnostic_severities": {
+                "type": "object",
+                "properties": {
+                  "entity_overlap": {
+                    "type": "string",
+                    "enum": ["warn", "fail"]
+                  },
+                  "temporal_oot": {
+                    "type": "string",
+                    "enum": ["warn", "fail"]
+                  },
+                  "risk_outside_approval": {
+                    "type": "string",
+                    "enum": ["warn", "fail"]
+                  },
+                  "maturity": {
+                    "type": "string",
+                    "enum": ["warn", "fail"]
+                  },
+                  "label_coverage": {
+                    "type": "string",
+                    "enum": ["warn", "fail"]
+                  },
+                  "historical_score_coverage": {
+                    "type": "string",
+                    "enum": ["warn", "fail"]
+                  },
+                  "group_coverage_gap": {
+                    "type": "string",
+                    "enum": ["warn", "fail"]
+                  },
+                  "sufficiency": {
+                    "type": "string",
+                    "enum": ["warn", "fail"]
+                  }
+                },
+                "required": [
+                  "entity_overlap",
+                  "temporal_oot",
+                  "risk_outside_approval",
+                  "maturity",
+                  "label_coverage",
+                  "historical_score_coverage",
+                  "group_coverage_gap",
+                  "sufficiency"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "minimum_partition_count",
+              "minimum_bad_count",
+              "minimum_label_coverage",
+              "minimum_historical_score_coverage",
+              "maximum_group_coverage_gap",
+              "diagnostic_severities"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "source_mode",
+          "dataset_id",
+          "expected_dataset_content_hash",
+          "workspace_revision",
+          "workspace_generation",
+          "semantic_mapping_hash",
+          "target_col",
+          "target_bad_value",
+          "drop_nan_labels",
+          "relationship",
+          "scope",
+          "approval_population",
+          "risk_population",
+          "partitioning",
+          "maturity",
+          "performance_window",
+          "observation_window",
+          "field_bindings",
+          "historical_score",
+          "policy"
+        ],
+        "$defs": {
+          "population_request": {
+            "type": "object",
+            "properties": {
+              "inclusion": {
+                "anyOf": [
+                  {"$ref": "#/$defs/predicate"},
+                  {"type": "null"}
+                ]
+              },
+              "exclusion": {
+                "anyOf": [
+                  {"$ref": "#/$defs/predicate"},
+                  {"type": "null"}
+                ]
+              }
+            },
+            "required": ["inclusion", "exclusion"],
+            "additionalProperties": false
+          },
+          "predicate_partitioning": {
+            "type": "object",
+            "properties": {
+              "method": {"const": "predicate_ast"},
+              "selectors": {
+                "type": "object",
+                "properties": {
+                  "development": {"$ref": "#/$defs/predicate"},
+                  "validation": {"$ref": "#/$defs/predicate"},
+                  "oot": {"$ref": "#/$defs/predicate"}
+                },
+                "required": ["development", "validation", "oot"],
+                "additionalProperties": false
+              }
+            },
+            "required": ["method", "selectors"],
+            "additionalProperties": false
+          },
+          "time_range_partitioning": {
+            "type": "object",
+            "properties": {
+              "method": {"const": "time_ranges"},
+              "column": {"type": "string", "minLength": 1},
+              "ranges": {
+                "type": "object",
+                "properties": {
+                  "development": {"$ref": "#/$defs/date_range"},
+                  "validation": {"$ref": "#/$defs/date_range"},
+                  "oot": {"$ref": "#/$defs/date_range"}
+                },
+                "required": ["development", "validation", "oot"],
+                "additionalProperties": false
+              }
+            },
+            "required": ["method", "column", "ranges"],
+            "additionalProperties": false
+          },
+          "date_range": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": ["string", "null"],
+                "format": "date",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "end": {
+                "type": ["string", "null"],
+                "format": "date",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              }
+            },
+            "required": ["start", "end"],
+            "additionalProperties": false
+          },
+          "predicate": {
+            "oneOf": [
+              {"$ref": "#/$defs/comparison_predicate"},
+              {"$ref": "#/$defs/boolean_predicate"},
+              {"$ref": "#/$defs/not_predicate"},
+              {"$ref": "#/$defs/null_predicate"}
+            ]
+          },
+          "comparison_predicate": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": ["eq", "ne", "gt", "gte", "lt", "lte"]
+              },
+              "left": {"$ref": "#/$defs/scalar_expression"},
+              "right": {"$ref": "#/$defs/scalar_expression"}
+            },
+            "required": ["op", "left", "right"],
+            "additionalProperties": false
+          },
+          "boolean_predicate": {
+            "type": "object",
+            "properties": {
+              "op": {"type": "string", "enum": ["and", "or"]},
+              "args": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 256,
+                "items": {"$ref": "#/$defs/predicate"}
+              }
+            },
+            "required": ["op", "args"],
+            "additionalProperties": false
+          },
+          "not_predicate": {
+            "type": "object",
+            "properties": {
+              "op": {"const": "not"},
+              "arg": {"$ref": "#/$defs/predicate"}
+            },
+            "required": ["op", "arg"],
+            "additionalProperties": false
+          },
+          "null_predicate": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": ["is_null", "is_not_null"]
+              },
+              "arg": {"$ref": "#/$defs/scalar_expression"}
+            },
+            "required": ["op", "arg"],
+            "additionalProperties": false
+          },
+          "scalar_expression": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "column": {"type": "string", "minLength": 1}
+                },
+                "required": ["column"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "literal": {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                },
+                "required": ["literal"],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.materialize-sample-design-v2-native-tool.v1"
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "bundle_id": {
+            "type": "string",
+            "pattern": "^strategy-sample-design-bundle-[0-9a-f]{24}$"
+          },
+          "sample_design_id": {
+            "type": "string",
+            "pattern": "^strategy-sample-design-[0-9a-f]{24}$"
+          },
+          "sample_design_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "membership_id": {
+            "type": "string",
+            "pattern": "^strategy-sample-membership-[0-9a-f]{24}$"
+          },
+          "membership_content_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "bundle": {"$ref": "#/$defs/sample_design_v2_bundle"},
+          "membership": {"$ref": "#/$defs/membership_header"},
+          "artifacts": {
+            "type": "object",
+            "properties": {
+              "membership": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "strategy_sample_membership_v2_native_binary"
+                  },
+                  "format": {"const": "binary"},
+                  "filename": {
+                    "type": "string",
+                    "pattern": "^strategy-sample-membership-[0-9a-f]{24}-[0-9a-f]{24}\\.bin$"
+                  }
+                },
+                "required": ["kind", "format", "filename"],
+                "additionalProperties": false
+              },
+              "bundle": {
+                "type": "object",
+                "properties": {
+                  "kind": {"const": "strategy_sample_design_v2_json"},
+                  "format": {"const": "json"},
+                  "filename": {
+                    "type": "string",
+                    "pattern": "^strategy-sample-design-bundle-[0-9a-f]{24}\\.json$"
+                  },
+                  "content_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "format",
+                  "filename",
+                  "content_hash"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": ["membership", "bundle"],
+            "additionalProperties": false
+          },
+          "source_binding": {
+            "type": "object",
+            "properties": {
+              "source_mode": {"const": "native_active_dataset"},
+              "dataset_ref": {
+                "type": "object",
+                "properties": {
+                  "dataset_id": {"type": "string", "minLength": 1},
+                  "content_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": ["dataset_id", "content_hash"],
+                "additionalProperties": false
+              },
+              "dataset_registry_ref": {
+                "type": "object",
+                "properties": {
+                  "source_path_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "metadata_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": ["source_path_hash", "metadata_hash"],
+                "additionalProperties": false
+              },
+              "workspace_ref": {
+                "type": "object",
+                "properties": {
+                  "revision": {"type": "integer", "minimum": 0},
+                  "generation": {"type": "integer", "minimum": 0},
+                  "semantic_mapping_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "revision",
+                  "generation",
+                  "semantic_mapping_hash"
+                ],
+                "additionalProperties": false
+              },
+              "target_selector": {
+                "type": "object",
+                "properties": {
+                  "column": {"type": "string", "minLength": 1},
+                  "bad_value": {"type": "integer", "enum": [0, 1]},
+                  "drop_missing": {"type": "boolean"}
+                },
+                "required": ["column", "bad_value", "drop_missing"],
+                "additionalProperties": false
+              },
+              "membership_registry_identity_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "development_partition": {"const": "risk/development"}
+            },
+            "required": [
+              "source_mode",
+              "dataset_ref",
+              "dataset_registry_ref",
+              "workspace_ref",
+              "target_selector",
+              "membership_registry_identity_hash",
+              "development_partition"
+            ],
+            "additionalProperties": false
+          },
+          "warnings": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "not_created_strategy": {"const": true},
+          "not_adopted": {"const": true},
+          "not_deployed": {"const": true}
+        },
+        "required": [
+          "schema_version",
+          "content_hash",
+          "bundle_id",
+          "sample_design_id",
+          "sample_design_content_hash",
+          "membership_id",
+          "membership_content_hash",
+          "bundle",
+          "membership",
+          "artifacts",
+          "source_binding",
+          "warnings",
+          "not_created_strategy",
+          "not_adopted",
+          "not_deployed"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "source_ref": {
+            "type": "object",
+            "properties": {
+              "kind": {"type": "string", "minLength": 1},
+              "ref_id": {"type": "string", "minLength": 1},
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": ["kind", "ref_id", "content_hash"],
+            "additionalProperties": false
+          },
+          "dataset_ref": {
+            "type": "object",
+            "properties": {
+              "dataset_id": {"type": "string", "minLength": 1},
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": ["dataset_id", "content_hash"],
+            "additionalProperties": false
+          },
+          "exact_dataset_ref": {
+            "type": "object",
+            "properties": {
+              "dataset_id": {"type": "string", "minLength": 1},
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "role": {"const": "active"}
+            },
+            "required": ["dataset_id", "content_hash", "role"],
+            "additionalProperties": false
+          },
+          "workspace_ref": {
+            "type": "object",
+            "properties": {
+              "revision": {"type": "integer", "minimum": 0},
+              "generation": {"type": "integer", "minimum": 0},
+              "semantic_mapping_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "revision",
+              "generation",
+              "semantic_mapping_hash"
+            ],
+            "additionalProperties": false
+          },
+          "identity": {
+            "type": "object",
+            "properties": {
+              "task_id": {"type": "string", "minLength": 1},
+              "dataset_ref": {"$ref": "#/$defs/exact_dataset_ref"},
+              "workspace_ref": {"$ref": "#/$defs/workspace_ref"}
+            },
+            "required": ["task_id", "dataset_ref", "workspace_ref"],
+            "additionalProperties": false
+          },
+          "row_ordinal": {
+            "type": "object",
+            "properties": {
+              "start": {"const": 0},
+              "stop": {"type": "integer", "minimum": 1},
+              "step": {"const": 1}
+            },
+            "required": ["start", "stop", "step"],
+            "additionalProperties": false
+          },
+          "analysis_universe": {
+            "type": "object",
+            "properties": {
+              "dataset_ref": {"$ref": "#/$defs/dataset_ref"},
+              "row_count": {"type": "integer", "minimum": 1},
+              "row_ordinal": {"$ref": "#/$defs/row_ordinal"}
+            },
+            "required": ["dataset_ref", "row_count", "row_ordinal"],
+            "additionalProperties": false
+          },
+          "target_selector": {
+            "type": "object",
+            "properties": {
+              "status": {"const": "resolved"},
+              "column": {"type": "string", "minLength": 1},
+              "good_value": {"type": "integer", "enum": [0, 1]},
+              "bad_value": {"type": "integer", "enum": [0, 1]},
+              "drop_missing": {"type": "boolean"},
+              "source_refs": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"$ref": "#/$defs/source_ref"}
+              },
+              "reason": {"type": "null"}
+            },
+            "required": [
+              "status",
+              "column",
+              "good_value",
+              "bad_value",
+              "drop_missing",
+              "source_refs",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "membership_ref": {
+            "type": "object",
+            "properties": {
+              "membership_id": {
+                "type": "string",
+                "pattern": "^strategy-sample-membership-[0-9a-f]{24}$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": ["membership_id", "content_hash"],
+            "additionalProperties": false
+          },
+          "population_ref": {
+            "type": "object",
+            "properties": {
+              "role": {"type": "string", "enum": ["approval", "risk"]},
+              "population_id": {
+                "type": "string",
+                "pattern": "^strategy-sample-population-[0-9a-f]{24}$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": ["role", "population_id", "content_hash"],
+            "additionalProperties": false
+          },
+          "addressed_ref": {
+            "type": "object",
+            "properties": {
+              "historical_score_id": {
+                "type": "string",
+                "pattern": "^strategy-historical-score-[0-9a-f]{24}$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": ["historical_score_id", "content_hash"],
+            "additionalProperties": false
+          },
+          "policy_ref": {
+            "type": "object",
+            "properties": {
+              "policy_id": {
+                "type": "string",
+                "pattern": "^strategy-sample-policy-[0-9a-f]{24}$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": ["policy_id", "content_hash"],
+            "additionalProperties": false
+          },
+          "native_compatibility": {
+            "type": "object",
+            "properties": {
+              "source_mode": {"const": "native_active_dataset"},
+              "development_partition": {"const": "risk/development"}
+            },
+            "required": ["source_mode", "development_partition"],
+            "additionalProperties": false
+          },
+          "native_sample_design": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"const": "strategy.sample-design.v2"},
+              "producer_version": {
+                "const": "marvis.strategy.sample-design/2"
+              },
+              "sample_design_id": {
+                "type": "string",
+                "pattern": "^strategy-sample-design-[0-9a-f]{24}$"
+              },
+              "identity": {"$ref": "#/$defs/identity"},
+              "analysis_universe": {
+                "$ref": "#/$defs/analysis_universe"
+              },
+              "sample_semantics": {"$ref": "#/$defs/sample_semantics"},
+              "relationship": {
+                "type": "string",
+                "enum": ["nested_same_cohort", "parallel_time_cohorts"]
+              },
+              "target_selector": {"$ref": "#/$defs/target_selector"},
+              "membership_ref": {"$ref": "#/$defs/membership_ref"},
+              "population_refs": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {"$ref": "#/$defs/population_ref"}
+              },
+              "historical_score_ref": {"$ref": "#/$defs/addressed_ref"},
+              "policy_ref": {"$ref": "#/$defs/policy_ref"},
+              "compatibility": {"$ref": "#/$defs/native_compatibility"},
+              "source_refs": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"$ref": "#/$defs/source_ref"}
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "schema_version",
+              "producer_version",
+              "sample_design_id",
+              "identity",
+              "analysis_universe",
+              "sample_semantics",
+              "relationship",
+              "target_selector",
+              "membership_ref",
+              "population_refs",
+              "historical_score_ref",
+              "policy_ref",
+              "compatibility",
+              "source_refs",
+              "content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "field_bindings": {
+            "type": "object",
+            "properties": {
+              "entity_field": {"type": ["string", "null"], "minLength": 1},
+              "time_field": {"type": ["string", "null"], "minLength": 1},
+              "group_field": {"type": ["string", "null"], "minLength": 1},
+              "month_field": {"type": ["string", "null"], "minLength": 1},
+              "weight_field": {"type": ["string", "null"], "minLength": 1},
+              "loan_amount_field": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "overdue_amount_field": {
+                "type": ["string", "null"],
+                "minLength": 1
+              }
+            },
+            "required": [
+              "entity_field",
+              "time_field",
+              "group_field",
+              "month_field",
+              "weight_field",
+              "loan_amount_field",
+              "overdue_amount_field"
+            ],
+            "additionalProperties": false
+          },
+          "performance_window": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["provided", "unavailable"]
+              },
+              "days": {"type": ["integer", "null"], "minimum": 1}
+            },
+            "required": ["status", "days"],
+            "additionalProperties": false
+          },
+          "observation_window": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["provided", "unavailable"]
+              },
+              "start": {
+                "type": ["string", "null"],
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "end": {
+                "type": ["string", "null"],
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              }
+            },
+            "required": ["status", "start", "end"],
+            "additionalProperties": false
+          },
+          "split_definition": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["available", "unavailable"]
+              },
+              "method": {
+                "type": ["string", "null"],
+                "enum": [
+                  "column_values",
+                  "time_ranges",
+                  "precomputed_masks",
+                  null
+                ]
+              },
+              "column": {"type": ["string", "null"], "minLength": 1},
+              "development_values": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": ["string", "number", "boolean"]
+                }
+              },
+              "validation_values": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": ["string", "number", "boolean"]
+                }
+              },
+              "oot_values": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": ["string", "number", "boolean"]
+                }
+              },
+              "source_refs": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {"$ref": "#/$defs/source_ref"}
+              }
+            },
+            "required": [
+              "status",
+              "method",
+              "column",
+              "development_values",
+              "validation_values",
+              "oot_values",
+              "source_refs"
+            ],
+            "additionalProperties": false
+          },
+          "sample_semantics": {
+            "type": "object",
+            "properties": {
+              "field_bindings": {"$ref": "#/$defs/field_bindings"},
+              "scope": {
+                "type": "string",
+                "enum": ["strategy_development", "exploration_only"]
+              },
+              "performance_window": {
+                "$ref": "#/$defs/performance_window"
+              },
+              "observation_window": {
+                "$ref": "#/$defs/observation_window"
+              },
+              "split_definition": {"$ref": "#/$defs/split_definition"}
+            },
+            "required": [
+              "field_bindings",
+              "scope",
+              "performance_window",
+              "observation_window",
+              "split_definition"
+            ],
+            "additionalProperties": false
+          },
+          "partition_membership_ref": {
+            "type": "object",
+            "properties": {
+              "membership_id": {
+                "type": "string",
+                "pattern": "^strategy-sample-membership-[0-9a-f]{24}$"
+              },
+              "membership_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "mask_name": {
+                "type": "string",
+                "enum": [
+                  "approval/development",
+                  "approval/validation",
+                  "approval/oot",
+                  "risk/development",
+                  "risk/validation",
+                  "risk/oot"
+                ]
+              }
+            },
+            "required": [
+              "membership_id",
+              "membership_content_hash",
+              "mask_name"
+            ],
+            "additionalProperties": false
+          },
+          "population_partition": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "enum": ["development", "validation", "oot"]
+              },
+              "membership_ref": {
+                "$ref": "#/$defs/partition_membership_ref"
+              },
+              "row_count": {"type": "integer", "minimum": 0}
+            },
+            "required": ["name", "membership_ref", "row_count"],
+            "additionalProperties": false
+          },
+          "maturity_evidence": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "confirmed_matured",
+                  "not_matured",
+                  "unknown",
+                  "unavailable",
+                  "not_applicable"
+                ]
+              },
+              "performance_window_days": {
+                "type": ["integer", "null"],
+                "minimum": 1
+              },
+              "cutoff_date": {
+                "type": ["string", "null"],
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "eligible_count": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "labeled_count": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "source_refs": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {"$ref": "#/$defs/source_ref"}
+              },
+              "reason": {"type": ["string", "null"], "minLength": 1}
+            },
+            "required": [
+              "status",
+              "performance_window_days",
+              "cutoff_date",
+              "eligible_count",
+              "labeled_count",
+              "source_refs",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "sample_population": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"const": "strategy.sample-population.v2"},
+              "producer_version": {
+                "const": "marvis.strategy.sample-design/2"
+              },
+              "population_id": {
+                "type": "string",
+                "pattern": "^strategy-sample-population-[0-9a-f]{24}$"
+              },
+              "role": {
+                "type": "string",
+                "enum": ["approval", "risk"]
+              },
+              "membership_ref": {"$ref": "#/$defs/membership_ref"},
+              "inclusion_predicate_ref": {
+                "anyOf": [
+                  {"$ref": "#/$defs/source_ref"},
+                  {"type": "null"}
+                ]
+              },
+              "exclusion_predicate_ref": {
+                "anyOf": [
+                  {"$ref": "#/$defs/source_ref"},
+                  {"type": "null"}
+                ]
+              },
+              "partitions": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": {"$ref": "#/$defs/population_partition"}
+              },
+              "total_count": {"type": "integer", "minimum": 0},
+              "maturity_evidence": {"$ref": "#/$defs/maturity_evidence"},
+              "source_refs": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {"$ref": "#/$defs/source_ref"}
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "schema_version",
+              "producer_version",
+              "population_id",
+              "role",
+              "membership_ref",
+              "inclusion_predicate_ref",
+              "exclusion_predicate_ref",
+              "partitions",
+              "total_count",
+              "maturity_evidence",
+              "source_refs",
+              "content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "historical_score": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"const": "strategy.historical-score.v2"},
+              "producer_version": {
+                "const": "marvis.strategy.sample-design/2"
+              },
+              "historical_score_id": {
+                "type": "string",
+                "pattern": "^strategy-historical-score-[0-9a-f]{24}$"
+              },
+              "status": {
+                "type": "string",
+                "enum": ["available", "unavailable", "not_applicable"]
+              },
+              "column": {"type": ["string", "null"], "minLength": 1},
+              "direction": {
+                "type": ["string", "null"],
+                "enum": [
+                  "higher_is_riskier",
+                  "lower_is_riskier",
+                  null
+                ]
+              },
+              "source_refs": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {"$ref": "#/$defs/source_ref"}
+              },
+              "reason": {"type": ["string", "null"], "minLength": 1},
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "schema_version",
+              "producer_version",
+              "historical_score_id",
+              "status",
+              "column",
+              "direction",
+              "source_refs",
+              "reason",
+              "content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "diagnostic_severities": {
+            "type": "object",
+            "properties": {
+              "entity_overlap": {
+                "type": "string",
+                "enum": ["warn", "fail"]
+              },
+              "temporal_oot": {
+                "type": "string",
+                "enum": ["warn", "fail"]
+              },
+              "risk_outside_approval": {
+                "type": "string",
+                "enum": ["warn", "fail"]
+              },
+              "maturity": {
+                "type": "string",
+                "enum": ["warn", "fail"]
+              },
+              "label_coverage": {
+                "type": "string",
+                "enum": ["warn", "fail"]
+              },
+              "historical_score_coverage": {
+                "type": "string",
+                "enum": ["warn", "fail"]
+              },
+              "group_coverage_gap": {
+                "type": "string",
+                "enum": ["warn", "fail"]
+              },
+              "sufficiency": {
+                "type": "string",
+                "enum": ["warn", "fail"]
+              }
+            },
+            "required": [
+              "entity_overlap",
+              "temporal_oot",
+              "risk_outside_approval",
+              "maturity",
+              "label_coverage",
+              "historical_score_coverage",
+              "group_coverage_gap",
+              "sufficiency"
+            ],
+            "additionalProperties": false
+          },
+          "sample_policy": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"const": "strategy.sample-policy.v2"},
+              "producer_version": {
+                "const": "marvis.strategy.sample-design/2"
+              },
+              "policy_id": {
+                "type": "string",
+                "pattern": "^strategy-sample-policy-[0-9a-f]{24}$"
+              },
+              "minimum_partition_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minimum_bad_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minimum_label_coverage": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "minimum_historical_score_coverage": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "maximum_group_coverage_gap": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "diagnostic_severities": {
+                "$ref": "#/$defs/diagnostic_severities"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "schema_version",
+              "producer_version",
+              "policy_id",
+              "minimum_partition_count",
+              "minimum_bad_count",
+              "minimum_label_coverage",
+              "minimum_historical_score_coverage",
+              "maximum_group_coverage_gap",
+              "diagnostic_severities",
+              "content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "diagnostic_evidence": {
+            "type": "object",
+            "properties": {
+              "actual": {
+                "type": ["string", "number", "boolean", "null"]
+              },
+              "expected": {
+                "type": ["string", "number", "boolean", "null"]
+              },
+              "numerator": {
+                "type": ["string", "number", "boolean", "null"]
+              },
+              "denominator": {
+                "type": ["string", "number", "boolean", "null"]
+              }
+            },
+            "required": [
+              "actual",
+              "expected",
+              "numerator",
+              "denominator"
+            ],
+            "additionalProperties": false
+          },
+          "sample_diagnostic": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "const": "strategy.sample-diagnostic.v2"
+              },
+              "producer_version": {
+                "const": "marvis.strategy.sample-design/2"
+              },
+              "diagnostic_id": {
+                "type": "string",
+                "pattern": "^strategy-sample-diagnostic-[0-9a-f]{24}$"
+              },
+              "code": {
+                "type": "string",
+                "enum": [
+                  "target_selector",
+                  "entity_overlap",
+                  "temporal_oot",
+                  "risk_outside_approval",
+                  "maturity",
+                  "label_coverage",
+                  "historical_score_coverage",
+                  "group_coverage_gap",
+                  "sufficiency"
+                ]
+              },
+              "category": {
+                "type": "string",
+                "enum": [
+                  "contract",
+                  "leakage",
+                  "maturity",
+                  "coverage",
+                  "bias",
+                  "sufficiency"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pass",
+                  "warn",
+                  "fail",
+                  "unavailable",
+                  "not_applicable"
+                ]
+              },
+              "message": {"type": "string", "minLength": 1},
+              "evidence": {"$ref": "#/$defs/diagnostic_evidence"},
+              "policy_ref": {"$ref": "#/$defs/policy_ref"},
+              "source_refs": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {"$ref": "#/$defs/source_ref"}
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "schema_version",
+              "producer_version",
+              "diagnostic_id",
+              "code",
+              "category",
+              "status",
+              "message",
+              "evidence",
+              "policy_ref",
+              "source_refs",
+              "content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "sample_design_ref": {
+            "type": "object",
+            "properties": {
+              "sample_design_id": {
+                "type": "string",
+                "pattern": "^strategy-sample-design-[0-9a-f]{24}$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": ["sample_design_id", "content_hash"],
+            "additionalProperties": false
+          },
+          "metric_definition_ref": {
+            "type": "object",
+            "properties": {
+              "metric_definition_id": {
+                "type": "string",
+                "pattern": "^metric-definition-[0-9a-f]{24}$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": ["metric_definition_id", "content_hash"],
+            "additionalProperties": false
+          },
+          "metric_definition": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "const": "strategy.metric-definition.v2"
+              },
+              "producer_version": {
+                "const": "marvis.strategy.sample-design/2"
+              },
+              "metric_definition_id": {
+                "type": "string",
+                "pattern": "^metric-definition-[0-9a-f]{24}$"
+              },
+              "metric_key": {
+                "type": "string",
+                "enum": [
+                  "population_count",
+                  "labeled_count",
+                  "label_coverage",
+                  "bad_count",
+                  "bad_rate"
+                ]
+              },
+              "display_name": {"type": "string", "minLength": 1},
+              "metric_family": {
+                "type": "string",
+                "enum": ["volume", "coverage", "risk"]
+              },
+              "numerator_definition": {
+                "type": "string",
+                "minLength": 1
+              },
+              "denominator_definition": {
+                "type": ["string", "null"],
+                "minLength": 1
+              },
+              "aggregation": {
+                "type": "string",
+                "enum": ["count", "ratio"]
+              },
+              "unit": {
+                "type": "string",
+                "enum": ["count", "ratio"]
+              },
+              "precision": {
+                "type": "integer",
+                "enum": [0, 6]
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "schema_version",
+              "producer_version",
+              "metric_definition_id",
+              "metric_key",
+              "display_name",
+              "metric_family",
+              "numerator_definition",
+              "denominator_definition",
+              "aggregation",
+              "unit",
+              "precision",
+              "content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "metric_observation": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "const": "strategy.metric-observation.v2"
+              },
+              "producer_version": {
+                "const": "marvis.strategy.sample-design/2"
+              },
+              "observation_id": {
+                "type": "string",
+                "pattern": "^metric-observation-[0-9a-f]{24}$"
+              },
+              "sample_design_ref": {
+                "$ref": "#/$defs/sample_design_ref"
+              },
+              "metric_definition_ref": {
+                "$ref": "#/$defs/metric_definition_ref"
+              },
+              "population": {
+                "type": "string",
+                "enum": ["approval", "risk"]
+              },
+              "partition": {
+                "type": "string",
+                "enum": ["overall", "development", "validation", "oot"]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "present",
+                  "unavailable",
+                  "not_applicable",
+                  "not_matured",
+                  "insufficient_data"
+                ]
+              },
+              "value": {
+                "type": ["number", "boolean", "null"]
+              },
+              "numerator": {"type": ["number", "null"]},
+              "denominator": {"type": ["number", "null"]},
+              "sample_count": {"type": "integer", "minimum": 0},
+              "unit": {
+                "type": "string",
+                "enum": ["count", "ratio", "score", "days", "boolean"]
+              },
+              "source_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "items": {"$ref": "#/$defs/source_ref"}
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "schema_version",
+              "producer_version",
+              "observation_id",
+              "sample_design_ref",
+              "metric_definition_ref",
+              "population",
+              "partition",
+              "status",
+              "value",
+              "numerator",
+              "denominator",
+              "sample_count",
+              "unit",
+              "source_refs",
+              "content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "sample_design_v2_bundle": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "const": "strategy.sample-design-bundle.v2"
+              },
+              "producer_version": {
+                "const": "marvis.strategy.sample-design/2"
+              },
+              "bundle_id": {
+                "type": "string",
+                "pattern": "^strategy-sample-design-bundle-[0-9a-f]{24}$"
+              },
+              "sample_design": {"$ref": "#/$defs/native_sample_design"},
+              "populations": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {"$ref": "#/$defs/sample_population"}
+              },
+              "membership": {"$ref": "#/$defs/membership_header"},
+              "historical_score": {"$ref": "#/$defs/historical_score"},
+              "policy": {"$ref": "#/$defs/sample_policy"},
+              "diagnostics": {
+                "type": "array",
+                "minItems": 9,
+                "maxItems": 9,
+                "items": {"$ref": "#/$defs/sample_diagnostic"}
+              },
+              "metric_definitions": {
+                "type": "array",
+                "minItems": 5,
+                "maxItems": 5,
+                "items": {"$ref": "#/$defs/metric_definition"}
+              },
+              "metric_observations": {
+                "type": "array",
+                "minItems": 40,
+                "maxItems": 40,
+                "items": {"$ref": "#/$defs/metric_observation"}
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "schema_version",
+              "producer_version",
+              "bundle_id",
+              "sample_design",
+              "populations",
+              "membership",
+              "historical_score",
+              "policy",
+              "diagnostics",
+              "metric_definitions",
+              "metric_observations",
+              "content_hash"
+            ],
+            "additionalProperties": false
+          },
+          "population_counts": {
+            "type": "object",
+            "properties": {
+              "development": {"type": "integer", "minimum": 0},
+              "validation": {"type": "integer", "minimum": 0},
+              "oot": {"type": "integer", "minimum": 0},
+              "total": {"type": "integer", "minimum": 0}
+            },
+            "required": ["development", "validation", "oot", "total"],
+            "additionalProperties": false
+          },
+          "membership_header": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"const": "strategy.sample-membership.v2"},
+              "codec_version": {"const": "marvis.strategy.sample-membership/2"},
+              "membership_id": {
+                "type": "string",
+                "pattern": "^strategy-sample-membership-[0-9a-f]{24}$"
+              },
+              "task_id": {"type": "string", "minLength": 1},
+              "dataset_ref": {"$ref": "#/$defs/dataset_ref"},
+              "row_count": {"type": "integer", "minimum": 1},
+              "row_ordinal": {"$ref": "#/$defs/row_ordinal"},
+              "mask_order": {
+                "const": [
+                  "approval/development",
+                  "approval/validation",
+                  "approval/oot",
+                  "risk/development",
+                  "risk/validation",
+                  "risk/oot"
+                ]
+              },
+              "bitorder": {"const": "little"},
+              "bytes_per_mask": {"type": "integer", "minimum": 1},
+              "payload_bytes": {"type": "integer", "minimum": 1},
+              "counts": {
+                "type": "object",
+                "properties": {
+                  "analysis_universe": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "approval": {"$ref": "#/$defs/population_counts"},
+                  "risk": {"$ref": "#/$defs/population_counts"},
+                  "relationship": {
+                    "type": "object",
+                    "properties": {
+                      "risk_within_approval": {
+                        "$ref": "#/$defs/population_counts"
+                      },
+                      "risk_outside_approval": {
+                        "$ref": "#/$defs/population_counts"
+                      }
+                    },
+                    "required": [
+                      "risk_within_approval",
+                      "risk_outside_approval"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "analysis_universe",
+                  "approval",
+                  "risk",
+                  "relationship"
+                ],
+                "additionalProperties": false
+              },
+              "payload_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "schema_version",
+              "codec_version",
+              "membership_id",
+              "task_id",
+              "dataset_ref",
+              "row_count",
+              "row_ordinal",
+              "mask_order",
+              "bitorder",
+              "bytes_per_mask",
+              "payload_bytes",
+              "counts",
+              "payload_hash",
+              "content_hash"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_materialize_sample_design_v2_native",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:artifact"],
+      "memory_limit_mb": 4096
+    },
+    {
       "name": "materialize_model_evidence_v2",
       "summary": "Translate authenticated task-owned univariate candidate artifacts into one immutable Strategy ModelEvidence V2 bundle without accepting caller-computed metrics.",
       "input_schema": {

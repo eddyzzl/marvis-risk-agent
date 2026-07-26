@@ -197,7 +197,7 @@ def test_frontier_group_nl_is_exactly_grounded_and_routes_before_singleton() -> 
     assert not utterance_targets_interactive_tree_frontier_materialization(
         utterance
     )
-    assert llm.calls[0]["prompt_version"] == 44
+    assert llm.calls[0]["prompt_version"] == 47
     assert "interactive_tree_frontier_group_materialization" in (
         llm.calls[0]["system_prompt"]
     )

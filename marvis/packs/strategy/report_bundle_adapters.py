@@ -130,6 +130,7 @@ from marvis.packs.strategy.sample_design_binding import (
 )
 from marvis.packs.strategy.sample_design_v2_tools import (
     StrategySampleDesignV2ArtifactBinding,
+    resolve_strategy_sample_design_v2_source_mode,
 )
 from marvis.packs.strategy.voting_candidate import (
     VOTING_CANDIDATE_ASSET_TYPE,
@@ -346,6 +347,11 @@ def build_strategy_report_bundle_source_inputs(
     for validation in pool_validations:
         _require_same_task(task_id, pool_validation=validation)
     sample = _authenticated_sample_design(sample_design)
+    resolve_strategy_sample_design_v2_source_mode(
+        sample["sample_design"],
+        capability="legacy_development",
+        consumer="strategy_report_bundle",
+    )
     pool, design = _authenticated_candidate_pool(candidate_pool)
     validations = _authenticated_pool_validations(
         pool_validations,
