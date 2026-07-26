@@ -319,6 +319,9 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     voting_tool = next(
         tool for tool in manifest.tools if tool.name == "build_voting_candidate"
     )
+    voting_search_tool = next(
+        tool for tool in manifest.tools if tool.name == "search_voting_candidates"
+    )
     cross_matrix_tool = next(
         tool for tool in manifest.tools if tool.name == "build_cross_matrix_candidate"
     )
@@ -401,6 +404,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "apply_automatic_tree",
         "materialize_automatic_tree_leaf_fragment",
         "build_voting_candidate",
+        "search_voting_candidates",
         "build_cross_matrix_candidate",
         "materialize_cross_matrix_cell_selection",
         "build_scorecard_band_asset",
@@ -730,6 +734,41 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "maxItems": 1,
         "items": {"$ref": "#/$defs/artifact"},
     }
+    assert voting_search_tool.determinism == "deterministic"
+    assert voting_search_tool.policy.human_decision_gate == "none"
+    assert voting_search_tool.policy.effect_authorization == "none"
+    assert set(voting_search_tool.side_effects) == {
+        "read:task",
+        "read:dataset",
+        "write:artifact",
+    }
+    assert voting_search_tool.input_schema["additionalProperties"] is False
+    assert voting_search_tool.input_schema["properties"]["member_count"] == {
+        "type": "integer",
+        "minimum": 2,
+        "maximum": 50,
+    }
+    assert voting_search_tool.input_schema["properties"]["pool_ref"][
+        "additionalProperties"
+    ] is False
+    assert voting_search_tool.output_schema["additionalProperties"] is False
+    assert voting_search_tool.output_schema["properties"]["schema_version"] == {
+        "const": "strategy.search-voting-candidates-tool.v1"
+    }
+    assert voting_search_tool.output_schema["properties"][
+        "excluded_unsupported_rule_ids"
+    ]["uniqueItems"] is True
+    for field in (
+        "not_mutated_pool",
+        "not_selected",
+        "not_admitted",
+        "not_applied",
+        "not_adopted",
+        "not_deployed",
+    ):
+        assert voting_search_tool.output_schema["properties"][field] == {
+            "const": True
+        }
     assert cross_matrix_tool.determinism == "deterministic"
     assert cross_matrix_tool.policy.human_decision_gate == "none"
     assert cross_matrix_tool.policy.effect_authorization == "none"
