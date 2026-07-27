@@ -417,7 +417,7 @@ def _first_present(payloads: list[dict[str, Any]], key: str) -> Any:
 
 
 def _entry_id(entry: Any) -> str:
-    return str(entry.get("id") if isinstance(entry, dict) else getattr(entry, "id"))
+    return str(entry.get("id") if isinstance(entry, dict) else entry.id)
 
 
 def _entry_source_task_id(entry: Any) -> str | None:
@@ -433,16 +433,16 @@ def _distinct_task_support(members: list[Any]) -> int:
 
 
 def _entry_category(entry: Any) -> str:
-    return str(entry.get("memory_type") if isinstance(entry, dict) else getattr(entry, "memory_type"))
+    return str(entry.get("memory_type") if isinstance(entry, dict) else entry.memory_type)
 
 
 def _entry_payload(entry: Any) -> dict[str, Any]:
-    payload = entry.get("payload") if isinstance(entry, dict) else getattr(entry, "payload")
+    payload = entry.get("payload") if isinstance(entry, dict) else entry.payload
     return payload if isinstance(payload, dict) else {}
 
 
 def _entry_summary(entry: Any) -> str:
-    return str(entry.get("summary") if isinstance(entry, dict) else getattr(entry, "summary"))
+    return str(entry.get("summary") if isinstance(entry, dict) else entry.summary)
 
 
 def _now_iso() -> str:

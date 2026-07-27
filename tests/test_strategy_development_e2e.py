@@ -153,7 +153,6 @@ def test_strategy_development_runs_reversible_steps_to_only_adoption_gate(tmp_pa
             "sample_design_ref": sample_design_ref,
             "strategy_type": "approval",
             "score_direction": "higher_is_better",
-            "strategy_type": "approval",
             # A max_bad_rate constraint is required for a max_profit-objective
             # scan with no profit_params (every prefix ties at 0 expected
             # profit) to prefer a non-trivial cut over "approve everyone" --
@@ -259,7 +258,6 @@ def test_strategy_development_double_adopt_confirm_conflicts_gracefully(tmp_path
             "sample_design_ref": sample_design_ref,
             "strategy_type": "approval",
             "score_direction": "higher_is_better",
-            "strategy_type": "approval",
             "max_bad_rate": 0.05,
         },
     )

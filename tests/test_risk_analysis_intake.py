@@ -304,6 +304,42 @@ def test_vtg_complete_contract_returns_report_template_and_column_map():
     assert result.intake_state["phase"] == "ready"
 
 
+def test_normalized_column_name_collision_blocks_plan_instead_of_guessing():
+    dataset = _Dataset("vtg", "task-risk/vtg.parquet")
+    columns = [
+        "product",
+        "Product",
+        "as_of_date",
+        "cohort",
+        "amount_unit",
+        "disbursement_amount",
+        "mob14_bad_rate",
+        "turnover",
+        "terminal_bad_rate",
+    ]
+
+    result = _advance(
+        _Registry([dataset]),
+        _Backend({"vtg": columns}),
+        user_text="材料已上传",
+        conversation=[_assistant_state("await_materials", "vtg_terminal")],
+    )
+
+    assert result.template_id is None
+    assert result.intake_state["phase"] == "await_materials"
+    assert result.intake_state["missing_columns"] == [
+        "product（归一化后匹配多个源列）",
+    ]
+    assert result.intake_state["ambiguous_columns"] == [
+        {
+            "canonical": "product",
+            "source_columns": ["product", "Product"],
+        }
+    ]
+    assert "字段名冲突" in result.content
+    assert "product 匹配到 product, Product" in result.content
+
+
 def test_equal_contract_reupload_selects_latest_registered_dataset():
     old = _Dataset("vtg_old", "task-risk/vtg_old.parquet", row_count=2)
     corrected = _Dataset(

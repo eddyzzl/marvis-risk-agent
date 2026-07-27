@@ -8,9 +8,10 @@ formats this payload; it never recomputes a financial metric.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 import math
-from typing import Any, Iterable
+from typing import Any
 
 import pandas as pd
 
@@ -795,9 +796,17 @@ def calculate_vtg_terminal(
         f"金额字段统一使用 amount_unit={amount_units[0]}。",
     ]
     if curve_derived_count:
-        balance_basis = (
-            "余额金额" if "mob_balance_amount" in mapping else "放款金额 × 余额率"
-        )
+        if (
+            "mob_balance_amount" in mapping
+            and "mob_balance_rate" in mapping
+        ):
+            balance_basis = (
+                "逐行可用的余额金额或放款金额 × 余额率；两者同时存在时先勾稽"
+            )
+        elif "mob_balance_amount" in mapping:
+            balance_basis = "余额金额"
+        else:
+            balance_basis = "放款金额 × 余额率"
         day_count_bases = _ordered_unique(
             f"{row['day_count_basis']:g}" for row in detail_rows
         )
@@ -1013,8 +1022,8 @@ def calculate_profitability(
 
     detail_rows: list[dict[str, Any]] = []
     scenario_missing_count = 0
-    derived_cost_counts = {field: 0 for field in _PROFIT_DERIVABLE_COST_FIELDS}
-    reconciled_cost_counts = {field: 0 for field in _PROFIT_DERIVABLE_COST_FIELDS}
+    derived_cost_counts = dict.fromkeys(_PROFIT_DERIVABLE_COST_FIELDS, 0)
+    reconciled_cost_counts = dict.fromkeys(_PROFIT_DERIVABLE_COST_FIELDS, 0)
     supplied_driver_values: dict[str, list[Any]] = {
         field: [] for field in _PROFIT_DRIVER_FIELDS
     }
@@ -1226,12 +1235,14 @@ def calculate_profitability(
         for row in summary_rows
         if row["net_yield"] < 0.0
     ]
-    negative_fixed = [row for row in summary_rows if row["fixed_income_yield"] < 0.0]
-    for row in negative_fixed:
-        red_flags.append(
+    red_flags.extend(
+        (
             f"{_profit_slice_identity(row)} 的类固收收益率为 "
             f"{_format_percent(row['fixed_income_yield'])}，低于 0。"
         )
+        for row in summary_rows
+        if row["fixed_income_yield"] < 0.0
+    )
 
     assumptions = [
         (
@@ -1552,12 +1563,22 @@ def _collapse_profitability_customer_stages(
         weighted_data_cost = 0.0
         transaction_weight_sum = 0.0
         provenance: list[str] = []
+        seen_stages: set[str] = set()
         for position in positions:
             row = data.loc[position]
             row_number = position + 1
             stage = _required_text(
                 row, mapping, "customer_stage", analysis_kind, row_number
             )
+            if stage in seen_stages:
+                raise RiskAnalysisError(
+                    f"产品 {product} / 期间 {period} / 场景 {scenario} / 资产 "
+                    f"{asset_class} 的 customer_stage 必须唯一，发现重复值 {stage!r}。",
+                    analysis_kind=analysis_kind,
+                    field="customer_stage",
+                    row_number=row_number,
+                )
+            seen_stages.add(stage)
             transaction_weight = _number(
                 row,
                 mapping,
@@ -1753,7 +1774,7 @@ def _resolve_profitability_costs(
 ) -> tuple[dict[str, float], dict[str, str], dict[str, Any]]:
     costs: dict[str, float] = {}
     sources: dict[str, str] = {}
-    drivers: dict[str, Any] = {field: None for field in _PROFIT_DRIVER_FIELDS}
+    drivers: dict[str, Any] = dict.fromkeys(_PROFIT_DRIVER_FIELDS)
 
     for field in _PROFIT_ALWAYS_EXPLICIT_COST_FIELDS:
         value = _number(
@@ -2170,7 +2191,6 @@ def _collapse_vtg_balance_curves(
     collapsed_rows: list[pd.Series] = []
     zero_disbursement_skipped_count = 0
 
-    use_balance_amount = "mob_balance_amount" in mapping
     for (
         product,
         cohort,
@@ -2224,6 +2244,7 @@ def _collapse_vtg_balance_curves(
             zero_disbursement_skipped_count += len(positions)
             continue
         seen_mobs: set[tuple[str, Any]] = set()
+        balance_sources: set[str] = set()
         weighted_balance_days = 0.0
         total_mob_days = 0.0
         for position in positions:
@@ -2258,55 +2279,53 @@ def _collapse_vtg_balance_curves(
                 minimum_inclusive=False,
             )
             total_mob_days += mob_days
-            if use_balance_amount:
-                balance_amount = _number(
-                    row,
-                    mapping,
-                    "mob_balance_amount",
-                    analysis_kind,
-                    row_number,
-                    required=True,
-                    minimum=0.0,
+            balance_amount = _number(
+                row,
+                mapping,
+                "mob_balance_amount",
+                analysis_kind,
+                row_number,
+                minimum=0.0,
+            )
+            balance_rate = _number(
+                row,
+                mapping,
+                "mob_balance_rate",
+                analysis_kind,
+                row_number,
+                rate=True,
+            )
+            if balance_amount is None and balance_rate is None:
+                raise RiskAnalysisError(
+                    f"第 {row_number} 行 mob_balance_amount 与 "
+                    "mob_balance_rate 至少一个不能为空。",
+                    analysis_kind=analysis_kind,
+                    field="mob_balance_rate",
+                    row_number=row_number,
                 )
-                assert balance_amount is not None
-                if "mob_balance_rate" in mapping:
-                    balance_rate = _number(
-                        row,
-                        mapping,
-                        "mob_balance_rate",
-                        analysis_kind,
-                        row_number,
-                        required=True,
-                        rate=True,
+            if balance_amount is not None and balance_rate is not None:
+                implied_balance_amount = disbursement * balance_rate
+                if not math.isclose(
+                    balance_amount,
+                    implied_balance_amount,
+                    rel_tol=_VTG_BALANCE_RECONCILIATION_REL_TOLERANCE,
+                    abs_tol=_VTG_BALANCE_RECONCILIATION_ABS_TOLERANCE,
+                ):
+                    raise RiskAnalysisError(
+                        f"第 {row_number} 行 mob_balance_amount={balance_amount} "
+                        "与 disbursement_amount × mob_balance_rate="
+                        f"{implied_balance_amount} 不一致。",
+                        analysis_kind=analysis_kind,
+                        field="mob_balance_amount",
+                        row_number=row_number,
                     )
-                    assert balance_rate is not None
-                    implied_balance_amount = disbursement * balance_rate
-                    if not math.isclose(
-                        balance_amount,
-                        implied_balance_amount,
-                        rel_tol=_VTG_BALANCE_RECONCILIATION_REL_TOLERANCE,
-                        abs_tol=_VTG_BALANCE_RECONCILIATION_ABS_TOLERANCE,
-                    ):
-                        raise RiskAnalysisError(
-                            f"第 {row_number} 行 mob_balance_amount={balance_amount} "
-                            "与 disbursement_amount × mob_balance_rate="
-                            f"{implied_balance_amount} 不一致。",
-                            analysis_kind=analysis_kind,
-                            field="mob_balance_amount",
-                            row_number=row_number,
-                        )
+                balance_sources.add("mob_balance_amount_reconciled_with_rate")
+            elif balance_amount is not None:
+                balance_sources.add("mob_balance_amount")
             else:
-                balance_rate = _number(
-                    row,
-                    mapping,
-                    "mob_balance_rate",
-                    analysis_kind,
-                    row_number,
-                    required=True,
-                    rate=True,
-                )
                 assert balance_rate is not None
                 balance_amount = disbursement * balance_rate
+                balance_sources.add("mob_balance_rate")
             weighted_balance_days += balance_amount * mob_days
 
         if abs(total_mob_days - day_count_basis) > _VTG_CURVE_DAY_TOLERANCE:
@@ -2324,7 +2343,10 @@ def _collapse_vtg_balance_curves(
                 f"{identity} 的 MOB 余额曲线日均余额必须大于 0。",
                 analysis_kind=analysis_kind,
                 field=(
-                    "mob_balance_amount" if use_balance_amount else "mob_balance_rate"
+                    "mob_balance_amount"
+                    if "mob_balance_amount" in mapping
+                    and "mob_balance_rate" not in mapping
+                    else "mob_balance_rate"
                 ),
                 row_number=first_position + 1,
             )
@@ -2352,12 +2374,15 @@ def _collapse_vtg_balance_curves(
         collapsed = first_row.copy()
         collapsed[turnover_column] = disbursement / avg_daily_balance
         collapsed[avg_balance_column] = avg_daily_balance
+        balance_source = (
+            next(iter(balance_sources))
+            if len(balance_sources) == 1
+            else "mixed(" + ",".join(sorted(balance_sources)) + ")"
+        )
         collapsed[balance_source_column] = (
-            "mob_balance_curve_reconciled_with_explicit_avg"
+            f"{balance_source}_reconciled_with_explicit_avg"
             if supplied_avg_daily_balance is not None
-            else "mob_balance_amount_reconciled_with_rate"
-            if use_balance_amount and "mob_balance_rate" in mapping
-            else ("mob_balance_amount" if use_balance_amount else "mob_balance_rate")
+            else balance_source
         )
         collapsed_rows.append(collapsed)
 
@@ -2545,6 +2570,7 @@ def _normalize_column_map(
             "column_map 必须是非空对象。", analysis_kind=analysis_kind
         )
     normalized: dict[str, str] = {}
+    source_owners: dict[str, str] = {}
     for raw_canonical, raw_source in column_map.items():
         canonical = str(raw_canonical or "").strip()
         source = str(raw_source or "").strip()
@@ -2565,6 +2591,14 @@ def _normalize_column_map(
                 analysis_kind=analysis_kind,
                 field=canonical,
             )
+        if source in source_owners:
+            raise RiskAnalysisError(
+                "同一源数据列不能映射到多个业务字段: "
+                f"{source_owners[source]} 和 {canonical} -> {source}",
+                analysis_kind=analysis_kind,
+                field=canonical,
+            )
+        source_owners[source] = canonical
         normalized[canonical] = source
     return normalized
 

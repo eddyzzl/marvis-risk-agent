@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from marvis.app import create_app
+from marvis.db import TaskRepository
 
 
 @pytest.fixture
@@ -30,6 +31,53 @@ def test_agent_risk_task_can_be_created_before_materials(client):
     assert source_dir.is_dir()
     assert source_dir.parent == client.app.state.settings.workspace / "material_uploads"
     assert source_dir.name.startswith("risk-intake-")
+
+
+def test_deleting_agent_risk_task_removes_its_generated_intake_directory(client):
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "待删除风险分析",
+            "validator": "qa",
+            "source_dir": "",
+            "task_type": "vintage",
+            "run_mode": "agent",
+        },
+    )
+    task_id = created.json()["id"]
+    source_dir = Path(created.json()["source_dir"])
+    (source_dir / "temporary-note.txt").write_text("task-owned", encoding="utf-8")
+
+    deleted = client.delete(f"/api/tasks/{task_id}")
+
+    assert deleted.status_code == 204, deleted.text
+    assert not source_dir.exists()
+
+
+def test_failed_agent_risk_task_creation_removes_unclaimed_intake_directory(
+    client,
+    monkeypatch,
+):
+    uploads_root = client.app.state.settings.workspace / "material_uploads"
+
+    def fail_create_task(*_args, **_kwargs):
+        raise RuntimeError("database write failed")
+
+    monkeypatch.setattr(TaskRepository, "create_task", fail_create_task)
+
+    with pytest.raises(RuntimeError, match="database write failed"):
+        client.post(
+            "/api/tasks",
+            json={
+                "model_name": "创建失败的风险分析",
+                "validator": "qa",
+                "source_dir": "",
+                "task_type": "vintage",
+                "run_mode": "agent",
+            },
+        )
+
+    assert list(uploads_root.glob("risk-intake-*")) == []
 
 
 def test_empty_material_dir_is_rejected_for_other_tasks(client):

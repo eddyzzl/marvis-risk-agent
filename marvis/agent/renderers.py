@@ -7905,7 +7905,9 @@ def _render_risk_analysis_report(o: dict):
             "rows": [
                 [
                     metric_labels.get(str(name), str(name)),
-                    _pct(value) if str(name).endswith(("_rate", "_yield")) else _fmt(value),
+                    _pct(value)
+                    if str(name).endswith(("_rate", "_yield", "_spread"))
+                    else _fmt(value),
                 ]
                 for name, value in metrics.items()
             ],

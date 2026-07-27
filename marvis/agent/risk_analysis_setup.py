@@ -12,10 +12,10 @@ user message before calling setup, so state lookup must ignore user messages.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Iterable, Mapping, Sequence
 
 from marvis.agent.vintage_setup import VintageSetupError, build_vintage_proposal
 from marvis.domain import FileRole
@@ -555,11 +555,22 @@ def _await_missing_columns(
     analysis_scope: str | None = None,
 ) -> RiskAnalysisSetupDecision:
     missing = list(match["missing_columns"])
+    ambiguous = list(match.get("ambiguous_columns") or [])
     observed = ", ".join(match["observed_columns"]) or "（无可读列）"
+    ambiguity_line = (
+        "\n字段名冲突："
+        + "；".join(
+            f"{item['canonical']} 匹配到 {', '.join(item['source_columns'])}"
+            for item in ambiguous
+        )
+        + "。请保留一个含义明确且唯一的列名后重新上传。"
+        if ambiguous
+        else ""
+    )
     content = (
         f"已检查最接近契约的数据表 `{match['dataset_name']}`，目前还不能启动测算。\n"
         f"缺少：{', '.join(missing)}。\n"
-        f"已识别列：{observed}。\n"
+        f"已识别列：{observed}。{ambiguity_line}\n"
         "请补齐这些列后重新上传；我不会用相似但含义不明的字段代替，也不会在缺列时启动计划。"
     )
     state = {
@@ -568,6 +579,8 @@ def _await_missing_columns(
         "dataset_id": match["dataset_id"],
         "missing_columns": missing,
     }
+    if ambiguous:
+        state["ambiguous_columns"] = ambiguous
     if analysis_scope:
         state["analysis_scope"] = analysis_scope
     return _chat_decision(
@@ -701,17 +714,25 @@ def _ensure_registered_datasets(registry, task_id: str, source_dir) -> list:
         artifacts = scan_source_dir(source_path)
     except (OSError, ValueError):
         return []
+    registration_errors: list[Exception] = []
     for artifact in artifacts:
         if artifact.role != FileRole.SAMPLE:
             continue
         try:
             registry.register_from_upload(task_id, Path(artifact.path), role="sample")
-        except Exception:
-            # Intake remains a recoverable chat interaction. The normal upload
-            # endpoint returns detailed ingest failures to the user; a stale or
-            # unreadable source-dir file must not turn setup into a 500/error gate.
+        except Exception as exc:
+            # Try every candidate so one stale file does not hide a usable table.
+            # If none can be registered, re-raise the first typed ingest error:
+            # the driver converts it into the existing structured, retryable
+            # workflow diagnostic instead of silently claiming no material exists.
+            registration_errors.append(exc)
             continue
-    return list(registry.list_for_task(task_id))
+    datasets = list(registry.list_for_task(task_id))
+    if datasets:
+        return datasets
+    if registration_errors:
+        raise registration_errors[0]
+    return []
 
 
 def _best_contract_match(
@@ -733,24 +754,42 @@ def _best_contract_match(
 
 def _contract_match(registry, backend, dataset, contract: _MaterialContract) -> dict:
     columns = _dataset_columns(registry, backend, dataset)
-    lookup = {
-        _normalize_column(column): column for column in columns if str(column).strip()
-    }
+    lookup: dict[str, list[str]] = {}
+    for column in columns:
+        if not str(column).strip():
+            continue
+        lookup.setdefault(_normalize_column(column), []).append(column)
     aliases = contract.aliases or {}
     column_map: dict[str, str] = {}
+    ambiguous_columns: list[dict[str, object]] = []
     for canonical in contract.all_columns:
         candidates = (canonical, *aliases.get(canonical, ()))
-        actual = next(
-            (
-                lookup.get(_normalize_column(candidate))
-                for candidate in candidates
-                if _normalize_column(candidate) in lookup
-            ),
-            None,
-        )
-        if actual is not None:
-            column_map[canonical] = actual
-    missing = [column for column in contract.required if column not in column_map]
+        for candidate in candidates:
+            matches = lookup.get(_normalize_column(candidate), [])
+            if not matches:
+                continue
+            if len(matches) == 1:
+                column_map[canonical] = matches[0]
+            else:
+                ambiguous_columns.append(
+                    {
+                        "canonical": canonical,
+                        "source_columns": list(matches),
+                    }
+                )
+            break
+    ambiguous_canonicals = {
+        str(item["canonical"]) for item in ambiguous_columns
+    }
+    missing = [
+        column
+        for column in contract.required
+        if column not in column_map and column not in ambiguous_canonicals
+    ]
+    missing.extend(
+        f"{item['canonical']}（归一化后匹配多个源列）"
+        for item in ambiguous_columns
+    )
     if contract.one_of and not any(column in column_map for column in contract.one_of):
         missing.append(" 或 ".join(contract.one_of) + "（至少一个）")
     if (
@@ -800,6 +839,7 @@ def _contract_match(registry, backend, dataset, contract: _MaterialContract) -> 
         "observed_columns": columns,
         "column_map": column_map,
         "missing_columns": missing,
+        "ambiguous_columns": ambiguous_columns,
     }
 
 

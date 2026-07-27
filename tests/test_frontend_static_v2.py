@@ -1414,6 +1414,9 @@ def test_create_dialog_auto_fills_removed_report_values():
 def test_create_dialog_uses_visual_run_mode_cards():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
+    run_mode_start = index_html.index('class="run-mode-cards"')
+    run_mode_end = index_html.index("</section>", run_mode_start)
+    run_mode_markup = index_html[run_mode_start:run_mode_end]
 
     assert 'class="run-mode-cards"' in index_html
     assert 'class="run-mode-card selected-tone-amber"' in index_html
@@ -1430,8 +1433,8 @@ def test_create_dialog_uses_visual_run_mode_cards():
     assert 'value="agent"' in index_html
     assert 'name="runMode" type="radio" value="manual" checked' not in index_html
     assert 'name="runMode" type="radio" value="agent" disabled' not in index_html
-    assert "预留" not in index_html
-    assert "后续" not in index_html
+    assert "预留" not in run_mode_markup
+    assert "后续" not in run_mode_markup
     assert 'class="mode-choice"' not in index_html
 
     assert ".run-mode-cards {" in styles_css
@@ -6546,6 +6549,7 @@ def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
             "    return { id: `task-${createApiCalls}`, run_mode: 'agent' };",
             "  },",
             "};",
+            "const strategyCandidateLabController = { selectTask() { return Promise.resolve(); } };",
             "function taskTypeDefinition() { return { initialGoal: '', label: '建模' }; }",
             "const defaultTaskType = 'modeling';",
             "function prefillAgentTaskInstruction() {}",
@@ -7959,6 +7963,12 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert '<option value="active">启用</option>' in status_filter
     assert '<option value="deleted">已删除</option>' in index_html
     assert '<option value="rejected">已拒绝</option>' in index_html
+    for memory_type in (
+        "join_experience",
+        "strategy_experience",
+        "risk_analysis_experience",
+    ):
+        assert f'<option value="{memory_type}">' in index_html
     assert 'data-agent-memory-action="inspect"' in memory_panel_js
     assert 'data-agent-memory-action="disable"' in memory_panel_js
     assert 'data-agent-memory-action="enable"' in memory_panel_js

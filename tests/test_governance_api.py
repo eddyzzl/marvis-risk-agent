@@ -388,7 +388,7 @@ def test_issued_effect_approval_is_fenced_by_live_binding_drift(tmp_path, drift)
     plan = app.state.plan_repo.load_plan("plan-1")
     step = next(item for item in plan.steps if item.id == "step-adopt")
     manifest, tool = app.state.tool_registry.resolve_with_manifest(step.tool_ref)
-    if drift in {"revision", "target"}:
+    if drift in {"revision", "target", "strategy_spec"}:
         with pytest.raises(ApprovalBindingError):
             app.state.governance_service.resolve_binding(
                 task_id=plan.task_id,

@@ -7,6 +7,7 @@ from openpyxl import load_workbook
 import pandas as pd
 import pytest
 
+from marvis.agent.renderers import render_tool_output
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
@@ -583,6 +584,49 @@ def test_vtg_terminal_reconciles_dual_average_balance_curve_inputs():
         calculate_vtg_terminal(frame, column_map=mapping)
 
 
+def test_vtg_terminal_allows_row_level_choice_between_two_balance_inputs():
+    frame = pd.DataFrame(
+        {
+            "产品": ["A", "A"],
+            "账期": ["2025-01", "2025-01"],
+            "截至日期": ["2025-03-31", "2025-03-31"],
+            "金额单位": ["万元", "万元"],
+            "放款金额": [3600.0, 3600.0],
+            "MOB14不良率": [0.10, 0.10],
+            "终值不良率": [0.08, 0.08],
+            "MOB": [0, 1],
+            "MOB天数": [30.0, 330.0],
+            "日数基准": [360.0, 360.0],
+            "MOB平均日余额率": [1.0, None],
+            "MOB平均日余额": [None, 1800.0],
+        }
+    )
+    mapping = {
+        "product": "产品",
+        "cohort": "账期",
+        "as_of_date": "截至日期",
+        "amount_unit": "金额单位",
+        "disbursement_amount": "放款金额",
+        "mob14_bad_rate": "MOB14不良率",
+        "terminal_bad_rate": "终值不良率",
+        "mob": "MOB",
+        "mob_days": "MOB天数",
+        "day_count_basis": "日数基准",
+        "mob_balance_rate": "MOB平均日余额率",
+        "mob_balance_amount": "MOB平均日余额",
+    }
+
+    result = calculate_vtg_terminal(frame, column_map=mapping)
+
+    expected_avg_balance = (3600.0 * 30.0 + 1800.0 * 330.0) / 360.0
+    assert result.detail_rows[0]["avg_daily_balance"] == pytest.approx(
+        expected_avg_balance
+    )
+    assert result.detail_rows[0]["mob_balance_source"] == (
+        "mixed(mob_balance_amount,mob_balance_rate)"
+    )
+
+
 @pytest.mark.parametrize(
     ("mutator", "message"),
     [
@@ -944,6 +988,23 @@ def test_profitability_customer_stages_reject_inconsistent_asset_inputs():
         calculate_profitability(frame, column_map=mapping)
 
 
+def test_profitability_customer_stages_reject_duplicate_stage_rows():
+    frame = pd.concat([_raw_profit_frame()] * 2, ignore_index=True)
+    frame["客户阶段"] = ["首借", "首借"]
+    frame["交易权重"] = [1.0, 9.0]
+    mapping = {
+        **_RAW_PROFIT_COLUMN_MAP,
+        "customer_stage": "客户阶段",
+        "transaction_weight": "交易权重",
+    }
+
+    with pytest.raises(
+        RiskAnalysisError,
+        match="customer_stage 必须唯一.*首借",
+    ):
+        calculate_profitability(frame, column_map=mapping)
+
+
 def test_profitability_requires_average_balance_weight_basis():
     frame = _profit_frame()
     frame.loc[0, "权重口径"] = "disbursement"
@@ -964,6 +1025,33 @@ def test_profitability_requires_as_of_period_at_tool_boundary():
         match="column_map 缺少必需字段: as_of_period",
     ):
         calculate_profitability(_profit_frame(), column_map=mapping)
+
+
+def test_column_map_rejects_one_source_column_for_two_business_fields():
+    mapping = dict(_VTG_COLUMN_MAP)
+    mapping["cohort"] = mapping["product"]
+
+    with pytest.raises(
+        RiskAnalysisError,
+        match="同一源数据列不能映射到多个业务字段: product 和 cohort -> 产品",
+    ):
+        calculate_vtg_terminal(_vtg_frame(), column_map=mapping)
+
+
+def test_risk_analysis_renderer_formats_scenario_spread_as_percentage():
+    _text, tables = render_tool_output(
+        "generate_risk_analysis_report",
+        {
+            "analysis_kind": "profitability",
+            "source_row_count": 2,
+            "row_count": 2,
+            "headline_metrics": {
+                "largest_scenario_net_yield_spread": 0.02,
+            },
+        },
+    )
+
+    assert tables[0]["rows"] == [["最大场景净收益差", "2.0%"]]
 
 
 def test_profitability_rejects_duplicate_asset_class_business_slice():
@@ -1298,3 +1386,46 @@ def test_builtin_tool_writes_task_output_audit_and_schema_valid_result(tmp_path)
     assert audits[0]["target_ref"] == task.id
     assert audits[0]["detail"]["dataset_id"] == dataset.id
     assert audits[0]["detail"]["column_map"] == _VTG_COLUMN_MAP
+
+
+def test_builtin_tool_rejects_dataset_owned_by_another_task(tmp_path):
+    settings, plugin_repo, _plugin_registry, runner, registry, task = _tool_runtime(
+        tmp_path
+    )
+    source_dir = tmp_path / "other-source"
+    source_dir.mkdir()
+    other_task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="其他任务",
+            model_version="dev",
+            validator="pytest",
+            source_dir=str(source_dir),
+            algorithm="lr",
+            run_mode="agent",
+            task_type=TASK_TYPE_VINTAGE,
+        )
+    )
+    source = tmp_path / "other-vtg.parquet"
+    _vtg_frame().to_parquet(source, index=False)
+    foreign_dataset = registry.register_existing(
+        source,
+        task_id=other_task.id,
+        role="performance",
+    )
+
+    result = runner.invoke(
+        ToolRef("risk_analysis", "generate_risk_analysis_report"),
+        {
+            "analysis_kind": "vtg_terminal",
+            "dataset_id": foreign_dataset.id,
+            "column_map": _VTG_COLUMN_MAP,
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is False
+    assert "dataset not found" in str(result.error)
+    assert not (
+        settings.tasks_dir / task.id / "outputs" / "risk_analysis_report.xlsx"
+    ).exists()
+    assert plugin_repo.list_audit(kind="risk_analysis.report.generated") == []

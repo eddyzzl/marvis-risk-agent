@@ -30,6 +30,31 @@ def test_risk_report_keeps_numeric_values_numeric():
     assert cell.value == -0.0125
 
 
+@pytest.mark.parametrize("value", ["safe\x0btext", "\x0b=1+1"])
+def test_risk_report_removes_xml_illegal_control_characters(value: str):
+    workbook = Workbook()
+    cell = workbook.active.cell(row=1, column=1, value=_cell_value(value))
+
+    assert "\x0b" not in cell.value
+    assert cell.data_type == "s"
+    if "=" in value:
+        assert cell.value.startswith("'")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["A" * 40_000, "=" + "A" * 40_000],
+)
+def test_risk_report_bounds_uploaded_text_to_excel_cell_limit(value: str):
+    workbook = Workbook()
+    cell = workbook.active.cell(row=1, column=1, value=_cell_value(value))
+
+    assert len(cell.value) == 32_767
+    assert cell.data_type == "s"
+    if value.startswith("="):
+        assert cell.value.startswith("'")
+
+
 def test_risk_report_neutralizes_uploaded_text_across_every_sheet(tmp_path):
     payload = RiskAnalysisReportPayload(
         analysis_kind="vtg_terminal",

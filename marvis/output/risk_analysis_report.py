@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -31,6 +32,7 @@ _WARN_FILL = "FFF2CC"
 _FAIL_FILL = "F4CCCC"
 _PASS_FILL = "D9EAD3"
 _BORDER_COLOR = "C9D2DC"
+_EXCEL_CELL_TEXT_MAX_CHARS = 32_767
 
 _ANALYSIS_LABELS = {
     "vtg_terminal": "VTG 终值与年化不良测算",
@@ -539,10 +541,10 @@ def _cell_value(value: Any) -> Any:
 def _safe_excel_text(value: str) -> str:
     """Keep uploaded labels/text from becoming formulas in the XLSX output."""
 
-    text = str(value)
+    text = ILLEGAL_CHARACTERS_RE.sub(" ", str(value))
     if text.lstrip().startswith(("=", "+", "-", "@")):
-        return "'" + text
-    return text
+        return "'" + text[: _EXCEL_CELL_TEXT_MAX_CHARS - 1]
+    return text[:_EXCEL_CELL_TEXT_MAX_CHARS]
 
 
 def _label(key: str) -> str:
