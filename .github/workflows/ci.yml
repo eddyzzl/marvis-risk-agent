@@ -15,11 +15,90 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
+  quality:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Fast tier finishes well under an hour on a hosted runner; the manual
-    # full-suite dispatch needs the headroom (real training/JVM/server tests).
-    timeout-minutes: 100
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Run static and source-integrity checks
+        env:
+          CHECK_DIFF_RANGE: ${{ github.event_name == 'pull_request' && format('{0}...HEAD', github.event.pull_request.base.sha) || 'HEAD~1..HEAD' }}
+        run: uv run scripts/check --fast --skip-pytest
+
+  fast_tests:
+    if: github.event_name != 'workflow_dispatch'
+    name: fast_tests (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 1
+            index: 0
+          - shard: 2
+            index: 1
+          - shard: 3
+            index: 2
+          - shard: 4
+            index: 3
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Run fast-test shard
+        env:
+          PYTEST_SHARD_INDEX: ${{ matrix.index }}
+          PYTEST_SHARD_TOTAL: 4
+        run: |
+          uv run python -m pytest -q \
+            -p scripts.pytest_shard \
+            -m "not slow and not e2e and not llm and not pmml_runtime"
+
+  full_checks:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
 
     steps:
       - name: Check out repository
@@ -39,7 +118,6 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Set up Java
-        if: github.event_name == 'workflow_dispatch'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -53,25 +131,33 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked --extra dev
 
-      - name: Run checks
-        # PR/push gates run the fast tier (slow/e2e/llm excluded): hosted
-        # 2-core runners cannot finish real-training/JVM tests inside sane
-        # limits (the all-recipe tuning test alone exceeds 10 minutes there).
-        # The full suite remains the local release gate and can be run here
-        # on demand via workflow_dispatch.
-        env:
-          CHECK_DIFF_RANGE: ${{ github.event_name == 'pull_request' && format('{0}...HEAD', github.event.pull_request.base.sha) || 'HEAD~1..HEAD' }}
-          CHECK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'fast' }}
+      - name: Run full release checks
         run: |
-          if [ "$CHECK_MODE" = "full" ]; then
-            # Manual dispatch reviews the whole branch, not just the tip commit.
-            base="$(git merge-base origin/main HEAD 2>/dev/null || true)"
-            if [ -n "$base" ] && [ "$base" != "$(git rev-parse HEAD)" ]; then
-              export CHECK_DIFF_RANGE="${base}...HEAD"
-            fi
-            uv run scripts/check
+          base="$(git merge-base origin/main HEAD 2>/dev/null || true)"
+          if [ -n "$base" ] && [ "$base" != "$(git rev-parse HEAD)" ]; then
+            export CHECK_DIFF_RANGE="${base}...HEAD"
+          fi
+          uv run scripts/check
+
+  checks:
+    if: always()
+    needs: [quality, fast_tests, full_checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Require the applicable verification lanes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          FAST_TESTS_RESULT: ${{ needs.fast_tests.result }}
+          FULL_CHECKS_RESULT: ${{ needs.full_checks.result }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            test "$FULL_CHECKS_RESULT" = "success"
           else
-            uv run scripts/check --fast
+            test "$QUALITY_RESULT" = "success"
+            test "$FAST_TESTS_RESULT" = "success"
           fi
 
   strategy_smoke:
