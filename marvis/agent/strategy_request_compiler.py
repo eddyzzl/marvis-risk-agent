@@ -73,6 +73,7 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "automatic_tree_candidate_build",
     "automatic_tree_apply",
     "automatic_tree_leaf_materialization",
+    "interactive_tree_split_search",
     "interactive_tree_revision",
     "interactive_tree_frontier_group_materialization",
     "interactive_tree_frontier_materialization",
@@ -4057,6 +4058,10 @@ def _validate_standard_workflow_payload(
             )
         elif workflow == "interactive_tree_revision":
             normalized = _validate_interactive_tree_revision_inputs(raw_inputs)
+        elif workflow == "interactive_tree_split_search":
+            normalized = _validate_interactive_tree_split_search_inputs(
+                raw_inputs
+            )
         elif workflow == "interactive_tree_frontier_group_materialization":
             normalized = (
                 _validate_interactive_tree_frontier_group_materialization_inputs(
@@ -6001,6 +6006,109 @@ def _validate_automatic_tree_leaf_materialization_inputs(
         normalized["selection_reason"] = _automatic_tree_selection_reason(
             inputs["selection_reason"]
         )
+    return normalized
+
+
+def _validate_interactive_tree_split_search_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate exact tree/node pointers plus explicit bounded search controls."""
+
+    workflow = "interactive_tree_split_search"
+    allowed = {
+        "source_tree_id",
+        "node_id",
+        "mode",
+        "features",
+        "max_thresholds_per_feature",
+        "max_row_evaluations",
+    }
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    required = {
+        "source_tree_id",
+        "node_id",
+        "mode",
+        "max_thresholds_per_feature",
+        "max_row_evaluations",
+    }
+    missing = sorted(required - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+    source_tree_id = _required_text(
+        inputs["source_tree_id"],
+        name=f"{workflow} source_tree_id",
+    )
+    if _INTERACTIVE_TREE_SOURCE_ID_RE.fullmatch(source_tree_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} source_tree_id 必须是完整 automatic-tree asset "
+            "或 interactive-tree revision ID。"
+        )
+    node_id = _required_text(
+        inputs["node_id"],
+        name=f"{workflow} node_id",
+    )
+    if _INTERACTIVE_TREE_NODE_ID_RE.fullmatch(node_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} node_id 必须是 node- 后接 20 位小写十六进制字符。"
+        )
+    mode = _required_text(inputs["mode"], name=f"{workflow} mode")
+    if mode not in {"all_features", "selected_features"}:
+        raise _DraftValidationError(
+            f"{workflow} mode 只允许 all_features 或 selected_features。"
+        )
+    has_features = "features" in inputs
+    if mode == "all_features" and has_features:
+        raise _DraftValidationError(
+            f"{workflow} all_features 不能提供 features。"
+        )
+    if mode == "selected_features" and not has_features:
+        raise _DraftValidationError(
+            f"{workflow} selected_features 必须提供 features。"
+        )
+    normalized: dict[str, Any] = {
+        "source_tree_id": source_tree_id,
+        "node_id": node_id,
+        "mode": mode,
+    }
+    if has_features:
+        raw_features = inputs["features"]
+        if (
+            isinstance(raw_features, (str, bytes, bytearray))
+            or not isinstance(raw_features, Sequence)
+        ):
+            raise _DraftValidationError(
+                f"{workflow} features 必须是非空字符串数组。"
+            )
+        features = [
+            _required_text(item, name=f"{workflow} feature")
+            for item in raw_features
+        ]
+        if (
+            not features
+            or len(features) > 50
+            or len(features) != len(set(features))
+        ):
+            raise _DraftValidationError(
+                f"{workflow} features 必须非空、唯一且不超过 50 个。"
+            )
+        normalized["features"] = sorted(features)
+    for field, maximum in (
+        ("max_thresholds_per_feature", 20),
+        ("max_row_evaluations", 20_000_000),
+    ):
+        value = inputs[field]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+            or value > maximum
+        ):
+            raise _DraftValidationError(
+                f"{workflow} {field} 必须是 1 到 {maximum} 的整数。"
+            )
+        normalized[field] = value
     return normalized
 
 
@@ -9626,6 +9734,8 @@ def _ground_refinement_request(
         )
     if draft.workflow == "automatic_tree_leaf_materialization":
         return _ground_automatic_tree_leaf_materialization(utterance, result)
+    if draft.workflow == "interactive_tree_split_search":
+        return _ground_interactive_tree_split_search(utterance, result)
     if draft.workflow == "interactive_tree_revision":
         return _ground_interactive_tree_revision(utterance, result)
     if draft.workflow == "interactive_tree_frontier_group_materialization":
@@ -13929,6 +14039,135 @@ def _ground_automatic_tree_leaf_materialization(
     return result
 
 
+def _ground_interactive_tree_split_search(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Ground one aggregate-only node search without authorizing a tree edit."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if re.search(
+        r"(?:不要|别|无需|仅讨论|以后|将来|曾经|是否|能否|可否|"
+        r"\b(?:not|do\s+not|don't|later|future|historical|whether|can\s+you)\b)",
+        utterance,
+        re.IGNORECASE,
+    ):
+        return _clarification(
+            "原话必须是当前、肯定的一次节点候选搜索命令；否定、问句、"
+            "历史、假设或未来描述不会启动搜索。",
+            code="interactive_tree_split_search_intent_negated",
+            fields=("search_intent",),
+        )
+    if not (
+        re.search(
+            r"(?:搜索|分析|遍历|候选|排名|试算|search|rank|candidate|"
+            r"evaluate)",
+            utterance,
+            re.IGNORECASE,
+        )
+        and re.search(
+            r"(?:树|节点|分裂|特征|tree|node|split|feature)",
+            utterance,
+            re.IGNORECASE,
+        )
+    ):
+        return _clarification(
+            "请明确要求对一个交互树节点搜索或分析分裂候选。",
+            code="interactive_tree_split_search_explicit_intent_required",
+            fields=("search_intent",),
+        )
+    if re.search(
+        r"(?:直接替换|直接修改|自动选(?:最优|最佳|冠军)|采用第一名|"
+        r"继续建树|自动续建|加入策略池|入池|应用|采纳|部署|投产|生成报告|"
+        r"replace\s+and\s+apply|select\s+(?:the\s+)?winner|"
+        r"auto[- ]?build|continue\s+(?:the\s+)?tree|add\s+to\s+pool|"
+        r"adopt|deploy|generate\s+(?:a\s+)?report)",
+        utterance,
+        re.IGNORECASE,
+    ):
+        return _clarification(
+            "本轮只生成节点分裂候选证据；选定候选、修改树、自动续建、"
+            "入池、应用、报告、采纳或部署必须拆成后续明确请求。",
+            code="interactive_tree_split_search_single_step_required",
+            fields=("next_action",),
+        )
+    if re.search(
+        r"(?:artifact|content_hash|evidence_hash|sample_design_ref|"
+        r"dataset_id|workspace_revision|registry_metadata_hash|"
+        r"制品哈希|样本绑定|数据集绑定)",
+        utterance,
+        re.IGNORECASE,
+    ):
+        return _clarification(
+            "artifact、hash、数据集、workspace、样本与树父链由平台恢复，"
+            "不能由本次自然语言搜索覆盖。",
+            code="interactive_tree_split_search_platform_controls_forbidden",
+            fields=("platform_bindings",),
+        )
+    source_matches = tuple(
+        _INTERACTIVE_TREE_SOURCE_ID_TOKEN_RE.finditer(utterance)
+    )
+    node_matches = tuple(_INTERACTIVE_TREE_NODE_ID_TOKEN_RE.finditer(utterance))
+    source_ids = frozenset(match.group(0) for match in source_matches)
+    node_ids = frozenset(match.group(0) for match in node_matches)
+    if (
+        len(source_matches) != 1
+        or len(source_ids) != 1
+        or len(node_matches) != 1
+        or len(node_ids) != 1
+    ):
+        return _clarification(
+            "请逐字提供且只提供一个完整 automatic-tree/revision ID 和一个"
+            "完整 node ID；平台不会用“那棵树”“最差节点”等代词或排名"
+            "替你选择。",
+            code="interactive_tree_split_search_explicit_ids_required",
+            fields=("source_tree_id", "node_id"),
+        )
+    ungrounded: list[str] = []
+    if source_ids != {inputs["source_tree_id"]}:
+        ungrounded.append("source_tree_id")
+    if node_ids != {inputs["node_id"]}:
+        ungrounded.append("node_id")
+    all_feature_intent = re.search(
+        r"(?:全部特征|所有特征|全特征|完整特征全集|"
+        r"all\s+(?:authenticated\s+)?features?|full\s+feature\s+universe)",
+        utterance,
+        re.IGNORECASE,
+    )
+    if inputs["mode"] == "all_features":
+        if all_feature_intent is None or "features" in inputs:
+            ungrounded.append("mode")
+    else:
+        features = inputs.get("features")
+        if (
+            all_feature_intent is not None
+            or not isinstance(features, list)
+            or any(feature not in utterance for feature in features)
+        ):
+            ungrounded.append("features")
+    for field in (
+        "max_thresholds_per_feature",
+        "max_row_evaluations",
+    ):
+        value = inputs[field]
+        if re.search(
+            rf"(?<![0-9A-Fa-f.]){re.escape(str(value))}(?![0-9A-Fa-f.])",
+            utterance,
+        ) is None:
+            ungrounded.append(field)
+    if ungrounded:
+        return _clarification(
+            "搜索范围和预算必须与用户原话完全一致：明确全特征或逐字给出"
+            "特征子集，并给出每特征阈值数与总行评估预算；平台不会补默认值"
+            "或猜测。",
+            code="interactive_tree_split_search_controls_not_grounded",
+            fields=tuple(dict.fromkeys(ungrounded)),
+        )
+    return result
+
+
 def _ground_interactive_tree_revision(
     utterance: str,
     result: StrategyRequestCompilation,
@@ -17250,6 +17489,25 @@ def _standard_workflow_confirmation_text(
         ]
         if "selection_reason" in inputs:
             details.append(f"用户原话选择说明：{inputs['selection_reason']}")
+    elif draft.workflow == "interactive_tree_split_search":
+        details = [
+            "已识别为〔交互式树节点分裂候选搜索 Workflow〕",
+            f"来源树 pointer：{inputs['source_tree_id']}",
+            f"精确可见 node pointer：{inputs['node_id']}",
+            (
+                "搜索范围：认证树的全部特征"
+                if inputs["mode"] == "all_features"
+                else "搜索范围：用户明确的特征子集 "
+                + "、".join(inputs["features"])
+            ),
+            "每特征最大候选阈值数："
+            f"{inputs['max_thresholds_per_feature']}",
+            f"总行评估预算：{inputs['max_row_evaluations']}",
+            "平台将认证完整树父链、数据集、workspace 与 SampleDesign，只"
+            "持久化左右节点聚合风险证据，不输出客户明细",
+            "排名只用于浏览；本步骤不会选择胜者、修改树、入池、应用、"
+            "采纳或部署",
+        ]
     elif draft.workflow == "interactive_tree_revision":
         operation = inputs["operation"]
         details = [
@@ -18075,6 +18333,13 @@ def _user_prompt(
         "Strategy Pool、业务动作、采纳、部署或 leaf ID 写回。selection_reason 中也"
         "不得藏入理由替换、后续动作、生命周期操作或极值/排名选叶语义；它只接受"
         "人工/业务/风险/合规/样本评审依据类短说明。"
+        "对于 interactive_tree_split_search，只能逐字抄录用户当前肯定命令中"
+        "唯一完整的 source_tree_id、唯一完整的 node_id、明确的 "
+        "all_features/selected_features 范围、每特征最大阈值数和总行评估"
+        "预算；selected_features 还要逐字抄录唯一特征列表，all_features 必须"
+        "省略 features。不得补默认预算，不得输出平台 artifact/hash、父链、"
+        "condition、metrics、dataset/workspace/SampleDesign 或明细，不得同轮"
+        "选胜者、改树、自动续建、入池、应用、报告、采纳或部署。"
         "对于 interactive_tree_revision，只能逐字抄录用户当前肯定命令中唯一完整的"
         " source_tree_id（candidate-asset- 或 interactive-tree-revision- 后接 32 位"
         "小写十六进制）、唯一完整的 split node_id（node- 后接 20 位小写十六进制）、"

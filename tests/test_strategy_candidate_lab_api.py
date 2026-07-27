@@ -1393,7 +1393,7 @@ def test_candidate_lab_replays_scorecard_pool_and_projects_safe_evidence(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v8"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v9"
     band = body["candidates"]["scorecard_band"]["latest"]
     assert band["detail"]["asset_id"] == asset["asset_id"]
     assert band["detail"]["performance"] == {"auc": 1.0, "ks": 1.0}
@@ -1974,7 +1974,7 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
 
     assert response.status_code == 200, response.text
     assert response.json() == {
-        "schema_version": "strategy.candidate-lab-projection.v8",
+        "schema_version": "strategy.candidate-lab-projection.v9",
         "task_id": task_id,
         "can_start": True,
         "blocked_reason": None,
@@ -1990,6 +1990,7 @@ def test_candidate_lab_empty_projection_is_task_scoped_and_bounded(tmp_path: Pat
                 "cross_rule_candidate",
                 "automatic_tree",
                 "interactive_tree_revision",
+                "interactive_tree_split_search",
                 "scorecard_band",
                 "scorecard_cutoff_selection",
                 "voting_search",
@@ -2134,7 +2135,7 @@ def test_candidate_lab_projects_authenticated_materialized_strategy_history(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v8"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v9"
     collection = body["strategies"]
     assert collection["total"] == 1
     assert collection["truncated"] is False
@@ -2362,7 +2363,7 @@ def test_candidate_lab_projects_authenticated_project_context_and_history(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v8"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v9"
     project = body["workflow"]["project_context"]
     assert project["revision_id"] == output["revision"]["revision_id"]
     assert project["revision"] == 1
@@ -2401,7 +2402,7 @@ def test_candidate_lab_v4_projects_authenticated_native_dual_population_sample(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["schema_version"] == "strategy.candidate-lab-projection.v8"
+    assert body["schema_version"] == "strategy.candidate-lab-projection.v9"
     sample = body["workflow"]["sample_design"]
     assert sample["source_mode"] == "native_active_dataset"
     assert sample["relationship"] == "parallel_time_cohorts"

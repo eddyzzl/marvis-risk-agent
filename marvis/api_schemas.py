@@ -225,6 +225,7 @@ ManualStrategyWorkflow = Literal[
     "cross_matrix_candidate_build_from_search",
     "cross_rule_search",
     "cross_rule_candidate_build_from_search",
+    "interactive_tree_split_search",
     "interactive_tree_revision",
     "interactive_tree_frontier_group_materialization",
     "interactive_tree_frontier_materialization",
@@ -829,6 +830,38 @@ class ManualInteractiveTreeRevisionInputs(BaseModel):
             raise ValueError(
                 "feature is allowed only for replace_split_feature"
             )
+        return self
+
+
+class ManualInteractiveTreeSplitSearchInputs(BaseModel):
+    """One visible tree/node pointer plus explicit bounded search controls."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    source_tree_id: ManualInteractiveTreeSourceId
+    node_id: ManualInteractiveTreeNodeId
+    mode: Literal["all_features", "selected_features"]
+    features: list[StrictCanonicalNonEmptyStr] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=50,
+    )
+    max_thresholds_per_feature: StrictInt = Field(ge=1, le=20)
+    max_row_evaluations: StrictInt = Field(ge=1, le=20_000_000)
+
+    @model_validator(mode="after")
+    def validate_mode_fields(self) -> Self:
+        if "features" in self.model_fields_set and self.features is None:
+            raise ValueError(
+                "optional fields must be omitted instead of null: features"
+            )
+        if self.mode == "all_features":
+            if self.features is not None:
+                raise ValueError("all_features forbids features")
+        elif self.features is None:
+            raise ValueError("selected_features requires features")
+        elif len(self.features) != len(set(self.features)):
+            raise ValueError("selected_features requires unique features")
         return self
 
 
@@ -1613,6 +1646,9 @@ _MANUAL_CANDIDATE_STABILITY_INPUTS = TypeAdapter(
 _MANUAL_INTERACTIVE_TREE_REVISION_INPUTS = TypeAdapter(
     ManualInteractiveTreeRevisionInputs
 )
+_MANUAL_INTERACTIVE_TREE_SPLIT_SEARCH_INPUTS = TypeAdapter(
+    ManualInteractiveTreeSplitSearchInputs
+)
 _MANUAL_INTERACTIVE_TREE_FRONTIER_MATERIALIZATION_INPUTS = TypeAdapter(
     ManualInteractiveTreeFrontierMaterializationInputs
 )
@@ -1756,6 +1792,11 @@ class ManualStrategyRequest(BaseModel):
                 self.workflow_inputs,
                 strict=True,
             )
+        elif self.workflow == "interactive_tree_split_search":
+            _MANUAL_INTERACTIVE_TREE_SPLIT_SEARCH_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
         elif self.workflow == "interactive_tree_frontier_materialization":
             _MANUAL_INTERACTIVE_TREE_FRONTIER_MATERIALIZATION_INPUTS.validate_python(
                 self.workflow_inputs,
@@ -1870,6 +1911,7 @@ class ManualStrategyRequest(BaseModel):
             "scorecard_cutoff_selection": {"asset_id", "cutoff_id"},
             "candidate_monthly_stability": {"asset_id", "entry_id"},
             "interactive_tree_revision": {"source_tree_id", "node_id"},
+            "interactive_tree_split_search": {"source_tree_id", "node_id"},
             "interactive_tree_frontier_materialization": {
                 "revision_id",
                 "source_node_id",

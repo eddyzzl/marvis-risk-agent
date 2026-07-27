@@ -1397,6 +1397,79 @@
 
                     <details class="candidate-lab-launcher">
                       <summary>
+                        <span><strong>树节点候选搜索</strong><small>对指定节点做全特征或指定特征阈值试算</small></span>
+                      </summary>
+                      <form
+                        data-candidate-lab-form
+                        data-candidate-lab-workflow="interactive_tree_split_search"
+                      >
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>来源树 / Revision <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="interactive_tree_search_source_id">
+                            <option value="">请选择自动树或不可变 revision</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>当前可见节点 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="interactive_tree_search_node_id">
+                            <option value="">请选择要分析的节点</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>搜索范围 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="interactive_tree_search_mode">
+                            <option value="all_features" selected>认证树的全部特征</option>
+                            <option value="selected_features">仅指定特征</option>
+                          </select>
+                        </label>
+                        <label
+                          class="candidate-lab-field candidate-lab-field-wide hidden"
+                          data-candidate-lab-tree-search-features-panel
+                        >
+                          <span>指定特征 <b aria-hidden="true">*</b></span>
+                          <textarea
+                            rows="2"
+                            data-candidate-lab-field="interactive_tree_search_features"
+                            placeholder="例如：score, age, income"
+                          ></textarea>
+                        </label>
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>每特征最大阈值数 <b aria-hidden="true">*</b></span>
+                            <input
+                              type="number"
+                              min="1"
+                              max="20"
+                              step="1"
+                              value="10"
+                              data-candidate-lab-field="interactive_tree_search_max_thresholds"
+                            >
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>总行评估预算 <b aria-hidden="true">*</b></span>
+                            <input
+                              type="number"
+                              min="1"
+                              max="20000000"
+                              step="1"
+                              value="2000000"
+                              data-candidate-lab-field="interactive_tree_search_max_row_evaluations"
+                            >
+                          </label>
+                        </div>
+                        <p class="candidate-lab-field-help" data-candidate-lab-tree-search-help>
+                          当前任务尚无受认证自动树，请先构建自动规则树。
+                        </p>
+                        <p class="candidate-lab-field-help">
+                          只生成聚合候选证据；排名不代表胜者，不会修改树、入池、应用、采纳或部署。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">搜索节点候选</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
                         <span><strong>双人群样本设计</strong><small>审批人群与风险表现人群、分区和成熟度</small></span>
                       </summary>
                       <form data-candidate-lab-form data-candidate-lab-workflow="strategy_sample_design_v2">

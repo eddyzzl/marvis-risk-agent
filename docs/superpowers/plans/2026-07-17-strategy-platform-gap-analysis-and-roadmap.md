@@ -552,6 +552,8 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 
 **交互树精确替换分裂字段纵切（已完成，2026-07-27）**：`interactive_tree_revision` 在保留既有剪枝和阈值契约的同时新增 `replace_split_feature`。用户必须逐字提供唯一来源树/revision、当前可见 split node、来源树认证 feature universe 中一个不同字段及唯一有限阈值；自然语言和 Manual DTO 都拒绝“最佳字段”“自动推荐”、平台 binding 注入、同字段 no-op 与复合后续动作。确定性 replay 会使用当前 effective tree 配置，只改变目标 node 的字段/阈值/缺失路由并重算目标子树，核对其他分支未变化、完整 frontier exactly-once、最小叶、指标守恒、方向诊断和 DSL evaluator 等价；随后在 writer lock 内重新认证父链、SampleDesign、dataset/workspace 与文件字节并发布 task-owned 不可变 revision。Candidate Lab 投影只暴露认证 feature universe 和可换字段节点 pointer，不自动选字段；生成的 revision 继续复用前沿物化、Pool 和下游治理链。全字段候选指标搜索、单字段候选点和自动续建仍待后续纵切。
 
+**交互树节点候选搜索纵切（已完成，2026-07-27）**：新增 `interactive_tree_split_search`，自然语言与 Manual 工作台均要求唯一 task-owned automatic tree/revision、唯一当前可见 node、`all_features` 或显式 `selected_features` 范围、每特征候选阈值数和总行评估预算。平台从认证树恢复 feature universe、冻结的缺失中位数路由、风险方向、最小叶、完整父 revision 链、精确 SampleDesign 和 development 数据；内核最多接受 50 个特征、每特征 20 个阈值、1,000 个候选及 2,000 万次行评估，只固化父/左右节点的件数、好坏、坏率、可用权重、Gini 增益、方向一致性和失败约束，不输出客户明细。搜索结果有内容派生 ID/hash、canonical JSON、task artifact/provenance、writer-lock 二次计算和完整加载认证；rank 明确只作导航，`winner_selected=false`、`tree_modified=false`。Candidate Lab 只从受认证投影选择来源和节点，候选行按钮仅回填后续 `adjust_split_threshold` 或 `replace_split_feature` 表单，仍需用户单独确认，不能同轮入池、应用、采纳或部署。与参考平台相比，这保留了全字段/单字段候选能力，同时补上预算、样本 lineage、不可变证据和无暗选胜者边界；消费精确 search/candidate 证据、带明确目标/约束/停止条件的自动续建仍是下一纵切。
+
 交付：
 
 1. **单规则**：tree/quantile/equal-width/chi 四类分箱、类别等值箱、3-20 箱、最小样本、KS/IV/AUC/WOE/LIFT、件数+金额、批量排序、人工选箱/合并入池和 Excel；

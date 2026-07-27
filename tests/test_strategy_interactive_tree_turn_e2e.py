@@ -17,6 +17,10 @@ from marvis.packs.strategy.interactive_tree_tools import (
     INTERACTIVE_TREE_REVISION_ARTIFACT_KIND,
     INTERACTIVE_TREE_REVISION_ORIGIN_TOOL,
 )
+from marvis.packs.strategy.interactive_tree_split_search_tools import (
+    INTERACTIVE_TREE_SPLIT_SEARCH_ARTIFACT_KIND,
+    INTERACTIVE_TREE_SPLIT_SEARCH_ORIGIN_TOOL,
+)
 from marvis.plugins.manifest import ToolRef
 from tests.strategy_sample_design_support import (
     materialize_mature_strategy_sample_design,
@@ -194,6 +198,67 @@ def test_structured_turn_executes_interactive_tree_revision_and_registers_artifa
     assert revision["revision_id"] == output["revision_id"]
     assert revision["revision_hash"] == output["revision_hash"]
     assert revision["edit"] == output["edit"]
+
+
+@pytest.mark.slow
+@pytest.mark.e2e
+def test_structured_turn_executes_bounded_all_feature_node_search(
+    automatic_tree_turn: dict[str, object],
+) -> None:
+    client = automatic_tree_turn["client"]
+    assert isinstance(client, TestClient)
+    task_id = str(automatic_tree_turn["task_id"])
+    workflow_inputs = {
+        "source_tree_id": str(automatic_tree_turn["asset_id"]),
+        "node_id": str(automatic_tree_turn["root_node_id"]),
+        "mode": "all_features",
+        "max_thresholds_per_feature": 5,
+        "max_row_evaluations": 2_000,
+    }
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "按当前树投影搜索指定节点的全部特征分裂候选。",
+            "strategy_request": _standard_workflow_request(
+                "interactive_tree_split_search",
+                workflow_inputs,
+            ),
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plan = plans[-1]
+    assert plan["template_id"] == (
+        "strategy_interactive_tree_split_search"
+    )
+    assert plan["status"] == "done"
+    stored = client.app.state.plan_repo.load_plan(plan["id"])
+    assert stored.steps[0].tool_ref == ToolRef(
+        "strategy",
+        "search_interactive_tree_split_candidates",
+    )
+    assert stored.steps[0].inputs == workflow_inputs
+    output = client.app.state.plan_repo.load_step_output(stored.steps[0].id)
+    assert output["winner_selected"] is False
+    assert output["tree_modified"] is False
+    assert output["feature_count"] == 2
+    assert output["eligible_candidates"] > 0
+    descriptor = output["artifacts"][0]
+    assert descriptor["kind"] == INTERACTIVE_TREE_SPLIT_SEARCH_ARTIFACT_KIND
+    artifacts = client.get(
+        f"/api/tasks/{task_id}/task-artifacts"
+    ).json()["artifacts"]
+    registered = next(
+        artifact
+        for artifact in artifacts
+        if artifact["id"] == descriptor["artifact_id"]
+    )
+    assert registered["origin_tool"] == INTERACTIVE_TREE_SPLIT_SEARCH_ORIGIN_TOOL
+    downloaded = client.get(registered["download_url"])
+    assert downloaded.status_code == 200
+    assert downloaded.json()["claims"]["winner_selected"] is False
 
 
 @pytest.mark.slow

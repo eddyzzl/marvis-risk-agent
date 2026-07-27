@@ -34,6 +34,7 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "strategy_report_bundle_v2",
   "voting_candidate_search",
   "voting_candidate_build_from_search",
+  "interactive_tree_split_search",
   "interactive_tree_revision",
   "interactive_tree_frontier_group_materialization",
   "interactive_tree_frontier_materialization",
@@ -69,6 +70,7 @@ const WORKFLOW_LABELS = Object.freeze({
   strategy_report_bundle_v2: "形成策略迭代评审报告",
   voting_candidate_search: "搜索 Voting 组合",
   voting_candidate_build_from_search: "从搜索结果构建 Voting 候选",
+  interactive_tree_split_search: "搜索交互树节点分裂候选",
   interactive_tree_revision: "创建不可变交互式树修订",
   interactive_tree_frontier_group_materialization: "物化交互树前沿 OR 分组",
   interactive_tree_frontier_materialization: "物化交互树前沿节点",
@@ -116,6 +118,12 @@ const COLLECTION_DEFINITIONS = Object.freeze([
     title: "交互式树修订",
     description: "每条不可变分支各自保留完整拓扑、frontier、历史与回放证据",
     pointerKey: "frontier",
+  },
+  {
+    key: "interactive_tree_split_search",
+    title: "树节点分裂候选",
+    description: "全特征或指定特征的有预算阈值试算，仅保留聚合风险证据",
+    pointerKey: "",
   },
   {
     key: "scorecard_band",
@@ -170,6 +178,8 @@ const INTERACTIVE_TREE_SOURCE_ID_RE = /^(?:candidate-asset-[0-9a-f]{32}|interact
 const INTERACTIVE_TREE_NODE_ID_RE = /^node-[0-9a-f]{20}$/;
 const INTERACTIVE_TREE_REVISION_ID_RE = /^interactive-tree-revision-[0-9a-f]{32}$/;
 const INTERACTIVE_TREE_FRONTIER_SOURCE_NODE_ID_RE = /^(?:node|leaf)-[0-9a-f]{20}$/;
+const INTERACTIVE_TREE_SPLIT_SEARCH_ID_RE = /^interactive-tree-split-search-[0-9a-f]{32}$/;
+const INTERACTIVE_TREE_SPLIT_CANDIDATE_ID_RE = /^interactive-tree-split-candidate-[0-9a-f]{32}$/;
 const STRATEGY_POOL_TYPES = Object.freeze([
   "approval",
   "reject",
@@ -521,6 +531,7 @@ function candidateDetailHtml(item, pointerKey) {
     '<span class="candidate-lab-card-state">查看证据</span>',
     "</summary>",
     '<div class="candidate-lab-card-body">',
+    evidenceIdentityHtml(item),
     evidenceIdentityHtml(item),
     lifecycleHtml(item.lifecycle),
     detailFacts
@@ -1306,6 +1317,106 @@ function interactiveTreeDetailHtml(item) {
   ].join("");
 }
 
+function interactiveTreeSplitSearchDetailHtml(item) {
+  const searchId = nonEmptyText(item?.search_id);
+  const sourceTreeId = nonEmptyText(item?.source_tree_id);
+  const nodeId = nonEmptyText(item?.node_id);
+  const sourceNode = isRecord(item?.source_node) ? item.source_node : {};
+  const candidates = Array.isArray(item?.candidates)
+    ? item.candidates.filter(isRecord)
+    : [];
+  const canPrefill = (
+    sourceNode.kind === "split"
+    && sourceNode.is_visible === true
+    && sourceNode.is_frontier !== true
+    && sourceNode.can_prune === true
+  );
+  return [
+    '<details class="candidate-lab-evidence-card candidate-lab-tree-card">',
+    "<summary>",
+    '<span class="candidate-lab-card-title">',
+    `<strong>${escapeHtml(searchId || "树节点候选搜索")}</strong>`,
+    `<small>${escapeHtml(sourceTreeId)} · ${escapeHtml(nodeId)}</small>`,
+    "</span>",
+    `<span class="candidate-lab-card-state">${escapeHtml(stablePrimitiveText(
+      candidates.length,
+    ))} 个候选</span>`,
+    "</summary>",
+    '<div class="candidate-lab-card-body">',
+    evidenceIdentityHtml(item),
+    '<div class="candidate-lab-boundary-note" data-tone="info">',
+    "<strong>排名仅用于浏览</strong>",
+    "<p>搜索没有选择胜者，也没有修改树。点击“带入树修订”只会回填来源、节点、字段和阈值，仍需人工确认提交。</p>",
+    "</div>",
+    factsTableHtml({
+      search_id: searchId,
+      source_tree_id: sourceTreeId,
+      node_id: nodeId,
+      node_kind: item?.node_kind,
+      mode: item?.mode,
+      features: item?.features,
+      population: item?.population,
+      budget: item?.budget,
+      claims: item?.claims,
+    }),
+    '<div class="candidate-lab-table-scroll">',
+    '<table class="candidate-lab-table"><thead><tr>',
+    "<th>排名</th><th>字段 / 阈值</th><th>左侧</th><th>右侧</th><th>增益 / 方向</th><th>资格</th><th>操作</th>",
+    "</tr></thead><tbody>",
+    ...candidates.map((candidate) => {
+      const candidateId = nonEmptyText(candidate.candidate_id);
+      const feature = nonEmptyText(candidate.feature);
+      const threshold = Number(candidate.threshold);
+      const eligible = candidate.eligible === true;
+      const changesSplit = (
+        feature !== nonEmptyText(sourceNode.feature)
+        || threshold !== Number(sourceNode.threshold)
+      );
+      const action = (
+        eligible
+        && canPrefill
+        && changesSplit
+        && INTERACTIVE_TREE_SPLIT_CANDIDATE_ID_RE.test(candidateId)
+        && Number.isFinite(threshold)
+      )
+        ? [
+          '<button type="button" class="button compact secondary"',
+          ' data-candidate-lab-interactive-tree-split-candidate="1"',
+          ` data-search-id="${escapeHtml(searchId)}"`,
+          ` data-candidate-id="${escapeHtml(candidateId)}"`,
+          ` data-source-tree-id="${escapeHtml(sourceTreeId)}"`,
+          ` data-node-id="${escapeHtml(nodeId)}"`,
+          ` data-feature="${escapeHtml(feature)}"`,
+          ` data-threshold="${escapeHtml(stablePrimitiveText(threshold))}">`,
+          "带入树修订</button>",
+        ].join("")
+        : "—";
+      return [
+        "<tr>",
+        `<td>${escapeHtml(stablePrimitiveText(candidate.rank))}</td>`,
+        `<td><strong>${escapeHtml(feature)}</strong><small>≤ ${escapeHtml(
+          stablePrimitiveText(threshold),
+        )} · 缺失→${escapeHtml(stablePrimitiveText(candidate.missing_child))}</small></td>`,
+        `<td>${escapeHtml(readableValue(candidate.left))}</td>`,
+        `<td>${escapeHtml(readableValue(candidate.right))}</td>`,
+        `<td>${escapeHtml(stablePrimitiveText(candidate.gain))}<small>${escapeHtml(
+          readableValue(candidate.direction),
+        )}</small></td>`,
+        `<td>${eligible ? "可用" : escapeHtml(readableValue(candidate.failures))}</td>`,
+        `<td>${action}</td>`,
+        "</tr>",
+      ].join("");
+    }),
+    "</tbody></table>",
+    "</div>",
+    item?.truncated === true
+      ? '<p class="candidate-lab-truncated">当前结果或阈值空间已按明确预算截断。</p>'
+      : "",
+    "</div>",
+    "</details>",
+  ].join("");
+}
+
 function candidateItemHtml(item, definition) {
   if (
     definition.key === "automatic_tree"
@@ -1315,6 +1426,9 @@ function candidateItemHtml(item, definition) {
   }
   if (definition.key === "scorecard_band") {
     return scorecardBandDetailHtml(item);
+  }
+  if (definition.key === "interactive_tree_split_search") {
+    return interactiveTreeSplitSearchDetailHtml(item);
   }
   if (definition.key === "scorecard_cutoff_selection") {
     return scorecardSelectionDetailHtml(item);
@@ -2112,6 +2226,19 @@ function optionalNumber(form, name, { integer = false } = {}) {
   const value = Number(raw);
   if (!Number.isFinite(value) || (integer && !Number.isInteger(value))) {
     throw new Error(`${fieldLabel(name)}必须是${integer ? "整数" : "有限数字"}。`);
+  }
+  return value;
+}
+
+function parseRequiredInteger(raw, label, { min, max }) {
+  const value = Number(raw);
+  if (
+    !nonEmptyText(raw)
+    || !Number.isSafeInteger(value)
+    || value < min
+    || value > max
+  ) {
+    throw new Error(`${label}必须是 ${min} 到 ${max} 的整数。`);
   }
   return value;
 }
@@ -3566,6 +3693,70 @@ function collectVotingCandidateBuildFromSearchInputs(form) {
   return inputs;
 }
 
+function collectInteractiveTreeSplitSearchInputs(form) {
+  const source = selectedProjectionOption(
+    form,
+    "interactive_tree_search_source_id",
+    "树或 revision",
+  );
+  const node = selectedProjectionOption(
+    form,
+    "interactive_tree_search_node_id",
+    "当前可见节点",
+  );
+  const sourceTreeId = nonEmptyText(source.value);
+  const nodeId = nonEmptyText(node.value);
+  const mode = formValue(form, "interactive_tree_search_mode");
+  if (
+    !INTERACTIVE_TREE_SOURCE_ID_RE.test(sourceTreeId)
+    || !INTERACTIVE_TREE_NODE_ID_RE.test(nodeId)
+    || nonEmptyText(source.dataset?.sourceTreeId) !== sourceTreeId
+    || nonEmptyText(node.dataset?.sourceTreeId) !== sourceTreeId
+    || nonEmptyText(node.dataset?.nodeId) !== nodeId
+    || !["all_features", "selected_features"].includes(mode)
+  ) {
+    throw new Error("树节点搜索必须来自当前任务的受认证可见拓扑。");
+  }
+  const maxThresholds = parseRequiredInteger(
+    formValue(form, "interactive_tree_search_max_thresholds"),
+    "每特征最大阈值数",
+    { min: 1, max: 20 },
+  );
+  const maxRowEvaluations = parseRequiredInteger(
+    formValue(form, "interactive_tree_search_max_row_evaluations"),
+    "总行评估预算",
+    { min: 1, max: 20000000 },
+  );
+  const inputs = {
+    source_tree_id: sourceTreeId,
+    node_id: nodeId,
+    mode,
+    max_thresholds_per_feature: maxThresholds,
+    max_row_evaluations: maxRowEvaluations,
+  };
+  if (mode === "selected_features") {
+    const features = splitValues(
+      formValue(form, "interactive_tree_search_features"),
+    );
+    const universe = new Set(
+      nonEmptyText(source.dataset?.featureUniverse)
+        .split("\u001f")
+        .map(nonEmptyText)
+        .filter(Boolean),
+    );
+    if (
+      !features.length
+      || features.length > 50
+      || new Set(features).size !== features.length
+      || features.some((feature) => !universe.has(feature))
+    ) {
+      throw new Error("指定特征必须非空、唯一，并来自当前来源树的认证特征全集。");
+    }
+    inputs.features = features;
+  }
+  return inputs;
+}
+
 function collectInteractiveTreeRevisionInputs(form) {
   const source = selectedProjectionOption(
     form,
@@ -3781,6 +3972,7 @@ export function collectStrategyCandidateLabRequest(form) {
     voting_candidate_search: collectVotingCandidateSearchInputs,
     voting_candidate_build_from_search:
       collectVotingCandidateBuildFromSearchInputs,
+    interactive_tree_split_search: collectInteractiveTreeSplitSearchInputs,
     interactive_tree_revision: collectInteractiveTreeRevisionInputs,
     interactive_tree_frontier_group_materialization:
       collectInteractiveTreeFrontierGroupMaterializationInputs,
@@ -3878,6 +4070,12 @@ function interactiveTreeForm(root) {
   ) || null;
 }
 
+function interactiveTreeSplitSearchForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="interactive_tree_split_search"]',
+  ) || null;
+}
+
 function interactiveTreeProjectionSources(payload) {
   const candidates = isRecord(payload?.candidates) ? payload.candidates : {};
   const collections = [
@@ -3897,6 +4095,114 @@ function interactiveTreeProjectionSources(payload) {
       seen.add(sourceTreeId);
       return true;
     });
+}
+
+function syncInteractiveTreeSplitSearchControls(
+  form,
+  payload,
+  { preserveNode = true } = {},
+) {
+  if (!form) return;
+  const sourceSelect = formField(
+    form,
+    "interactive_tree_search_source_id",
+  );
+  const nodeSelect = formField(form, "interactive_tree_search_node_id");
+  if (!sourceSelect || !nodeSelect) return;
+  const sources = interactiveTreeProjectionSources(payload);
+  const previousSource = nonEmptyText(sourceSelect.value);
+  const previousNode = preserveNode ? nonEmptyText(nodeSelect.value) : "";
+  sourceSelect.innerHTML = [
+    '<option value="">请选择自动树或不可变 revision</option>',
+    ...sources.map((item) => {
+      const sourceTreeId = nonEmptyText(item?.detail?.source_tree_id);
+      const featureUniverse = Array.isArray(
+        item?.pointers?.feature_universe,
+      )
+        ? item.pointers.feature_universe.map(nonEmptyText).filter(Boolean)
+        : [];
+      const visibleCount = (
+        Array.isArray(item?.pointers?.nodes)
+          ? item.pointers.nodes
+          : []
+      ).filter((node) => node?.is_visible === true).length;
+      return projectionOptionHtml(
+        sourceTreeId,
+        `${sourceTreeId} · ${visibleCount} 个可见节点 · ${featureUniverse.length} 个认证特征`,
+        {
+          "candidate-lab-projection": "1",
+          "source-tree-id": sourceTreeId,
+          "feature-universe": featureUniverse.join("\u001f"),
+        },
+      );
+    }),
+  ].join("");
+  sourceSelect.value = selectContainsValue(sourceSelect, previousSource)
+    ? previousSource
+    : "";
+  const selectedSourceId = nonEmptyText(sourceSelect.value);
+  const selectedSource = sources.find(
+    (item) => item?.detail?.source_tree_id === selectedSourceId,
+  );
+  const nodes = (
+    Array.isArray(selectedSource?.pointers?.nodes)
+      ? selectedSource.pointers.nodes
+      : []
+  ).filter((node) => (
+    isRecord(node)
+    && node.is_visible === true
+    && INTERACTIVE_TREE_NODE_ID_RE.test(nonEmptyText(node.node_id))
+  ));
+  nodeSelect.innerHTML = [
+    '<option value="">请选择要分析的当前可见节点</option>',
+    ...nodes.map((node) => projectionOptionHtml(
+      node.node_id,
+      `${node.node_id} · ${node.kind}${node.feature ? ` · ${node.feature} ≤ ${stablePrimitiveText(node.threshold)}` : ""}`,
+      {
+        "candidate-lab-projection": "1",
+        "source-tree-id": selectedSourceId,
+        "node-id": node.node_id,
+      },
+    )),
+  ].join("");
+  nodeSelect.value = selectContainsValue(nodeSelect, previousNode)
+    ? previousNode
+    : "";
+  const selectedSourceOption = Array.from(
+    sourceSelect.selectedOptions || [],
+  )[0] || null;
+  const featurePanel = form.querySelector?.(
+    "[data-candidate-lab-tree-search-features-panel]",
+  );
+  const selectedMode = formValue(form, "interactive_tree_search_mode")
+    || "all_features";
+  featurePanel?.classList?.toggle?.(
+    "hidden",
+    selectedMode !== "selected_features",
+  );
+  const help = form.querySelector?.(
+    "[data-candidate-lab-tree-search-help]",
+  );
+  if (help) {
+    if (!sources.length) {
+      help.textContent = "当前任务尚无受认证自动树，请先构建自动规则树。";
+    } else if (!selectedSource) {
+      help.textContent = "请明确选择来源树或 revision；页面不会自动代选。";
+    } else if (!nodes.length) {
+      help.textContent = "该来源树当前没有可见节点可供搜索。";
+    } else if (!nodeSelect.value) {
+      help.textContent = "请明确选择节点；页面不会按风险、样本量或排名自动代选。";
+    } else {
+      const featureCount = nonEmptyText(
+        selectedSourceOption?.dataset?.featureUniverse,
+      ).split("\u001f").filter(Boolean).length;
+      help.textContent = (
+        selectedMode === "all_features"
+          ? `将搜索该树全部 ${featureCount} 个认证特征。`
+          : `请从该树 ${featureCount} 个认证特征中填写明确子集。`
+      ) + " 排名只用于浏览，不会修改树。";
+    }
+  }
 }
 
 function interactiveTreePointer(payload, sourceTreeId, nodeId) {
@@ -3980,6 +4286,73 @@ function interactiveTreeRevisionRequestIsCurrent(payload, inputs) {
       || inputs.feature !== pointer.current_feature
     )
   );
+}
+
+function interactiveTreeSplitSearchRequestIsCurrent(payload, inputs) {
+  if (!isRecord(inputs)) return false;
+  const sourceTreeId = nonEmptyText(inputs.source_tree_id);
+  const nodeId = nonEmptyText(inputs.node_id);
+  const source = interactiveTreeProjectionSources(payload).find(
+    (item) => item?.detail?.source_tree_id === sourceTreeId,
+  );
+  const node = (
+    Array.isArray(source?.pointers?.nodes)
+      ? source.pointers.nodes
+      : []
+  ).find((item) => (
+    item?.node_id === nodeId && item?.is_visible === true
+  ));
+  const featureUniverse = new Set(
+    (Array.isArray(source?.pointers?.feature_universe)
+      ? source.pointers.feature_universe
+      : [])
+      .map(nonEmptyText)
+      .filter(Boolean),
+  );
+  if (
+    !source
+    || !node
+    || !Number.isInteger(inputs.max_thresholds_per_feature)
+    || inputs.max_thresholds_per_feature < 1
+    || inputs.max_thresholds_per_feature > 20
+    || !Number.isInteger(inputs.max_row_evaluations)
+    || inputs.max_row_evaluations < 1
+    || inputs.max_row_evaluations > 20000000
+  ) return false;
+  if (inputs.mode === "all_features") {
+    return !Object.prototype.hasOwnProperty.call(inputs, "features");
+  }
+  return (
+    inputs.mode === "selected_features"
+    && Array.isArray(inputs.features)
+    && inputs.features.length > 0
+    && inputs.features.length <= 50
+    && new Set(inputs.features).size === inputs.features.length
+    && inputs.features.every((feature) => featureUniverse.has(feature))
+  );
+}
+
+function interactiveTreeSplitCandidatePointer(
+  payload,
+  searchId,
+  candidateId,
+) {
+  const searches = collectionItems(
+    payload?.candidates?.interactive_tree_split_search,
+  );
+  const search = searches.find((item) => (
+    item?.kind === "interactive_tree_split_search"
+    && item?.search_id === searchId
+    && INTERACTIVE_TREE_SPLIT_SEARCH_ID_RE.test(searchId)
+  ));
+  const candidate = (
+    Array.isArray(search?.candidates) ? search.candidates : []
+  ).find((item) => (
+    item?.candidate_id === candidateId
+    && item?.eligible === true
+    && INTERACTIVE_TREE_SPLIT_CANDIDATE_ID_RE.test(candidateId)
+  ));
+  return search && candidate ? { search, candidate } : null;
 }
 
 function syncInteractiveTreeRevisionControls(
@@ -6728,6 +7101,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       + "[data-candidate-lab-form] button, "
       + "[data-candidate-lab-interactive-tree-prune], "
       + "[data-candidate-lab-interactive-tree-threshold], "
+      + "[data-candidate-lab-interactive-tree-split-candidate], "
       + "[data-candidate-lab-interactive-tree-frontier-materialize]",
     ) || [];
     for (const control of controls) {
@@ -6883,6 +7257,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       state.payload,
     );
     syncVotingForms(root, state.payload);
+    syncInteractiveTreeSplitSearchControls(
+      interactiveTreeSplitSearchForm(root),
+      state.payload,
+    );
     syncInteractiveTreeRevisionControls(
       interactiveTreeForm(root),
       state.payload,
@@ -6971,6 +7349,11 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       { preserveRule: false },
     );
     syncVotingForms(root, state.payload);
+    syncInteractiveTreeSplitSearchControls(
+      interactiveTreeSplitSearchForm(root),
+      state.payload,
+      { preserveNode: false },
+    );
     syncInteractiveTreeRevisionControls(
       interactiveTreeForm(root),
       state.payload,
@@ -7190,6 +7573,17 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       ) {
         throw new Error(
           "所选 Strategy Pool 已过期、为空或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
+        );
+      }
+      if (
+        strategyRequest.workflow === "interactive_tree_split_search"
+        && !interactiveTreeSplitSearchRequestIsCurrent(
+          state.payload,
+          strategyRequest.workflow_inputs,
+        )
+      ) {
+        throw new Error(
+          "树节点搜索来源、可见节点或认证特征全集已过期，请刷新 Candidate Lab 后重选。",
         );
       }
       if (
@@ -7442,6 +7836,96 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       if (launcher) launcher.open = true;
       dependencies.setActionStatus?.(
         "已带入受认证 revision 与前沿节点；确认后只物化该节点，不会自动入池。",
+        "info",
+      );
+      renderAvailability();
+      return true;
+    }
+    const splitCandidate = event.target?.closest?.(
+      "[data-candidate-lab-interactive-tree-split-candidate]",
+    );
+    if (splitCandidate) {
+      event.preventDefault?.();
+      const reason = blockedReason(state, dependencies);
+      const form = interactiveTreeForm(panel());
+      if (reason) {
+        const message = BLOCKED_REASON_COPY[reason]
+          || "当前 Candidate Lab 暂不可启动新分析。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+        return true;
+      }
+      const searchId = nonEmptyText(splitCandidate.dataset?.searchId);
+      const candidateId = nonEmptyText(splitCandidate.dataset?.candidateId);
+      const pointer = interactiveTreeSplitCandidatePointer(
+        state.payload,
+        searchId,
+        candidateId,
+      );
+      const sourceTreeId = nonEmptyText(
+        splitCandidate.dataset?.sourceTreeId,
+      );
+      const nodeId = nonEmptyText(splitCandidate.dataset?.nodeId);
+      const feature = nonEmptyText(splitCandidate.dataset?.feature);
+      const threshold = Number(splitCandidate.dataset?.threshold);
+      if (
+        !pointer
+        || !form
+        || pointer.search.source_tree_id !== sourceTreeId
+        || pointer.search.node_id !== nodeId
+        || pointer.candidate.feature !== feature
+        || Number(pointer.candidate.threshold) !== threshold
+      ) {
+        const message = "该分裂候选不属于当前任务的受认证搜索证据。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+        return true;
+      }
+      const currentFeature = nonEmptyText(
+        pointer.search?.source_node?.feature,
+      );
+      const operation = feature === currentFeature
+        ? "adjust_split_threshold"
+        : "replace_split_feature";
+      const revisionPointer = interactiveTreeRevisionPointer(
+        state.payload,
+        sourceTreeId,
+        nodeId,
+        operation,
+      );
+      if (!revisionPointer) {
+        const message = "该搜索来源节点当前已不可编辑，请刷新树投影后重新搜索。";
+        setFormError(form, message);
+        dependencies.setActionStatus?.(message, "error");
+        return true;
+      }
+      syncInteractiveTreeRevisionControls(
+        form,
+        state.payload,
+        {
+          requestedOperation: operation,
+          requestedSourceTreeId: sourceTreeId,
+          requestedNodeId: nodeId,
+          preserveNode: false,
+        },
+      );
+      const thresholdField = formField(form, "interactive_tree_threshold");
+      if (thresholdField) thresholdField.value = stablePrimitiveText(threshold);
+      if (operation === "replace_split_feature") {
+        const featureField = formField(form, "interactive_tree_feature");
+        if (!selectContainsValue(featureField, feature)) {
+          const message = "候选字段已不在当前来源树的认证特征全集中。";
+          setFormError(form, message);
+          dependencies.setActionStatus?.(message, "error");
+          return true;
+        }
+        featureField.value = feature;
+      }
+      setFormError(form, "");
+      const launcher = form.closest?.(".candidate-lab-launcher");
+      if (launcher) launcher.open = true;
+      dependencies.setActionStatus?.(
+        "已回填受认证候选字段与阈值；尚未修改树，请检查理由并手动确认创建不可变 revision。",
         "info",
       );
       renderAvailability();
@@ -7801,6 +8285,27 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     const interactiveTree = field.closest?.(
       '[data-candidate-lab-workflow="interactive_tree_revision"]',
     );
+    const interactiveTreeSearch = field.closest?.(
+      '[data-candidate-lab-workflow="interactive_tree_split_search"]',
+    );
+    if (
+      interactiveTreeSearch
+      && [
+        "interactive_tree_search_source_id",
+        "interactive_tree_search_node_id",
+        "interactive_tree_search_mode",
+      ].includes(fieldName)
+    ) {
+      syncInteractiveTreeSplitSearchControls(
+        interactiveTreeSearch,
+        state.payload,
+        {
+          preserveNode: fieldName === "interactive_tree_search_node_id",
+        },
+      );
+      renderAvailability();
+      return true;
+    }
     if (
       interactiveTree
       && [

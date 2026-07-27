@@ -1875,6 +1875,80 @@ STRATEGY_AUTOMATIC_TREE_LEAF_MATERIALIZATION = WorkflowTemplate(
 )
 
 
+STRATEGY_INTERACTIVE_TREE_SPLIT_SEARCH = WorkflowTemplate(
+    id="strategy_interactive_tree_split_search",
+    title="交互式决策树节点候选搜索",
+    goal_patterns=(
+        "搜索交互式决策树节点的全部特征候选",
+        "分析决策树节点的分裂候选",
+        "对指定节点做单特征候选阈值搜索",
+        "search all split candidates for an interactive tree node",
+        "rank split thresholds for a tree node",
+    ),
+    slots=(
+        SlotSpec(
+            "source_tree_id",
+            True,
+            "user",
+            "Exact automatic-tree asset id or interactive-tree revision id",
+        ),
+        SlotSpec("node_id", True, "user", "Exact currently visible node id"),
+        SlotSpec(
+            "mode",
+            True,
+            "user",
+            "Exact all_features or selected_features search scope",
+        ),
+        SlotSpec(
+            "features",
+            False,
+            "user",
+            "Explicit feature subset for selected_features mode",
+        ),
+        SlotSpec(
+            "max_thresholds_per_feature",
+            True,
+            "user",
+            "Explicit 1..20 threshold-candidate budget per feature",
+        ),
+        SlotSpec(
+            "max_row_evaluations",
+            True,
+            "user",
+            "Explicit 1..20000000 aggregate row-evaluation budget",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="搜索节点分裂候选",
+            tool_ref=ToolRef(
+                "strategy",
+                "search_interactive_tree_split_candidates",
+            ),
+            inputs_template={
+                "source_tree_id": "{slot:source_tree_id}",
+                "node_id": "{slot:node_id}",
+                "mode": "{slot:mode}",
+                "features": "{slot:features}",
+                "max_thresholds_per_feature": (
+                    "{slot:max_thresholds_per_feature}"
+                ),
+                "max_row_evaluations": "{slot:max_row_evaluations}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "search_id"}),
+                PostCheck("nonempty", {"field": "search_hash"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_INTERACTIVE_TREE_REVISION = WorkflowTemplate(
     id="strategy_interactive_tree_revision",
     title="交互式决策树不可变修订",

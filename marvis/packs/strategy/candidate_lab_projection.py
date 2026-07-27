@@ -104,6 +104,11 @@ from marvis.packs.strategy.interactive_tree_tools import (
     VerifiedInteractiveTreeRevision,
     load_verified_interactive_tree_revisions,
 )
+from marvis.packs.strategy.interactive_tree_split_search_tools import (
+    INTERACTIVE_TREE_SPLIT_SEARCH_ARTIFACT_KIND,
+    INTERACTIVE_TREE_SPLIT_SEARCH_ORIGIN_TOOL,
+    load_verified_interactive_tree_split_search,
+)
 from marvis.packs.strategy.impact_cube_binding import (
     load_strategy_impact_cube_artifact,
 )
@@ -239,7 +244,7 @@ from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.strategy_lifecycle import is_locally_adopted
 
 
-SCHEMA_VERSION = "strategy.candidate-lab-projection.v8"
+SCHEMA_VERSION = "strategy.candidate-lab-projection.v9"
 
 UNIVARIATE_ARTIFACT_KIND = "strategy_candidate_json"
 UNIVARIATE_ORIGIN_TOOL = "strategy.analyze_univariate_candidates"
@@ -285,6 +290,8 @@ _MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 _MAX_PROJECTION_BYTES = 64 * 1024 * 1024
 _MAX_CANDIDATES_PER_KIND = 20
 _MAX_INTERACTIVE_TREE_REVISIONS = 20
+_MAX_INTERACTIVE_TREE_SPLIT_SEARCHES = 20
+_MAX_INTERACTIVE_TREE_SPLIT_CANDIDATES = 100
 _MAX_SCORECARD_CANDIDATES_PER_KIND = 3
 _MAX_VOTING_SEARCHES = 20
 _MAX_VOTING_SEARCH_COMBINATIONS = 20
@@ -543,6 +550,25 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
             r"^interactive-tree-revision-[0-9a-f]{32}\.json$"
         ),
     )
+    (
+        interactive_tree_split_search_records,
+        interactive_tree_split_search_total,
+    ) = artifact_repository.list_recent_for_task_kind_with_count(
+        task_id,
+        INTERACTIVE_TREE_SPLIT_SEARCH_ARTIFACT_KIND,
+        limit=_MAX_INTERACTIVE_TREE_SPLIT_SEARCHES,
+    )
+    interactive_tree_split_search_records = _candidate_record_window(
+        settings,
+        task_id,
+        interactive_tree_split_search_records,
+        kind=INTERACTIVE_TREE_SPLIT_SEARCH_ARTIFACT_KIND,
+        origin_tool=INTERACTIVE_TREE_SPLIT_SEARCH_ORIGIN_TOOL,
+        directory_name="strategy_interactive_tree_split_searches",
+        filename_pattern=re.compile(
+            r"^interactive-tree-split-search-[0-9a-f]{32}\.json$"
+        ),
+    )
     scorecard_band_records, scorecard_band_total = (
         artifact_repository.list_recent_for_task_kind_with_count(
             task_id,
@@ -628,6 +654,10 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         context,
         interactive_tree_records,
     )
+    interactive_tree_split_search = [
+        _project_interactive_tree_split_search(context, record)
+        for record in interactive_tree_split_search_records
+    ]
     scorecard_band = [
         _project_scorecard_band(context, record)
         for record in scorecard_band_records
@@ -725,6 +755,11 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
                 interactive_tree_revision,
                 _MAX_INTERACTIVE_TREE_REVISIONS,
                 total=interactive_tree_total,
+            ),
+            "interactive_tree_split_search": _collection(
+                interactive_tree_split_search,
+                _MAX_INTERACTIVE_TREE_SPLIT_SEARCHES,
+                total=interactive_tree_split_search_total,
             ),
             "scorecard_band": _collection(
                 scorecard_band,
@@ -3092,6 +3127,130 @@ def _project_interactive_tree_revisions(
             )
         )
     return projected
+
+
+def _project_interactive_tree_split_search(
+    context: _ProjectionContext,
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    _read_candidate_record(
+        context,
+        record,
+        kind=INTERACTIVE_TREE_SPLIT_SEARCH_ARTIFACT_KIND,
+        origin_tool=INTERACTIVE_TREE_SPLIT_SEARCH_ORIGIN_TOOL,
+        directory_name="strategy_interactive_tree_split_searches",
+    )
+    provenance = _mapping(
+        record.get("provenance"),
+        "interactive-tree split search provenance",
+    )
+    binding = load_verified_interactive_tree_split_search(
+        _scorecard_live_runtime(context),
+        task_id=context.task_id,
+        search_id=_text(
+            provenance.get("search_id"),
+            "interactive-tree split search_id",
+        ),
+    )
+    if (
+        binding.artifact_id != record["id"]
+        or binding.path != Path(record["path"])
+        or not hmac.compare_digest(
+            binding.content_hash,
+            _sha256(
+                record.get("content_hash"),
+                "interactive-tree split search content hash",
+            ),
+        )
+        or binding.provenance != provenance
+    ):
+        raise CandidateLabProjectionError(
+            "interactive-tree split search registry binding drifted"
+        )
+    result = binding.result
+    source_topology = (
+        interactive_tree_topology_evidence(
+            binding.source.automatic_source.asset
+        )
+        if binding.source.parent_revision is None
+        else interactive_tree_topology_evidence(
+            binding.source.automatic_source.asset,
+            revision_payload=binding.source.parent_revision,
+            parent_revision=(
+                binding.source.ancestor_revisions[0]
+                if binding.source.ancestor_revisions
+                else None
+            ),
+            ancestor_revisions=binding.source.ancestor_revisions[1:],
+        )
+    )
+    source_node = next(
+        (
+            item
+            for item in source_topology["nodes"]
+            if item["node_id"] == result["source"]["node_id"]
+        ),
+        None,
+    )
+    if source_node is None or source_node.get("is_visible") is not True:
+        raise CandidateLabProjectionError(
+            "interactive-tree split search source node changed"
+        )
+    candidates = [
+        {
+            key: candidate[key]
+            for key in (
+                "candidate_id",
+                "rank",
+                "feature",
+                "threshold",
+                "missing_child",
+                "eligible",
+                "failures",
+                "gain",
+                "parent",
+                "left",
+                "right",
+                "direction",
+            )
+        }
+        for candidate in result["candidates"][
+            :_MAX_INTERACTIVE_TREE_SPLIT_CANDIDATES
+        ]
+    ]
+    return {
+        "kind": "interactive_tree_split_search",
+        "search_id": result["search_id"],
+        "search_hash": result["search_hash"],
+        "source_tree_id": result["source"]["source_tree_id"],
+        "node_id": result["source"]["node_id"],
+        "node_kind": provenance["node_kind"],
+        "source_node": {
+            key: source_node[key]
+            for key in (
+                "node_id",
+                "kind",
+                "is_visible",
+                "is_frontier",
+                "can_prune",
+                "feature",
+                "threshold",
+            )
+            if key in source_node
+        },
+        "mode": provenance["mode"],
+        "features": list(result["request"]["features"]),
+        "budget": result["budget"],
+        "population": result["population"],
+        "candidates": candidates,
+        "claims": result["claims"],
+        "artifact": _artifact_projection(record, context.task_id),
+        "total": len(result["candidates"]),
+        "truncated": (
+            result["budget"]["truncated"]
+            or len(result["candidates"]) > len(candidates)
+        ),
+    }
 
 
 def _project_interactive_tree_revision(

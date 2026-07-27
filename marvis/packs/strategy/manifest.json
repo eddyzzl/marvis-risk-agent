@@ -3188,6 +3188,167 @@
       "memory_limit_mb": 1024
     },
     {
+      "name": "search_interactive_tree_split_candidates",
+      "summary": "Search one exact visible automatic-tree or interactive-revision node across either its complete authenticated feature universe or an explicit feature subset under hard threshold and row-evaluation budgets; persist aggregate-only ranked evidence without selecting a winner or modifying the tree or Strategy Pool.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source_tree_id": {
+            "type": "string",
+            "pattern": "^(?:candidate-asset|interactive-tree-revision)-[0-9a-f]{32}$"
+          },
+          "node_id": {"type": "string", "minLength": 1},
+          "mode": {
+            "type": "string",
+            "enum": ["all_features", "selected_features"]
+          },
+          "features": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "maxItems": 50,
+            "uniqueItems": true
+          },
+          "max_thresholds_per_feature": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "max_row_evaluations": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20000000
+          }
+        },
+        "required": [
+          "source_tree_id",
+          "node_id",
+          "mode",
+          "max_thresholds_per_feature",
+          "max_row_evaluations"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {"mode": {"const": "all_features"}},
+              "required": ["mode"]
+            },
+            "then": {"not": {"required": ["features"]}}
+          },
+          {
+            "if": {
+              "properties": {"mode": {"const": "selected_features"}},
+              "required": ["mode"]
+            },
+            "then": {"required": ["features"]}
+          }
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": "strategy.search-interactive-tree-split-candidates-tool.v1"
+          },
+          "search_id": {
+            "type": "string",
+            "pattern": "^interactive-tree-split-search-[0-9a-f]{32}$"
+          },
+          "search_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "source_tree_id": {
+            "type": "string",
+            "pattern": "^(?:candidate-asset|interactive-tree-revision)-[0-9a-f]{32}$"
+          },
+          "node_id": {"type": "string", "minLength": 1},
+          "mode": {
+            "type": "string",
+            "enum": ["all_features", "selected_features"]
+          },
+          "feature_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "evaluated_candidates": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "eligible_candidates": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "truncated": {"type": "boolean"},
+          "search_result": {"type": "object"},
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "artifact_id": {"type": "string", "minLength": 1},
+                "kind": {
+                  "const": "strategy_interactive_tree_split_search_json"
+                },
+                "format": {"const": "json"},
+                "filename": {"type": "string", "minLength": 1},
+                "content_hash": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "download_url": {"type": "string", "minLength": 1}
+              },
+              "required": [
+                "artifact_id",
+                "kind",
+                "format",
+                "filename",
+                "content_hash",
+                "download_url"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "winner_selected": {"const": false},
+          "tree_modified": {"const": false}
+        },
+        "required": [
+          "schema_version",
+          "search_id",
+          "search_hash",
+          "source_tree_id",
+          "node_id",
+          "mode",
+          "feature_count",
+          "evaluated_candidates",
+          "eligible_candidates",
+          "truncated",
+          "search_result",
+          "artifacts",
+          "winner_selected",
+          "tree_modified"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_search_interactive_tree_split_candidates",
+      "policy": {
+        "schema_version": "tool-policy.v1",
+        "human_decision_gate": "none",
+        "effect_authorization": "none"
+      },
+      "side_effects": ["read:task", "read:dataset", "write:artifact"],
+      "memory_limit_mb": 2048
+    },
+    {
       "name": "revise_interactive_tree",
       "summary": "Prune one exact visible split, adjust its finite effective threshold, or replace its feature and threshold from the authenticated tree feature universe; replay the complete visible tree against the governed development sample and publish a new immutable revision without changing the Strategy Pool.",
       "input_schema": {

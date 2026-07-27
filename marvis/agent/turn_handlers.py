@@ -169,6 +169,9 @@ from marvis.packs.strategy.interactive_tree_revision import (
     interactive_tree_topology_evidence,
 )
 from marvis.packs.strategy.interactive_tree_tools import (
+    MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES,
+    _RevisionReadBudget,
+    _resolve_revision_source_on_connection,
     load_verified_interactive_tree_revision,
 )
 from marvis.packs.strategy.voting_candidate_fragment import (
@@ -1947,6 +1950,7 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "cross_matrix_candidate_build_from_search",
         "cross_rule_search",
         "cross_rule_candidate_build_from_search",
+        "interactive_tree_split_search",
         "interactive_tree_revision",
         "interactive_tree_frontier_group_materialization",
         "interactive_tree_frontier_materialization",
@@ -2858,6 +2862,23 @@ def _run_validated_strategy_request(
             task,
             template_id="strategy_automatic_tree_leaf_materialization",
             slots=_automatic_tree_leaf_materialization_slots(
+                runtime,
+                task_id=task.id,
+                draft=draft,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "interactive_tree_split_search"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_interactive_tree_split_search",
+            slots=_interactive_tree_split_search_plan_slots(
                 runtime,
                 task_id=task.id,
                 draft=draft,
@@ -4284,6 +4305,19 @@ def _standard_workflow_request_preflight(
         except StrategySetupError as exc:
             return ("automatic_tree_leaf_source_required", str(exc))
         return None
+    if draft.workflow == "interactive_tree_split_search":
+        try:
+            _interactive_tree_split_search_plan_slots(
+                runtime,
+                task_id=task.id,
+                draft=draft,
+            )
+        except StrategySetupError as exc:
+            return (
+                "interactive_tree_split_search_current_projection_required",
+                str(exc),
+            )
+        return None
     if draft.workflow == "interactive_tree_revision":
         # Threshold edits are exposed by a manual tree projection, so reject a
         # stale/hidden split before a plan is created.  The Tool still repeats
@@ -4941,6 +4975,82 @@ def _candidate_source_artifact_slots(
         "expected_candidate_id": verified.candidate_id,
         "expected_evidence_hash": verified.evidence_hash,
     }
+
+
+def _interactive_tree_split_search_plan_slots(
+    runtime: DriverTurnRuntime,
+    *,
+    task_id: str,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Authenticate the exact visible node and feature universe before planning."""
+
+    inputs = draft.to_dict()["workflow_inputs"]
+    source_tree_id = inputs.get("source_tree_id")
+    node_id = inputs.get("node_id")
+    if not isinstance(source_tree_id, str) or not isinstance(node_id, str):
+        raise StrategySetupError(
+            "节点候选搜索必须提供完整来源树 ID 和当前可见 node ID。"
+        )
+    repository = TaskArtifactRepository(runtime.settings.db_path)
+    read_runtime = SimpleNamespace(
+        settings=runtime.settings,
+        task_artifacts=repository,
+    )
+    try:
+        with repository.transaction() as conn:
+            source = _resolve_revision_source_on_connection(
+                conn,
+                runtime=read_runtime,
+                task_id=task_id,
+                source_tree_id=source_tree_id,
+                revision_cache={},
+                automatic_source_cache={},
+                budget=_RevisionReadBudget(
+                    MAX_INTERACTIVE_TREE_REVISION_ANCESTRY_BYTES
+                ),
+            )
+        ancestors = source.ancestor_revisions
+        topology = (
+            interactive_tree_topology_evidence(source.automatic_source.asset)
+            if source.parent_revision is None
+            else interactive_tree_topology_evidence(
+                source.automatic_source.asset,
+                revision_payload=source.parent_revision,
+                parent_revision=ancestors[0] if ancestors else None,
+                ancestor_revisions=ancestors[1:],
+            )
+        )
+    except Exception as exc:
+        raise StrategySetupError(
+            f"来源树 {source_tree_id} 未通过当前任务的完整制品或父链认证。"
+        ) from exc
+    matches = [
+        node
+        for node in topology.get("nodes", [])
+        if isinstance(node, Mapping) and node.get("node_id") == node_id
+    ]
+    if len(matches) != 1 or matches[0].get("is_visible") is not True:
+        raise StrategySetupError(
+            f"节点 {node_id} 不是来源树 {source_tree_id} 当前投影中的可见节点；"
+            "请刷新树视图并重新选择。"
+        )
+    feature_universe = set(
+        source.automatic_source.asset["tree_result"]["training"][
+            "feature_order"
+        ]
+    )
+    requested = (
+        feature_universe
+        if inputs.get("mode") == "all_features"
+        else set(inputs.get("features", []))
+    )
+    if not requested or not requested.issubset(feature_universe):
+        raise StrategySetupError(
+            "节点候选搜索的特征不属于来源树的认证特征全集；"
+            "请刷新候选实验室并重新选择。"
+        )
+    return dict(inputs)
 
 
 def _interactive_tree_revision_plan_slots(
@@ -11593,6 +11703,7 @@ def _strategy_request_requires_dataset(
             "scorecard_band_build",
             "scorecard_cutoff_selection",
             "automatic_tree_leaf_materialization",
+            "interactive_tree_split_search",
             "interactive_tree_revision",
             "interactive_tree_frontier_group_materialization",
             "interactive_tree_frontier_materialization",
