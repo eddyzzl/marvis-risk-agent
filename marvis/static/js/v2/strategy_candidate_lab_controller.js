@@ -3,6 +3,11 @@ import {
   getStrategyCandidateLab,
   submitStrategyCandidateLabRequest,
 } from "./api_v2.js";
+import {
+  loadStrategyCandidateLabViewState,
+  persistStrategyCandidateLabViewState,
+  restoreStrategyCandidateLabViewState,
+} from "./strategy_candidate_lab_state.js";
 
 export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "strategy_project_context",
@@ -7359,6 +7364,14 @@ export function createStrategyCandidateLabController(dependencies = {}) {
   const fetchCandidateLab = dependencies.getStrategyCandidateLab || getStrategyCandidateLab;
   const submitCandidateLab = dependencies.submitStrategyCandidateLabRequest
     || submitStrategyCandidateLabRequest;
+  let storage = dependencies.storage;
+  if (storage === undefined) {
+    try {
+      storage = typeof localStorage === "undefined" ? null : localStorage;
+    } catch (_) {
+      storage = null;
+    }
+  }
   const state = {
     taskId: "",
     payload: null,
@@ -7369,6 +7382,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
   let operation = 0;
   let boundRoot = null;
   let activeRefresh = null;
+  let restoredTaskId = "";
 
   function selectedTask() {
     return dependencies.getSelectedTask?.() || null;
@@ -7380,6 +7394,16 @@ export function createStrategyCandidateLabController(dependencies = {}) {
 
   function panel() {
     return $("strategyCandidateLabPanel");
+  }
+
+  function persistCurrentView(taskId = state.taskId) {
+    const currentTaskId = nonEmptyText(taskId);
+    if (!currentTaskId) return false;
+    return persistStrategyCandidateLabViewState(
+      currentTaskId,
+      panel(),
+      storage,
+    );
   }
 
   function renderAvailability() {
@@ -7567,6 +7591,19 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       interactiveTreeFrontierMaterializationForm(root),
       state.payload,
     );
+    if (state.payload && restoredTaskId !== state.taskId) {
+      const snapshot = loadStrategyCandidateLabViewState(
+        state.taskId,
+        storage,
+      );
+      restoredTaskId = state.taskId;
+      if (snapshot && restoreStrategyCandidateLabViewState(root, snapshot)) {
+        // Re-run the projection sync once with restored parent selectors, then
+        // restore dependent node/cell/cutpoint selectors against those options.
+        render();
+        restoreStrategyCandidateLabViewState(root, snapshot);
+      }
+    }
     renderAvailability();
   }
 
@@ -7666,6 +7703,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
   }
 
   function clear() {
+    persistCurrentView();
     activeRefresh?.controller?.abort?.();
     activeRefresh = null;
     operation += 1;
@@ -7674,6 +7712,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     state.loading = false;
     state.submitting = false;
     state.error = "";
+    restoredTaskId = "";
     render();
     return stateSnapshot(state);
   }
@@ -7695,9 +7734,11 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       activeRefresh = null;
     }
     if (state.taskId !== requestedTaskId) {
+      persistCurrentView();
       state.taskId = requestedTaskId;
       state.payload = null;
       state.error = "";
+      restoredTaskId = "";
       resetForms();
     }
     const refreshOperation = ++operation;
@@ -7755,6 +7796,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       return clear();
     }
     if (state.taskId !== taskId) {
+      persistCurrentView();
       activeRefresh?.controller?.abort?.();
       activeRefresh = null;
       operation += 1;
@@ -7763,6 +7805,7 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       state.loading = true;
       state.submitting = false;
       state.error = "";
+      restoredTaskId = "";
       resetForms();
       render();
     }
@@ -8726,6 +8769,10 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     return false;
   }
 
+  function handlePersistedViewMutation() {
+    persistCurrentView();
+  }
+
   function bind(root = document) {
     if (!root || boundRoot === root || typeof root.addEventListener !== "function") return;
     if (boundRoot) unbind();
@@ -8733,6 +8780,8 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     root.addEventListener("submit", handleSubmit);
     root.addEventListener("click", handleClick);
     root.addEventListener("change", handleChange);
+    root.addEventListener("change", handlePersistedViewMutation);
+    root.addEventListener("toggle", handlePersistedViewMutation, true);
   }
 
   function unbind() {
@@ -8740,6 +8789,8 @@ export function createStrategyCandidateLabController(dependencies = {}) {
     boundRoot.removeEventListener?.("submit", handleSubmit);
     boundRoot.removeEventListener?.("click", handleClick);
     boundRoot.removeEventListener?.("change", handleChange);
+    boundRoot.removeEventListener?.("change", handlePersistedViewMutation);
+    boundRoot.removeEventListener?.("toggle", handlePersistedViewMutation, true);
     boundRoot = null;
   }
 

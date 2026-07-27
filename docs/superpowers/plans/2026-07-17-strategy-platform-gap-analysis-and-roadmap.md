@@ -777,24 +777,24 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 ### Phase 3：Candidate Lab
 
 32. 单规则四分箱、类别箱、全指标和选箱入池（确定性分析、证据与 JSON/XLSX、证据绑定的选箱/合并、不可变候选资产及其 Strategy Pool 入池已完成；原生 risk/development 的单变量与 historical refinement 已完成，单变量 asset 与其当前 Pool entry 的 development 逐月命中分布/PSI 已完成；原生 Pool/稳定性消费、其他候选类型和 OOT 稳定性待续）；
-33. 加权自动规则树、方向检查、树图和写回（受限完整树、叶选择/入池及自然语言 full-tree apply 已完成，原生 risk/development 建树与叶物化已接通；原生 Pool/后续消费者、交互展示、代码和列写回待续）；
+33. 加权自动规则树、方向检查、树图和写回（受限完整树、叶选择/入池、SVG/PNG、Python/SQL、XLSX 及自然语言 full-tree apply 的 leaf/rule 写回已完成，原生 risk/development 建树、叶物化与 Pool 后续链已接通；交互式 revision 的独立图形交付仍待续）；
 34. 交互树节点/候选/手工分裂内核（不可变剪枝、调阈值、换字段、全字段/指定字段候选搜索已完成）；
 35. 交互树删节点、自动续建、可视化、代码和入池（删节点、精确种子受控续建、frontier singleton/OR group 入池已完成；完整可视化、代码和节点命中列写回待续）；
 36. 标准 WOE-LR 评分卡 Workbench；
 37. voting 候选、自定义规则、受预算组合和 n-of-k（显式 n-of-k 候选、同样本 lineage 及受治理入池已完成；自动搜索、自定义编辑、代码和列写回待续）；
-38. 2D/3D 自动 cross rules 与 2D matrix/cell（2D matrix、显式 cell group、同样本 lineage 及入池、原生 risk/development historical Cross 与 cell selection、有预算的 2D/3D 阈值规则搜索、精确物化、Candidate Lab、Pool 来源及报告附录已完成；人工切点、代码和列写回待续）；
+38. 2D/3D 自动 cross rules 与 2D matrix/cell（2D matrix、显式人工双轴切点、cell group、同样本 lineage 及入池、原生 risk/development historical Cross 与 cell selection、有预算的 2D/3D 阈值规则搜索、精确物化、Candidate Lab、Pool 来源及报告附录已完成；候选级独立代码包不另建旁路，统一在 Pool 物化后的 canonical Strategy 交付）；
 39. Candidate artifact、代码、写回列和 report-ready evidence 统一到 DSL。
 
 ### Phase 4：Strategy Pool、回测与交付
 
-40. 稳定 rule id、pool CRUD、完整 reorder 和 Pool → canonical draft Strategy（Agent 自然语言、严格 Manual request、原子 ledger/audit 纵切已完成；Workbench 的物化控件与完整展示待续）；
+40. 稳定 rule id、pool CRUD、完整 reorder 和 Pool → canonical draft Strategy（Agent 自然语言、严格 Manual request、原子 ledger/audit、Workbench 物化控件、策略历史和当前本地 champion 展示均已完成）；
 41. first-match 级联 waterfall（approval/reject 当前 Pool 的 standalone/incremental/shadowed/remaining 已完成；其余类型待专属口径）；
 42. 单规则/策略逐月、件数和金额回测（approval/reject 当前 Pool 的总体、逐月、规则 incremental、标签/金额覆盖、基线 delta、成熟 development Sample Design 强绑定及 `target_bad_value=0|1` 已完成；direct backtest 仅保留兼容边界，V2 Workflow 必须注入 ref；单规则独立视图、分群×月及其余类型待续）；
 43. 分群操作符与分群×月；
 44. 策略/漏斗/月度/分群/code tabs；
 45. `StrategyReportBundle`、七步 Workflow、模块化 Excel/JSON/Markdown/DOCX、额度定价扩展与结构化 provenance（固定七节、不可变 revision、四格式原子登记及当前单变量/Pool-entry stability appendix 已完成；额度/定价专属扩展、其他候选稳定性和独立 OOT 章节待续）；
-46. Python/SQL/JSON codegen 和逐行 equivalence；
-47. 分析产物列写回与修改后数据导出。
+46. Python/SQL/JSON codegen 和逐行 equivalence（已由 `strategy_dsl_delivery` 完成；绑定当前 Strategy、活动数据与固定预算，发布四类下载及逐行一致性证据）；
+47. 分析产物列写回与修改后数据导出（完整自动树 leaf/rule 写回、五类 Pool 全量 first-match 写回及安全 CSV/XLSX 导出已完成；其余独立候选若无单独业务必要性统一先物化 Pool/Strategy，避免复制执行内核）。
 
 ### Phase 5：独立验证集
 
@@ -808,7 +808,7 @@ Agent 选取证据时先按 artifact kind/origin 识别最新原生 bundle，再
 
 53. Workbench shell 与七区信息架构（Candidate Lab 首个宽桌面区域已接通，其余区域待续）；
 54. 完整 Manual 控件和 evidence drawer（单变量、Cross、自动树/交互树、Voting、评分卡、Pool 全操作与受认证 Evidence Drawer 已完成；其余七区 Manual 控件按对应条目继续收口）；
-55. 节点/切点/cell/页面/语言状态持久化；
+55. 节点/切点/cell/页面/语言状态持久化（首个本地 task-scoped 视图状态已完成：恢复当前有效的下拉/多选、数值预算、人工切点和 launcher 开合，64 KiB 上限且不保存自由文本；字段别名、语言及跨设备同步待续）；
 56. Agent 与 Manual 共用 Workflow/DSL/gate、缺失信息状态和报告 revision；
 57. 完整七步报告 browser/API E2E、进度、取消和恢复。
 
