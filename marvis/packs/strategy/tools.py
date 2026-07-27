@@ -2349,7 +2349,8 @@ def _validated_pricing_inputs(
             require_unique=False,
         )
         if len(band_edges) < 2 or any(
-            right <= left for left, right in zip(band_edges, band_edges[1:])
+            right <= left
+            for left, right in zip(band_edges, band_edges[1:], strict=False)
         ):
             raise StrategyError(
                 "band_edges must contain at least two strictly increasing values"
@@ -5613,7 +5614,10 @@ def _univariate_manual_breakpoint_values(
                 f"manual_breakpoints for {feature} must contain finite numbers"
             )
         normalized.append(number)
-    if any(left >= right for left, right in zip(normalized, normalized[1:])):
+    if any(
+        left >= right
+        for left, right in zip(normalized, normalized[1:], strict=False)
+    ):
         raise StrategyError(
             f"manual_breakpoints for {feature} must be strictly increasing and unique"
         )

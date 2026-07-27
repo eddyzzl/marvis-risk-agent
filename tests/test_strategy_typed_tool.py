@@ -204,7 +204,7 @@ def test_backtest_writer_reauthenticates_sample_design_inside_transaction(
         "approval",
     )
     original = (
-        strategy_tools.require_strategy_sample_design_execution_binding_on_connection
+        strategy_tools.require_strategy_risk_development_execution_binding_on_connection
     )
 
     def remove_sample_design_before_persistence(conn, binding):
@@ -216,7 +216,7 @@ def test_backtest_writer_reauthenticates_sample_design_inside_transaction(
 
     monkeypatch.setattr(
         strategy_tools,
-        "require_strategy_sample_design_execution_binding_on_connection",
+        "require_strategy_risk_development_execution_binding_on_connection",
         remove_sample_design_before_persistence,
     )
 

@@ -952,6 +952,12 @@ class StrategyRepository:
         )
         effect_receipt = None
         if governed_effect:
+            try:
+                strategy_spec_hash = _strategy_spec_hash_from_row(head)
+            except ValueError as exc:
+                raise ConflictError(
+                    "策略效果授权失败：策略 spec 在批准后发生变化"
+                ) from exc
             effect_receipt = _validate_strategy_effect_authorization(
                 conn,
                 effect_execution_id=str(effect_execution_id),
@@ -962,7 +968,7 @@ class StrategyRepository:
                 version=version,
                 status=str(head["status"]),
                 asset_status=current_asset_status,
-                strategy_spec_hash=_strategy_spec_hash_from_row(head),
+                strategy_spec_hash=strategy_spec_hash,
             )
         if str(head["status"]) != LEGACY_STATUS_DRAFT or current_asset_status not in {
             ASSET_STATUS_DRAFT,

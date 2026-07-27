@@ -467,13 +467,17 @@ def test_only_pointer_selection_enters_pool_and_compiles_exact_score_requirement
         before = path.read_bytes()
 
         @contextmanager
-        def drift_inside_pool_write():
+        def drift_inside_pool_write(
+            *,
+            _path=path,
+            _before=before,
+        ):
             with transaction() as conn:
-                path.write_bytes(before + b"\n")
+                _path.write_bytes(_before + b"\n")
                 try:
                     yield conn
                 finally:
-                    path.write_bytes(before)
+                    _path.write_bytes(_before)
 
         monkeypatch.setattr(
             real["runtime"].task_artifacts,

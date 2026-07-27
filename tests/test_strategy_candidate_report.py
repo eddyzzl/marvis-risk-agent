@@ -303,7 +303,7 @@ def test_xlsx_contains_report_ready_evidence_without_recomputing_metrics() -> No
 
     bin_rows = _rows(workbook, "Bins")
     headers = bin_rows[0]
-    first_bin = dict(zip(headers, bin_rows[1]))
+    first_bin = dict(zip(headers, bin_rows[1], strict=True))
     source_bin = analysis["features"][0]["methods"][0]["bins"][0]
     assert first_bin["Feature"] == "age"
     assert first_bin["Count"] == source_bin["count"]

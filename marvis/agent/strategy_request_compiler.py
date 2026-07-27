@@ -5482,7 +5482,10 @@ def _validate_pricing_workflow_inputs(
             maximum_items=51,
             minimum_items=2,
         )
-        if any(right <= left for left, right in zip(edges, edges[1:])):
+        if any(
+            right <= left
+            for left, right in zip(edges, edges[1:], strict=False)
+        ):
             raise _DraftValidationError(
                 "limit_pricing_matrix band_edges 必须严格递增。"
             )
@@ -5794,7 +5797,10 @@ def _validate_manual_breakpoint_mapping(
                     f"{workflow} manual_breakpoints.{feature} 只能包含有限数字。"
                 )
             points.append(number)
-        if any(left >= right for left, right in zip(points, points[1:])):
+        if any(
+            left >= right
+            for left, right in zip(points, points[1:], strict=False)
+        ):
             raise _DraftValidationError(
                 f"{workflow} manual_breakpoints.{feature} 必须严格递增且不重复。"
             )
@@ -7470,7 +7476,10 @@ def _validate_scorecard_band_build_inputs(
         raise _DraftValidationError(
             f"{workflow} raw_pd_band_edges 必须从 0.0 开始并以 1.0 结束。"
         )
-    if any(left >= right for left, right in zip(edges, edges[1:])):
+    if any(
+        left >= right
+        for left, right in zip(edges, edges[1:], strict=False)
+    ):
         raise _DraftValidationError(
             f"{workflow} raw_pd_band_edges 必须严格递增。"
         )
@@ -8839,7 +8848,7 @@ def _explicit_manual_breakpoint_bindings(
                 any(not math.isfinite(item) for item in points)
                 or any(
                     left >= right
-                    for left, right in zip(points, points[1:])
+                    for left, right in zip(points, points[1:], strict=False)
                 )
                 or column in bindings
             ):
@@ -15237,7 +15246,7 @@ def _utterance_requests_automatic_tree_follow_up(utterance: str) -> bool:
     for clause in _automatic_tree_follow_up_clauses(utterance):
         leaf_matches = tuple(_AUTOMATIC_TREE_LEAF_TOKEN_RE.finditer(clause))
         effect_matches = tuple(_AUTOMATIC_TREE_DECISION_EFFECT_RE.finditer(clause))
-        for leaf_match in leaf_matches:
+        if leaf_matches:
             for effect_match in effect_matches:
                 if not _automatic_tree_follow_up_action_is_negated(
                     clause,

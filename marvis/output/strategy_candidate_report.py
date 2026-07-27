@@ -574,7 +574,10 @@ def _manual_breakpoints(value: object, *, path: str) -> list[float]:
                 f"{path}[{index}] must be a finite canonical float"
             )
         normalized.append(item)
-    if any(left >= right for left, right in zip(normalized, normalized[1:])):
+    if any(
+        left >= right
+        for left, right in zip(normalized, normalized[1:], strict=False)
+    ):
         raise StrategyCandidateReportError(
             f"{path} must be strictly increasing and unique"
         )

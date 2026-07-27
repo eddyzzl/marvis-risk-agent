@@ -111,4 +111,3 @@ def test_automatic_tree_apply_renderer_fails_closed_on_spoofed_counts() -> None:
     assert "attacker-result" not in text
     assert output["source"]["asset_id"] not in text
     assert tables == []
-

@@ -245,7 +245,9 @@ def _publish_legacy_migration_020_report(
     return task_id, strategy_id, bundle, artifacts
 
 
-def test_migration_021_is_registered_and_builds_guarded_report_ledger(tmp_path):
+def test_migration_021_remains_registered_in_current_schema_and_builds_guarded_report_ledger(
+    tmp_path,
+):
     db_path = tmp_path / "migration.sqlite"
     _seed_strategy_task(db_path)
     init_db(db_path)
@@ -266,10 +268,14 @@ def test_migration_021_is_registered_and_builds_guarded_report_ledger(tmp_path):
             )
         }
 
-    assert version == db_schema_module.SCHEMA_VERSION == 21
-    assert db_schema_module._MIGRATIONS[-1] == (
+    assert version == db_schema_module.SCHEMA_VERSION == 22
+    assert (
         21,
         db_schema_module._migration_021_strategy_report_docx,
+    ) in db_schema_module._MIGRATIONS
+    assert db_schema_module._MIGRATIONS[-1] == (
+        22,
+        db_schema_module._migration_022_strategy_pool_materializations,
     )
     assert {"strategy_report_heads", "strategy_report_revisions"} <= tables
     assert {
@@ -317,7 +323,7 @@ def test_migration_021_preserves_and_revalidates_legacy_three_output_revision(
             "SELECT * FROM strategy_report_revisions WHERE report_id = ?",
             (bundle["report_id"],),
         ).fetchone()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 21
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 22
     assert row["docx_artifact_id"] is None
     assert row["docx_artifact_hash"] is None
 

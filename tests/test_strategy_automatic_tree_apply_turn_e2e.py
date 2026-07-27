@@ -18,6 +18,9 @@ from marvis.data.workspace import DataSemanticMapping, DataWorkspaceDraft
 from marvis.db import DatasetRepository
 from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.task_artifacts import TaskArtifactRepository
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 class _PayloadLLM:
@@ -90,18 +93,15 @@ def built_tree_for_apply(
         ),
         expected_revision=selected.revision,
     )
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
     llm = _PayloadLLM(
         {
             "request_kind": "standard_workflow",
-            "workflow": "strategy_sample_design",
+            "workflow": "automatic_tree_candidate_build",
             "workflow_inputs": {
-                "target_bad_value": 1,
-                "performance_window_status": "provided",
-                "performance_window_days": 90,
-                "observation_window_status": "provided",
-                "observation_start": "2025-01-01",
-                "observation_end": "2025-12-31",
-                "maturity_status": "confirmed_matured",
+                "features": ["score", "income"],
+                "max_depth": 2,
+                "min_leaf_count": 2,
             },
         }
     )
@@ -109,30 +109,6 @@ def built_tree_for_apply(
         "marvis.agent.validation_app_service.driver_llm_client",
         lambda request, task: llm,
     )
-    designed = client.post(
-        f"/api/tasks/{task_id}/agent/messages",
-        json={
-            "content": (
-                "固化策略样本设计；表现窗 90 天；观察窗 2025-01-01 至 "
-                "2025-12-31；成熟度已确认成熟；1 代表坏样本。"
-            )
-        },
-    )
-    assert designed.status_code == 202, designed.text
-    designed_plans = client.app.state.plan_repo.list_plans_for_task(task_id)
-    assert [item.template_id for item in designed_plans] == [
-        "strategy_sample_design"
-    ], designed.json()
-    assert designed_plans[0].status == "done", designed.json()
-    llm.payload = {
-        "request_kind": "standard_workflow",
-        "workflow": "automatic_tree_candidate_build",
-        "workflow_inputs": {
-            "features": ["score", "income"],
-            "max_depth": 2,
-            "min_leaf_count": 2,
-        },
-    }
     built = client.post(
         f"/api/tasks/{task_id}/agent/messages",
         json={"content": "用 score 和 income 建树，max_depth 2，min_leaf_count 2。"},

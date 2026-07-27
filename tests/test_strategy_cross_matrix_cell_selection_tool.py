@@ -564,13 +564,21 @@ def test_source_and_dataset_drift_roll_back_staged_selection(
         fx = _fixture(tmp_path / drift)
         original = selection_tools._persist_selection
 
-        def drift_then_persist(*args, **kwargs):
-            if drift == "source":
-                path = Path(fx.source_record["path"])
+        def drift_then_persist(
+            *args,
+            _drift=drift,
+            _fx=fx,
+            _original=original,
+            **kwargs,
+        ):
+            if _drift == "source":
+                path = Path(_fx.source_record["path"])
             else:
-                path = Path(fx.runtime.registry.resolve_verified_path(fx.dataset.id))
+                path = Path(
+                    _fx.runtime.registry.resolve_verified_path(_fx.dataset.id)
+                )
             path.write_bytes(path.read_bytes() + b"drift")
-            return original(*args, **kwargs)
+            return _original(*args, **kwargs)
 
         monkeypatch.setattr(selection_tools, "_persist_selection", drift_then_persist)
         with pytest.raises(StrategyError, match="drift|hash|binding"):

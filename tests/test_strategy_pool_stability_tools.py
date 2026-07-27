@@ -341,9 +341,14 @@ def test_pool_stability_rechecks_publication_before_commit_and_is_atomic(
                     fixture["runtime"].task_artifacts.register_on_connection
                 )
 
-                def tampering_register(conn, **kwargs):
-                    record = original_register(conn, **kwargs)
-                    if failure_point == "registry_recheck":
+                def tampering_register(
+                    conn,
+                    _original_register=original_register,
+                    _failure_point=failure_point,
+                    **kwargs,
+                ):
+                    record = _original_register(conn, **kwargs)
+                    if _failure_point == "registry_recheck":
                         conn.execute(
                             """
                             UPDATE task_artifacts
@@ -368,8 +373,12 @@ def test_pool_stability_rechecks_publication_before_commit_and_is_atomic(
                     fixture["runtime"].repo.write_audit_on_connection
                 )
 
-                def tampering_audit(conn, **kwargs):
-                    original_audit(conn, **kwargs)
+                def tampering_audit(
+                    conn,
+                    _original_audit=original_audit,
+                    **kwargs,
+                ):
+                    _original_audit(conn, **kwargs)
                     conn.execute(
                         """
                         UPDATE audit

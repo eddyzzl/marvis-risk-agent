@@ -675,6 +675,28 @@ def _run_driver_turn(
         )
         _append_spec_messages(spec, repo, task, turn, runtime)
         return join_turn_response(repo, task.id)
+    except _StrategySampleDesignRequiredError as exc:
+        if spec.intent != "strategy":
+            raise
+        return _strategy_request_clarification_response(
+            repo,
+            task,
+            code="strategy_sample_design_required",
+            message=str(exc),
+            fields=(
+                "target_bad_value",
+                "drop_nan_labels",
+                "relationship",
+                "approval_population",
+                "risk_population",
+                "partitioning",
+                "maturity",
+                "performance_window",
+                "observation_window",
+                "field_bindings",
+                "historical_score",
+            ),
+        )
     except spec.setup_error_types as exc:
         return append_workflow_error(repo, task, spec, exc, setup_error=True)
     except DriverError:
@@ -987,6 +1009,15 @@ def _run_strategy_setup(
             constraints.append(f"通过客群坏率 ≤ {proposal.max_bad_rate:.2%}")
         if proposal.min_approval_rate is not None:
             constraints.append(f"通过率 ≥ {proposal.min_approval_rate:.2%}")
+        slots = proposal.template_slots()
+        context = _strategy_dataset_context(runtime, task, require_target=True)
+        slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+            runtime,
+            task,
+            context=context,
+            drop_nan_labels=False,
+            allow_native_risk_development=True,
+        )
         repo.add_agent_message(
             task.id,
             role="assistant",
@@ -1004,15 +1035,6 @@ def _run_strategy_setup(
                 "ingest_notices": notices,
             },
         )
-        slots = proposal.template_slots()
-        context = _strategy_dataset_context(runtime, task, require_target=True)
-        slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
-            runtime,
-            task,
-            context=context,
-            drop_nan_labels=False,
-            allow_native_risk_development=True,
-        )
         return (proposal.template_id, slots, {})
 
     if intent != STRATEGY_INTENT_QUICK_ANALYSIS:
@@ -1028,6 +1050,15 @@ def _run_strategy_setup(
     notices = registry.consume_ingest_notices(task.id)
     note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
     bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
+    slots = proposal.template_slots()
+    context = _strategy_dataset_context(runtime, task, require_target=True)
+    slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+        runtime,
+        task,
+        context=context,
+        drop_nan_labels=False,
+        allow_native_risk_development=True,
+    )
     repo.add_agent_message(
         task.id,
         role="assistant",
@@ -1041,15 +1072,6 @@ def _run_strategy_setup(
             "intent": STRATEGY_INTENT_QUICK_ANALYSIS,
             "ingest_notices": notices,
         },
-    )
-    slots = proposal.template_slots()
-    context = _strategy_dataset_context(runtime, task, require_target=True)
-    slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
-        runtime,
-        task,
-        context=context,
-        drop_nan_labels=False,
-        allow_native_risk_development=True,
     )
     return (proposal.template_id, slots, {})
 
@@ -1199,6 +1221,15 @@ def _run_rule_strategy_setup(
     notices = registry.consume_ingest_notices(task.id)
     note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
     bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
+    slots = proposal.template_slots()
+    context = _strategy_dataset_context(runtime, task, require_target=True)
+    slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
+        runtime,
+        task,
+        context=context,
+        drop_nan_labels=False,
+        allow_native_risk_development=True,
+    )
     repo.add_agent_message(
         task.id,
         role="assistant",
@@ -1212,15 +1243,6 @@ def _run_rule_strategy_setup(
             "intent": STRATEGY_INTENT_RULE_MINING,
             "ingest_notices": notices,
         },
-    )
-    slots = proposal.template_slots()
-    context = _strategy_dataset_context(runtime, task, require_target=True)
-    slots["sample_design_ref"] = _latest_matching_strategy_sample_design_ref(
-        runtime,
-        task,
-        context=context,
-        drop_nan_labels=False,
-        allow_native_risk_development=True,
     )
     return (proposal.template_id, slots, {})
 
@@ -12867,8 +12889,28 @@ def agent_autodrive_turn(
                     decision_message,
                     task_id=task.id,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                repo.add_agent_message(
+                    task.id,
+                    role="assistant",
+                    stage="chat",
+                    content=(
+                        "⚠️ 自动决策引用的历史记忆未能写入审计记录；"
+                        "为避免无审计执行，本次已停止。请重试或手动确认当前步骤。"
+                    ),
+                    metadata={
+                        "intent": "agent_error",
+                        "kind": "governance_block",
+                        "code": "memory_use_audit_failed",
+                        "decision_message_id": (
+                            decision_message.get("id")
+                            if isinstance(decision_message, dict)
+                            else None
+                        ),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                return
         gate_meta = (
             gate.get("metadata") if isinstance(gate.get("metadata"), dict) else {}
         )

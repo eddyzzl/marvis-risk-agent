@@ -669,7 +669,10 @@ def _strict_manual_breakpoints(value: object, *, name: str) -> list[float]:
                 f"{name} must contain finite numbers"
             )
         normalized.append(number)
-    if any(left >= right for left, right in zip(normalized, normalized[1:])):
+    if any(
+        left >= right
+        for left, right in zip(normalized, normalized[1:], strict=False)
+    ):
         raise CrossMatrixCandidateAssetError(
             f"{name} must be strictly increasing and unique"
         )

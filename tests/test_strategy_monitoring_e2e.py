@@ -16,9 +16,13 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from fastapi.testclient import TestClient
 
+from marvis.agent.plan_driver import PlanDriver
+from marvis.app import create_app
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
+from marvis.data.workspace import DataSemanticMapping, DataWorkspaceDraft
 from marvis.db import DatasetRepository, PluginRepository, PlanRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.governance.repository import GovernanceRepository
@@ -33,10 +37,12 @@ from marvis.orchestrator.validator import PlanValidator
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
+from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.strategy import StrategyRepository
 from marvis.settings import build_settings
-
-from marvis.agent.plan_driver import PlanDriver
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 class FakeLLM:
@@ -121,11 +127,48 @@ def _register(registry, tmp_path, frame, name, task_id):
     return registry.register_existing(path, task_id=task_id, role="strategy_sample")
 
 
-def _adopt_strategy(driver, registry, plan_repo, tmp_path, task):
+def _materialize_sample_ref(settings, task, dataset, monkeypatch):
+    client = TestClient(create_app(settings))
+    workspaces = DataWorkspaceRepository(settings.db_path)
+    current = workspaces.get_or_default(task.id)
+    activated = workspaces.save(
+        task.id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+        ),
+        expected_revision=current.revision,
+    )
+    workspaces.save(
+        task.id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+            semantic_mapping=DataSemanticMapping(
+                target_col="bad",
+                field_roles={"bad": "target"},
+            ),
+        ),
+        expected_revision=activated.revision,
+    )
+    return materialize_mature_strategy_sample_design(
+        client,
+        task.id,
+        monkeypatch,
+    )
+
+
+def _adopt_strategy(driver, registry, plan_repo, settings, tmp_path, task, monkeypatch):
     # Baseline: rule `score < 500` -> approval 0.80, approved bad rate 1/16 = 0.0625.
     scores = list(range(100, 2100, 100))
     bad = [1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     baseline = _register(registry, tmp_path, pd.DataFrame({"score": scores, "bad": bad}), "baseline", task.id)
+    sample_design_ref = _materialize_sample_ref(
+        settings,
+        task,
+        baseline,
+        monkeypatch,
+    )
     turn = driver.start(
         task_id=task.id,
         template_id="strategy_development",
@@ -136,6 +179,7 @@ def _adopt_strategy(driver, registry, plan_repo, tmp_path, task):
             "score_direction": "higher_is_better",
             "strategy_type": "approval",
             "max_bad_rate": 0.1,
+            "sample_design_ref": sample_design_ref,
         },
     )
     plan_id = turn.plan_id
@@ -178,9 +222,20 @@ def _awaiting_step(plan_repo, plan_id):
 
 
 @pytest.mark.slow
-def test_strategy_monitoring_e2e_red_then_new_version_then_report(tmp_path):
+def test_strategy_monitoring_e2e_red_then_new_version_then_report(
+    tmp_path,
+    monkeypatch,
+):
     driver, registry, plan_repo, settings, task = _monitoring_driver(tmp_path)
-    strategy_id = _adopt_strategy(driver, registry, plan_repo, tmp_path, task)
+    strategy_id = _adopt_strategy(
+        driver,
+        registry,
+        plan_repo,
+        settings,
+        tmp_path,
+        task,
+        monkeypatch,
+    )
 
     # Drift-injected fresh sample: 100 rows, 30 rejected (score<500), 70 approved
     # with 25 bad -> approved bad rate 25/70=0.357, drift +0.294 (>0.10) -> RED.

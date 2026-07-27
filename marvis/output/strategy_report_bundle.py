@@ -736,10 +736,14 @@ def _write_docx_voting_search_table(
     for row in shown_rows:
         cells = row["cells"]
 
-        def display(key: str) -> str:
+        def display(
+            key: str,
+            *,
+            _cells: Mapping[str, Any] = cells,
+        ) -> str:
             return _docx_text(
                 _table_field_display_value(
-                    cells[key],
+                    _cells[key],
                     column=columns[key],
                 )
             )

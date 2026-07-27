@@ -994,9 +994,13 @@ def _risk_direction(rates: Sequence[float], *, method: str) -> str:
         return "unordered"
     if len(rates) <= 1 or all(value == rates[0] for value in rates):
         return "flat"
-    if all(left <= right for left, right in zip(rates, rates[1:])):
+    if all(
+        left <= right for left, right in zip(rates, rates[1:], strict=False)
+    ):
         return "increasing"
-    if all(left >= right for left, right in zip(rates, rates[1:])):
+    if all(
+        left >= right for left, right in zip(rates, rates[1:], strict=False)
+    ):
         return "decreasing"
     return "non_monotonic"
 

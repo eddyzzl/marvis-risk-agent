@@ -16,7 +16,7 @@ def test_load_and_score_matches_manual_sigmoid():
     df = pd.DataFrame({"x1": [0.0, 1.0, 2.0], "x2": [0.0, 0.0, 1.0]})
     scores = scorer.score(df)
     expected = [1 / (1 + math.exp(-z)) for z in [0.0, 1.0, 1.0]]
-    for got, want in zip(scores, expected):
+    for got, want in zip(scores, expected, strict=True):
         assert got == pytest.approx(want, abs=1e-6)
 
 

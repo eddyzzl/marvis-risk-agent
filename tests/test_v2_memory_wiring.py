@@ -610,6 +610,100 @@ def test_agent_autodrive_decision_message_carries_memory_references_and_audits_u
     assert any(event["event_type"] == "use" for event in events)
 
 
+def test_agent_autodrive_fails_closed_when_memory_use_audit_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from marvis.agent.turn_handlers import DRIVER_TURN_FUNCS, agent_autodrive_turn
+
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    _seed_history_entry(
+        settings,
+        ks=0.30,
+        auc=0.70,
+        scope="binary:binary:A卡",
+    )
+
+    class _TokenRepo:
+        def __init__(self):
+            self.messages = [
+                {
+                    "role": "assistant",
+                    "metadata": {
+                        "kind": "gate",
+                        "step_id": "gate-1",
+                        "model_delivery": {
+                            "source_tool": "select_experiment",
+                            "recipe": "lgb",
+                            "metrics": {},
+                        },
+                    },
+                }
+            ]
+
+        def list_agent_messages(self, task_id):
+            return self.messages
+
+        def add_agent_message(
+            self,
+            task_id,
+            *,
+            role,
+            stage,
+            content,
+            metadata,
+        ):
+            message = {
+                "id": f"msg-{len(self.messages)}",
+                "role": role,
+                "stage": stage,
+                "content": content,
+                "metadata": metadata,
+            }
+            self.messages.append(message)
+            return message
+
+    class _FakeLLM:
+        def complete(self, **kwargs):
+            return json.dumps({"action": "confirm", "reason": "结果正常,继续"})
+
+    calls = []
+
+    def fake_turn(runtime, repo, task, **kwargs):
+        calls.append(kwargs)
+        return {"status": "ok"}
+
+    def fail_audit(*args, **kwargs):
+        raise OSError("audit store unavailable")
+
+    monkeypatch.setitem(DRIVER_TURN_FUNCS, TASK_TYPE_MODELING, fake_turn)
+    monkeypatch.setattr(
+        "marvis.agent.turn_handlers.audit_agent_memory_use_from_store",
+        fail_audit,
+    )
+    repo = _TokenRepo()
+    task = _task_record(
+        id="task-current",
+        task_type=TASK_TYPE_MODELING,
+        model_name="A卡",
+    )
+
+    agent_autodrive_turn(
+        SimpleNamespace(settings=settings),
+        repo,
+        task,
+        client=_FakeLLM(),
+    )
+
+    assert calls == []
+    blocked = repo.messages[-1]
+    assert blocked["metadata"]["intent"] == "agent_error"
+    assert blocked["metadata"]["kind"] == "governance_block"
+    assert blocked["metadata"]["code"] == "memory_use_audit_failed"
+    assert "无审计执行" in blocked["content"]
+
+
 # -- (e) MEM-4: field_convention hints reorder setup candidates --------------
 
 def test_fetch_field_convention_hints_reads_matching_field_convention_memory(tmp_path: Path):

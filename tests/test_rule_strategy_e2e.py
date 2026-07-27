@@ -12,12 +12,15 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from fastapi.testclient import TestClient
 
 from marvis.agent.memory_bridge import capture_agent_memory_for_driver_done
 from marvis.agent.plan_driver import PlanDriver
 from marvis.agent_memory.store import AgentMemoryStore
+from marvis.app import create_app
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
+from marvis.data.workspace import DataSemanticMapping, DataWorkspaceDraft
 from marvis.db import (
     DatasetRepository,
     PluginRepository,
@@ -38,8 +41,12 @@ from marvis.orchestrator.validator import PlanValidator
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
+from marvis.repositories.data_workspace import DataWorkspaceRepository
 from marvis.repositories.strategy import StrategyRepository
 from marvis.settings import build_settings
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 class FakeLLM:
@@ -120,16 +127,62 @@ def _register(registry, tmp_path, task_id):
     return registry.register_existing(path, task_id=task_id, role="strategy_sample")
 
 
+def _materialize_sample_ref(
+    settings,
+    task,
+    dataset,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, str]:
+    client = TestClient(create_app(settings))
+    workspaces = DataWorkspaceRepository(settings.db_path)
+    current = workspaces.get_or_default(task.id)
+    activated = workspaces.save(
+        task.id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+        ),
+        expected_revision=current.revision,
+    )
+    workspaces.save(
+        task.id,
+        DataWorkspaceDraft(
+            active_dataset_id=dataset.id,
+            active_dataset_content_hash=dataset.content_hash,
+            semantic_mapping=DataSemanticMapping(
+                target_col="bad",
+                field_roles={"bad": "target"},
+            ),
+        ),
+        expected_revision=activated.revision,
+    )
+    return materialize_mature_strategy_sample_design(
+        client,
+        task.id,
+        monkeypatch,
+    )
+
+
 @pytest.mark.slow
-def test_rule_strategy_runs_reversible_steps_to_only_adoption_gate(tmp_path):
+def test_rule_strategy_runs_reversible_steps_to_only_adoption_gate(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     driver, registry, plan_repo, settings, task = _driver(tmp_path)
     dataset = _register(registry, tmp_path, task.id)
+    sample_design_ref = _materialize_sample_ref(
+        settings,
+        task,
+        dataset,
+        monkeypatch,
+    )
 
     turn = driver.start(
         task_id=task.id, template_id="rule_strategy",
         slots={
             "dataset_id": dataset.id, "target_col": "bad", "feature_cols": ["f1", "f2"],
             "min_support": 0.05, "min_lift": 1.2,
+            "sample_design_ref": sample_design_ref,
         },
     )
     assert turn.status == PlanStatus.VALIDATED.value
@@ -202,15 +255,25 @@ def test_rule_strategy_runs_reversible_steps_to_only_adoption_gate(tmp_path):
 
 
 @pytest.mark.slow
-def test_rule_strategy_default_selection_keeps_all_candidates(tmp_path):
+def test_rule_strategy_default_selection_keeps_all_candidates(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     """The automatic reversible selection keeps every mined candidate by default."""
     driver, registry, plan_repo, settings, task = _driver(tmp_path)
     dataset = _register(registry, tmp_path, task.id)
+    sample_design_ref = _materialize_sample_ref(
+        settings,
+        task,
+        dataset,
+        monkeypatch,
+    )
     turn = driver.start(
         task_id=task.id, template_id="rule_strategy",
         slots={
             "dataset_id": dataset.id, "target_col": "bad", "feature_cols": ["f1", "f2"],
             "min_support": 0.05, "min_lift": 1.2,
+            "sample_design_ref": sample_design_ref,
         },
     )
     plan_id = turn.plan_id

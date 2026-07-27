@@ -17,6 +17,9 @@ from marvis.agent.strategy_setup import resolve_strategy_intent
 from marvis.agent.turn_handlers import _strategy_success_criteria
 from marvis.app import create_app
 from marvis.domain import TASK_TYPE_STRATEGY, TaskRecord, TaskStatus
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 @pytest.fixture
@@ -54,7 +57,11 @@ def test_strategy_intent_taxonomy_and_priority(goal, expected):
     assert resolve_strategy_intent(None, goal) == expected
 
 
-def test_strategy_agent_start_defaults_to_full_development_plan(client, tmp_path):
+def test_strategy_agent_start_defaults_to_full_development_plan(
+    client,
+    tmp_path,
+    monkeypatch,
+):
     src = _strategy_source(tmp_path)
     created = client.post(
         "/api/tasks",
@@ -74,6 +81,11 @@ def test_strategy_agent_start_defaults_to_full_development_plan(client, tmp_path
     )
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
 
     started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
 
@@ -98,6 +110,54 @@ def test_strategy_agent_start_defaults_to_full_development_plan(client, tmp_path
         "采纳策略",
         "策略文档",
     ]
+
+
+def test_strategy_agent_start_requires_governed_sample_design(client, tmp_path):
+    src = _strategy_source(tmp_path)
+    created = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "额度准入策略",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+            "score_col": "score",
+            "strategy_input": {
+                "objective": "max_approval",
+                "max_bad_rate": 0.20,
+            },
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert started.status_code == 202, started.text
+    payload = started.json()
+    assert payload["status"] == "clarification_required"
+    assert payload["code"] == "strategy_sample_design_required"
+    assert set(payload["fields"]) == {
+        "target_bad_value",
+        "drop_nan_labels",
+        "relationship",
+        "approval_population",
+        "risk_population",
+        "partitioning",
+        "maturity",
+        "performance_window",
+        "observation_window",
+        "field_bindings",
+        "historical_score",
+    }
+    assert "成熟策略样本设计" in payload["messages"][-1]["content"]
+    assert not any(
+        "开始完整策略开发" in message["content"]
+        for message in payload["messages"]
+    )
+    assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
 
 
 @pytest.mark.parametrize("strategy_type", ["limit", "pricing", "segmentation"])
@@ -376,7 +436,11 @@ def test_max_profit_strategy_requires_complete_profit_contract(client, tmp_path)
     assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
 
 
-def test_explicit_quick_strategy_analysis_keeps_lightweight_workflow(client, tmp_path):
+def test_explicit_quick_strategy_analysis_keeps_lightweight_workflow(
+    client,
+    tmp_path,
+    monkeypatch,
+):
     src = _strategy_source(tmp_path)
     created = client.post(
         "/api/tasks",
@@ -393,6 +457,11 @@ def test_explicit_quick_strategy_analysis_keeps_lightweight_workflow(client, tmp
     )
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
 
     started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert started.status_code == 202, started.text
@@ -415,7 +484,11 @@ def test_explicit_quick_strategy_analysis_keeps_lightweight_workflow(client, tmp
     )
 
 
-def test_quick_strategy_analysis_phrase_overrides_development_default(client, tmp_path):
+def test_quick_strategy_analysis_phrase_overrides_development_default(
+    client,
+    tmp_path,
+    monkeypatch,
+):
     src = _strategy_source(tmp_path)
     created = client.post(
         "/api/tasks",
@@ -431,6 +504,11 @@ def test_quick_strategy_analysis_phrase_overrides_development_default(client, tm
     )
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
 
     started = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -442,7 +520,11 @@ def test_quick_strategy_analysis_phrase_overrides_development_default(client, tm
     assert plans[-1]["template_id"] == "strategy_analysis"
 
 
-def test_start_strategy_development_message_uses_full_product_route(client, tmp_path):
+def test_start_strategy_development_message_uses_full_product_route(
+    client,
+    tmp_path,
+    monkeypatch,
+):
     src = _strategy_source(tmp_path)
     created = client.post(
         "/api/tasks",
@@ -462,6 +544,11 @@ def test_start_strategy_development_message_uses_full_product_route(client, tmp_
     )
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
 
     started = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -476,7 +563,11 @@ def test_start_strategy_development_message_uses_full_product_route(client, tmp_
     ]
 
 
-def test_strategy_rule_mining_goal_routes_to_rule_strategy_template(client, tmp_path):
+def test_strategy_rule_mining_goal_routes_to_rule_strategy_template(
+    client,
+    tmp_path,
+    monkeypatch,
+):
     src = tmp_path / "rules"
     src.mkdir(parents=True, exist_ok=True)
     # bad concentrated where f1 is low -> mining returns candidate reject rules.
@@ -500,6 +591,11 @@ def test_strategy_rule_mining_goal_routes_to_rule_strategy_template(client, tmp_
     )
     assert created.status_code == 200, created.text
     task_id = created.json()["id"]
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
 
     started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert started.status_code == 202, started.text

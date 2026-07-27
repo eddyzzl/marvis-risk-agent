@@ -910,7 +910,10 @@ def _manual_breakpoints(value: object, *, name: str) -> list[float]:
         raise CrossMatrixCellSelectionError(
             f"{name} must contain canonical finite floats"
         )
-    if any(left >= right for left, right in zip(points, points[1:])):
+    if any(
+        left >= right
+        for left, right in zip(points, points[1:], strict=False)
+    ):
         raise CrossMatrixCellSelectionError(
             f"{name} must be strictly increasing and unique"
         )

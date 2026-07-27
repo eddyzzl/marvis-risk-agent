@@ -12,6 +12,9 @@ from marvis.agent.strategy_setup import StrategyDevelopmentProposal
 from marvis.app import create_app
 from marvis.db import TaskRepository, connect
 from marvis.domain import StrategyTaskInput, TaskCreate
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 def _client(tmp_path: Path) -> TestClient:
@@ -54,6 +57,7 @@ def _create_strategy_task(
 
 def test_strategy_clarification_can_resume_with_structured_business_contract(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     client = _client(tmp_path)
     created = _create_strategy_task(client, tmp_path)
@@ -65,6 +69,7 @@ def test_strategy_clarification_can_resume_with_structured_business_contract(
     assert clarified.status_code == 202, clarified.text
     assert clarified.json()["status"] == "clarification_required"
     assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"] == []
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
 
     contract = {
         "entry_mode": "strategy_development",
@@ -83,7 +88,10 @@ def test_strategy_clarification_can_resume_with_structured_business_contract(
     assert resumed.status_code == 202, resumed.text
     assert resumed.json()["status"] == "ok"
     plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
-    assert [plan["template_id"] for plan in plans] == ["strategy_development"]
+    assert [plan["template_id"] for plan in plans] == [
+        "strategy_sample_design",
+        "strategy_development",
+    ]
     loaded = client.get(f"/api/tasks/{task_id}")
     assert loaded.status_code == 200, loaded.text
     assert loaded.json()["strategy_input"] == {
@@ -402,6 +410,7 @@ def test_losing_driver_job_request_does_not_persist_strategy_input(tmp_path: Pat
 
 def test_nonterminal_plan_rejects_contract_replacement_without_mutation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     client = _client(tmp_path)
     original_contract = {
@@ -414,6 +423,7 @@ def test_nonterminal_plan_rejects_contract_replacement_without_mutation(
         strategy_input=original_contract,
     )
     task_id = created["id"]
+    materialize_mature_strategy_sample_design(client, task_id, monkeypatch)
     started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert started.status_code == 202, started.text
     assert client.get(f"/api/tasks/{task_id}/plans").json()["plans"]

@@ -28,6 +28,7 @@ def test_univariate_candidate_analysis_is_one_governed_builtin_step():
         "drop_nan_labels",
         "features",
         "methods",
+        "manual_breakpoints",
         "loan_amount_col",
         "overdue_amount_col",
         "sentinel_values",

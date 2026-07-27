@@ -461,9 +461,16 @@ def _summarize_columns(
         selections: list[str] = []
         positions: dict[tuple[str, str], int] = {}
 
-        def add(spec: _ColumnSpec, key: str, expression: str) -> None:
-            positions[(spec.name, key)] = len(selections)
-            selections.append(expression)
+        def add(
+            spec: _ColumnSpec,
+            key: str,
+            expression: str,
+            *,
+            _positions: dict[tuple[str, str], int] = positions,
+            _selections: list[str] = selections,
+        ) -> None:
+            _positions[(spec.name, key)] = len(_selections)
+            _selections.append(expression)
 
         for spec in batch:
             quoted = sql_identifier(spec.name, allowed)

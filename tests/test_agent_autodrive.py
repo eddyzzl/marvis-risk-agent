@@ -30,6 +30,9 @@ from marvis.app import create_app
 from marvis.domain import TASK_TYPE_MODELING
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
 from marvis.plugins.manifest import ToolRef
+from tests.strategy_sample_design_support import (
+    materialize_mature_strategy_sample_design,
+)
 
 
 def _join_dir(root: Path, n: int = 50) -> Path:
@@ -431,6 +434,11 @@ def test_agent_mode_autodrives_strategy_to_completion(client: TestClient, tmp_pa
         # governed business contract, so the compatibility route is explicit.
         "strategy_input": {"entry_mode": "strategy_analysis"},
     }).json()["id"]
+    materialize_mature_strategy_sample_design(
+        client,
+        task_id,
+        monkeypatch,
+    )
 
     resp = client.post(f"/api/tasks/{task_id}/agent/start", json={"acceptance_mode": "auto_accept"})
 

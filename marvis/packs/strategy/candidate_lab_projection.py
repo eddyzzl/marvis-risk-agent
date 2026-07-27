@@ -2105,7 +2105,10 @@ def _project_pool_add_sources(
         context.artifact_repository.list_recent_for_task_kind_with_count(
             context.task_id,
             SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
-            limit=_MAX_SCORECARD_CANDIDATES_PER_KIND,
+            limit=min(
+                _MAX_POOL_ADD_SOURCES_PER_KIND,
+                _MAX_SCORECARD_CANDIDATES_PER_KIND,
+            ),
         )
     )
     voting_records, voting_total = (

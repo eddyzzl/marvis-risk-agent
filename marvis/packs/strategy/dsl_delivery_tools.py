@@ -2980,7 +2980,7 @@ def _validate_artifacts(value: object, *, task_id: str | None) -> list[dict]:
         )
     normalized: list[dict] = []
     artifact_ids: set[str] = set()
-    for index, (name, contract) in enumerate(_FILE_CONTRACT.items()):
+    for index, (_name, contract) in enumerate(_FILE_CONTRACT.items()):
         artifact = _canonical_object(
             value[index],
             f"artifacts[{index}]",

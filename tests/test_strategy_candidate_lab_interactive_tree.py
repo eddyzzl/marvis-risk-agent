@@ -455,7 +455,18 @@ def test_candidate_lab_replays_interactive_frontier_pool_sources(
         "validation_status": "unvalidated",
     }
     assert entry["execution"]["condition"] == fragment["condition"]
-    assert _hash_keys(projection) == set()
+    drawer = projection["evidence_drawer"]
+    projection_without_drawer = {
+        key: value
+        for key, value in projection.items()
+        if key != "evidence_drawer"
+    }
+    assert _hash_keys(projection_without_drawer) == set()
+    assert _hash_keys(drawer) == {
+        "content_hash",
+        "input_binding_hash",
+        "provenance_hash",
+    }
 
 
 def test_candidate_lab_frontier_pool_source_tampering_fails_closed(

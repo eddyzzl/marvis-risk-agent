@@ -2309,6 +2309,8 @@ def _validated_build_voting_candidate_from_search_output(
         ):
             return None
         selected_rule_ids: list[str] = []
+        selected_entry_ids: list[str] = []
+        selected_pool_positions: list[int] = []
         for entry in selected_entries:
             if (
                 not isinstance(entry, dict)
@@ -2322,8 +2324,15 @@ def _validated_build_voting_candidate_from_search_output(
                 or not entry["rule_id"]
             ):
                 return None
+            selected_pool_positions.append(entry["pool_position"])
+            selected_entry_ids.append(entry["entry_id"])
             selected_rule_ids.append(entry["rule_id"])
-        if selected_rule_ids != members:
+        if (
+            len(set(selected_pool_positions)) != len(selected_pool_positions)
+            or len(set(selected_entry_ids)) != len(selected_entry_ids)
+            or len(set(selected_rule_ids)) != len(selected_rule_ids)
+            or set(selected_rule_ids) != set(members)
+        ):
             return None
         if (
             candidate["candidate_stage"] != "development"

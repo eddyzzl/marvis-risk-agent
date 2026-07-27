@@ -139,9 +139,17 @@ def test_frontier_group_template_matches_closed_tool_contract(
     output = tool.output_schema
     assert output["additionalProperties"] is False
     assert output["properties"]["schema_version"] == {
-        "const": (
-            "strategy.materialize-interactive-tree-frontier-group-selection-tool.v1"
-        )
+        "type": "string",
+        "enum": [
+            (
+                "strategy.materialize-interactive-tree-frontier-group-selection-"
+                "tool.v1"
+            ),
+            (
+                "strategy.materialize-interactive-tree-frontier-group-selection-"
+                "tool.v2"
+            ),
+        ],
     }
     assert set(output["required"]) == {
         "schema_version",

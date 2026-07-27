@@ -553,7 +553,9 @@ def test_tool_second_artifact_db_failure_rolls_back_lifecycle_files_and_audits(
         "adoption_reason": "committee promotes challenger",
     }
     repository_cls = strategy_repository_module.StrategyRepository
-    original_save = repository_cls.save_strategy_artifact_with_audit_on_connection
+    original_save = (
+        repository_cls.register_verified_strategy_artifact_with_audit_on_connection
+    )
     call_count = 0
 
     def fail_second_artifact(self, *args, **kwargs):
@@ -565,7 +567,7 @@ def test_tool_second_artifact_db_failure_rolls_back_lifecycle_files_and_audits(
 
     monkeypatch.setattr(
         repository_cls,
-        "save_strategy_artifact_with_audit_on_connection",
+        "register_verified_strategy_artifact_with_audit_on_connection",
         fail_second_artifact,
     )
 

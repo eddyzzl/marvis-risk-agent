@@ -1832,7 +1832,7 @@ def test_purge_task_removes_all_task_scoped_rows_and_writes_audit(tmp_path):
     with pytest.raises(KeyError):
         repo.get_task(task.id)
     with connect(db_path) as conn:
-        for table, column in (
+        for table, _column in (
             ("datasets", "task_id"),
             ("joins", "task_id"),
             ("plans", "task_id"),

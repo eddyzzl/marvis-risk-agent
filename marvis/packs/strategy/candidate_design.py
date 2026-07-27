@@ -499,7 +499,9 @@ def design_strategy_candidate(
             },
         }
     ]
-    for index, (band, action) in enumerate(zip(bands, selected_actions, strict=True)):
+    for index, (_band, action) in enumerate(
+        zip(bands, selected_actions, strict=True)
+    ):
         rules.append(
             {
                 "rule_id": f"{_rule_prefix(strategy_type)}-band-{index + 1:02d}",

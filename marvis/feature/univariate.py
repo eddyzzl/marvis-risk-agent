@@ -460,7 +460,7 @@ def _categorical_result(
     try:
         normalized_values = [
             None if is_na else _json_scalar(value)
-            for value, is_na in zip(values, missing)
+            for value, is_na in zip(values, missing, strict=True)
         ]
     except FeatureError:
         return _unavailable(method, "non_json_category")
@@ -728,8 +728,12 @@ def _numeric_risk_direction(groups: list[dict[str, Any]], target: np.ndarray) ->
             rates.append(float(np.mean(target[mask] == 1)))
     if len(rates) <= 1 or all(value == rates[0] for value in rates):
         return "flat"
-    increasing = all(left <= right for left, right in zip(rates, rates[1:]))
-    decreasing = all(left >= right for left, right in zip(rates, rates[1:]))
+    increasing = all(
+        left <= right for left, right in zip(rates, rates[1:], strict=False)
+    )
+    decreasing = all(
+        left >= right for left, right in zip(rates, rates[1:], strict=False)
+    )
     if increasing:
         return "increasing"
     if decreasing:
@@ -1009,7 +1013,10 @@ def _normalize_manual_breakpoint_values(
                 f"manual_breakpoints for {feature} must contain finite numbers"
             )
         normalized.append(number)
-    if any(left >= right for left, right in zip(normalized, normalized[1:])):
+    if any(
+        left >= right
+        for left, right in zip(normalized, normalized[1:], strict=False)
+    ):
         raise FeatureError(
             f"manual_breakpoints for {feature} must be strictly increasing and unique"
         )

@@ -69,7 +69,11 @@ def _output(*, eligible: bool) -> dict:
         candidate["metric_observations"].append(
             deepcopy(candidate["metric_observations"][-1])
         )
-    for item, rule_id in zip(candidate["selected_entries"], member_rule_ids):
+    for item, rule_id in zip(
+        candidate["selected_entries"],
+        member_rule_ids,
+        strict=True,
+    ):
         item["rule_id"] = rule_id
     return {
         "schema_version": "strategy.build-voting-candidate-from-search-tool.v1",
@@ -124,6 +128,22 @@ def test_voting_search_selection_renderer_shows_exact_source_without_winner_labe
     assert "尚未入池" in text
 
 
+def test_voting_search_selection_renderer_accepts_pool_order_normalization() -> None:
+    output = _output(eligible=True)
+    output["source_search_selection"]["member_rule_ids"].reverse()
+
+    text, _tables = render_tool_output(
+        "build_voting_candidate_from_search",
+        output,
+        trusted_inputs=_trusted_inputs(),
+    )
+
+    assert "完整性校验失败" not in text
+    assert SEARCH_ID in text
+    assert COMBO_ID in text
+    assert output["voting_candidate"]["asset_id"] in text
+
+
 def test_voting_search_selection_renderer_warns_when_constraints_failed() -> None:
     text, _tables = render_tool_output(
         "build_voting_candidate_from_search",
@@ -171,7 +191,7 @@ def test_voting_search_selection_renderer_rejects_malformed_nested_candidate() -
 
 
 def test_voting_search_selection_renderer_rejects_pointer_candidate_mismatch() -> None:
-    for mutation in ("n", "members", "lifecycle"):
+    for mutation in ("n", "members", "duplicate_members", "lifecycle"):
         output = deepcopy(_output(eligible=True))
         if mutation == "n":
             output["source_search_selection"]["n"] = 1
@@ -179,6 +199,10 @@ def test_voting_search_selection_renderer_rejects_pointer_candidate_mismatch() -
             output["source_search_selection"]["member_rule_ids"][0] = (
                 "candidate-rule-" + "f" * 32
             )
+        elif mutation == "duplicate_members":
+            output["voting_candidate"]["selected_entries"][0]["rule_id"] = output[
+                "voting_candidate"
+            ]["selected_entries"][1]["rule_id"]
         else:
             output["voting_candidate"]["not_admitted"] = False
 

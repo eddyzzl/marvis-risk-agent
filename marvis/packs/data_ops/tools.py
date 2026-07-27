@@ -1231,7 +1231,7 @@ def tool_export_dataset(inputs: dict, ctx) -> dict:
                 runtime.repo.transaction,
                 _commit,
             )
-        except _DatasetExportConcurrentReplay:
+        except _DatasetExportConcurrentReplay as exc:
             uow.rollback()
             winner = _find_existing_dataset_export(
                 runtime,
@@ -1239,7 +1239,9 @@ def tool_export_dataset(inputs: dict, ctx) -> dict:
                 input_hash=input_hash,
             )
             if winner is None:  # pragma: no cover - defensive transaction invariant
-                raise ValueError("concurrent dataset export winner is missing")
+                raise ValueError(
+                    "concurrent dataset export winner is missing"
+                ) from exc
             return _dataset_export_tool_payload(winner, cached=True)
         except Exception:
             uow.rollback()

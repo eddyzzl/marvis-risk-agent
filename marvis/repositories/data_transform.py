@@ -901,7 +901,10 @@ def _validate_transform_steps(
             "transform.steps length must match transform.operations"
         )
     prior_rows = source_rows
-    for index, (raw_step, operation) in enumerate(zip(steps, operations), start=1):
+    for index, (raw_step, operation) in enumerate(
+        zip(steps, operations, strict=True),
+        start=1,
+    ):
         field = f"transform.steps[{index - 1}]"
         step = _evidence_object(raw_step, field_name=field)
         _require_evidence_integer(step.get("step"), index, field_name=f"{field}.step")
