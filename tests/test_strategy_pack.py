@@ -574,8 +574,10 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "build_voting_candidate_from_search",
         "build_cross_matrix_candidate",
         "search_cross_matrix_candidates",
-        "build_cross_matrix_candidate_from_search",
-        "materialize_cross_matrix_cell_selection",
+            "build_cross_matrix_candidate_from_search",
+            "search_cross_threshold_rules",
+            "build_cross_rule_candidate_from_search",
+            "materialize_cross_matrix_cell_selection",
         "build_scorecard_band_asset",
         "materialize_scorecard_cutoff_selection",
         "refine_univariate_candidate",
@@ -627,7 +629,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert delivery_tool.output_schema["additionalProperties"] is False
     report_output_schema = report_bundle_tool.output_schema
     assert report_output_schema["properties"]["schema_version"] == {
-        "const": "strategy.build-report-bundle-v2-tool.v7"
+        "const": "strategy.build-report-bundle-v2-tool.v8"
     }
     report_artifacts = report_output_schema["properties"]["artifacts"]
     assert report_artifacts["minItems"] == 4

@@ -197,6 +197,11 @@ from marvis.packs.strategy.cross_candidate_search_tools import (
     load_cross_candidate_search_artifact,
     resolve_cross_candidate_search_pair,
 )
+from marvis.packs.strategy.cross_rule_search_tools import (
+    CROSS_RULE_SEARCH_ARTIFACT_KIND,
+    load_cross_rule_search_artifact,
+    resolve_cross_rule_search_rule,
+)
 from marvis.packs.strategy.cross_matrix_cell_selection import (
     CROSS_MATRIX_CELL_SELECTION_ARTIFACT_KIND,
     CROSS_MATRIX_CELL_SELECTION_ARTIFACT_SCHEMA_VERSION,
@@ -282,6 +287,7 @@ from marvis.packs.strategy.report_bundle_adapters import (
     build_strategy_report_bundle_source_inputs,
     validate_candidate_stability_report_compatibility,
     validate_cross_candidate_search_report_compatibility,
+    validate_cross_rule_search_report_compatibility,
 )
 from marvis.packs.strategy.report_bundle_tools import (
     authenticate_strategy_report_identity_for_pool_on_connection,
@@ -1939,6 +1945,8 @@ _MANUAL_STRATEGY_WORKFLOWS = frozenset(
         "voting_candidate_build_from_search",
         "cross_matrix_candidate_search",
         "cross_matrix_candidate_build_from_search",
+        "cross_rule_search",
+        "cross_rule_candidate_build_from_search",
         "interactive_tree_revision",
         "interactive_tree_frontier_group_materialization",
         "interactive_tree_frontier_materialization",
@@ -2954,6 +2962,43 @@ def _run_validated_strategy_request(
             task,
             template_id="strategy_cross_matrix_candidate_build_from_search",
             slots=_strategy_cross_candidate_build_from_search_plan_slots(
+                runtime,
+                task,
+                draft,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow == "cross_rule_search"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id="strategy_cross_rule_search",
+            slots=_strategy_cross_rule_search_plan_slots(
+                runtime,
+                task,
+                draft,
+            ),
+            auto_start=auto_start,
+        )
+
+    if (
+        isinstance(draft, StandardWorkflowRequestDraft)
+        and draft.workflow
+        == "cross_rule_candidate_build_from_search"
+    ):
+        return _start_confirmed_strategy_plan(
+            runtime,
+            repo,
+            task,
+            template_id=(
+                "strategy_cross_rule_candidate_build_from_search"
+            ),
+            slots=_strategy_cross_rule_candidate_build_plan_slots(
                 runtime,
                 task,
                 draft,
@@ -4296,6 +4341,22 @@ def _standard_workflow_request_preflight(
         except StrategySetupError as exc:
             return ("strategy_cross_search_pair_binding_required", str(exc))
         return None
+    if draft.workflow == "cross_rule_search":
+        try:
+            _strategy_cross_rule_search_plan_slots(runtime, task, draft)
+        except StrategySetupError as exc:
+            return ("strategy_cross_rule_source_binding_required", str(exc))
+        return None
+    if draft.workflow == "cross_rule_candidate_build_from_search":
+        try:
+            _strategy_cross_rule_candidate_build_plan_slots(
+                runtime,
+                task,
+                draft,
+            )
+        except StrategySetupError as exc:
+            return ("strategy_cross_rule_binding_required", str(exc))
+        return None
     if draft.workflow == "voting_candidate_build_from_search":
         try:
             _strategy_voting_candidate_build_from_search_plan_slots(
@@ -5548,6 +5609,58 @@ def _strategy_cross_candidate_build_from_search_plan_slots(
     return {
         "search_id": inputs["search_id"],
         "pair_id": inputs["pair_id"],
+    }
+
+
+def _strategy_cross_rule_search_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Bind platform evidence separately from explicit rule-search controls."""
+
+    if draft.workflow != "cross_rule_search":
+        raise StrategySetupError(
+            "Cross 阈值规则搜索 slots 收到了错误的 Workflow。"
+        )
+    inputs = draft.to_dict()["workflow_inputs"]
+    return {
+        **_latest_cross_candidate_search_source_slots(
+            runtime,
+            task_id=task.id,
+        ),
+        "features": list(inputs["features"]),
+        "dimension": inputs["dimension"],
+        "constraints": dict(inputs["constraints"]),
+        "max_trials": inputs["max_trials"],
+    }
+
+
+def _strategy_cross_rule_candidate_build_plan_slots(
+    runtime: DriverTurnRuntime,
+    task: TaskRecord,
+    draft: StandardWorkflowRequestDraft,
+) -> dict[str, object]:
+    """Preflight one exact rule pointer; never infer from rank."""
+
+    if draft.workflow != "cross_rule_candidate_build_from_search":
+        raise StrategySetupError(
+            "Cross 阈值规则候选 slots 收到了错误的 Workflow。"
+        )
+    inputs = draft.to_dict()["workflow_inputs"]
+    try:
+        resolve_cross_rule_search_rule(
+            _strategy_report_read_runtime(runtime),
+            task_id=task.id,
+            search_id=inputs["search_id"],
+            rule_id=inputs["rule_id"],
+        )
+    except StrategyError as exc:
+        raise StrategySetupError(str(exc)) from exc
+    return {
+        "search_id": inputs["search_id"],
+        "rule_id": inputs["rule_id"],
+        "selection_reason": inputs.get("selection_reason"),
     }
 
 
@@ -7701,6 +7814,25 @@ def _strategy_report_bundle_v2_plan_slots(
             ),
         }
     )
+    cross_rule_search = _strategy_report_latest_cross_rule_search_binding(
+        read_runtime,
+        task_id=task.id,
+        sample=sample,
+    )
+    cross_rule_search_ref = (
+        None
+        if cross_rule_search is None
+        else {
+            "artifact_id": cross_rule_search.artifact_id,
+            "expected_artifact_content_hash": (
+                cross_rule_search.artifact_content_hash
+            ),
+            "expected_search_id": cross_rule_search.result["search_id"],
+            "expected_search_content_hash": (
+                cross_rule_search.result["content_hash"]
+            ),
+        }
+    )
     impact_cube = _strategy_report_latest_impact_cube_binding(
         read_runtime,
         task_id=task.id,
@@ -7843,6 +7975,7 @@ def _strategy_report_bundle_v2_plan_slots(
             pool_stability=pool_stability,
             voting_candidate_search=voting_candidate_search,
             cross_candidate_search=cross_candidate_search,
+            cross_rule_search=cross_rule_search,
             pool_impact=impact,
             impact_cube=impact_cube,
             model_evidence=model_evidence,
@@ -7876,6 +8009,7 @@ def _strategy_report_bundle_v2_plan_slots(
         "pool_stability_ref": pool_stability_ref,
         "voting_candidate_search_ref": voting_candidate_search_ref,
         "cross_candidate_search_ref": cross_candidate_search_ref,
+        "cross_rule_search_ref": cross_rule_search_ref,
         "pool_impact_ref": pool_impact_ref,
         "impact_cube_ref": impact_cube_ref,
         "report_revision": int(head["current_revision"]) + 1,
@@ -8578,6 +8712,66 @@ def _strategy_report_cross_search_matches(
     except StrategyError:
         return False
     return True
+
+
+def _strategy_report_latest_cross_rule_search_binding(
+    read_runtime: SimpleNamespace,
+    *,
+    task_id: str,
+    sample,
+):
+    """Select the newest authenticated Cross rule search for this V2 sample."""
+
+    records, total = _strategy_report_artifact_window(
+        read_runtime,
+        task_id=task_id,
+        kind=CROSS_RULE_SEARCH_ARTIFACT_KIND,
+        limit=_STRATEGY_REPORT_CROSS_SEARCH_REPLAY_LIMIT,
+        unavailable_code=(
+            "strategy_report_bundle_v2_cross_rule_search_registry_unavailable"
+        ),
+        invalid_code="strategy_report_bundle_v2_cross_rule_search_invalid",
+        label="Cross rule search",
+    )
+    for item in records:
+        try:
+            binding = load_cross_rule_search_artifact(
+                read_runtime,
+                task_id=task_id,
+                artifact_id=item.get("id"),
+                expected_artifact_content_hash=item.get("content_hash"),
+            )
+        except (
+            KeyError,
+            ModelingError,
+            StrategyError,
+            TypeError,
+            ValueError,
+            *_STRATEGY_V2_ARTIFACT_ERRORS,
+        ) as exc:
+            raise _StrategyV2EvidenceSetupError(
+                "strategy_report_bundle_v2_cross_rule_search_invalid",
+                "最新待判定的 Cross 阈值规则搜索 artifact 未通过文件、"
+                "registry、provenance 或样本绑定复核；平台不会回退到旧证据。",
+            ) from exc
+        try:
+            validate_cross_rule_search_report_compatibility(
+                cross_rule_search=binding,
+                sample_design=sample,
+            )
+        except StrategyError:
+            continue
+        return binding
+    if total > _STRATEGY_REPORT_CROSS_SEARCH_REPLAY_LIMIT:
+        raise _StrategyV2EvidenceSetupError(
+            "strategy_report_bundle_v2_cross_rule_search_"
+            "selection_window_exhausted",
+            "已完整认证最新 "
+            f"{_STRATEGY_REPORT_CROSS_SEARCH_REPLAY_LIMIT} 个 Cross 阈值"
+            "规则搜索 artifact，但 registry 仍有更早记录；平台无法证明"
+            "窗口外不存在兼容证据，本次未创建报告计划。",
+        )
+    return None
 
 
 def _strategy_report_latest_impact_cube_binding(
@@ -11379,6 +11573,8 @@ def _strategy_request_requires_dataset(
             "voting_candidate_build",
             "cross_matrix_candidate_search",
             "cross_matrix_candidate_build_from_search",
+            "cross_rule_search",
+            "cross_rule_candidate_build_from_search",
         }:
             return False
         return True

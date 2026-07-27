@@ -18,6 +18,130 @@ def run_node(script: str) -> None:
     )
 
 
+def test_cross_rule_launchers_use_authenticated_fields_and_exact_rule_pointers():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          STRATEGY_CANDIDATE_LAB_WORKFLOWS,
+          collectStrategyCandidateLabRequest,
+          strategyCandidateLabResultsHtml,
+        } from "./marvis/static/js/v2/strategy_candidate_lab_controller.js";
+
+        function projectionOption(value, dataset = {}) {
+          return {
+            value,
+            dataset: { candidateLabProjection: "1", ...dataset },
+          };
+        }
+        function makeForm(workflow, values = {}, fields = {}) {
+          return {
+            dataset: { candidateLabWorkflow: workflow },
+            querySelector(selector) {
+              const match = selector.match(/data-candidate-lab-field="([^"]+)"/);
+              if (!match) return null;
+              return fields[match[1]] || { value: values[match[1]] ?? "" };
+            },
+            querySelectorAll() { return []; },
+          };
+        }
+
+        const age = projectionOption("age", { feature: "age" });
+        const score = projectionOption("score", { feature: "score" });
+        const search = collectStrategyCandidateLabRequest(makeForm(
+          "cross_rule_search",
+          {
+            cross_rule_dimension: "2",
+            cross_rule_min_lift: "1.5",
+            cross_rule_min_bad_count: "20",
+            cross_rule_max_hit_share: "0.3",
+            cross_rule_min_amount_lift: "",
+            cross_rule_max_trials: "500",
+          },
+          {
+            cross_rule_features: { selectedOptions: [age, score] },
+          },
+        ));
+        assert.deepEqual(search, {
+          request_kind: "standard_workflow",
+          workflow: "cross_rule_search",
+          workflow_inputs: {
+            features: ["age", "score"],
+            dimension: 2,
+            constraints: {
+              min_lift: 1.5,
+              min_bad_count: 20,
+              max_hit_share: 0.3,
+              min_amount_lift: null,
+            },
+            max_trials: 500,
+          },
+        });
+
+        const searchId = `cross-rule-search-${"a".repeat(32)}`;
+        const ruleId = `cross-rule-${"b".repeat(32)}`;
+        const build = collectStrategyCandidateLabRequest(makeForm(
+          "cross_rule_candidate_build_from_search",
+          { cross_rule_selection_reason: "人工风险评审。" },
+          {
+            cross_rule_build_search_id: {
+              value: searchId,
+              selectedOptions: [
+                projectionOption(searchId, { searchId }),
+              ],
+            },
+            cross_rule_build_rule_id: {
+              value: ruleId,
+              selectedOptions: [
+                projectionOption(ruleId, { searchId, ruleId }),
+              ],
+            },
+          },
+        ));
+        assert.deepEqual(build, {
+          request_kind: "standard_workflow",
+          workflow: "cross_rule_candidate_build_from_search",
+          workflow_inputs: {
+            search_id: searchId,
+            rule_id: ruleId,
+            selection_reason: "人工风险评审。",
+          },
+        });
+        assert.ok(STRATEGY_CANDIDATE_LAB_WORKFLOWS.includes("cross_rule_search"));
+
+        const html = strategyCandidateLabResultsHtml({
+          candidates: {
+            cross_rule_search: {
+              all: [{
+                search_id: searchId,
+                dimension: 2,
+                features: [],
+                constraints: { min_lift: 1.5 },
+                max_trials: 500,
+                search_space: 1000,
+                evaluated: 500,
+                eligible: 3,
+                truncated: true,
+                rules_truncated: false,
+                rules: [{
+                  rule_id: ruleId,
+                  rank: 1,
+                  conditions: [],
+                  metrics: { lift: 2.1, hit_share: 0.1 },
+                  eligible: true,
+                  constraint_failures: [],
+                }],
+              }],
+              total: 1,
+            },
+          },
+        });
+        assert.match(html, /不会把第一名当成冠军/);
+        assert.match(html, new RegExp(ruleId));
+      """
+    )
+
+
 def test_candidate_lab_api_uses_task_owned_get_and_existing_agent_message_envelope():
     run_node(
         """

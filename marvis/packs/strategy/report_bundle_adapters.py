@@ -49,6 +49,13 @@ from marvis.packs.strategy.cross_candidate_search_tools import (
     CROSS_CANDIDATE_SEARCH_ARTIFACT_SCHEMA_VERSION,
     CrossCandidateSearchArtifactBinding,
 )
+from marvis.packs.strategy.cross_rule_search import (
+    canonical_cross_rule_search_result_json,
+    validate_cross_rule_search_result,
+)
+from marvis.packs.strategy.cross_rule_search_tools import (
+    CrossRuleSearchArtifactBinding,
+)
 from marvis.packs.strategy.model_evidence import (
     canonical_strategy_model_evidence_bundle_json,
     validate_strategy_model_evidence_bundle,
@@ -181,6 +188,11 @@ _VOTING_SEARCH_REPORT_TITLE = (
 _MAX_CROSS_SEARCH_REPORT_PAIRS = 20
 _CROSS_SEARCH_REPORT_TITLE = (
     "Cross候选字段对搜索结果（开发回测，仅供明确选择，未构建/未入池）"
+)
+_MAX_CROSS_RULE_REPORT_RULES = 50
+_CROSS_RULE_REPORT_TITLE = (
+    "2D/3D Cross阈值规则搜索结果"
+    "（开发回测，仅供明确选择，未自动构建/未入池）"
 )
 _VOTING_SEARCH_PROVENANCE_FIELDS = frozenset(
     {
@@ -387,6 +399,25 @@ def validate_cross_candidate_search_report_compatibility(
     )
 
 
+def validate_cross_rule_search_report_compatibility(
+    *,
+    cross_rule_search: CrossRuleSearchArtifactBinding,
+    sample_design: _StrategySampleDesignV2Binding,
+) -> dict[str, Any]:
+    """Authenticate aggregate 2D/3D rule evidence for one exact V2 sample."""
+
+    sample = _authenticated_sample_design(sample_design)
+    _require_same_task(
+        sample_design.task_id,
+        cross_rule_search=cross_rule_search,
+    )
+    return _authenticated_cross_rule_search(
+        cross_rule_search,
+        sample_binding=sample_design,
+        sample=sample,
+    )
+
+
 def build_strategy_report_bundle_source_inputs(
     *,
     project_context: StrategyProjectContextArtifactBinding,
@@ -399,6 +430,7 @@ def build_strategy_report_bundle_source_inputs(
     pool_stability: StrategyPoolStabilityArtifactBinding | None = None,
     voting_candidate_search: VotingCandidateSearchArtifactBinding | None = None,
     cross_candidate_search: CrossCandidateSearchArtifactBinding | None = None,
+    cross_rule_search: CrossRuleSearchArtifactBinding | None = None,
     pool_impact: StrategyPoolImpactArtifactBinding | None = None,
     impact_cube: StrategyImpactCubeArtifactBinding | None = None,
     model_evidence: StrategyModelEvidenceV2ArtifactBinding | None = None,
@@ -424,6 +456,7 @@ def build_strategy_report_bundle_source_inputs(
         pool_stability=pool_stability,
         voting_candidate_search=voting_candidate_search,
         cross_candidate_search=cross_candidate_search,
+        cross_rule_search=cross_rule_search,
         pool_impact=(
             None if impact_cube is not None else pool_impact
         ),
@@ -466,6 +499,15 @@ def build_strategy_report_bundle_source_inputs(
         if cross_candidate_search is None
         else _authenticated_cross_candidate_search(
             cross_candidate_search,
+            sample_binding=sample_design,
+            sample=sample,
+        )
+    )
+    cross_rule = (
+        None
+        if cross_rule_search is None
+        else _authenticated_cross_rule_search(
+            cross_rule_search,
             sample_binding=sample_design,
             sample=sample,
         )
@@ -614,6 +656,15 @@ def build_strategy_report_bundle_source_inputs(
             cross_candidate_search.artifact_content_hash,
         )
     )
+    cross_rule_ref = (
+        None
+        if cross_rule_search is None
+        else _artifact_ref(
+            "cross_rule_search",
+            cross_rule_search.artifact_id,
+            cross_rule_search.artifact_content_hash,
+        )
+    )
     validation_refs = {
         evidence["partition"]: _artifact_ref(
             "strategy_validation",
@@ -721,6 +772,8 @@ def build_strategy_report_bundle_source_inputs(
             voting_search_ref=voting_search_ref,
             cross_search=cross_search,
             cross_search_ref=cross_search_ref,
+            cross_rule_search=cross_rule,
+            cross_rule_search_ref=cross_rule_ref,
             dataset_ref=_dataset_ref_from_sample(sample),
             strategy_lifecycle=lifecycle,
         ),
@@ -2140,6 +2193,115 @@ def _authenticated_cross_candidate_search(
     return result
 
 
+def _authenticated_cross_rule_search(
+    binding: CrossRuleSearchArtifactBinding,
+    *,
+    sample_binding: _StrategySampleDesignV2Binding,
+    sample: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Authenticate aggregate threshold-rule evidence for the exact report sample."""
+
+    _require_binding_type(
+        binding,
+        CrossRuleSearchArtifactBinding,
+        "Cross rule search",
+    )
+    try:
+        result = validate_cross_rule_search_result(binding.result)
+    except StrategyError as exc:
+        raise StrategyReportBundleError(
+            "Cross rule search result evidence is invalid"
+        ) from exc
+    if result != binding.result or binding.task_id != sample_binding.task_id:
+        raise StrategyReportBundleError(
+            "Cross rule search binding identity changed"
+        )
+    _require_canonical_artifact_hash(
+        binding.artifact_content_hash,
+        canonical_cross_rule_search_result_json(result),
+        "Cross rule search",
+    )
+    execution = binding.sample_binding
+    _require_binding_type(
+        execution,
+        StrategyRiskDevelopmentExecutionBinding,
+        "Cross rule search risk-development sample",
+    )
+    design = sample["sample_design"]
+    identity = design["identity"]
+    dataset_ref = identity["dataset_ref"]
+    workspace_ref = identity["workspace_ref"]
+    target = design["target_selector"]
+    risk_population = next(
+        (
+            item
+            for item in sample["populations"]
+            if item["role"] == "risk"
+        ),
+        None,
+    )
+    development = (
+        None
+        if risk_population is None
+        else next(
+            (
+                item
+                for item in risk_population["partitions"]
+                if item["name"] == "development"
+            ),
+            None,
+        )
+    )
+    if development is None:
+        raise StrategyReportBundleError(
+            "Cross rule search sample-design development population is missing"
+        )
+    provenance = binding.artifact_provenance
+    dropped = provenance.get("nan_labels_dropped")
+    if (
+        execution.to_ref_dict()
+        != _sample_risk_development_ref(sample_binding)
+        or execution.task_id != sample_binding.task_id
+        or execution.dataset_id != dataset_ref["dataset_id"]
+        or execution.dataset_content_hash != dataset_ref["content_hash"]
+        or execution.workspace_revision != workspace_ref["revision"]
+        or execution.workspace_generation != workspace_ref["generation"]
+        or execution.semantic_mapping_hash
+        != workspace_ref["semantic_mapping_hash"]
+        or execution.target_col != target["column"]
+        or execution.target_bad_value != target["bad_value"]
+        or execution.drop_nan_labels != target["drop_missing"]
+        or getattr(binding.dataset, "dataset_id", None)
+        != dataset_ref["dataset_id"]
+        or getattr(binding.dataset, "content_hash", None)
+        != dataset_ref["content_hash"]
+        or isinstance(dropped, bool)
+        or not isinstance(dropped, int)
+        or dropped < 0
+        or result["population"]["row_count"] + dropped
+        != development["row_count"]
+    ):
+        raise StrategyReportBundleError(
+            "Cross rule search sample, target, or workspace changed"
+        )
+    if (
+        provenance.get("search_id") != result["search_id"]
+        or provenance.get("search_content_hash") != result["content_hash"]
+        or provenance.get("sample_design_ref") != execution.to_ref_dict()
+        or provenance.get("features") != result["configuration"]["features"]
+        or provenance.get("dimension")
+        != result["configuration"]["dimension"]
+        or provenance.get("constraints")
+        != result["configuration"]["constraints"]
+        or provenance.get("max_trials")
+        != result["configuration"]["max_trials"]
+    ):
+        raise StrategyReportBundleError(
+            "Cross rule search provenance identity changed"
+        )
+    return result
+
+
 def _authenticated_candidate_stability(
     binding: StrategyCandidateStabilityArtifactBinding,
 ) -> dict[str, Any]:
@@ -3474,6 +3636,8 @@ def _candidate_section(
     voting_search_ref: Mapping[str, str] | None,
     cross_search: Mapping[str, Any] | None,
     cross_search_ref: Mapping[str, str] | None,
+    cross_rule_search: Mapping[str, Any] | None,
+    cross_rule_search_ref: Mapping[str, str] | None,
     dataset_ref: Mapping[str, str],
     strategy_lifecycle: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -3827,6 +3991,38 @@ def _candidate_section(
                 cross_search_ref,
             ]
         )
+    if cross_rule_search is not None:
+        if cross_rule_search_ref is None:
+            raise StrategyReportBundleError(
+                "Cross rule search projection requires an authenticated "
+                "result reference"
+            )
+        projection = _cross_rule_search_report_projection(
+            cross_rule_search,
+            source_ref=cross_rule_search_ref,
+        )
+        summary_fields.extend(projection["summary_fields"])
+        tables.append(projection["table"])
+        stage_evidence.append(
+            {
+                "effect_stage": "backtested",
+                "population": "risk",
+                "partition": "development",
+                "binding": {
+                    "kind": "development_backtest",
+                    "dataset_ref": dataset_ref,
+                    "frozen_artifact_ref": cross_rule_search_ref,
+                    "result_ref": cross_rule_search_ref,
+                },
+            }
+        )
+        section_refs = _dedupe_refs(
+            [
+                *section_refs,
+                dataset_ref,
+                cross_rule_search_ref,
+            ]
+        )
     return build_strategy_report_section(
         key="candidate_combinations",
         title=_SECTION_TITLES["candidate_combinations"],
@@ -4030,6 +4226,126 @@ def _cross_search_report_projection(
                 "cross_search_displayed",
                 "Cross报告展示字段对数",
                 _present_field(len(pairs), source_ref),
+            ),
+        ],
+        "table": table,
+    }
+
+
+def _cross_rule_search_report_projection(
+    result: Mapping[str, Any],
+    *,
+    source_ref: Mapping[str, str],
+) -> dict[str, Any]:
+    rules = list(result["rules"][:_MAX_CROSS_RULE_REPORT_RULES])
+    rows = []
+    for rule in rules:
+        condition_text = " AND ".join(
+            (
+                f"{item['feature']} {item['operator']} "
+                f"{item['threshold']:g}"
+                + (" OR missing" if item["include_missing"] else "")
+            )
+            for item in rule["conditions"]
+        )
+        failures = "、".join(rule["constraint_failures"])
+        metrics = rule["metrics"]
+        rows.append(
+            {
+                "row_id": rule["rule_id"],
+                "cells": {
+                    "rank": _present_field(rule["rank"], source_ref),
+                    "rule_id": _present_field(rule["rule_id"], source_ref),
+                    "conditions": _present_field(
+                        condition_text,
+                        source_ref,
+                    ),
+                    "eligible": _present_field(
+                        rule["eligible"],
+                        source_ref,
+                    ),
+                    "constraint_failures": _present_field(
+                        failures,
+                        source_ref,
+                    ),
+                    "count": _present_field(metrics["count"], source_ref),
+                    "bad": _present_field(metrics["bad"], source_ref),
+                    "hit_share": _present_field(
+                        metrics["hit_share"],
+                        source_ref,
+                    ),
+                    "bad_rate": _present_field(
+                        metrics["bad_rate"],
+                        source_ref,
+                    ),
+                    "lift": _present_field(metrics["lift"], source_ref),
+                    "bad_capture_rate": _present_field(
+                        metrics["bad_capture_rate"],
+                        source_ref,
+                    ),
+                    "amount_lift": _present_field(
+                        metrics["amount_lift"],
+                        source_ref,
+                    ),
+                },
+            }
+        )
+    table = build_strategy_report_table(
+        table_id="cross_threshold_rule_search",
+        title=_CROSS_RULE_REPORT_TITLE,
+        sheet_key="appendix_cross_rules",
+        granularity="aggregate",
+        content_class="metric_summary",
+        effect_stage="backtested",
+        columns=[
+            _column("rank", "稳定排序"),
+            _column("rule_id", "规则ID"),
+            _column("conditions", "交叉条件"),
+            _column("eligible", "是否满足搜索约束"),
+            _column("constraint_failures", "未满足约束"),
+            _column("count", "命中样本数"),
+            _column("bad", "命中坏样本数"),
+            _column("hit_share", "命中占比"),
+            _column("bad_rate", "命中坏账率"),
+            _column("lift", "风险Lift"),
+            _column("bad_capture_rate", "坏样本捕获率"),
+            _column("amount_lift", "金额Lift"),
+        ],
+        rows=rows,
+        source_refs=[source_ref],
+    )
+    configuration = result["configuration"]
+    return {
+        "summary_fields": [
+            _named(
+                "cross_rule_dimension",
+                "Cross阈值规则维度",
+                _present_field(configuration["dimension"], source_ref),
+            ),
+            _named(
+                "cross_rule_search_space",
+                "Cross阈值规则搜索空间",
+                _present_field(result["search_space"], source_ref),
+            ),
+            _named(
+                "cross_rule_evaluated",
+                "Cross阈值规则已评估数",
+                _present_field(result["evaluated"], source_ref),
+            ),
+            _named(
+                "cross_rule_eligible",
+                "Cross阈值规则满足约束数",
+                _present_field(result["eligible"], source_ref),
+            ),
+            _named(
+                "cross_rule_truncated",
+                "Cross阈值规则搜索是否截断",
+                _present_field(result["truncated"], source_ref),
+            ),
+            _named(
+                "cross_rule_displayed",
+                "Cross阈值规则报告展示数",
+                _present_field(len(rules), source_ref),
             ),
         ],
         "table": table,

@@ -178,6 +178,7 @@ _STAGE_REF_KINDS = {
             "strategy_candidate_asset",
             "strategy_candidate_pool",
             "cross_candidate_search",
+            "cross_rule_search",
         }
     ),
     "backtest_result_ref": frozenset(
@@ -187,6 +188,7 @@ _STAGE_REF_KINDS = {
             "strategy_impact",
             "voting_candidate_search",
             "cross_candidate_search",
+            "cross_rule_search",
         }
     ),
     "validation_result_ref": frozenset(

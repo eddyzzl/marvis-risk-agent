@@ -2165,6 +2165,89 @@
 
                     <details class="candidate-lab-launcher">
                       <summary>
+                        <span><strong>2D/3D Cross 阈值规则搜索</strong><small>从认证单变量边界中有预算地挖掘高风险交叉规则</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="cross_rule_search">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>参与搜索的独立字段（2–12 个） <b aria-hidden="true">*</b></span>
+                          <select multiple size="8" data-candidate-lab-field="cross_rule_features">
+                            <option value="" disabled>等待当前单变量受认证投影</option>
+                          </select>
+                        </label>
+                        <div class="candidate-lab-form-grid">
+                          <label class="candidate-lab-field">
+                            <span>交叉维度 <b aria-hidden="true">*</b></span>
+                            <select data-candidate-lab-field="cross_rule_dimension">
+                              <option value="2">2D（两个条件同时命中）</option>
+                              <option value="3">3D（三个条件同时命中）</option>
+                            </select>
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最多评估试验数 <b aria-hidden="true">*</b></span>
+                            <input type="number" min="1" max="5000" step="1" value="500" data-candidate-lab-field="cross_rule_max_trials">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最小 Lift <b aria-hidden="true">*</b></span>
+                            <input type="number" min="0" max="1000" step="0.01" value="1.5" data-candidate-lab-field="cross_rule_min_lift">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最小坏样本数 <b aria-hidden="true">*</b></span>
+                            <input type="number" min="0" step="1" value="20" data-candidate-lab-field="cross_rule_min_bad_count">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最大命中占比 <b aria-hidden="true">*</b></span>
+                            <input type="number" min="0" max="1" step="0.01" value="0.3" data-candidate-lab-field="cross_rule_max_hit_share">
+                          </label>
+                          <label class="candidate-lab-field">
+                            <span>最小金额 Lift</span>
+                            <input type="number" min="0" max="1000" step="0.01" data-candidate-lab-field="cross_rule_min_amount_lift" placeholder="留空表示不设金额门槛">
+                          </label>
+                        </div>
+                        <p class="candidate-lab-field-help" data-candidate-lab-cross-rule-help>
+                          请先完成单变量分析；阈值、风险方向、缺失分支和哨兵排除由平台从认证证据恢复。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          搜索会展示全部已评估规则及排序，但不会把第一名当成冠军，不会自动构建、入 Pool、采纳或部署。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">搜索 Cross 阈值规则</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
+                        <span><strong>构建指定 Cross 阈值规则</strong><small>逐项选择完整 Search 与 Rule 指针</small></span>
+                      </summary>
+                      <form data-candidate-lab-form data-candidate-lab-workflow="cross_rule_candidate_build_from_search">
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>Cross 阈值规则搜索证据 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="cross_rule_build_search_id">
+                            <option value="">等待当前 Cross 阈值规则搜索投影</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>精确规则 <b aria-hidden="true">*</b></span>
+                          <select data-candidate-lab-field="cross_rule_build_rule_id">
+                            <option value="">请先明确选择一份搜索证据</option>
+                          </select>
+                        </label>
+                        <label class="candidate-lab-field candidate-lab-field-wide">
+                          <span>人工选择理由</span>
+                          <textarea rows="2" maxlength="500" data-candidate-lab-field="cross_rule_selection_reason" placeholder="可选；记录业务、风险或合规评审依据"></textarea>
+                        </label>
+                        <p class="candidate-lab-field-help" data-candidate-lab-cross-rule-build-help>
+                          页面显示 eligible、约束失败和效果指标，但不会按 rank 自动代选。
+                        </p>
+                        <p class="candidate-lab-boundary-note">
+                          只提交完整 search_id 与 rule_id。候选构建后仍未验证、未入池、未采纳、未部署。
+                        </p>
+                        <p class="candidate-lab-form-error" data-candidate-lab-form-error role="alert" aria-live="polite"></p>
+                        <button type="submit" class="button compact primary">构建所选规则候选</button>
+                      </form>
+                    </details>
+
+                    <details class="candidate-lab-launcher">
+                      <summary>
                         <span><strong>Cross 自动搜索</strong><small>从当前单变量证据明确选择字段，按预算评估两两组合</small></span>
                       </summary>
                       <form data-candidate-lab-form data-candidate-lab-workflow="cross_matrix_candidate_search">

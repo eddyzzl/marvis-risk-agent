@@ -50,6 +50,11 @@ from marvis.packs.strategy.cross_candidate_search_tools import (
     load_cross_candidate_search_artifact,
     require_cross_candidate_search_artifact_binding_on_connection,
 )
+from marvis.packs.strategy.cross_rule_search_tools import (
+    CrossRuleSearchArtifactBinding,
+    load_cross_rule_search_artifact,
+    require_cross_rule_search_artifact_binding_on_connection,
+)
 from marvis.packs.strategy.dsl import strategy_spec_hash
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.impact_cube_binding import (
@@ -130,7 +135,7 @@ if TYPE_CHECKING:
 
 
 BUILD_STRATEGY_REPORT_BUNDLE_V2_TOOL_SCHEMA_VERSION = (
-    "strategy.build-report-bundle-v2-tool.v7"
+    "strategy.build-report-bundle-v2-tool.v8"
 )
 BUILD_STRATEGY_REPORT_BUNDLE_V2_AUDIT_KIND = (
     "strategy.report_bundle.published"
@@ -153,6 +158,7 @@ _INPUT_FIELDS = frozenset(
         "pool_stability_ref",
         "voting_candidate_search_ref",
         "cross_candidate_search_ref",
+        "cross_rule_search_ref",
         "pool_impact_ref",
         "impact_cube_ref",
         "strategy_identity",
@@ -234,6 +240,7 @@ _CROSS_CANDIDATE_SEARCH_REF_FIELDS = frozenset(
         "expected_search_content_hash",
     }
 )
+_CROSS_RULE_SEARCH_REF_FIELDS = _CROSS_CANDIDATE_SEARCH_REF_FIELDS
 _IMPACT_REF_FIELDS = frozenset(
     {
         "artifact_id",
@@ -344,6 +351,9 @@ _VOTING_CANDIDATE_SEARCH_ID_RE = re.compile(
 _CROSS_CANDIDATE_SEARCH_ID_RE = re.compile(
     r"^cross-search-[0-9a-f]{32}$"
 )
+_CROSS_RULE_SEARCH_ID_RE = re.compile(
+    r"^cross-rule-search-[0-9a-f]{32}$"
+)
 _IMPACT_CUBE_ID_RE = re.compile(
     r"^strategy-impact-cube-[0-9a-f]{24}$"
 )
@@ -377,6 +387,7 @@ class _ReportSources:
     pool_stability: StrategyPoolStabilityArtifactBinding | None
     voting_candidate_search: VotingCandidateSearchArtifactBinding | None
     cross_candidate_search: CrossCandidateSearchArtifactBinding | None
+    cross_rule_search: CrossRuleSearchArtifactBinding | None
     pool_impact: StrategyPoolImpactArtifactBinding | None
     impact_cube: StrategyImpactCubeArtifactBinding | None
     model_evidence: StrategyModelEvidenceV2ArtifactBinding | None
@@ -511,6 +522,7 @@ def run_build_strategy_report_bundle_v2(inputs, ctx, runtime) -> dict[str, Any]:
             pool_stability=sources.pool_stability,
             voting_candidate_search=sources.voting_candidate_search,
             cross_candidate_search=sources.cross_candidate_search,
+            cross_rule_search=sources.cross_rule_search,
             pool_impact=sources.pool_impact,
             impact_cube=sources.impact_cube,
             model_evidence=sources.model_evidence,
@@ -753,6 +765,15 @@ def _load_sources(
             **request["cross_candidate_search_ref"],
         )
     )
+    cross_rule_search = (
+        None
+        if request["cross_rule_search_ref"] is None
+        else load_cross_rule_search_artifact(
+            runtime,
+            task_id=task_id,
+            **request["cross_rule_search_ref"],
+        )
+    )
     impact_cube = (
         None
         if request["impact_cube_ref"] is None
@@ -836,6 +857,7 @@ def _load_sources(
         pool_stability=pool_stability,
         voting_candidate_search=voting_candidate_search,
         cross_candidate_search=cross_candidate_search,
+        cross_rule_search=cross_rule_search,
         pool_impact=pool_impact,
         impact_cube=impact_cube,
         model_evidence=model_evidence,
@@ -1119,6 +1141,11 @@ def _revalidate_sources(conn, sources: _ReportSources, *, strategies) -> None:
             conn,
             sources.cross_candidate_search,
         )
+    if sources.cross_rule_search is not None:
+        require_cross_rule_search_artifact_binding_on_connection(
+            conn,
+            sources.cross_rule_search,
+        )
     if sources.impact_cube is not None:
         require_strategy_impact_cube_artifact_binding_on_connection(
             conn,
@@ -1261,6 +1288,7 @@ def _audit_source_artifacts(sources: _ReportSources) -> dict[str, Any]:
         "pool_stability": None,
         "voting_candidate_search": None,
         "cross_candidate_search": None,
+        "cross_rule_search": None,
         "pool_impact": None,
         "impact_cube": None,
         "model_evidence": None,
@@ -1360,6 +1388,15 @@ def _audit_source_artifacts(sources: _ReportSources) -> dict[str, Any]:
             "search_content_hash": (
                 sources.cross_candidate_search.result["content_hash"]
             ),
+        }
+    if sources.cross_rule_search is not None:
+        result["cross_rule_search"] = {
+            "artifact_id": sources.cross_rule_search.artifact_id,
+            "content_hash": sources.cross_rule_search.artifact_content_hash,
+            "search_id": sources.cross_rule_search.result["search_id"],
+            "search_content_hash": sources.cross_rule_search.result[
+                "content_hash"
+            ],
         }
     if sources.model_evidence is not None:
         result["model_evidence"] = {
@@ -1524,6 +1561,9 @@ def _validate_inputs(value: object) -> dict[str, Any]:
         _optional_cross_candidate_search_ref(
             request["cross_candidate_search_ref"]
         )
+    )
+    request["cross_rule_search_ref"] = _optional_cross_rule_search_ref(
+        request["cross_rule_search_ref"]
     )
     request["impact_cube_ref"] = _optional_impact_cube_ref(
         request["impact_cube_ref"]
@@ -1807,6 +1847,41 @@ def _optional_cross_candidate_search_ref(
         "expected_search_content_hash": _hash(
             obj["expected_search_content_hash"],
             "cross_candidate_search_ref.expected_search_content_hash",
+        ),
+    }
+
+
+def _optional_cross_rule_search_ref(
+    value: object,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    obj = _exact_object(
+        value,
+        _CROSS_RULE_SEARCH_REF_FIELDS,
+        "cross_rule_search_ref",
+    )
+    search_id = _text(
+        obj["expected_search_id"],
+        "cross_rule_search_ref.expected_search_id",
+    )
+    if _CROSS_RULE_SEARCH_ID_RE.fullmatch(search_id) is None:
+        raise StrategyError(
+            "cross_rule_search_ref.expected_search_id is not canonical"
+        )
+    return {
+        "artifact_id": _hash(
+            obj["artifact_id"],
+            "cross_rule_search_ref.artifact_id",
+        ),
+        "expected_artifact_content_hash": _hash(
+            obj["expected_artifact_content_hash"],
+            "cross_rule_search_ref.expected_artifact_content_hash",
+        ),
+        "expected_search_id": search_id,
+        "expected_search_content_hash": _hash(
+            obj["expected_search_content_hash"],
+            "cross_rule_search_ref.expected_search_content_hash",
         ),
     }
 

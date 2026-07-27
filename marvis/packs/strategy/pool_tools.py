@@ -92,6 +92,18 @@ from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
     load_verified_cross_matrix_source_artifact,
     load_verified_cross_matrix_source_artifact_on_connection,
 )
+from marvis.packs.strategy.cross_rule_candidate import (
+    cross_rule_candidate_to_verified_fragment,
+)
+from marvis.packs.strategy.cross_rule_search_tools import (
+    CROSS_RULE_CANDIDATE_ARTIFACT_KIND,
+    CROSS_RULE_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+    CROSS_RULE_CANDIDATE_ORIGIN_TOOL,
+    CrossRuleCandidateArtifactBinding,
+    load_cross_rule_candidate_artifact,
+    replay_cross_rule_candidate_binding,
+    require_cross_rule_candidate_artifact_binding_on_connection,
+)
 from marvis.packs.strategy.interactive_tree_frontier_selection import (
     INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_KIND,
     INTERACTIVE_TREE_FRONTIER_SELECTION_ARTIFACT_SCHEMA_VERSION,
@@ -408,6 +420,13 @@ class _CrossMatrixCandidateLineage:
 
 
 @dataclass(frozen=True)
+class _CrossRuleCandidateLineage:
+    candidate: CrossRuleCandidateArtifactBinding
+    verified_fragment: dict[str, Any]
+    source_binding: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class _ScorecardDatasetBinding:
     dataset_id: str
     task_id: str
@@ -444,6 +463,7 @@ _CandidateLineage = (
     | _InteractiveTreeCandidateLineage
     | _InteractiveTreeGroupCandidateLineage
     | _CrossMatrixCandidateLineage
+    | _CrossRuleCandidateLineage
     | _ScorecardCandidateLineage
     | _VotingCandidateLineage
 )
@@ -3116,6 +3136,11 @@ def _load_candidate_lineage(
         CROSS_MATRIX_ASSET_ORIGIN_TOOL,
         CROSS_MATRIX_ASSET_ARTIFACT_V2_SCHEMA_VERSION,
     )
+    cross_rule_candidate_triple = (
+        CROSS_RULE_CANDIDATE_ARTIFACT_KIND,
+        CROSS_RULE_CANDIDATE_ORIGIN_TOOL,
+        CROSS_RULE_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+    )
     scorecard_selection_triple = (
         SCORECARD_CUTOFF_SELECTION_ARTIFACT_KIND,
         SCORECARD_CUTOFF_SELECTION_ORIGIN_TOOL,
@@ -3188,6 +3213,15 @@ def _load_candidate_lineage(
         raise StrategyError(
             "complete Cross Matrix assets cannot be admitted directly; "
             "materialize a cell selection first"
+        )
+    if triple == cross_rule_candidate_triple:
+        return _load_cross_rule_candidate_lineage(
+            runtime,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            expected_content_hash=expected_content_hash,
+            expected_asset_id=expected_asset_id,
+            expected_asset_hash=expected_asset_hash,
         )
     if triple == scorecard_selection_triple:
         return _load_scorecard_candidate_lineage(
@@ -3781,6 +3815,60 @@ def _load_cross_matrix_candidate_lineage(
     )
 
 
+def _load_cross_rule_candidate_lineage(
+    runtime,
+    *,
+    task_id: str,
+    artifact_id: str,
+    expected_content_hash: str,
+    expected_asset_id: str,
+    expected_asset_hash: str,
+) -> _CrossRuleCandidateLineage:
+    """Replay one materialized threshold rule before Pool admission."""
+
+    candidate = load_cross_rule_candidate_artifact(
+        runtime,
+        task_id=task_id,
+        artifact_id=artifact_id,
+        expected_artifact_content_hash=expected_content_hash,
+        expected_asset_id=expected_asset_id,
+        expected_asset_hash=expected_asset_hash,
+    )
+    replay_cross_rule_candidate_binding(runtime, candidate)
+    search = candidate.search
+    identity = search.evidence["identity"]
+    verified_fragment = cross_rule_candidate_to_verified_fragment(
+        candidate.candidate,
+        artifact_binding={
+            "artifact_id": candidate.artifact_id,
+            "artifact_kind": CROSS_RULE_CANDIDATE_ARTIFACT_KIND,
+            "artifact_schema_version": (
+                CROSS_RULE_CANDIDATE_ARTIFACT_SCHEMA_VERSION
+            ),
+            "artifact_content_hash": candidate.artifact_content_hash,
+            "origin_tool": CROSS_RULE_CANDIDATE_ORIGIN_TOOL,
+        },
+        evidence_identity={
+            "dataset_id": identity["dataset_id"],
+            "dataset_content_hash": identity["dataset_content_hash"],
+            "workspace_revision": identity["workspace_revision"],
+            "workspace_generation": identity["workspace_generation"],
+            "semantic_mapping_hash": identity["semantic_mapping_hash"],
+            "sample_context_hash": search.result["source"][
+                "sample_context_hash"
+            ],
+        },
+    )
+    source_binding, _rule_id, _execution = verified_fragment_pool_parts(
+        verified_fragment
+    )
+    return _CrossRuleCandidateLineage(
+        candidate=candidate,
+        verified_fragment=verified_fragment,
+        source_binding=source_binding,
+    )
+
+
 def _require_cross_matrix_groups_disjoint(
     lineages: Sequence[_CandidateLineage],
 ) -> None:
@@ -4253,6 +4341,9 @@ def _require_lineage_on_connection(
             cache=cache if cache is not None else _LineageCache.empty(),
         )
         return
+    if isinstance(lineage, _CrossRuleCandidateLineage):
+        _require_cross_rule_lineage_on_connection(conn, lineage)
+        return
     if isinstance(lineage, _ScorecardCandidateLineage):
         _require_scorecard_lineage_on_connection(
             conn,
@@ -4270,6 +4361,51 @@ def _require_lineage_on_connection(
         )
         return
     raise StrategyError("unsupported candidate lineage type")
+
+
+def _require_cross_rule_lineage_on_connection(
+    conn,
+    lineage: _CrossRuleCandidateLineage,
+) -> None:
+    require_cross_rule_candidate_artifact_binding_on_connection(
+        conn,
+        lineage.candidate,
+    )
+    candidate = lineage.candidate
+    search = candidate.search
+    identity = search.evidence["identity"]
+    verified_fragment = cross_rule_candidate_to_verified_fragment(
+        candidate.candidate,
+        artifact_binding={
+            "artifact_id": candidate.artifact_id,
+            "artifact_kind": CROSS_RULE_CANDIDATE_ARTIFACT_KIND,
+            "artifact_schema_version": (
+                CROSS_RULE_CANDIDATE_ARTIFACT_SCHEMA_VERSION
+            ),
+            "artifact_content_hash": candidate.artifact_content_hash,
+            "origin_tool": CROSS_RULE_CANDIDATE_ORIGIN_TOOL,
+        },
+        evidence_identity={
+            "dataset_id": identity["dataset_id"],
+            "dataset_content_hash": identity["dataset_content_hash"],
+            "workspace_revision": identity["workspace_revision"],
+            "workspace_generation": identity["workspace_generation"],
+            "semantic_mapping_hash": identity["semantic_mapping_hash"],
+            "sample_context_hash": search.result["source"][
+                "sample_context_hash"
+            ],
+        },
+    )
+    source_binding, _rule_id, _execution = verified_fragment_pool_parts(
+        verified_fragment
+    )
+    if (
+        verified_fragment != lineage.verified_fragment
+        or source_binding != lineage.source_binding
+    ):
+        raise StrategyError(
+            "Cross rule candidate lineage changed before Pool persistence"
+        )
 
 
 def _require_scorecard_lineage_on_connection(

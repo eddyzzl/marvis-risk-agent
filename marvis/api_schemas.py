@@ -223,6 +223,8 @@ ManualStrategyWorkflow = Literal[
     "voting_candidate_build_from_search",
     "cross_matrix_candidate_search",
     "cross_matrix_candidate_build_from_search",
+    "cross_rule_search",
+    "cross_rule_candidate_build_from_search",
     "interactive_tree_revision",
     "interactive_tree_frontier_group_materialization",
     "interactive_tree_frontier_materialization",
@@ -580,6 +582,14 @@ ManualCrossSearchId = Annotated[
 ManualCrossPairId = Annotated[
     StrictStr,
     StringConstraints(pattern=r"^cross-pair-[0-9a-f]{32}$"),
+]
+ManualCrossRuleSearchId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^cross-rule-search-[0-9a-f]{32}$"),
+]
+ManualCrossRuleId = Annotated[
+    StrictStr,
+    StringConstraints(pattern=r"^cross-rule-[0-9a-f]{32}$"),
 ]
 ManualVotingMetric = Literal[
     "hit_count",
@@ -965,6 +975,64 @@ class ManualCrossMatrixCandidateBuildFromSearchInputs(BaseModel):
 
     search_id: ManualCrossSearchId
     pair_id: ManualCrossPairId
+
+
+class ManualCrossRuleSearchConstraints(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    min_lift: StrictInt | StrictFloat = Field(ge=0.0, le=1_000.0)
+    min_bad_count: StrictInt = Field(ge=0)
+    max_hit_share: StrictInt | StrictFloat = Field(ge=0.0, le=1.0)
+    min_amount_lift: StrictInt | StrictFloat | None = Field(
+        default=None,
+        ge=0.0,
+        le=1_000.0,
+    )
+
+    @model_validator(mode="after")
+    def require_explicit_finite_amount_control(self) -> Self:
+        if "min_amount_lift" not in self.model_fields_set:
+            raise ValueError("min_amount_lift must be explicit, including null")
+        for value in (
+            self.min_lift,
+            self.max_hit_share,
+            self.min_amount_lift,
+        ):
+            if value is not None and not math.isfinite(float(value)):
+                raise ValueError("Cross rule constraints must be finite")
+        return self
+
+
+class ManualCrossRuleSearchInputs(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    features: Annotated[
+        list[StrictCanonicalNonEmptyStr],
+        Field(min_length=2, max_length=12),
+        AfterValidator(_unique_strings),
+    ]
+    dimension: Literal[2, 3]
+    constraints: ManualCrossRuleSearchConstraints
+    max_trials: StrictInt = Field(ge=1, le=5_000)
+
+
+class ManualCrossRuleCandidateBuildFromSearchInputs(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    search_id: ManualCrossRuleSearchId
+    rule_id: ManualCrossRuleId
+    selection_reason: ManualSelectionReason | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_null_reason(self) -> Self:
+        if (
+            "selection_reason" in self.model_fields_set
+            and self.selection_reason is None
+        ):
+            raise ValueError(
+                "optional fields must be omitted instead of null: selection_reason"
+            )
+        return self
 
 
 class ManualStrategyPoolDecisionAction(BaseModel):
@@ -1542,6 +1610,12 @@ _MANUAL_CROSS_MATRIX_CANDIDATE_SEARCH_INPUTS = TypeAdapter(
 _MANUAL_CROSS_MATRIX_CANDIDATE_BUILD_FROM_SEARCH_INPUTS = TypeAdapter(
     ManualCrossMatrixCandidateBuildFromSearchInputs
 )
+_MANUAL_CROSS_RULE_SEARCH_INPUTS = TypeAdapter(
+    ManualCrossRuleSearchInputs
+)
+_MANUAL_CROSS_RULE_CANDIDATE_BUILD_FROM_SEARCH_INPUTS = TypeAdapter(
+    ManualCrossRuleCandidateBuildFromSearchInputs
+)
 _MANUAL_STRATEGY_POOL_COMPILE_INPUTS = TypeAdapter(
     ManualStrategyPoolCompileInputs
 )
@@ -1697,6 +1771,19 @@ class ManualStrategyRequest(BaseModel):
                     strict=True,
                 )
             )
+        elif self.workflow == "cross_rule_search":
+            _MANUAL_CROSS_RULE_SEARCH_INPUTS.validate_python(
+                self.workflow_inputs,
+                strict=True,
+            )
+        elif self.workflow == "cross_rule_candidate_build_from_search":
+            (
+                _MANUAL_CROSS_RULE_CANDIDATE_BUILD_FROM_SEARCH_INPUTS
+                .validate_python(
+                    self.workflow_inputs,
+                    strict=True,
+                )
+            )
         elif self.workflow == "strategy_pool_compile":
             _MANUAL_STRATEGY_POOL_COMPILE_INPUTS.validate_python(
                 self.workflow_inputs,
@@ -1781,6 +1868,10 @@ class ManualStrategyRequest(BaseModel):
             "cross_matrix_candidate_build_from_search": {
                 "search_id",
                 "pair_id",
+            },
+            "cross_rule_candidate_build_from_search": {
+                "search_id",
+                "rule_id",
             },
             "strategy_pool_add_candidate": {
                 "candidate_asset_id",

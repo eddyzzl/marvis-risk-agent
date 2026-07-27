@@ -42,6 +42,9 @@ from marvis.packs.strategy.cross_candidate_search_tools import (
     CROSS_CANDIDATE_SEARCH_ARTIFACT_KIND,
     run_search_cross_matrix_candidates,
 )
+from marvis.packs.strategy.cross_rule_search_tools import (
+    run_search_cross_threshold_rules,
+)
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.impact_cube_tools import (
     run_measure_strategy_impact_cube,
@@ -167,6 +170,53 @@ def _attach_cross_search(fixture: dict) -> dict:
             "expected_evidence_hash": source["evidence_hash"],
             "features": ["score", "loan_amount"],
             "max_pairs": 1,
+        },
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+
+def _attach_cross_rule_search(fixture: dict) -> dict:
+    source = strategy_tools.tool_analyze_univariate_candidates(
+        {
+            "dataset_id": fixture["dataset"].id,
+            "expected_content_hash": fixture["dataset"].content_hash,
+            "workspace_revision": fixture["workspace"].revision,
+            "analysis_generation": fixture["workspace"].analysis_generation,
+            "semantic_mapping_hash": data_semantic_mapping_hash(
+                fixture["mapping"]
+            ),
+            "target_col": "bad",
+            "sample_design_ref": fixture["sample_design_ref"],
+            "features": ["score", "loan_amount"],
+            "methods": ["equal_width"],
+            "bin_count": 3,
+            "drop_nan_labels": True,
+            "loan_amount_col": "loan_amount",
+            "overdue_amount_col": "overdue_amount",
+        },
+        fixture["ctx"],
+    )
+    source_artifact = next(
+        item
+        for item in source["artifacts"]
+        if item["kind"] == "strategy_candidate_json"
+    )
+    return run_search_cross_threshold_rules(
+        {
+            "source_artifact_id": source_artifact["artifact_id"],
+            "expected_artifact_content_hash": source_artifact["content_hash"],
+            "expected_candidate_id": source["candidate_id"],
+            "expected_evidence_hash": source["evidence_hash"],
+            "features": ["score", "loan_amount"],
+            "dimension": 2,
+            "constraints": {
+                "min_lift": 0.0,
+                "min_bad_count": 0,
+                "max_hit_share": 1.0,
+                "min_amount_lift": None,
+            },
+            "max_trials": 4,
         },
         fixture["ctx"],
         fixture["runtime"],
@@ -421,6 +471,7 @@ def test_report_turn_binds_exact_current_sources_and_first_head(
     assert slots["candidate_stability_ref"] is None
     assert slots["voting_candidate_search_ref"] is None
     assert slots["cross_candidate_search_ref"] is None
+    assert slots["cross_rule_search_ref"] is None
     assert slots["pool_validation_refs"] == []
     assert slots["report_revision"] == 1
     assert slots["previous_report_id"] is None
@@ -555,6 +606,95 @@ def test_report_turn_passes_exact_selected_cross_search_to_preflight(
         "expected_search_id": search.result["search_id"],
         "expected_search_content_hash": search.result["content_hash"],
     }
+
+
+def test_report_turn_passes_exact_selected_cross_rule_search_to_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    search = SimpleNamespace(
+        artifact_id="a" * 64,
+        artifact_content_hash="b" * 64,
+        result={
+            "search_id": "cross-rule-search-" + ("1" * 32),
+            "content_hash": "c" * 64,
+        },
+    )
+    observed = {}
+    original_adapter = (
+        turn_handlers.build_strategy_report_bundle_source_inputs
+    )
+
+    def capture_preflight(**kwargs):
+        observed["search"] = kwargs.pop("cross_rule_search")
+        return original_adapter(**kwargs)
+
+    monkeypatch.setattr(
+        turn_handlers,
+        "_strategy_report_latest_cross_rule_search_binding",
+        lambda *args, **kwargs: search,
+    )
+    monkeypatch.setattr(
+        turn_handlers,
+        "build_strategy_report_bundle_source_inputs",
+        capture_preflight,
+    )
+
+    slots = _strategy_report_bundle_v2_plan_slots(
+        _runtime(fixture),
+        fixture["task"],
+        _draft(),
+        source_message={"content": "请生成当前审批策略迭代评审报告。"},
+    )
+
+    assert observed["search"] is search
+    assert slots["cross_rule_search_ref"] == {
+        "artifact_id": search.artifact_id,
+        "expected_artifact_content_hash": search.artifact_content_hash,
+        "expected_search_id": search.result["search_id"],
+        "expected_search_content_hash": search.result["content_hash"],
+    }
+
+
+def test_report_turn_and_tool_publish_real_cross_rule_appendix(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path)
+    searched = _attach_cross_rule_search(fixture)
+    slots = _strategy_report_bundle_v2_plan_slots(
+        _runtime(fixture),
+        fixture["task"],
+        _draft(),
+        source_message={"content": "请生成当前审批策略迭代评审报告。"},
+    )
+
+    assert slots["cross_rule_search_ref"]["expected_search_id"] == (
+        searched["search_id"]
+    )
+    output = run_build_strategy_report_bundle_v2(
+        slots,
+        fixture["ctx"],
+        fixture["runtime"],
+    )
+
+    candidate_section = next(
+        section
+        for section in output["bundle"]["sections"]
+        if section["key"] == "candidate_combinations"
+    )
+    table = next(
+        item
+        for item in candidate_section["tables"]
+        if item["table_id"] == "cross_threshold_rule_search"
+    )
+    assert table["sheet_key"] == "appendix_cross_rules"
+    assert table["rows"][0]["row_id"] == (
+        searched["search_result"]["rules"][0]["rule_id"]
+    )
+    assert output["schema_version"] == (
+        "strategy.build-report-bundle-v2-tool.v8"
+    )
 
 
 def test_report_cross_search_window_skips_authenticated_unrelated_evidence(

@@ -12,6 +12,8 @@ export const STRATEGY_CANDIDATE_LAB_WORKFLOWS = Object.freeze([
   "cross_matrix_analysis",
   "cross_matrix_candidate_search",
   "cross_matrix_candidate_build_from_search",
+  "cross_rule_search",
+  "cross_rule_candidate_build_from_search",
   "automatic_tree_candidate_build",
   "scorecard_band_build",
   "scorecard_cutoff_selection",
@@ -45,6 +47,8 @@ const WORKFLOW_LABELS = Object.freeze({
   cross_matrix_analysis: "启动二维 Cross Matrix",
   cross_matrix_candidate_search: "搜索 Cross Matrix 字段组合",
   cross_matrix_candidate_build_from_search: "从搜索结果构建 Cross Matrix 候选",
+  cross_rule_search: "搜索 2D/3D Cross 阈值规则",
+  cross_rule_candidate_build_from_search: "构建指定 Cross 阈值规则候选",
   automatic_tree_candidate_build: "启动自动规则树",
   scorecard_band_build: "生成评分卡分档证据",
   scorecard_cutoff_selection: "记录评分卡 Cutoff 选择",
@@ -87,6 +91,18 @@ const COLLECTION_DEFINITIONS = Object.freeze([
     key: "cross_search",
     title: "Cross 自动搜索",
     description: "受认证单变量字段的两两组合搜索、交互增益与稀疏性证据",
+    pointerKey: "",
+  },
+  {
+    key: "cross_rule_search",
+    title: "Cross 阈值规则搜索",
+    description: "有预算的 2D/3D 阈值组合、约束结果与精确规则指针",
+    pointerKey: "",
+  },
+  {
+    key: "cross_rule_candidate",
+    title: "Cross 阈值规则候选",
+    description: "由用户精确点名规则后物化的可入池候选",
     pointerKey: "",
   },
   {
@@ -148,6 +164,8 @@ const VOTING_SEARCH_ID_RE = /^voting-search-[0-9a-f]{32}$/;
 const VOTING_COMBO_ID_RE = /^voting-combo-[0-9a-f]{32}$/;
 const CROSS_SEARCH_ID_RE = /^cross-search-[0-9a-f]{32}$/;
 const CROSS_PAIR_ID_RE = /^cross-pair-[0-9a-f]{32}$/;
+const CROSS_RULE_SEARCH_ID_RE = /^cross-rule-search-[0-9a-f]{32}$/;
+const CROSS_RULE_ID_RE = /^cross-rule-[0-9a-f]{32}$/;
 const INTERACTIVE_TREE_SOURCE_ID_RE = /^(?:candidate-asset-[0-9a-f]{32}|interactive-tree-revision-[0-9a-f]{32})$/;
 const INTERACTIVE_TREE_NODE_ID_RE = /^node-[0-9a-f]{20}$/;
 const INTERACTIVE_TREE_REVISION_ID_RE = /^interactive-tree-revision-[0-9a-f]{32}$/;
@@ -880,6 +898,87 @@ function crossSearchDetailHtml(item) {
   ].join("");
 }
 
+function crossRuleSearchDetailHtml(item) {
+  const features = Array.isArray(item?.features)
+    ? item.features.filter(isRecord)
+    : [];
+  const rules = Array.isArray(item?.rules)
+    ? item.rules.filter(isRecord)
+    : [];
+  return [
+    '<details class="candidate-lab-evidence-card candidate-lab-cross-search-card">',
+    "<summary>",
+    '<span class="candidate-lab-card-title">',
+    `<strong>${escapeHtml(nonEmptyText(item?.search_id) || "Cross 阈值规则搜索")}</strong>`,
+    `<small>${escapeHtml(stablePrimitiveText(item?.dimension))}D · ${escapeHtml(stablePrimitiveText(item?.evaluated))} / ${escapeHtml(stablePrimitiveText(item?.search_space))} 条试验 · 未选择</small>`,
+    "</span>",
+    '<span class="candidate-lab-card-state">查看规则证据</span>',
+    "</summary>",
+    '<div class="candidate-lab-card-body">',
+    evidenceIdentityHtml({ artifact: item?.artifact }),
+    '<div class="candidate-lab-boundary-note" data-tone="info">',
+    "<strong>人工选择边界</strong>",
+    "<p>rank、eligible 和约束失败只描述确定性证据。页面不会把第一名当成冠军，也不会自动构建或入池；必须明确选择完整 rule_id。</p>",
+    "</div>",
+    '<section class="candidate-lab-subsection"><h5>搜索参数与预算</h5>',
+    factsTableHtml({
+      dimension: item?.dimension,
+      constraints: item?.constraints,
+      max_trials: item?.max_trials,
+      search_space: item?.search_space,
+      evaluated: item?.evaluated,
+      eligible: item?.eligible,
+      truncated: item?.truncated,
+    }),
+    "</section>",
+    '<section class="candidate-lab-subsection"><h5>字段阈值来源</h5>',
+    scorecardRowsTableHtml(
+      features,
+      ["feature", "method", "risk_direction", "thresholds", "excluded_values", "missing_count", "missing_bad"],
+      "当前搜索没有可见字段阈值配置。",
+    ),
+    "</section>",
+    '<section class="candidate-lab-subsection"><h5>规则指针（仅展示，不代替选择）</h5>',
+    scorecardRowsTableHtml(
+      rules,
+      ["rank", "rule_id", "conditions", "metrics", "eligible", "constraint_failures"],
+      "当前搜索没有可见规则。",
+    ),
+    "</section>",
+    item?.rules_truncated
+      ? '<p class="candidate-lab-truncated">规则展示已按服务端预算截断；请下载完整搜索证据查看其余已评估规则。</p>'
+      : "",
+    "</div>",
+    "</details>",
+  ].join("");
+}
+
+function crossRuleCandidateDetailHtml(item) {
+  const detail = isRecord(item?.detail) ? item.detail : {};
+  return [
+    '<details class="candidate-lab-evidence-card">',
+    "<summary>",
+    '<span class="candidate-lab-card-title">',
+    `<strong>${escapeHtml(nonEmptyText(detail.asset_id) || "Cross 阈值规则候选")}</strong>`,
+    `<small>${escapeHtml(stablePrimitiveText(detail.dimension))}D · development / ${escapeHtml(stablePrimitiveText(detail.validation_status))}</small>`,
+    "</span>",
+    '<span class="candidate-lab-card-state">查看候选</span>',
+    "</summary>",
+    '<div class="candidate-lab-card-body">',
+    evidenceIdentityHtml({ artifact: item?.artifact }),
+    '<section class="candidate-lab-subsection"><h5>精确来源与效果</h5>',
+    factsTableHtml(detail),
+    "</section>",
+    '<div class="candidate-lab-boundary-note" data-tone="info">',
+    "<strong>生命周期边界</strong>",
+    "<p>候选已物化但尚未独立验证、入池、应用、采纳或部署；后续动作仍需单独确认。</p>",
+    "</div>",
+    riskHtml(item?.risks),
+    "</div>",
+    "</details>",
+  ].join("");
+}
+
 function interactiveTreeEligiblePointers(item) {
   const sourceTreeId = nonEmptyText(item?.detail?.source_tree_id);
   const nodes = new Map(
@@ -1174,6 +1273,12 @@ function candidateItemHtml(item, definition) {
   }
   if (definition.key === "cross_search") {
     return crossSearchDetailHtml(item);
+  }
+  if (definition.key === "cross_rule_search") {
+    return crossRuleSearchDetailHtml(item);
+  }
+  if (definition.key === "cross_rule_candidate") {
+    return crossRuleCandidateDetailHtml(item);
   }
   return candidateDetailHtml(item, definition.pointerKey);
 }
@@ -2361,6 +2466,95 @@ function collectCrossCandidateBuildFromSearchInputs(form) {
   return { search_id: searchId, pair_id: pairId };
 }
 
+function collectCrossRuleSearchInputs(form) {
+  const select = formField(form, "cross_rule_features");
+  const options = Array.from(select?.selectedOptions || []);
+  if (options.length < 2 || options.length > 12) {
+    throw new Error("Cross 阈值规则搜索必须明确选择 2 到 12 个独立字段。");
+  }
+  if (options.some((option) => (
+    option.dataset?.candidateLabProjection !== "1"
+    || nonEmptyText(option.value) !== nonEmptyText(option.dataset?.feature)
+    || !nonEmptyText(option.value)
+  ))) {
+    throw new Error("Cross 阈值规则字段必须来自当前单变量受认证投影。");
+  }
+  const features = options.map((option) => nonEmptyText(option.value));
+  if (new Set(features).size !== features.length) {
+    throw new Error("Cross 阈值规则搜索不能重复选择同一字段。");
+  }
+  const dimension = optionalNumber(form, "cross_rule_dimension", {
+    integer: true,
+  });
+  if (![2, 3].includes(dimension)) {
+    throw new Error("Cross 阈值规则维度只能是 2D 或 3D。");
+  }
+  if (features.length < dimension) {
+    throw new Error("参与搜索的字段数不能少于规则维度。");
+  }
+  const minLift = optionalNumber(form, "cross_rule_min_lift");
+  const minBadCount = optionalNumber(form, "cross_rule_min_bad_count", {
+    integer: true,
+  });
+  const maxHitShare = optionalNumber(form, "cross_rule_max_hit_share");
+  const minAmountLift = optionalNumber(form, "cross_rule_min_amount_lift");
+  const maxTrials = optionalNumber(form, "cross_rule_max_trials", {
+    integer: true,
+  });
+  if (
+    minLift === undefined || minLift < 0 || minLift > 1000
+    || minBadCount === undefined || minBadCount < 0
+    || maxHitShare === undefined || maxHitShare < 0 || maxHitShare > 1
+    || (minAmountLift !== undefined
+      && (minAmountLift < 0 || minAmountLift > 1000))
+    || maxTrials === undefined || maxTrials < 1 || maxTrials > 5000
+  ) {
+    throw new Error("Cross 阈值规则约束或 max_trials 超出受控范围。");
+  }
+  return {
+    features,
+    dimension,
+    constraints: {
+      min_lift: minLift,
+      min_bad_count: minBadCount,
+      max_hit_share: maxHitShare,
+      min_amount_lift: minAmountLift === undefined ? null : minAmountLift,
+    },
+    max_trials: maxTrials,
+  };
+}
+
+function collectCrossRuleCandidateBuildInputs(form) {
+  const search = selectedProjectionOption(
+    form,
+    "cross_rule_build_search_id",
+    "Cross 阈值规则搜索证据",
+  );
+  const rule = selectedProjectionOption(
+    form,
+    "cross_rule_build_rule_id",
+    "Cross 阈值规则",
+  );
+  const searchId = nonEmptyText(search.value);
+  const ruleId = nonEmptyText(rule.value);
+  if (
+    !CROSS_RULE_SEARCH_ID_RE.test(searchId)
+    || !CROSS_RULE_ID_RE.test(ruleId)
+    || nonEmptyText(search.dataset?.searchId) !== searchId
+    || nonEmptyText(rule.dataset?.searchId) !== searchId
+    || nonEmptyText(rule.dataset?.ruleId) !== ruleId
+  ) {
+    throw new Error("Cross 阈值规则必须属于当前选择的受认证搜索证据。");
+  }
+  const inputs = { search_id: searchId, rule_id: ruleId };
+  optionalText(
+    inputs,
+    "selection_reason",
+    formValue(form, "cross_rule_selection_reason"),
+  );
+  return inputs;
+}
+
 function collectTreeInputs(form) {
   const features = uniqueValues(splitValues(formValue(form, "features")), "建树字段");
   if (!features.length) throw new Error("请至少填写一个自动树建树字段。");
@@ -3486,6 +3680,9 @@ export function collectStrategyCandidateLabRequest(form) {
     cross_matrix_candidate_search: collectCrossCandidateSearchInputs,
     cross_matrix_candidate_build_from_search:
       collectCrossCandidateBuildFromSearchInputs,
+    cross_rule_search: collectCrossRuleSearchInputs,
+    cross_rule_candidate_build_from_search:
+      collectCrossRuleCandidateBuildInputs,
     automatic_tree_candidate_build: collectTreeInputs,
     scorecard_band_build: collectScorecardBandInputs,
     scorecard_cutoff_selection: collectScorecardCutoffSelectionInputs,
@@ -5945,6 +6142,174 @@ function crossCandidateRequestIsCurrent(request, payload) {
   );
 }
 
+function crossRuleSearchForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="cross_rule_search"]',
+  ) || null;
+}
+
+function crossRuleBuildForm(root) {
+  return root?.querySelector?.(
+    '[data-candidate-lab-workflow="cross_rule_candidate_build_from_search"]',
+  ) || null;
+}
+
+function syncCrossRuleSearchControls(form, payload) {
+  if (!form) return;
+  const select = formField(form, "cross_rule_features");
+  if (!select) return;
+  const features = crossSearchFeatureOptions(payload);
+  const previous = new Set(selectedValues(select));
+  select.innerHTML = features.length
+    ? features.map((item) => projectionOptionHtml(
+      item.feature,
+      `${item.feature} · ${item.methodCount} 种受认证分箱方法`,
+      {
+        "candidate-lab-projection": "1",
+        feature: item.feature,
+      },
+    )).join("")
+    : '<option value="" disabled>当前没有可搜索的单变量字段</option>';
+  for (const option of Array.from(select.options || [])) {
+    option.selected = previous.has(option.value);
+  }
+  const selectedCount = selectedValues(select).length;
+  const dimension = Number(formValue(form, "cross_rule_dimension"));
+  const help = form.querySelector?.("[data-candidate-lab-cross-rule-help]");
+  if (help) {
+    help.textContent = features.length < 2
+      ? "当前受认证单变量字段不足 2 个，请先完成单变量分析。"
+      : selectedCount < dimension
+        ? `当前选择 ${selectedCount} 个字段；${dimension}D 搜索至少需要 ${dimension} 个字段，页面不会自动代选。`
+        : `已明确选择 ${selectedCount} 个字段做 ${dimension}D 有预算搜索；阈值和风险方向由平台从认证证据恢复。`;
+  }
+}
+
+function crossRuleSearchProjectionCandidates(payload) {
+  const collection = isRecord(payload?.candidates?.cross_rule_search)
+    ? payload.candidates.cross_rule_search
+    : {};
+  const seen = new Set();
+  return collectionItems(collection).filter((search) => {
+    const searchId = nonEmptyText(search?.search_id);
+    if (
+      !CROSS_RULE_SEARCH_ID_RE.test(searchId)
+      || seen.has(searchId)
+    ) return false;
+    seen.add(searchId);
+    return true;
+  });
+}
+
+function crossRulePointers(search) {
+  const seen = new Set();
+  return (Array.isArray(search?.rules) ? search.rules : []).filter((rule) => {
+    const ruleId = nonEmptyText(rule?.rule_id);
+    if (!isRecord(rule) || !CROSS_RULE_ID_RE.test(ruleId) || seen.has(ruleId)) {
+      return false;
+    }
+    seen.add(ruleId);
+    return true;
+  });
+}
+
+function syncCrossRuleBuildControls(
+  form,
+  payload,
+  { preserveRule = true } = {},
+) {
+  if (!form) return;
+  const searches = crossRuleSearchProjectionCandidates(payload);
+  const searchSelect = formField(form, "cross_rule_build_search_id");
+  const ruleSelect = formField(form, "cross_rule_build_rule_id");
+  if (!searchSelect || !ruleSelect) return;
+  const previousSearchId = nonEmptyText(searchSelect.value);
+  searchSelect.innerHTML = [
+    '<option value="">请明确选择一份 Cross 阈值规则搜索</option>',
+    ...searches.map((search) => projectionOptionHtml(
+      search.search_id,
+      `${search.search_id} · ${stablePrimitiveText(search.dimension)}D · 已评估 ${stablePrimitiveText(search.evaluated)} · eligible ${stablePrimitiveText(search.eligible)}`,
+      {
+        "candidate-lab-projection": "1",
+        "search-id": nonEmptyText(search.search_id),
+      },
+    )),
+  ].join("");
+  searchSelect.value = selectContainsValue(searchSelect, previousSearchId)
+    ? previousSearchId
+    : "";
+  const searchId = nonEmptyText(searchSelect.value);
+  const search = searches.find((item) => item.search_id === searchId);
+  const rules = crossRulePointers(search);
+  const previousRuleId = nonEmptyText(ruleSelect.value);
+  const previousSource = nonEmptyText(
+    Array.from(ruleSelect.selectedOptions || [])[0]?.dataset?.searchId,
+  );
+  ruleSelect.innerHTML = [
+    `<option value="">${searchId ? "请明确选择该搜索中的完整 rule_id" : "请先明确选择搜索证据"}</option>`,
+    ...rules.map((rule) => projectionOptionHtml(
+      rule.rule_id,
+      [
+        rule.rule_id,
+        `rank ${stablePrimitiveText(rule.rank)}`,
+        rule.eligible === true ? "eligible" : "未满足约束",
+        `lift ${stablePrimitiveText(rule?.metrics?.lift)}`,
+        `命中率 ${stablePrimitiveText(rule?.metrics?.hit_share)}`,
+      ].join(" · "),
+      {
+        "candidate-lab-projection": "1",
+        "search-id": searchId,
+        "rule-id": nonEmptyText(rule.rule_id),
+        eligible: rule.eligible === true ? "1" : "0",
+      },
+    )),
+  ].join("");
+  if (
+    preserveRule
+    && previousSource === searchId
+    && selectContainsValue(ruleSelect, previousRuleId)
+  ) {
+    ruleSelect.value = previousRuleId;
+  } else {
+    ruleSelect.value = "";
+  }
+  const help = form.querySelector?.("[data-candidate-lab-cross-rule-build-help]");
+  if (help) {
+    help.textContent = searches.length === 0
+      ? "当前任务尚无受认证 Cross 阈值规则搜索。"
+      : !searchId
+        ? "请明确选择搜索；页面不会默认选择最新搜索。"
+        : rules.length === 0
+          ? "该搜索当前没有可见规则，请下载完整证据或重新搜索。"
+          : "请逐项查看约束与指标后选择 rule_id；页面不会自动选择第一名。";
+  }
+}
+
+function crossRuleRequestIsCurrent(request, payload) {
+  if (request?.workflow === "cross_rule_search") {
+    const available = new Set(
+      crossSearchFeatureOptions(payload).map((item) => item.feature),
+    );
+    const features = request?.workflow_inputs?.features;
+    return (
+      Array.isArray(features)
+      && features.length >= 2
+      && features.length <= 12
+      && new Set(features).size === features.length
+      && features.every((feature) => available.has(feature))
+    );
+  }
+  if (
+    request?.workflow !== "cross_rule_candidate_build_from_search"
+  ) return true;
+  const search = crossRuleSearchProjectionCandidates(payload).find(
+    (item) => item.search_id === request?.workflow_inputs?.search_id,
+  );
+  return crossRulePointers(search).some(
+    (rule) => rule.rule_id === request?.workflow_inputs?.rule_id,
+  );
+}
+
 function votingSearchForm(root) {
   return root?.querySelector?.(
     '[data-candidate-lab-workflow="voting_candidate_search"]',
@@ -6361,6 +6726,14 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       crossCandidateBuildForm(root),
       state.payload,
     );
+    syncCrossRuleSearchControls(
+      crossRuleSearchForm(root),
+      state.payload,
+    );
+    syncCrossRuleBuildControls(
+      crossRuleBuildForm(root),
+      state.payload,
+    );
     syncVotingForms(root, state.payload);
     syncInteractiveTreeRevisionControls(
       interactiveTreeForm(root),
@@ -6439,6 +6812,15 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       crossCandidateBuildForm(root),
       state.payload,
       { preservePair: false },
+    );
+    syncCrossRuleSearchControls(
+      crossRuleSearchForm(root),
+      state.payload,
+    );
+    syncCrossRuleBuildControls(
+      crossRuleBuildForm(root),
+      state.payload,
+      { preserveRule: false },
     );
     syncVotingForms(root, state.payload);
     syncInteractiveTreeRevisionControls(
@@ -6640,6 +7022,14 @@ export function createStrategyCandidateLabController(dependencies = {}) {
       )) {
         throw new Error(
           "所选单变量字段、Cross 搜索或 Pair 已过期或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
+        );
+      }
+      if (!crossRuleRequestIsCurrent(
+        strategyRequest,
+        state.payload,
+      )) {
+        throw new Error(
+          "所选单变量字段、Cross 阈值搜索或规则已过期或不属于当前任务受认证投影，请刷新 Candidate Lab 后重选。",
         );
       }
       if (
@@ -7069,6 +7459,36 @@ export function createStrategyCandidateLabController(dependencies = {}) {
         crossBuild,
         state.payload,
         { preservePair: false },
+      );
+      renderAvailability();
+      return true;
+    }
+    const crossRuleSearch = field.closest?.(
+      '[data-candidate-lab-workflow="cross_rule_search"]',
+    );
+    if (
+      crossRuleSearch
+      && (
+        fieldName === "cross_rule_features"
+        || fieldName === "cross_rule_dimension"
+        || fieldName === "cross_rule_max_trials"
+      )
+    ) {
+      syncCrossRuleSearchControls(crossRuleSearch, state.payload);
+      renderAvailability();
+      return true;
+    }
+    const crossRuleBuild = field.closest?.(
+      '[data-candidate-lab-workflow="cross_rule_candidate_build_from_search"]',
+    );
+    if (
+      crossRuleBuild
+      && fieldName === "cross_rule_build_search_id"
+    ) {
+      syncCrossRuleBuildControls(
+        crossRuleBuild,
+        state.payload,
+        { preserveRule: false },
       );
       renderAvailability();
       return true;

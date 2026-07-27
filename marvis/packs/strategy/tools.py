@@ -83,6 +83,10 @@ from marvis.packs.strategy.cross_candidate_search_tools import (
     run_build_cross_matrix_candidate_from_search,
     run_search_cross_matrix_candidates,
 )
+from marvis.packs.strategy.cross_rule_search_tools import (
+    run_build_cross_rule_candidate_from_search,
+    run_search_cross_threshold_rules,
+)
 from marvis.packs.strategy.cross_matrix_cell_selection_tools import (
     run_materialize_cross_matrix_cell_selection,
 )
@@ -961,6 +965,22 @@ def tool_build_cross_matrix_candidate_from_search(inputs: dict, ctx) -> dict:
     """Build one exact Cross candidate from an authenticated search pointer."""
 
     return run_build_cross_matrix_candidate_from_search(
+        inputs,
+        ctx,
+        _runtime(ctx),
+    )
+
+
+def tool_search_cross_threshold_rules(inputs: dict, ctx) -> dict:
+    """Search bounded 2D/3D threshold rules without choosing a winner."""
+
+    return run_search_cross_threshold_rules(inputs, ctx, _runtime(ctx))
+
+
+def tool_build_cross_rule_candidate_from_search(inputs: dict, ctx) -> dict:
+    """Materialize one exact Cross threshold rule search pointer."""
+
+    return run_build_cross_rule_candidate_from_search(
         inputs,
         ctx,
         _runtime(ctx),

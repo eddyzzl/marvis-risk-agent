@@ -8192,6 +8192,123 @@ def _render_materialize_scorecard_cutoff_selection(o: dict):
     ]
 
 
+def _render_search_cross_threshold_rules(o: dict):
+    result = (
+        o.get("search_result")
+        if isinstance(o.get("search_result"), dict)
+        else {}
+    )
+    configuration = (
+        result.get("configuration")
+        if isinstance(result.get("configuration"), dict)
+        else {}
+    )
+    rules = [
+        item
+        for item in (result.get("rules") or [])[:20]
+        if isinstance(item, dict)
+    ]
+    text = (
+        "**2D/3D Cross 阈值规则搜索完成。**"
+        f"搜索 `{result.get('search_id', '')}` 使用 "
+        f"{_fmt(configuration.get('dimension'))}D 组合，"
+        f"已评估 {_fmt(result.get('evaluated'))} / "
+        f"{_fmt(result.get('search_space'))} 条试验，"
+        f"其中 {_fmt(result.get('eligible'))} 条满足约束。"
+        "**排序只用于展示证据；平台没有自动选择、构建、入池、应用、"
+        "采纳或部署任何规则。**"
+    )
+    return text, [
+        {
+            "title": "Cross 阈值规则搜索结果（最多展示 20 条）",
+            "columns": [
+                "Rank",
+                "Rule ID",
+                "Conditions",
+                "Hit Share",
+                "Bad Rate",
+                "Lift",
+                "Amount Lift",
+                "Eligible",
+                "Constraint Failures",
+            ],
+            "rows": [
+                [
+                    _fmt(rule.get("rank")),
+                    str(rule.get("rule_id") or ""),
+                    " AND ".join(
+                        (
+                            f"{item.get('feature', '')} "
+                            f"{item.get('operator', '')} "
+                            f"{_fmt(item.get('threshold'))}"
+                            + (
+                                " OR missing"
+                                if item.get("include_missing") is True
+                                else ""
+                            )
+                        )
+                        for item in (rule.get("conditions") or [])
+                        if isinstance(item, dict)
+                    ),
+                    _pct((rule.get("metrics") or {}).get("hit_share")),
+                    _pct((rule.get("metrics") or {}).get("bad_rate")),
+                    _fmt((rule.get("metrics") or {}).get("lift")),
+                    _fmt((rule.get("metrics") or {}).get("amount_lift")),
+                    str(rule.get("eligible")),
+                    "、".join(rule.get("constraint_failures") or []),
+                ]
+                for rule in rules
+            ],
+        }
+    ]
+
+
+def _render_build_cross_rule_candidate_from_search(o: dict):
+    candidate = (
+        o.get("candidate")
+        if isinstance(o.get("candidate"), dict)
+        else {}
+    )
+    selection = (
+        o.get("source_search_selection")
+        if isinstance(o.get("source_search_selection"), dict)
+        else {}
+    )
+    metrics = (
+        candidate.get("metrics")
+        if isinstance(candidate.get("metrics"), dict)
+        else {}
+    )
+    text = (
+        "**Cross 阈值规则候选已精确物化。**"
+        f"候选 `{candidate.get('asset_id', '')}` 来自搜索 "
+        f"`{selection.get('search_id', '')}` 的规则 "
+        f"`{selection.get('rule_id', '')}`；原始 rank "
+        f"{_fmt(selection.get('rank'))}、eligible "
+        f"`{selection.get('eligible')}` 仅作为来源证据。"
+        "**候选仍未独立验证、未入池、未应用、未采纳、未部署。**"
+    )
+    return text, [
+        {
+            "title": "Cross 阈值规则候选",
+            "columns": ["字段", "值"],
+            "rows": [
+                ["Asset ID", str(candidate.get("asset_id") or "")],
+                ["Rule ID", str(selection.get("rule_id") or "")],
+                ["Dimension", _fmt(candidate.get("dimension"))],
+                ["Hit Share", _pct(metrics.get("hit_share"))],
+                ["Bad Rate", _pct(metrics.get("bad_rate"))],
+                ["Lift", _fmt(metrics.get("lift"))],
+                ["Amount Lift", _fmt(metrics.get("amount_lift"))],
+                [
+                    "Selection Reason",
+                    str(candidate.get("selection_reason") or "未提供"),
+                ],
+            ],
+        }
+    ]
+
+
 _RENDERERS = {
     "make_split": _render_make_split,
     "choose_modeling_spec": _render_choose_modeling_spec,
@@ -8230,6 +8347,10 @@ _RENDERERS = {
     ),
     "build_voting_candidate": _render_build_voting_candidate,
     "build_cross_matrix_candidate": _render_build_cross_matrix_candidate,
+    "search_cross_threshold_rules": _render_search_cross_threshold_rules,
+    "build_cross_rule_candidate_from_search": (
+        _render_build_cross_rule_candidate_from_search
+    ),
     "materialize_cross_matrix_cell_selection": (
         _render_materialize_cross_matrix_cell_selection
     ),

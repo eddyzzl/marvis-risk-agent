@@ -134,6 +134,19 @@ from marvis.packs.strategy.cross_candidate_search_tools import (
     CROSS_CANDIDATE_SEARCH_ORIGIN_TOOL,
     load_cross_candidate_search_artifact,
 )
+from marvis.packs.strategy.cross_rule_candidate import (
+    cross_rule_candidate_to_verified_fragment,
+)
+from marvis.packs.strategy.cross_rule_search_tools import (
+    CROSS_RULE_CANDIDATE_ARTIFACT_KIND,
+    CROSS_RULE_CANDIDATE_ARTIFACT_SCHEMA_VERSION,
+    CROSS_RULE_CANDIDATE_ORIGIN_TOOL,
+    CROSS_RULE_SEARCH_ARTIFACT_KIND,
+    CROSS_RULE_SEARCH_ORIGIN_TOOL,
+    load_cross_rule_candidate_artifact,
+    load_cross_rule_search_artifact,
+    replay_cross_rule_candidate_binding,
+)
 from marvis.packs.strategy.pool import (
     POOL_PRODUCER_VERSION,
     validate_strategy_pool,
@@ -226,7 +239,7 @@ from marvis.repositories.task_artifacts import TaskArtifactRepository
 from marvis.strategy_lifecycle import is_locally_adopted
 
 
-SCHEMA_VERSION = "strategy.candidate-lab-projection.v7"
+SCHEMA_VERSION = "strategy.candidate-lab-projection.v8"
 
 UNIVARIATE_ARTIFACT_KIND = "strategy_candidate_json"
 UNIVARIATE_ORIGIN_TOOL = "strategy.analyze_univariate_candidates"
@@ -277,6 +290,9 @@ _MAX_VOTING_SEARCHES = 20
 _MAX_VOTING_SEARCH_COMBINATIONS = 20
 _MAX_CROSS_SEARCHES = 20
 _MAX_CROSS_SEARCH_PAIRS = 20
+_MAX_CROSS_RULE_SEARCHES = 20
+_MAX_CROSS_RULES = 50
+_MAX_CROSS_RULE_CANDIDATES = 20
 _MAX_POOL_ADD_SOURCES_PER_KIND = 20
 _MAX_RANKINGS = 50
 _MAX_METRICS = 100
@@ -457,6 +473,42 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
             r"^cross-search-[0-9a-f]{32}_[0-9a-f]{12}\.json$"
         ),
     )
+    cross_rule_search_records, cross_rule_search_total = (
+        artifact_repository.list_recent_for_task_kind_with_count(
+            task_id,
+            CROSS_RULE_SEARCH_ARTIFACT_KIND,
+            limit=_MAX_CROSS_RULE_SEARCHES,
+        )
+    )
+    cross_rule_search_records = _candidate_record_window(
+        settings,
+        task_id,
+        cross_rule_search_records,
+        kind=CROSS_RULE_SEARCH_ARTIFACT_KIND,
+        origin_tool=CROSS_RULE_SEARCH_ORIGIN_TOOL,
+        directory_name="strategy_cross_rule_searches",
+        filename_pattern=re.compile(
+            r"^cross-rule-search-[0-9a-f]{32}_[0-9a-f]{12}\.json$"
+        ),
+    )
+    cross_rule_candidate_records, cross_rule_candidate_total = (
+        artifact_repository.list_recent_for_task_kind_with_count(
+            task_id,
+            CROSS_RULE_CANDIDATE_ARTIFACT_KIND,
+            limit=_MAX_CROSS_RULE_CANDIDATES,
+        )
+    )
+    cross_rule_candidate_records = _candidate_record_window(
+        settings,
+        task_id,
+        cross_rule_candidate_records,
+        kind=CROSS_RULE_CANDIDATE_ARTIFACT_KIND,
+        origin_tool=CROSS_RULE_CANDIDATE_ORIGIN_TOOL,
+        directory_name="strategy_cross_rule_candidates",
+        filename_pattern=re.compile(
+            r"^cross-rule-asset-[0-9a-f]{32}_[0-9a-f]{12}\.json$"
+        ),
+    )
     automatic_tree_records, automatic_tree_total = (
         artifact_repository.list_recent_for_task_kind_with_count(
             task_id,
@@ -560,6 +612,14 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
         _project_cross_search(context, record)
         for record in cross_search_records
     ]
+    cross_rule_search = [
+        _project_cross_rule_search(context, record)
+        for record in cross_rule_search_records
+    ]
+    cross_rule_candidate = [
+        _project_cross_rule_candidate(context, record)
+        for record in cross_rule_candidate_records
+    ]
     automatic_tree = [
         _project_automatic_tree(context, record)
         for record in automatic_tree_records
@@ -599,6 +659,8 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
             "univariate": univariate,
             "cross_matrix": cross_matrix,
             "cross_search": cross_search,
+            "cross_rule_search": cross_rule_search,
+            "cross_rule_candidate": cross_rule_candidate,
             "automatic_tree": automatic_tree,
             "interactive_tree_revision": interactive_tree_revision,
             "scorecard_band": scorecard_band,
@@ -643,6 +705,16 @@ def _build_projection(settings, task_id: str) -> dict[str, Any]:
                 cross_search,
                 _MAX_CROSS_SEARCHES,
                 total=cross_search_total,
+            ),
+            "cross_rule_search": _collection(
+                cross_rule_search,
+                _MAX_CROSS_RULE_SEARCHES,
+                total=cross_rule_search_total,
+            ),
+            "cross_rule_candidate": _collection(
+                cross_rule_candidate,
+                _MAX_CROSS_RULE_CANDIDATES,
+                total=cross_rule_candidate_total,
             ),
             "automatic_tree": _collection(
                 automatic_tree,
@@ -1999,6 +2071,13 @@ def _project_pool_add_sources(
             limit=_MAX_POOL_ADD_SOURCES_PER_KIND,
         )
     )
+    cross_rule_records, cross_rule_total = (
+        context.artifact_repository.list_recent_for_task_kind_with_count(
+            context.task_id,
+            CROSS_RULE_CANDIDATE_ARTIFACT_KIND,
+            limit=_MAX_POOL_ADD_SOURCES_PER_KIND,
+        )
+    )
     projected = []
     for record in univariate_records:
         fragment = _verified_univariate_asset_fragment(context, record)
@@ -2153,6 +2232,25 @@ def _project_pool_add_sources(
                 ),
             )
         )
+    for record in cross_rule_records:
+        fragment = _verified_cross_rule_candidate_fragment(context, record)
+        asset = _mapping(
+            fragment.get("asset"),
+            "Cross rule Pool source asset",
+        )
+        projected.append(
+            (
+                record,
+                _pool_add_source_from_fragment(
+                    fragment,
+                    source_kind="cross_threshold_rule",
+                    candidate_asset_id=_text(
+                        asset.get("asset_id"),
+                        "Cross rule Pool source asset_id",
+                    ),
+                ),
+            )
+        )
     return _pool_add_source_collection(
         projected,
         total=(
@@ -2163,8 +2261,9 @@ def _project_pool_add_sources(
             + interactive_group_total
             + scorecard_total
             + voting_total
+            + cross_rule_total
         ),
-        limit=_MAX_POOL_ADD_SOURCES_PER_KIND * 7,
+        limit=_MAX_POOL_ADD_SOURCES_PER_KIND * 8,
     )
 
 
@@ -2430,6 +2529,158 @@ def _project_cross_search(
         "truncated": result["truncated"],
         "pairs": pairs,
         "artifact": _artifact_projection(record, context.task_id),
+    }
+
+
+def _project_cross_rule_search(
+    context: _ProjectionContext,
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    _read_candidate_record(
+        context,
+        record,
+        kind=CROSS_RULE_SEARCH_ARTIFACT_KIND,
+        origin_tool=CROSS_RULE_SEARCH_ORIGIN_TOOL,
+        directory_name="strategy_cross_rule_searches",
+    )
+    binding = load_cross_rule_search_artifact(
+        _scorecard_live_runtime(context),
+        task_id=context.task_id,
+        artifact_id=_text(record.get("id"), "Cross rule search artifact id"),
+        expected_artifact_content_hash=_sha256(
+            record.get("content_hash"),
+            "Cross rule search artifact content hash",
+        ),
+    )
+    result = binding.result
+    configuration = result["configuration"]
+    rules = [
+        {
+            "rule_id": item["rule_id"],
+            "rank": item["rank"],
+            "conditions": [
+                dict(condition) for condition in item["conditions"]
+            ],
+            "metrics": dict(item["metrics"]),
+            "eligible": item["eligible"],
+            "constraint_failures": list(item["constraint_failures"]),
+        }
+        for item in result["rules"][:_MAX_CROSS_RULES]
+    ]
+    return {
+        "search_id": result["search_id"],
+        "dimension": configuration["dimension"],
+        "features": [
+            {
+                key: item[key]
+                for key in (
+                    "feature",
+                    "method",
+                    "risk_direction",
+                    "thresholds",
+                    "excluded_values",
+                    "missing_count",
+                    "missing_bad",
+                )
+            }
+            for item in configuration["features"]
+        ],
+        "constraints": dict(configuration["constraints"]),
+        "max_trials": configuration["max_trials"],
+        "search_space": result["search_space"],
+        "evaluated": result["evaluated"],
+        "eligible": result["eligible"],
+        "truncated": result["truncated"],
+        "rules": rules,
+        "rules_truncated": len(result["rules"]) > len(rules),
+        "artifact": _artifact_projection(record, context.task_id),
+    }
+
+
+def _load_cross_rule_candidate_binding(
+    context: _ProjectionContext,
+    record: Mapping[str, Any],
+):
+    _read_candidate_record(
+        context,
+        record,
+        kind=CROSS_RULE_CANDIDATE_ARTIFACT_KIND,
+        origin_tool=CROSS_RULE_CANDIDATE_ORIGIN_TOOL,
+        directory_name="strategy_cross_rule_candidates",
+    )
+    provenance = _mapping(
+        record.get("provenance"),
+        "Cross rule candidate provenance",
+    )
+    binding = load_cross_rule_candidate_artifact(
+        _scorecard_live_runtime(context),
+        task_id=context.task_id,
+        artifact_id=_text(record.get("id"), "Cross rule candidate artifact id"),
+        expected_artifact_content_hash=_sha256(
+            record.get("content_hash"),
+            "Cross rule candidate artifact content hash",
+        ),
+        expected_asset_id=_text(
+            provenance.get("asset_id"),
+            "Cross rule candidate asset_id",
+        ),
+        expected_asset_hash=_sha256(
+            provenance.get("asset_hash"),
+            "Cross rule candidate asset_hash",
+        ),
+    )
+    replay_cross_rule_candidate_binding(
+        _scorecard_live_runtime(context),
+        binding,
+    )
+    return binding
+
+
+def _project_cross_rule_candidate(
+    context: _ProjectionContext,
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    binding = _load_cross_rule_candidate_binding(context, record)
+    candidate = binding.candidate
+    selection = candidate["source_selection"]
+    return {
+        "kind": "cross_rule_candidate",
+        "artifact": _artifact_projection(record, context.task_id),
+        "candidate_id": candidate["asset_id"],
+        "lifecycle": dict(candidate["lifecycle"]),
+        "detail": {
+            "asset_id": candidate["asset_id"],
+            "asset_type": candidate["asset_type"],
+            "search_id": selection["search_id"],
+            "rule_id": selection["rule_id"],
+            "rule_rank": selection["rule_rank"],
+            "eligible": selection["eligible"],
+            "constraint_failures": list(
+                selection["constraint_failures"]
+            ),
+            "dimension": candidate["dimension"],
+            "conditions": [
+                dict(item) for item in candidate["condition"]["args"]
+            ],
+            "metrics": dict(candidate["metrics"]),
+            "selection_reason": candidate["selection_reason"],
+            "effect_stage": candidate["effect_stage"],
+            "validation_status": candidate["validation_status"],
+        },
+        "risks": {
+            "red_flags": [],
+            "report_info_gaps": (
+                []
+                if selection["eligible"]
+                else [
+                    "该规则未满足搜索约束；仍允许按精确 ID 物化，"
+                    "但入池前应说明评审依据。"
+                ]
+            ),
+        },
+        "pointers": {},
+        "total": 1,
+        "truncated": False,
     }
 
 
@@ -3945,7 +4196,51 @@ def _verified_pool_source_fragment(
         return _verified_scorecard_cutoff_selection(context, record)[
             "fragment"
         ]
+    if dispatch == (
+        CROSS_RULE_CANDIDATE_ARTIFACT_KIND,
+        CROSS_RULE_CANDIDATE_ORIGIN_TOOL,
+    ):
+        return _verified_cross_rule_candidate_fragment(context, record)
     raise CandidateLabProjectionError("pool source artifact contract is unsupported")
+
+
+def _verified_cross_rule_candidate_fragment(
+    context: _ProjectionContext,
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    cache_key = _record_cache_key(record)
+    cached = context.verified_cache.get(cache_key)
+    if cached is not None:
+        return _cached_fragment(cached, "cross_rule_candidate_fragment")
+    binding = _load_cross_rule_candidate_binding(context, record)
+    identity = binding.search.evidence["identity"]
+    fragment = cross_rule_candidate_to_verified_fragment(
+        binding.candidate,
+        artifact_binding={
+            "artifact_id": binding.artifact_id,
+            "artifact_kind": CROSS_RULE_CANDIDATE_ARTIFACT_KIND,
+            "artifact_schema_version": (
+                CROSS_RULE_CANDIDATE_ARTIFACT_SCHEMA_VERSION
+            ),
+            "artifact_content_hash": binding.artifact_content_hash,
+            "origin_tool": CROSS_RULE_CANDIDATE_ORIGIN_TOOL,
+        },
+        evidence_identity={
+            "dataset_id": identity["dataset_id"],
+            "dataset_content_hash": identity["dataset_content_hash"],
+            "workspace_revision": identity["workspace_revision"],
+            "workspace_generation": identity["workspace_generation"],
+            "semantic_mapping_hash": identity["semantic_mapping_hash"],
+            "sample_context_hash": binding.search.result["source"][
+                "sample_context_hash"
+            ],
+        },
+    )
+    context.verified_cache[cache_key] = {
+        "kind": "cross_rule_candidate_fragment",
+        "fragment": fragment,
+    }
+    return fragment
 
 
 def _verified_univariate_asset_fragment(

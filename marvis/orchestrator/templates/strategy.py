@@ -491,6 +491,136 @@ STRATEGY_CROSS_MATRIX_CANDIDATE_BUILD_FROM_SEARCH = WorkflowTemplate(
 )
 
 
+STRATEGY_CROSS_RULE_SEARCH = WorkflowTemplate(
+    id="strategy_cross_rule_search",
+    title="2D/3D Cross 阈值规则搜索",
+    goal_patterns=(
+        "搜索 2D Cross 阈值规则",
+        "挖掘 3D 交叉高风险规则",
+        "search bounded Cross threshold rules",
+    ),
+    slots=(
+        SlotSpec(
+            "source_artifact_id",
+            True,
+            "task_context",
+            "Latest exact univariate candidate evidence artifact",
+        ),
+        SlotSpec(
+            "expected_artifact_content_hash",
+            True,
+            "task_context",
+            "Authenticated source artifact content hash",
+        ),
+        SlotSpec(
+            "expected_candidate_id",
+            True,
+            "task_context",
+            "Authenticated parent candidate id",
+        ),
+        SlotSpec(
+            "expected_evidence_hash",
+            True,
+            "task_context",
+            "Authenticated parent evidence hash",
+        ),
+        SlotSpec("features", True, "user", "Two to twelve explicit features"),
+        SlotSpec("dimension", True, "user", "Exact dimension 2 or 3"),
+        SlotSpec(
+            "constraints",
+            True,
+            "user",
+            "Explicit lift, bad-count, hit-share and amount-lift constraints",
+        ),
+        SlotSpec(
+            "max_trials",
+            True,
+            "user",
+            "Hard one-to-5000 deterministic trial budget",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="搜索 Cross 阈值规则",
+            tool_ref=ToolRef("strategy", "search_cross_threshold_rules"),
+            inputs_template={
+                "source_artifact_id": "{slot:source_artifact_id}",
+                "expected_artifact_content_hash": (
+                    "{slot:expected_artifact_content_hash}"
+                ),
+                "expected_candidate_id": "{slot:expected_candidate_id}",
+                "expected_evidence_hash": "{slot:expected_evidence_hash}",
+                "features": "{slot:features}",
+                "dimension": "{slot:dimension}",
+                "constraints": "{slot:constraints}",
+                "max_trials": "{slot:max_trials}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "search_id"}),
+                PostCheck("nonempty", {"field": "content_hash"}),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
+STRATEGY_CROSS_RULE_CANDIDATE_BUILD_FROM_SEARCH = WorkflowTemplate(
+    id="strategy_cross_rule_candidate_build_from_search",
+    title="Cross 阈值规则精确候选构建",
+    goal_patterns=(
+        "从 Cross 规则搜索结果构建候选",
+        "物化指定 Cross 阈值规则",
+        "build exact Cross threshold-rule candidate",
+    ),
+    slots=(
+        SlotSpec("search_id", True, "user", "Exact Cross rule search id"),
+        SlotSpec("rule_id", True, "user", "Exact evaluated Cross rule id"),
+        SlotSpec(
+            "selection_reason",
+            False,
+            "user",
+            "Optional human audit reason; never used for ranking",
+        ),
+    ),
+    steps=(
+        StepTemplate(
+            title="从搜索规则构建 Cross 候选",
+            tool_ref=ToolRef(
+                "strategy",
+                "build_cross_rule_candidate_from_search",
+            ),
+            inputs_template={
+                "search_id": "{slot:search_id}",
+                "rule_id": "{slot:rule_id}",
+                "selection_reason": "{slot:selection_reason}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck("nonempty", {"field": "candidate.asset_id"}),
+                PostCheck("nonempty", {"field": "candidate.asset_hash"}),
+                PostCheck(
+                    "nonempty",
+                    {"field": "source_search_selection.search_id"},
+                ),
+                PostCheck(
+                    "nonempty",
+                    {"field": "source_search_selection.rule_id"},
+                ),
+                PostCheck("nonempty", {"field": "artifacts"}),
+            ),
+            needs_confirmation=False,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+
 STRATEGY_CROSS_MATRIX_CELL_SELECTION = WorkflowTemplate(
     id="strategy_cross_matrix_cell_selection",
     title="Cross Matrix 精确单元格选择",
@@ -3193,6 +3323,12 @@ STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
             "Optional exact authenticated Cross candidate search evidence",
         ),
         SlotSpec(
+            "cross_rule_search_ref",
+            False,
+            "task_context",
+            "Optional exact authenticated 2D/3D Cross rule search evidence",
+        ),
+        SlotSpec(
             "report_revision",
             True,
             "task_context",
@@ -3262,6 +3398,7 @@ STRATEGY_REPORT_BUNDLE_V2 = WorkflowTemplate(
                 "cross_candidate_search_ref": (
                     "{slot:cross_candidate_search_ref}"
                 ),
+                "cross_rule_search_ref": "{slot:cross_rule_search_ref}",
                 "report_revision": "{slot:report_revision}",
                 "previous_report_id": "{slot:previous_report_id}",
                 "previous_report_content_hash": (

@@ -81,6 +81,8 @@ FRESH_STANDARD_STRATEGY_WORKFLOWS = (
     "voting_candidate_build",
     "cross_matrix_candidate_search",
     "cross_matrix_candidate_build_from_search",
+    "cross_rule_search",
+    "cross_rule_candidate_build_from_search",
     "cross_matrix_analysis",
     "cross_matrix_cell_selection",
     "strategy_pool_add_candidate",
@@ -742,6 +744,88 @@ _CROSS_SEARCH_SELECTION_FOLLOW_UP_RE = re.compile(
 _CROSS_SEARCH_NEGATION_PREFIX_RE = re.compile(
     r"(?:不|不要|不用|无需|不需要|先不|暂不|不会|不再|别|禁止)\s*$|"
     r"(?<![A-Za-z0-9_])(?:do\s+not|don't|dont|never|without)\s*$",
+    re.IGNORECASE,
+)
+_CROSS_RULE_SUBJECT_RE = re.compile(
+    r"(?:2|3)\s*[dD][^，,；;。\n]{0,24}(?:Cross|交叉)"
+    r"[^，,；;。\n]{0,24}(?:阈值)?规则|"
+    r"(?:Cross|交叉)[^，,；;。\n]{0,24}(?:阈值|threshold)"
+    r"[^，,；;。\n]{0,16}(?:规则|rules?)|"
+    r"(?:Cross|交叉)[^，,；;。\n]{0,16}(?:规则|rules?)",
+    re.IGNORECASE,
+)
+_CROSS_RULE_SEARCH_INTENT_RE = re.compile(
+    r"(?:搜索|查找|挖掘|枚举|筛选|探索)|"
+    r"(?<![A-Za-z0-9_])(?:search|find|mine|enumerate|screen|explore)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_RULE_SEARCH_ID_RE = re.compile(
+    r"^cross-rule-search-[0-9a-f]{32}$"
+)
+_CROSS_RULE_SEARCH_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])cross-rule-search-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])"
+)
+_CROSS_RULE_ID_RE = re.compile(r"^cross-rule-[0-9a-f]{32}$")
+_CROSS_RULE_ID_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])cross-rule-[0-9a-f]{32}"
+    r"(?![A-Za-z0-9_-])"
+)
+_CROSS_RULE_SELECTION_INTENT_RE = re.compile(
+    r"(?:构建|物化|生成|创建)[^；;。\n]{0,80}(?:Cross|交叉|规则|候选)|"
+    r"(?:Cross|交叉|规则|搜索结果)[^；;。\n]{0,80}(?:构建|物化|生成|创建)|"
+    r"(?<![A-Za-z0-9_])(?:build|materialize|create|generate)"
+    r"[^;.!?\n]{0,80}(?:cross|rule|candidate)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_RULE_DIMENSION_RE = re.compile(
+    r"(?<![A-Za-z0-9_])dimension\s*(?:=|:|：|为)?\s*(?P<value>[23])"
+    r"(?![A-Za-z0-9_])|"
+    r"(?P<zh_value>[23])\s*[dD维]",
+    re.IGNORECASE,
+)
+_CROSS_RULE_MIN_LIFT_RE = re.compile(
+    r"(?<![A-Za-z0-9_])min[_\s-]*lift\s*(?:=|:|：|为)?\s*"
+    r"(?P<value>\d+(?:\.\d+)?)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_RULE_MIN_BAD_COUNT_RE = re.compile(
+    r"(?<![A-Za-z0-9_])min[_\s-]*bad[_\s-]*count"
+    r"\s*(?:=|:|：|为)?\s*(?P<value>\d+)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_RULE_MAX_HIT_SHARE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])max[_\s-]*hit[_\s-]*share"
+    r"\s*(?:=|:|：|为)?\s*(?P<value>\d+(?:\.\d+)?)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_RULE_MIN_AMOUNT_LIFT_RE = re.compile(
+    r"(?<![A-Za-z0-9_])min[_\s-]*amount[_\s-]*lift"
+    r"\s*(?:=|:|：|为)?\s*(?P<value>null|none|\d+(?:\.\d+)?)"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_RULE_MAX_TRIALS_RE = re.compile(
+    r"(?<![A-Za-z0-9_])max[_\s-]*trials?"
+    r"\s*(?:=|:|：|为)?\s*(?P<value>\d{1,5})(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CROSS_RULE_PLATFORM_CONTROL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:source_artifact_id|"
+    r"expected_artifact_content_hash|expected_candidate_id|"
+    r"expected_evidence_hash|dataset_id|target_col|thresholds?|directions?|"
+    r"rule_id|rank|winner|champion|content_hash|artifact_id)"
+    r"\s*(?:=|:|：)",
+    re.IGNORECASE,
+)
+_CROSS_RULE_SELECTION_HEURISTIC_RE = re.compile(
+    r"(?:第[一二三四五六七八九十百\d]+名|第一(?:个|名|条)|最好(?:的)?|"
+    r"最优|最佳|冠军|Top\s*[-#]?\s*\d+|排名|刚才(?:那个|这个|的)?|"
+    r"上述|这个规则|那个规则)|"
+    r"(?<![A-Za-z0-9_])(?:winner|champion|first|best|top\s*[-#]?\s*\d+|"
+    r"rank(?:ing)?|previous|that\s+one|this\s+one)(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
 _CROSS_METHOD_GROUNDING = {
@@ -3974,6 +4058,16 @@ def _validate_standard_workflow_payload(
                     raw_inputs
                 )
             )
+        elif workflow == "cross_rule_search":
+            normalized = _validate_cross_rule_search_inputs(
+                raw_inputs,
+                whitelist,
+                target_col=target_col,
+            )
+        elif workflow == "cross_rule_candidate_build_from_search":
+            normalized = _validate_cross_rule_candidate_build_inputs(
+                raw_inputs
+            )
         elif workflow == "cross_matrix_analysis":
             normalized = _validate_cross_matrix_workflow_inputs(
                 raw_inputs,
@@ -6409,6 +6503,196 @@ def _validate_cross_matrix_candidate_build_from_search_inputs(
     return {"search_id": search_id, "pair_id": pair_id}
 
 
+def _validate_cross_rule_search_inputs(
+    inputs: Mapping[str, Any],
+    whitelist: tuple[str, ...],
+    *,
+    target_col: str | None,
+) -> dict[str, Any]:
+    """Validate only the human-owned rule-search universe and hard budget."""
+
+    workflow = "cross_rule_search"
+    allowed = {"features", "dimension", "constraints", "max_trials"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted(allowed - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+    raw_features = inputs["features"]
+    if (
+        not isinstance(raw_features, Sequence)
+        or isinstance(raw_features, str | bytes | bytearray)
+        or not 2 <= len(raw_features) <= 12
+    ):
+        raise _DraftValidationError(
+            f"{workflow} features 必须是 2 到 12 个明确字段的数组。"
+        )
+    features = [
+        _workflow_column(
+            value,
+            name=f"{workflow} features",
+            whitelist=whitelist,
+        )
+        for value in raw_features
+    ]
+    if len(set(features)) != len(features):
+        raise _DraftValidationError(f"{workflow} features 不能包含重复字段。")
+    if target_col is not None and target_col in features:
+        raise _DraftValidationError(
+            f"{workflow} features 不能包含当前目标列「{target_col}」。"
+        )
+    dimension = inputs["dimension"]
+    if isinstance(dimension, bool) or dimension not in {2, 3}:
+        raise _DraftValidationError(
+            f"{workflow} dimension 只能是整数 2 或 3。"
+        )
+    raw_constraints = inputs["constraints"]
+    constraint_fields = {
+        "min_lift",
+        "min_bad_count",
+        "max_hit_share",
+        "min_amount_lift",
+    }
+    if not isinstance(raw_constraints, Mapping):
+        raise _DraftValidationError(
+            f"{workflow} constraints 必须是对象。"
+        )
+    unknown = sorted(set(raw_constraints) - constraint_fields)
+    missing_constraints = sorted(constraint_fields - set(raw_constraints))
+    if unknown or missing_constraints:
+        details = []
+        if unknown:
+            details.append("不支持 " + "、".join(unknown))
+        if missing_constraints:
+            details.append("缺少 " + "、".join(missing_constraints))
+        raise _DraftValidationError(
+            f"{workflow} constraints 字段无效：" + "；".join(details) + "。"
+        )
+
+    def finite_constraint(
+        name: str,
+        *,
+        minimum: float,
+        maximum: float,
+        optional: bool = False,
+    ) -> float | None:
+        value = raw_constraints[name]
+        if optional and value is None:
+            return None
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(float(value))
+            or not minimum <= float(value) <= maximum
+        ):
+            raise _DraftValidationError(
+                f"{workflow} constraints.{name} 必须是 "
+                f"{minimum:g} 到 {maximum:g} 的有限数值"
+                + ("或 null。" if optional else "。")
+            )
+        return float(value)
+
+    min_bad_count = raw_constraints["min_bad_count"]
+    if (
+        isinstance(min_bad_count, bool)
+        or not isinstance(min_bad_count, int)
+        or min_bad_count < 0
+    ):
+        raise _DraftValidationError(
+            f"{workflow} constraints.min_bad_count 必须是非负整数。"
+        )
+    constraints = {
+        "min_lift": finite_constraint(
+            "min_lift",
+            minimum=0.0,
+            maximum=1_000.0,
+        ),
+        "min_bad_count": min_bad_count,
+        "max_hit_share": finite_constraint(
+            "max_hit_share",
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        "min_amount_lift": finite_constraint(
+            "min_amount_lift",
+            minimum=0.0,
+            maximum=1_000.0,
+            optional=True,
+        ),
+    }
+    max_trials = inputs["max_trials"]
+    if (
+        isinstance(max_trials, bool)
+        or not isinstance(max_trials, int)
+        or not 1 <= max_trials <= 5_000
+    ):
+        raise _DraftValidationError(
+            f"{workflow} max_trials 必须是 1 到 5000 的整数。"
+        )
+    return {
+        "features": features,
+        "dimension": dimension,
+        "constraints": constraints,
+        "max_trials": max_trials,
+    }
+
+
+def _validate_cross_rule_candidate_build_inputs(
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one exact rule pointer and an optional human audit reason."""
+
+    workflow = "cross_rule_candidate_build_from_search"
+    allowed = {"search_id", "rule_id", "selection_reason"}
+    _reject_workflow_fields(inputs, allowed, workflow=workflow)
+    missing = sorted({"search_id", "rule_id"} - set(inputs))
+    if missing:
+        raise _DraftValidationError(
+            f"{workflow} 缺少字段：" + "、".join(missing) + "。"
+        )
+    search_id = _required_text(
+        inputs["search_id"],
+        name=f"{workflow} search_id",
+    )
+    rule_id = _required_text(
+        inputs["rule_id"],
+        name=f"{workflow} rule_id",
+    )
+    if _CROSS_RULE_SEARCH_ID_RE.fullmatch(search_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} search_id 必须是完整的 cross-rule-search ID。"
+        )
+    if _CROSS_RULE_ID_RE.fullmatch(rule_id) is None:
+        raise _DraftValidationError(
+            f"{workflow} rule_id 必须是完整的 cross-rule ID。"
+        )
+    normalized: dict[str, Any] = {
+        "search_id": search_id,
+        "rule_id": rule_id,
+    }
+    if "selection_reason" in inputs:
+        normalized["selection_reason"] = _cross_rule_selection_reason(
+            inputs["selection_reason"]
+        )
+    return normalized
+
+
+def _cross_rule_selection_reason(value: object) -> str:
+    if not isinstance(value, str) or "\x00" in value:
+        raise _DraftValidationError(
+            "cross_rule_candidate_build_from_search selection_reason "
+            "必须是文本。"
+        )
+    canonical = " ".join(unicodedata.normalize("NFC", value).split())
+    if not canonical or len(canonical) > 500:
+        raise _DraftValidationError(
+            "cross_rule_candidate_build_from_search selection_reason "
+            "必须是 1 到 500 个字符。"
+        )
+    return canonical
+
+
 def _validate_voting_candidate_search_inputs(
     inputs: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -7598,8 +7882,30 @@ def _utterance_targets_cross_candidate_search(utterance: str) -> bool:
     """Reserve bounded Cross feature-pair search before explicit matrix build."""
 
     return (
-        not _utterance_targets_cross_search_selection(utterance)
+        not _utterance_targets_cross_rule_search(utterance)
+        and not _utterance_targets_cross_rule_selection(utterance)
+        and not _utterance_targets_cross_search_selection(utterance)
         and _CROSS_SEARCH_INTENT_RE.search(utterance) is not None
+    )
+
+
+def _utterance_targets_cross_rule_search(utterance: str) -> bool:
+    """Reserve bounded threshold-rule mining before Matrix pair routing."""
+
+    return (
+        not _utterance_targets_cross_rule_selection(utterance)
+        and _CROSS_RULE_SUBJECT_RE.search(utterance) is not None
+        and _CROSS_RULE_SEARCH_INTENT_RE.search(utterance) is not None
+    )
+
+
+def _utterance_targets_cross_rule_selection(utterance: str) -> bool:
+    """Reserve one exact rule materialization before every Cross route."""
+
+    return (
+        _CROSS_RULE_SEARCH_ID_TOKEN_RE.search(utterance) is not None
+        and _CROSS_RULE_ID_TOKEN_RE.search(utterance) is not None
+        and _CROSS_RULE_SELECTION_INTENT_RE.search(utterance) is not None
     )
 
 
@@ -7824,6 +8130,11 @@ def _voting_positive_command_clause_spans(
 
 
 def _utterance_targets_cross_matrix(utterance: str) -> bool:
+    if (
+        _utterance_targets_cross_rule_search(utterance)
+        or _utterance_targets_cross_rule_selection(utterance)
+    ):
+        return False
     without_selection_ids = _CROSS_MATRIX_CELL_SELECTION_ID_TOKEN_RE.sub(
         " ", utterance
     )
@@ -9086,6 +9397,35 @@ def _ground_refinement_request(
             fields=("workflow",),
         )
     if (
+        _utterance_targets_cross_rule_selection(utterance)
+        and not (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow
+            == "cross_rule_candidate_build_from_search"
+        )
+    ):
+        return _clarification(
+            "原话明确提供 Cross rule search_id 与 rule_id 并要求精确构建"
+            "候选，只能编译为 cross_rule_candidate_build_from_search；"
+            "不能按排名选择、重新搜索或改路由到 Cross Matrix。",
+            code="cross_rule_selection_workflow_required",
+            fields=("workflow",),
+        )
+    if (
+        _utterance_targets_cross_rule_search(utterance)
+        and not (
+            isinstance(draft, StandardWorkflowRequestDraft)
+            and draft.workflow == "cross_rule_search"
+        )
+    ):
+        return _clarification(
+            "原话明确要求搜索 2D/3D Cross 阈值规则，只能编译为 "
+            "cross_rule_search；不能改路由到 Cross Matrix 字段对搜索、"
+            "显式双轴构建或通用策略生命周期。",
+            code="cross_rule_search_workflow_required",
+            fields=("workflow",),
+        )
+    if (
         _utterance_targets_cross_search_selection(utterance)
         and not (
             isinstance(draft, StandardWorkflowRequestDraft)
@@ -9253,6 +9593,14 @@ def _ground_refinement_request(
         return _ground_voting_candidate_build_from_search(utterance, result)
     if draft.workflow == "voting_candidate_build":
         return _ground_voting_candidate_build(utterance, result)
+    if draft.workflow == "cross_rule_search":
+        return _ground_cross_rule_search(
+            utterance,
+            result,
+            whitelist=whitelist,
+        )
+    if draft.workflow == "cross_rule_candidate_build_from_search":
+        return _ground_cross_rule_candidate_build(utterance, result)
     if draft.workflow == "cross_matrix_candidate_search":
         return _ground_cross_matrix_candidate_search(
             utterance,
@@ -11179,6 +11527,216 @@ def _sample_design_scalar_text(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+def _ground_cross_rule_search(
+    utterance: str,
+    result: StrategyRequestCompilation,
+    *,
+    whitelist: tuple[str, ...],
+) -> StrategyRequestCompilation:
+    """Ground every bounded rule-search control in the current command."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if not _utterance_targets_cross_rule_search(utterance):
+        return _clarification(
+            "请明确要求搜索 2D/3D Cross 阈值规则，并在当前请求中提供 "
+            "features、dimension、四项 constraints 与 max_trials。",
+            code="cross_rule_search_intent_required",
+            fields=("search_intent",),
+        )
+    if (
+        re.search(
+            r"(?:不要|不用|无需|先不|暂不|取消|停止)"
+            r"[^，,；;。\n]{0,32}(?:搜索|查找|挖掘|枚举|筛选)|"
+            r"(?<![A-Za-z0-9_])(?:do\s+not|don't|cancel|stop)"
+            r"[^,;.!?\n]{0,32}(?:search|find|mine|enumerate|screen)",
+            utterance,
+            re.IGNORECASE,
+        )
+        is not None
+        or _CROSS_MATRIX_NONCOMMAND_RE.search(utterance) is not None
+        or _CROSS_MATRIX_POSTPONED_CANCELLATION_RE.search(utterance) is not None
+    ):
+        return _clarification(
+            "Cross 阈值规则搜索必须是当前轮立即执行的肯定式命令。",
+            code="cross_rule_search_positive_command_required",
+            fields=("search_intent",),
+        )
+    if _cross_search_pattern_has_positive(
+        utterance,
+        _CROSS_SEARCH_FOLLOW_UP_RE,
+    ):
+        return _clarification(
+            "本轮只搜索 Cross 阈值规则；构建候选、入池、应用、采纳和"
+            "部署必须另发请求。",
+            code="cross_rule_search_single_step_required",
+            fields=("next_action",),
+        )
+    if _CROSS_RULE_PLATFORM_CONTROL_RE.search(utterance) is not None:
+        return _clarification(
+            "Cross 阈值规则搜索只接受字段、维度、四项业务约束和试验预算；"
+            "阈值、方向、artifact/hash、rule/rank/winner 均由平台恢复或计算。",
+            code="cross_rule_search_platform_binding_forbidden",
+            fields=("platform_binding",),
+        )
+
+    bindings = tuple(_CROSS_SEARCH_FEATURES_RE.finditer(utterance))
+    if len(bindings) != 1:
+        return _clarification(
+            "请且只请用 features=[字段1, 字段2, ...] 给出 2 到 12 个"
+            "候选字段。",
+            code="cross_rule_search_controls_not_grounded",
+            fields=("features",),
+        )
+    observed_features = [
+        token.strip().strip("'\"`")
+        for token in re.split(r"[,，]", bindings[0].group("value"))
+        if token.strip()
+    ]
+    if (
+        observed_features != list(inputs["features"])
+        or len(set(observed_features)) != len(observed_features)
+        or any(feature not in whitelist for feature in observed_features)
+    ):
+        return _clarification(
+            "features 必须逐字等于当前命令中的唯一白名单字段列表；"
+            "模型不得补写、删减或改序。",
+            code="cross_rule_search_controls_not_grounded",
+            fields=("features",),
+        )
+
+    dimensions = {
+        int(match.group("value") or match.group("zh_value"))
+        for match in _CROSS_RULE_DIMENSION_RE.finditer(utterance)
+    }
+    constraints = inputs["constraints"]
+    min_lifts = {
+        float(match.group("value"))
+        for match in _CROSS_RULE_MIN_LIFT_RE.finditer(utterance)
+    }
+    min_bad_counts = {
+        int(match.group("value"))
+        for match in _CROSS_RULE_MIN_BAD_COUNT_RE.finditer(utterance)
+    }
+    max_hit_shares = {
+        float(match.group("value"))
+        for match in _CROSS_RULE_MAX_HIT_SHARE_RE.finditer(utterance)
+    }
+    raw_amount_lifts = {
+        match.group("value").casefold()
+        for match in _CROSS_RULE_MIN_AMOUNT_LIFT_RE.finditer(utterance)
+    }
+    amount_lifts = {
+        None if value in {"null", "none"} else float(value)
+        for value in raw_amount_lifts
+    }
+    max_trials = {
+        int(match.group("value"))
+        for match in _CROSS_RULE_MAX_TRIALS_RE.finditer(utterance)
+    }
+    if (
+        dimensions != {inputs["dimension"]}
+        or min_lifts != {float(constraints["min_lift"])}
+        or min_bad_counts != {constraints["min_bad_count"]}
+        or max_hit_shares != {float(constraints["max_hit_share"])}
+        or amount_lifts != {constraints["min_amount_lift"]}
+        or max_trials != {inputs["max_trials"]}
+    ):
+        return _clarification(
+            "dimension、min_lift、min_bad_count、max_hit_share、"
+            "min_amount_lift 与 max_trials 必须在当前命令中逐项明确且唯一；"
+            "模型不得补默认值或改写约束。",
+            code="cross_rule_search_controls_not_grounded",
+            fields=(
+                "dimension",
+                "constraints",
+                "max_trials",
+            ),
+        )
+    return result
+
+
+def _ground_cross_rule_candidate_build(
+    utterance: str,
+    result: StrategyRequestCompilation,
+) -> StrategyRequestCompilation:
+    """Ground one exact search/rule pointer without heuristic selection."""
+
+    draft = result.draft
+    assert isinstance(draft, StandardWorkflowRequestDraft)
+    inputs = draft.to_dict()["workflow_inputs"]
+    if not _utterance_targets_cross_rule_selection(utterance):
+        return _clarification(
+            "请在独立请求中提供一个完整 cross-rule-search ID、一个完整"
+            " cross-rule ID，并明确要求构建候选。",
+            code="cross_rule_selection_intent_required",
+            fields=("build_intent", "search_id", "rule_id"),
+        )
+    if _CROSS_RULE_SELECTION_HEURISTIC_RE.search(utterance) is not None:
+        return _clarification(
+            "请逐字点名完整 search_id 与 rule_id；平台不会消费第一名、"
+            "最好、冠军、Top N、排名或‘刚才那个’。",
+            code="cross_rule_selection_explicit_ids_required",
+            fields=("search_id", "rule_id"),
+        )
+    if (
+        _CROSS_MATRIX_NEGATED_BUILD_RE.search(utterance) is not None
+        or _CROSS_MATRIX_NONCOMMAND_RE.search(utterance) is not None
+        or _CROSS_MATRIX_POSTPONED_CANCELLATION_RE.search(utterance) is not None
+    ):
+        return _clarification(
+            "Cross 规则候选构建必须是当前轮立即执行的肯定式单步命令。",
+            code="cross_rule_selection_positive_command_required",
+            fields=("build_intent",),
+        )
+    if _cross_search_pattern_has_positive(
+        utterance,
+        _CROSS_SEARCH_SELECTION_FOLLOW_UP_RE,
+    ):
+        return _clarification(
+            "本轮只能构建一个精确 Cross 规则候选；入池、设置动作、应用、"
+            "采纳和部署必须另发请求。",
+            code="cross_rule_selection_single_step_required",
+            fields=("next_action",),
+        )
+    search_ids = tuple(
+        match.group(0)
+        for match in _CROSS_RULE_SEARCH_ID_TOKEN_RE.finditer(utterance)
+    )
+    rule_ids = tuple(
+        match.group(0)
+        for match in _CROSS_RULE_ID_TOKEN_RE.finditer(utterance)
+    )
+    if (
+        search_ids != (inputs["search_id"],)
+        or rule_ids != (inputs["rule_id"],)
+    ):
+        return _clarification(
+            "Cross 规则候选构建必须逐字提供且只提供一个完整 search_id "
+            "与一个完整 rule_id。",
+            code="cross_rule_selection_ids_not_grounded",
+            fields=("search_id", "rule_id"),
+        )
+    reason = inputs.get("selection_reason")
+    if reason is not None:
+        labeled = re.search(
+            r"(?:选择理由|理由|原因|说明|selection[_\s-]*reason)"
+            r"\s*(?:=|:|：|为)\s*(?P<reason>[^；;。\n]{1,500})",
+            utterance,
+            re.IGNORECASE,
+        )
+        if labeled is None or " ".join(
+            unicodedata.normalize("NFC", labeled.group("reason")).split()
+        ) != reason:
+            return _clarification(
+                "selection_reason 仅在当前命令显式标注时逐字抄录。",
+                code="cross_rule_selection_reason_not_grounded",
+                fields=("selection_reason",),
+            )
+    return result
 
 
 def _ground_cross_matrix_candidate_search(
@@ -16441,6 +16999,39 @@ def _standard_workflow_confirmation_text(
             "development/backtested/unvalidated Cross 候选",
             "不会加入或修改 Pool，不会设置动作、应用、采纳或部署",
         ]
+    elif draft.workflow == "cross_rule_search":
+        constraints = inputs["constraints"]
+        amount_lift = constraints["min_amount_lift"]
+        details = [
+            "已识别为〔2D/3D Cross 阈值规则搜索 Workflow〕",
+            "显式候选字段：" + "、".join(inputs["features"]),
+            f"组合维度：{inputs['dimension']}D；最多评估 "
+            f"{inputs['max_trials']} 条确定性试验",
+            "约束："
+            f"min_lift={constraints['min_lift']:g}，"
+            f"min_bad_count={constraints['min_bad_count']}，"
+            f"max_hit_share={constraints['max_hit_share']:g}，"
+            "min_amount_lift="
+            + ("null" if amount_lift is None else f"{amount_lift:g}"),
+            "平台将绑定最新精确单变量证据与 risk/development 样本，"
+            "从认证分箱边界和风险方向生成有预算的 2D/3D 阈值组合",
+            "本步骤只发布全部已评估规则的聚合证据与排序；不会自动选择、"
+            "构建候选、入池、应用、采纳或部署",
+        ]
+    elif draft.workflow == "cross_rule_candidate_build_from_search":
+        details = [
+            "已识别为〔Cross 阈值规则精确候选构建 Workflow〕",
+            f"搜索证据 pointer：{inputs['search_id']}",
+            f"规则 pointer：{inputs['rule_id']}",
+            "平台将重新认证并完整重放搜索、数据、样本和规则条件；"
+            "不会采用排名、最好或冠军等启发式选择",
+            "本步骤只构建一个 development/unvalidated 候选；不会自动入池、"
+            "应用、采纳或部署",
+        ]
+        if "selection_reason" in inputs:
+            details.append(
+                f"用户原话选择说明：{inputs['selection_reason']}"
+            )
     elif draft.workflow == "cross_matrix_analysis":
         details = [
             "已识别为〔二维 Cross Matrix 候选分析 Workflow〕",
@@ -17451,6 +18042,20 @@ def _user_prompt(
         "champion、指标或结果，也不得按第一名、最好、Top N、刚才那个或代词"
         "选择。它必须是后续独立的单步构建请求；同轮重新搜索、入池、设置动作、"
         "应用、采纳、部署或写回必须 clarification。"
+        "对于 cross_rule_search，只能逐字抄录用户唯一 features=[...] 列表中"
+        "的 2 到 12 个白名单字段、dimension=2/3、完整 constraints"
+        "（min_lift、min_bad_count、max_hit_share、min_amount_lift）和 1..5000 "
+        "max_trials；所有控制都必须在当前请求显式提供。不得填写 source "
+        "artifact/hash、dataset/target/sample、阈值、方向、rule/rank/winner/"
+        "champion、指标或结果。平台从最新认证单变量证据恢复阈值和风险方向，"
+        "并在 risk/development 样本做有预算的 2D/3D 聚合搜索。本步骤只搜索和"
+        "排序全部已评估证据，不自动选择、不构建、不入池、不应用、不采纳、不部署。"
+        "对于 cross_rule_candidate_build_from_search，只能逐字抄录当前请求中"
+        "唯一完整的 cross-rule-search ID、唯一完整的 cross-rule ID，以及用户"
+        "显式标注时的 selection_reason；未显式标注必须省略。不得输出 artifact/"
+        "hash、条件、阈值、方向、rank/winner/champion、指标或结果，也不得按"
+        "第一名、最好、Top N 或代词选择。它只精确构建一个未验证候选；入池、"
+        "动作、应用、采纳或部署必须另发请求。"
         "对于 cross_matrix_analysis，只能抄录两个明确轴字段、各自方法及用户明确给出的"
         "单变量分析参数；不得输出平台数据绑定、目标列、预算、边界、cell、condition、"
         "指标、artifact/asset/effect/rule id、动作或推荐。它只构建二维矩阵证据，不能"

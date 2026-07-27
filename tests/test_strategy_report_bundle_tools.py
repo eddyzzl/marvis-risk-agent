@@ -1114,7 +1114,7 @@ def test_report_bundle_projects_platform_bound_pool_validation_refs_exactly(
 def test_report_bundle_tool_schema_version_is_v6() -> None:
     assert (
         BUILD_STRATEGY_REPORT_BUNDLE_V2_TOOL_SCHEMA_VERSION
-        == "strategy.build-report-bundle-v2-tool.v7"
+        == "strategy.build-report-bundle-v2-tool.v8"
     )
 
 
@@ -1673,7 +1673,7 @@ def test_report_bundle_passes_exact_voting_search_binding_and_audits_it(
         "search_content_hash": search_hash,
     }
     assert output["schema_version"] == (
-        "strategy.build-report-bundle-v2-tool.v7"
+        "strategy.build-report-bundle-v2-tool.v8"
     )
 
 
@@ -1768,7 +1768,7 @@ def test_report_bundle_passes_exact_cross_search_binding_and_audits_it(
         "search_content_hash": search_hash,
     }
     assert output["schema_version"] == (
-        "strategy.build-report-bundle-v2-tool.v7"
+        "strategy.build-report-bundle-v2-tool.v8"
     )
 
 
@@ -2331,6 +2331,77 @@ def test_build_report_bundle_revalidates_pool_stability_and_exact_impact_cube_be
 
     assert _report_rows(fixture) == []
     assert _audit_rows(fixture) == []
+
+
+def test_report_bundle_passes_exact_cross_rule_search_binding_and_audits_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _setup(tmp_path)
+    search_id = "cross-rule-search-" + ("1" * 32)
+    search_hash = "c" * 64
+    cross_ref = {
+        "artifact_id": "a" * 64,
+        "expected_artifact_content_hash": "b" * 64,
+        "expected_search_id": search_id,
+        "expected_search_content_hash": search_hash,
+    }
+    fixture["request"]["cross_rule_search_ref"] = cross_ref
+    binding = SimpleNamespace(
+        artifact_id=cross_ref["artifact_id"],
+        artifact_content_hash=cross_ref[
+            "expected_artifact_content_hash"
+        ],
+        result={
+            "search_id": search_id,
+            "content_hash": search_hash,
+        },
+    )
+    observed = {}
+    original_adapter = report_tools.build_strategy_report_bundle_source_inputs
+
+    def load_search(runtime, **kwargs):
+        observed["loader"] = (runtime, kwargs)
+        return binding
+
+    def capture_search_binding(**kwargs):
+        observed["binding"] = kwargs["cross_rule_search"]
+        kwargs.pop("cross_rule_search")
+        return original_adapter(**kwargs)
+
+    monkeypatch.setattr(
+        report_tools,
+        "load_cross_rule_search_artifact",
+        load_search,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "require_cross_rule_search_artifact_binding_on_connection",
+        lambda conn, actual: None,
+    )
+    monkeypatch.setattr(
+        report_tools,
+        "build_strategy_report_bundle_source_inputs",
+        capture_search_binding,
+    )
+
+    output = _run(fixture)
+
+    assert observed["binding"] is binding
+    assert observed["loader"][1] == {
+        "task_id": fixture["task"].id,
+        **cross_ref,
+    }
+    audit = json.loads(str(_audit_rows(fixture)[0]["detail_json"]))
+    assert audit["source_artifacts"]["cross_rule_search"] == {
+        "artifact_id": binding.artifact_id,
+        "content_hash": binding.artifact_content_hash,
+        "search_id": search_id,
+        "search_content_hash": search_hash,
+    }
+    assert output["schema_version"] == (
+        "strategy.build-report-bundle-v2-tool.v8"
+    )
 
 
 def test_build_report_bundle_revalidates_voting_search_immediately_before_commit(
