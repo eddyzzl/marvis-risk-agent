@@ -86,7 +86,8 @@ Excel 单元格 32767 字符限制。现在所有文本统一清理非法字符�
 
 策略主线已经改变自然语言策略编译 Prompt，但 registry 仍记录 version 50，锁定
 哈希也停在旧文本。这样运行记录会把新 Prompt 错标成旧评测基线。现在同步升级到
-version 51 并锁定当前哈希；Prompt registry 和策略编译契约定点回归均通过。
+version 51、锁定当前哈希，并同步 16 处下游编译器版本断言；Prompt registry 和
+全部策略请求编译契约回归均通过。
 
 ### Medium：损坏策略快照泄漏治理层内部异常
 
@@ -130,8 +131,9 @@ slow/e2e/llm 仍由手工 full release gate 覆盖。这里没有删除测试；
 - Bandit high-severity：未发现高危问题。
 - CI 分片器：`8 passed`；workflow YAML、4 分片完整收集、Ruff 和
   `git diff --check`：通过。
-- PR 前合计影响面验证 712 项通过；PR CI 补充的当前 Data Operations 权限契约、
-  报告发布锁等待、原并发幂等和 Prompt 版本契约另有 `5 passed`。
+- PR 前合计影响面验证 712 项通过；PR CI 补充的 Data Operations、Prompt 和报告
+  发布受影响组 `13 passed`，全部策略请求编译器与 Prompt 契约组
+  `1531 passed`。
 
 本分支没有在每次修复后重复执行全仓回归。PR 前使用完整差异审查与受影响测试集，
 PR CI 使用仓库门禁；两条 E2E 合并后的 main 再统一执行一次发布级全量回归。
